@@ -1,0 +1,40 @@
+[Unit]
+Description=Human Money Node (humoco-node) Daemon
+Documentation=https://github.com/humoco/human-money-node
+After=network.target network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=simple
+User=humoco
+Group=humoco
+ExecStart=/usr/local/bin/humoco run --config /etc/humoco/humoco.toml
+Restart=always
+RestartSec=5
+# 30 seconds allow redb async flush queue to gracefully drain to disk
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+# Allocates /var/lib/humoco with proper ownership
+StateDirectory=humoco
+WorkingDirectory=/var/lib/humoco
+
+# Linux Sandboxing & Hardening
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+LockPersonality=true
+
+# Remove unnecessary capabilities
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

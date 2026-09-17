@@ -1,0 +1,57 @@
+# ==============================================================================
+# Human Money Node (humoco-node) - Caddy Reverse Proxy Configuration
+# ==============================================================================
+{
+	# Restrict or disable admin API in production
+	admin off
+}
+
+# Replace api.example.com with your public fully qualified domain name
+api.example.com {
+	# Automatic TLS certificate provisioning via Let's Encrypt / ZeroSSL
+
+	# Security Headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Compression for JSON API responses
+	encode zstd gzip
+
+	# Request body size limits (Spec 10 & 13)
+	# Default 64 KiB for /v1/lock and /v1/status; 1 MiB for /v1/sync
+	@sync path /v1/sync
+	request_body @sync {
+		max_size 1MB
+	}
+	@standard not path /v1/sync
+	request_body @standard {
+		max_size 64KB
+	}
+
+	# Reverse proxy to HuMoCo Ingress API
+	# In docker-compose, routes to the internal service name 'humoco-node:8080'.
+	# On bare-metal / systemd, change to '127.0.0.1:8080'.
+	reverse_proxy humoco-node:8080 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 5s
+		}
+	}
+
+	# Structured JSON access logging
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}

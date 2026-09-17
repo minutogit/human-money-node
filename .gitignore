@@ -1,0 +1,44 @@
+# Rust / Cargo build artifacts
+/target
+
+# Node Identity & Private Keys (CRITICAL: Never commit node identities!)
+node_key.bin
+*.key
+*.pem
+*.seed
+*.mnemonic
+
+# Node Data & Persistence (Local storage and databases)
+*.redb
+*.redb.lock
+my-node/
+.data/
+data/
+
+# Unix Domain Sockets & Runtime IPC
+*.sock
+
+# Logs & Environment
+*.log
+.env
+.env.*
+!.env.example
+
+# IDE & Editor files
+.idea/
+.vscode/
+.zed/
+.helix/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.temp
+*.orig
+*.rej
+
+# OS generated files
+.DS_Store
+Thumbs.db
+

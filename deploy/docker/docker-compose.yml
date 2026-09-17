@@ -1,0 +1,42 @@
+services:
+  humoco-node:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    ports:
+      # P2P QUIC transport (UDP only)
+      - "9090:9090/udp"
+    expose:
+      # Client Ingress HTTP REST API (internal network only)
+      - "8080"
+    volumes:
+      - node_data:/data
+      - node_config:/config
+    environment:
+      - RUST_LOG=info
+      - HUMOCO_DATA_DIR=/data
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - humoco-node
+
+volumes:
+  node_data:
+    name: humoco_node_data
+  node_config:
+    name: humoco_node_config
+  caddy_data:
+    name: humoco_caddy_data
+  caddy_config:
+    name: humoco_caddy_config

@@ -1,0 +1,3 @@
+# Audit Reports Directory
+Hier werden die detaillierten Rohberichte der einzelnen Model-Router-Durchläufe abgelegt.
+Format: `YYYY-MM-DD_<id>_<shortname>.md`

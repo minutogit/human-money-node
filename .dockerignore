@@ -1,0 +1,10 @@
+target/
+.git/
+.gemini/
+.agents/
+docs/
+prompts/
+deploy/
+*.md
+*.log
+scratch/

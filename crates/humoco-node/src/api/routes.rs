@@ -1229,7 +1229,7 @@ async fn assemble_status_quorum_certificate(
                 let score_b = humoco_sim_core::client_flow::compute_hrw_score_f64(&b.0, shard_id);
                 score_b.total_cmp(&score_a)
             });
-            candidate_nodes.truncate(20);
+            candidate_nodes.truncate(32);
 
             if collected_signatures.len() < required_q {
                 if let Some(transport) = &state.transport {

@@ -34,9 +34,9 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | **05** | `05_performance_und_latency_audit.md` | 2. Architektur | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
 | **06** | `06_chaos_und_fuzz_test_generator.md` | 5. Chaos | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
 | **07** | `07_faulheit_und_free_riding_audit.md` | 4. Dynamik | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
-| **08** | `08_sabotage_zensur_und_eclipse_audit.md` | 3. Byzantine | *Nie* | - | 0 | 0 | `⚪ Untested` | **Sehr Hoch** |
-| **09** | `09_knoten_hack_und_key_compromise_audit.md` | 3. Byzantine | *Nie* | - | 0 | 0 | `⚪ Untested` | **Hoch** |
-| **10** | `10_kartellbildung_und_shard_takeover_audit.md` | 3. Byzantine | *Nie* | - | 0 | 0 | `⚪ Untested` | **Hoch** |
+| **08** | `08_sabotage_zensur_und_eclipse_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 6 | 0 | `🟢 Clean` | **Niedrig** |
+| **09** | `09_knoten_hack_und_key_compromise_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **10** | `10_kartellbildung_und_shard_takeover_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **11** | `11_time_warp_und_uhren_manipulation_audit.md` | 4. Dynamik | *Nie* | - | 0 | 0 | `⚪ Untested` | **Hoch** |
 | **12** | `12_mutation_testing_und_test_blindspot_audit.md` | 1. Testing | *Nie* | - | 0 | 0 | `⚪ Untested` | **Hoch** |
 | **13** | `13_unsafe_code_und_memory_safety_audit.md` | 1. Safety | 2026-09-15 | muse-spark | 4 | 0 | `🟢 Clean` | **Niedrig** |
@@ -53,4 +53,5 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 |---|---|---|---|---|---|
 | *Init* | - | - | - | Initialisierung der Matrix | - |
 | 2026-09-15 09:55 | [04, 02, 13] | muse-spark | 19 | 10 Fixes: BLAKE3 Length-Prefix (wire.rs), Replay-Cache Race (pow.rs), Gateway HRW-Ticket Routing (routes.rs), Shard 24h Hysterese (transport.rs), Quota Overflow checked_add (quota.rs), ProofChain Bounds (types.rs), UDS Bounds (server.rs), First-Party Ban Signature Check (engine.rs), #![forbid(unsafe_code)] (lib.rs), Doc 12 Mermaid Typo | `prompts/reports/2026-09-15_*.md` |
+| 2026-09-18 20:55 | [08, 09, 10] | muse-spark | 16 | Status Quorum Query Candidate Window Erweiterung auf Rank 32 Hedged Fallback (routes.rs), Client-Side Custody & Shard-Takeover Validierung | `prompts/reports/2026-09-18_*.md` |
 

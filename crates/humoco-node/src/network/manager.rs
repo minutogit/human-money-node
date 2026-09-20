@@ -217,6 +217,7 @@ pub struct PeerManager {
     base_backoff_ms: u64,
     max_backoff_ms: u64,
     ge20_first_reached_ms: Arc<AtomicU64>,
+    sync_notify: Arc<tokio::sync::Notify>,
 }
 
 impl PeerManager {
@@ -249,6 +250,7 @@ impl PeerManager {
             friend_map.insert(*key, None);
             if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(key) {
                 let nid = *blake3::hash(vk.as_bytes()).as_bytes();
+                friend_map.insert(nid, None);
                 let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
                 vk_map.insert(nid, vk);
                 u16_map.insert(u16_id, vk);
@@ -262,6 +264,7 @@ impl PeerManager {
                 friend_map.insert(*key, Some(*addr));
                 if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(key) {
                     let nid = *blake3::hash(vk.as_bytes()).as_bytes();
+                    friend_map.insert(nid, Some(*addr));
                     let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
                     vk_map.insert(nid, vk);
                     u16_map.insert(u16_id, vk);
@@ -305,7 +308,18 @@ impl PeerManager {
             base_backoff_ms: DEFAULT_BASE_BACKOFF_MS,
             max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
             ge20_first_reached_ms: Arc::new(AtomicU64::new(0)),
+            sync_notify: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Returns the shared Notify handle for triggering bootstrap/shard sync runs.
+    pub fn sync_notifier(&self) -> Arc<tokio::sync::Notify> {
+        self.sync_notify.clone()
+    }
+
+    /// Triggers an immediate or debounced sync run across listeners.
+    pub fn notify_sync_trigger(&self) {
+        self.sync_notify.notify_waiters();
     }
 
     /// Periodically re-resolves configured DNS hostname peers (every 10 minutes)
@@ -374,6 +388,7 @@ impl PeerManager {
 
                         if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key) {
                             let nid = *blake3::hash(vk.as_bytes()).as_bytes();
+                            friends_guard.insert(nid, Some(new_addr));
                             let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
                             self.verifying_keys.write().await.insert(nid, vk);
                             self.u16_to_vk.write().await.insert(u16_id, vk);
@@ -381,6 +396,7 @@ impl PeerManager {
                     }
 
                     state.current_addr = Some(new_addr);
+                    self.notify_sync_trigger();
                 }
             }
         }
@@ -398,12 +414,18 @@ impl PeerManager {
             entry,
             current_addr: None,
         });
+        self.notify_sync_trigger();
     }
 
     /// Adds or registers a peer address if not already present.
     pub async fn add_peer(&self, addr: SocketAddr) {
         let mut peers = self.peers.write().await;
+        let was_absent = !peers.contains_key(&addr);
         peers.entry(addr).or_insert_with(|| PeerInfo::new(addr));
+        drop(peers);
+        if was_absent {
+            self.notify_sync_trigger();
+        }
     }
 
     /// Removes a peer address from management.
@@ -451,10 +473,20 @@ impl PeerManager {
             PeerConnectionType::Untrusted
         };
 
+        let was_connected = {
+            let peers = self.peers.read().await;
+            peers.get(&addr).map(|p| p.is_connected()).unwrap_or(false)
+        };
+
         let mut peers = self.peers.write().await;
         let entry = peers.entry(addr).or_insert_with(|| PeerInfo::with_type(addr, conn_type));
         entry.conn_type = conn_type;
         entry.mark_success(node_id, conn);
+        drop(peers);
+
+        if !was_connected {
+            self.notify_sync_trigger();
+        }
     }
 
     /// Registers an explicit direct F2F friend.
@@ -462,12 +494,18 @@ impl PeerManager {
     pub async fn register_f2f_friend(&self, node_id: [u8; 32], addr: Option<SocketAddr>) {
         let mut friends = self.f2f_friends.write().await;
         friends.insert(node_id, addr);
+        if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&node_id) {
+            let nid = *blake3::hash(vk.as_bytes()).as_bytes();
+            friends.insert(nid, addr);
+        }
         if let Some(a) = addr {
             let mut peers = self.peers.write().await;
             let entry = peers.entry(a).or_insert_with(|| PeerInfo::with_type(a, PeerConnectionType::FriendToFriend));
             entry.node_id = Some(node_id);
             entry.conn_type = PeerConnectionType::FriendToFriend;
         }
+        drop(friends);
+        self.notify_sync_trigger();
     }
 
     /// Checks if a given node_id is an authorized direct F2F friend.
@@ -600,6 +638,8 @@ impl PeerManager {
                     ingress_diversity_mask: mask,
                 },
             );
+            drop(nodes);
+            self.notify_sync_trigger();
         }
     }
 
@@ -963,6 +1003,8 @@ impl PeerManager {
         let entry = peers.entry(addr).or_insert_with(|| PeerInfo::new(addr));
         entry.connection = Some(conn);
         entry.status = PeerStatus::Connected;
+        drop(peers);
+        self.notify_sync_trigger();
     }
 
     /// Returns the number of currently connected peers.

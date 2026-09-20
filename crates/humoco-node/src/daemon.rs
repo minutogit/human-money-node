@@ -370,21 +370,72 @@ impl NodeDaemon {
             }
         });
 
-        // 3. Non-blocking Shard-Digest Pull-Sync (digest-first, active sync on divergence)
+        // 3. Non-blocking Recurring Shard-Digest Pull-Sync & Bootstrap Motor
         let sync_pm = peer_manager.clone();
         let sync_transport = transport.clone();
         let sync_engine = engine.clone();
         let sync_storage = storage.clone();
         let sync_cancel = self.cancel_token.clone();
         let shard_sync_handle = tokio::spawn(async move {
-            // small initial delay to let accept loop and peer connections settle
+            let sync_notify = sync_pm.sync_notifier();
+            let is_syncing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            // Small initial delay to let accept loop and initial peer connections settle
             tokio::select! {
                 _ = sync_cancel.cancelled() => return,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
-            if sync_cancel.is_cancelled() { return; }
-            if let Err(e) = run_shard_digest_pull_sync(&sync_transport, &sync_pm, &sync_engine, &sync_storage, &sync_cancel).await {
-                debug!(error=%e, "Shard digest pull-sync finished with note");
+            if !sync_cancel.is_cancelled() {
+                if let Err(e) = run_shard_digest_pull_sync(&sync_transport, &sync_pm, &sync_engine, &sync_storage, &sync_cancel).await {
+                    debug!(error=%e, "Initial shard sync finished with note");
+                }
+            }
+
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // consume initial tick
+
+            loop {
+                tokio::select! {
+                    _ = sync_cancel.cancelled() => {
+                        info!("Shard sync motor shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        if !is_syncing.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            let transport = sync_transport.clone();
+                            let pm = sync_pm.clone();
+                            let eng = sync_engine.clone();
+                            let stor = sync_storage.clone();
+                            let cancel = sync_cancel.clone();
+                            let syncing_flag = is_syncing.clone();
+                            tokio::spawn(async move {
+                                let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &cancel).await;
+                                syncing_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                            });
+                        }
+                    }
+                    _ = sync_notify.notified() => {
+                        // Debounce window (5s) to coalesce rapid bursts of peer events and prevent thundering herd
+                        tokio::select! {
+                            _ = sync_cancel.cancelled() => break,
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                        }
+                        if sync_cancel.is_cancelled() { break; }
+                        if !is_syncing.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            let transport = sync_transport.clone();
+                            let pm = sync_pm.clone();
+                            let eng = sync_engine.clone();
+                            let stor = sync_storage.clone();
+                            let cancel = sync_cancel.clone();
+                            let syncing_flag = is_syncing.clone();
+                            tokio::spawn(async move {
+                                let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &cancel).await;
+                                syncing_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                            });
+                        }
+                    }
+                }
             }
         });
 
@@ -517,9 +568,9 @@ impl NodeDaemon {
     }
 }
 
-/// Single-shot non-blocking shard digest pull-sync.
-/// Queries known shard peers for ShardDigestRequest and pulls full data via ActiveSyncRequest on divergence.
-/// If N < 3 or no peers answer, finishes immediately.
+/// Non-blocking shard digest and bootstrap pull-sync.
+/// In small networks (N < 20) or when the local node is empty, pulls active locks directly from candidate peers.
+/// In sharded networks (N >= 20), queries known shard peers for ShardDigestRequest and pulls data via ActiveSyncRequest on divergence.
 async fn run_shard_digest_pull_sync(
     transport: &crate::network::QuicTransport,
     peer_manager: &crate::network::PeerManager,
@@ -529,24 +580,90 @@ async fn run_shard_digest_pull_sync(
 ) -> Result<(), NodeError> {
     // Gather candidates
     let candidate_addrs = peer_manager.shard_sync_addrs().await;
-    let total_known = candidate_addrs.len() + 1; // include self
-    if total_known < 3 {
-        info!(total_known, "Shard digest sync: N < 3, skipping sync (provisional quorum)");
-        return Ok(());
-    }
     if candidate_addrs.is_empty() {
-        info!("Shard digest sync: no known shard peers, skipping");
+        debug!("Shard digest sync: no known shard peers, skipping");
         return Ok(());
     }
-
+    let total_known = candidate_addrs.len() + 1; // include self
     let now_ms = peer_manager.net_time_ms();
 
-    // Multi-Shard & HMC Sync (Spec 03):
+    let local_valid_locks = storage.all_valid_locks(now_ms).unwrap_or_default();
+    let local_valid_hmc = storage.all_valid_hmc_locks(now_ms).unwrap_or_default();
+    let ram_locks_count = engine.ram.read().await.len();
+    let hmc_ram_count = engine.hmc_ram.read().await.locks.len();
+    let is_local_empty = local_valid_locks.is_empty()
+        && local_valid_hmc.is_empty()
+        && ram_locks_count == 0
+        && hmc_ram_count == 0;
+
+    let mut seq: u64 = 1;
+
+    // Bootstrap / Small Network Sync (N < 20 or empty node):
+    // In small networks or cold boot, directly pull active locks from available peers (R = N)
+    if total_known < 20 || is_local_empty {
+        debug!(total_known, is_local_empty, "Performing active sync pull across candidate peers (bootstrap / N < 20 mode)");
+        for addr in &candidate_addrs {
+            if cancel_token.is_cancelled() {
+                return Ok(());
+            }
+            let conn = match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                transport.connect_peer(*addr),
+            )
+            .await
+            {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    debug!(peer=%addr, error=%e, "Bootstrap ActiveSync: connect failed");
+                    continue;
+                }
+                Err(_) => {
+                    debug!(peer=%addr, "Bootstrap ActiveSync: connect timeout");
+                    continue;
+                }
+            };
+
+            let sync_payload = match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                transport.request_active_sync(&conn, seq),
+            )
+            .await
+            {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => {
+                    debug!(peer=%addr, error=%e, "Bootstrap ActiveSync: request failed");
+                    continue;
+                }
+                Err(_) => {
+                    debug!(peer=%addr, "Bootstrap ActiveSync: request timeout");
+                    continue;
+                }
+            };
+            seq = seq.wrapping_add(1);
+            let now_ms2 = peer_manager.net_time_ms();
+
+            for (rec, root_valid) in sync_payload.locks {
+                if cancel_token.is_cancelled() { break; }
+                let _ = engine
+                    .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
+                    .await;
+            }
+            for (tag, entry) in sync_payload.hmc_locks {
+                if cancel_token.is_cancelled() { break; }
+                let _ = engine
+                    .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
+                    .await;
+            }
+        }
+        info!("Bootstrap active sync pull completed");
+        return Ok(());
+    }
+
+    // Dominant Quorum Shard Digest Sync (N >= 20):
     // Collect all shard IDs for which the node has local entries (at least 0, plus all shard IDs from local locks and HMC voucher tags)
     let mut shard_ids: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
     shard_ids.insert(0);
 
-    let local_valid_locks = storage.all_valid_locks(now_ms).unwrap_or_default();
     for (rec, _) in &local_valid_locks {
         let sid = u16::from_be_bytes([rec.parent_lock[0], rec.parent_lock[1]]);
         shard_ids.insert(sid);
@@ -556,7 +673,6 @@ async fn run_shard_digest_pull_sync(
         shard_ids.insert(sid);
     }
 
-    let local_valid_hmc = storage.all_valid_hmc_locks(now_ms).unwrap_or_default();
     for (tag, _) in &local_valid_hmc {
         let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
         let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
@@ -567,8 +683,6 @@ async fn run_shard_digest_pull_sync(
         let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
         shard_ids.insert(sid);
     }
-
-    let mut seq: u64 = 1;
 
     for shard_id in shard_ids {
         if cancel_token.is_cancelled() {

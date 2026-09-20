@@ -4,3 +4,10 @@ members = [
     "crates/humoco-sim-core",
     "crates/humoco-node",
 ]
+
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1
+

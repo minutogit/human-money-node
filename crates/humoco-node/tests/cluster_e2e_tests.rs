@@ -168,6 +168,16 @@ impl ClusterHarness {
             node_setups.push((temp, identity, config));
         }
 
+        // Mutual F2F pubkey trust across all cluster nodes
+        let pubkeys: Vec<String> = node_setups.iter().map(|(_, id, _)| id.public_key_hex()).collect();
+        for (i, (_, _, config)) in node_setups.iter_mut().enumerate() {
+            for (j, pk) in pubkeys.iter().enumerate() {
+                if i != j {
+                    config.f2f.trusted_pubkeys.push(pk.clone());
+                }
+            }
+        }
+
         // 2. Spawn daemons with oneshot notification channel for bound ports
         let mut test_nodes = Vec::with_capacity(size);
         for (temp, identity, config) in node_setups {
@@ -753,3 +763,309 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
 
     println!("Compliance Test completed successfully!");
 }
+
+#[tokio::test]
+async fn test_e2e_bootstrap_sync_n2() {
+    let identity_a = NodeIdentity::generate();
+    let identity_b = NodeIdentity::generate();
+
+    // 1. Spawn Node A (standalone)
+    let temp_a = tempdir().expect("temp_a");
+    let key_path_a = temp_a.path().join("node_key.bin");
+    identity_a.save_to_file(&key_path_a).expect("save key a");
+
+    let mut config_a = NodeConfig::default();
+    config_a.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config_a.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config_a.storage.data_dir = temp_a.path().join("data");
+    config_a.identity.key_path = key_path_a;
+    config_a.f2f.tokens.push("cluster_f2f_token".into());
+    config_a.f2f.trusted_pubkeys.push(identity_b.public_key_hex());
+
+    let cancel_a = CancellationToken::new();
+    let (tx_a, rx_a) = tokio::sync::oneshot::channel::<BoundAddrs>();
+    let daemon_a = NodeDaemon::with_bound_sender(config_a.clone(), identity_a.clone(), cancel_a.clone(), tx_a);
+    let handle_a = tokio::spawn(async move { daemon_a.run().await });
+    let bound_a = tokio::time::timeout(Duration::from_secs(5), rx_a).await.unwrap().unwrap();
+
+    let node_a = TestNode {
+        identity: identity_a.clone(),
+        config: config_a,
+        temp_dir: temp_a,
+        cancel_token: cancel_a,
+        rpc_addr: bound_a.rpc_addr,
+        p2p_addr: bound_a.p2p_addr,
+        task_handle: Some(handle_a),
+    };
+
+    // Wait for Node A ready
+    for _ in 0..50 {
+        if let Ok((status, dto)) = node_a.get_status().await {
+            if status == StatusCode::OK && dto.status == "ok" {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Submit a lock to Node A
+    let parent_lock = "ff".repeat(32);
+    let receiver_pub = "ee".repeat(32);
+    let now = test_now_ms();
+    let req = LockSubmitRequest {
+        parent_lock: parent_lock.clone(),
+        receiver_pub,
+        nonce: "bootstrap_nonce_n2".into(),
+        valid_until: now + 60_000,
+        root_valid_until: now + 600_000,
+        created_at: Some(now),
+        auth_token: None,
+        peer_token: Some("cluster_f2f_token".into()),
+        pow_challenge: None,
+        pow_nonce: None,
+        crypto_suite: None,
+        is_bridge_lock: None,
+        pqc_receiver: None,
+    };
+
+    let (status, resp) = node_a.post_lock(&req).await.expect("post_lock on Node A");
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(resp.status, "ACCEPTED");
+
+    // 3. Spawn Node B with Node A as configured F2F peer
+    let temp_b = tempdir().expect("temp_b");
+    let key_path_b = temp_b.path().join("node_key.bin");
+    identity_b.save_to_file(&key_path_b).expect("save key b");
+
+    let mut config_b = NodeConfig::default();
+    config_b.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config_b.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config_b.storage.data_dir = temp_b.path().join("data");
+    config_b.identity.key_path = key_path_b;
+    config_b.f2f.tokens.push("cluster_f2f_token".into());
+    config_b.f2f.trusted_pubkeys.push(identity_a.public_key_hex());
+    config_b.f2f.peers.push(format!("{}@{}", identity_a.public_key_hex(), bound_a.p2p_addr));
+
+    let cancel_b = CancellationToken::new();
+    let (tx_b, rx_b) = tokio::sync::oneshot::channel::<BoundAddrs>();
+    let daemon_b = NodeDaemon::with_bound_sender(config_b.clone(), identity_b.clone(), cancel_b.clone(), tx_b);
+    let handle_b = tokio::spawn(async move { daemon_b.run().await });
+    let bound_b = tokio::time::timeout(Duration::from_secs(5), rx_b).await.unwrap().unwrap();
+
+    let node_b = TestNode {
+        identity: identity_b,
+        config: config_b,
+        temp_dir: temp_b,
+        cancel_token: cancel_b,
+        rpc_addr: bound_b.rpc_addr,
+        p2p_addr: bound_b.p2p_addr,
+        task_handle: Some(handle_b),
+    };
+
+    // Wait for Node B ready
+    for _ in 0..50 {
+        if let Ok((status, dto)) = node_b.get_status().await {
+            if status == StatusCode::OK && dto.status == "ok" {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Verify that Node B pulls the lock from Node A via active bootstrap sync
+    let sync_req = SyncRequest { sparse_locators: vec![] };
+    let mut synced = false;
+    for _ in 0..100 {
+        if let Ok((status, sync_resp)) = node_b.post_sync(&sync_req).await {
+            if status == StatusCode::OK && sync_resp.locks.iter().any(|l| l.parent_lock == parent_lock) {
+                synced = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(synced, "Node B must automatically sync all locks from Node A on N=2 bootstrap");
+
+    node_a.cancel_token.cancel();
+    node_b.cancel_token.cancel();
+}
+
+#[tokio::test]
+async fn test_e2e_churn_and_reconnect_sync() {
+    let harness = ClusterHarness::spawn_cluster(3)
+        .await
+        .expect("Spawn 3-node cluster");
+
+    let now = test_now_ms();
+    let parent_lock_1 = "11".repeat(32);
+    let req1 = LockSubmitRequest {
+        parent_lock: parent_lock_1.clone(),
+        receiver_pub: "aa".repeat(32),
+        nonce: "churn_nonce_1".into(),
+        valid_until: now + 60_000,
+        root_valid_until: now + 600_000,
+        created_at: Some(now),
+        auth_token: None,
+        peer_token: Some("cluster_f2f_token".into()),
+        pow_challenge: None,
+        pow_nonce: None,
+        crypto_suite: None,
+        is_bridge_lock: None,
+        pqc_receiver: None,
+    };
+
+    // Submit lock 1 to Node 0
+    let (status, resp) = harness.nodes[0].post_lock(&req1).await.expect("Submit lock 1");
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(resp.status, "ACCEPTED");
+
+    // Shut down Node 2 (simulating offline churn)
+    harness.nodes[2].cancel_token.cancel();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Submit lock 2 to Node 0 while Node 2 is offline
+    let parent_lock_2 = "22".repeat(32);
+    let req2 = LockSubmitRequest {
+        parent_lock: parent_lock_2.clone(),
+        receiver_pub: "bb".repeat(32),
+        nonce: "churn_nonce_2".into(),
+        valid_until: now + 60_000,
+        root_valid_until: now + 600_000,
+        created_at: Some(now),
+        auth_token: None,
+        peer_token: Some("cluster_f2f_token".into()),
+        pow_challenge: None,
+        pow_nonce: None,
+        crypto_suite: None,
+        is_bridge_lock: None,
+        pqc_receiver: None,
+    };
+
+    let (status, resp) = harness.nodes[0].post_lock(&req2).await.expect("Submit lock 2");
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(resp.status, "ACCEPTED");
+
+    // Respawn Node 2 reusing its storage directory and identity
+    let mut config_respawn = harness.nodes[2].config.clone();
+    config_respawn.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config_respawn.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config_respawn.f2f = harness.nodes[2].config.f2f.clone();
+    config_respawn.f2f.peers = vec![format!("{}@{}", harness.nodes[0].identity.public_key_hex(), harness.nodes[0].p2p_addr)];
+
+    let cancel_respawn = CancellationToken::new();
+    let (tx_r, rx_r) = tokio::sync::oneshot::channel::<BoundAddrs>();
+    let daemon_respawn = NodeDaemon::with_bound_sender(
+        config_respawn.clone(),
+        harness.nodes[2].identity.clone(),
+        cancel_respawn.clone(),
+        tx_r,
+    );
+    let handle_respawn = tokio::spawn(async move { daemon_respawn.run().await });
+    let bound_respawn = tokio::time::timeout(Duration::from_secs(5), rx_r).await.unwrap().unwrap();
+
+    let node_2_respawned = TestNode {
+        identity: harness.nodes[2].identity.clone(),
+        config: config_respawn,
+        temp_dir: tempdir().unwrap(), // dummy temp dir, data_dir was in original node[2]
+        cancel_token: cancel_respawn,
+        rpc_addr: bound_respawn.rpc_addr,
+        p2p_addr: bound_respawn.p2p_addr,
+        task_handle: Some(handle_respawn),
+    };
+
+    // Verify Node 2 reconnects and syncs missing lock 2
+    let sync_req = SyncRequest { sparse_locators: vec![] };
+    let mut has_lock_2 = false;
+    for _ in 0..100 {
+        if let Ok((status, sync_resp)) = node_2_respawned.post_sync(&sync_req).await {
+            if status == StatusCode::OK && sync_resp.locks.iter().any(|l| l.parent_lock == parent_lock_2) {
+                has_lock_2 = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(has_lock_2, "Node 2 must automatically synchronize missed locks after reconnect");
+
+    node_2_respawned.cancel_token.cancel();
+}
+
+#[tokio::test]
+async fn test_e2e_sync_garbage_and_invalid_lock_rejection() {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("humoco.redb");
+    let storage = std::sync::Arc::new(humoco_node::storage::RedbStorage::open(&db_path).unwrap());
+    let cancel = CancellationToken::new();
+    let (engine, _flush_handle) = humoco_node::storage::DualTierEngine::new_with_token(storage.clone(), cancel.clone());
+
+    let now_ms = 1_000_000u64;
+
+    // 1. Ingest lock with expired TTL (valid_until < now)
+    let expired_lock = humoco_sim_core::types::LockRecord::new(
+        [0x33u8; 32],
+        [0x44u8; 32],
+        b"nonce_expired".to_vec(),
+        humoco_sim_core::types::SimTime(now_ms - 200_000),
+        humoco_sim_core::types::SimTime(now_ms - 50_000),
+    );
+
+    let res = engine.ingress_lock_with_origin(
+        expired_lock,
+        humoco_sim_core::types::SimTime(now_ms),
+        humoco_sim_core::types::SimTime(now_ms + 100_000),
+        humoco_node::storage::IngressOrigin::PartitionSync,
+    ).await;
+
+    assert!(matches!(res, Ok(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow) | Err(_)));
+    assert_eq!(engine.ram.read().await.len(), 0, "Expired lock must not be inserted into RAM");
+
+    // 2. Ingest lock with root_valid_until < valid_until (invalid causality / origin mandate)
+    let invalid_root_lock = humoco_sim_core::types::LockRecord::new(
+        [0x55u8; 32],
+        [0x66u8; 32],
+        b"nonce_invalid_root".to_vec(),
+        humoco_sim_core::types::SimTime(now_ms),
+        humoco_sim_core::types::SimTime(now_ms + 60_000),
+    );
+
+    let res2 = engine.ingress_lock_with_origin(
+        invalid_root_lock,
+        humoco_sim_core::types::SimTime(now_ms),
+        humoco_sim_core::types::SimTime(now_ms + 10_000), // root expires before successor lock!
+        humoco_node::storage::IngressOrigin::PartitionSync,
+    ).await;
+
+    assert!(matches!(res2, Ok(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow) | Err(_)));
+    assert_eq!(engine.ram.read().await.len(), 0, "Invalid root validity lock must not be inserted");
+
+    // 3. Ingest HMC lock with missing voucher root and invalid deletable_at
+    let invalid_hmc_entry = humoco_node::api::hmc::L2LockEntry {
+        layer2_voucher_id: "test_voucher_garbage".into(),
+        t_id: [0x88u8; 32],
+        layer2_signature: [0xAAu8; 64],
+        sender_ephemeral_pub: [0x99u8; 32],
+        encrypted_timestamp: now_ms as u128,
+        deletable_at: None, // Missing deletable_at and unknown voucher root!
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        trap_r: None,
+        trap_s: None,
+        privacy_guard: None,
+    };
+
+    let (v, is_new) = engine.ingress_hmc_lock_with_origin(
+        "corrupted_tag".to_string(),
+        invalid_hmc_entry,
+        humoco_node::storage::IngressOrigin::PartitionSync,
+        Some(now_ms),
+    ).await;
+
+    assert!(!is_new, "Corrupted HMC lock without root or deletable_at must be rejected");
+    assert!(matches!(v, humoco_node::api::hmc::L2Verdict::Rejected { .. }));
+
+    cancel.cancel();
+}
+
+

@@ -156,10 +156,50 @@ Dieses Dokument fasst die Ergebnisse der 3 KI-Audit-Läufe (Spezifikations-Abgle
      Es werden **keine neuen bürokratischen Sonderregeln** (wie Migrationsticket-Limits, Verbotslisten oder Quoten-Ablaufdaten) benötigt. Die bestehende Trias aus **Argon2d-Hardwarekosten + 24h-Inkubationswand + fester NodePubKey-Identität** bietet vollkommen ausreichenden Selbstschutz durch Physik.
 - **Status:** Für nachgelagerte Architektur- & Skalierungs-Runde vorgemerkt (KISS-Empfehlung: Keine zusätzlichen Sonderregeln).
 
+### ⚖️ TODO-ARCH-06: Spieltheorie des "Storage-Evasion"-Wettlaufs (Free-Rider-Anreiz, Shard-Vermeidung via HRW-Re-Mining vs. Reale Grenzkosten)
+- **Problemstellung & Ausgangsüberlegung:**
+  Jeder Knoten kann prinzipiell seine `HrwRoutingId` neu minen (neuer Argon2d-Hash mit neuer Nonce oder höherer Schwierigkeit, wenn die Rechenleistung über die Jahre gestiegen ist).
+  In einem theoretischen Großnetzwerk mit Millionen von Knoten ($N \ge 1.000.000$) existieren netzweit genau $65.536 \times 20 = 1.310.720$ Shard-Slots.
+  *Die Kernfrage:* Entsteht für Node-Betreiber ein spieltheoretischer Anreiz zum "Storage Evasion" (Free-Rider-Verhalten / Race to the Bottom), indem sie gezielt eine `HrwRoutingId` erwürfeln/re-minen, mit der sie in keinem einzigen Shard in den Top-20 landen? Dadurch müssten sie keine Shard-Daten speichern und keine Quorum-Prüfungen durchführen, könnten aber dennoch voll als Gateway fungieren und Gebühren/Transaktionen bedienen.
+
+- **Mathematische & Spieltheoretische Analyse:**
+  1. **Kombinatorische Wahrscheinlichkeit nach Netzwerkgröße ($N$):**
+     - Die Wahrscheinlichkeit, für einen einzelnen Shard *nicht* in den Top-20 zu sein, beträgt $1 - \frac{20}{N}$.
+     - Die Wahrscheinlichkeit, für **alle $65.536$ Shards gleichzeitig** in keinem einzigen Top-20-Slot zu sein, beträgt:
+       $$P(\text{0 Shards}) = \left(1 - \frac{20}{N}\right)^{65.536}$$
+     - **Bei $N = 1.000$ Knoten:** $P \approx (0{,}98)^{65.536} \approx 10^{-574}$ (physikalisch unmöglich).
+     - **Bei $N = 10.000$ Knoten:** $P \approx (0{,}998)^{65.536} \approx 10^{-57}$ (rechnerisch unmöglich).
+     - **Bei $N = 100.000$ Knoten:** $P \approx \exp\left(-\frac{65.536 \times 20}{100.000}\right) \approx e^{-13{,}1} \approx 2 \times 10^{-6}$ (1 zu 500.000).
+     - **Bei $N \ge 1.310.720$ Knoten:** Durchschnitt $\le 1$ Shard pro Knoten. Bei $N = 10.000.000$ besitzen $\approx 87{,}7\,\%$ aller Knoten rein stochastisch $0$ Shards.
+     - *Erkenntnis 1:* Für $N < 100.000$ ist das Erwürfeln einer "Zero-Storage-ID" rechnerisch völlig unmöglich. In Millionen-Netzen wiederum ist "0 Shards" der stochastische Normalzustand für fast 90 % aller Knoten, ohne dass manipuliert werden muss.
+
+  2. **Kostenasymmetrie: Argon2d-Mining vs. HuMoCo-Speicherkosten (Zero State Bloat):**
+     - *Was kostet das Speichern eines Shards in HuMoCo wirklich?*
+       Ein Shard verwaltet $1/65.536$ des weltweiten Verkehrs. Dank Gutschein-TTL (`root.valid_until`) und $144\,\text{Bytes}$ pro Lock hat ein Shard selbst bei 100 Millionen weltweiten Transaktionen/Tag im Schnitt nur $\approx 1.500$ aktive Locks im `RamIndex` ($\approx 216\,\text{KB}$ RAM!).
+       Die physischen Speicherkosten für $216\,\text{KB}$ RAM und redb liegen bei $< 0{,}0001\,\text{€}$ pro Jahr.
+     - *Was kostet ein Argon2d-Re-Mining?*
+       $1\text{--}4$ Stunden CPU-Volllast ($m = 1\text{--}2\,\text{GB}$) kosten $\approx 0{,}04\,\text{€}$ bis $0{,}84\,\text{€}$ an Strom und Hardware-Verschleiß.
+     - *Erkenntnis 2:* Das Verbrennen von Strom zum Re-Mining eines Shard-Tickets ist um ein Vielfaches teurer als das Vorhalten der winzigen $216\,\text{KB}$ RAM. Rational handelnde Betreiber haben daher einen **negativen ROI** beim Versuch, Shard-Speicher zu vermeiden.
+
+  3. **HRW-Invarianz & Quorum-Garantie:**
+     - HRW ermittelt für jeden Shard $s$ deterministisch die 20 höchsten Scores $\text{BLAKE3}(\text{HrwRoutingId} \parallel s)$ über alle $N_{\text{active}}$ Knoten.
+     - Selbst wenn ein Teil der Knoten "schwache" Scores sucht, existiert für jeden Shard immer eine vollständige Top-20.
+     - Verweigert ein in die Top-20 gewählter Knoten die Arbeit (Lazy Node), greift die lokale Suspension (`missing_count >= 3`) und Rang 21 rückt in $0\,\text{ms}$ nach.
+
+  4. **Entkopplung von Gateway-Rolle und Shard-Pflicht (Spec 00 & Spec 13):**
+     - Ein Gateway ist bereits heute als zustandsloser Vermittler (Stateless Messenger) auf Tier 1 konzipiert.
+     - Jeder Knoten (auch solche mit 0 Shards) kann als Gateway fungieren und Zahlungen an die zuständigen Shards routen.
+
+- **Zu klärende Fragen & Härtungsaspekte für die Zukunft:**
+  1. **Argon2d-Schwierigkeitsanpassung über Jahrzehnte:**
+     Wenn die Rechenleistung über 10–20 Jahre massiv steigt (Moore's Law), greift die Headroom-Metrik ($H = D_{\text{own}} / D_{\text{net\_median}}$ aus Spec 07). Führt ein Anstieg des Netzwerk-Medians dazu, dass alte Tickets graduell neu gemint werden müssen? (Autonomes Hintergrund-Mining bei $H < 1{,}2$).
+  2. **Anreiz-Symmetrie:**
+     Besteht Bedarf für eine explizite "Proof-of-Storage"-Kompensation oder genügt die bestehende KISS-Physik (extrem geringe Speicherkosten durch $144\,\text{B}$ und TTL-Purge)?
+  3. **Fazit:** Die Kombination aus **hohem Argon2d-Mining-Aufwand + 24h-Inkubationswand + extrem geringen Speicherkosten ($144\,\text{Bytes} \times \text{TTL}$)** macht den "Storage-Evasion"-Wettlauf ökonomisch unattraktiv. Das Design ist spieltheoretisch stabil.
+
+- **Status:** Konzeptionell analysiert und für langfristige Spieltheorie- & Skalierungs-Dokumentation vorgemerkt.
 
 
-
-## 🚨 Priorität P0: Kritische Sicherheits- & Konsistenz-Blocker
 
 ### 🔴 P0-1: HMC-Ingress maskiert Double-Spend als `Verified` (Fehlende 409-Semantik)
 * **Betroffene Dateien:**

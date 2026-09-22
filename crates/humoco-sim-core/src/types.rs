@@ -59,6 +59,9 @@ pub type SignersBitmask = u32;
 /// Failure threshold: after how many consecutive failures a node is suspended
 pub const MISSING_COUNT_THRESHOLD: u32 = 3;
 
+pub const FLAG_INBOUND_ACTIVE: u8 = 1 << 0;
+pub const FLAG_LAST_FAILED: u8 = 1 << 1;
+
 /// Deterministic discrete simulation time in milliseconds
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct SimTime(pub u64);
@@ -296,14 +299,15 @@ pub enum PeerPresenceState {
 }
 
 /// 16-byte compact RAM index entry for known peers (docs/11:pillar 3)
-#[repr(C)]
+#[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerPresenceEntry {
     pub node_id_prefix: u64,
     pub hourly_bitmask: u32,
-    pub missing_count: u8,
+    pub malus_score: u8,
     pub maturity_hours: u8,
-    pub _reserved: u16,
+    pub flags: u8,
+    pub backoff_level: u8,
 }
 
 impl PeerPresenceEntry {
@@ -312,15 +316,53 @@ impl PeerPresenceEntry {
         Self {
             node_id_prefix: prefix,
             hourly_bitmask: 1, // Erstes Bit gesetzt
-            missing_count: 0,
+            malus_score: 0,
             maturity_hours: 0,
-            _reserved: 0,
+            flags: 0,
+            backoff_level: 0,
         }
     }
 
+    /// Records inbound service activity (e.g. Ingress Lock, Read query, Sync request) – sets FLAG_INBOUND_ACTIVE.
+    pub fn record_inbound_activity(&mut self) {
+        self.flags |= FLAG_INBOUND_ACTIVE;
+    }
+
+    /// Records an outbound failure / timeout:
+    /// Symmetrical 1:1 tit-for-tat (+1 malus per miss), with activity escalation lock when offline/DDoS.
+    pub fn record_outbound_failure(&mut self) -> u8 {
+        self.flags |= FLAG_LAST_FAILED;
+        // Escalation only if inbound was active OR first failure (backoff == 0)
+        if (self.flags & FLAG_INBOUND_ACTIVE) != 0 || self.backoff_level == 0 {
+            self.malus_score = self.malus_score.saturating_add(1);
+            self.backoff_level = self.malus_score.min(17);
+            self.flags &= !FLAG_INBOUND_ACTIVE;
+        } else {
+            // Escalation lock: malus and backoff remain unchanged when offline/DDoS
+        }
+        self.backoff_level
+    }
+
+    /// Records a successful outbound interaction (symmetrical 1:1: -1 malus per success).
+    pub fn record_outbound_success(&mut self) {
+        self.flags &= !FLAG_LAST_FAILED;
+        self.malus_score = self.malus_score.saturating_sub(1);
+        self.backoff_level = self.malus_score.min(17);
+    }
+
+    /// Alias for backwards compatibility
+    pub fn record_missing(&mut self) -> u8 {
+        self.record_outbound_failure()
+    }
+
+    /// Alias for backwards compatibility
+    pub fn record_success(&mut self) {
+        self.record_outbound_success()
+    }
+
     /// Advances the hourly sliding window and records whether an HB was received in this hour.
-    /// Decays transient missing_count by 1 (hourly decay / autonomous healing).
-    /// On DORMANT, missing_count is reset to 0 so the node can be probed directly on re-entry.
+    /// Decays backoff_level by 1 (hourly decay / autonomous healing).
+    /// On DORMANT, backoff_level and flags are reset so the node can be probed directly on re-entry.
     pub fn record_hour(&mut self, current_epoch: u16, received_heartbeat: bool) -> PeerPresenceState {
         let _ = current_epoch;
         let bit = if received_heartbeat { 1u32 } else { 0u32 };
@@ -328,42 +370,37 @@ impl PeerPresenceEntry {
         self.maturity_hours = self.maturity_hours.saturating_add(1);
 
         // Hourly penalty decay (-1) -> autonomous healing without death spirals
-        self.missing_count = self.missing_count.saturating_sub(1);
+        self.backoff_level = self.backoff_level.saturating_sub(1);
+        self.malus_score = self.malus_score.saturating_sub(1);
 
         let state = self.evaluate_state();
 
-        // 🎯 INVARIANT: On DORMANT, missing_count is reset to 0 so the node can be probed cleanly upon re-entry.
+        // 🎯 INVARIANT: On DORMANT, reset for clean re-entry probation.
         if state == PeerPresenceState::Dormant {
-            self.missing_count = 0;
+            self.backoff_level = 0;
+            self.flags = 0;
         }
 
         state
     }
 
-    /// Records a lock failure / timeout:
-    /// Increments missing_count by 1. When missing_count >= 3, the node is locally suspended.
-    pub fn record_missing(&mut self) -> u8 {
-        self.missing_count = self.missing_count.saturating_add(1);
-        self.missing_count
+    /// Is service choked? (Tit-for-Tat: backoff>0 && last failed)
+    pub fn is_service_choked(&self) -> bool {
+        self.backoff_level > 0 && (self.flags & FLAG_LAST_FAILED != 0)
     }
 
-    /// Records a successful lock signature:
-    /// Resets transient missing_count immediately to 0 (node proved operational).
-    pub fn record_success(&mut self) {
-        self.missing_count = 0;
-    }
-
-    /// Is the node currently in local suspension (missing_count >= 3)?
+    /// Is the node currently in local suspension (choked)?
     pub fn is_suspended(&self) -> bool {
-        self.missing_count >= (MISSING_COUNT_THRESHOLD as u8)
+        self.is_service_choked()
     }
 
-    /// May the node participate in HRW quorums? (active AND not locally suspended)
+    /// May the node participate in HRW quorums? (active AND not choked)
     pub fn is_hrw_eligible(&self) -> bool {
-        self.evaluate_state() == PeerPresenceState::Active && !self.is_suspended()
+        self.evaluate_state() == PeerPresenceState::Active && !self.is_service_choked()
     }
 
     /// May gossips / heartbeats from this node be forwarded?
+    /// F2F Gossip is NEVER choked to prevent network partitions and death spirals.
     pub fn should_forward_gossip(&self) -> bool {
         true
     }
@@ -1126,10 +1163,16 @@ mod tests {
     #[test]
     fn test_peer_presence_entry_lifecycle_and_backoff_reset() {
         assert_eq!(std::mem::size_of::<PeerPresenceEntry>(), 16, "Must be exactly 16 bytes");
+        assert_eq!(std::mem::align_of::<PeerPresenceEntry>(), 8, "Must be 8-byte aligned");
+        assert_eq!(FLAG_INBOUND_ACTIVE, 1, "FLAG_INBOUND_ACTIVE must be 1<<0");
+        assert_eq!(FLAG_LAST_FAILED, 2, "FLAG_LAST_FAILED must be 1<<1");
 
         let mut entry = PeerPresenceEntry::new(0x1234_5678, 100);
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Immature);
         assert!(!entry.is_hrw_eligible());
+        assert_eq!(entry.malus_score, 0);
+        assert_eq!(entry.backoff_level, 0);
+        assert_eq!(entry.flags, 0);
 
         // After 10 hours with 1 HB each -> still Immature (age < 24h)
         for ep in 101..=110 {
@@ -1144,94 +1187,177 @@ mod tests {
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Active);
         assert!(entry.is_hrw_eligible());
         assert!(entry.should_forward_gossip());
+        assert_eq!(entry.backoff_level, 0);
 
-        // 1. First failure -> missing_count = 1 (not suspended yet, degrading in P2P mesh)
-        assert_eq!(entry.record_missing(), 1);
-        assert_eq!(entry.missing_count, 1);
-        assert!(!entry.is_suspended());
-        assert!(entry.is_hrw_eligible());
-        assert!(entry.should_forward_gossip()); // Always true for F2F decoupling
-
-        // 2. Second failure -> missing_count = 2 (still in mesh)
-        assert_eq!(entry.record_missing(), 2);
-        assert_eq!(entry.missing_count, 2);
-        assert!(!entry.is_suspended());
-        assert!(entry.is_hrw_eligible());
-
-        // 3. Third failure -> missing_count = 3 -> Locally suspended! (Rank 21 steps in in 0ms)
-        assert_eq!(entry.record_missing(), 3);
-        assert_eq!(entry.missing_count, 3);
+        // Activity-coupled 1:1 Tit-for-Tat: inbound + failure -> 1:1 malus (+1), choked
+        entry.record_inbound_activity();
+        assert!(entry.flags & FLAG_INBOUND_ACTIVE != 0);
+        let bl = entry.record_outbound_failure();
+        assert_eq!(bl, 1, "First failure with inbound => backoff 1");
+        assert_eq!(entry.malus_score, 1);
+        assert_eq!(entry.backoff_level, 1);
+        assert_eq!(entry.flags & FLAG_INBOUND_ACTIVE, 0, "Inbound flag cleared after escalation");
+        assert!(entry.flags & FLAG_LAST_FAILED != 0);
         assert!(entry.is_suspended());
-        assert!(!entry.is_hrw_eligible());
-        assert!(entry.should_forward_gossip()); // Gossip runs unconditionally
+        assert!(entry.is_service_choked());
+        assert!(!entry.is_hrw_eligible(), "Choked peer not HRW eligible");
+        assert!(entry.should_forward_gossip(), "Gossip is always forwarded");
 
-        // Autonomous healing: 1 hour passes with HB -> missing_count decays from 3 to 2
+        // Eskalationssperre: second failure WITHOUT inbound -> no escalation (offline/DDoS protection)
+        let bl2 = entry.record_outbound_failure();
+        assert_eq!(bl2, 1, "Without inbound and backoff>0, no escalation");
+        assert_eq!(entry.malus_score, 1, "Malus unchanged due to escalation lock");
+        assert_eq!(entry.backoff_level, 1);
+        assert!(entry.is_suspended());
+
+        // Autonomous healing: 1 hour passes -> backoff & malus decay from 1 to 0, choking lifted
         entry.record_hour(125, true);
-        assert_eq!(entry.missing_count, 2);
-        assert!(!entry.is_suspended(), "Hourly decay (-1) restores eligibility without death spirals");
-        assert!(entry.is_hrw_eligible());
-
-        // Success immediately resets missing_count to 0
-        entry.record_success();
-        assert_eq!(entry.missing_count, 0);
-        assert!(!entry.is_suspended());
+        assert_eq!(entry.backoff_level, 0, "Hourly decay -1");
+        assert_eq!(entry.malus_score, 0, "Hourly malus decay -1");
+        assert!(!entry.is_suspended(), "Hourly decay restores eligibility without death spirals");
         assert!(entry.is_hrw_eligible());
         assert!(entry.should_forward_gossip());
+        assert!(!entry.is_service_choked());
 
-        // 22 hours without HB -> DORMANT (only 2 bits left in 24h window)
+        // Inbound + failure again -> second escalation
+        entry.record_inbound_activity();
+        let bl3 = entry.record_outbound_failure();
+        assert_eq!(entry.malus_score, 1);
+        assert_eq!(bl3, 1);
+        assert_eq!(entry.backoff_level, 1);
+        assert!(entry.is_suspended());
+
+        entry.record_inbound_activity();
+        let bl4 = entry.record_outbound_failure();
+        assert_eq!(entry.malus_score, 2);
+        assert_eq!(bl4, 2);
+        assert_eq!(entry.backoff_level, 2);
+
+        // Success: clears LAST_FAILED, malus -1 (1:1), backoff updates
+        entry.record_outbound_success();
+        assert_eq!(entry.malus_score, 1);
+        assert_eq!(entry.backoff_level, 1);
+        assert_eq!(entry.flags & FLAG_LAST_FAILED, 0, "Success clears LAST_FAILED");
+        assert!(!entry.is_service_choked(), "Not choked after success (flag cleared)");
+        assert!(entry.should_forward_gossip());
+        assert!(entry.is_hrw_eligible());
+
+        // 1:1 ratio: 1 more success drains malus to 0 -> backoff 0
+        entry.record_outbound_success();
+        assert_eq!(entry.malus_score, 0);
+        assert_eq!(entry.backoff_level, 0, "When malus 0, backoff resets to 0");
+        assert!(!entry.is_suspended());
+
+        // Re-create choking for dormant test: inbound + failure => malus 1 backoff 1
+        entry.record_inbound_activity();
+        entry.record_outbound_failure();
+        assert_eq!(entry.malus_score, 1);
+        assert_eq!(entry.backoff_level, 1);
+        assert!(entry.is_suspended());
+
+        // 22 hours without HB -> DORMANT (only 2 bits left in 24h window) -> backoff & flags reset
         for ep in 126..=146 {
             entry.record_hour(ep, false);
         }
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Dormant);
-        assert_eq!(entry.missing_count, 0, "Dormant transition cleanly resets missing_count to 0 for re-entry probation");
+        assert_eq!(entry.backoff_level, 0, "Dormant transition resets backoff to 0 for re-entry probation");
+        assert_eq!(entry.flags, 0, "Dormant clears flags");
+        assert!(!entry.is_suspended());
 
         // Fast re-entry: 2 consecutive HBs bring it back to ACTIVE
         entry.record_hour(147, true);
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Dormant);
+        assert_eq!(entry.backoff_level, 0);
         entry.record_hour(148, true);
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Active);
-        assert!(entry.is_hrw_eligible(), "Active node with missing_count=0 is immediately eligible for quorums");
+        assert!(entry.is_hrw_eligible(), "Active node with backoff 0 immediately eligible for quorums");
         assert!(entry.should_forward_gossip());
+
+        // Alias checks
+        entry.record_inbound_activity();
+        let alias_bl = entry.record_missing();
+        assert_eq!(alias_bl, entry.backoff_level);
+        entry.record_success();
+        assert_eq!(entry.flags & FLAG_LAST_FAILED, 0);
     }
 
     #[test]
     fn test_transient_missing_count_damping_and_hourly_decay() {
         let mut entry = PeerPresenceEntry::new(0xDEAD_BEEF, 1);
-        
+
         // Initial state
-        assert_eq!(entry.missing_count, 0);
+        assert_eq!(entry.malus_score, 0);
+        assert_eq!(entry.backoff_level, 0);
         assert!(!entry.is_suspended());
+        assert!(entry.should_forward_gossip());
 
-        // Accumulate 5 misses (saturating)
+        // Accumulate 5 outbound failures WITH inbound (1:1 tit-for-tat escalation)
         for i in 1..=5 {
-            let count = entry.record_missing();
-            assert_eq!(count, i);
+            entry.record_inbound_activity();
+            let bl = entry.record_outbound_failure();
+            assert_eq!(entry.malus_score, i);
+            assert_eq!(bl, i);
+            assert_eq!(entry.backoff_level, i);
         }
-        assert_eq!(entry.missing_count, 5);
+        assert_eq!(entry.malus_score, 5);
+        assert_eq!(entry.backoff_level, 5);
         assert!(entry.is_suspended());
+        assert!(entry.should_forward_gossip());
+        assert!(!entry.is_hrw_eligible());
 
-        // Hourly decay heals step-by-step
+        // Eskalationssperre: further failure without inbound must NOT increase malus/backoff
+        let malus_before = entry.malus_score;
+        let backoff_before = entry.backoff_level;
+        let bl_no_inbound = entry.record_outbound_failure();
+        assert_eq!(bl_no_inbound, backoff_before);
+        assert_eq!(entry.malus_score, malus_before);
+        assert_eq!(entry.backoff_level, backoff_before);
+
+        // Hourly decay heals backoff & malus step-by-step
         entry.record_hour(2, true);
-        assert_eq!(entry.missing_count, 4);
+        assert_eq!(entry.backoff_level, 4);
+        assert_eq!(entry.malus_score, 4);
         assert!(entry.is_suspended());
 
         entry.record_hour(3, true);
-        assert_eq!(entry.missing_count, 3);
+        assert_eq!(entry.backoff_level, 3);
+        assert_eq!(entry.malus_score, 3);
         assert!(entry.is_suspended());
 
         entry.record_hour(4, true);
-        assert_eq!(entry.missing_count, 2);
-        assert!(!entry.is_suspended(), "Dropping below 3 lifts suspension");
+        assert_eq!(entry.backoff_level, 2);
+        assert_eq!(entry.malus_score, 2);
+        assert!(entry.is_suspended());
 
         entry.record_hour(5, true);
-        assert_eq!(entry.missing_count, 1);
+        assert_eq!(entry.backoff_level, 1);
+        assert_eq!(entry.malus_score, 1);
+        assert!(entry.is_suspended());
 
         entry.record_hour(6, true);
-        assert_eq!(entry.missing_count, 0);
+        assert_eq!(entry.backoff_level, 0);
+        assert_eq!(entry.malus_score, 0);
+        assert!(!entry.is_suspended(), "Dropping to 0 lifts choking");
 
         // Does not underflow on further hours
         entry.record_hour(7, true);
-        assert_eq!(entry.missing_count, 0);
+        assert_eq!(entry.backoff_level, 0);
+        assert_eq!(entry.malus_score, 0);
+
+        // Inbound + failure -> malus 1, backoff 1
+        entry.record_inbound_activity();
+        entry.record_outbound_failure();
+        assert_eq!(entry.malus_score, 1);
+        assert_eq!(entry.backoff_level, 1);
+        assert!(entry.is_suspended());
+
+        // 1:1 Success: drains malus by 1 immediately -> malus 0 backoff 0
+        entry.record_outbound_success();
+        assert_eq!(entry.malus_score, 0);
+        assert_eq!(entry.backoff_level, 0);
+        assert!(!entry.is_suspended());
+        assert!(entry.should_forward_gossip());
+        assert_eq!(entry.flags & FLAG_LAST_FAILED, 0);
     }
 
     #[test]

@@ -166,7 +166,7 @@ fn test_spec_03_lazy_node_defense_suspend_and_promote() {
 
 #[test]
 fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
-    use humoco_sim_core::types::{PeerPresenceEntry, PeerPresenceState};
+    use humoco_sim_core::types::{PeerPresenceEntry, PeerPresenceState, FLAG_INBOUND_ACTIVE, FLAG_LAST_FAILED};
 
     let mut peer = PeerPresenceEntry::new(0xABCD_EF01, 100);
 
@@ -175,61 +175,95 @@ fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
         peer.record_hour(ep, true);
     }
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Active);
-    assert_eq!(peer.missing_count, 0);
+    assert_eq!(peer.malus_score, 0);
+    assert_eq!(peer.backoff_level, 0);
     assert!(peer.is_hrw_eligible());
     assert!(peer.should_forward_gossip());
 
-    // 1. Ausfall: missing_count = 1 (noch nicht suspendiert, Degrading im P2P Mesh)
-    assert_eq!(peer.record_missing(), 1);
-    assert_eq!(peer.missing_count, 1);
-    assert!(!peer.is_suspended());
-    assert!(peer.is_hrw_eligible());
-    assert!(peer.should_forward_gossip());
+    // 1:1 Tit-for-Tat: inbound + failure -> malus 1, backoff 1, choked
+    peer.record_inbound_activity();
+    assert!(peer.flags & FLAG_INBOUND_ACTIVE != 0);
+    let bl = peer.record_outbound_failure();
+    assert_eq!(bl, 1);
+    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.backoff_level, 1);
+    assert!(peer.is_suspended(), "Choked after failure");
+    assert!(!peer.is_hrw_eligible(), "Choked peer not HRW eligible (gateway skips to rank 21)");
+    assert!(peer.should_forward_gossip(), "Gossip is always forwarded");
 
-    // 2. Zweiter Ausfall: missing_count = 2 (noch im Mesh)
-    assert_eq!(peer.record_missing(), 2);
-    assert_eq!(peer.missing_count, 2);
-    assert!(!peer.is_suspended());
-    assert!(peer.is_hrw_eligible());
+    // Eskalationssperre: ohne inbound keine weitere Eskalation (offline/DDoS Schutz)
+    let bl2 = peer.record_outbound_failure();
+    assert_eq!(bl2, 1, "No escalation without inbound");
+    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.backoff_level, 1);
+    assert!(peer.is_suspended());
 
-    // 3. Dritter Ausfall: missing_count = 3 -> Lokal suspendiert! (Skip & Replace: Rang 21 springt ein)
-    assert_eq!(peer.record_missing(), 3);
-    assert_eq!(peer.missing_count, 3);
-    assert!(peer.is_suspended(), "Must be suspended on missing_count >= 3");
-    assert!(!peer.is_hrw_eligible(), "Must NOT be HRW eligible (Gateway skips to Rank 21)");
-    assert!(peer.should_forward_gossip(), "Gossip must run unconditionally");
-
-    // Autonome Heilung: 1 Stunde vergeht mit Heartbeat -> missing_count sinkt von 3 auf 2
+    // Autonome Heilung: 1 Stunde vergeht -> backoff & malus decay, choking lifted
     peer.record_hour(125, true);
-    assert_eq!(peer.missing_count, 2);
-    assert!(!peer.is_suspended(), "Stündlicher Abbau (-1) hebt Suspension ohne Kaskaden-Death-Spiral auf");
+    assert_eq!(peer.backoff_level, 0, "Hourly backoff decay -1");
+    assert_eq!(peer.malus_score, 0, "Hourly malus decay -1");
+    assert!(!peer.is_suspended(), "Decay lifts choking without death spiral");
     assert!(peer.is_hrw_eligible());
     assert!(peer.should_forward_gossip());
 
-    // Erneuter Ausfall -> wieder suspendiert (missing_count = 3)
-    assert_eq!(peer.record_missing(), 3);
+    // Erneuter Ausfall mit inbound -> wieder choked (malus 1, backoff 1)
+    peer.record_inbound_activity();
+    let bl3 = peer.record_outbound_failure();
+    assert_eq!(bl3, 1);
+    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.backoff_level, 1);
     assert!(peer.is_suspended());
     assert!(!peer.is_hrw_eligible());
+    assert!(peer.should_forward_gossip());
 
-    // Sofortiger Reset bei Erfolg: Antwortet der Knoten erfolgreich, wird missing_count direkt auf 0 gesetzt
-    peer.record_success();
-    assert_eq!(peer.missing_count, 0);
-    assert!(!peer.is_suspended());
+    // Zweiter Ausfall mit inbound -> malus 2, backoff 2
+    peer.record_inbound_activity();
+    let bl4 = peer.record_outbound_failure();
+    assert_eq!(bl4, 2);
+    assert_eq!(peer.malus_score, 2);
+    assert_eq!(peer.backoff_level, 2);
+
+    // Erfolg: FLAG_LAST_FAILED cleared, malus -1 (1:1)
+    peer.record_outbound_success();
+    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.flags & FLAG_LAST_FAILED, 0);
+    assert!(!peer.is_suspended(), "Not choked after success (flag cleared)");
+    assert!(peer.should_forward_gossip());
     assert!(peer.is_hrw_eligible());
+    assert_eq!(peer.backoff_level, 1);
 
-    // Langzeit-Offline -> Dormant (missing_count wird für sauberen Re-Entry genullt)
+    // 1 weiterer Erfolg -> malus 0, backoff 0
+    peer.record_outbound_success();
+    assert_eq!(peer.malus_score, 0);
+    assert_eq!(peer.backoff_level, 0);
+    assert!(!peer.is_suspended());
+
+    // Dormant-Reset: inbound+failure to re-choke, then 23h offline -> DORMANT clears backoff & flags
+    peer.record_inbound_activity();
+    peer.record_outbound_failure();
+    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.backoff_level, 1);
     for ep in 126..=148 {
         peer.record_hour(ep, false);
     }
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Dormant);
-    assert_eq!(peer.missing_count, 0, "Dormant transition resets missing_count for clean re-entry");
+    assert_eq!(peer.backoff_level, 0, "Dormant resets backoff for clean re-entry");
+    assert_eq!(peer.flags, 0, "Dormant clears flags");
+    assert!(!peer.is_suspended());
 
     // Fast Re-Entry nach Wochen: 2 Stunden reichen für Reaktivierung zur Probe
     peer.record_hour(149, true);
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Dormant);
     peer.record_hour(150, true);
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Active);
-    assert_eq!(peer.missing_count, 0);
+    assert_eq!(peer.backoff_level, 0);
     assert!(peer.is_hrw_eligible(), "Eligible for probation probe immediately upon re-entry");
     assert!(peer.should_forward_gossip());
+
+    // Alias roundtrip
+    peer.record_inbound_activity();
+    let alias_bl = peer.record_missing();
+    assert_eq!(alias_bl, peer.backoff_level);
+    peer.record_success();
+    assert_eq!(peer.flags & FLAG_LAST_FAILED, 0);
 }

@@ -518,8 +518,8 @@ A fraud proof is a **time-critical security emergency alert**. It follows specia
 To reliably feed ingress traffic to foreign shards with minimal latency, the network uses no cumbersome token attestation system but direct **P2P reciprocity (tit-for-tat)** and **zero-gossip 4-byte bitmask feedback**:
 
 * **Zero-Gossip Shard Feedback (4-Byte Piggyback):** When closing the QUIC streams after successful quorum, the gateway sends a 4-byte `signers_bitmask`. Participating shard nodes increment missing signatures locally in RAM (`missing_count`).
-* **Local Isolation & HRW Rank 21:** If a shard node reaches `missing_count >= 3`, it is locally isolated. Deterministically the node at **HRW rank 21** steps in in $0\,\text{ms}$.
-* **Reciprocal P2P Throttling (8:1 Ratio Credit):** Nodes that refuse work in their shards lose their peering credits on the direct QUIC connections. Incoming ingress streams are throttled (`429 QuotaExhausted`).
+* **Local Isolation & HRW Rank 21:** If a shard node reaches `missing_count >= 3`, it is locally suspended. Deterministically the node at **HRW rank 21** steps in in $0\,\text{ms}$.
+* **Reciprocal P2P Throttling & Suspension:** Nodes that refuse work in their shards lose their peering credits on direct QUIC connections. Incoming ingress streams are throttled (`429 QuotaExhausted`).
 * **Smart-Client Failover:** Since censoring or lazy gateways suffer latencies and timeouts, end clients automatically switch to active, performant gateways in $< 200\,\text{ms}$.
 
 ---
@@ -589,5 +589,5 @@ pub fn parse_and_validate_wire_header(
 5. **[INV-1005] Jury-Free Ingress Verification:** Ingress accounting is performed exclusively directly and objectively by the receiving shard nodes; no control juries exist for load declarations.
 6. **[INV-1006] Stochastic Receipt Sampling:** Shard nodes stochastically scatter $p = 0{,}02\,\%$ of all processed locks as 64-byte `SignedGossipReceipt` into the P2P gossip channel.
 7. **[INV-1007] Non-Repudiation Ingress:** Every lock forwarding requires a validly signed `SignedIngressEnvelope` of the gateway; sequence splits constitute an incontestable fraud proof.
-8. **[INV-1008] Reciprocal Shard & Stream Integrity:** Gateways secure their P2P ingress priority through active participation in assigned shard quorums; on persistent refusal local stream backoff (8:1 Ratio Credit) applies without need for circular epoch attestations.
+8. **[INV-1008] Reciprocal Shard & Stream Integrity:** Gateways secure their P2P ingress priority through active participation in assigned shard quorums; on persistent refusal (`missing_count >= 3`) local stream suspension applies without need for circular epoch attestations.
 9. **[INV-1009] PULL-Sync Replay Safety:** `ActiveSyncRequest` is permitted in QUIC 0-RTT early data because requesting quorated lock lists is strictly idempotent and triggers no state mutations on the server.

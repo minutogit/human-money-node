@@ -118,11 +118,11 @@ To distinguish honest shard node timeouts on quota exhaustion from work refusal 
 2. **[INV-0909] The 3-zone plausibility check (honest frontrunner vs. fraud):**  
    The gateway (and every verifying peer) evaluates a `429` response against its own ingress counter for the sender relative to the quota limit:
    * **Zone 1: Clear fraud & laziness zone ($< 75\,\%$ of limit):**  
-     Sender has consumed only a fraction of the limit (e.g., $2\times \text{NCB}$). A shard node already reporting `429` here refuses work. $\rightarrow$ **$\text{malus\_score} += 8$ (1m $\to$ 2m $\dots$ ban)**.
+     Sender has consumed only a fraction of the limit (e.g., $2\times \text{NCB}$). A shard node already reporting `429` here refuses work. $\rightarrow$ **$\text{missing\_count} += 1$ (Failure counted)**.
    * **Zone 2: Tolerant border / cutoff zone ($75\,\%$ to $125\,\%$ of limit):**  
-     Sender is scraping the 5× limit. A shard node hitting the limit first due to minimal packet ordering is an **honest frontrunner**. $\rightarrow$ **$\text{malus\_score} += 0$ (No penalty)**.
+     Sender is scraping the 5× limit. A shard node hitting the limit first due to minimal packet ordering is an **honest frontrunner**. $\rightarrow$ **$\text{missing\_count} += 0$ (No penalty)**.
    * **Zone 3: Genuine overload zone ($> 125\,\%$ of limit):**  
-     Sender is far beyond the limit. All nodes reject. $\rightarrow$ **$\text{malus\_score} += 0$ (Regular rate-limit protection)**.
+     Sender is far beyond the limit. All nodes reject. $\rightarrow$ **$\text{missing\_count} += 0$ (Regular rate-limit protection)**.
 
 ### 5.3 [INV-0907] New-Node Bootstrap & Seed Initialization (Anti-Deadlock)
 
@@ -170,7 +170,7 @@ Since $\Delta t = 0$ for read requests, the read thermometer measures **read ope
 6. **[INV-0906] Silent enforcement:** Quota exceedances are enforced exclusively via local silent dropping or `429 QuotaExceeded`; no global pillory or alarm broadcasts exist.
 7. **[INV-0907] Seed initialization for new nodes:** New nodes fill all 28 slots of their ring buffer on joining with the current peer median to prevent cold-start deadlocks in large networks.
 8. **[INV-0908] Fast re-seed on network merges:** On abrupt network growth ($N_{\text{new}} \ge 2\times N_{\text{old}}$) the 28-day buffer is immediately re-seeded with the new global median; during 24h merge hysteresis a quota moratorium applies.
-9. **[INV-0909] 3-zone plausibility check for `429 QuotaExceeded`:** Rejections below $75\,\%$ of limit are punished as fraud/laziness with $\text{malus\_score} += 8$; in border zone ($75\dots 125\,\%$) a node counts as honest frontrunner with $\text{malus\_score} += 0$.
+9. **[INV-0909] 3-zone plausibility check for `429 QuotaExceeded`:** Rejections below $75\,\%$ of limit are punished as fraud/laziness with $\text{missing\_count} += 1$; in border zone ($75\dots 125\,\%$) a node counts as honest frontrunner with $\text{missing\_count} += 0$.
 10. **[INV-0910] Read hard floor ($50.000\,\text{reads/day}$):** Every node and smart client has a guaranteed minimum read capacity of $50.000$ read credits per day ($\approx 2.083\,\text{reads/h}$).
 11. **[INV-0911] 28-day read median smoothing:** Read queries are smoothed via a separate 28-day slotted ring buffer to cushion scraping and crawler attacks.
 12. **[INV-0912] Read Whale Brake ($K \le 5{,}0$):** No single node may fetch more than $5\times$ the smoothed read median per 24h epoch.

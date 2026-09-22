@@ -165,7 +165,7 @@ fn test_spec_03_lazy_node_defense_suspend_and_promote() {
 }
 
 #[test]
-fn test_spec_03_ratio_credit_8_to_1_backoff_and_probe_on_expiry() {
+fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
     use humoco_sim_core::types::{PeerPresenceEntry, PeerPresenceState};
 
     let mut peer = PeerPresenceEntry::new(0xABCD_EF01, 100);
@@ -175,80 +175,61 @@ fn test_spec_03_ratio_credit_8_to_1_backoff_and_probe_on_expiry() {
         peer.record_hour(ep, true);
     }
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Active);
-    assert_eq!(peer.malus_score, 0);
-    assert_eq!(peer.backoff_minutes_left, 0);
+    assert_eq!(peer.missing_count, 0);
     assert!(peer.is_hrw_eligible());
     assert!(peer.should_forward_gossip());
 
-    // 1. Ausfall: +8 Malus -> Stufe 1 -> 1m Sperre (Sanfter Jitter-Schutz)
+    // 1. Ausfall: missing_count = 1 (noch nicht suspendiert, Degrading im P2P Mesh)
     assert_eq!(peer.record_missing(), 1);
-    assert_eq!(peer.malus_score, 8);
-    assert_eq!(peer.backoff_minutes_left, 1);
-    assert!(peer.is_suspended());
-    assert!(!peer.is_hrw_eligible());
+    assert_eq!(peer.missing_count, 1);
+    assert!(!peer.is_suspended());
+    assert!(peer.is_hrw_eligible());
     assert!(peer.should_forward_gossip());
 
-    // 2. Erneuter Ausfall: +8 Malus -> Score 16 -> Stufe 2 -> 2m Sperre
+    // 2. Zweiter Ausfall: missing_count = 2 (noch im Mesh)
     assert_eq!(peer.record_missing(), 2);
-    assert_eq!(peer.malus_score, 16);
-    assert_eq!(peer.backoff_minutes_left, 2);
+    assert_eq!(peer.missing_count, 2);
+    assert!(!peer.is_suspended());
+    assert!(peer.is_hrw_eligible());
 
-    // 3. Dritter Ausfall: +8 Malus -> Score 24 -> Stufe 3 -> 4m Sperre
-    assert_eq!(peer.record_missing(), 4);
-    assert_eq!(peer.malus_score, 24);
-    assert_eq!(peer.backoff_minutes_left, 4);
-
-    // Phase 1: Während der 4m Sperrzeit (Skip & Replace)
-    // Minute 1 vergeht -> Sperrzeit sinkt auf 3m
-    peer.record_elapsed_minutes(1);
-    assert_eq!(peer.backoff_minutes_left, 3);
-    assert!(peer.is_suspended(), "Must stay suspended during active backoff");
+    // 3. Dritter Ausfall: missing_count = 3 -> Lokal suspendiert! (Skip & Replace: Rang 21 springt ein)
+    assert_eq!(peer.record_missing(), 3);
+    assert_eq!(peer.missing_count, 3);
+    assert!(peer.is_suspended(), "Must be suspended on missing_count >= 3");
     assert!(!peer.is_hrw_eligible(), "Must NOT be HRW eligible (Gateway skips to Rank 21)");
     assert!(peer.should_forward_gossip(), "Gossip must run unconditionally");
 
-    // Minute 2 und 3 vergehen -> 1m übrig
-    peer.record_elapsed_minutes(2);
-    assert_eq!(peer.backoff_minutes_left, 1);
-
-    // Minute 4 vergeht -> 0m übrig (Probe on Expiry freigeschaltet!)
-    peer.record_elapsed_minutes(1);
-    assert_eq!(peer.backoff_minutes_left, 0);
-    assert!(!peer.is_suspended());
-    assert!(peer.is_hrw_eligible(), "Probe on Expiry: Gateway queries node again!");
+    // Autonome Heilung: 1 Stunde vergeht mit Heartbeat -> missing_count sinkt von 3 auf 2
+    peer.record_hour(125, true);
+    assert_eq!(peer.missing_count, 2);
+    assert!(!peer.is_suspended(), "Stündlicher Abbau (-1) hebt Suspension ohne Kaskaden-Death-Spiral auf");
+    assert!(peer.is_hrw_eligible());
     assert!(peer.should_forward_gossip());
 
-    // Phase 2: Probe on Expiry - Fall A: Knoten antwortet erfolgreich!
-    // -> Malus sinkt um 1 Punkt von 24 auf 23 (8:1 Asymmetrie)
+    // Erneuter Ausfall -> wieder suspendiert (missing_count = 3)
+    assert_eq!(peer.record_missing(), 3);
+    assert!(peer.is_suspended());
+    assert!(!peer.is_hrw_eligible());
+
+    // Sofortiger Reset bei Erfolg: Antwortet der Knoten erfolgreich, wird missing_count direkt auf 0 gesetzt
     peer.record_success();
-    assert_eq!(peer.malus_score, 23);
-    assert_eq!(peer.backoff_minutes_left, 0);
+    assert_eq!(peer.missing_count, 0);
+    assert!(!peer.is_suspended());
+    assert!(peer.is_hrw_eligible());
 
-    // Phase 2: Probe on Expiry - Fall B: Knoten versagt beim nächsten Lock sofort wieder (Flapping)
-    // -> Score 23 + 8 = 31 -> Stufe 3 -> Sofort wieder 4m Sperre!
-    assert_eq!(peer.record_missing(), 4);
-    assert_eq!(peer.malus_score, 31);
-    assert_eq!(peer.backoff_minutes_left, 4);
-
-    // Phase 3: Langzeit-Offline -> Dormant (Score bleibt als Gedächtnis erhalten)
-    for ep in 129..=150 {
+    // Langzeit-Offline -> Dormant (missing_count wird für sauberen Re-Entry genullt)
+    for ep in 126..=148 {
         peer.record_hour(ep, false);
     }
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Dormant);
-    assert_eq!(peer.malus_score, 31, "Dormant transition must NOT wipe malus_score (no trust without work)");
-    assert_eq!(peer.backoff_minutes_left, 0, "Dormant transition MUST reset backoff_minutes_left to 0 for probe readiness");
+    assert_eq!(peer.missing_count, 0, "Dormant transition resets missing_count for clean re-entry");
 
     // Fast Re-Entry nach Wochen: 2 Stunden reichen für Reaktivierung zur Probe
-    peer.record_hour(151, true);
+    peer.record_hour(149, true);
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Dormant);
-    peer.record_hour(152, true);
+    peer.record_hour(150, true);
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Active);
-    assert_eq!(peer.malus_score, 31, "Preserved score 31 across offline period");
-    assert!(peer.is_hrw_eligible(), "Eligible for probation probe");
+    assert_eq!(peer.missing_count, 0);
+    assert!(peer.is_hrw_eligible(), "Eligible for probation probe immediately upon re-entry");
     assert!(peer.should_forward_gossip());
-
-    // Rehabilitation: 31 erfolgreiche Signaturen bauen den Score sauber auf 0 ab
-    for _ in 0..31 {
-        peer.record_success();
-    }
-    assert_eq!(peer.malus_score, 0);
 }

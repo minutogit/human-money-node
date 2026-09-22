@@ -161,7 +161,7 @@ flowchart TD
 
 To prevent lazy gateway nodes from earning ingress fees from end clients without participating in shard quorums themselves:
 * **Reciprocal Peer Reputation (Tit-for-Tat):** Shard nodes measure the collaboration of directly connected gateways on their shard responsibilities via the 4-byte bitmask feedback.
-* **Automatic Exclusion of Free-Riders:** Gateways that refuse work in their own shard responsibilities (`missing_count >= 3`) suffer an 8:1 ratio-credit backoff at the direct peering edges. Their ingress streams are throttled (`429 QuotaExhausted`).
+* **Automatic Exclusion of Free-Riders:** Gateways that refuse work in their own shard responsibilities (`missing_count >= 3`) suffer local suspension at the direct peering edges. Their ingress streams are throttled (`429 QuotaExhausted`).
 * **Market Cleanup:** Clients of the throttled gateway experience timeouts and automatically migrate to fully cooperating gateways within $< 200\,\text{ms}$.
 
 ---
@@ -173,4 +173,4 @@ To prevent lazy gateway nodes from earning ingress fees from end clients without
 3. **[INV-1303] Stateless Tier-3 Challenges:** Generation and verification of Tier-3 PoW puzzles requires no persistent storage on the server ($O(1)$ memory overhead).
 4. **[INV-1304] Asymmetric Cost Barrier:** The cost of verifying an Argon2id solution on the server is strictly capped by fixed worker slots; the cost for mass attacks scales linearly with $N \times 64\,\text{MB}$.
 5. **[INV-1305] Autonomous Emergency Brake:** Each Node operator can locally raise the Argon2id difficulty for Tier 3 without network consensus up to 60 seconds or temporarily throttle the anonymous port under extreme flooding.
-6. **[INV-1306] Reciprocal Ingress Prioritization:** Gateway ingress into foreign shards is tied to continuous reciprocity; inactive nodes are deprioritized at the peering edges via ratio-credit throttling (8:1 backoff).
+6. **[INV-1306] Reciprocal Ingress Prioritization:** Gateway ingress into foreign shards is tied to continuous reciprocity; inactive nodes are deprioritized at the peering edges via local suspension (`missing_count >= 3`).

@@ -110,28 +110,25 @@ flowchart TD
 
 1. **Parallel Broadcast Without Blocking & Local Backoff Cache (Gateway View):**  
    The gateway does not wait for stragglers, but assembles the `QuorumCertificate` as soon as the first $14$ of $20$ signatures are present.  
-   * **Local Exponential Backoff Cache ($< 16\,\text{KB}$ RAM):** If a shard node repeatedly fails to respond ($100\,\text{ms}$ timeout), it is marked in the local gateway cache as `UNREACHABLE` with an exponential minute-based backoff (e.g., 1m, 2m, 4m, 8m, etc.). On subsequent locks the gateway no longer queries that node at all, but contacts the succeeding HRW ranks 21..24 directly ($0\,\text{ms}$ wait time for clients).
+   * **Local Suspension Cache ($< 16\,\text{KB}$ RAM):** If a shard node repeatedly fails to respond ($100\,\text{ms}$ timeout, $\ge 3$ debounced misses), it is marked in the local gateway cache as `SUSPENDED`. On subsequent locks the gateway no longer queries that node at all, but contacts the succeeding HRW ranks 21..24 directly ($0\,\text{ms}$ wait time for clients).
 2. **The 4-Byte Piggyback Ack:** The gateway sends the $4$-byte `signers_bitmask` back to the shard nodes when closing the QUIC streams.
 3. **[INV-0310] Stochastic Read Routing (`StatusQuery`) & Read Backoff:**
    * **Uniform Random Load Balancing:** For read queries (`L2StatusQuery` / `StatusQuery`) the gateway does not rigidly query rank 1 (to avoid hotspotting), but uniformly at random selects an unsuspended node from the shard's Top-20:
      $$\text{Target-Node} = \text{UniformRandom}\Big(\big\{ N \in \text{Top20}(\text{Shard\_ID}) \;\big|\; \text{!is\_suspended}(N) \big\}\Big)$$
    * **Read Timeout & Fast Failover:** If the selected shard node does not respond within $100\,\text{ms}$ timeout:
-     * The faulty node is penalized with $\text{malus\_score} += 8$ (`record_missing()`) and locally suspended with minute-based backoff.
+     * The faulty node is incremented (`missing_count += 1` via `record_missing()`) and locally suspended once $\text{missing\_count} \ge 3$.
      * The gateway performs an immediate **fast failover** to an alternative unsuspended shard node from the Top-20 ($< 100\,\text{ms}$ total delay for the client).
-     * If the node responds successfully, its malus decreases by $-1$ (`record_success()`).
-4. **[INV-0309] Gateway Target-Quorum Difference Check & 8:1 Ratio-Credit Lazy-Node Detection:**
+     * If the node responds successfully, its missing count resets to 0 (`record_success()`).
+4. **[INV-0309] Gateway Target-Quorum Difference Check & Transient Missing-Count Lazy-Node Detection:**
    * **Target comparison against Top-20:** The gateway compares the signers contained in the quorum certificate exactly against the primary HRW ranks $1 \dots 20$ of the shard.
-   * **8:1 Asymmetric Ratio-Credit Accounting (Purely Event-Based):**
-     * **Missing node (rank $i \in 1..20$ without signature / timeout / unjustified 429):** $\text{malus\_score} = \min(255, \text{malus\_score} + 8)$.
-       * Suspension level $k = \text{malus\_score} \gg 3$.
-       * Suspension duration in minutes $\text{backoff\_minutes\_left} = \min(65.535, 1 \ll (k - 1)) \text{ minutes}$ ($1\text{m} \to 2\text{m} \to 4\text{m} \to 8\text{m} \to 16\text{m} \dots \to 65.535\text{m} \approx 45{,}5\text{ days}$).
-     * **Successful node (valid signature):** $\text{malus\_score} = \max(0, \text{malus\_score} - 1)$ and $\text{backoff\_minutes\_left} = 0$.
-     * **Plausible quota rejection (`429 QuotaExceeded`, `INV-0909`):** If a `429` response falls within the tolerant margin ($75\dots 125\,\%$) or the quota overflow is confirmed by the quorum ($\ge 14$ rejections), it counts as proper participation: $\text{malus\_score} += 0$ (no penalty). Only `429` messages in the fraud zone ($< 75\,\%$ of the limit) incur $\text{malus\_score} += 8$.
-     * **No automatic time decay:** The malus score decays exclusively through demonstrably successful work (no score reset by merely waiting).
-     * **Mathematical error-tolerance threshold ($p^* = \frac{1}{9} \approx 11{,}1\,\%$):** Nodes with up to $10\,\%$ transient line jitter decay statistically toward 0; nodes with $\ge 12{,}5\dots 20\,\%$ failure rate inevitably escalate into multi-day suspensions.
-   * **Data-Plane "Skip & Replace":** While $\text{backoff\_minutes\_left} > 0$ the gateway sends no shard locks or queries to that node, but queries HRW successors directly (ranks 21..24) ($0\,\text{ms}$ client delay). Its gossips are locally discarded.
-   * **Probe on Expiry:** As soon as $\text{backoff\_minutes\_left} == 0$, the node is queried again as a regular candidate on the next shard request (probation).
-   * **Dormant Transition & Memory Retention:** On transition to `DORMANT` ($> 21\text{--}24\,\text{h}$ offline) only $\text{backoff\_minutes\_left} = 0$ is set so the node can be probed upon re-entry. The $\text{malus\_score}$ remains fully preserved (no trust advance through absence).
+   * **Transient Missing-Count Accounting & Autonomous Decay:**
+     * **Missing node (rank $i \in 1..20$ without signature / timeout / unjustified 429):** $\text{missing\_count} = \min(255, \text{missing\_count} + 1)$.
+       * Local suspension: $\text{missing\_count} \ge 3 \implies \text{SUSPENDED}$ (Rank 21 promotes in $0\,\text{ms}$).
+     * **Successful node (valid signature):** $\text{missing\_count} = 0$ (immediate reinstatement).
+     * **Plausible quota rejection (`429 QuotaExceeded`, `INV-0909`):** If a `429` response falls within the tolerant margin ($75\dots 125\,\%$) or the quota overflow is confirmed by the quorum ($\ge 14$ rejections), it counts as proper participation: $\text{missing\_count} += 0$ (no penalty). Only `429` messages in the fraud zone ($< 75\,\%$ of the limit) incur $\text{missing\_count} += 1$.
+     * **Hourly autonomous decay:** $\text{missing\_count} = \max(0, \text{missing\_count} - 1)$ per hour, ensuring autonomous recovery without deadlocks.
+   * **Data-Plane "Skip & Replace":** While $\text{is\_suspended}(N)$ the gateway sends no shard locks or queries to that node, but queries HRW successors directly (ranks 21..24) ($0\,\text{ms}$ client delay). Gossip heartbeats remain unconditionally forwarded.
+   * **Dormant Transition & Clean Re-Entry:** On transition to `DORMANT` ($> 21\text{--}24\,\text{h}$ offline) $\text{missing\_count} = 0$ is set so the node is immediately eligible for probation on re-entry. Multi-week lockouts are eliminated.
 5. **[INV-0308] Stochastic Gossip Percolation & Starvation Threshold (The 73.1% Weibull Formula):**  
    * **Censorship immunity under partial blocking ($\le 50\,\%$):** Passive non-forwarding of heartbeats by small censorship cartels ($\le 50\,\%$) **cannot isolate** an honest node. Thanks to high triadic closure and small-world paths, gossip reaches $> 99{,}8\,\%$ of all honest nodes.
    * **The exact percolation decay equation (Weibull model, $R^2 = 99{,}90\,\%$):**

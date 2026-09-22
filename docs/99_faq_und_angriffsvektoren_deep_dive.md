@@ -300,7 +300,7 @@ flowchart LR
 
     subgraph SelfHeal["3. HRW-Rang 21 & P2P-Drossel"]
         LocalEvict --> Rank21["HRW-Rang 21 rückt nach (0ms)"]
-        LocalEvict --> PeerBackoff["P2P Ratio-Credit Backoff (8:1)"]
+        LocalEvict --> PeerBackoff["P2P Drosselung & Suspension"]
         PeerBackoff --> ClientFailover["Clients wandern in < 200ms zu ehrlichen Gateways ab"]
     end
 ```
@@ -308,7 +308,7 @@ flowchart LR
 1. **Parallel-Broadcast ohne Blockade:** Das Gateway wartet nicht auf Nachzügler. Sobald 14 Teilsignaturen eintreffen, wird das Lock-Zertifikat sofort assembliert.
 2. **Zero-Gossip Shard-Feedback (4-Byte Piggyback):** Beim Schließen der QUIC-Streams sendet das Gateway eine 4-Byte `signers_bitmask`. Die 19 aktiven Shard-Nodes zählen fehlende Signaturen lokal im RAM hoch (`missing_count`).
 3. **Deterministisches Nachrücken (HRW-Rang 21):** Überschreitet ein Knoten die Ausfallschwelle (`missing_count >= 3`), binden die verbleibenden Knoten deterministisch den Knoten auf **HRW-Rang 21** als Ersatz ein.
-4. **Reziproke Peer-Drosselung & Client-Abwanderung:** Der faule Knoten erleidet an den direkten Peering-Kanten ein Ratio-Credit-Backoff (`8:1`). Wenn er versucht, Ingress für eigene Kunden einzuspeisen, steigen seine Latenzen dramatisch. Smart Clients bemerken die Verzögerungen und wechseln in $< 200\,\text{ms}$ zu voll kooperierenden Gateways. Der Betreiber verdient $0\,\text{EUR}$ Ingress-Gebühren.
+4. **Reziproke Peer-Drosselung & Client-Abwanderung:** Der faule Knoten erleidet an den direkten Peering-Kanten lokale Suspension (`missing_count >= 3`). Wenn er versucht, Ingress für eigene Kunden einzuspeisen, steigen seine Latenzen dramatisch. Smart Clients bemerken die Verzögerungen und wechseln in $< 200\,\text{ms}$ zu voll kooperierenden Gateways. Der Betreiber verdient $0\,\text{EUR}$ Ingress-Gebühren.
 
 ---
 

@@ -42,7 +42,7 @@ Dieses Dokument fasst die Ergebnisse der 3 KI-Audit-Läufe (Spezifikations-Abgle
      Würde ein Knoten versuchen, zu allen $\approx 3.150$ Co-Shard-Knoten permanente QUIC-Verbindungen zu halten, entstünden $\approx 250 \dots 300\,\text{MB}$ RAM-Overhead (TLS-States, Flow-Control) und bei 5s-Intervallen über $600$ Keep-Alive-Pings/Sekunde reiner Leerlauf-Traffic.
   2. **Interferenz mit Lazy-Node-Detektion:**
      Wie erkennt ein Gateway oder Shard-Knoten zuverlässig, ob ein Co-Shard-Knoten "faul" ist (Arbeitsverweigerung, Timeout, böswilliges Schweigen), wenn Verbindungen nicht dauerhaft bestehen, sondern on-demand/flüchtig aufgebaut werden?
-     - Führt ein verzögerter QUIC-Handshake (Paketverlust / NAT-Traversal) zu einem unberechtigten Malus (`missing_count += 8`), obwohl der Knoten gar nicht faul ist?
+     - Führt ein verzögerter QUIC-Handshake (Paketverlust / NAT-Traversal) zu einem unberechtigten Fehlschlag (`missing_count += 1`), obwohl der Knoten gar nicht faul ist?
      - Wie funktioniert das 4-Byte Piggyback-Feedback (`signers_bitmask`) bei flüchtigen Verbindungen, ohne dass Shard-Knoten untereinander Verbindungsorgien starten müssen?
      - Wie wird verhindert, dass faules Verhalten erst nach vielen Sekunden bemerkt wird, wenn Verbindungen jedes Mal neu verhandelt werden müssen?
 - **Vorgeschlagene Lösungsarchitektur:**
@@ -50,7 +50,7 @@ Dieses Dokument fasst die Ergebnisse der 3 KI-Audit-Läufe (Spezifikations-Abgle
     - *Tier 1 (F2F-Freunde, 10–50 Peers):* Permanent offen, 5s Keep-Alive, Träger für Gossip und Heartbeats.
     - *Tier 2 (Shard-Direct, bis zu 3.150 Peers):* Flüchtiger LRU-Pool (z. B. 128–256 gleichzeitige Verbindungen), **kein** Keep-Alive, automatisches Schließen nach 15–30s Inaktivität (`IdleTimeout` $\neq$ Fehler).
   - **Gateway-fokussierte Lazy-Node-Detektion:**
-    - Nur das Gateway, das den PoS-Lock parallel an die Top-20 broadcastet, misst die Antwortzeiten und verwaltet den lokalen Minuten-Backoff (`record_missing`).
+    - Nur das Gateway, das den PoS-Lock parallel an die Top-20 broadcastet, misst die Antwortzeiten und verwaltet die lokale Suspension (`record_missing`).
     - Shard-Knoten müssen untereinander keine Verbindungen zur gegenseitigen Überwachung halten ($\Delta \text{Last} \le 0$).
 - **Status:** Für nachgelagerte Netzwerk- & Skalierungs-Runde vorgemerkt.
 

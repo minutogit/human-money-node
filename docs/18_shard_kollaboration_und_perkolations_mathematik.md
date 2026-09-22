@@ -150,20 +150,23 @@ sequenceDiagram
 
 ---
 
-## 6. [INV-1106] Asymmetrisches 8:1 Ratio-Credit & Minuten-Flapping-Schutz
+## 6. [INV-1501] Transiente missing_count Dämpfung & Autonome Heilung
 
-Um byzantinisches oder instabiles Flapping (*"1x antworten, 3x ausfallen, 1x antworten"*) zu verhindern, verwendet der `PeerPresenceEntry` ein **asymmetrisches 8:1 Ratio-Credit-System (`malus_score: u8`) mit Minuten-Präzision**:
+Um Kaskaden-Death-Spirals und Deadlocks unter DoS oder kurzzeitigen Lastspitzen mathematisch auszuschließen, verwendet der `PeerPresenceEntry` das **transiente `missing_count`-Modell (`missing_count: u8`) mit stündlichem Zerfall**:
 
 ```mermaid
 flowchart TD
-    Missing["Lock-/Read-Timeout (Missing Event)"] --> IncPenalty["malus_score = min(malus_score + 8, 255)"]
-    IncPenalty --> SetBackoff["backoff_minutes_left = 2^(k - 1)<br/>(Stufen: 1m -> 2m -> 4m -> 8m -> 16m ... -> 65.535m)"]
+    Missing["Lock-/Read-Timeout (Missing Event)"] --> IncMissing["missing_count = min(missing_count + 1, 255)"]
+    IncMissing --> CheckSuspended{"missing_count >= 3?"}
+    CheckSuspended -- Ja --> LocalSuspended["Lokal SUSPENDED<br/>(Rang 21 rückt in 0ms nach)"]
+    CheckSuspended -- Nein --> MeshDegrading["Degrading im P2P-Mesh<br/>(Bleibt HRW-berechtigt)"]
     
-    Success["Erfolgreicher Lock / Read"] --> LiftBackoff["backoff_minutes_left = 0 (Knoten darf arbeiten)"]
-    LiftBackoff --> DecPenalty["malus_score = max(malus_score - 1, 0)<br/>(Baut Altlasten nur mit 8:1 Verhältnis ab!)"]
+    Success["Erfolgreicher Lock / Read"] --> InstantReset["missing_count = 0<br/>(Sofortige Wiederaufnahme)"]
+    HourlyTick["Stündlicher Tick"] --> DecayPenalty["missing_count = max(missing_count - 1, 0)<br/>(Autonome Heilung ohne Gossip)"]
 ```
 
-### Die Invarianten des Flapping-Schutzes:
-1. **Asymmetrischer 8:1 Abbau:** Bei einem Fehler steigt der `malus_score` um $+8$. Jeder erfolgreiche Lock/Read baut genau $-1$ Punkt ab (`saturating_sub(1)`). Ein Miss macht 8 Erfolge zunichte.
-2. **Minuten-Granularität für Jitter-Toleranz:** Kurze Leitungs-Schlucker (z. B. 1s DSL-Drop) führen lediglich zu einer 1-Minuten-Pause (Stufe 1). Chronische Störer eskalieren in Tage und bis zu $45{,}5$ Tage ($65.535\text{m}$).
-3. **Gedächtniserhalt bei DORMANT:** Bei Übergang zu `DORMANT` wird lediglich $\text{backoff\_minutes\_left} = 0$ gesetzt, damit der Knoten bei einem Re-Entry direkt für Bewährungsproben bereitsteht. Der `malus_score` bleibt vollständig erhalten.
+### Die Invarianten der transienten Dämpfung:
+1. **Lokale Suspension ab $\ge 3$ Misses:** Ein einzelner Ausfall führt lediglich zu einer Vorwarnung (`Degrading`). Erst ab $\ge 3$ aufeinanderfolgenden Misses wird der Knoten lokal im Gateway-Cache als `SUSPENDED` markiert; deterministisch springt HRW-Rang 21 in $0\,\text{ms}$ ein.
+2. **Sofortiger Reset bei Erfolg:** Antwortet der Knoten bei einer Folge-Transaktion erfolgreich, wird `missing_count` sofort auf 0 zurückgesetzt (`record_success()`).
+3. **Autonome stündliche Heilung (`-1 / h`):** Jede Stunde baut sich der Zählerstand um $-1$ ab (`missing_count.saturating_sub(1)`). Knoten heilen autonom ohne Betreiber-Eingriff und ohne veraltete Deadlocks.
+4. **Sauberer Re-Entry bei DORMANT:** Bei Übergang zu `DORMANT` wird `missing_count = 0` gesetzt, damit der Knoten bei einem Re-Entry direkt für Bewährungsproben im Shard bereitsteht. Multi-Wochen-Sperren sind physikalisch eliminiert.

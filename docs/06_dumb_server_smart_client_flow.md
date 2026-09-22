@@ -138,7 +138,7 @@ Due to information asymmetry (customer only queries predecessor `challenge_ds_ta
 
 > [!NOTE]
 > **Gateway-side read routing (`docs/03:INV-0310`):**  
-> The gateway does not rigidly forward `L2StatusQuery` to rank 1, but stochastically selects an active, non-suspended node uniformly at random from the shard's Top-20. If it does not respond within $100\,\text{ms}$, it accrues $+8$ demerit points (`record_missing()`) and the gateway switches via fast failover immediately to an alternative shard node ($< 100\,\text{ms}$ client latency).
+> The gateway does not rigidly forward `L2StatusQuery` to rank 1, but stochastically selects an active, non-suspended node uniformly at random from the shard's Top-20. If it does not respond within $100\,\text{ms}$, it increments its failure counter (`record_missing()`) and the gateway switches via fast failover immediately to an alternative shard node ($< 100\,\text{ms}$ client latency).
 
 ```mermaid
 flowchart TD

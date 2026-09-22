@@ -301,9 +301,9 @@ pub enum PeerPresenceState {
 pub struct PeerPresenceEntry {
     pub node_id_prefix: u64,
     pub hourly_bitmask: u32,
-    pub backoff_minutes_left: u16,
+    pub missing_count: u8,
     pub maturity_hours: u8,
-    pub malus_score: u8,
+    pub _reserved: u16,
 }
 
 impl PeerPresenceEntry {
@@ -312,69 +312,53 @@ impl PeerPresenceEntry {
         Self {
             node_id_prefix: prefix,
             hourly_bitmask: 1, // Erstes Bit gesetzt
-            backoff_minutes_left: 0,
+            missing_count: 0,
             maturity_hours: 0,
-            malus_score: 0,
+            _reserved: 0,
         }
     }
 
     /// Advances the hourly sliding window and records whether an HB was received in this hour.
-    /// Subtracts 60 minutes from an active backoff.
-    /// The malus score decays purely event-based via successful lock signatures (record_success).
-    /// On DORMANT the backoff counter is reset to 0, while the malus score is retained as memory.
+    /// Decays transient missing_count by 1 (hourly decay / autonomous healing).
+    /// On DORMANT, missing_count is reset to 0 so the node can be probed directly on re-entry.
     pub fn record_hour(&mut self, current_epoch: u16, received_heartbeat: bool) -> PeerPresenceState {
         let _ = current_epoch;
         let bit = if received_heartbeat { 1u32 } else { 0u32 };
         self.hourly_bitmask = (self.hourly_bitmask << 1) | bit;
         self.maturity_hours = self.maturity_hours.saturating_add(1);
 
-        if self.backoff_minutes_left > 0 {
-            self.backoff_minutes_left = self.backoff_minutes_left.saturating_sub(60);
-        }
+        // Hourly penalty decay (-1) -> autonomous healing without death spirals
+        self.missing_count = self.missing_count.saturating_sub(1);
 
         let state = self.evaluate_state();
 
-        // 🎯 INVARIANT: On DORMANT, backoff_minutes_left is reset to 0 so the node can be probed directly on re-entry.
-        // The malus_score is fully retained (no trust advance for absence).
+        // 🎯 INVARIANT: On DORMANT, missing_count is reset to 0 so the node can be probed cleanly upon re-entry.
         if state == PeerPresenceState::Dormant {
-            self.backoff_minutes_left = 0;
+            self.missing_count = 0;
         }
 
         state
     }
 
-    /// Subtracts n minutes from the remaining ban time (fine-grained time progression)
-    pub fn record_elapsed_minutes(&mut self, minutes: u16) {
-        self.backoff_minutes_left = self.backoff_minutes_left.saturating_sub(minutes);
-    }
-
-    /// Records a lock failure / timeout in the 8:1 ratio credit system:
-    /// Score += 8, level k = Score >> 3.
-    /// Exponential backoff in minutes (starting at 1 minute for smooth jitter protection):
-    /// Level 1 -> 1m, level 2 -> 2m, level 3 -> 4m, level 4 -> 8m, ..., level 17 -> 65,535m (~45.5 days hard cap).
-    pub fn record_missing(&mut self) -> u16 {
-        self.malus_score = self.malus_score.saturating_add(8);
-        let k = (self.malus_score >> 3) as usize;
-        let shift = (k.saturating_sub(1)).min(16);
-        let backoff = (1u32 << shift).min(65_535) as u16;
-        self.backoff_minutes_left = backoff;
-        backoff
+    /// Records a lock failure / timeout:
+    /// Increments missing_count by 1. When missing_count >= 3, the node is locally suspended.
+    pub fn record_missing(&mut self) -> u8 {
+        self.missing_count = self.missing_count.saturating_add(1);
+        self.missing_count
     }
 
     /// Records a successful lock signature:
-    /// Lifts the current ban immediately (node may work), but decrements the malus score
-    /// by exactly 1 point (flapping protection: 1 miss outweighs 8 successes).
+    /// Resets transient missing_count immediately to 0 (node proved operational).
     pub fn record_success(&mut self) {
-        self.backoff_minutes_left = 0;
-        self.malus_score = self.malus_score.saturating_sub(1);
+        self.missing_count = 0;
     }
 
-    /// Is the node currently in local backoff (suspended)?
+    /// Is the node currently in local suspension (missing_count >= 3)?
     pub fn is_suspended(&self) -> bool {
-        self.backoff_minutes_left > 0
+        self.missing_count >= (MISSING_COUNT_THRESHOLD as u8)
     }
 
-    /// May the node participate in HRW quorums? (active AND not in backoff)
+    /// May the node participate in HRW quorums? (active AND not locally suspended)
     pub fn is_hrw_eligible(&self) -> bool {
         self.evaluate_state() == PeerPresenceState::Active && !self.is_suspended()
     }
@@ -1161,103 +1145,93 @@ mod tests {
         assert!(entry.is_hrw_eligible());
         assert!(entry.should_forward_gossip());
 
-        // 1. Lock failure -> +8 score -> 1m backoff (level 1)
+        // 1. First failure -> missing_count = 1 (not suspended yet, degrading in P2P mesh)
         assert_eq!(entry.record_missing(), 1);
+        assert_eq!(entry.missing_count, 1);
+        assert!(!entry.is_suspended());
+        assert!(entry.is_hrw_eligible());
+        assert!(entry.should_forward_gossip()); // Always true for F2F decoupling
+
+        // 2. Second failure -> missing_count = 2 (still in mesh)
+        assert_eq!(entry.record_missing(), 2);
+        assert_eq!(entry.missing_count, 2);
+        assert!(!entry.is_suspended());
+        assert!(entry.is_hrw_eligible());
+
+        // 3. Third failure -> missing_count = 3 -> Locally suspended! (Rank 21 steps in in 0ms)
+        assert_eq!(entry.record_missing(), 3);
+        assert_eq!(entry.missing_count, 3);
         assert!(entry.is_suspended());
         assert!(!entry.is_hrw_eligible());
-        assert!(entry.should_forward_gossip()); // Always true for F2F decoupling
-        assert_eq!(entry.backoff_minutes_left, 1);
-        assert_eq!(entry.malus_score, 8);
+        assert!(entry.should_forward_gossip()); // Gossip runs unconditionally
 
-        // 2. Further failure -> score 16 -> 2m backoff (level 2)
-        assert_eq!(entry.record_missing(), 2);
-        assert_eq!(entry.backoff_minutes_left, 2);
-        assert_eq!(entry.malus_score, 16);
+        // Autonomous healing: 1 hour passes with HB -> missing_count decays from 3 to 2
+        entry.record_hour(125, true);
+        assert_eq!(entry.missing_count, 2);
+        assert!(!entry.is_suspended(), "Hourly decay (-1) restores eligibility without death spirals");
+        assert!(entry.is_hrw_eligible());
 
-        // 3. Further failure -> score 24 -> 4m backoff (level 3)
-        assert_eq!(entry.record_missing(), 4);
-        assert_eq!(entry.backoff_minutes_left, 4);
-        assert_eq!(entry.malus_score, 24);
-
-        // 1 minute passes -> backoff drops from 4m to 3m
-        entry.record_elapsed_minutes(1);
-        assert_eq!(entry.backoff_minutes_left, 3);
-        assert!(entry.is_suspended());
-
-        // 3 more minutes pass -> backoff to 0
-        entry.record_elapsed_minutes(3);
-        assert_eq!(entry.backoff_minutes_left, 0);
-        assert!(!entry.is_suspended());
-
-        // Flapping test: node delivers 1 successful signature
-        // -> ban immediately lifted, but score drops by only 1 point (from 24 to 23)!
+        // Success immediately resets missing_count to 0
         entry.record_success();
-        assert_eq!(entry.backoff_minutes_left, 0);
-        assert_eq!(entry.malus_score, 23, "Score must decrement by 1 on success");
+        assert_eq!(entry.missing_count, 0);
         assert!(!entry.is_suspended());
         assert!(entry.is_hrw_eligible());
         assert!(entry.should_forward_gossip());
-
-        // If it now fails again immediately -> score 23 + 8 = 31 -> level 3 (4m ban instead of 1m!)
-        assert_eq!(entry.record_missing(), 4, "Flapping node immediately gets 4m penalty instead of 1m");
-        assert_eq!(entry.malus_score, 31);
 
         // 22 hours without HB -> DORMANT (only 2 bits left in 24h window)
         for ep in 126..=146 {
             entry.record_hour(ep, false);
         }
-        // As soon as it becomes DORMANT, backoff is reset to 0, but the malus score remains as memory
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Dormant);
-        assert_eq!(entry.backoff_minutes_left, 0, "Dormant transition must reset backoff to 0");
-        assert_eq!(entry.malus_score, 31, "Dormant must NOT wipe or decay malus_score");
+        assert_eq!(entry.missing_count, 0, "Dormant transition cleanly resets missing_count to 0 for re-entry probation");
 
         // Fast re-entry: 2 consecutive HBs bring it back to ACTIVE
         entry.record_hour(147, true);
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Dormant);
         entry.record_hour(148, true);
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Active);
-        assert!(entry.is_hrw_eligible(), "Active node with backoff=0 is eligible for probes");
+        assert!(entry.is_hrw_eligible(), "Active node with missing_count=0 is immediately eligible for quorums");
         assert!(entry.should_forward_gossip());
-        assert_eq!(entry.malus_score, 31, "Memory preserved: still has score 31");
-
-        // Rehabilitation via 31 successful lock signatures
-        for _ in 0..31 {
-            entry.record_success();
-        }
-        assert_eq!(entry.malus_score, 0, "Score successfully worked off to 0");
     }
 
     #[test]
-    fn test_backoff_exponential_cap_minutes() {
+    fn test_transient_missing_count_damping_and_hourly_decay() {
         let mut entry = PeerPresenceEntry::new(0xDEAD_BEEF, 1);
         
-        let expected_backoffs = [
-            1,     // Level 1: score 8   -> 1m
-            2,     // Level 2: score 16  -> 2m
-            4,     // Level 3: score 24  -> 4m
-            8,     // Level 4: score 32  -> 8m
-            16,    // Level 5: score 40  -> 16m
-            32,    // Level 6: score 48  -> 32m
-            64,    // Level 7: score 56  -> 64m (~1h)
-            128,   // Level 8: score 64  -> 128m (~2.1h)
-            256,   // Level 9: score 72  -> 256m (~4.2h)
-            512,   // Level 10: score 80 -> 512m (~8.5h)
-            1024,  // Level 11: score 88 -> 1024m (~17h)
-            2048,  // Level 12: score 96 -> 2048m (~34h)
-            4096,  // Level 13: score 104 -> 4096m (~2.8d)
-            8192,  // Level 14: score 112 -> 8192m (~5.7d)
-            16384, // Level 15: score 120 -> 16384m (~11.4d)
-            32768, // Level 16: score 128 -> 32768m (~22.8d)
-            65535, // Level 17: score 136 -> 65535m (~45.5d hard cap)
-            65535, // Level 18: score 144 -> 65535m (~45.5d hard cap)
-        ];
+        // Initial state
+        assert_eq!(entry.missing_count, 0);
+        assert!(!entry.is_suspended());
 
-        for (idx, expected) in expected_backoffs.iter().enumerate() {
-            let backoff = entry.record_missing();
-            assert_eq!(backoff, *expected, "Mismatch at step {}", idx + 1);
-            assert_eq!(entry.backoff_minutes_left, *expected);
-            assert_eq!(entry.malus_score, ((idx + 1) * 8) as u8);
+        // Accumulate 5 misses (saturating)
+        for i in 1..=5 {
+            let count = entry.record_missing();
+            assert_eq!(count, i);
         }
+        assert_eq!(entry.missing_count, 5);
+        assert!(entry.is_suspended());
+
+        // Hourly decay heals step-by-step
+        entry.record_hour(2, true);
+        assert_eq!(entry.missing_count, 4);
+        assert!(entry.is_suspended());
+
+        entry.record_hour(3, true);
+        assert_eq!(entry.missing_count, 3);
+        assert!(entry.is_suspended());
+
+        entry.record_hour(4, true);
+        assert_eq!(entry.missing_count, 2);
+        assert!(!entry.is_suspended(), "Dropping below 3 lifts suspension");
+
+        entry.record_hour(5, true);
+        assert_eq!(entry.missing_count, 1);
+
+        entry.record_hour(6, true);
+        assert_eq!(entry.missing_count, 0);
+
+        // Does not underflow on further hours
+        entry.record_hour(7, true);
+        assert_eq!(entry.missing_count, 0);
     }
 
     #[test]

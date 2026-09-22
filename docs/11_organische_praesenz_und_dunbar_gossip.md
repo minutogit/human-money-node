@@ -195,24 +195,24 @@ Each node tracks known peers in an ultra-compact RAM index (16 bytes per node).
 pub struct PeerPresenceEntry {
     pub node_id_prefix: u64,        // 8 bytes: Unique BLAKE3 prefix
     pub hourly_bitmask: u32,        // 4 bytes: Last 24-32 hours of presence (1 bit/h)
-    pub backoff_minutes_left: u16,  // 2 bytes: Remaining ban minutes (0 = free, 1m..65,535m ≈ 45.5 days)
+    pub missing_count: u8,          // 1 byte: Transient failure counter (0..255, >=3 is suspended)
     pub maturity_hours: u8,         // 1 byte: Hours since first contact (0..255)
-    pub malus_score: u8,            // 1 byte: 8:1 ratio-credit malus (0..255)
+    pub _reserved: u16,             // 2 bytes: Alignment padding
 }
 ```
 
-#### State Transitions via Hysteresis, Backoff & Fast Re-Entry:
-* **Hourly tick:** $\text{hourly\_bitmask} = \text{hourly\_bitmask} \ll 1$, $\text{maturity\_hours} += 1$, $\text{backoff\_minutes\_left} = \text{backoff\_minutes\_left}.saturating\_sub(60)$.
+#### State Transitions via Hysteresis, Suspension & Fast Re-Entry:
+* **Hourly tick:** $\text{hourly\_bitmask} = \text{hourly\_bitmask} \ll 1$, $\text{maturity\_hours} += 1$, $\text{missing\_count} = \text{missing\_count}.saturating\_sub(1)$ (stündlicher Zerfall / autonome Heilung).
 * **Initial activation of newcomer (`IMMATURE` $\to$ `ACTIVE`):**
   $$\text{maturity\_hours} \ge 24\,\text{h} \quad \land \quad \text{popcount}(\text{hourly\_bitmask}_{24h}) \ge \tau_{\text{on}} \quad (\tau_{\text{on}} = 8 \text{ out of } 24)$$
-* **Dynamic minute-lock backoff (`ACTIVE_HEALTHY` $\to$ `ACTIVE_SUSPENDED`):**
-  $$\text{malus\_score} += 8 \quad \implies \quad \text{backoff\_minutes\_left} = \min(65.535, 1 \ll ((\text{malus\_score} \gg 3) - 1)) \quad (1\text{m} \to 2\text{m} \to 4\text{m} \dots \to 65.535\text{m})$$
-  *(While `backoff_minutes_left > 0`, no shard locks are sent to this peer and its heartbeats are discarded locally).*
-* **Immediate unblocking & decay on successful lock:**
-  $$\text{backoff\_minutes\_left} = 0, \quad \text{malus\_score} = \max(0, \text{malus\_score} - 1)$$
+* **Dynamic local suspension (`ACTIVE_HEALTHY` $\to$ `ACTIVE_SUSPENDED`):**
+  $$\text{missing\_count} += 1 \quad \implies \quad \text{is\_suspended}() = (\text{missing\_count} \ge 3)$$
+  *(While `is_suspended() == true`, the node is skipped in HRW quorums and rank 21 promotes in $0\,\text{ms}$. Gossip heartbeats remain unconditionally forwarded).*
+* **Immediate unblocking on successful lock signature:**
+  $$\text{missing\_count} = 0 \quad (\text{sofortige Wiederaufnahme})$$
 * **Deactivation (`ACTIVE` $\to$ `DORMANT`):**
   $$\text{popcount}(\text{hourly\_bitmask}_{24h}) \le \tau_{\text{off}} \quad (\tau_{\text{off}} = 3 \text{ out of } 24) \quad (\text{after } \ge 21\text{--}24\,\text{h of inactivity})$$
-  * **🎯 Memory retention on re-entry:** At the moment of transition to `DORMANT`, $\text{backoff\_minutes\_left} = 0$ is set so the node is immediately available for probation on re-entry. The $\text{malus\_score}$ is fully retained (no trust advance through absence).
+  * **🎯 Clean re-entry:** At the moment of transition to `DORMANT`, $\text{missing\_count} = 0$ is set so the node is immediately available for probation on re-entry without multi-week lockouts.
 * **Fast re-entry of known nodes (`DORMANT` $\to$ `ACTIVE` for probation):**
   $$(\text{hourly\_bitmask} \ \& \ 0\text{b}11) == 0\text{b}11 \quad (\ge 2\,\text{consecutive hours})$$
   *(If a server comes back online after weeks/months, it is immediately ready for probation again after 2 hours of Fast Re-Entry).*

@@ -25,7 +25,7 @@ flowchart TD
         direction TB
         F2["Lokaler Shard-Miss"] --> G2["Rein lokale Suspension (Skip & Replace)"]
         G2 --> A2["Rang 21 springt in 0 ms ein / Last sinkt sofort"]
-        A2 --> Heal["Stündlicher Malus-Abbau (-1) -> Rückkehr zur Stabilität"]
+        A2 --> Heal["Stündlicher Abbau (-1) -> Rückkehr zur Stabilität"]
     end
 ```
 
@@ -56,7 +56,7 @@ flowchart TD
 ### 1. Die frühen P2P-Tauschbörsen (Gnutella & BitTorrent DHT Sybil Slander, 2000er)
 * **Der Fehler:** Frühe File-Sharing-Clients führten verteilte Bad-Peer-Listen über Gossip.
 * **Der Zusammenbruch:** Angreifer speisten massenhaft gefälschte IP-Sperrlisten ein. Innerhalb weniger Stunden hatten sich alle ehrlichen Knoten gegenseitig auf die Blacklist gesetzt. Das Overlay-Netzwerk zerfiel vollständig.
-* **HuMoCo-Lösung:** **Kein Reputations-Gossip.** Jeder Knoten führt Malus-Scores **ausschließlich im eigenen RAM**. Niemand kann einem Knoten vorschreiben, wen er zu sperren hat.
+* **HuMoCo-Lösung:** **Kein Reputations-Gossip.** Jeder Knoten führt Zählerstände **ausschließlich im eigenen RAM**. Niemand kann einem Knoten vorschreiben, wen er zu sperren hat.
 
 ---
 
@@ -72,8 +72,8 @@ flowchart TD
 ### 3. BGP Internet Routing: Die Route Flap Damping Kaskade (1990er/2000er)
 * **Der Fehler:** Router im weltweiten Internet-Backbone führten *Route Flap Damping* ein: Wenn eine Route kurz wackelte, wurde sie für $2^k$ Minuten global unterdrückt.
 * **Der Zusammenbruch:** Bei regulären BGP-Updates (Path Exploration) erzeugten selbst gesunde Routen kurze Ankündigungs-Schwankungen. Die Damping-Algorithmen interpretierten dies fälschlicherweise als Wackeln und sperrten gesunde globale Routen für Stunden. Ganze Länder und Kontinente waren plötzlich offline.
-* **HuMoCo-Lösung:** **[INV-1106] Asymmetrisches 8:1 Ratio-System:**  
-  Ein einzelner Miss erzeugt nur eine minimale 1-Stunden-Sperre, die bei erfolgreicher Mitarbeit sofort wieder gelöst wird. Ein Aufschaukeln ist mathematisch auf $p_{\text{fail}} > 12{,}5\,\%$ beschränkt.
+* **HuMoCo-Lösung:** **[INV-1501] Transiente missing_count Dämpfung & Autonome Heilung:**  
+  Ein einzelner Miss führt zu keiner Sperre (erst ab $\ge 3$ Misses lokale Suspension), ein Erfolg nullt den Zähler sofort, und stündlicher Zerfall ($-1/\text{h}$) garantiert stetige autonome Heilung ohne Kaskaden-Death-Spirals.
 
 ---
 
@@ -156,7 +156,7 @@ Gegeben sei ein Netzwerk mit $N = 10.000$ Knoten. Ein Anteil $\beta \in [0, 1]$ 
 
 | Bedrohung | Konventionelle P2P-Netze | HuMoCo Layer-2 Sperrregister |
 |:---|:---|:---|
-| **Verleumdung / Anschwärzen** | ❌ Gossip-Bann führt zu Hexenjagden | ✅ **Immun:** 0 Reputations-Gossip, rein lokaler RAM-Malus |
-| **Flapping / Wackeln** | ❌ Schaukelt sich zu Dauer-Banns auf | ✅ **Gedämpft:** 8:1 Ratio-Credit mit stündlichem Verfall |
+| **Verleumdung / Anschwärzen** | ❌ Gossip-Bann führt zu Hexenjagden | ✅ **Immun:** 0 Reputations-Gossip, rein lokaler RAM-Zähler |
+| **Flapping / Wackeln** | ❌ Schaukelt sich zu Dauer-Banns auf | ✅ **Gedämpft:** Transiente missing_count Dämpfung mit stündlichem Verfall |
 | **DDoS / Last-Kaskade** | ❌ Exponential Retries blockieren CPU | ✅ **Gedämpft:** Zero-Latency Failover via Rang 21 |
 | **Großstörung (z.B. ISP-Ausfall)** | ❌ Führt zu Kettenreaktion | ✅ **Selbstheilend:** $-1$ Punkt pro fehlerfreier Stunde |

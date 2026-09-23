@@ -1130,7 +1130,37 @@ impl DualTierEngine {
 
     /// Pruning: Evicts expired entries from RAM indices and persistent disk indexes.
     /// Entkoppelt RAM-Pruning (< 10µs) vom synchronen Disk-I/O (Spec 19 / AGENTS.md Regel 1).
+    /// Resilience hardening: rejects forward jumps >24h (86_400_000 ms) on local NTP warp
+    /// unless corroborated by F2F network median, to prevent accidental mass purge.
     pub async fn prune_expired(&self, now: SimTime) -> Result<usize, StorageError> {
+        if let Some(pm) = self.peer_manager.read().await.as_ref() {
+            let last = pm.clock().last_net_time_ms();
+            if last > 0 {
+                let jump = now.0.saturating_sub(last);
+                if jump > 86_400_000 {
+                    let corroborated = pm
+                        .clock()
+                        .current_median_offset()
+                        .map(|median| {
+                            let median_abs = median.unsigned_abs();
+                            // Network median is clamped to 15 min (900_000 ms); a 24h jump can never be corroborated
+                            // by median alone. This strict check ensures only an explicit large median would allow it.
+                            median_abs >= 86_400_000 || median_abs >= jump.saturating_sub(900_000)
+                        })
+                        .unwrap_or(false);
+                    if !corroborated {
+                        warn!(
+                            now_ms = now.0,
+                            last_net_time = last,
+                            jump_ms = jump,
+                            "Prune rejected: forward clock jump >24h (86_400_000 ms) not corroborated by F2F network median (NTP warp protection)"
+                        );
+                        return Ok(0);
+                    }
+                }
+            }
+        }
+
         let ram_pruned = {
             let mut ram = self.ram.write().await;
             ram.prune_expired(now)

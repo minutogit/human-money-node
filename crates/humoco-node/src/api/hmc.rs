@@ -5,113 +5,69 @@ use sha3::Sha3_256;
 
 use crate::identity::NodeIdentity;
 
-pub mod base58_32 {
-    use serde::{de, Deserialize, Deserializer, Serializer};
-    use std::convert::TryInto;
+macro_rules! impl_base58_array {
+    ($mod_name:ident, $N:literal) => {
+        pub mod $mod_name {
+            use serde::{de, Deserialize, Deserializer, Serializer};
+            use std::convert::TryInto;
 
-    pub fn serialize<S>(data: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&bs58::encode(data).into_string())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let vec = bs58::decode(s).into_vec().map_err(de::Error::custom)?;
-        vec.try_into()
-            .map_err(|_| de::Error::custom("Length mismatch, expected 32 bytes"))
-    }
-}
-
-pub mod base58_32_opt {
-    use serde::{de, Deserialize, Deserializer, Serializer};
-    use std::convert::TryInto;
-
-    pub fn serialize<S>(data: &Option<[u8; 32]>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match data {
-            Some(d) => serializer.serialize_str(&bs58::encode(d).into_string()),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s: Option<String> = Option::deserialize(deserializer)?;
-        match s {
-            Some(s) => {
-                let vec = bs58::decode(s).into_vec().map_err(de::Error::custom)?;
-                let arr: [u8; 32] = vec
-                    .try_into()
-                    .map_err(|_| de::Error::custom("Length mismatch, expected 32 bytes"))?;
-                Ok(Some(arr))
+            pub fn serialize<S>(data: &[u8; $N], serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(&bs58::encode(data).into_string())
             }
-            None => Ok(None),
-        }
-    }
-}
 
-pub mod base58_64 {
-    use serde::{de, Deserialize, Deserializer, Serializer};
-    use std::convert::TryInto;
-
-    pub fn serialize<S>(data: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&bs58::encode(data).into_string())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let vec = bs58::decode(s).into_vec().map_err(de::Error::custom)?;
-        vec.try_into()
-            .map_err(|_| de::Error::custom("Length mismatch, expected 64 bytes"))
-    }
-}
-
-pub mod base58_64_opt {
-    use serde::{de, Deserialize, Deserializer, Serializer};
-    use std::convert::TryInto;
-
-    pub fn serialize<S>(data: &Option<[u8; 64]>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match data {
-            Some(d) => serializer.serialize_str(&bs58::encode(d).into_string()),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<[u8; 64]>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s: Option<String> = Option::deserialize(deserializer)?;
-        match s {
-            Some(s) => {
+            pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; $N], D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let s = String::deserialize(deserializer)?;
                 let vec = bs58::decode(s).into_vec().map_err(de::Error::custom)?;
-                let arr: [u8; 64] = vec
-                    .try_into()
-                    .map_err(|_| de::Error::custom("Length mismatch, expected 64 bytes"))?;
-                Ok(Some(arr))
+                vec.try_into()
+                    .map_err(|_| de::Error::custom(concat!("Length mismatch, expected ", stringify!($N), " bytes")))
             }
-            None => Ok(None),
         }
-    }
+    };
+    ($mod_name:ident, $N:literal, opt) => {
+        pub mod $mod_name {
+            use serde::{de, Deserialize, Deserializer, Serializer};
+            use std::convert::TryInto;
+
+            pub fn serialize<S>(data: &Option<[u8; $N]>, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                match data {
+                    Some(d) => serializer.serialize_str(&bs58::encode(d).into_string()),
+                    None => serializer.serialize_none(),
+                }
+            }
+
+            pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<[u8; $N]>, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let s: Option<String> = Option::deserialize(deserializer)?;
+                match s {
+                    Some(s) => {
+                        let vec = bs58::decode(s).into_vec().map_err(de::Error::custom)?;
+                        let arr: [u8; $N] = vec
+                            .try_into()
+                            .map_err(|_| de::Error::custom(concat!("Length mismatch, expected ", stringify!($N), " bytes")))?;
+                        Ok(Some(arr))
+                    }
+                    None => Ok(None),
+                }
+            }
+        }
+    };
 }
+
+impl_base58_array!(base58_32, 32);
+impl_base58_array!(base58_32_opt, 32, opt);
+impl_base58_array!(base58_64, 64);
+impl_base58_array!(base58_64_opt, 64, opt);
 
 pub mod base58_u128 {
     use serde::{de, Deserialize, Deserializer, Serializer};

@@ -553,14 +553,23 @@ async fn submit_lock(
                                 let peers = peer_mgr.f2f_peer_addrs().await;
                                 let d = peers.len();
                                 if d > 0 {
-                                    let k = crate::network::manager::calculate_fan_out(d);
-                                    let mut selected_peers = peers;
-                                    if k < d {
-                                        use rand::seq::SliceRandom;
-                                        let mut rng = rand::thread_rng();
-                                        selected_peers.shuffle(&mut rng);
-                                        selected_peers.truncate(k);
-                                    }
+                                    let mut k = crate::network::manager::calculate_fan_out(d);
+                                    k = k.clamp(1, peers.len());
+                                    let selected_peers: Vec<std::net::SocketAddr> = if peers.len() <= k {
+                                        peers
+                                    } else {
+                                        let mut scored: Vec<([u8; 32], std::net::SocketAddr)> = peers
+                                            .into_iter()
+                                            .map(|addr| {
+                                                let mut hasher = blake3::Hasher::new();
+                                                hasher.update(&record_clone.id);
+                                                hasher.update(addr.to_string().as_bytes());
+                                                (*hasher.finalize().as_bytes(), addr)
+                                            })
+                                            .collect();
+                                        scored.sort_by(|a, b| a.0.cmp(&b.0));
+                                        scored.into_iter().take(k).map(|(_, addr)| addr).collect()
+                                    };
                                     if let Ok(bytes) = bincode::serialize(&(record_clone, root_valid_until)) {
                                         let header = humoco_sim_core::wire::WireHeader::new(
                                             humoco_sim_core::wire::MsgType::GossipAnnounce as u16,
@@ -859,6 +868,114 @@ pub fn create_attestation(
 }
 
 
+// ---------------------------------------------------------------------------
+// Shared quorum helpers — extracted from assemble_quorum_certificate and
+// assemble_status_quorum_certificate to eliminate duplicated bitmap and
+// JoinSet fanout / attestation verification logic.
+// ---------------------------------------------------------------------------
+
+/// Computes the 32-bit signer bitmap for a quorum certificate.
+/// Ranks all active HRW ids plus self by HRW score, truncates to 32, and
+/// maps each collected signature's node_id to its HRW rank bit position.
+fn compute_signer_bitmap(
+    active_for_bitmap: Vec<([u8; 32], std::net::SocketAddr)>,
+    self_hrw: [u8; 32],
+    shard_id: u16,
+    collected_signatures: &[AttestationDto],
+) -> u32 {
+    let mut all_ids: Vec<[u8; 32]> = active_for_bitmap.into_iter().map(|(nid, _)| nid).collect();
+    all_ids.push(self_hrw);
+    all_ids.sort_by(|a, b| {
+        let sa = humoco_sim_core::client_flow::compute_hrw_score_f64(a, shard_id);
+        let sb = humoco_sim_core::client_flow::compute_hrw_score_f64(b, shard_id);
+        sb.total_cmp(&sa)
+    });
+    all_ids.truncate(32);
+    let mut bitmap: u32 = 0;
+    for sig in collected_signatures {
+        for (idx, nid) in all_ids.iter().enumerate() {
+            let nid_u16 = u16::from_be_bytes([nid[0], nid[1]]);
+            if nid_u16 == sig.node_id {
+                bitmap |= 1u32 << idx;
+                break;
+            }
+        }
+    }
+    bitmap
+}
+
+/// Verifies a peer attestation's cryptographic fields and HRW binding.
+/// Checks verifying-key existence, signature/lock_id hex decoding, lock_id
+/// equality, and Ed25519 `verify_strict` against the canonical sig digest.
+/// Returns `true` only when fully valid; logs warnings otherwise.
+async fn verify_peer_attestation(
+    peer_mgr: &crate::network::PeerManager,
+    att: &AttestationDto,
+    expected_lock_id: [u8; 32],
+    shard_id: u16,
+    target_status: u8,
+) -> bool {
+    let vk = match peer_mgr.get_peer_verifying_key(att.node_id).await {
+        Some(k) => k,
+        None => {
+            tracing::warn!(
+                node_id = att.node_id,
+                "Dropped attestation: peer verifying key not found in peer manager"
+            );
+            return false;
+        }
+    };
+
+    let sig_bytes = match hex::decode(&att.signature) {
+        Ok(b) if b.len() == 64 => {
+            let mut arr = [0u8; 64];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            tracing::warn!(node_id = att.node_id, "Dropped attestation: invalid signature length");
+            return false;
+        }
+    };
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+
+    let att_lock_id_bytes = match hex::decode(&att.lock_id) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            tracing::warn!(node_id = att.node_id, "Dropped attestation: invalid lock_id hex");
+            return false;
+        }
+    };
+
+    if att_lock_id_bytes != expected_lock_id {
+        tracing::warn!(node_id = att.node_id, "Dropped attestation: lock_id mismatch");
+        return false;
+    }
+
+    let domain_tag = if target_status == 1 {
+        humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL
+    } else {
+        humoco_sim_core::crypto::DOMAIN_APPROVE_PROV
+    };
+    let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
+        domain_tag, 0, 0, 0, shard_id, target_status, &expected_lock_id,
+    );
+
+    if let Err(e) = vk.verify_strict(&sig_digest, &sig) {
+        tracing::warn!(
+            node_id = att.node_id,
+            error = %e,
+            "Dropped attestation: cryptographic signature verification failed"
+        );
+        return false;
+    }
+    true
+}
+
 /// Assembles a quorum certificate for a lock by collecting signatures from top-20 HRW nodes
 /// or creating a local standalone certificate when N=1 or no peers are available.
 async fn assemble_quorum_certificate(
@@ -979,85 +1096,7 @@ async fn assemble_quorum_certificate(
                                     continue;
                                 }
 
-                                // Cryptographically verify peer attestation via peer_manager
-                                let vk = match peer_mgr.get_peer_verifying_key(att.node_id).await {
-                                    Some(k) => k,
-                                    None => {
-                                        tracing::warn!(
-                                            node_id = att.node_id,
-                                            "Dropped attestation: peer verifying key not found in peer manager"
-                                        );
-                                        if rank_idx < 20 {
-                                            peer_mgr.record_failure(addr).await;
-                                        }
-                                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                                        continue;
-                                    }
-                                };
-
-                                let sig_bytes = match hex::decode(&att.signature) {
-                                    Ok(b) if b.len() == 64 => {
-                                        let mut arr = [0u8; 64];
-                                        arr.copy_from_slice(&b);
-                                        arr
-                                    }
-                                    _ => {
-                                        tracing::warn!(node_id = att.node_id, "Dropped attestation: invalid signature length");
-                                        if rank_idx < 20 {
-                                            peer_mgr.record_failure(addr).await;
-                                        }
-                                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                                        continue;
-                                    }
-                                };
-                                let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-
-                                let att_lock_id_bytes = match hex::decode(&att.lock_id) {
-                                    Ok(b) if b.len() == 32 => {
-                                        let mut arr = [0u8; 32];
-                                        arr.copy_from_slice(&b);
-                                        arr
-                                    }
-                                    _ => {
-                                        tracing::warn!(node_id = att.node_id, "Dropped attestation: invalid lock_id hex");
-                                        if rank_idx < 20 {
-                                            peer_mgr.record_failure(addr).await;
-                                        }
-                                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                                        continue;
-                                    }
-                                };
-
-                                if att_lock_id_bytes != lock_id {
-                                    tracing::warn!(node_id = att.node_id, "Dropped attestation: lock_id mismatch");
-                                    if rank_idx < 20 {
-                                        peer_mgr.record_failure(addr).await;
-                                    }
-                                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                                    continue;
-                                }
-
-                                let domain_tag = if target_status == 1 {
-                                    humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL
-                                } else {
-                                    humoco_sim_core::crypto::DOMAIN_APPROVE_PROV
-                                };
-                                let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
-                                    domain_tag,
-                                    0,
-                                    0,
-                                    0,
-                                    shard_id,
-                                    target_status,
-                                    &lock_id,
-                                );
-
-                                if let Err(e) = vk.verify_strict(&sig_digest, &sig) {
-                                    tracing::warn!(
-                                        node_id = att.node_id,
-                                        error = %e,
-                                        "Dropped attestation: cryptographic signature verification failed"
-                                    );
+                                if !verify_peer_attestation(peer_mgr, &att, lock_id, shard_id, target_status).await {
                                     if rank_idx < 20 {
                                         peer_mgr.record_failure(addr).await;
                                     }
@@ -1117,27 +1156,7 @@ async fn assemble_quorum_certificate(
                 0
             };
 
-            let signer_bitmap = {
-                let mut all_ids: Vec<[u8; 32]> = active_for_bitmap.into_iter().map(|(nid, _)| nid).collect();
-                all_ids.push(self_hrw);
-                all_ids.sort_by(|a, b| {
-                    let sa = humoco_sim_core::client_flow::compute_hrw_score_f64(a, shard_id);
-                    let sb = humoco_sim_core::client_flow::compute_hrw_score_f64(b, shard_id);
-                    sb.total_cmp(&sa)
-                });
-                all_ids.truncate(32);
-                let mut bitmap: u32 = 0;
-                for sig in &collected_signatures {
-                    for (idx, nid) in all_ids.iter().enumerate() {
-                        let nid_u16 = u16::from_be_bytes([nid[0], nid[1]]);
-                        if nid_u16 == sig.node_id {
-                            bitmap |= 1u32 << idx;
-                            break;
-                        }
-                    }
-                }
-                bitmap
-            };
+            let signer_bitmap = compute_signer_bitmap(active_for_bitmap, self_hrw, shard_id, &collected_signatures);
 
             QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),
@@ -1277,60 +1296,7 @@ async fn assemble_status_quorum_certificate(
                                 continue;
                             }
 
-                            let vk = match peer_mgr.get_peer_verifying_key(att.node_id).await {
-                                Some(k) => k,
-                                None => {
-                                    peer_mgr.record_failure(addr).await;
-                                    continue;
-                                }
-                            };
-
-                            let sig_bytes = match hex::decode(&att.signature) {
-                                Ok(b) if b.len() == 64 => {
-                                    let mut arr = [0u8; 64];
-                                    arr.copy_from_slice(&b);
-                                    arr
-                                }
-                                _ => {
-                                    peer_mgr.record_failure(addr).await;
-                                    continue;
-                                }
-                            };
-                            let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-
-                            let att_lock_id_bytes = match hex::decode(&att.lock_id) {
-                                Ok(b) if b.len() == 32 => {
-                                    let mut arr = [0u8; 32];
-                                    arr.copy_from_slice(&b);
-                                    arr
-                                }
-                                _ => {
-                                    peer_mgr.record_failure(addr).await;
-                                    continue;
-                                }
-                            };
-
-                            if att_lock_id_bytes != lock_id {
-                                peer_mgr.record_failure(addr).await;
-                                continue;
-                            }
-
-                            let domain_tag = if target_status == 1 {
-                                humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL
-                            } else {
-                                humoco_sim_core::crypto::DOMAIN_APPROVE_PROV
-                            };
-                            let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
-                                domain_tag,
-                                0,
-                                0,
-                                0,
-                                shard_id,
-                                target_status,
-                                &lock_id,
-                            );
-
-                            if vk.verify_strict(&sig_digest, &sig).is_err() {
+                            if !verify_peer_attestation(peer_mgr, &att, lock_id, shard_id, target_status).await {
                                 peer_mgr.record_failure(addr).await;
                                 continue;
                             }
@@ -1373,27 +1339,7 @@ async fn assemble_status_quorum_certificate(
                 0
             };
 
-            let signer_bitmap = {
-                let mut all_ids: Vec<[u8; 32]> = active_for_bitmap.into_iter().map(|(nid, _)| nid).collect();
-                all_ids.push(self_hrw);
-                all_ids.sort_by(|a, b| {
-                    let sa = humoco_sim_core::client_flow::compute_hrw_score_f64(a, shard_id);
-                    let sb = humoco_sim_core::client_flow::compute_hrw_score_f64(b, shard_id);
-                    sb.total_cmp(&sa)
-                });
-                all_ids.truncate(32);
-                let mut bitmap: u32 = 0;
-                for sig in &collected_signatures {
-                    for (idx, nid) in all_ids.iter().enumerate() {
-                        let nid_u16 = u16::from_be_bytes([nid[0], nid[1]]);
-                        if nid_u16 == sig.node_id {
-                            bitmap |= 1u32 << idx;
-                            break;
-                        }
-                    }
-                }
-                bitmap
-            };
+            let signer_bitmap = compute_signer_bitmap(active_for_bitmap, self_hrw, shard_id, &collected_signatures);
 
             QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),

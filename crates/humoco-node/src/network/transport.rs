@@ -11,6 +11,8 @@ use tracing::{debug, error, info, warn};
 pub const STREAM_CONCURRENCY_LIMIT: usize = 1024;
 /// Maximum number of concurrent background gossip forward tasks.
 pub const GOSSIP_FORWARD_CONCURRENCY_LIMIT: usize = 64;
+/// Maximum number of concurrent QUIC handshake / connection handler tasks (DoS/OOM protection).
+pub const CONNECTION_CONCURRENCY_LIMIT: usize = 256;
 
 static GOSSIP_FORWARD_SEMAPHORE: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(GOSSIP_FORWARD_CONCURRENCY_LIMIT));
@@ -632,14 +634,23 @@ impl RequestHandler for NodeRequestHandler {
                                 let f2f_peers = pm.f2f_peer_addrs().await;
                                 let d = f2f_peers.len();
                                 if d > 0 {
-                                    let k = crate::network::manager::calculate_fan_out(d);
-                                    let mut selected_peers = f2f_peers;
-                                    if k < d {
-                                        use rand::seq::SliceRandom;
-                                        let mut rng = rand::thread_rng();
-                                        selected_peers.shuffle(&mut rng);
-                                        selected_peers.truncate(k);
-                                    }
+                                    let mut k = crate::network::manager::calculate_fan_out(d);
+                                    k = k.clamp(1, f2f_peers.len());
+                                    let selected_peers: Vec<SocketAddr> = if f2f_peers.len() <= k {
+                                        f2f_peers
+                                    } else {
+                                        let mut scored: Vec<([u8; 32], SocketAddr)> = f2f_peers
+                                            .into_iter()
+                                            .map(|addr| {
+                                                let mut hasher = blake3::Hasher::new();
+                                                hasher.update(&record.id);
+                                                hasher.update(addr.to_string().as_bytes());
+                                                (*hasher.finalize().as_bytes(), addr)
+                                            })
+                                            .collect();
+                                        scored.sort_by(|a, b| a.0.cmp(&b.0));
+                                        scored.into_iter().take(k).map(|(_, addr)| addr).collect()
+                                    };
 
                                     let mut fwd_header = header;
                                     fwd_header.reserved = hops + 1;
@@ -691,7 +702,11 @@ pub struct QuicTransport {
     handler: Arc<dyn RequestHandler>,
     cancel_token: CancellationToken,
     stream_semaphore: Arc<Semaphore>,
+    connection_semaphore: Arc<Semaphore>,
 }
+
+/// Backwards-compatible alias for `QuicTransport` (task spec naming: `QuicP2pTransport`).
+pub type QuicP2pTransport = QuicTransport;
 
 impl QuicTransport {
     /// Binds a QUIC endpoint on the specified socket address using the NodeIdentity.
@@ -730,6 +745,7 @@ impl QuicTransport {
             handler,
             cancel_token,
             stream_semaphore: Arc::new(Semaphore::new(STREAM_CONCURRENCY_LIMIT)),
+            connection_semaphore: Arc::new(Semaphore::new(CONNECTION_CONCURRENCY_LIMIT)),
         })
     }
 
@@ -980,8 +996,20 @@ impl QuicTransport {
                             let peer_manager = self.peer_manager.clone();
                             let cancel_token = self.cancel_token.clone();
                             let stream_semaphore = self.stream_semaphore.clone();
+                            let connection_semaphore = self.connection_semaphore.clone();
+                            let permit = match connection_semaphore.try_acquire_owned() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    warn!(
+                                        "Connection concurrency limit {} reached, dropping incoming QUIC handshake (DoS protection)",
+                                        CONNECTION_CONCURRENCY_LIMIT
+                                    );
+                                    continue;
+                                }
+                            };
 
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 match incoming_conn.await {
                                     Ok(conn) => {
                                         let remote_addr = conn.remote_address();

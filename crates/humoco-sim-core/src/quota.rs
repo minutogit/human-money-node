@@ -108,6 +108,29 @@ impl QuartileStats {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared ring-buffer helpers — eliminate repetitive array manipulation
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn filled_array<const N: usize>(val: u64) -> [u64; N] {
+    [val; N]
+}
+
+#[inline]
+fn slice_sum(slice: &[u64]) -> u128 {
+    slice.iter().map(|&x| x as u128).sum()
+}
+
+#[inline]
+fn array_sum<const N: usize>(arr: &[u64; N]) -> u128 {
+    arr.iter().map(|&x| x as u128).sum()
+}
+
+fn seeded_epoch_hours(current_epoch_hour: u64) -> [u64; 24] {
+    std::array::from_fn(|i| current_epoch_hour.saturating_sub((23 - i) as u64))
+}
+
 /// 28-day slotted ring buffer for sluggish median smoothing
 #[derive(Clone, Debug)]
 pub struct SlottedMedianRingBuffer {
@@ -119,7 +142,7 @@ pub struct SlottedMedianRingBuffer {
 impl SlottedMedianRingBuffer {
     pub fn new() -> Self {
         Self {
-            slots: [0; 28],
+            slots: filled_array(0),
             count: 0,
             write_idx: 0,
         }
@@ -137,7 +160,7 @@ impl SlottedMedianRingBuffer {
     /// Initializes all 28 slots with a seed median and lower bound
     pub fn seed_with_floor(&mut self, seed_median: u64, floor: u64) {
         let eff_seed = seed_median.max(floor);
-        self.slots = [eff_seed; 28];
+        self.slots = filled_array(eff_seed);
         self.count = 28;
         self.write_idx = 0;
     }
@@ -154,7 +177,7 @@ impl SlottedMedianRingBuffer {
         if self.count == 0 {
             return None;
         }
-        let sum: u128 = self.slots[..self.count].iter().map(|&x| x as u128).sum();
+        let sum = slice_sum(&self.slots[..self.count]);
         Some((sum / self.count as u128) as u64)
     }
 
@@ -198,8 +221,8 @@ pub struct HourlySlottedRingBuffer {
 impl HourlySlottedRingBuffer {
     pub fn new() -> Self {
         Self {
-            slots: [0; 24],
-            epoch_hours: [0; 24],
+            slots: filled_array(0),
+            epoch_hours: filled_array(0),
             count: 0,
             last_epoch_hour: 0,
         }
@@ -229,7 +252,7 @@ impl HourlySlottedRingBuffer {
         if self.count == 0 {
             return 0;
         }
-        let sum: u128 = self.slots.iter().map(|&x| x as u128).sum();
+        let sum = array_sum(&self.slots);
         sum.min(u64::MAX as u128) as u64
     }
 
@@ -240,11 +263,8 @@ impl HourlySlottedRingBuffer {
 
     /// Fills all 24 slots with the seed value for a clean cold start.
     pub fn seed_with_floor(&mut self, seed_hourly_median: u64, current_epoch_hour: u64) {
-        self.slots = [seed_hourly_median; 24];
-        for i in 0..24 {
-            let offset = 23 - i;
-            self.epoch_hours[i] = current_epoch_hour.saturating_sub(offset as u64);
-        }
+        self.slots = filled_array(seed_hourly_median);
+        self.epoch_hours = seeded_epoch_hours(current_epoch_hour);
         self.count = 24;
         self.last_epoch_hour = current_epoch_hour;
     }

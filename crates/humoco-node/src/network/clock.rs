@@ -200,6 +200,12 @@ impl NetworkClock {
         self.time_offset.load(Ordering::Relaxed)
     }
 
+    /// Returns the last issued `net_time` in milliseconds (monotonic anchor, lock-free).
+    #[inline]
+    pub fn last_net_time_ms(&self) -> u64 {
+        self.last_net_time.load(Ordering::Relaxed)
+    }
+
     /// Sets an offset directly (with clamping to 15 minutes) for tests
     pub fn set_offset_for_testing(&self, offset_ms: i64) {
         let clamped = offset_ms.clamp(-MAX_TIME_OFFSET_CLAMP_MS, MAX_TIME_OFFSET_CLAMP_MS);

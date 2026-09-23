@@ -559,6 +559,7 @@ async fn collect_peer_attestations(
                     // Early return as soon as required quorum is reached
                     if collected_signatures.len() >= query.required_q {
                         join_set.abort_all();
+                        in_flight.clear(); // Aborted stragglers must NEVER be counted as peer failures (AGENTS.md / INV-1501)
                         break;
                     }
                 }

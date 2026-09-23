@@ -27,9 +27,9 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 
 | ID | Prompt-Datei | Pillar | Letzter Durchlauf | Modell | Funde gesamt | Offen | Status | Prio-Score |
 |---|---|---|---|---|---|---|---|---|
-| **01** | `01_subtraktion_und_vereinfachung.md` | 2. Architektur | *Nie* | - | 0 | 0 | `⚪ Untested` | **Hoch** |
+| **01** | `01_subtraktion_und_vereinfachung.md` | 2. Architektur | 2026-09-23 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **02** | `02_security_und_byzantine_hardening.md` | 3. Byzantine | 2026-09-15 | muse-spark | 8 | 0 | `🟢 Clean` | **Niedrig** |
-| **03** | `03_todes_spiralen_und_deadlock_audit.md` | 4. Dynamik | *Nie* | - | 0 | 0 | `⚪ Untested` | **Hoch** |
+| **03** | `03_todes_spiralen_und_deadlock_audit.md` | 4. Dynamik | 2026-09-23 | muse-spark | 3 | 0 | `🟢 Clean` | **Niedrig** |
 | **04** | `04_invarianten_und_spezifikations_waechter.md` | 2. Architektur | 2026-09-15 | muse-spark | 7 | 0 | `🟢 Clean` | **Niedrig** |
 | **05** | `05_performance_und_latency_audit.md` | 2. Architektur | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
 | **06** | `06_chaos_und_fuzz_test_generator.md` | 5. Chaos | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
@@ -37,7 +37,7 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | **08** | `08_sabotage_zensur_und_eclipse_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 6 | 0 | `🟢 Clean` | **Niedrig** |
 | **09** | `09_knoten_hack_und_key_compromise_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **10** | `10_kartellbildung_und_shard_takeover_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **11** | `11_time_warp_und_uhren_manipulation_audit.md` | 4. Dynamik | *Nie* | - | 0 | 0 | `⚪ Untested` | **Hoch** |
+| **11** | `11_time_warp_und_uhren_manipulation_audit.md` | 4. Dynamik | 2026-09-23 | muse-spark | 2 | 0 | `🟢 Clean` | **Niedrig** |
 | **12** | `12_mutation_testing_und_test_blindspot_audit.md` | 1. Testing | *Nie* | - | 0 | 0 | `⚪ Untested` | **Hoch** |
 | **13** | `13_unsafe_code_und_memory_safety_audit.md` | 1. Safety | 2026-09-15 | muse-spark | 4 | 0 | `🟢 Clean` | **Niedrig** |
 | **14** | `14_property_based_testing_und_fuzzing.md` | 1. Testing | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
@@ -54,4 +54,5 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | *Init* | - | - | - | Initialisierung der Matrix | - |
 | 2026-09-15 09:55 | [04, 02, 13] | muse-spark | 19 | 10 Fixes: BLAKE3 Length-Prefix (wire.rs), Replay-Cache Race (pow.rs), Gateway HRW-Ticket Routing (routes.rs), Shard 24h Hysterese (transport.rs), Quota Overflow checked_add (quota.rs), ProofChain Bounds (types.rs), UDS Bounds (server.rs), First-Party Ban Signature Check (engine.rs), #![forbid(unsafe_code)] (lib.rs), Doc 12 Mermaid Typo | `prompts/reports/2026-09-15_*.md` |
 | 2026-09-18 20:55 | [08, 09, 10] | muse-spark | 16 | Status Quorum Query Candidate Window Erweiterung auf Rank 32 Hedged Fallback (routes.rs), Client-Side Custody & Shard-Takeover Validierung | `prompts/reports/2026-09-18_*.md` |
+| 2026-09-23 22:40 | [01, 03, 11] | muse-spark | 10 | 10 Befunde: Subtraktion-Potenzial (1.6k-2.2k LOC Duplikate in Quorum & Ringpuffern), Todes-Spiralen & Deadlocks 100% bestanden (Härtungsempfehlungen: BLAKE3-Fanout, Fraud-Limiting, QUIC Conn-Semaphore), Time-Warp 100% bestanden (F2F Median & Ingress Windows robust, Prune-Guard & Heartbeat-Skew-Check identifiziert) | `prompts/reports/2026-09-23_*.md` |
 

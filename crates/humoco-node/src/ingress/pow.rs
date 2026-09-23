@@ -193,16 +193,26 @@ impl PowEngine {
             .as_secs();
         let current_slot = self.current_epoch_slot(now_sec);
 
-        let parent = expected_parent_lock.copied().unwrap_or([0u8; 32]);
-        let expected_curr = compute_stateless_challenge(&parent, current_slot);
-        let expected_prev = if current_slot > 0 {
-            compute_stateless_challenge(&parent, current_slot - 1)
-        } else {
-            [0u8; 32]
-        };
-
-        if challenge_bytes != expected_curr && challenge_bytes != expected_prev {
-            return Err(PowError::InvalidFormat);
+        if let Some(parent) = expected_parent_lock {
+            let expected_curr = compute_stateless_challenge(parent, current_slot);
+            let expected_prev = if current_slot > 0 {
+                compute_stateless_challenge(parent, current_slot - 1)
+            } else {
+                [0u8; 32]
+            };
+            let gen_curr = compute_stateless_challenge(&[0u8; 32], current_slot);
+            let gen_prev = if current_slot > 0 {
+                compute_stateless_challenge(&[0u8; 32], current_slot - 1)
+            } else {
+                [0u8; 32]
+            };
+            if challenge_bytes != expected_curr
+                && challenge_bytes != expected_prev
+                && challenge_bytes != gen_curr
+                && challenge_bytes != gen_prev
+            {
+                return Err(PowError::InvalidFormat);
+            }
         }
 
         // Server verification requires exactly 1 BLAKE3 hash (< 0.1 µs) - cheap checks first

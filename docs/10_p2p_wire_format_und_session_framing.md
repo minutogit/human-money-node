@@ -264,7 +264,6 @@ stateDiagram-v2
 | `ShardMapPing` | **YES (🟢)** | Topology ping; returns topology snapshot. |
 | `ActiveSyncRequest` | **YES (🟢)** | **Idempotent PULL-sync.** Merely returns already-quorated active locks; mutates no state. |
 | `LockVerifyRequest` | **NO (🔴)** | **State mutation.** 0-RTT replay could create artificial race conditions. **1-RTT strictly required.** |
-| `TombstoneBroadcast` | **NO (🔴)** | State mutation; requires 1-RTT verification. |
 | `EquivocationProof` | **NO (🔴)** | Slashing trigger; requires 1-RTT nonce binding. |
 
 ### 4.2 Replay Protection for Write Operations
@@ -585,7 +584,7 @@ pub fn parse_and_validate_wire_header(
 1. **[INV-1001] Fixed Header Dimension:** The `WireHeader` is invariantly exactly 32 bytes in size and aligned to an 8-byte memory boundary (`#[repr(C, align(8))]`).
 2. **[INV-1002] Magic Constant:** Every valid HuMoCo framing packet must start with the 4 ASCII bytes `b"HUMO"`.
 3. **[INV-1003] Domain Separation Invariance:** All signatures bind the system-specific `DOMAIN_TAG` in the BLAKE3 preimage. Class-swapping between provisional and final confirmations is mathematically excluded.
-4. **[INV-1004] 0-RTT Write Protection:** State-changing operations (`LockVerifyRequest`, `TombstoneBroadcast`, `EquivocationProof`) must never be accepted in QUIC 0-RTT early data.
+4. **[INV-1004] 0-RTT Write Protection:** State-changing operations (`LockVerifyRequest`, `EquivocationProof`) must never be accepted in QUIC 0-RTT early data.
 5. **[INV-1005] Jury-Free Ingress Verification:** Ingress accounting is performed exclusively directly and objectively by the receiving shard nodes; no control juries exist for load declarations.
 6. **[INV-1006] Stochastic Receipt Sampling:** Shard nodes stochastically scatter $p = 0{,}02\,\%$ of all processed locks as 64-byte `SignedGossipReceipt` into the P2P gossip channel.
 7. **[INV-1007] Non-Repudiation Ingress:** Every lock forwarding requires a validly signed `SignedIngressEnvelope` of the gateway; sequence splits constitute an incontestable fraud proof.

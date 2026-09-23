@@ -62,7 +62,6 @@ impl RequestHandler for DefaultRequestHandler {
                 x if x == MsgType::ActiveSyncRequest as u16 => MsgType::ActiveSyncDone as u16,
                 x if x == MsgType::ShardDigestRequest as u16 => MsgType::ShardDigestResponse as u16,
                 x if x == MsgType::EquivocationProof as u16 => MsgType::EquivocationAck as u16,
-                x if x == MsgType::MergeLoserBroadcast as u16 => MsgType::MergeLoserAck as u16,
                 _ => MsgType::StatusResponse as u16,
             };
             let resp_header =
@@ -126,7 +125,6 @@ pub struct NodeRequestHandler {
     pub storage: Arc<crate::storage::RedbStorage>,
     pub identity: NodeIdentity,
     pub peer_manager: Option<Arc<crate::network::PeerManager>>,
-    pub seen_gossip_locks: Arc<parking_lot::Mutex<crate::network::manager::SeenGossipCache>>,
 }
 
 impl NodeRequestHandler {
@@ -140,9 +138,6 @@ impl NodeRequestHandler {
             storage,
             identity,
             peer_manager: None,
-            seen_gossip_locks: Arc::new(parking_lot::Mutex::new(
-                crate::network::manager::SeenGossipCache::default(),
-            )),
         }
     }
 
@@ -152,13 +147,11 @@ impl NodeRequestHandler {
         identity: NodeIdentity,
         peer_manager: Arc<crate::network::PeerManager>,
     ) -> Self {
-        let seen_gossip_locks = peer_manager.seen_gossip_cache();
         Self {
             engine,
             storage,
             identity,
             peer_manager: Some(peer_manager),
-            seen_gossip_locks,
         }
     }
 }

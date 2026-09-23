@@ -44,6 +44,7 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | **15** | `15_clean_code_und_idiomatic_rust_audit.md` | 1. Clean Code | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
 | **16** | `16_supply_chain_und_dependency_audit.md` | 1. Supply Chain | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
 | **17** | `17_update_and_supply_chain_verification.md` | 1. Sovereign | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
+| **18** | `18_legacy_code_and_architectural_drift_audit.md` | 2. Architektur | 2026-09-23 | muse-spark | 12 | 0 | `🟢 Clean` | **Niedrig** |
 
 ---
 
@@ -55,4 +56,5 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | 2026-09-15 09:55 | [04, 02, 13] | muse-spark | 19 | 10 Fixes: BLAKE3 Length-Prefix (wire.rs), Replay-Cache Race (pow.rs), Gateway HRW-Ticket Routing (routes.rs), Shard 24h Hysterese (transport.rs), Quota Overflow checked_add (quota.rs), ProofChain Bounds (types.rs), UDS Bounds (server.rs), First-Party Ban Signature Check (engine.rs), #![forbid(unsafe_code)] (lib.rs), Doc 12 Mermaid Typo | `prompts/reports/2026-09-15_*.md` |
 | 2026-09-18 20:55 | [08, 09, 10] | muse-spark | 16 | Status Quorum Query Candidate Window Erweiterung auf Rank 32 Hedged Fallback (routes.rs), Client-Side Custody & Shard-Takeover Validierung | `prompts/reports/2026-09-18_*.md` |
 | 2026-09-23 22:40 | [01, 03, 11] | muse-spark | 10 | 10 Befunde: Subtraktion-Potenzial (1.6k-2.2k LOC Duplikate in Quorum & Ringpuffern), Todes-Spiralen & Deadlocks 100% bestanden (Härtungsempfehlungen: BLAKE3-Fanout, Fraud-Limiting, QUIC Conn-Semaphore), Time-Warp 100% bestanden (F2F Median & Ingress Windows robust, Prune-Guard & Heartbeat-Skew-Check identifiziert) | `prompts/reports/2026-09-23_*.md` |
+| 2026-09-23 23:42 | [18, 01] | muse-spark | 17 | Audit 18: 12 Funde zu toten Wire-Nachrichtentypen (`GossipAnnounce`, `MergeLoser*`, `ActiveSyncChunk`), Dual-Stack-Resten (`LockSubmitRequest` vs. HMC Native), toten Geister-Caches (`SeenGossipCache`) und Doku-Drifts (`TombstoneBroadcast`). Audit 01: 2.4k-2.8k LoC Subtraktionspotenzial identifiziert (QR/Dashboard-Peripherie, Fanout/Flush-Duplikate, RingBuffer-Abstraktion, Alias-Explosion). | `prompts/reports/2026-09-23_*.md` |
 

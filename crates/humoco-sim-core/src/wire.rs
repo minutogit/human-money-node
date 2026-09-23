@@ -89,18 +89,14 @@ pub enum MsgType {
     ShardMapPong = 0x0006,
     LockVerifyRequest = 0x0101,
     LockVerifyResponse = 0x0102,
-    MergeLoserBroadcast = 0x0103,
-    MergeLoserAck = 0x0104,
     EquivocationProof = 0x0105,
     EquivocationAck = 0x0106,
     ActiveSyncRequest = 0x0107,
-    ActiveSyncChunk = 0x0108,
     ActiveSyncDone = 0x0109,
     ShardDigestRequest = 0x010A,
     ShardDigestResponse = 0x010B,
     Heartbeat = 0x0201,
     HeartbeatAck = 0x0202,
-    GossipAnnounce = 0x0203,
 }
 
 pub const FLAG_PROVISIONAL: u32 = 0x0000_0001;

@@ -88,8 +88,7 @@ flowchart TD
 | `LatencyProbe` / `ShardMapPing` | ✅ **YES** | Pure latency and topology snapshots |
 | `ActiveSyncRequest` | ✅ **YES** | **Idempotent PULL Sync:** Requests quorated active locks; 0 state mutation |
 | `LockVerifyRequest` / Init | ❌ **NO** | **State change: 1-RTT TLS 1.3 strictly enforced** |
-| `TombstoneBroadcast` | ❌ **NO** | State mutation; requires 1-RTT nonce binding |
-| `EquivocationProof` / `FraudAlert` | ❌ **NO** | **Slashing Trigger:** Requires 1-RTT nonce binding for replay protection |
+| `EquivocationProof` / `FraudAlert` | ❌ **NO** | **Slashing Trigger:** Requires 1-RTT Nonce binding for replay protection |
 | `Argon2id PoW Submission` | ❌ **NO** | One-shot protection against PoW replays |
 
 ### 3.2 Anti-Replay & QUIC Delegation

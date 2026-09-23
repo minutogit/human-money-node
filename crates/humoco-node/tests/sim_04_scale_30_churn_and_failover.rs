@@ -1,6 +1,6 @@
 //! sim_04_scale_30_churn_and_failover – 30-Knoten Small-World Mesh mit Churn, Failover & Heilung.
 //! Phasen 1–7, 100% echte Produktionskomponenten (NodeDaemon, redb, Quinn QUIC, Axum HTTP,
-//! HRW Argon2d Sharding, DualTierEngine, SeenGossipCache).
+//! HRW Argon2d Sharding, DualTierEngine).
 
 mod simulation;
 
@@ -16,7 +16,7 @@ use rand::seq::SliceRandom;
 
 use humoco_node::api::hmc::{L2AuthPayload, L2LockEntry, L2StatusQuery, L2Verdict};
 use humoco_node::identity::NodeIdentity;
-use humoco_node::network::{PeerManager, SeenGossipCache, QuicTransport};
+use humoco_node::network::{PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 use humoco_sim_core::storage::RamIndex;
 use humoco_sim_core::types::{PeerPresenceEntry, SimTime};
@@ -442,8 +442,6 @@ async fn test_sim_04_scale_30_churn_and_failover() {
     let storage6 = Arc::new(RedbStorage::open(&db_path6).expect("open redb6"));
     let (engine6, _handle6) = DualTierEngine::new(storage6.clone());
 
-    // SeenGossipCache usage (real production)
-    let mut gossip_cache = SeenGossipCache::new(10_000);
     let wallet_ttl = SimWallet::new();
     let ttl_ms: u64 = 2_000;
     let now_ms6 = SimWallet::now_ms();
@@ -461,12 +459,6 @@ async fn test_sim_04_scale_30_churn_and_failover() {
         matches!(verdict6, L2Verdict::Verified { .. }) && is_new6,
         format!("TTL genesis must be Verified, got {:?}", verdict6),
     );
-    // Gossip cache first insert must be new
-    let is_new_gossip = gossip_cache.check_and_insert(&genesis_ttl.transaction_hash);
-    sim.reporter.check(is_new_gossip, "First gossip insert must be new");
-    let is_dup = gossip_cache.check_and_insert(&genesis_ttl.transaction_hash);
-    sim.reporter.check(!is_dup, "Duplicate gossip must be suppressed O(1)");
-    sim.reporter.check(gossip_cache.len() == 1, "Gossip cache len must be 1");
 
     // Quinn QUIC bind demonstration (real transport)
     let qid6 = NodeIdentity::generate();

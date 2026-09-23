@@ -85,8 +85,7 @@ impl SyncPayload {
 
 /// Returns the maximum allowed payload length based on the message type (INV: DoS / OOM protection).
 pub fn max_payload_len_for_msg_type(msg_type: u16) -> usize {
-    if msg_type == MsgType::ActiveSyncChunk as u16
-        || msg_type == MsgType::ActiveSyncRequest as u16
+    if msg_type == MsgType::ActiveSyncRequest as u16
         || msg_type == MsgType::ActiveSyncDone as u16
     {
         MAX_SYNC_FRAME_PAYLOAD_LEN
@@ -254,8 +253,8 @@ mod tests {
         let err = write_frame(&mut buffer, &header, &large_payload).await;
         assert!(err.is_err(), "Standard frame > 64KiB must be rejected");
 
-        // Sync message (ActiveSyncChunk) up to 4 MiB is accepted
-        let sync_header = WireHeader::new(MsgType::ActiveSyncChunk as u16, 1, 1, 0, 100 * 1024);
+        // Sync message (ActiveSyncDone) up to 4 MiB is accepted
+        let sync_header = WireHeader::new(MsgType::ActiveSyncDone as u16, 1, 1, 0, 100 * 1024);
         let sync_payload = vec![1u8; 100 * 1024];
         let ok = write_frame(&mut buffer, &sync_header, &sync_payload).await;
         assert!(ok.is_ok(), "Sync frame up to 4MiB must be accepted");

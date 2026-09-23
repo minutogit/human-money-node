@@ -8,10 +8,9 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use humoco_node::api::hmc::{L2Verdict, L2StatusQuery, L2AuthPayload};
 use humoco_sim_core::crypto::{sign_lock_attestation, verify_attestation};
-use humoco_sim_core::fraud::FraudProofPayload;
+use humoco_sim_core::fraud::{sign_heartbeat, FraudProofPayload, FraudProofPillar, SlotDetector128};
 use humoco_sim_core::types::{SimTime, Attestation};
 use humoco_sim_core::wire::{MsgType, WireHeader};
-use humoco_node::network::manager::SeenGossipCache;
 
 use simulation::{MeshSimulator, SimWallet};
 
@@ -315,77 +314,29 @@ async fn test_sim_03_byzantine_resilience() {
 
     sim.reporter.end_phase_ok();
 
-    // --- Phase 3: Echo-Gossip Flooding (500 Duplikate -> O(1) Drop, Delta Load <=0) ---
-    sim.reporter.begin_phase("Phase 3 - Echo-Gossip Flooding O(1) Drop");
+    // --- Phase 3: Heartbeat Spam & SlotDetector128 O(1) Fraud Slashing (Spec 10 Pillar 3) ---
+    sim.reporter.begin_phase("Phase 3 - Heartbeat Spam & SlotDetector128 O(1) Slashing");
 
     {
-        let mut cache = SeenGossipCache::new(10_000);
-        let gossip_lock_id = *blake3::hash(b"byzantine_gossip_flooding_lock").as_bytes();
+        let mut detector = SlotDetector128::new();
+        let node_id = 7u16;
 
-        // First insertion must be new
-        let first_is_new = cache.check_and_insert(&gossip_lock_id);
-        sim.reporter.check(first_is_new, "First gossip must be new");
+        let t0 = SimTime(1_000_000_000);
+        let hb1 = sign_heartbeat(node_id, t0);
 
-        // Flood 500 duplicates – all must be suppressed in O(1)
-        let mut suppressed = 0usize;
-        let start = std::time::Instant::now();
-        for _ in 0..500 {
-            let is_new = cache.check_and_insert(&gossip_lock_id);
-            if !is_new {
-                suppressed += 1;
-            }
-        }
-        let elapsed = start.elapsed();
+        // First heartbeat stored cleanly
+        let proof1 = detector.observe(hb1);
+        sim.reporter.check(proof1.is_none(), "First honest heartbeat must not trigger fraud");
 
-        sim.reporter.check(
-            suppressed == 500,
-            format!("500 duplicates must be suppressed, got {suppressed}/500"),
-        );
-        sim.reporter.check(
-            cache.len() == 1,
-            format!("Cache len must remain 1 after flooding, got {}", cache.len()),
-        );
-        sim.reporter.check(
-            cache.contains(&gossip_lock_id),
-            "Cache must still contain original gossip id",
-        );
+        // Second heartbeat within 10 minutes (< 50 min threshold) => Slashing proof generated immediately!
+        let t1 = SimTime(1_000_000_000 + 10 * 60 * 1000);
+        let hb2 = sign_heartbeat(node_id, t1);
+        let proof2 = detector.observe(hb2);
+        sim.reporter.check(proof2.is_some(), "Heartbeat spam within 10m (<50m) must trigger FraudProofPayload immediately");
 
-        // Delta Load <= 0 : no additional work after cache hit
-        // We model load as cache.len() growth; suppressed duplicates cause zero growth
-        let delta_load: i64 = cache.len() as i64 - 1;
-        sim.reporter.check(
-            delta_load <= 0,
-            format!("Delta Load must be <=0 after flooding, got {delta_load}"),
-        );
-
-        // Timing must be O(1) – 500 ops far below 5ms on honest path (even in debug)
-        sim.reporter.check(
-            elapsed.as_millis() < 50,
-            format!("500 gossip checks must be <50ms (O(1)), took {:?}", elapsed),
-        );
-
-        // Also test via shared PeerManager seen cache API (production path)
-        {
-            use humoco_node::network::PeerManager;
-            let pm = PeerManager::new(vec![]);
-            let is_new_pm = pm.check_and_record_seen_gossip(&gossip_lock_id);
-            // pm has empty cache, so first must be true
-            sim.reporter.check(is_new_pm, "PeerManager first gossip via PM must be new");
-            // However our duplicate id is now known to pm, next 500 should be dropped
-            let mut suppressed_pm = 0usize;
-            for _ in 0..500 {
-                if !pm.check_and_record_seen_gossip(&gossip_lock_id) {
-                    suppressed_pm += 1;
-                }
-            }
-            sim.reporter.check(
-                suppressed_pm == 500,
-                format!("PeerManager must suppress 500 duplicates, got {suppressed_pm}"),
-            );
-            sim.reporter.check(
-                pm.has_seen_gossip(&gossip_lock_id),
-                "PeerManager must report has_seen_gossip for flooded id",
-            );
+        if let Some(proof) = proof2 {
+            sim.reporter.check(proof.proof_pillar == FraudProofPillar::HeartbeatSpam, "Proof pillar must be HeartbeatSpam");
+            sim.reporter.check(proof.verify(), "Generated HeartbeatSpam fraud proof must be cryptographically valid");
         }
     }
 

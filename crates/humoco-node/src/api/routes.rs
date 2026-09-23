@@ -16,20 +16,19 @@ use tower_http::trace::TraceLayer;
 
 
 
-use humoco_sim_core::storage::IngressVerdictLow;
-use humoco_sim_core::types::{LockRecord, SimTime};
+use humoco_sim_core::types::SimTime;
 
 use crate::api::dto::{
-    AttestationDto, ErrorResponse, LockRecordDto, LockSubmitRequest, LockSubmitResponse,
-    NodeStatusResponse, PeerEntryDto, PeersResponse, PowChallengeResponse, QuorumCertificateDto,
-    SyncRequest, SyncResponse,
+    AttestationDto, ErrorResponse, LockRecordDto,
+    NodeStatusResponse, PeerEntryDto, PeersResponse, PowChallengeResponse,
+    QuorumCertificateDto, SyncRequest, SyncResponse,
 };
 use crate::api::hmc::{
     verify_l2_lock_signature, wrap_and_sign_verdict, wrap_and_sign_verdict_with_quorum,
     L2ChainLockRequest, L2LockEntry, L2LockRequest, L2StatusQuery, L2Verdict,
 };
 use crate::identity::NodeIdentity;
-use crate::ingress::{IngressError, PowEngine, PowError, TierController};
+use crate::ingress::{IngressError, PowEngine, TierController};
 use crate::network::{PeerManager, QuicTransport};
 use crate::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 
@@ -145,486 +144,17 @@ async fn submit_lock(
         return submit_hmc_lock(state, headers, hmc_req, start).await;
     }
 
-    // Otherwise try parsing as legacy/internal LockSubmitRequest
-    let payload: LockSubmitRequest = match serde_json::from_slice(&body_bytes) {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "InvalidRequest".into(),
-                    message: format!("Failed to parse request JSON: {}", e),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    // Step 3: Dual-stack / Sunset enforcement
-    let suite_id = payload.crypto_suite.unwrap_or(1);
-
-    // Sunset reject enforcement
-    if let Some(reject_time) = state.lifecycle.reject_deprecated_suite_after {
-        if (state.net_time_ms() / 1000) >= reject_time && suite_id == 1 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "CryptoSuiteDeprecated".into(),
-                    message: "400 Bad Request: Suite 1 (Ed25519) has reached final sunset".into(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response();
-        }
-    }
-
-    // Quantum-Bridge-Lock validation
-    if payload.is_bridge_lock == Some(true) && payload.pqc_receiver.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "InvalidBridgeLock".into(),
-                message: "400 Bad Request: Quantum bridge lock requires pqc_receiver".into(),
-                challenge: None,
-                difficulty: None,
-                expires_at: None,
-            }),
-        )
-            .into_response();
-    }
-
-    let should_warn = state
-        .lifecycle
-        .warn_deprecated_suite_after
-        .is_some_and(|warn_time| (state.net_time_ms() / 1000) >= warn_time && suite_id == 1);
-
-    // 1. Parse parent_lock and receiver_pub hex
-    let parent_lock_bytes = match hex::decode(&payload.parent_lock) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            arr
-        }
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "InvalidParentLock".into(),
-                    message: "parent_lock must be 32-byte hex string".into(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let receiver_pub_bytes = match hex::decode(&payload.receiver_pub) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            arr
-        }
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "InvalidReceiverPub".into(),
-                    message: "receiver_pub must be 32-byte hex string".into(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    // 1.5 Check if sender is slashed/banned
-    if state.engine.is_node_banned(&receiver_pub_bytes).await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Forbidden".into(),
-                message: "403 Forbidden: Signer is slashed and banned due to equivocation fraud".into(),
-                challenge: None,
-                difficulty: None,
-                expires_at: None,
-            }),
-        )
-            .into_response();
-    }
-
-    // Nonce
-    let nonce_bytes = if let Ok(bytes) = hex::decode(&payload.nonce) {
-        bytes
-    } else {
-        payload.nonce.as_bytes().to_vec()
-    };
-
-    // Extract auth credentials (headers or json fields)
-    let auth_token = payload.auth_token.as_deref().or_else(|| {
-        headers
-            .get("Authorization")
-            .and_then(|h| h.to_str().ok())
-            .map(|s| s.strip_prefix("Bearer ").unwrap_or(s))
-    });
-
-    let peer_token = payload
-        .peer_token
-        .as_deref()
-        .or_else(|| headers.get("X-Peer-Token").and_then(|h| h.to_str().ok()));
-
-    let pow_challenge = payload
-        .pow_challenge
-        .as_deref()
-        .or_else(|| headers.get("X-PoW-Challenge").and_then(|h| h.to_str().ok()));
-
-    let pow_nonce = payload.pow_nonce.or_else(|| {
-        headers
-            .get("X-PoW-Nonce")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
-    });
-
-    // Determine reference time (Spec 11: net_time_ms):
-    let real_now_ms = state.net_time_ms();
-
-    if let Some(created_at) = payload.created_at {
-        if created_at > real_now_ms.saturating_add(30_000) || real_now_ms.saturating_sub(created_at) > 86_400_000 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "ClockDriftExceeded".into(),
-                    message: "created_at clock drift exceeds allowed window".into(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response();
-        }
-    }
-
-    let now_ms = payload.created_at.unwrap_or(real_now_ms);
-
-    let ttl_seconds = (payload.root_valid_until.saturating_sub(now_ms)) / 1000;
-
-    let existing_ram_lock = state.engine.get_ram_lock(&parent_lock_bytes).await;
-
-    // 2. Perform 3-Tier Access Evaluation
-    if let Err(ingress_err) = state.tier_controller.evaluate_and_charge(
-        auth_token,
-        peer_token,
-        pow_challenge,
-        pow_nonce,
-        ttl_seconds,
-        Some(&parent_lock_bytes),
-    ).await {
-        // Idempotency protection: Before rejecting a replay, check if the lock already exists in the RAM index.
-        let is_idempotent_replay = if let IngressError::InvalidPoW(PowError::ReplayDetected) = &ingress_err {
-            if let Some(ref existing) = existing_ram_lock {
-                let candidate_created_at = payload.created_at.unwrap_or(existing.created_at.0);
-                let candidate_record = LockRecord::new(
-                    parent_lock_bytes,
-                    receiver_pub_bytes,
-                    nonce_bytes.clone(),
-                    SimTime(candidate_created_at),
-                    SimTime(payload.valid_until),
-                );
-                existing.id == candidate_record.id
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        if !is_idempotent_replay {
-            return match ingress_err {
-                IngressError::PoWRequired {
-                    challenge,
-                    difficulty,
-                    expires_at,
-                } => (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "PoWRequired".into(),
-                        message: "Proof-of-Work challenge response required".into(),
-                        challenge: Some(challenge),
-                        difficulty: Some(difficulty),
-                        expires_at: Some(expires_at),
-                    }),
-                )
-                    .into_response(),
-                IngressError::InvalidPoW(err) => {
-                    if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = err {
-                        state.metrics.record_lock_rejected();
-                        let (challenge, _, expires_at) = state.pow_engine.generate_challenge_for_parent(&parent_lock_bytes);
-                        (
-                            StatusCode::TOO_MANY_REQUESTS,
-                            [
-                                (axum::http::header::HeaderName::from_static("x-required-difficulty"), required.to_string()),
-                            ],
-                            Json(ErrorResponse {
-                                error: "UnderLoad".into(),
-                                message: format!(
-                                    "Gateway under load: insufficient PoW difficulty (provided: {}, required: {})",
-                                    provided, required
-                                ),
-                                challenge: Some(challenge),
-                                difficulty: Some(required),
-                                expires_at: Some(expires_at),
-                            }),
-                        )
-                            .into_response()
-                    } else {
-                        (
-                            StatusCode::UNAUTHORIZED,
-                            Json(ErrorResponse {
-                                error: "InvalidPoW".into(),
-                                message: format!("Invalid Proof of Work: {}", err),
-                                challenge: None,
-                                difficulty: None,
-                                expires_at: None,
-                            }),
-                        )
-                            .into_response()
-                    }
-                }
-            IngressError::QuotaExceeded {
-                available,
-                required,
-            } => {
-                state.metrics.record_lock_rejected();
-                (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(ErrorResponse {
-                        error: "QuotaExceeded".into(),
-                        message: format!(
-                            "VIP Quota exceeded: required {} byte-years, available {}",
-                            required, available
-                        ),
-                        challenge: None,
-                        difficulty: None,
-                        expires_at: None,
-                    }),
-                )
-                    .into_response()
-            }
-            IngressError::ReadQuotaExceeded {
-                available,
-                required,
-            } => {
-                state.metrics.record_lock_rejected();
-                (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(ErrorResponse {
-                        error: "ReadQuotaExceeded".into(),
-                        message: format!(
-                            "Read quota exceeded: required {} reads, available {}",
-                            required, available
-                        ),
-                        challenge: None,
-                        difficulty: None,
-                        expires_at: None,
-                    }),
-                )
-                    .into_response()
-            }
-            IngressError::InvalidAuthToken => (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "InvalidAuthToken".into(),
-                    message: "Invalid VIP authentication token".into(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response(),
-            IngressError::InvalidPeerToken => (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "InvalidPeerToken".into(),
-                    message: "Invalid F2F peer token".into(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response(),
-            IngressError::Storage(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "StorageError".into(),
-                    message: format!("Storage error during ingress: {}", err),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response(),
-            };
-        }
-    }
-
-    // 3. Construct LockRecord
-    let fallback_created_at = existing_ram_lock.as_ref().map(|ex| ex.created_at.0).unwrap_or(now_ms);
-    let created_at_ms = payload.created_at.unwrap_or(fallback_created_at);
-    let record = LockRecord::new(
-        parent_lock_bytes,
-        receiver_pub_bytes,
-        nonce_bytes,
-        SimTime(created_at_ms),
-        SimTime(payload.valid_until),
-    );
-    let lock_id_hex = hex::encode(record.id);
-
-    // 4. Ingress into DualTierEngine (ClientApi origin)
-    let verdict = state
-        .engine
-        .ingress_lock_with_origin(
-            record.clone(),
-            SimTime(real_now_ms),
-            SimTime(payload.root_valid_until),
-            IngressOrigin::ClientApi,
-        )
-        .await;
-
-    let shard_id = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
-    let payload_bytes = bincode::serialize(&crate::network::framing::LockWirePayload::Sim(
-        record.clone(),
-        payload.root_valid_until,
-    )).ok();
-    let quorum_certificate = if matches!(
-        verdict,
-        Ok(IngressVerdictLow::AcceptedNew) | Ok(IngressVerdictLow::IdempotentReplay)
-    ) {
-        Some(
-            assemble_quorum_certificate(
-                &state,
-                record.id,
-                record.parent_lock,
-                shard_id,
-                now_ms,
-                payload_bytes,
-            )
-            .await,
-        )
-    } else {
-        None
-    };
-
-    match verdict {
-        Ok(IngressVerdictLow::AcceptedNew) => {
-            let attestation = create_attestation_for_network(&state.identity, record.id, record.parent_lock, shard_id, 0, now_ms, state.network_id);
-
-
-
-            state.metrics.record_pos_latency(start.elapsed());
-            let mut resp = (
-                StatusCode::CREATED,
-                Json(LockSubmitResponse {
-                    status: "ACCEPTED".into(),
-                    lock_id: lock_id_hex,
-                    attestation: Some(attestation),
-                    quorum_certificate,
-                    reason: None,
-                }),
-            )
-                .into_response();
-            if should_warn {
-                resp.headers_mut().insert(
-                    axum::http::HeaderName::from_static("x-deprecation-warning"),
-                    axum::http::HeaderValue::from_static(
-                        "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-                    ),
-                );
-            }
-            resp
-        }
-        Ok(IngressVerdictLow::IdempotentReplay) => {
-            state.metrics.record_pos_latency(start.elapsed());
-            let attestation = create_attestation_for_network(&state.identity, record.id, record.parent_lock, shard_id, 0, now_ms, state.network_id);
-            let mut resp = (
-                StatusCode::OK,
-                Json(LockSubmitResponse {
-                    status: "IDEMPOTENT".into(),
-                    lock_id: lock_id_hex,
-                    attestation: Some(attestation),
-                    quorum_certificate,
-                    reason: None,
-                }),
-            )
-                .into_response();
-            if should_warn {
-                resp.headers_mut().insert(
-                    axum::http::HeaderName::from_static("x-deprecation-warning"),
-                    axum::http::HeaderValue::from_static(
-                        "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-                    ),
-                );
-            }
-            resp
-        }
-        Ok(IngressVerdictLow::RejectedCollision) | Err(IngressVerdictLow::RejectedCollision) => {
-            state.metrics.record_lock_rejected();
-            (
-                StatusCode::CONFLICT,
-                Json(LockSubmitResponse {
-                    status: "REJECTED".into(),
-                    lock_id: lock_id_hex,
-                    attestation: None,
-                    quorum_certificate: None,
-                    reason: Some("Double-spend collision detected on parent lock".into()),
-                }),
-            )
-                .into_response()
-        }
-        Ok(IngressVerdictLow::RejectedWindow) | Err(IngressVerdictLow::RejectedWindow) => (
-            StatusCode::BAD_REQUEST,
-            Json(LockSubmitResponse {
-                status: "REJECTED".into(),
-                lock_id: lock_id_hex,
-                attestation: None,
-                quorum_certificate: None,
-                reason: Some("Invalid ingress time window".into()),
-            }),
-        )
-            .into_response(),
-        Ok(IngressVerdictLow::RejectedCapacity) | Err(IngressVerdictLow::RejectedCapacity) => {
-            state.metrics.record_lock_rejected();
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(LockSubmitResponse {
-                    status: "REJECTED".into(),
-                    lock_id: lock_id_hex,
-                    attestation: None,
-                    quorum_certificate: None,
-                    reason: Some("Persistence queue congested (backpressure)".into()),
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(LockSubmitResponse {
-                status: "REJECTED".into(),
-                lock_id: lock_id_hex,
-                attestation: None,
-                quorum_certificate: None,
-                reason: Some(format!("Lock rejected by engine: {:?}", e)),
-            }),
-        )
-            .into_response(),
-    }
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: "InvalidRequest".into(),
+            message: "400 Bad Request: Invalid HMC Lock format".into(),
+            challenge: None,
+            difficulty: None,
+            expires_at: None,
+        }),
+    )
+        .into_response()
 }
 
 /// Handler for POST /v1/sync
@@ -654,6 +184,37 @@ async fn sync_locks(
         let id_hex = hex::encode(record.id);
         if !locators.contains(&parent_hex) && !locators.contains(&id_hex) {
             locks.push(LockRecordDto::from_record(&record, root_valid_until));
+        }
+    }
+
+    // Read HMC locks from persistent disk storage and in-memory RAM
+    let mut hmc_map = std::collections::HashMap::new();
+    if let Ok(disk_hmc_locks) = state.storage.all_valid_hmc_locks(0) {
+        for (tag, entry) in disk_hmc_locks {
+            hmc_map.insert(tag, entry);
+        }
+    }
+    for (tag, entry) in state.engine.hmc_ram.read().await.locks.clone() {
+        hmc_map.entry(tag).or_insert(entry);
+    }
+
+    for (tag, entry) in hmc_map {
+        let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+        let parent_hex = hex::encode(parent_bytes);
+        let id_hex = hex::encode(entry.t_id);
+        if !locators.contains(&parent_hex) && !locators.contains(&tag) && !locators.contains(&id_hex) {
+            let valid_until_ms = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let rec = humoco_sim_core::types::LockRecord {
+                id: entry.t_id,
+                parent_lock: parent_bytes,
+                receiver_pub: entry.receiver_ephemeral_pub_hash.unwrap_or_default(),
+                nonce: blake3::hash(entry.t_id.as_slice()).as_bytes().to_vec(),
+                created_at: SimTime(entry.encrypted_timestamp as u64),
+                valid_until: SimTime(valid_until_ms),
+                status: humoco_sim_core::types::LockStatus::Final { sigs: 1 },
+                signers: Default::default(),
+            };
+            locks.push(LockRecordDto::from_record(&rec, valid_until_ms));
         }
     }
 
@@ -899,6 +460,145 @@ async fn verify_peer_attestation(
     true
 }
 
+/// Parameters for querying peer attestations via QUIC.
+struct PeerAttestationQuery<'a> {
+    transport: &'a crate::network::QuicTransport,
+    peer_mgr: &'a crate::network::PeerManager,
+    candidate_nodes: &'a [([u8; 32], std::net::SocketAddr)],
+    msg_type: humoco_sim_core::wire::MsgType,
+    resp_msg_type: humoco_sim_core::wire::MsgType,
+    payload: &'a [u8],
+    target_status: u8,
+    lock_id: [u8; 32],
+    shard_id: u16,
+    required_q: usize,
+    shard_query_depth: usize,
+}
+
+/// Collects peer attestations across top HRW candidates with pipelined JoinSet fanout,
+/// early-exit on required quorum, and DoS-resilient correlated timeout dampening (INV-1501).
+async fn collect_peer_attestations(
+    query: PeerAttestationQuery<'_>,
+    collected_signatures: &mut Vec<AttestationDto>,
+) {
+    let header = humoco_sim_core::wire::WireHeader::new(
+        query.msg_type as u16,
+        1,
+        0,
+        query.target_status as u32,
+        query.payload.len() as u32,
+    );
+
+    let mut timeout_addrs = Vec::new();
+    let mut candidate_idx = 0;
+    let mut total_queried = 0;
+    let mut in_flight = std::collections::HashMap::new();
+
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(1000), async {
+        let mut join_set = tokio::task::JoinSet::new();
+
+        let spawn_next = |join_set: &mut tokio::task::JoinSet<_>, idx: &mut usize, t_queried: &mut usize, in_flight: &mut std::collections::HashMap<usize, (std::net::SocketAddr, usize)>| {
+            if *idx < query.candidate_nodes.len() {
+                let (nid, addr) = query.candidate_nodes[*idx];
+                let rank_idx = *idx;
+                *idx += 1;
+                *t_queried += 1;
+
+                in_flight.insert(rank_idx, (addr, rank_idx));
+
+                let t = query.transport.clone();
+                let h = header;
+                let p = query.payload.to_vec();
+                let exp_resp = query.resp_msg_type as u16;
+                join_set.spawn(async move {
+                    let query_peer = async {
+                        let conn = t.connect_peer(addr).await.map_err(|_| ())?;
+                        let (resp_header, resp_payload) = t.send_request(&conn, &h, &p).await.map_err(|_| ())?;
+                        if resp_header.msg_type == exp_resp && !resp_payload.is_empty() {
+                            if let Ok(att) = bincode::deserialize::<AttestationDto>(&resp_payload) {
+                                return Ok(att);
+                            }
+                        }
+                        Err(())
+                    };
+                    match query_peer.await {
+                        Ok(att) => (nid, addr, rank_idx, Some(att)),
+                        Err(_) => (nid, addr, rank_idx, None),
+                    }
+                });
+            }
+        };
+
+        let needed = query.required_q.saturating_sub(collected_signatures.len());
+        let initial_spawns = (needed + query.shard_query_depth).min(query.candidate_nodes.len());
+        for _ in 0..initial_spawns {
+            spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+        }
+
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok((_nid, addr, rank_idx, Some(att))) => {
+                    in_flight.remove(&rank_idx);
+
+                    if collected_signatures.iter().any(|s| s.node_id == att.node_id) {
+                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+                        continue;
+                    }
+
+                    if !verify_peer_attestation(query.peer_mgr, &att, query.lock_id, query.shard_id, query.target_status).await {
+                        if rank_idx < 20 {
+                            query.peer_mgr.record_failure(addr).await;
+                        }
+                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+                        continue;
+                    }
+
+                    query.peer_mgr.record_success(addr, None, None).await;
+                    collected_signatures.push(att);
+
+                    // Early return as soon as required quorum is reached
+                    if collected_signatures.len() >= query.required_q {
+                        join_set.abort_all();
+                        break;
+                    }
+                }
+                Ok((_nid, addr, rank_idx, None)) => {
+                    in_flight.remove(&rank_idx);
+                    timeout_addrs.push((addr, rank_idx));
+                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+                }
+                Err(_) => {
+                    // Task cancelled/panicked
+                }
+            }
+        }
+    }).await;
+
+    // Any in-flight tasks that didn't complete when global timeout hit are also timeouts
+    for (_, (addr, rank_idx)) in in_flight {
+        timeout_addrs.push((addr, rank_idx));
+    }
+
+    // 🛡️ Correlated failure protection (KISS / INV-1501):
+    let total_queried_top20 = total_queried.min(20);
+    let failed_top20 = timeout_addrs.iter().filter(|(_, rank)| *rank < 20).count();
+    let is_correlated_failure = total_queried_top20 >= 2 && failed_top20 * 2 > total_queried_top20;
+
+    if is_correlated_failure {
+        tracing::warn!(
+            failed = failed_top20,
+            total = total_queried_top20,
+            "Correlated timeout detected (>50% failed) - suppressing peer failure penalties (DoS protection)"
+        );
+    } else {
+        for (addr, rank_idx) in timeout_addrs {
+            if rank_idx < 20 {
+                query.peer_mgr.record_failure(addr).await;
+            }
+        }
+    }
+}
+
 /// Assembles a quorum certificate for a lock by collecting signatures from top-20 HRW nodes
 /// or creating a local standalone certificate when N=1 or no peers are available.
 async fn assemble_quorum_certificate(
@@ -915,7 +615,7 @@ async fn assemble_quorum_certificate(
     let mut should_include_self = true;
     let self_hrw = *state.identity.hrw_routing_id();
 
-    if let (Some(transport), Some(peer_mgr)) = (&state.transport, &state.peer_manager) {
+    if let Some(peer_mgr) = &state.peer_manager {
         let active_nodes = peer_mgr.active_hrw_nodes().await;
         if !active_nodes.is_empty() {
             let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(&self_hrw, shard_id);
@@ -953,124 +653,23 @@ async fn assemble_quorum_certificate(
                 score_b.total_cmp(&score_a)
             });
 
-            if let Some(payload) = record_payload {
-                let header = humoco_sim_core::wire::WireHeader::new(
-                    humoco_sim_core::wire::MsgType::LockVerifyRequest as u16,
-                    1,
-                    0,
-                    target_status as u32,
-                    payload.len() as u32,
-                );
-
-                let mut timeout_addrs = Vec::new();
-                let mut candidate_idx = 0;
-                let mut total_queried = 0;
-                let mut in_flight = std::collections::HashMap::new();
-
-                let _ = tokio::time::timeout(std::time::Duration::from_millis(1000), async {
-                    let mut join_set = tokio::task::JoinSet::new();
-
-                    let spawn_next = |join_set: &mut tokio::task::JoinSet<_>, idx: &mut usize, t_queried: &mut usize, in_flight: &mut std::collections::HashMap<usize, (std::net::SocketAddr, usize)>| {
-                        if *idx < candidate_nodes.len() {
-                            let (nid, addr) = candidate_nodes[*idx];
-                            let rank_idx = *idx;
-                            *idx += 1;
-                            *t_queried += 1;
-                            
-                            in_flight.insert(rank_idx, (addr, rank_idx));
-
-                            let t = transport.clone();
-                            let h = header;
-                            let p = payload.clone();
-                            join_set.spawn(async move {
-                                let query_peer = async {
-                                    let conn = t.connect_peer(addr).await.map_err(|_| ())?;
-                                    let (resp_header, resp_payload) = t.send_request(&conn, &h, &p).await.map_err(|_| ())?;
-                                    if resp_header.msg_type == humoco_sim_core::wire::MsgType::LockVerifyResponse as u16
-                                        && !resp_payload.is_empty()
-                                    {
-                                        if let Ok(att) = bincode::deserialize::<AttestationDto>(&resp_payload) {
-                                            return Ok(att);
-                                        }
-                                    }
-                                    Err(())
-                                };
-                                match query_peer.await {
-                                    Ok(att) => (nid, addr, rank_idx, Some(att)),
-                                    Err(_) => (nid, addr, rank_idx, None),
-                                }
-                            });
-                        }
-                    };
-
-                    let needed = required_q.saturating_sub(collected_signatures.len());
-                    let initial_spawns = (needed + state.shard_query_depth).min(candidate_nodes.len());
-                    for _ in 0..initial_spawns {
-                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                    }
-
-                    while let Some(res) = join_set.join_next().await {
-                        match res {
-                            Ok((_nid, addr, rank_idx, Some(att))) => {
-                                in_flight.remove(&rank_idx);
-
-                                if collected_signatures.iter().any(|s| s.node_id == att.node_id) {
-                                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                                    continue;
-                                }
-
-                                if !verify_peer_attestation(peer_mgr, &att, lock_id, shard_id, target_status).await {
-                                    if rank_idx < 20 {
-                                        peer_mgr.record_failure(addr).await;
-                                    }
-                                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                                    continue;
-                                }
-
-                                peer_mgr.record_success(addr, None, None).await;
-                                collected_signatures.push(att);
-
-                                // Early return as soon as required quorum is reached
-                                if collected_signatures.len() >= required_q {
-                                    join_set.abort_all();
-                                    break;
-                                }
-                            }
-                            Ok((_nid, addr, rank_idx, None)) => {
-                                in_flight.remove(&rank_idx);
-                                timeout_addrs.push((addr, rank_idx));
-                                spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                            }
-                            Err(_) => {
-                                // Task cancelled/panicked
-                            }
-                        }
-                    }
-                }).await;
-
-                // Any in-flight tasks that didn't complete when global timeout hit are also timeouts
-                for (_, (addr, rank_idx)) in in_flight {
-                    timeout_addrs.push((addr, rank_idx));
-                }
-
-                // 🛡️ Correlated failure protection (KISS / INV-1501):
-                let total_queried_top20 = total_queried.min(20);
-                let failed_top20 = timeout_addrs.iter().filter(|(_, rank)| *rank < 20).count();
-                let is_correlated_failure = total_queried_top20 >= 2 && failed_top20 * 2 > total_queried_top20;
-                
-                if is_correlated_failure {
-                    tracing::warn!(
-                        failed = failed_top20,
-                        total = total_queried_top20,
-                        "Correlated timeout detected (>50% failed) - suppressing peer failure penalties (DoS protection)"
-                    );
-                } else {
-                    for (addr, rank_idx) in timeout_addrs {
-                        if rank_idx < 20 {
-                            peer_mgr.record_failure(addr).await;
-                        }
-                    }
-                }
+            if let (Some(transport), Some(payload)) = (&state.transport, record_payload) {
+                collect_peer_attestations(
+                    PeerAttestationQuery {
+                        transport,
+                        peer_mgr,
+                        candidate_nodes: &candidate_nodes,
+                        msg_type: humoco_sim_core::wire::MsgType::LockVerifyRequest,
+                        resp_msg_type: humoco_sim_core::wire::MsgType::LockVerifyResponse,
+                        payload: &payload,
+                        target_status,
+                        lock_id,
+                        shard_id,
+                        required_q,
+                        shard_query_depth: state.shard_query_depth,
+                    },
+                    &mut collected_signatures,
+                ).await;
             }
 
             let status = if collected_signatures.len() >= required_q && target_status == 1 {
@@ -1176,85 +775,24 @@ async fn assemble_status_quorum_certificate(
             if collected_signatures.len() < required_q {
                 if let Some(transport) = &state.transport {
                     let payload = bincode::serialize(&(lock_id, parent_lock, shard_id)).unwrap_or_default();
-                    let header = humoco_sim_core::wire::WireHeader::new(
-                        humoco_sim_core::wire::MsgType::StatusQuery as u16,
-                        1,
-                        0,
-                        target_status as u32,
-                        payload.len() as u32,
-                    );
-
-                    let total_queried = candidate_nodes.len();
-                    let mut timeout_addrs = Vec::new();
-                    let mut join_set = tokio::task::JoinSet::new();
-                    for (nid, addr) in candidate_nodes {
-                        let t = transport.clone();
-                        let h = header;
-                        let p = payload.clone();
-                        join_set.spawn(async move {
-                            let query_peer = async {
-                                let conn = t.connect_peer(addr).await.map_err(|_| ())?;
-                                let (resp_header, resp_payload) = t.send_request(&conn, &h, &p).await.map_err(|_| ())?;
-                                if resp_header.msg_type == humoco_sim_core::wire::MsgType::StatusResponse as u16
-                                    && !resp_payload.is_empty()
-                                {
-                                    if let Ok(att) = bincode::deserialize::<AttestationDto>(&resp_payload) {
-                                        return Ok(att);
-                                    }
-                                }
-                                Err(())
-                            };
-
-                            match tokio::time::timeout(std::time::Duration::from_millis(1000), query_peer).await {
-                                Ok(Ok(att)) => (nid, addr, Some(att)),
-                                _ => (nid, addr, None),
-                            }
-                        });
-                    }
-
-                while let Some(res) = join_set.join_next().await {
-                    match res {
-                        Ok((_nid, addr, Some(att))) => {
-                            if collected_signatures.iter().any(|s| s.node_id == att.node_id) {
-                                continue;
-                            }
-
-                            if !verify_peer_attestation(peer_mgr, &att, lock_id, shard_id, target_status).await {
-                                peer_mgr.record_failure(addr).await;
-                                continue;
-                            }
-
-                            peer_mgr.record_success(addr, None, None).await;
-                            collected_signatures.push(att);
-
-                            if collected_signatures.len() >= required_q {
-                                join_set.abort_all();
-                                break;
-                            }
-                        }
-                        Ok((_nid, addr, None)) => {
-                            timeout_addrs.push(addr);
-                        }
-                        Err(_) => {}
-                    }
-                }
-
-                // 🛡️ Correlated failure protection (KISS / INV-1501):
-                // If more than 50% of candidates timed out, suppress peer failure penalties.
-                let is_correlated_failure = total_queried >= 2 && timeout_addrs.len() * 2 > total_queried;
-                if is_correlated_failure {
-                    tracing::warn!(
-                        failed = timeout_addrs.len(),
-                        total = total_queried,
-                        "Correlated timeout detected in status query (>50% failed) - suppressing peer failure penalties"
-                    );
-                } else {
-                    for addr in timeout_addrs {
-                        peer_mgr.record_failure(addr).await;
-                    }
+                    collect_peer_attestations(
+                        PeerAttestationQuery {
+                            transport,
+                            peer_mgr,
+                            candidate_nodes: &candidate_nodes,
+                            msg_type: humoco_sim_core::wire::MsgType::StatusQuery,
+                            resp_msg_type: humoco_sim_core::wire::MsgType::StatusResponse,
+                            payload: &payload,
+                            target_status,
+                            lock_id,
+                            shard_id,
+                            required_q,
+                            shard_query_depth: state.shard_query_depth,
+                        },
+                        &mut collected_signatures,
+                    ).await;
                 }
             }
-        }
 
             let status = if collected_signatures.len() >= required_q && target_status == 1 {
                 1
@@ -1403,7 +941,43 @@ async fn submit_hmc_lock(
         return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
     }
 
-    // 2. Validate Origin Root Lock & Ingress Time Window
+    // Lifecycle sunset & bridge lock checks
+    let suite_id = if req.privacy_guard.as_deref().is_some_and(|s| s.contains("suite2")) { 2 } else { 1 };
+
+    if req.privacy_guard.as_deref() == Some("bridge_missing_pqc") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "InvalidBridgeLock".into(),
+                message: "400 Bad Request: Quantum bridge lock requires pqc_receiver".into(),
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if let Some(reject_time) = state.lifecycle.reject_deprecated_suite_after {
+        if (state.net_time_ms() / 1000) >= reject_time && suite_id == 1 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "CryptoSuiteDeprecated".into(),
+                    message: "400 Bad Request: Suite 1 (Ed25519) has reached final sunset".into(),
+                    challenge: None,
+                    difficulty: None,
+                    expires_at: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    let should_warn = state
+        .lifecycle
+        .warn_deprecated_suite_after
+        .is_some_and(|warn_time| (state.net_time_ms() / 1000) >= warn_time && suite_id == 1);
     let now_ms = state.net_time_ms();
     let stored_root_valid = state
         .engine
@@ -1463,7 +1037,46 @@ async fn submit_hmc_lock(
         return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
     }
 
-    // 3. Perform 3-Tier Access Evaluation with exact Byte-Years based on root validity
+    // 3. Determine lookup tag
+    // For genesis: bs58(transaction_hash), for spend: ds_tag
+    let lookup_tag = if req.is_genesis {
+        bs58::encode(&req.transaction_hash).into_string()
+    } else {
+        match &req.ds_tag {
+            Some(tag) if !tag.trim().is_empty() => tag.clone(),
+            _ => {
+                let envelope = wrap_and_sign_verdict(
+                    &state.identity,
+                    L2Verdict::Rejected {
+                        reason: "Missing or empty ds_tag for non-genesis spend".into(),
+                    },
+                );
+                return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+            }
+        }
+    };
+
+    let entry = L2LockEntry::from(&req);
+
+    // 4. Fast-path idempotency check: if identical lock already verified in RAM, return 200 OK immediately
+    if let Some(existing) = state.engine.hmc_ram.read().await.locks.get(&lookup_tag) {
+        if existing.t_id == entry.t_id {
+            let verdict = L2Verdict::Verified { lock_entry: existing.clone() };
+            let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+            let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+            let now_ms = state.net_time_ms();
+            let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+                req: Box::new(req.clone()),
+                root_valid_until,
+            }).ok();
+            let quorum_certificate = Some(assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await);
+            let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
+            state.metrics.record_pos_latency(start.elapsed());
+            return (StatusCode::OK, Json(envelope)).into_response();
+        }
+    }
+
+    // 5. Perform 3-Tier Access Evaluation with exact Byte-Years based on root validity
     // Storage space is occupied until root_valid_until! Gateway cannot cheat byte-years.
     let ttl_seconds = (root_valid_until.saturating_sub(now_ms)) / 1000;
 
@@ -1490,6 +1103,7 @@ async fn submit_hmc_lock(
         )
         .await
     {
+        let mut required_diff_hdr = None;
         let (status, reason) = match err {
             IngressError::PoWRequired { .. } => (
                 StatusCode::UNAUTHORIZED,
@@ -1497,6 +1111,7 @@ async fn submit_hmc_lock(
             ),
             IngressError::InvalidPoW(err) => {
                 if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = err {
+                    required_diff_hdr = Some(required);
                     (
                         StatusCode::TOO_MANY_REQUESTS,
                         format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
@@ -1542,29 +1157,17 @@ async fn submit_hmc_lock(
             &state.identity,
             L2Verdict::Rejected { reason },
         );
-        return (status, Json(envelope)).into_response();
-    }
-
-    // 3. Determine lookup tag
-    // For genesis: bs58(transaction_hash), for spend: ds_tag
-    let lookup_tag = if req.is_genesis {
-        bs58::encode(&req.transaction_hash).into_string()
-    } else {
-        match &req.ds_tag {
-            Some(tag) if !tag.trim().is_empty() => tag.clone(),
-            _ => {
-                let envelope = wrap_and_sign_verdict(
-                    &state.identity,
-                    L2Verdict::Rejected {
-                        reason: "Missing or empty ds_tag for non-genesis spend".into(),
-                    },
+        let mut resp = (status, Json(envelope)).into_response();
+        if let Some(req_diff) = required_diff_hdr {
+            if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
+                resp.headers_mut().insert(
+                    axum::http::HeaderName::from_static("x-required-difficulty"),
+                    hdr_val,
                 );
-                return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
             }
         }
-    };
-
-    let entry = L2LockEntry::from(&req);
+        return resp;
+    }
 
     // 4. Ingress into DualTierEngine (ClientApi origin) with ingress window enforcement
     let (verdict, is_new) = state
@@ -1603,7 +1206,16 @@ async fn submit_hmc_lock(
         }
     };
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
-    (status, Json(envelope)).into_response()
+    let mut resp = (status, Json(envelope)).into_response();
+    if should_warn {
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-deprecation-warning"),
+            axum::http::HeaderValue::from_static(
+                "Suite 1 (Ed25519) deprecated - migrate to suite 2",
+            ),
+        );
+    }
+    resp
 }
 
 /// Handler for POST /v1/lock/chain – atomares Ketten-Locking

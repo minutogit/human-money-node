@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use humoco_node::{
-    api::{build_router, AppState, LockSubmitRequest},
+    api::{build_router, AppState},
     identity::NodeIdentity,
     ingress::{PowEngine, TierController},
     network::{DefaultRequestHandler, PeerManager, QuicTransport},
@@ -80,27 +80,41 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
     // 3. Simulate multiple lock requests under DoS: All 20 candidate peers are unreachable
     // Perform 3 rounds of lock requests
     for round in 1..=3 {
+        let sender_key = ed25519_dalek::SigningKey::from_bytes(&[round as u8; 32]);
+        let sender_pub = sender_key.verifying_key().to_bytes();
+        let parent_bytes = [round as u8; 32];
         let now = test_now_ms();
-        let req_payload = LockSubmitRequest {
-            parent_lock: format!("{:02x}", round).repeat(32),
-            receiver_pub: "02".repeat(32),
-            nonce: format!("dos_test_nonce_{}", round),
-            valid_until: now + 60_000,
-            root_valid_until: now + 600_000,
-            created_at: Some(now),
-            auth_token: None,
-            peer_token: Some("friend_secret_token".into()),
-            pow_challenge: None,
-            pow_nonce: None,
-            crypto_suite: None,
-            is_bridge_lock: None,
-            pqc_receiver: None,
+        let valid_until_ms = now + 600_000;
+        let del_str = valid_until_ms.to_string();
+
+        let mut req_payload = humoco_node::api::hmc::L2LockRequest {
+            auth: humoco_node::api::hmc::L2AuthPayload {
+                ephemeral_pubkey: sender_pub,
+                auth_signature: None,
+            },
+            layer2_voucher_id: format!("dos_voucher_{}", round),
+            ds_tag: None,
+            transaction_hash: parent_bytes,
+            is_genesis: true,
+            sender_ephemeral_pub: sender_pub,
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0u8; 64],
+            trap_r: Some("none".into()),
+            trap_s: Some("none".into()),
+            encrypted_timestamp: 0,
+            deletable_at: Some(del_str),
+            privacy_guard: None,
         };
+        let payload_hash = humoco_node::api::hmc::calculate_l2_payload_hash(&req_payload);
+        use ed25519_dalek::Signer;
+        req_payload.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
 
         let req = Request::builder()
             .method("POST")
             .uri("/v1/lock")
             .header("content-type", "application/json")
+            .header("x-peer-token", "friend_secret_token")
             .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
             .unwrap();
 

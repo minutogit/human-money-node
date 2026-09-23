@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signer, SigningKey};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -10,8 +10,12 @@ use tower::ServiceExt;
 
 use humoco_node::{
     api::{
-        build_router, AppState, ErrorResponse, LockSubmitRequest, LockSubmitResponse,
-        NodeStatusResponse, PowChallengeResponse, SyncRequest, SyncResponse,
+        build_router,
+        hmc::{
+            calculate_l2_payload_hash, L2AuthPayload, L2LockRequest, L2ResponseEnvelope, L2Verdict,
+        },
+        AppState, NodeStatusResponse, PowChallengeResponse, SyncRequest,
+        SyncResponse,
     },
     identity::NodeIdentity,
     ingress::{PowEngine, TierController},
@@ -46,6 +50,71 @@ fn test_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn make_test_hmc_genesis(
+    parent_hex: &str,
+    valid_until_ms: u64,
+    sender_key: &SigningKey,
+) -> L2LockRequest {
+    let sender_pub = sender_key.verifying_key().to_bytes();
+    let tx_hash = *blake3::hash(parent_hex.as_bytes()).as_bytes();
+    let del_str = valid_until_ms.to_string();
+
+    let mut req = L2LockRequest {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: format!("voucher_{}", parent_hex),
+        ds_tag: None,
+        transaction_hash: tx_hash,
+        is_genesis: true,
+        sender_ephemeral_pub: sender_pub,
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        deletable_at: Some(del_str),
+        privacy_guard: None,
+    };
+    let payload_hash = calculate_l2_payload_hash(&req);
+    req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
+    req
+}
+
+fn make_test_hmc_spend(
+    voucher_id: &str,
+    ds_tag: &str,
+    tx_hash: [u8; 32],
+    sender_key: &SigningKey,
+) -> L2LockRequest {
+    let sender_pub = sender_key.verifying_key().to_bytes();
+
+    let mut req = L2LockRequest {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.to_string(),
+        ds_tag: Some(ds_tag.to_string()),
+        transaction_hash: tx_hash,
+        is_genesis: false,
+        sender_ephemeral_pub: sender_pub,
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let payload_hash = calculate_l2_payload_hash(&req);
+    req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
+    req
+}
+
 async fn response_json<T: serde::de::DeserializeOwned>(res: axum::response::Response) -> T {
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body_bytes).expect("Failed to deserialize response body")
@@ -53,77 +122,44 @@ async fn response_json<T: serde::de::DeserializeOwned>(res: axum::response::Resp
 
 #[tokio::test]
 async fn test_api_lock_submission_and_idempotency() {
-    let (app, _storage, identity, tier_controller, _) = setup_test_app();
+    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("friend_secret_token");
 
+    let sender_key = SigningKey::from_bytes(&[1u8; 32]);
     let now = test_now_ms();
-    let req_payload = LockSubmitRequest {
-        parent_lock: "01".repeat(32),
-        receiver_pub: "02".repeat(32),
-        nonce: "test_nonce_123".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: Some("friend_secret_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let req_payload = make_test_hmc_genesis(&"01".repeat(32), now + 600_000, &sender_key);
 
     // 1. Initial lock submission -> 201 Created
     let req = Request::builder()
         .method("POST")
         .uri("/v1/lock")
         .header("content-type", "application/json")
+        .header("x-peer-token", "friend_secret_token")
         .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
         .unwrap();
 
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
 
-    let submit_resp: LockSubmitResponse = response_json(res).await;
-    assert_eq!(submit_resp.status, "ACCEPTED");
-    assert!(submit_resp.attestation.is_some());
-
-    let attestation = submit_resp.attestation.unwrap();
-    assert_eq!(attestation.lock_id, submit_resp.lock_id);
-    assert_eq!(attestation.signature.len(), 128); // 64 bytes hex encoded
-
-    // Verify signature with node identity using canonical SigDigest
-    let sig_bytes = hex::decode(&attestation.signature).unwrap();
-    let lock_id_bytes: [u8; 32] = hex::decode(&attestation.lock_id).unwrap().try_into().unwrap();
-    let parent_lock_bytes: [u8; 32] = hex::decode(&attestation.parent_lock).unwrap().try_into().unwrap();
-    let shard_id = u16::from_be_bytes([parent_lock_bytes[0], parent_lock_bytes[1]]);
-    let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
-        humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
-        0,
-        0,
-        0,
-        shard_id,
-        0,
-        &lock_id_bytes,
-    );
-    let ed_sig = ed25519_dalek::Signature::from_slice(&sig_bytes).unwrap();
-    assert!(identity.verifying_key().verify_strict(&sig_digest, &ed_sig).is_ok());
+    let submit_resp: L2ResponseEnvelope = response_json(res).await;
+    assert!(matches!(submit_resp.verdict, L2Verdict::Verified { .. }));
+    assert_ne!(submit_resp.server_signature, [0u8; 64]);
 
     // 2. Exact duplicate submission -> 200 OK (Idempotent)
     let req_dup = Request::builder()
         .method("POST")
         .uri("/v1/lock")
         .header("content-type", "application/json")
+        .header("x-peer-token", "friend_secret_token")
         .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
         .unwrap();
 
     let res_dup = app.oneshot(req_dup).await.unwrap();
     assert_eq!(res_dup.status(), StatusCode::OK);
 
-    let submit_resp_dup: LockSubmitResponse = response_json(res_dup).await;
-    assert_eq!(submit_resp_dup.status, "IDEMPOTENT");
-    assert_eq!(submit_resp_dup.lock_id, submit_resp.lock_id);
-    assert!(submit_resp_dup.attestation.is_some());
+    let submit_resp_dup: L2ResponseEnvelope = response_json(res_dup).await;
+    assert!(matches!(submit_resp_dup.verdict, L2Verdict::Verified { .. }));
+    assert_ne!(submit_resp_dup.server_signature, [0u8; 64]);
 }
 
 #[tokio::test]
@@ -134,21 +170,26 @@ async fn test_api_lock_conflict_double_spend() {
     let parent_lock = "aa".repeat(32);
     let now = test_now_ms();
 
-    let req_lock_a = LockSubmitRequest {
-        parent_lock: parent_lock.clone(),
-        receiver_pub: "11".repeat(32),
-        nonce: "nonce_a".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: Some("friend_secret_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let genesis_key = SigningKey::from_bytes(&[9u8; 32]);
+    let genesis_req = make_test_hmc_genesis(&parent_lock, now + 600_000, &genesis_key);
+
+    let res_gen = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "friend_secret_token")
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_gen.status(), StatusCode::CREATED);
+
+    let sender_key_a = SigningKey::from_bytes(&[1u8; 32]);
+    let req_lock_a = make_test_hmc_spend(&genesis_req.layer2_voucher_id, "spent_tag_01", [0x11; 32], &sender_key_a);
 
     let res_a = app
         .clone()
@@ -157,6 +198,7 @@ async fn test_api_lock_conflict_double_spend() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "friend_secret_token")
                 .body(Body::from(serde_json::to_vec(&req_lock_a).unwrap()))
                 .unwrap(),
         )
@@ -165,22 +207,9 @@ async fn test_api_lock_conflict_double_spend() {
 
     assert_eq!(res_a.status(), StatusCode::CREATED);
 
-    // Second lock on same parent with different receiver/nonce -> 409 Conflict
-    let req_lock_b = LockSubmitRequest {
-        parent_lock,
-        receiver_pub: "22".repeat(32),
-        nonce: "nonce_b".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: Some("friend_secret_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    // Second lock on same ds_tag with different transaction_hash -> 409 Conflict
+    let sender_key_b = SigningKey::from_bytes(&[2u8; 32]);
+    let req_lock_b = make_test_hmc_spend(&genesis_req.layer2_voucher_id, "spent_tag_01", [0x22; 32], &sender_key_b);
 
     let res_b = app
         .oneshot(
@@ -188,6 +217,7 @@ async fn test_api_lock_conflict_double_spend() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "friend_secret_token")
                 .body(Body::from(serde_json::to_vec(&req_lock_b).unwrap()))
                 .unwrap(),
         )
@@ -195,9 +225,8 @@ async fn test_api_lock_conflict_double_spend() {
         .unwrap();
 
     assert_eq!(res_b.status(), StatusCode::CONFLICT);
-    let conflict_resp: LockSubmitResponse = response_json(res_b).await;
-    assert_eq!(conflict_resp.status, "REJECTED");
-    assert!(conflict_resp.reason.unwrap().contains("Double-spend"));
+    let conflict_resp: L2ResponseEnvelope = response_json(res_b).await;
+    assert!(matches!(conflict_resp.verdict, L2Verdict::Conflict { .. }));
 }
 
 #[tokio::test]
@@ -206,23 +235,10 @@ async fn test_api_pow_challenge_and_public_ingress() {
 
     let parent_lock = "bb".repeat(32);
     let now = test_now_ms();
-    let mut req_payload = LockSubmitRequest {
-        parent_lock,
-        receiver_pub: "cc".repeat(32),
-        nonce: "public_nonce".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: None,
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let sender_key = SigningKey::from_bytes(&[3u8; 32]);
+    let req_payload = make_test_hmc_genesis(&parent_lock, now + 600_000, &sender_key);
 
-    // 1. Submit without PoW -> 401 Unauthorized + Challenge
+    // 1. Submit without PoW -> 401 Unauthorized
     let res_unauth = app
         .clone()
         .oneshot(
@@ -237,12 +253,10 @@ async fn test_api_pow_challenge_and_public_ingress() {
         .unwrap();
 
     assert_eq!(res_unauth.status(), StatusCode::UNAUTHORIZED);
-    let err_resp: ErrorResponse = response_json(res_unauth).await;
-    assert_eq!(err_resp.error, "PoWRequired");
-    assert!(err_resp.challenge.is_some());
-    assert_eq!(err_resp.difficulty, Some(8));
+    let err_resp: L2ResponseEnvelope = response_json(res_unauth).await;
+    assert!(matches!(err_resp.verdict, L2Verdict::Rejected { .. }));
 
-    // Also test GET /v1/pow-challenge endpoint
+    // Test GET /v1/pow-challenge endpoint
     let res_pow_endpoint = app
         .clone()
         .oneshot(
@@ -259,11 +273,8 @@ async fn test_api_pow_challenge_and_public_ingress() {
     assert_eq!(pow_dto.difficulty, 8);
 
     // 2. Solve PoW Challenge
-    let challenge = err_resp.challenge.unwrap();
+    let challenge = pow_dto.challenge;
     let nonce = PowEngine::solve_pow(&challenge, 8, 10_000).expect("Solve PoW");
-
-    req_payload.pow_challenge = Some(challenge);
-    req_payload.pow_nonce = Some(nonce);
 
     // 3. Submit with solved PoW -> 201 Created
     let res_pow_ok = app
@@ -272,6 +283,8 @@ async fn test_api_pow_challenge_and_public_ingress() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-pow-challenge", &challenge)
+                .header("x-pow-nonce", nonce.to_string())
                 .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
@@ -279,9 +292,8 @@ async fn test_api_pow_challenge_and_public_ingress() {
         .unwrap();
 
     assert_eq!(res_pow_ok.status(), StatusCode::CREATED);
-    let ok_resp: LockSubmitResponse = response_json(res_pow_ok).await;
-    assert_eq!(ok_resp.status, "ACCEPTED");
-    assert!(ok_resp.attestation.is_some());
+    let ok_resp: L2ResponseEnvelope = response_json(res_pow_ok).await;
+    assert!(matches!(ok_resp.verdict, L2Verdict::Verified { .. }));
 }
 
 #[tokio::test]
@@ -298,21 +310,8 @@ async fn test_api_vip_tier_quota_deduction() {
 
     // 1 Year TTL = 192 Byte-Years (31_536_000 seconds = 31_536_000_000 ms)
     let now = test_now_ms();
-    let req_payload = LockSubmitRequest {
-        parent_lock: "dd".repeat(32),
-        receiver_pub: "ee".repeat(32),
-        nonce: "vip_nonce_1".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 31_536_000_000,
-        created_at: Some(now),
-        auth_token: Some(vip_token.into()),
-        peer_token: None,
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let sender_key_1 = SigningKey::from_bytes(&[4u8; 32]);
+    let req_payload = make_test_hmc_genesis(&"dd".repeat(32), now + 31_536_000_000, &sender_key_1);
 
     let res = app
         .clone()
@@ -321,6 +320,7 @@ async fn test_api_vip_tier_quota_deduction() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", vip_token))
                 .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
@@ -328,28 +328,15 @@ async fn test_api_vip_tier_quota_deduction() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::CREATED);
-    let submit_resp: LockSubmitResponse = response_json(res).await;
-    assert_eq!(submit_resp.status, "ACCEPTED");
+    let submit_resp: L2ResponseEnvelope = response_json(res).await;
+    assert!(matches!(submit_resp.verdict, L2Verdict::Verified { .. }));
 
     // Quota should now be deducted: 1000 - 192 = 808
     assert_eq!(storage.get_quota(&account_tag).unwrap(), 808);
 
     // Try submitting with TTL that exceeds remaining quota (e.g. 5 years = 960 BY > 808)
-    let req_excess = LockSubmitRequest {
-        parent_lock: "ff".repeat(32),
-        receiver_pub: "ee".repeat(32),
-        nonce: "vip_nonce_2".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 5 * 31_536_000_000,
-        created_at: Some(now),
-        auth_token: Some(vip_token.into()),
-        peer_token: None,
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let sender_key_2 = SigningKey::from_bytes(&[5u8; 32]);
+    let req_excess = make_test_hmc_genesis(&"ff".repeat(32), now + 5 * 31_536_000_000, &sender_key_2);
 
     let res_excess = app
         .oneshot(
@@ -357,6 +344,7 @@ async fn test_api_vip_tier_quota_deduction() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", vip_token))
                 .body(Body::from(serde_json::to_vec(&req_excess).unwrap()))
                 .unwrap(),
         )
@@ -364,15 +352,15 @@ async fn test_api_vip_tier_quota_deduction() {
         .unwrap();
 
     assert_eq!(res_excess.status(), StatusCode::TOO_MANY_REQUESTS);
-    let err_resp: ErrorResponse = response_json(res_excess).await;
-    assert_eq!(err_resp.error, "QuotaExceeded");
+    let err_resp: L2ResponseEnvelope = response_json(res_excess).await;
+    assert!(matches!(err_resp.verdict, L2Verdict::Rejected { .. }));
     // Quota remains 808
     assert_eq!(storage.get_quota(&account_tag).unwrap(), 808);
 }
 
 #[tokio::test]
 async fn test_api_status_and_sync() {
-    let (app, storage, identity, tier_controller, _) = setup_test_app();
+    let (app, _storage, identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("sync_peer");
 
     // 1. Check health / status endpoint
@@ -396,21 +384,9 @@ async fn test_api_status_and_sync() {
     // 2. Submit a lock
     let parent_lock = "12".repeat(32);
     let now = test_now_ms();
-    let req_lock = LockSubmitRequest {
-        parent_lock: parent_lock.clone(),
-        receiver_pub: "34".repeat(32),
-        nonce: "sync_nonce".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: Some("sync_peer".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let sender_key = SigningKey::from_bytes(&[6u8; 32]);
+    let req_lock = make_test_hmc_genesis(&parent_lock, now + 600_000, &sender_key);
+    let tx_id_hex = hex::encode(req_lock.transaction_hash);
 
     let res_sub = app
         .clone()
@@ -419,24 +395,13 @@ async fn test_api_status_and_sync() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "sync_peer")
                 .body(Body::from(serde_json::to_vec(&req_lock).unwrap()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(res_sub.status(), StatusCode::CREATED);
-
-    // Wait a brief moment or manually persist to disk table
-    let mut parent_arr = [0u8; 32];
-    parent_arr.copy_from_slice(&hex::decode(&parent_lock).unwrap());
-    let rec = humoco_sim_core::types::LockRecord::new(
-        parent_arr,
-        [0x34; 32],
-        b"sync_nonce".to_vec(),
-        humoco_sim_core::types::SimTime(0),
-        humoco_sim_core::types::SimTime(60_000_000_000), // unexpired
-    );
-    storage.put_lock(&rec, 600_000_000_000).unwrap();
 
     // 3. Call sync without locator -> lock is returned
     let sync_req = SyncRequest {
@@ -457,11 +422,11 @@ async fn test_api_status_and_sync() {
     assert_eq!(res_sync.status(), StatusCode::OK);
     let sync_resp: SyncResponse = response_json(res_sync).await;
     assert!(!sync_resp.locks.is_empty());
-    assert_eq!(sync_resp.locks[0].parent_lock, parent_lock);
+    assert!(sync_resp.locks.iter().any(|l| l.id == tx_id_hex));
 
-    // 4. Call sync with locator including parent_lock -> filtered out
+    // 4. Call sync with locator including lock id -> filtered out
     let sync_req_filtered = SyncRequest {
-        sparse_locators: vec![parent_lock],
+        sparse_locators: vec![tx_id_hex],
     };
     let res_sync_filt = app
         .oneshot(
@@ -880,8 +845,9 @@ async fn test_banned_node_ingress_403_rejection() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("friend_token");
 
-    let banned_key = [0x99u8; 32];
-    engine.ban_node(banned_key, 12345).await;
+    let banned_signing_key = SigningKey::from_bytes(&[0x99u8; 32]);
+    let banned_pub = banned_signing_key.verifying_key().to_bytes();
+    engine.ban_node(banned_pub, 12345).await;
 
     let state = AppState::new(
         engine.clone(),
@@ -892,23 +858,9 @@ async fn test_banned_node_ingress_403_rejection() {
     );
     let app = build_router(state);
 
-    // 1. Submit standard lock from banned node
+    // 1. Submit HMC lock from banned ephemeral key
     let now = test_now_ms();
-    let banned_req = LockSubmitRequest {
-        parent_lock: "01".repeat(32),
-        receiver_pub: hex::encode(banned_key),
-        nonce: "test_nonce".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: Some("f2f_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let banned_req = make_test_hmc_genesis(&"01".repeat(32), now + 600_000, &banned_signing_key);
 
     let res = app
         .clone()
@@ -917,6 +869,7 @@ async fn test_banned_node_ingress_403_rejection() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "friend_token")
                 .body(Body::from(serde_json::to_vec(&banned_req).unwrap()))
                 .unwrap(),
         )
@@ -924,41 +877,6 @@ async fn test_banned_node_ingress_403_rejection() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::FORBIDDEN, "Banned node must be rejected with 403 Forbidden");
-
-    // 2. Submit HMC lock from banned ephemeral key
-    let hmc_req = humoco_node::api::hmc::L2LockRequest {
-        auth: humoco_node::api::hmc::L2AuthPayload {
-            ephemeral_pubkey: banned_key,
-            auth_signature: None,
-        },
-        layer2_voucher_id: "test_voucher_1".into(),
-        ds_tag: None,
-        transaction_hash: [0x11; 32],
-        is_genesis: true,
-        sender_ephemeral_pub: banned_key,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
-        layer2_signature: [0u8; 64],
-        trap_r: None,
-        trap_s: None,
-        encrypted_timestamp: 0,
-        deletable_at: None,
-        privacy_guard: None,
-    };
-
-    let res_hmc = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&hmc_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(res_hmc.status(), StatusCode::FORBIDDEN, "Banned node in HMC must be rejected with 403 Forbidden");
 }
 
 #[tokio::test]
@@ -966,35 +884,22 @@ async fn test_api_quorum_certificate_assembly_standalone() {
     let (app, _storage, identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("friend_token");
 
-    // 1. Submit standard Lock -> QuorumCertificateDto should be assembled with status 0 PROVISIONAL (N=1)
     let now = test_now_ms();
-    let req_payload = LockSubmitRequest {
-        parent_lock: "0a".repeat(32),
-        receiver_pub: "0b".repeat(32),
-        nonce: "standalone_qc_test".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: Some("friend_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let sender_key = SigningKey::from_bytes(&[8u8; 32]);
+    let req_payload = make_test_hmc_genesis(&"0a".repeat(32), now + 600_000, &sender_key);
 
     let req = Request::builder()
         .method("POST")
         .uri("/v1/lock")
         .header("content-type", "application/json")
+        .header("x-peer-token", "friend_token")
         .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
         .unwrap();
 
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
 
-    let submit_resp: LockSubmitResponse = response_json(res).await;
+    let submit_resp: L2ResponseEnvelope = response_json(res).await;
     assert!(submit_resp.quorum_certificate.is_some(), "QuorumCertificate must be attached");
 
     let qc = submit_resp.quorum_certificate.unwrap();
@@ -1071,29 +976,12 @@ async fn test_phase1_idempotent_retry_with_pow_and_created_at() {
     let (app, _storage, _identity, _tier_controller, pow_engine) = setup_test_app();
 
     let parent_lock = "88".repeat(32);
-    let parent_bytes = hex::decode(&parent_lock).unwrap();
-    let mut parent_arr = [0u8; 32];
-    parent_arr.copy_from_slice(&parent_bytes);
-
-    let (challenge, difficulty, _) = pow_engine.generate_challenge_for_parent(&parent_arr);
+    let (challenge, difficulty, _) = pow_engine.generate_challenge();
     let nonce = PowEngine::solve_blake3_hashcash(&challenge, difficulty, 50_000).expect("Solve BLAKE3 PoW");
 
     let now = test_now_ms();
-    let req_payload = LockSubmitRequest {
-        parent_lock: parent_lock.clone(),
-        receiver_pub: "99".repeat(32),
-        nonce: "pow_retry_nonce".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: None,
-        pow_challenge: Some(challenge),
-        pow_nonce: Some(nonce),
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let sender_key = SigningKey::from_bytes(&[10u8; 32]);
+    let req_payload = make_test_hmc_genesis(&parent_lock, now + 600_000, &sender_key);
 
     // 1. Initial submission -> 201 Created
     let res1 = app
@@ -1103,6 +991,8 @@ async fn test_phase1_idempotent_retry_with_pow_and_created_at() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-pow-challenge", &challenge)
+                .header("x-pow-nonce", nonce.to_string())
                 .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
@@ -1110,16 +1000,18 @@ async fn test_phase1_idempotent_retry_with_pow_and_created_at() {
         .unwrap();
 
     assert_eq!(res1.status(), StatusCode::CREATED);
-    let resp1: LockSubmitResponse = response_json(res1).await;
-    assert_eq!(resp1.status, "ACCEPTED");
+    let resp1: L2ResponseEnvelope = response_json(res1).await;
+    assert!(matches!(resp1.verdict, L2Verdict::Verified { .. }));
 
-    // 2. Retry with identical payload & PoW -> 200 OK (IdempotentReplay, not 401 ReplayDetected!)
+    // 2. Retry with identical payload & PoW -> 200 OK (IdempotentReplay)
     let res2 = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-pow-challenge", &challenge)
+                .header("x-pow-nonce", nonce.to_string())
                 .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
@@ -1127,9 +1019,8 @@ async fn test_phase1_idempotent_retry_with_pow_and_created_at() {
         .unwrap();
 
     assert_eq!(res2.status(), StatusCode::OK, "Retry of same lock must be recognized as idempotent (HTTP 200)");
-    let resp2: LockSubmitResponse = response_json(res2).await;
-    assert_eq!(resp2.status, "IDEMPOTENT");
-    assert_eq!(resp2.lock_id, resp1.lock_id);
+    let resp2: L2ResponseEnvelope = response_json(res2).await;
+    assert!(matches!(resp2.verdict, L2Verdict::Verified { .. }));
 }
 
 #[tokio::test]
@@ -1137,26 +1028,10 @@ async fn test_phase1_idempotent_retry_without_created_at() {
     let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("friend_retry_token");
 
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now_ms = test_now_ms();
     let parent_lock = "77".repeat(32);
-    let req_payload = LockSubmitRequest {
-        parent_lock: parent_lock.clone(),
-        receiver_pub: "66".repeat(32),
-        nonce: "no_created_at_nonce".into(),
-        valid_until: now_ms + 60_000,
-        root_valid_until: now_ms + 600_000,
-        created_at: None, // Client does not provide created_at
-        auth_token: None,
-        peer_token: Some("friend_retry_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let sender_key = SigningKey::from_bytes(&[11u8; 32]);
+    let req_payload = make_test_hmc_genesis(&parent_lock, now_ms + 600_000, &sender_key);
 
     // 1. Initial submission -> 201 Created
     let res1 = app
@@ -1166,6 +1041,7 @@ async fn test_phase1_idempotent_retry_without_created_at() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "friend_retry_token")
                 .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
@@ -1173,29 +1049,29 @@ async fn test_phase1_idempotent_retry_without_created_at() {
         .unwrap();
 
     assert_eq!(res1.status(), StatusCode::CREATED);
-    let resp1: LockSubmitResponse = response_json(res1).await;
-    assert_eq!(resp1.status, "ACCEPTED");
+    let resp1: L2ResponseEnvelope = response_json(res1).await;
+    assert!(matches!(resp1.verdict, L2Verdict::Verified { .. }));
 
     // Artificial delay to ensure now_ms would be different
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-    // 2. Retry without created_at -> 200 OK (server reuses existing created_at, preventing 409 Conflict!)
+    // 2. Retry -> 200 OK
     let res2 = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "friend_retry_token")
                 .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(res2.status(), StatusCode::OK, "Retry without created_at must succeed as idempotent (HTTP 200)");
-    let resp2: LockSubmitResponse = response_json(res2).await;
-    assert_eq!(resp2.status, "IDEMPOTENT");
-    assert_eq!(resp2.lock_id, resp1.lock_id);
+    assert_eq!(res2.status(), StatusCode::OK, "Retry must succeed as idempotent (HTTP 200)");
+    let resp2: L2ResponseEnvelope = response_json(res2).await;
+    assert!(matches!(resp2.verdict, L2Verdict::Verified { .. }));
 }
 
 #[tokio::test]
@@ -1334,7 +1210,13 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let peer_mgr = Arc::new(humoco_node::network::PeerManager::new(vec![]));
     let transport = humoco_node::network::QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &identity).unwrap();
 
-    let shard_id: u16 = 42;
+    let now = test_now_ms();
+    let sender_key = SigningKey::from_bytes(&[12u8; 32]);
+    let req_payload = make_test_hmc_genesis("qc_rank_filtering_parent", now + 600_000, &sender_key);
+    let lookup_tag = bs58::encode(&req_payload.transaction_hash).into_string();
+    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+
     let self_node_id = *identity.node_id();
     let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(&self_node_id, shard_id);
 
@@ -1381,31 +1263,13 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
 
     let app = build_router(state);
 
-    let mut parent_lock = [0x77u8; 32];
-    parent_lock[0..2].copy_from_slice(&shard_id.to_be_bytes());
-    let now = test_now_ms();
-    let req_payload = LockSubmitRequest {
-        parent_lock: hex::encode(parent_lock),
-        receiver_pub: "55".repeat(32),
-        nonce: "gateway_qc_nonce".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: Some("gateway_test_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
-
     let res = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "gateway_test_token")
                 .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
@@ -1413,7 +1277,7 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::CREATED);
-    let resp: LockSubmitResponse = response_json(res).await;
+    let resp: L2ResponseEnvelope = response_json(res).await;
     assert!(resp.quorum_certificate.is_some());
     let qc = resp.quorum_certificate.unwrap();
 
@@ -1429,23 +1293,10 @@ async fn test_api_created_at_clock_drift_exceeded() {
     tier_controller.register_f2f_peer("drift_peer_token");
 
     let now = test_now_ms();
+    let sender_key = SigningKey::from_bytes(&[15u8; 32]);
 
-    // 1. Future clock drift > 30s
-    let req_future = LockSubmitRequest {
-        parent_lock: "33".repeat(32),
-        receiver_pub: "44".repeat(32),
-        nonce: "drift_nonce_1".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now + 35_000), // > +30s in future
-        auth_token: None,
-        peer_token: Some("drift_peer_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    // 1. Time window invalid: valid_until < now + 30s (e.g. now + 10s)
+    let req_future = make_test_hmc_genesis(&"33".repeat(32), now + 10_000, &sender_key);
 
     let res_future = app
         .clone()
@@ -1454,6 +1305,7 @@ async fn test_api_created_at_clock_drift_exceeded() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "drift_peer_token")
                 .body(Body::from(serde_json::to_vec(&req_future).unwrap()))
                 .unwrap(),
         )
@@ -1462,22 +1314,8 @@ async fn test_api_created_at_clock_drift_exceeded() {
 
     assert_eq!(res_future.status(), StatusCode::BAD_REQUEST);
 
-    // 2. Past clock drift > 24h (86_400_000 ms)
-    let req_past = LockSubmitRequest {
-        parent_lock: "33".repeat(32),
-        receiver_pub: "44".repeat(32),
-        nonce: "drift_nonce_2".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now.saturating_sub(90_000_000)), // > 24h past
-        auth_token: None,
-        peer_token: Some("drift_peer_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    // 2. Past clock drift: valid_until in the past
+    let req_past = make_test_hmc_genesis(&"33".repeat(32), now.saturating_sub(90_000_000), &sender_key);
 
     let res_past = app
         .clone()
@@ -1486,6 +1324,7 @@ async fn test_api_created_at_clock_drift_exceeded() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "drift_peer_token")
                 .body(Body::from(serde_json::to_vec(&req_past).unwrap()))
                 .unwrap(),
         )
@@ -1502,24 +1341,11 @@ async fn test_api_pow_adaptive_backpressure_and_stateless_hashcash() {
     let now = test_now_ms();
     let parent_hex = "55".repeat(32);
     let parent_bytes = [0x55u8; 32];
+    let sender_key = SigningKey::from_bytes(&[13u8; 32]);
+    let req_payload = make_test_hmc_genesis(&parent_hex, now + 600_000, &sender_key);
 
     // 1. Submit with insufficient difficulty (nonce = 0 doesn't satisfy difficulty 8)
     let (challenge, difficulty, _) = pow_engine.generate_challenge_for_parent(&parent_bytes);
-    let req_insufficient = LockSubmitRequest {
-        parent_lock: parent_hex.clone(),
-        receiver_pub: "66".repeat(32),
-        nonce: "pow_test_nonce_1".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: None,
-        pow_challenge: Some(challenge.clone()),
-        pow_nonce: Some(0),
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None, // Fails difficulty
-    };
 
     let res = app
         .clone()
@@ -1528,7 +1354,9 @@ async fn test_api_pow_adaptive_backpressure_and_stateless_hashcash() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&req_insufficient).unwrap()))
+                .header("x-pow-challenge", &challenge)
+                .header("x-pow-nonce", "0")
+                .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
         .await
@@ -1545,22 +1373,6 @@ async fn test_api_pow_adaptive_backpressure_and_stateless_hashcash() {
     let valid_nonce = humoco_node::ingress::pow::solve_blake3_hashcash(&challenge, difficulty, 50_000)
         .expect("Must solve PoW");
 
-    let req_valid = LockSubmitRequest {
-        parent_lock: parent_hex,
-        receiver_pub: "66".repeat(32),
-        nonce: "pow_test_nonce_1".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: None,
-        pow_challenge: Some(challenge),
-        pow_nonce: Some(valid_nonce),
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
-
     let res_valid = app
         .clone()
         .oneshot(
@@ -1568,13 +1380,17 @@ async fn test_api_pow_adaptive_backpressure_and_stateless_hashcash() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&req_valid).unwrap()))
+                .header("x-pow-challenge", &challenge)
+                .header("x-pow-nonce", valid_nonce.to_string())
+                .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
                 .unwrap(),
         )
         .await
         .unwrap();
 
     assert_eq!(res_valid.status(), StatusCode::CREATED);
+    let ok_resp: L2ResponseEnvelope = response_json(res_valid).await;
+    assert!(matches!(ok_resp.verdict, L2Verdict::Verified { .. }));
 }
 
 #[tokio::test]
@@ -1714,21 +1530,8 @@ async fn test_prometheus_metrics_expansion() {
 
     // Submit a valid lock to increment pos_latency_count
     let now = test_now_ms();
-    let req = LockSubmitRequest {
-        parent_lock: "77".repeat(32),
-        receiver_pub: "88".repeat(32),
-        nonce: "metrics_nonce".into(),
-        valid_until: now + 60_000,
-        root_valid_until: now + 600_000,
-        created_at: Some(now),
-        auth_token: None,
-        peer_token: Some("metrics_peer_token".into()),
-        pow_challenge: None,
-        pow_nonce: None,
-        crypto_suite: None,
-        is_bridge_lock: None,
-        pqc_receiver: None,
-    };
+    let sender_key = SigningKey::from_bytes(&[14u8; 32]);
+    let req = make_test_hmc_genesis(&"77".repeat(32), now + 600_000, &sender_key);
 
     let res = app
         .clone()
@@ -1737,6 +1540,7 @@ async fn test_prometheus_metrics_expansion() {
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("x-peer-token", "metrics_peer_token")
                 .body(Body::from(serde_json::to_vec(&req).unwrap()))
                 .unwrap(),
         )

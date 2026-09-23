@@ -1,11 +1,10 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, RwLock as StdRwLock,
 };
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
 use rand::Rng;
 use tokio::sync::RwLock;
 
@@ -13,65 +12,11 @@ use crate::network::peer::{PeerConnectionType, PeerInfo, PeerStatus};
 
 pub const DEFAULT_BASE_BACKOFF_MS: u64 = 500;
 pub const DEFAULT_MAX_BACKOFF_MS: u64 = 30_000;
-pub const MAX_SEEN_GOSSIP_LOCKS: usize = 10_000;
 pub const MAX_GOSSIP_HOPS: u32 = 16;
 
 /// 24h Incubation period for re-mining / routing ticket updates and newcomers (Spec 07 & 11).
 pub const HRW_INCUBATION_SECS: u64 = 24 * 60 * 60;
 pub const HRW_INCUBATION_DURATION: Duration = Duration::from_secs(HRW_INCUBATION_SECS);
-
-/// Ring buffer / LRU-like FIFO cache for recently seen lock IDs
-/// for ash deduplication and echo-flooding prevention (Spec 11).
-#[derive(Debug, Clone)]
-pub struct SeenGossipCache {
-    seen: HashSet<[u8; 32]>,
-    queue: VecDeque<[u8; 32]>,
-    max_size: usize,
-}
-
-impl Default for SeenGossipCache {
-    fn default() -> Self {
-        Self::new(MAX_SEEN_GOSSIP_LOCKS)
-    }
-}
-
-impl SeenGossipCache {
-    pub fn new(max_size: usize) -> Self {
-        Self {
-            seen: HashSet::with_capacity(max_size.min(1024)),
-            queue: VecDeque::with_capacity(max_size.min(1024)),
-            max_size,
-        }
-    }
-
-    /// Returns `true` if the lock ID was new and inserted.
-    /// Returns `false` if the lock ID was already in the cache (echo).
-    pub fn check_and_insert(&mut self, lock_id: &[u8; 32]) -> bool {
-        if self.seen.contains(lock_id) {
-            return false;
-        }
-        if self.queue.len() >= self.max_size {
-            if let Some(oldest) = self.queue.pop_front() {
-                self.seen.remove(&oldest);
-            }
-        }
-        self.seen.insert(*lock_id);
-        self.queue.push_back(*lock_id);
-        true
-    }
-
-    pub fn contains(&self, lock_id: &[u8; 32]) -> bool {
-        self.seen.contains(lock_id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-}
 
 /// Bio-mimetic fan-out k(d) = min(d, ceil(sqrt(d)) + 1) according to Spec 11.
 pub fn calculate_fan_out(d: usize) -> usize {
@@ -212,7 +157,6 @@ pub struct PeerManager {
     u16_to_vk: Arc<RwLock<HashMap<u16, ed25519_dalek::VerifyingKey>>>,
     banned_nodes: Arc<RwLock<HashSet<[u8; 32]>>>,
     endpoint: Arc<StdRwLock<Option<quinn::Endpoint>>>,
-    seen_gossip_locks: Arc<Mutex<SeenGossipCache>>,
     clock: Arc<crate::network::NetworkClock>,
     base_backoff_ms: u64,
     max_backoff_ms: u64,
@@ -303,7 +247,6 @@ impl PeerManager {
             u16_to_vk: Arc::new(RwLock::new(u16_map)),
             banned_nodes: Arc::new(RwLock::new(HashSet::new())),
             endpoint: Arc::new(StdRwLock::new(None)),
-            seen_gossip_locks: Arc::new(Mutex::new(SeenGossipCache::default())),
             clock: Arc::new(crate::network::NetworkClock::new()),
             base_backoff_ms: DEFAULT_BASE_BACKOFF_MS,
             max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
@@ -945,25 +888,6 @@ impl PeerManager {
         self.endpoint.read().ok().and_then(|ep| ep.clone())
     }
 
-    /// Checks if a lock has already been seen in the gossip ring buffer.
-    /// If not, it is inserted atomically and `true` is returned.
-    /// If already seen (echo), `false` is returned.
-    pub fn check_and_record_seen_gossip(&self, lock_id: &[u8; 32]) -> bool {
-        let mut cache = self.seen_gossip_locks.lock();
-        cache.check_and_insert(lock_id)
-    }
-
-    /// Checks if a lock is present in the gossip ring buffer.
-    pub fn has_seen_gossip(&self, lock_id: &[u8; 32]) -> bool {
-        let cache = self.seen_gossip_locks.lock();
-        cache.contains(lock_id)
-    }
-
-    /// Returns a reference to the shared seen gossip cache.
-    pub fn seen_gossip_cache(&self) -> Arc<Mutex<SeenGossipCache>> {
-        self.seen_gossip_locks.clone()
-    }
-
     /// Records a failed interaction with a peer (debounced to at most once per 10s).
     pub async fn record_failure(&self, addr: SocketAddr) {
         self.record_failure_at(addr, Instant::now()).await;
@@ -1284,30 +1208,6 @@ mod tests {
         // Failure after 60s increases missing_count to 2
         manager.record_failure_at(addr, t0 + Duration::from_secs(60)).await;
         assert_eq!(manager.get_peer(&addr).await.unwrap().missing_count, 2);
-    }
-
-    #[test]
-    fn test_seen_gossip_cache() {
-        let mut cache = SeenGossipCache::new(3);
-        let id1 = [1u8; 32];
-        let id2 = [2u8; 32];
-        let id3 = [3u8; 32];
-        let id4 = [4u8; 32];
-
-        assert!(cache.check_and_insert(&id1));
-        assert!(!cache.check_and_insert(&id1)); // Duplicate echo rejected!
-        assert!(cache.contains(&id1));
-
-        assert!(cache.check_and_insert(&id2));
-        assert!(cache.check_and_insert(&id3));
-        assert_eq!(cache.len(), 3);
-
-        // Inserting 4th element must evict id1 (FIFO ring buffer)
-        assert!(cache.check_and_insert(&id4));
-        assert!(!cache.contains(&id1));
-        assert!(cache.contains(&id2));
-        assert!(cache.contains(&id3));
-        assert!(cache.contains(&id4));
     }
 
     #[test]

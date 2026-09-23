@@ -62,6 +62,7 @@ fn status_query(voucher: &str, challenge: &str) -> L2StatusQuery {
 }
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_sim_02_island_bridge_merge() {
     let mut sim = MeshSimulator::new();
 

@@ -180,74 +180,78 @@ fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
     assert!(peer.is_hrw_eligible());
     assert!(peer.should_forward_gossip());
 
-    // 1:1 Tit-for-Tat: inbound + failure -> malus 1, backoff 1, choked
+    // +2/-2 Tit-for-Tat: inbound + failure -> malus +2, backoff 1, choked
     peer.record_inbound_activity();
     assert!(peer.flags & FLAG_INBOUND_ACTIVE != 0);
     let bl = peer.record_outbound_failure();
     assert_eq!(bl, 1);
-    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.malus_score, 2);
     assert_eq!(peer.backoff_level, 1);
     assert!(peer.is_suspended(), "Choked after failure");
     assert!(!peer.is_hrw_eligible(), "Choked peer not HRW eligible (gateway skips to rank 21)");
-    assert!(peer.should_forward_gossip(), "Gossip is always forwarded");
+    assert!(!peer.should_forward_gossip(), "Gossip is suppressed while service is choked");
 
     // Eskalationssperre: ohne inbound keine weitere Eskalation (offline/DDoS Schutz)
     let bl2 = peer.record_outbound_failure();
     assert_eq!(bl2, 1, "No escalation without inbound");
-    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.malus_score, 2);
     assert_eq!(peer.backoff_level, 1);
     assert!(peer.is_suspended());
 
-    // Autonome Heilung: 1 Stunde vergeht -> backoff & malus decay, choking lifted
+    // Service-basiertes Heilen: 1 Stunde ohne Arbeit vergeht -> Malus bleibt bestehen (kein Zeit-Ablasshandel)
     peer.record_hour(125, true);
-    assert_eq!(peer.backoff_level, 0, "Hourly backoff decay -1");
-    assert_eq!(peer.malus_score, 0, "Hourly malus decay -1");
-    assert!(!peer.is_suspended(), "Decay lifts choking without death spiral");
-    assert!(peer.is_hrw_eligible());
-    assert!(peer.should_forward_gossip());
-
-    // Erneuter Ausfall mit inbound -> wieder choked (malus 1, backoff 1)
-    peer.record_inbound_activity();
-    let bl3 = peer.record_outbound_failure();
-    assert_eq!(bl3, 1);
-    assert_eq!(peer.malus_score, 1);
-    assert_eq!(peer.backoff_level, 1);
+    assert_eq!(peer.backoff_level, 1, "No automatic hourly decay (anti-free-rider)");
+    assert_eq!(peer.malus_score, 2, "Malus persists until worked off via successful interactions");
     assert!(peer.is_suspended());
     assert!(!peer.is_hrw_eligible());
-    assert!(peer.should_forward_gossip());
+    assert!(!peer.should_forward_gossip());
 
-    // Zweiter Ausfall mit inbound -> malus 2, backoff 2
+    // Erneuter Ausfall mit inbound -> weitere Eskalation (malus 2 + 2 = 4, backoff 2)
+    peer.record_inbound_activity();
+    let bl3 = peer.record_outbound_failure();
+    assert_eq!(bl3, 2);
+    assert_eq!(peer.malus_score, 4);
+    assert_eq!(peer.backoff_level, 2);
+    assert!(peer.is_suspended());
+    assert!(!peer.is_hrw_eligible());
+    assert!(!peer.should_forward_gossip());
+
+    // Dritter Ausfall mit inbound -> malus 6, backoff 3
     peer.record_inbound_activity();
     let bl4 = peer.record_outbound_failure();
-    assert_eq!(bl4, 2);
-    assert_eq!(peer.malus_score, 2);
-    assert_eq!(peer.backoff_level, 2);
+    assert_eq!(bl4, 3);
+    assert_eq!(peer.malus_score, 6);
+    assert_eq!(peer.backoff_level, 3);
 
-    // Erfolg: FLAG_LAST_FAILED cleared, malus -1 (1:1)
+    // Erfolg: FLAG_LAST_FAILED cleared, malus -2 (symmetrisch +2/-2)
     peer.record_outbound_success();
-    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.malus_score, 4);
+    assert_eq!(peer.backoff_level, 2);
     assert_eq!(peer.flags & FLAG_LAST_FAILED, 0);
     assert!(!peer.is_suspended(), "Not choked after success (flag cleared)");
     assert!(peer.should_forward_gossip());
     assert!(peer.is_hrw_eligible());
-    assert_eq!(peer.backoff_level, 1);
 
-    // 1 weiterer Erfolg -> malus 0, backoff 0
+    // 2 weitere Erfolge -> malus 0, backoff 0
+    peer.record_outbound_success();
+    assert_eq!(peer.malus_score, 2);
+    assert_eq!(peer.backoff_level, 1);
     peer.record_outbound_success();
     assert_eq!(peer.malus_score, 0);
     assert_eq!(peer.backoff_level, 0);
     assert!(!peer.is_suspended());
 
-    // Dormant-Reset: inbound+failure to re-choke, then 23h offline -> DORMANT clears backoff & flags
+    // Dormant-Reset: inbound+failure to re-choke, then 23h offline -> DORMANT clears backoff, malus & flags
     peer.record_inbound_activity();
     peer.record_outbound_failure();
-    assert_eq!(peer.malus_score, 1);
+    assert_eq!(peer.malus_score, 2);
     assert_eq!(peer.backoff_level, 1);
     for ep in 126..=148 {
         peer.record_hour(ep, false);
     }
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Dormant);
     assert_eq!(peer.backoff_level, 0, "Dormant resets backoff for clean re-entry");
+    assert_eq!(peer.malus_score, 0, "Dormant resets malus for clean re-entry");
     assert_eq!(peer.flags, 0, "Dormant clears flags");
     assert!(!peer.is_suspended());
 

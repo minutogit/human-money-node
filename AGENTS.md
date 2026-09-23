@@ -69,11 +69,11 @@ flowchart TD
         C1 --> Collapse["💥 Network collapse / partition"]
     end
 
-    subgraph StableLocal["✅ Mandatory: Subjective Local Dampening"]
+    subgraph StableLocal["✅ Mandatory: Subjective Local Dampening & Reflexive Circuit Breaker"]
         direction TB
-        A2["Node A registers timeout for Node B"] --> B2["Purely local suspension in A (missing_count >= 3)"]
-        B2 --> C2["Rank 21 steps in for A in 0 ms / load decreases (ΔLoad <= 0)"]
-        C2 --> Heal["Hourly penalty decay (-1) -> Autonomous healing"]
+        A2["Node A registers timeout for Node B"] --> B2["Activity-locked Tit-for-Tat (+2 / -2) with Rank 21 fallback"]
+        B2 --> C2["If Network Stress >= 40%: Reflexive Circuit Breaker flips to (+1 / -2)"]
+        C2 --> Heal["Forgiveness dominance (E[Δ] < 0 up to 66.7% fail) -> Homeostasis around 40%"]
     end
 ```
 

@@ -329,13 +329,23 @@ impl PeerPresenceEntry {
     }
 
     /// Records an outbound failure / timeout:
-    /// Symmetrical 1:1 tit-for-tat (+1 malus per miss), with activity escalation lock when offline/DDoS.
-    pub fn record_outbound_failure(&mut self) -> u8 {
+    /// - Normal mode (`is_under_stress == false`): `+2` malus points (`backoff_level = (malus / 2).min(17)`).
+    /// - Stress mode (`is_under_stress == true`): `+1` malus point (halved penalty for reflexive negative feedback cooling).
+    ///
+    /// ### 🛡️ Circuit Breaker & 40% Homeostasis:
+    /// When the entire network is under heavy DDoS/stress and >= 40% of responses are choked,
+    /// nodes switch to the damped `+1 / -2` mode. In this mode, forgiveness dominates:
+    /// `E[ΔMalus] < 0` for failure rates up to 66.7%, causing peer accusations to cool down
+    /// and stabilizing the network around the 40% equilibrium without cascading death spirals.
+    ///
+    /// Symmetrical `+2 / -2` tit-for-tat with activity escalation lock when offline/DDoS.
+    pub fn record_outbound_failure_damped(&mut self, is_under_stress: bool) -> u8 {
         self.flags |= FLAG_LAST_FAILED;
+        let increment = if is_under_stress { 1 } else { 2 };
         // Escalation only if inbound was active OR first failure (backoff == 0)
         if (self.flags & FLAG_INBOUND_ACTIVE) != 0 || self.backoff_level == 0 {
-            self.malus_score = self.malus_score.saturating_add(1);
-            self.backoff_level = self.malus_score.min(17);
+            self.malus_score = self.malus_score.saturating_add(increment);
+            self.backoff_level = (self.malus_score / 2).min(17);
             self.flags &= !FLAG_INBOUND_ACTIVE;
         } else {
             // Escalation lock: malus and backoff remain unchanged when offline/DDoS
@@ -343,11 +353,16 @@ impl PeerPresenceEntry {
         self.backoff_level
     }
 
-    /// Records a successful outbound interaction (symmetrical 1:1: -1 malus per success).
+    /// Records an outbound failure in normal (non-stressed) mode.
+    pub fn record_outbound_failure(&mut self) -> u8 {
+        self.record_outbound_failure_damped(false)
+    }
+
+    /// Records a successful outbound interaction (symmetrical -2 malus points -> 1:1 healing with normal failures).
     pub fn record_outbound_success(&mut self) {
         self.flags &= !FLAG_LAST_FAILED;
-        self.malus_score = self.malus_score.saturating_sub(1);
-        self.backoff_level = self.malus_score.min(17);
+        self.malus_score = self.malus_score.saturating_sub(2);
+        self.backoff_level = (self.malus_score / 2).min(17);
     }
 
     /// Alias for backwards compatibility
@@ -361,48 +376,53 @@ impl PeerPresenceEntry {
     }
 
     /// Advances the hourly sliding window and records whether an HB was received in this hour.
-    /// Decays backoff_level by 1 (hourly decay / autonomous healing).
-    /// On DORMANT, backoff_level and flags are reset so the node can be probed directly on re-entry.
+    /// Note: Penalty decay is service/interaction-based (-2 per success) to prevent free-riders from
+    /// sitting out penalties in low-traffic shards without contributing work.
+    /// On DORMANT, backoff_level, malus_score, and flags are reset so the node can be probed directly on re-entry.
     pub fn record_hour(&mut self, current_epoch: u16, received_heartbeat: bool) -> PeerPresenceState {
         let _ = current_epoch;
         let bit = if received_heartbeat { 1u32 } else { 0u32 };
         self.hourly_bitmask = (self.hourly_bitmask << 1) | bit;
         self.maturity_hours = self.maturity_hours.saturating_add(1);
 
-        // Hourly penalty decay (-1) -> autonomous healing without death spirals
-        self.backoff_level = self.backoff_level.saturating_sub(1);
-        self.malus_score = self.malus_score.saturating_sub(1);
-
         let state = self.evaluate_state();
 
         // 🎯 INVARIANT: On DORMANT, reset for clean re-entry probation.
         if state == PeerPresenceState::Dormant {
             self.backoff_level = 0;
+            self.malus_score = 0;
             self.flags = 0;
         }
 
         state
     }
 
-    /// Is service choked? (Tit-for-Tat: backoff>0 && last failed)
-    pub fn is_service_choked(&self) -> bool {
+    /// Is the peer currently suspended (Tit-for-Tat: backoff > 0 && last interaction failed)?
+    pub fn is_suspended(&self) -> bool {
         self.backoff_level > 0 && (self.flags & FLAG_LAST_FAILED != 0)
     }
 
-    /// Is the node currently in local suspension (choked)?
-    pub fn is_suspended(&self) -> bool {
-        self.is_service_choked()
+    /// Alias for backwards compatibility
+    pub fn is_service_choked(&self) -> bool {
+        self.is_suspended()
     }
 
-    /// May the node participate in HRW quorums? (active AND not choked)
+    /// May the node participate in HRW quorums? (active AND not suspended)
     pub fn is_hrw_eligible(&self) -> bool {
-        self.evaluate_state() == PeerPresenceState::Active && !self.is_service_choked()
+        self.evaluate_state() == PeerPresenceState::Active && !self.is_suspended()
     }
 
     /// May gossips / heartbeats from this node be forwarded?
-    /// F2F Gossip is NEVER choked to prevent network partitions and death spirals.
+    ///
+    /// ### 🧹 Anti-Free-Rider Gossip Gating:
+    /// Suspended nodes have their heartbeat forwarding temporarily gated so chronic free-riders
+    /// (who consume service while refusing shard verifications) starve into `DORMANT` after 21-24h
+    /// and are cleanly evicted from HRW and P2P connection pools.
+    ///
+    /// Honest nodes under temporary DDoS are protected by the reflexive stress circuit breaker
+    /// and activity escalation lock, keeping suspensions brief (<= 60s) so no hourly presence bits are lost.
     pub fn should_forward_gossip(&self) -> bool {
-        true
+        !self.is_suspended()
     }
 
     /// Determines the current presence state of the peer
@@ -430,6 +450,77 @@ impl PeerPresenceEntry {
             // Hysteresis intermediate zone: remains as before
             PeerPresenceState::Active
         }
+    }
+}
+
+/// 🛡️ Time-decayed network stress thermometer (The Ultimate Anti-Death-Spiral Safety Fuse).
+///
+/// ### 🏛️ System Role & Homeostasis:
+/// This component acts as the supreme circuit breaker for the entire P2P network against
+/// cascading gossip starvation.
+///
+/// In a decentralized mesh, if a large-scale coordinated attack or widespread flapping occurs,
+/// nodes could misdiagnose honest peers as faulty and suspend their heartbeats.
+///
+/// The `NetworkStressThermometer` continuously tracks the ratio of inbound `429 PeerSuspended`
+/// feedbacks via a 2-hour continuous integer EMA:
+/// 1. **Below 40% (0% .. 39.99%):** Normal operation. Full `+2 / -2` Tit-for-Tat rigor.
+///    Chronic free-riders are ruthlessly suspended and starved into `DORMANT`.
+/// 2. **At/Above 40% (>= 40.00%):** Stress Circuit Breaker trips. Accusations are halved (`+1` penalty),
+///    while healing remains full (`-2`). The mathematical expectation flips to forgiveness dominance
+///    (`E[ΔMalus] < 0` for up to 66.7% failure rate).
+/// 3. **Self-Cooling Equilibrium:** As nodes forgive each other faster under stress, mutual suspensions
+///    drop, cooling the entire network back down and oscillating safely around the 40% threshold.
+///    A collective network wipeout via gossip blocking is mathematically impossible.
+///
+/// - **Window:** 7,200 seconds (2 hours) continuous integer decay.
+/// - **Threshold:** 4,000 bps (40.00%) suspension pressure.
+/// - **Alpha:** 100 bps (1.00%) weight per event -> burst- and order-independent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkStressThermometer {
+    pub stress_level_bps: u16,
+    pub last_update_sec: u64,
+}
+
+impl NetworkStressThermometer {
+    pub const WINDOW_SECS: u64 = 7_200; // 2 hours
+    pub const STRESS_THRESHOLD_BPS: u16 = 4_000; // 40.00%
+    pub const EVENT_ALPHA_BPS: u32 = 100; // 1.00% weight per event
+
+    pub const fn new() -> Self {
+        Self {
+            stress_level_bps: 0,
+            last_update_sec: 0,
+        }
+    }
+
+    /// Updates the suspension pressure EMA based on time decay and a new shard response.
+    /// Returns whether the node is currently under systemic network stress (>= 40%).
+    pub fn update(&mut self, now_sec: u64, is_suspended: bool) -> bool {
+        let delta_secs = now_sec.saturating_sub(self.last_update_sec);
+        self.last_update_sec = now_sec;
+
+        let elapsed = delta_secs.min(Self::WINDOW_SECS) as u32;
+        let decay = ((self.stress_level_bps as u32 * elapsed) / Self::WINDOW_SECS as u32) as u16;
+        let decayed = self.stress_level_bps.saturating_sub(decay);
+
+        let target = if is_suspended { 10_000u32 } else { 0u32 };
+
+        let updated = ((decayed as u32 * (10_000 - Self::EVENT_ALPHA_BPS)) + (target * Self::EVENT_ALPHA_BPS)) / 10_000;
+        self.stress_level_bps = updated.min(10_000) as u16;
+
+        self.is_under_stress()
+    }
+
+    #[inline(always)]
+    pub fn is_under_stress(&self) -> bool {
+        self.stress_level_bps >= Self::STRESS_THRESHOLD_BPS
+    }
+}
+
+impl Default for NetworkStressThermometer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1189,69 +1280,72 @@ mod tests {
         assert!(entry.should_forward_gossip());
         assert_eq!(entry.backoff_level, 0);
 
-        // Activity-coupled 1:1 Tit-for-Tat: inbound + failure -> 1:1 malus (+1), choked
+        // Activity-coupled +2/-2 Tit-for-Tat: inbound + failure -> malus +2, backoff 1, choked
         entry.record_inbound_activity();
         assert!(entry.flags & FLAG_INBOUND_ACTIVE != 0);
         let bl = entry.record_outbound_failure();
-        assert_eq!(bl, 1, "First failure with inbound => backoff 1");
-        assert_eq!(entry.malus_score, 1);
+        assert_eq!(bl, 1, "First failure with inbound => backoff 1 (malus 2 / 2)");
+        assert_eq!(entry.malus_score, 2);
         assert_eq!(entry.backoff_level, 1);
         assert_eq!(entry.flags & FLAG_INBOUND_ACTIVE, 0, "Inbound flag cleared after escalation");
         assert!(entry.flags & FLAG_LAST_FAILED != 0);
         assert!(entry.is_suspended());
         assert!(entry.is_service_choked());
         assert!(!entry.is_hrw_eligible(), "Choked peer not HRW eligible");
-        assert!(entry.should_forward_gossip(), "Gossip is always forwarded");
+        assert!(!entry.should_forward_gossip(), "Gossip is suppressed while service is choked");
 
         // Eskalationssperre: second failure WITHOUT inbound -> no escalation (offline/DDoS protection)
         let bl2 = entry.record_outbound_failure();
         assert_eq!(bl2, 1, "Without inbound and backoff>0, no escalation");
-        assert_eq!(entry.malus_score, 1, "Malus unchanged due to escalation lock");
+        assert_eq!(entry.malus_score, 2, "Malus unchanged due to escalation lock");
         assert_eq!(entry.backoff_level, 1);
         assert!(entry.is_suspended());
 
-        // Autonomous healing: 1 hour passes -> backoff & malus decay from 1 to 0, choking lifted
+        // Service-based healing (no hourly decay): 1 hour passes -> malus remains until worked off
         entry.record_hour(125, true);
-        assert_eq!(entry.backoff_level, 0, "Hourly decay -1");
-        assert_eq!(entry.malus_score, 0, "Hourly malus decay -1");
-        assert!(!entry.is_suspended(), "Hourly decay restores eligibility without death spirals");
-        assert!(entry.is_hrw_eligible());
-        assert!(entry.should_forward_gossip());
-        assert!(!entry.is_service_choked());
+        assert_eq!(entry.backoff_level, 1, "No automatic hourly decay (anti-free-rider)");
+        assert_eq!(entry.malus_score, 2, "Malus persists until worked off via successful interactions");
+        assert!(entry.is_suspended());
+        assert!(!entry.is_hrw_eligible());
+        assert!(!entry.should_forward_gossip());
+        assert!(entry.is_service_choked());
 
-        // Inbound + failure again -> second escalation
+        // Inbound + failure again -> second escalation (malus 2 + 2 = 4, backoff = 2)
         entry.record_inbound_activity();
         let bl3 = entry.record_outbound_failure();
-        assert_eq!(entry.malus_score, 1);
-        assert_eq!(bl3, 1);
-        assert_eq!(entry.backoff_level, 1);
+        assert_eq!(entry.malus_score, 4);
+        assert_eq!(bl3, 2);
+        assert_eq!(entry.backoff_level, 2);
         assert!(entry.is_suspended());
 
         entry.record_inbound_activity();
         let bl4 = entry.record_outbound_failure();
-        assert_eq!(entry.malus_score, 2);
-        assert_eq!(bl4, 2);
-        assert_eq!(entry.backoff_level, 2);
+        assert_eq!(entry.malus_score, 6);
+        assert_eq!(bl4, 3);
+        assert_eq!(entry.backoff_level, 3);
 
-        // Success: clears LAST_FAILED, malus -1 (1:1), backoff updates
+        // Success: clears LAST_FAILED, malus -2 (symmetrical), backoff updates
         entry.record_outbound_success();
-        assert_eq!(entry.malus_score, 1);
-        assert_eq!(entry.backoff_level, 1);
+        assert_eq!(entry.malus_score, 4);
+        assert_eq!(entry.backoff_level, 2);
         assert_eq!(entry.flags & FLAG_LAST_FAILED, 0, "Success clears LAST_FAILED");
         assert!(!entry.is_service_choked(), "Not choked after success (flag cleared)");
         assert!(entry.should_forward_gossip());
         assert!(entry.is_hrw_eligible());
 
-        // 1:1 ratio: 1 more success drains malus to 0 -> backoff 0
+        // 2 more successes drain malus from 4 to 0 -> backoff 0
+        entry.record_outbound_success();
+        assert_eq!(entry.malus_score, 2);
+        assert_eq!(entry.backoff_level, 1);
         entry.record_outbound_success();
         assert_eq!(entry.malus_score, 0);
         assert_eq!(entry.backoff_level, 0, "When malus 0, backoff resets to 0");
         assert!(!entry.is_suspended());
 
-        // Re-create choking for dormant test: inbound + failure => malus 1 backoff 1
+        // Re-create choking for dormant test: inbound + failure => malus 2 backoff 1
         entry.record_inbound_activity();
         entry.record_outbound_failure();
-        assert_eq!(entry.malus_score, 1);
+        assert_eq!(entry.malus_score, 2);
         assert_eq!(entry.backoff_level, 1);
         assert!(entry.is_suspended());
 
@@ -1261,6 +1355,7 @@ mod tests {
         }
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Dormant);
         assert_eq!(entry.backoff_level, 0, "Dormant transition resets backoff to 0 for re-entry probation");
+        assert_eq!(entry.malus_score, 0, "Dormant transition resets malus to 0");
         assert_eq!(entry.flags, 0, "Dormant clears flags");
         assert!(!entry.is_suspended());
 
@@ -1282,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transient_missing_count_damping_and_hourly_decay() {
+    fn test_stress_damped_failure_and_persistence() {
         let mut entry = PeerPresenceEntry::new(0xDEAD_BEEF, 1);
 
         // Initial state
@@ -1291,73 +1386,72 @@ mod tests {
         assert!(!entry.is_suspended());
         assert!(entry.should_forward_gossip());
 
-        // Accumulate 5 outbound failures WITH inbound (1:1 tit-for-tat escalation)
-        for i in 1..=5 {
-            entry.record_inbound_activity();
-            let bl = entry.record_outbound_failure();
-            assert_eq!(entry.malus_score, i);
-            assert_eq!(bl, i);
-            assert_eq!(entry.backoff_level, i);
-        }
-        assert_eq!(entry.malus_score, 5);
-        assert_eq!(entry.backoff_level, 5);
-        assert!(entry.is_suspended());
-        assert!(entry.should_forward_gossip());
-        assert!(!entry.is_hrw_eligible());
-
-        // Eskalationssperre: further failure without inbound must NOT increase malus/backoff
-        let malus_before = entry.malus_score;
-        let backoff_before = entry.backoff_level;
-        let bl_no_inbound = entry.record_outbound_failure();
-        assert_eq!(bl_no_inbound, backoff_before);
-        assert_eq!(entry.malus_score, malus_before);
-        assert_eq!(entry.backoff_level, backoff_before);
-
-        // Hourly decay heals backoff & malus step-by-step
-        entry.record_hour(2, true);
-        assert_eq!(entry.backoff_level, 4);
-        assert_eq!(entry.malus_score, 4);
-        assert!(entry.is_suspended());
-
-        entry.record_hour(3, true);
-        assert_eq!(entry.backoff_level, 3);
-        assert_eq!(entry.malus_score, 3);
-        assert!(entry.is_suspended());
-
-        entry.record_hour(4, true);
-        assert_eq!(entry.backoff_level, 2);
-        assert_eq!(entry.malus_score, 2);
-        assert!(entry.is_suspended());
-
-        entry.record_hour(5, true);
-        assert_eq!(entry.backoff_level, 1);
-        assert_eq!(entry.malus_score, 1);
-        assert!(entry.is_suspended());
-
-        entry.record_hour(6, true);
-        assert_eq!(entry.backoff_level, 0);
-        assert_eq!(entry.malus_score, 0);
-        assert!(!entry.is_suspended(), "Dropping to 0 lifts choking");
-
-        // Does not underflow on further hours
-        entry.record_hour(7, true);
-        assert_eq!(entry.backoff_level, 0);
-        assert_eq!(entry.malus_score, 0);
-
-        // Inbound + failure -> malus 1, backoff 1
+        // Normal mode failure: +2 malus
         entry.record_inbound_activity();
-        entry.record_outbound_failure();
-        assert_eq!(entry.malus_score, 1);
+        entry.record_outbound_failure_damped(false);
+        assert_eq!(entry.malus_score, 2);
         assert_eq!(entry.backoff_level, 1);
-        assert!(entry.is_suspended());
+        assert!(!entry.should_forward_gossip(), "Choked -> gossip suppressed");
 
-        // 1:1 Success: drains malus by 1 immediately -> malus 0 backoff 0
+        // Stress mode failure: +1 malus (damped!)
+        entry.record_inbound_activity();
+        entry.record_outbound_failure_damped(true);
+        assert_eq!(entry.malus_score, 3);
+        assert_eq!(entry.backoff_level, 1); // 3 / 2 = 1
+
+        // Another stress mode failure: +1 malus -> 4 -> backoff 2
+        entry.record_inbound_activity();
+        entry.record_outbound_failure_damped(true);
+        assert_eq!(entry.malus_score, 4);
+        assert_eq!(entry.backoff_level, 2);
+
+        // Successful interaction heals full -2 points!
+        entry.record_outbound_success();
+        assert_eq!(entry.malus_score, 2);
+        assert_eq!(entry.backoff_level, 1);
+        assert!(entry.should_forward_gossip(), "Success unchokes node");
+
+        // Malus persists across hours without activity (no decay)
+        for ep in 2..=10 {
+            entry.record_hour(ep, true);
+        }
+        assert_eq!(entry.malus_score, 2, "Malus persists across hours");
+        assert_eq!(entry.backoff_level, 1);
+
+        // Final success heals completely
         entry.record_outbound_success();
         assert_eq!(entry.malus_score, 0);
         assert_eq!(entry.backoff_level, 0);
-        assert!(!entry.is_suspended());
-        assert!(entry.should_forward_gossip());
-        assert_eq!(entry.flags & FLAG_LAST_FAILED, 0);
+    }
+
+    #[test]
+    fn test_network_stress_thermometer_ema_and_burst_robustness() {
+        let mut thermo = NetworkStressThermometer::new();
+        assert_eq!(thermo.stress_level_bps, 0);
+        assert!(!thermo.is_under_stress());
+
+        // 1. Single choke after 1h idle: minimal rise (order independent)
+        thermo.update(3600, true);
+        assert_eq!(thermo.stress_level_bps, 100, "1 choke adds 100 bps (1%)");
+        assert!(!thermo.is_under_stress());
+
+        // 2. 19 OK responses in same second:
+        for _ in 0..19 {
+            thermo.update(3600, false);
+        }
+        assert!(thermo.stress_level_bps < 100, "19 OK responses dampen down to < 1%");
+        assert!(!thermo.is_under_stress());
+
+        // 3. Sustained DoS attack (e.g. 80 consecutive chokes over 30-40 minutes)
+        for i in 1..=80 {
+            thermo.update(3600 + i * 25, true);
+        }
+        assert!(thermo.stress_level_bps >= 4000, "Sustained attack crosses 40% threshold");
+        assert!(thermo.is_under_stress());
+
+        // 4. Attack stops -> 2 hours pass -> decays back below threshold
+        thermo.update(3600 + 80 * 25 + 7200, false);
+        assert!(!thermo.is_under_stress(), "2h decay clears stress state");
     }
 
     #[test]

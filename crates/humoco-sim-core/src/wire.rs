@@ -109,6 +109,7 @@ pub const FLAG_EXPIRED_CLEANUP: u32 = 0x0000_0004;
 pub const FLAG_HEDGED: u32 = 0x0000_0008;
 pub const FLAG_COMPRESSED: u32 = 0x0000_0010;
 pub const FLAG_BRIDGE_LOCK: u32 = 0x0000_0020;
+pub const FLAG_PEER_SUSPENDED: u32 = 0x0000_0040;
 
 /// Witness-separation LockEnvelope (suite_id + witness-separated fields)
 #[derive(Clone, Debug, PartialEq, Eq)]

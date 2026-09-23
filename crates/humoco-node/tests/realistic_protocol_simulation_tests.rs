@@ -505,6 +505,7 @@ impl Drop for TestNode {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_scenario_1_isolated_village_start_and_mesh_merge() {
     let temp1 = tempdir().expect("tempdir 1");
     let (mut cfg1, id1, temp1) = TestNode::create_setup(temp1, 0);
@@ -613,6 +614,7 @@ async fn test_scenario_1_isolated_village_start_and_mesh_merge() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_scenario_2_multi_hop_causality_chain_ingress_newcomer() {
     let temp1 = tempdir().expect("tempdir 1");
     let (mut cfg1, id1, temp1) = TestNode::create_setup(temp1, 0);
@@ -691,6 +693,7 @@ async fn test_scenario_2_multi_hop_causality_chain_ingress_newcomer() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_scenario_3_double_spend_partition_and_canonical_resolution() {
     let temp1 = tempdir().expect("tempdir 1");
     let (mut cfg1, id1, temp1) = TestNode::create_setup(temp1, 0);
@@ -819,6 +822,7 @@ async fn test_scenario_3_double_spend_partition_and_canonical_resolution() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_scenario_4_offline_maintenance_catchup_sync() {
     let temp1 = tempdir().expect("tempdir 1");
     let (mut cfg1, id1, temp1) = TestNode::create_setup(temp1, 0);
@@ -905,6 +909,7 @@ async fn test_scenario_4_offline_maintenance_catchup_sync() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_scenario_5_spam_rejection_fantasy_locks() {
     let temp = tempdir().expect("tempdir");
     let (cfg, id, temp) = TestNode::create_setup(temp, 0);

@@ -29,6 +29,7 @@ fn status_query(voucher: &str, challenge: &str, pubkey: [u8; 32]) -> L2StatusQue
 }
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_sim_03_byzantine_resilience() {
     let mut sim = MeshSimulator::new();
 

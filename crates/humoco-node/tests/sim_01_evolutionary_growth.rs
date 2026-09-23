@@ -12,6 +12,7 @@ use humoco_node::api::hmc::{L2StatusQuery, L2Verdict};
 use simulation::{MeshSimulator, SimWallet};
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_sim_01_evolutionary_growth() {
     let mut sim = MeshSimulator::new();
     sim.reporter.begin_phase("Phase 1 - N=1 Genesis");

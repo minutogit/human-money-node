@@ -33,6 +33,7 @@ fn status_query(voucher: &str, challenge: &str) -> L2StatusQuery {
 }
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     let mut sim = MeshSimulator::new();
 

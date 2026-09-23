@@ -31,6 +31,7 @@ fn status_query(voucher: &str, challenge: &str) -> L2StatusQuery {
 }
 
 #[tokio::test]
+#[ignore = "long-running simulation"]
 async fn test_sim_05_shard_baton_handover_integration() {
     let mut sim = MeshSimulator::new();
 

@@ -120,6 +120,15 @@ flowchart TD
 
 ### 🌐 The Internal 2-Tier P2P Model (Gossip Barrier vs. Shard-Direct):
 
+* **⚡ Checkout Hot-Path (PoS / Ingress) is 100% Shard-Direct RPC, 0% Gossip:**
+  - Locks are created via client-to-gateway ingress (`POST /v1/lock`), verified via Shard-Direct RPC (`LockVerifyRequest` / `LockVerifyResponse`), and synchronized via Spec 03 Digest Pull (`ShardDigestRequest` / `ActiveSyncRequest`).
+  - **Locks are NEVER gossiped.** Epidemic gossip for lock records is completely eliminated to guarantee deterministic latency and zero network amplification.
+
+* **📡 Strict 2-Stream Mesh Gossip:**
+  - P2P Mesh Gossip across F2F edges consists **strictly of exactly two streams**:
+    1. **Hourly Heartbeat / Presence Gossip (Spec 11):** 1 packet per hour, $\text{TTL} = 16$, Dunbar fan-out $k = \min(d, \lceil\sqrt{d}\rceil + 1)$. Used exclusively for presence discovery, topological awareness, and median clock synchronization.
+    2. **Equivocation Proofs (Spec 10):** Cryptographic first-party fraud evidence (`FRAUD_EQUIVOCATION`) forwarded with priority to isolate and ban double-signing offenders immediately.
+
 1. **Tier 1 – F2F Gossip Tier (`f2f_friends`):**
    * Heartbeats and gossip announcements may **exclusively** be received and forwarded via direct F2F friendship connections (`f2f.trusted_pubkeys` / `f2f.peers`).
    * There is **no** open gossip to the rest of the network. A node never floods rumors or heartbeats to arbitrary network nodes.

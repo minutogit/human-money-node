@@ -122,7 +122,7 @@ async fn test_quic_p2p_handshake_and_frame_exchange() {
     assert_eq!(node_b_handler.received_requests.load(Ordering::SeqCst), 1);
 
     // Unidirectional frame
-    let uni_header = WireHeader::new(MsgType::GossipAnnounce as u16, 200, 1, 0, 8);
+    let uni_header = WireHeader::new(MsgType::Heartbeat as u16, 200, 1, 0, 8);
     let uni_payload = b"gossip12".to_vec();
     transport_a
         .send_unidirectional(&conn_a_to_b, &uni_header, &uni_payload)

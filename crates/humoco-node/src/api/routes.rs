@@ -13,8 +13,7 @@ use ed25519_dalek::Signer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-static GOSSIP_SPAWN_SEMAPHORE: std::sync::LazyLock<tokio::sync::Semaphore> =
-    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(64));
+
 
 
 use humoco_sim_core::storage::IngressVerdictLow;
@@ -527,83 +526,7 @@ async fn submit_lock(
         Ok(IngressVerdictLow::AcceptedNew) => {
             let attestation = create_attestation_for_network(&state.identity, record.id, record.parent_lock, shard_id, 0, now_ms, state.network_id);
 
-            // Gossip newly accepted lock to F2F peers via QUIC transport if available
-            if let Some(ref transport) = state.transport {
-                if let Some(ref peer_mgr) = state.peer_manager {
-                    peer_mgr.check_and_record_seen_gossip(&record.id);
-                    // Pre-spawn semaphore check: zero allocations when saturated
-                    match GOSSIP_SPAWN_SEMAPHORE.try_acquire() {
-                        Err(_) => {
-                            tracing::warn!("Outgoing gossip spawn dropped: limit reached (64)");
-                        }
-                        Ok(permit) => {
-                            let transport = transport.clone();
-                            let peer_mgr = peer_mgr.clone();
-                            let record_clone = record.clone();
-                            let root_valid_until = payload.root_valid_until;
-                            let cancel_token = transport.cancel_token().clone();
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                if cancel_token.is_cancelled() {
-                                    return;
-                                }
-                        tokio::select! {
-                            _ = cancel_token.cancelled() => {}
-                            _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                                let peers = peer_mgr.f2f_peer_addrs().await;
-                                let d = peers.len();
-                                if d > 0 {
-                                    let mut k = crate::network::manager::calculate_fan_out(d);
-                                    k = k.clamp(1, peers.len());
-                                    let selected_peers: Vec<std::net::SocketAddr> = if peers.len() <= k {
-                                        peers
-                                    } else {
-                                        let mut scored: Vec<([u8; 32], std::net::SocketAddr)> = peers
-                                            .into_iter()
-                                            .map(|addr| {
-                                                let mut hasher = blake3::Hasher::new();
-                                                hasher.update(&record_clone.id);
-                                                hasher.update(addr.to_string().as_bytes());
-                                                (*hasher.finalize().as_bytes(), addr)
-                                            })
-                                            .collect();
-                                        scored.sort_by(|a, b| a.0.cmp(&b.0));
-                                        scored.into_iter().take(k).map(|(_, addr)| addr).collect()
-                                    };
-                                    if let Ok(bytes) = bincode::serialize(&(record_clone, root_valid_until)) {
-                                        let header = humoco_sim_core::wire::WireHeader::new(
-                                            humoco_sim_core::wire::MsgType::GossipAnnounce as u16,
-                                            1,
-                                            0,
-                                            0,
-                                            bytes.len() as u32,
-                                        );
-                                        for peer_addr in selected_peers {
-                                            if cancel_token.is_cancelled() {
-                                                break;
-                                            }
-                                            if let Ok(Ok(conn)) = tokio::time::timeout(
-                                                std::time::Duration::from_millis(500),
-                                                transport.connect_peer(peer_addr),
-                                            )
-                                            .await
-                                            {
-                                                let _ = tokio::time::timeout(
-                                                    std::time::Duration::from_millis(500),
-                                                    transport.send_unidirectional(&conn, &header, &bytes),
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                    }
-                                }
-                            }) => {}
-                                };
-                            });
-                        }
-                    }
-                }
-            }
+
 
             state.metrics.record_pos_latency(start.elapsed());
             let mut resp = (

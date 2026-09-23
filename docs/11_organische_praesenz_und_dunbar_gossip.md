@@ -34,9 +34,10 @@ If every node were to admit all announced identities into its routing table with
 The HuMoCo Layer-2 Collision Lock Registry solves this problem through **radically local, bio-mimetic information saturation** (inspired by Dunbar's number, Shannon channel capacity, and epidemic percolation):
 
 1. **No global voter rolls:** Each node maintains an autonomous, purely local view of active nodes.
-2. **Edge saturation (Random Early Satiation / RED):** Each edge has a finite information budget. Overload throttles itself stochastically.
-3. **24h incubation & maturation period (24h Shard Ticket Incubation Wall):** A node is only activated after 24 hours and $\ge 8/24$ hourly heartbeats.
-4. **Small-world epidemic:** Low fan-out and deterministic TTL ensure global percolation at minimal bandwidth ($< 25\,\text{KB/s}$).
+2. **Presence Gossip via Hourly Heartbeats:** The hourly Heartbeat (`MsgType::Heartbeat`) is the presence gossip that propagates network-wide across F2F edges. Lock transactions and state synchronization are never gossiped (100% Shard-Direct RPC / Spec 03 Digest Pull).
+3. **Edge saturation (Random Early Satiation / RED):** Each edge has a finite information budget. Overload throttles itself stochastically.
+4. **24h incubation & maturation period (24h Shard Ticket Incubation Wall):** A node is only activated after 24 hours and $\ge 8/24$ hourly heartbeats.
+5. **Small-world epidemic:** Low fan-out and deterministic TTL ensure global percolation at minimal bandwidth ($< 25\,\text{KB/s}$).
 
 ---
 
@@ -76,6 +77,10 @@ $$P_{\text{drop}}(r) = \begin{cases}
 ---
 
 ### Pillar 2: Epidemic Gossip & Small-World Percolation (Wildfire Model)
+
+> [!NOTE]
+> **Presence Gossip Propagation:**
+> The hourly Heartbeat is the presence gossip that propagates network-wide across F2F edges to maintain distributed topological awareness and clock synchronization. Checkout transactions and locks are never gossiped (0% Gossip).
 
 To ensure that legitimate heartbeats propagate reliably and without packet explosion in the global small-world network ($10^6$ to $10^8$ nodes), we use the physical **percolation model**:
 

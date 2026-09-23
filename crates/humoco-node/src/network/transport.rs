@@ -9,13 +9,9 @@ use tracing::{debug, error, info, warn};
 
 /// Maximum number of concurrent QUIC stream handler tasks (DoS/OOM protection).
 pub const STREAM_CONCURRENCY_LIMIT: usize = 1024;
-/// Maximum number of concurrent background gossip forward tasks.
-pub const GOSSIP_FORWARD_CONCURRENCY_LIMIT: usize = 64;
 /// Maximum number of concurrent QUIC handshake / connection handler tasks (DoS/OOM protection).
 pub const CONNECTION_CONCURRENCY_LIMIT: usize = 256;
 
-static GOSSIP_FORWARD_SEMAPHORE: std::sync::LazyLock<tokio::sync::Semaphore> =
-    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(GOSSIP_FORWARD_CONCURRENCY_LIMIT));
 
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
@@ -531,7 +527,6 @@ impl RequestHandler for NodeRequestHandler {
         let engine = self.engine.clone();
         let storage = self.storage.clone();
         let peer_manager = self.peer_manager.clone();
-        let seen_gossip_locks = self.seen_gossip_locks.clone();
         let identity = self.identity.clone();
         Box::pin(async move {
             if header.msg_type == MsgType::EquivocationProof as u16 {
@@ -582,112 +577,6 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 }
                 return Ok(());
-            }
-            if header.msg_type == MsgType::GossipAnnounce as u16 {
-                if let Ok((record, root_valid_until)) = bincode::deserialize::<(humoco_sim_core::types::LockRecord, u64)>(&payload) {
-                    let expected_id = humoco_sim_core::types::LockRecord::new(
-                        record.parent_lock,
-                        record.receiver_pub,
-                        record.nonce.clone(),
-                        record.created_at,
-                        record.valid_until,
-                    ).id;
-                    if record.id != expected_id {
-                        warn!("GossipAnnounce dropped: lock ID integrity check failed");
-                        return Ok(());
-                    }
-
-                    // Seen cache deduplication & echo-flooding protection (Spec 11):
-                    // Pre-check against ring buffer of recently seen lock IDs
-                    let is_new = seen_gossip_locks.lock().check_and_insert(&record.id);
-                    if !is_new {
-                        debug!(lock_id = %hex::encode(record.id), "GossipAnnounce dropped: already seen in gossip cache (echo suppression)");
-                        return Ok(());
-                    }
-
-                    if engine.is_node_banned(&record.receiver_pub).await {
-                        debug!("GossipAnnounce dropped: receiver is banned");
-                        return Ok(());
-                    }
-
-                    let now_ms = peer_manager
-                        .as_ref()
-                        .map(|pm| pm.net_time_ms())
-                        .unwrap_or_else(|| {
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as u64)
-                                .unwrap_or(0)
-                        });
-                    let verdict = engine.ingress_lock(
-                        record.clone(),
-                        humoco_sim_core::types::SimTime(now_ms),
-                        humoco_sim_core::types::SimTime(root_valid_until),
-                    ).await;
-
-                    // If the lock was accepted as new and valid in the RAM index:
-                    // Forward to F2F friends according to Dunbar gossip and bio-mimetic fan-out (Spec 11)
-                    if verdict == Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew) {
-                        let hops = header.reserved;
-                        if (hops as u32) < crate::network::manager::MAX_GOSSIP_HOPS {
-                            if let Some(ref pm) = peer_manager {
-                                let f2f_peers = pm.f2f_peer_addrs().await;
-                                let d = f2f_peers.len();
-                                if d > 0 {
-                                    let mut k = crate::network::manager::calculate_fan_out(d);
-                                    k = k.clamp(1, f2f_peers.len());
-                                    let selected_peers: Vec<SocketAddr> = if f2f_peers.len() <= k {
-                                        f2f_peers
-                                    } else {
-                                        let mut scored: Vec<([u8; 32], SocketAddr)> = f2f_peers
-                                            .into_iter()
-                                            .map(|addr| {
-                                                let mut hasher = blake3::Hasher::new();
-                                                hasher.update(&record.id);
-                                                hasher.update(addr.to_string().as_bytes());
-                                                (*hasher.finalize().as_bytes(), addr)
-                                            })
-                                            .collect();
-                                        scored.sort_by(|a, b| a.0.cmp(&b.0));
-                                        scored.into_iter().take(k).map(|(_, addr)| addr).collect()
-                                    };
-
-                                    let mut fwd_header = header;
-                                    fwd_header.reserved = hops + 1;
-                                    fwd_header.session_seq = header.session_seq.saturating_add(1);
-
-                                    let payload_clone = payload.clone();
-                                    let pm_clone = pm.clone();
-
-                                    // Pre-spawn semaphore check: zero allocations when saturated
-                                    match GOSSIP_FORWARD_SEMAPHORE.try_acquire() {
-                                        Err(_) => {
-                                            tracing::warn!("Gossip forward dropped: concurrency limit reached (64)");
-                                        }
-                                        Ok(permit) => {
-                                            tokio::spawn(async move {
-                                                let _permit = permit;
-                                                let ep_opt = pm_clone.get_endpoint();
-                                                for peer_addr in selected_peers {
-                                                    if let Some(conn) = pm_clone.get_connection(&peer_addr).await {
-                                                        let _ = send_unidirectional_frame(&conn, &fwd_header, &payload_clone).await;
-                                                    } else if let Some(ref ep) = ep_opt {
-                                                        if let Ok(connecting) = ep.connect(peer_addr, "localhost") {
-                                                            if let Ok(conn) = connecting.await {
-                                                                pm_clone.record_success(peer_addr, None, Some(conn.clone())).await;
-                                                                let _ = send_unidirectional_frame(&conn, &fwd_header, &payload_clone).await;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
             Ok(())
         })
@@ -1158,9 +1047,10 @@ impl QuicTransport {
                                 match read_frame(&mut recv).await {
                                     Ok((header, payload)) => {
                                         // GOSSIP BARRIER:
-                                        // GossipAnnounce and Heartbeat are STRICTLY accepted from direct F2F friends only!
-                                        let is_gossip = header.msg_type == MsgType::GossipAnnounce as u16
-                                            || header.msg_type == MsgType::Heartbeat as u16;
+                                        // GOSSIP BARRIER:
+                                        // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
+                                        let is_gossip = header.msg_type == MsgType::Heartbeat as u16
+                                            || header.msg_type == MsgType::EquivocationProof as u16;
 
                                         if is_gossip && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await {
                                             warn!(

@@ -104,6 +104,13 @@ impl fmt::Display for SimTime {
     }
 }
 
+/// ARCHITECTURAL INVARIANT / AUDIT NOTE (Spec 02, 08):
+/// Consensus Finality Thresholds:
+/// - N < 20: Provisional (yellow, Q = floor(2R/3) + 1).
+/// - N >= 20: Final (green, 14/20 BFT threshold after 24h hysteresis).
+/// - High-Assurance (16/20 @ N>=100) was evaluated in `spec_widerspruchs_analyse.md`
+///   and INTENTIONALLY OMITTED to keep POS terminals and wallets simple (KISS).
+///
 /// Maturity traffic light & lifecycle states of a lock entry
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LockStatus {

@@ -160,19 +160,19 @@ impl SimNode {
         proof.verify()
     }
 
-    /// Verifies and bans the perpetrator in O(1). Returns true if banned.
+    /// Verifies and bans the perpetrator in O(1). Returns true if newly banned.
     pub fn apply_fraud_proof(&mut self, proof: &FraudProofPayload) -> bool {
         if !proof.verify() {
             return false;
         }
         // O(1) insert
-        self.banned_nodes.insert(proof.perpetrator);
+        let newly_banned = self.banned_nodes.insert(proof.perpetrator);
         // If proof arrives via pubkey, fallback
         let pk_nid = u16::from_le_bytes([proof.perpetrator_node_id[0], proof.perpetrator_node_id[1]]);
         if pk_nid != proof.perpetrator {
             self.banned_nodes.insert(pk_nid);
         }
-        true
+        newly_banned
     }
 
     /// Alias for apply_fraud_proof (satisfies the "ServerBann" requirement)

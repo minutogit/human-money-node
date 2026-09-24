@@ -223,8 +223,13 @@ impl HmcRamIndex {
             }
         }
 
-        // Locator prefixes check for LCA
-        for prefix in locator_prefixes {
+        // Locator prefixes check for LCA (bounded to 32 prefixes of max 64 chars to prevent Read-DoS)
+        const MAX_LOCATORS: usize = 32;
+        const MAX_PREFIX_LEN: usize = 64;
+        for prefix in locator_prefixes.iter().take(MAX_LOCATORS) {
+            if prefix.len() > MAX_PREFIX_LEN {
+                continue;
+            }
             for tag in voucher_tags {
                 if tag.starts_with(prefix) {
                     return L2Verdict::MissingLocks { sync_point: prefix.clone() };

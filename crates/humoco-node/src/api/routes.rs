@@ -166,6 +166,12 @@ async fn submit_lock(
         .into_response()
 }
 
+/// ARCHITECTURAL INVARIANT / AUDIT NOTE (Spec 03, 11, Rule 1):
+/// - Hot-Path & Read Ingress (< 1µs RAM, < 5ms Node SLA):
+///   Read requests (status queries) query a deterministic or uniform-random shard node
+///   from the Top-20 active set. They NEVER hold disk write locks or trigger P2P gossip.
+/// - Sync Limits: Max 10,000 items per sync response with strictly validated net_time_ms.
+///
 /// Handler for POST /v1/sync
 async fn sync_locks(
     State(state): State<AppState>,
@@ -173,10 +179,11 @@ async fn sync_locks(
 ) -> (StatusCode, Json<SyncResponse>) {
     let locators: HashSet<String> = payload.sparse_locators.into_iter().collect();
 
+    let now_ms = state.net_time_ms();
     let mut lock_map = std::collections::HashMap::new();
 
     // 1. Read from persistent disk storage
-    if let Ok(disk_locks) = state.storage.all_valid_locks(0) {
+    if let Ok(disk_locks) = state.storage.all_valid_locks(now_ms) {
         for (rec, rv) in disk_locks {
             lock_map.insert(rec.parent_lock, (rec, rv));
         }
@@ -195,10 +202,12 @@ async fn sync_locks(
             locks.push(LockRecordDto::from_record(&record, root_valid_until));
         }
     }
+    const MAX_SYNC_LOCKS: usize = 10_000;
+    locks.truncate(MAX_SYNC_LOCKS);
 
     // Read HMC locks from persistent disk storage and in-memory RAM
     let mut hmc_map = std::collections::HashMap::new();
-    if let Ok(disk_hmc_locks) = state.storage.all_valid_hmc_locks(0) {
+    if let Ok(disk_hmc_locks) = state.storage.all_valid_hmc_locks(now_ms) {
         for (tag, entry) in disk_hmc_locks {
             hmc_map.insert(tag, entry);
         }
@@ -1114,6 +1123,13 @@ async fn submit_hmc_lock(
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
+    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+    let parent_for_pow = if req.is_genesis {
+        None
+    } else {
+        Some(&parent_bytes)
+    };
+
     if let Err(err) = state
         .tier_controller
         .evaluate_and_charge(
@@ -1122,7 +1138,7 @@ async fn submit_hmc_lock(
             pow_challenge,
             pow_nonce,
             ttl_seconds,
-            None,
+            parent_for_pow,
         )
         .await
     {

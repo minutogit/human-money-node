@@ -172,7 +172,16 @@ impl PowEngine {
         Ok((challenge_bytes, expires_at))
     }
 
-    /// Verifies that the submitted PoW challenge and nonce satisfy the required difficulty.
+    /// ARCHITECTURAL INVARIANT / AUDIT NOTE (Spec 13, Rule 9):
+    /// 1. Stateless Time-Window Hashcash: Challenges are deterministically derived from
+    ///    `BLAKE3(len || "HUMOCO_V1_POW_STATELESS" || parent || epoch_slot)` with a 10-minute
+    ///    window (`slot = now_sec / 600`).
+    /// 2. Replay Protection: `seen_solutions` provides atomic O(1) deduplication within the active
+    ///    window. Stateful per-client request counters are INTENTIONALLY NOT USED to prevent server
+    ///    memory exhaustion from rotating botnet IPs (KISS / Zero State).
+    /// 3. Generic vs. Parent Challenge: Genesis locks (no parent) use `[0u8; 32]`, while spends verify
+    ///    parent binding. Both paths are fully protected by `seen_solutions` replay deduplication.
+    ///
     /// Performs exactly 1 BLAKE3 hash computation (< 0.1 µs).
     pub async fn verify_pow_for_parent(
         &self,
@@ -194,16 +203,17 @@ impl PowEngine {
             .as_secs();
         let current_slot = self.current_epoch_slot(now_sec);
 
+        let gen_curr = compute_stateless_challenge(&[0u8; 32], current_slot);
+        let gen_prev = if current_slot > 0 {
+            compute_stateless_challenge(&[0u8; 32], current_slot - 1)
+        } else {
+            [0u8; 32]
+        };
+
         if let Some(parent) = expected_parent_lock {
             let expected_curr = compute_stateless_challenge(parent, current_slot);
             let expected_prev = if current_slot > 0 {
                 compute_stateless_challenge(parent, current_slot - 1)
-            } else {
-                [0u8; 32]
-            };
-            let gen_curr = compute_stateless_challenge(&[0u8; 32], current_slot);
-            let gen_prev = if current_slot > 0 {
-                compute_stateless_challenge(&[0u8; 32], current_slot - 1)
             } else {
                 [0u8; 32]
             };
@@ -214,6 +224,8 @@ impl PowEngine {
             {
                 return Err(PowError::InvalidFormat);
             }
+        } else if challenge_bytes != gen_curr && challenge_bytes != gen_prev {
+            return Err(PowError::InvalidFormat);
         }
 
         // Server verification requires exactly 1 BLAKE3 hash (< 0.1 µs) - cheap checks first

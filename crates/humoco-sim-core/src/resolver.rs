@@ -20,6 +20,14 @@ pub enum ResolutionResult {
     },
 }
 
+/// ARCHITECTURAL INVARIANT / AUDIT NOTE (Spec 02, 12, 14):
+/// Zero State Bloat & No Tombstones Doctrine:
+/// - Losing split-brain branches are resolved in RAM via min(H_canon).
+/// - Permanent loser/void records are INTENTIONALLY NOT persisted to disk.
+/// - Cryptographic equivocation proofs (double-signing by shard nodes) are captured
+///   in `TABLE_FRAUD_EVIDENCE` in O(1); non-malicious split-brain branches expire
+///   naturally with voucher TTL. Do NOT add persistent tombstone tables.
+///
 /// Resolves split-brain double-spend conflicts deterministically based on min(H_canon)
 /// Per docs/02:
 /// H_canon(Lock) = BLAKE3("HUMOCO_V1_CANON_RESOLVER" || Parent_Hash || Receiver_Pub || Nonce)

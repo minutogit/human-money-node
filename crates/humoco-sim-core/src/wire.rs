@@ -85,8 +85,6 @@ pub enum MsgType {
     StatusResponse = 0x0002,
     LatencyProbe = 0x0003,
     LatencyProbeAck = 0x0004,
-    ShardMapPing = 0x0005,
-    ShardMapPong = 0x0006,
     LockVerifyRequest = 0x0101,
     LockVerifyResponse = 0x0102,
     EquivocationProof = 0x0105,
@@ -188,7 +186,6 @@ pub fn parse_wire_header(raw: &[u8; 32], expected_seq: u64, is_0rtt: bool) -> Re
             header.msg_type,
             x if x == MsgType::StatusQuery as u16
                 || x == MsgType::LatencyProbe as u16
-                || x == MsgType::ShardMapPing as u16
                 || x == MsgType::ActiveSyncRequest as u16
         );
         if !allowed {

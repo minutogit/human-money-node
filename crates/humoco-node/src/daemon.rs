@@ -395,10 +395,16 @@ impl NodeDaemon {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await; // consume initial tick
 
+            let mut sync_tasks = tokio::task::JoinSet::new();
+
             loop {
+                // Drain any completed sync tasks to prevent task handle accumulation
+                while sync_tasks.try_join_next().is_some() {}
+
                 tokio::select! {
                     _ = sync_cancel.cancelled() => {
-                        info!("Shard sync motor shutting down");
+                        info!("Shard sync motor shutting down - aborting in-flight sync tasks");
+                        sync_tasks.abort_all();
                         break;
                     }
                     _ = interval.tick() => {
@@ -409,7 +415,7 @@ impl NodeDaemon {
                             let stor = sync_storage.clone();
                             let cancel = sync_cancel.clone();
                             let syncing_flag = is_syncing.clone();
-                            tokio::spawn(async move {
+                            sync_tasks.spawn(async move {
                                 let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &cancel).await;
                                 syncing_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                             });
@@ -418,10 +424,16 @@ impl NodeDaemon {
                     _ = sync_notify.notified() => {
                         // Debounce window (5s) to coalesce rapid bursts of peer events and prevent thundering herd
                         tokio::select! {
-                            _ = sync_cancel.cancelled() => break,
+                            _ = sync_cancel.cancelled() => {
+                                sync_tasks.abort_all();
+                                break;
+                            }
                             _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
                         }
-                        if sync_cancel.is_cancelled() { break; }
+                        if sync_cancel.is_cancelled() {
+                            sync_tasks.abort_all();
+                            break;
+                        }
                         if !is_syncing.swap(true, std::sync::atomic::Ordering::SeqCst) {
                             let transport = sync_transport.clone();
                             let pm = sync_pm.clone();
@@ -429,7 +441,7 @@ impl NodeDaemon {
                             let stor = sync_storage.clone();
                             let cancel = sync_cancel.clone();
                             let syncing_flag = is_syncing.clone();
-                            tokio::spawn(async move {
+                            sync_tasks.spawn(async move {
                                 let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &cancel).await;
                                 syncing_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                             });

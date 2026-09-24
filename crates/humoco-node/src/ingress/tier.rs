@@ -213,13 +213,18 @@ impl TierController {
         }
     }
 
-    /// Returns the current epoch day since UNIX epoch
+    /// Returns the epoch day since UNIX epoch for a given timestamp in milliseconds
+    pub fn current_epoch_day_at(&self, now_ms: u64) -> u64 {
+        now_ms / (86_400 * 1000)
+    }
+
+    /// Returns the current epoch day since UNIX epoch (using system time as fallback)
     pub fn current_epoch_day(&self) -> u64 {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        now_ms / (86_400 * 1000)
+        self.current_epoch_day_at(now_ms)
     }
 
     /// Evaluates and registers dynamic ingress for F2F peers against daily quota (K=1.0)
@@ -284,6 +289,30 @@ impl TierController {
         ttl_seconds: u64,
         parent_lock: Option<&[u8; 32]>,
     ) -> Result<IngressTier, IngressError> {
+        self.evaluate_and_charge_with_time(
+            auth_token,
+            peer_token,
+            pow_challenge,
+            pow_nonce,
+            ttl_seconds,
+            parent_lock,
+            None,
+        )
+        .await
+    }
+
+    /// [INV-0929] Evaluates tier credentials with decentralized network time, validates authorization, deducts quota (for VIP), or validates PoW (for Public).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate_and_charge_with_time(
+        &self,
+        auth_token: Option<&str>,
+        peer_token: Option<&str>,
+        pow_challenge: Option<&str>,
+        pow_nonce: Option<u64>,
+        ttl_seconds: u64,
+        parent_lock: Option<&[u8; 32]>,
+        now_ms: Option<u64>,
+    ) -> Result<IngressTier, IngressError> {
         // 1. Check Tier 1 (VIP) - in-memory atomic cache, no synchronous fsync stall (INV-0929 hot-path)
         if let Some(token) = auth_token {
             let account_tag = self.resolve_account_tag(token)?;
@@ -297,7 +326,10 @@ impl TierController {
             let is_valid = self.f2f_tokens.read().unwrap_or_else(|e| e.into_inner()).contains(token);
             if is_valid {
                 let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
-                let epoch_day = self.current_epoch_day();
+                let epoch_day = match now_ms {
+                    Some(ms) => self.current_epoch_day_at(ms),
+                    None => self.current_epoch_day(),
+                };
                 self.evaluate_f2f_quota(token, required_byte_years, epoch_day)?;
                 return Ok(IngressTier::Tier2F2F);
             } else {

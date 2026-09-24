@@ -100,24 +100,20 @@ pub enum MsgType {
     StatusResponse       = 0x0002,
     LatencyProbe         = 0x0003,
     LatencyProbeAck      = 0x0004,
-    ShardMapPing         = 0x0005,
-    ShardMapPong         = 0x0006,
 
-    // --- Write operations (1-RTT Only) ---
+    // --- Write & verification operations (1-RTT Only) ---
     LockVerifyRequest    = 0x0101,
     LockVerifyResponse   = 0x0102,
-    MergeLoserBroadcast  = 0x0103, // Notification about collision loser branch after merge
-    MergeLoserAck        = 0x0104,
     EquivocationProof    = 0x0105, // Fraud proof -> leads to permanent server ban
     EquivocationAck      = 0x0106,
     ActiveSyncRequest    = 0x0107, // PULL-sync request for active shard locks (0-RTT whitelisted)
-    ActiveSyncChunk      = 0x0108, // Streamed response chunk with LockEntry + QuorumCertificate
     ActiveSyncDone       = 0x0109, // Completion marker of the PULL-sync
+    ShardDigestRequest   = 0x010A, // Shard digest range request
+    ShardDigestResponse  = 0x010B, // Shard digest response
 
     // --- Peer & sync control ---
     Heartbeat            = 0x0201,
     HeartbeatAck         = 0x0202,
-    GossipAnnounce       = 0x0203,
 }
 ```
 
@@ -261,7 +257,6 @@ stateDiagram-v2
 | :--- | :--- | :--- |
 | `StatusQuery` | **YES (🟢)** | Fully idempotent; replay merely returns the same RAM status. |
 | `LatencyProbe` | **YES (🟢)** | Pure RTT measurement packet; modifies no system state. |
-| `ShardMapPing` | **YES (🟢)** | Topology ping; returns topology snapshot. |
 | `ActiveSyncRequest` | **YES (🟢)** | **Idempotent PULL-sync.** Merely returns already-quorated active locks; mutates no state. |
 | `LockVerifyRequest` | **NO (🔴)** | **State mutation.** 0-RTT replay could create artificial race conditions. **1-RTT strictly required.** |
 | `EquivocationProof` | **NO (🔴)** | Slashing trigger; requires 1-RTT nonce binding. |
@@ -559,7 +554,6 @@ pub fn parse_and_validate_wire_header(
         match header.msg_type {
             x if x == MsgType::StatusQuery as u16 
               || x == MsgType::LatencyProbe as u16 
-              || x == MsgType::ShardMapPing as u16
               || x == MsgType::ActiveSyncRequest as u16 => {}
               _ => return Err(WireError::ZeroRttForbiddenForWrites),
         }

@@ -368,8 +368,14 @@ impl DualTierEngine {
                 warn!("Persistence queue full: BanNode persisted to RAM immediately, queuing disk flush in background");
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = tx.send(op).await {
-                        warn!("Async background flush for BanNode failed: {}", e);
+                    match tokio::time::timeout(std::time::Duration::from_secs(1), tx.send(op)).await {
+                        Ok(Ok(_)) => {},
+                        Ok(Err(e)) => {
+                            warn!("Async background flush for BanNode failed: {}", e);
+                        }
+                        Err(_) => {
+                            warn!("Async background flush for BanNode timed out after 1s (queue congested)");
+                        }
                     }
                 });
             }
@@ -862,8 +868,8 @@ impl DualTierEngine {
                             Vec::<FlushOp>::new(),
                         )
                     } else {
-                        // Atomically insert all new hops
-                        for (tag, entry) in &new_entries {
+                        // Atomically insert all new hops and dispatch flush operations
+                        for (permit, (tag, entry)) in permits.into_iter().zip(new_entries.into_iter()) {
                             let root_valid = hmc.voucher_roots.get(&entry.layer2_voucher_id).copied();
                             let valid_until_ms = entry
                                 .deletable_at
@@ -882,20 +888,16 @@ impl DualTierEngine {
                                 .entry(entry.layer2_voucher_id.clone())
                                 .or_default()
                                 .insert(tag.clone());
-                            hmc.locks.insert(tag.clone(), entry.clone());
-                            hmc.filter.add(tag);
-                        }
-                        let terminal = terminal_entry_opt.unwrap();
-                        // Prepare flush ops – permits will be used to send after releasing lock
-                        // Store permits count to be used outside
-                        // Instead of returning permits (which have lifetime), we return ops and will send via try_send after
-                        // To keep reservation guarantee, we already reserved, so we can just send now via permits
-                        for (permit, (tag, entry)) in permits.into_iter().zip(new_entries.iter()) {
+                            hmc.filter.add(&tag);
+
+                            let entry_box = Box::new(entry);
+                            hmc.locks.insert(tag.clone(), (*entry_box).clone());
                             permit.send(FlushOp::PutHmcLock {
-                                lookup_tag: tag.clone(),
-                                entry: Box::new(entry.clone()),
+                                lookup_tag: tag,
+                                entry: entry_box,
                             });
                         }
+                        let terminal = terminal_entry_opt.unwrap();
                         (L2Verdict::Verified { lock_entry: terminal }, true, Vec::<FlushOp>::new())
                     }
                 }

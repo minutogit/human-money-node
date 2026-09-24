@@ -212,8 +212,11 @@ async fn sync_locks(
             hmc_map.insert(tag, entry);
         }
     }
-    for (tag, entry) in state.engine.hmc_ram.read().await.locks.clone() {
-        hmc_map.entry(tag).or_insert(entry);
+    {
+        let hmc_guard = state.engine.hmc_ram.read().await;
+        for (tag, entry) in &hmc_guard.locks {
+            hmc_map.entry(tag.clone()).or_insert_with(|| entry.clone());
+        }
     }
 
     for (tag, entry) in hmc_map {
@@ -684,6 +687,7 @@ async fn assemble_quorum_certificate(
                 let score_b = humoco_sim_core::client_flow::compute_hrw_score_f64(&b.0, shard_id);
                 score_b.total_cmp(&score_a)
             });
+            candidate_nodes.truncate(40);
 
             if let (Some(transport), Some(payload)) = (&state.transport, record_payload) {
                 collect_peer_attestations(
@@ -802,7 +806,7 @@ async fn assemble_status_quorum_certificate(
                 let score_b = humoco_sim_core::client_flow::compute_hrw_score_f64(&b.0, shard_id);
                 score_b.total_cmp(&score_a)
             });
-            candidate_nodes.truncate(32);
+            candidate_nodes.truncate(40);
 
             if collected_signatures.len() < required_q {
                 if let Some(transport) = &state.transport {
@@ -875,7 +879,8 @@ async fn query_status(
     headers: HeaderMap,
     Json(payload): Json<L2StatusQuery>,
 ) -> Response {
-    let epoch_day = state.tier_controller.current_epoch_day();
+    let now_ms = state.net_time_ms();
+    let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
     let client_node_id: u16 = if let Some(auth) = headers.get("Authorization").and_then(|h| h.to_str().ok()) {
         let tag = state.tier_controller.resolve_account_tag(auth).unwrap_or([0u8; 32]);
         u16::from_be_bytes([tag[0], tag[1]])
@@ -932,7 +937,6 @@ async fn query_status(
                 (ch_hash, voucher_bytes)
             }
         };
-        let now_ms = state.net_time_ms();
         Some(assemble_status_quorum_certificate(&state, lock_id, parent_lock, shard_id, now_ms, payload.read_quorum).await)
     } else {
         None
@@ -1132,13 +1136,14 @@ async fn submit_hmc_lock(
 
     if let Err(err) = state
         .tier_controller
-        .evaluate_and_charge(
+        .evaluate_and_charge_with_time(
             auth_token,
             peer_token,
             pow_challenge,
             pow_nonce,
             ttl_seconds,
             parent_for_pow,
+            Some(now_ms),
         )
         .await
     {
@@ -1317,7 +1322,7 @@ async fn submit_hmc_chain_lock(
 
     if let Err(err) = state
         .tier_controller
-        .evaluate_and_charge(auth_token, peer_token, pow_challenge, pow_nonce, ttl_seconds, None)
+        .evaluate_and_charge_with_time(auth_token, peer_token, pow_challenge, pow_nonce, ttl_seconds, None, Some(now_ms))
         .await
     {
         let (status, reason) = match err {

@@ -33,7 +33,7 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | **04** | `04_invarianten_und_spezifikations_waechter.md` | 2. Architektur | 2026-09-15 | muse-spark | 7 | 0 | `🟢 Clean` | **Niedrig** |
 | **05** | `05_performance_und_latency_audit.md` | 2. Architektur | 2026-09-24 | muse-spark | 7 | 0 | `🟢 Clean` | **Niedrig** |
 | **06** | `06_chaos_und_fuzz_test_generator.md` | 5. Chaos | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
-| **07** | `07_faulheit_und_free_riding_audit.md` | 4. Dynamik | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
+| **07** | `07_faulheit_und_free_riding_audit.md` | 4. Dynamik | 2026-09-24 | muse-spark | 6 | 0 | `🟢 Clean` | **Niedrig** |
 | **08** | `08_sabotage_zensur_und_eclipse_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 6 | 0 | `🟢 Clean` | **Niedrig** |
 | **09** | `09_knoten_hack_und_key_compromise_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **10** | `10_kartellbildung_und_shard_takeover_audit.md` | 3. Byzantine | 2026-09-18 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
@@ -41,8 +41,8 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | **12** | `12_mutation_testing_und_test_blindspot_audit.md` | 1. Testing | 2026-09-24 | muse-spark | 8 | 0 | `🟢 Clean` | **Niedrig** |
 | **13** | `13_unsafe_code_und_memory_safety_audit.md` | 1. Safety | 2026-09-15 | muse-spark | 4 | 0 | `🟢 Clean` | **Niedrig** |
 | **14** | `14_property_based_testing_und_fuzzing.md` | 1. Testing | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **15** | `15_clean_code_und_idiomatic_rust_audit.md` | 1. Clean Code | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
-| **16** | `16_supply_chain_und_dependency_audit.md` | 1. Supply Chain | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
+| **15** | `15_clean_code_und_idiomatic_rust_audit.md` | 1. Clean Code | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **16** | `16_supply_chain_und_dependency_audit.md` | 1. Supply Chain | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **17** | `17_update_and_supply_chain_verification.md` | 1. Sovereign | *Nie* | - | 0 | 0 | `⚪ Untested` | **Mittel** |
 | **18** | `18_legacy_code_and_architectural_drift_audit.md` | 2. Architektur | 2026-09-23 | muse-spark | 12 | 0 | `🟢 Clean` | **Niedrig** |
 
@@ -58,4 +58,5 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | 2026-09-23 22:40 | [01, 03, 11] | muse-spark | 10 | 10 Befunde: Subtraktion-Potenzial (1.6k-2.2k LOC Duplikate in Quorum & Ringpuffern), Todes-Spiralen & Deadlocks 100% bestanden (Härtungsempfehlungen: BLAKE3-Fanout, Fraud-Limiting, QUIC Conn-Semaphore), Time-Warp 100% bestanden (F2F Median & Ingress Windows robust, Prune-Guard & Heartbeat-Skew-Check identifiziert) | `prompts/reports/2026-09-23_*.md` |
 | 2026-09-23 23:42 | [18, 01] | muse-spark | 17 | Audit 18: 12 Funde zu toten Wire-Nachrichtentypen (`GossipAnnounce`, `MergeLoser*`, `ActiveSyncChunk`), Dual-Stack-Resten (`LockSubmitRequest` vs. HMC Native), toten Geister-Caches (`SeenGossipCache`) und Doku-Drifts (`TombstoneBroadcast`). Audit 01: 2.4k-2.8k LoC Subtraktionspotenzial identifiziert (QR/Dashboard-Peripherie, Fanout/Flush-Duplikate, RingBuffer-Abstraktion, Alias-Explosion). | `prompts/reports/2026-09-23_*.md` |
 | 2026-09-24 08:35 | [05, 12, 14] | muse-spark | 20 | Audit 05: Hot-Path Ingress Latenz (<5ms), JSON-Doppelparse-Eliminierung, VIP-Quota Entkopplung, Zero-Copy Header Framing. Audit 12: Mutationsanalyse (14 Mutanten, 8 Kill-Tests für Grenzwert- und Cache-Blindspots). Audit 14: 36 mathematische Property-Tests mit `proptest` für Invertibilität, Idempotenz, Ordnung, Monotonie und Quotas. | `prompts/reports/2026-09-24_*.md` |
+| 2026-09-24 09:22 | [07, 15, 16] | muse-spark | 16 | Audit 07: Free-Riding & Laziness Härtungen (H-01 bis H-06: Reziproker Ingress Credit, Proof-of-Custody Storage-Audit, EWMA-Latenz-SLA, strikte HRW-Bitmap-Bindung). Audit 15: Clean Code & Panic-Freiheit (keine externen unwraps, Visibility pub(crate) Kapselung, Newtype-Ergonomie). Audit 16: Supply Chain (keine CVEs, keine Copyleft-Lizenzen, Feature-Flag-Minimierung). | `prompts/reports/2026-09-24_*.md` |
 

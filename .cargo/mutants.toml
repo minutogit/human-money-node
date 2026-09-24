@@ -1,0 +1,23 @@
+# cargo-mutants configuration for HuMoCo Layer 2
+# Focuses mutation testing on consensus, cryptography, quota math, storage CAS, and protocol invariants.
+
+exclude_globs = [
+    # Exclude daemon CLI entrypoints and admin commands (noise reduction)
+    "crates/humoco-node/src/main.rs",
+    "crates/humoco-node/src/cli.rs",
+    "crates/humoco-node/src/control/mod.rs",
+    
+    # Exclude integration test directories and benchmarks from source mutation
+    "**/tests/**",
+    "**/benches/**",
+]
+
+exclude_re = [
+    # Exclude Display / Debug trait implementations
+    "<impl std::fmt::Display for .*>::fmt",
+    "<impl std::fmt::Debug for .*>::fmt",
+]
+
+# Bounded test timeouts
+timeout_multiplier = 2.0
+minimum_test_timeout = 10.0

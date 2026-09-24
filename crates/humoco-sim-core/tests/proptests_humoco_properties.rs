@@ -1013,10 +1013,10 @@ proptest! {
             } else {
                 // rejection => total unchanged
                 prop_assert_eq!(thermo.get_node_usage(node_id), total_accepted);
-                // further larger footprint also rejected (monotonic rejection after fill)
-                // Actually any footprint that would exceed quota is rejected; we can test that a huge footprint is rejected
+                // further footprint respects remaining quota (if empty, huge==quota should succeed; if nearly full, it must be rejected)
                 let huge_ok = thermo.try_accept_lock(day, node_id, quota, quota);
-                prop_assert!(!huge_ok, "when nearly full, full quota footprint must be rejected");
+                let expected_huge = total_accepted.saturating_add(quota) <= quota;
+                prop_assert_eq!(huge_ok, expected_huge, "huge footprint must respect remaining quota (total {} + quota {} <= quota {})", total_accepted, quota, quota);
                 break;
             }
         }

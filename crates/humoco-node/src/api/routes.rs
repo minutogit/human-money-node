@@ -128,6 +128,14 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+#[allow(clippy::large_enum_variant)]
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum IngressLockPayload {
+    Chain(L2ChainLockRequest),
+    Single(L2LockRequest),
+}
+
 /// Handler for POST /v1/lock and POST /lock
 async fn submit_lock(
     State(state): State<AppState>,
@@ -135,13 +143,14 @@ async fn submit_lock(
     body_bytes: bytes::Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
-    // Check if this is an HMC L2ChainLockRequest (batch) – must try before single lock
-    if let Ok(chain_req) = serde_json::from_slice::<crate::api::hmc::L2ChainLockRequest>(&body_bytes) {
-        return submit_hmc_chain_lock(State(state), headers, Json(chain_req)).await;
-    }
-    // Check if this is an HMC L2LockRequest
-    if let Ok(hmc_req) = serde_json::from_slice::<L2LockRequest>(&body_bytes) {
-        return submit_hmc_lock(state, headers, hmc_req, start).await;
+    match serde_json::from_slice::<IngressLockPayload>(&body_bytes) {
+        Ok(IngressLockPayload::Chain(chain_req)) => {
+            return submit_hmc_chain_lock(State(state), headers, Json(chain_req)).await;
+        }
+        Ok(IngressLockPayload::Single(hmc_req)) => {
+            return submit_hmc_lock(state, headers, hmc_req, start).await;
+        }
+        Err(_) => {}
     }
 
     (

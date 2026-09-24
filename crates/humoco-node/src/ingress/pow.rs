@@ -86,12 +86,13 @@ pub fn solve_blake3_hashcash(challenge_hex: &str, difficulty: u32, max_iteration
     None
 }
 
+#[allow(clippy::type_complexity)]
 #[derive(Clone, Debug)]
 pub struct PowEngine {
     pub secret: [u8; 32],
     default_difficulty: u32,
     challenge_ttl_seconds: u64,
-    seen_solutions: Arc<Mutex<HashMap<String, u64>>>,
+    seen_solutions: Arc<Mutex<HashMap<([u8; 32], u64), u64>>>,
 }
 
 impl PowEngine {
@@ -226,12 +227,12 @@ impl PowEngine {
         }
 
         // Replay check: every challenge+nonce pair can be verified only once (atomic check + insert)
-        let key = format!("{}:{}", challenge_hex, nonce);
+        let key = (challenge_bytes, nonce);
         let expires_at = (current_slot + 1) * self.challenge_ttl_seconds;
         {
             let mut seen = self.seen_solutions.lock();
             if seen.len() > 10_000 {
-                seen.retain(|_, &mut exp| exp > now_sec);
+                seen.retain(|_, exp| *exp > now_sec);
             }
             if seen.contains_key(&key) {
                 return Err(PowError::ReplayDetected);

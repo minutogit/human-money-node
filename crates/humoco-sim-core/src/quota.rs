@@ -98,7 +98,7 @@ impl QuartileStats {
     /// Computes the Zipf spread damper:
     /// Spread_Damper = max(0.5, min(1.0, (1.0 - (Q1 / Q3)) / 0.66))
     pub fn spread_damper(&self) -> f64 {
-        if self.q3 == 0 || self.q1 >= self.q3 {
+        if self.q1 >= self.q3 {
             return 0.5;
         }
 
@@ -111,12 +111,6 @@ impl QuartileStats {
 // ---------------------------------------------------------------------------
 // Shared ring-buffer helpers — eliminate repetitive array manipulation
 // ---------------------------------------------------------------------------
-
-#[inline]
-fn filled_array<const N: usize>(val: u64) -> [u64; N] {
-    [val; N]
-}
-
 
 #[inline]
 fn array_sum<const N: usize>(arr: &[u64; N]) -> u128 {
@@ -273,7 +267,7 @@ impl HourlySlottedRingBuffer {
     pub fn new() -> Self {
         Self {
             slots: SlottedRingBuffer::new(),
-            epoch_hours: filled_array(0),
+            epoch_hours: [0; 24],
             last_epoch_hour: 0,
         }
     }
@@ -285,7 +279,7 @@ impl HourlySlottedRingBuffer {
     /// - Updates `self.last_epoch_hour = epoch_hour.max(self.last_epoch_hour)`.
     /// - Increments `count = (count + 1).min(24)`.
     pub fn record_hourly_median(&mut self, epoch_hour: u64, median: u64) {
-        if self.slots.count() > 0 && epoch_hour < self.last_epoch_hour {
+        if epoch_hour < self.last_epoch_hour {
             return;
         }
 
@@ -731,5 +725,282 @@ mod tests {
         // Rolling 24h sum and average must remain exactly invariant despite day/night fluctuation
         assert_eq!(buffer.rolling_24h_sum(), 144_000);
         assert_eq!(buffer.rolling_24h_average(), 6_000);
+    }
+
+    #[test]
+    fn test_byte_years_edge_cases() {
+        // ttl_seconds == 0 -> min 1
+        assert_eq!(ByteYears::from_ttl_seconds(0), 1);
+        // from_ttl_days(0) -> 1
+        assert_eq!(ByteYears::from_ttl_days(0), 1);
+        // from_ttl_years(0.0) -> 1
+        assert_eq!(ByteYears::from_ttl_years(0.0), 1);
+    }
+
+    #[test]
+    fn test_quartiles_edge_cases_and_spread_damper() {
+        // Empty samples fallback to HARD_FLOOR_BASELINE_DAILY
+        let empty_stats = QuartileStats::calculate(&[]);
+        assert_eq!(empty_stats.q1, HARD_FLOOR_BASELINE_DAILY);
+        assert_eq!(empty_stats.median, HARD_FLOOR_BASELINE_DAILY);
+        assert_eq!(empty_stats.q3, HARD_FLOOR_BASELINE_DAILY);
+        assert_eq!(empty_stats.spread_damper(), 0.5);
+
+        // Odd length samples
+        let odd_samples = vec![10, 20, 30, 40, 50];
+        let odd_stats = QuartileStats::calculate(&odd_samples);
+        assert_eq!(odd_stats.median, 30);
+        assert_eq!(odd_stats.q1, 20); // 5/4 = 1 -> sorted[1]
+        assert_eq!(odd_stats.q3, 40); // 15/4 = 3 -> sorted[3]
+
+        // Even length samples
+        let even_samples = vec![10, 20, 30, 40];
+        let even_stats = QuartileStats::calculate(&even_samples);
+        assert_eq!(even_stats.median, 25); // (20 + 30) / 2
+        assert_eq!(even_stats.q1, 20); // 4/4 = 1 -> sorted[1]
+        assert_eq!(even_stats.q3, 40); // 12/4 = 3 -> sorted[3]
+
+        // Spread damper edge cases
+        // 1. q3 == 0 -> 0.5
+        let zero_q3 = QuartileStats { q1: 0, median: 0, q3: 0 };
+        assert_eq!(zero_q3.spread_damper(), 0.5);
+
+        // 2. q1 >= q3 -> 0.5
+        let equal_q = QuartileStats { q1: 100, median: 100, q3: 100 };
+        assert_eq!(equal_q.spread_damper(), 0.5);
+        let inverted_q = QuartileStats { q1: 200, median: 100, q3: 100 };
+        assert_eq!(inverted_q.spread_damper(), 0.5);
+
+        // 3. (1.0 - ratio) / 0.66 < 0.5 (e.g. ratio = 0.9 -> damper ~0.1515 -> clamped to 0.5)
+        let high_ratio = QuartileStats { q1: 900, median: 950, q3: 1000 };
+        assert_eq!(high_ratio.spread_damper(), 0.5);
+
+        // 4. (1.0 - ratio) / 0.66 > 1.0 (e.g. ratio = 0.0 -> damper ~1.515 -> clamped to 1.0)
+        let zero_ratio = QuartileStats { q1: 0, median: 500, q3: 1000 };
+        assert_eq!(zero_ratio.spread_damper(), 1.0);
+
+        // 5. Exactly 1.0 damper when ratio = 0.34 ((1.0 - 0.34) / 0.66 = 1.0)
+        let exact_one = QuartileStats { q1: 340, median: 500, q3: 1000 };
+        let damper = exact_one.spread_damper();
+        assert!((damper - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_slotted_ring_buffer_and_median_buffer_lifecycle() {
+        let mut rb: SlottedRingBuffer<4> = SlottedRingBuffer::new();
+        assert_eq!(rb.count(), 0);
+        assert_eq!(rb.average(), None);
+        assert_eq!(rb.sum(), 0);
+
+        rb.push(10);
+        assert_eq!(rb.count(), 1);
+        assert_eq!(rb.average(), Some(10));
+        assert_eq!(rb.sum(), 10);
+
+        rb.push(20);
+        rb.push(30);
+        rb.push(40);
+        assert_eq!(rb.count(), 4);
+        assert_eq!(rb.sum(), 100);
+        assert_eq!(rb.average(), Some(25));
+        assert_eq!(rb.slots(), &[10, 20, 30, 40]);
+
+        // Push 5th element -> overwrites index 0
+        rb.push(50);
+        assert_eq!(rb.count(), 4);
+        assert_eq!(rb.slots(), &[50, 20, 30, 40]);
+        assert_eq!(rb.sum(), 140);
+        assert_eq!(rb.average(), Some(35));
+
+        // set_slot
+        rb.set_slot(1, 100);
+        assert_eq!(rb.slots(), &[50, 100, 30, 40]);
+
+        // seed & seed_with_floor
+        rb.seed(77);
+        assert_eq!(rb.slots(), &[77, 77, 77, 77]);
+        assert_eq!(rb.count(), 4);
+
+        rb.seed_with_floor(50, 100);
+        assert_eq!(rb.slots(), &[100, 100, 100, 100]);
+
+        // SlottedMedianRingBuffer
+        let mut smb = SlottedMedianRingBuffer::new();
+        assert_eq!(smb.moving_average(), None);
+        assert_eq!(smb.moving_average_median(), HARD_FLOOR_BASELINE_DAILY);
+        assert_eq!(smb.days_recorded(), 0);
+
+        smb.seed(1_500_000);
+        assert_eq!(smb.days_recorded(), 28);
+        assert_eq!(smb.moving_average_median(), 1_500_000);
+        assert_eq!(smb.slots(), &[1_500_000; 28]);
+
+        smb.push_daily_median(2_000_000);
+        assert!(smb.moving_average_median() > 1_500_000);
+
+        let default_smb = SlottedMedianRingBuffer::default();
+        assert_eq!(default_smb.days_recorded(), 0);
+    }
+
+    #[test]
+    fn test_hourly_slotted_ring_buffer_boundaries_and_accessors() {
+        let mut hrb = HourlySlottedRingBuffer::new();
+        assert_eq!(hrb.count(), 0);
+        assert_eq!(hrb.last_epoch_hour(), 0);
+        assert_eq!(hrb.slots(), &[0u64; 24]);
+        assert_eq!(hrb.epoch_hours(), &[0u64; 24]);
+
+        // 1. Initial record
+        hrb.record_hourly_median(5, 500);
+        assert_eq!(hrb.count(), 1);
+        assert_eq!(hrb.last_epoch_hour(), 5);
+        assert_eq!(hrb.slots()[5], 500);
+        assert_eq!(hrb.epoch_hours()[5], 5);
+
+        // 2. Same slot / same hour update (slot == last_slot)
+        hrb.record_hourly_median(5, 750);
+        assert_eq!(hrb.slots()[5], 750);
+        assert_eq!(hrb.last_epoch_hour(), 5);
+        assert_eq!(hrb.count(), 2);
+
+        // 3. Wrap-around (e.g. hour 29 = slot 5)
+        hrb.record_hourly_median(29, 999);
+        assert_eq!(hrb.last_epoch_hour(), 29);
+        assert_eq!(hrb.slots()[5], 999);
+        assert_eq!(hrb.epoch_hours()[5], 29);
+
+        // 4. seed_with_floor
+        let mut seeded_hrb = HourlySlottedRingBuffer::new();
+        seeded_hrb.seed_with_floor(1234, 100);
+        assert_eq!(seeded_hrb.count(), 24);
+        assert_eq!(seeded_hrb.last_epoch_hour(), 100);
+        assert_eq!(seeded_hrb.slots(), &[1234u64; 24]);
+        // Check epoch_hours are descending towards past
+        assert_eq!(seeded_hrb.epoch_hours()[23], 100);
+        assert_eq!(seeded_hrb.epoch_hours()[0], 100 - 23);
+    }
+
+    #[test]
+    fn test_evaluate_quota_exceeded_claim_thresholds() {
+        let limit = 1000u64;
+        // 75% = 750, 125% = 1250
+
+        // Zone 1: < 75% (FraudulentRejection)
+        let v1 = evaluate_quota_exceeded_claim(749, limit);
+        assert_eq!(v1, QuotaPlausibilityVerdict::FraudulentRejection { malus_increment: 8 });
+        assert_eq!(v1.malus(), 8);
+
+        // Zone 2: == 75% (BoundaryCutoff)
+        let v2 = evaluate_quota_exceeded_claim(750, limit);
+        assert_eq!(v2, QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 });
+        assert_eq!(v2.malus(), 0);
+
+        // Zone 2: within [75%, 125%]
+        let v3 = evaluate_quota_exceeded_claim(1000, limit);
+        assert_eq!(v3, QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 });
+        assert_eq!(v3.malus(), 0);
+
+        // Zone 2: == 125% (BoundaryCutoff)
+        let v4 = evaluate_quota_exceeded_claim(1250, limit);
+        assert_eq!(v4, QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 });
+        assert_eq!(v4.malus(), 0);
+
+        // Zone 3: > 125% (LegitimateOverload)
+        let v5 = evaluate_quota_exceeded_claim(1251, limit);
+        assert_eq!(v5, QuotaPlausibilityVerdict::LegitimateOverload { malus_increment: 0 });
+        assert_eq!(v5.malus(), 0);
+    }
+
+    #[test]
+    fn test_network_thermometer_full_lifecycle_and_reseed() {
+        let mut therm = NetworkThermometer::new();
+        assert_eq!(therm.effective_ncb(), HARD_FLOOR_BASELINE_DAILY);
+        assert_eq!(therm.effective_read_ncb(), HARD_FLOOR_READ_BASELINE_DAILY);
+
+        // seed_from_peers & seed_read_from_peers
+        therm.seed_from_peers(1_200_000);
+        assert_eq!(therm.effective_ncb(), 1_200_000);
+
+        therm.seed_read_from_peers(80_000);
+        assert_eq!(therm.effective_read_ncb(), 80_000);
+
+        // fast_reseed_on_merge arithmetic & scaling
+        therm.fast_reseed_on_merge(2_500_000);
+        assert_eq!(therm.effective_ncb(), 2_500_000);
+        // read quota = 2_500_000 / 5 = 500_000 (which is > 50_000 floor)
+        assert_eq!(therm.effective_read_ncb(), 500_000);
+
+        // fast_reseed_read_on_merge with value below floor
+        therm.fast_reseed_read_on_merge(100_000); // 100_000 / 5 = 20_000 < 50_000 floor -> 50_000
+        assert_eq!(therm.effective_read_ncb(), HARD_FLOOR_READ_BASELINE_DAILY);
+        // fast_reseed_read_on_merge with value above floor (verifies / vs %)
+        therm.fast_reseed_read_on_merge(500_000); // 500_000 / 5 = 100_000 > 50_000 floor -> 100_000
+        assert_eq!(therm.effective_read_ncb(), 100_000);
+
+        // calculate_daily_quota & calculate_daily_read_quota arithmetic
+        // ncb = 2_500_000, k = 1.0, damper = 1.0 -> 2_500_000
+        assert_eq!(therm.calculate_daily_quota(1.0, 1.0), 2_500_000);
+        // k clamping: k > 5.0 -> clamped to 5.0
+        assert_eq!(therm.calculate_daily_quota(10.0, 1.0), 12_500_000);
+        // k clamping: k < 0.0 -> clamped to 0.0
+        assert_eq!(therm.calculate_daily_quota(-1.0, 1.0), 0);
+        // damper clamping: damper < 0.5 -> clamped to 0.5
+        assert_eq!(therm.calculate_daily_quota(1.0, 0.1), 1_250_000);
+        // damper clamping: damper > 1.0 -> clamped to 1.0
+        assert_eq!(therm.calculate_daily_quota(1.0, 2.0), 2_500_000);
+
+        // calculate_daily_read_quota
+        // ncb_read = 100_000, k = 2.0, damper = 0.8 -> 100_000 * 2.0 * 0.8 = 160_000
+        assert_eq!(therm.calculate_daily_read_quota(2.0, 0.8), 160_000);
+
+        // calculate_sync_read_credits
+        assert_eq!(NetworkThermometer::calculate_sync_read_credits(0), 1);
+        assert_eq!(NetworkThermometer::calculate_sync_read_credits(1), 2);
+        assert_eq!(NetworkThermometer::calculate_sync_read_credits(10), 2);
+        assert_eq!(NetworkThermometer::calculate_sync_read_credits(11), 3);
+        assert_eq!(NetworkThermometer::calculate_sync_read_credits(20), 3);
+        assert_eq!(NetworkThermometer::calculate_sync_read_credits(21), 4);
+
+        // try_accept_lock & try_accept_read tracking and rollover
+        let node = 42u16;
+        let quota = 1000u64;
+        assert_eq!(therm.get_node_usage(node), 0);
+        assert_eq!(therm.get_node_read_usage(node), 0);
+
+        // Ingress within quota
+        assert!(therm.try_accept_lock(1, node, 600, quota));
+        assert_eq!(therm.get_node_usage(node), 600);
+
+        // Exceeding quota
+        assert!(!therm.try_accept_lock(1, node, 500, quota));
+        assert_eq!(therm.get_node_usage(node), 600);
+
+        // Read ingress within quota
+        assert!(therm.try_accept_read(1, node, 400, quota));
+        assert_eq!(therm.get_node_read_usage(node), 400);
+
+        // Read ingress exceeding quota
+        assert!(!therm.try_accept_read(1, node, 700, quota));
+        assert_eq!(therm.get_node_read_usage(node), 400);
+
+        // Epoch day rollover (day 2) resets usages
+        assert!(therm.try_accept_lock(2, node, 300, quota));
+        assert_eq!(therm.get_node_usage(node), 300);
+        assert_eq!(therm.get_node_read_usage(node), 0);
+
+        // record_daily_median & record_daily_read_median
+        therm.record_daily_median(3_000_000);
+        therm.record_daily_read_median(600_000);
+
+        // hourly_buffer, hourly_buffer_mut, record_hourly_median, rolling_24h_average
+        therm.record_hourly_median(10, 1000);
+        assert_eq!(therm.hourly_buffer().count(), 1);
+        assert_eq!(therm.rolling_24h_average(), 1000);
+
+        therm.hourly_buffer_mut().record_hourly_median(11, 2000);
+        assert_eq!(therm.rolling_24h_average(), 1500);
+
+        let default_therm = NetworkThermometer::default();
+        assert_eq!(default_therm.effective_ncb(), HARD_FLOOR_BASELINE_DAILY);
     }
 }

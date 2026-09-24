@@ -1,5 +1,7 @@
 # Rust / Cargo build artifacts
 /target
+mutants.out/
+mutants.out.old/
 
 # Node Identity & Private Keys (CRITICAL: Never commit node identities!)
 node_key.bin

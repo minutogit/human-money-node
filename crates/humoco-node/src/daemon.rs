@@ -889,6 +889,6 @@ mod tests {
         cancel_token.cancel();
 
         let result = handle.await.expect("task join");
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(())), "daemon run must be Ok, got {:?}", result);
     }
 }

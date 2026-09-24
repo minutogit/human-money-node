@@ -270,7 +270,7 @@ proptest! {
         let rec = LockRecord::new(parent, receiver, nonce, now, valid_until);
         let mut idx = RamIndex::new();
         let r1 = idx.try_insert(rec.clone(), now, root_valid);
-        prop_assert!(r1.is_ok());
+        prop_assert_eq!(r1, Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew));
         let len_after_first = idx.len();
         // second insert identical => IdempotentReplay, len unchanged
         let r2 = idx.try_insert(rec.clone(), now, root_valid);

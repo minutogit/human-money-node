@@ -48,11 +48,18 @@ async fn test_anti_framing_split_brain_collision_does_not_ban_signers() {
     );
     lock_b.signers.insert(victim_node_id_u16);
 
-    // Ingress colliding lock
+    // Ingress colliding lock — deterministic min(H_canon) decides WinnerA/B, never panic
     let res_b = engine
         .ingress_lock_with_origin(lock_b, SimTime(100), SimTime(2_000_000), IngressOrigin::PartitionSync)
         .await;
-    assert!(res_b.is_ok() || res_b.is_err());
+    assert!(
+        matches!(
+            res_b,
+            Ok(IngressVerdictLow::AcceptedNew) | Err(IngressVerdictLow::RejectedCollision)
+        ),
+        "collision must be deterministic WinnerA/B via min(H_canon), got {:?}",
+        res_b
+    );
 
     // CRITICAL ANTI-FRAMING CHECK: Victim MUST NOT be banned!
     assert!(

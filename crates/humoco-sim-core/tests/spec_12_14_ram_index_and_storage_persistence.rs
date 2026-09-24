@@ -19,7 +19,7 @@ fn test_inv1201_hot_path_ram_latency_first_seen() {
     let start = Instant::now();
     let r1 = idx.try_insert(rec1.clone(), now, root_valid);
     let elapsed = start.elapsed();
-    assert!(r1.is_ok(), "first-seen must be accepted");
+    assert_eq!(r1.unwrap(), humoco_sim_core::storage::IngressVerdictLow::AcceptedNew, "first-seen must be accepted");
     // Latency check: single operation <1ms (in test environment <5ms allowed due to CI)
     assert!(elapsed.as_millis() < 5, "First-Seen must be <1ms, was {:?}", elapsed);
 
@@ -84,7 +84,7 @@ fn test_inv1202_ingress_time_window() {
 
     let rec_ok = LockRecord::new(parent, make_receiver(0x02), b"ok".to_vec(), now, SimTime(now.0 + 40_000));
     let res2 = idx.try_insert(rec_ok, now, root_valid);
-    assert!(res2.is_ok());
+    assert_eq!(res2.unwrap(), humoco_sim_core::storage::IngressVerdictLow::AcceptedNew);
 
     // Second lock with same parent but future window would be rejected anyway, but collision logic also
     let root_small = SimTime(now.0 + 35_000);
@@ -128,7 +128,7 @@ fn test_inv1203_zero_cost_ttl_eviction_after_grace() {
     let rec_new = LockRecord::new(parent1, make_receiver(0xEE), b"new".to_vec(), after_grace, SimTime(after_grace.0+40_000));
     let new_root = SimTime(after_grace.0 + 100_000);
     let r = idx.try_insert(rec_new, after_grace, new_root);
-    assert!(r.is_ok(), "after TTL eviction same parent can be reused");
+    assert_eq!(r.unwrap(), humoco_sim_core::storage::IngressVerdictLow::AcceptedNew, "after TTL eviction same parent can be reused");
 }
 
 // INV-1401: Dual-Tier Safety & Replay (WAL / Persistenz-Streaming & vollständige Crash-Recovery)

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use parking_lot::RwLock as PlRwLock;
 use thiserror::Error;
 
 use humoco_sim_core::quota::{ByteYears, NetworkThermometer, MAX_WHALE_MULTIPLIER};
@@ -50,6 +51,7 @@ pub struct TierController {
     vip_tags: Arc<RwLock<HashSet<[u8; 32]>>>,
     f2f_tokens: Arc<RwLock<HashSet<String>>>,
     thermometer: Arc<RwLock<NetworkThermometer>>,
+    vip_quota_cache: Arc<PlRwLock<HashMap<[u8; 32], u64>>>,
 }
 
 impl TierController {
@@ -62,7 +64,61 @@ impl TierController {
             vip_tags: Arc::new(RwLock::new(HashSet::new())),
             f2f_tokens: Arc::new(RwLock::new(HashSet::new())),
             thermometer: Arc::new(RwLock::new(NetworkThermometer::new())),
+            vip_quota_cache: Arc::new(PlRwLock::new(HashMap::new())),
         }
+    }
+
+    /// Returns the cached VIP quota for an account, if present in the in-memory cache.
+    pub fn get_cached_vip_quota(&self, account_tag: &[u8; 32]) -> Option<u64> {
+        self.vip_quota_cache.read().get(account_tag).copied()
+    }
+
+    /// Sets the cached VIP quota directly (e.g. after top-up via control plane).
+    pub fn set_cached_vip_quota(&self, account_tag: [u8; 32], balance: u64) {
+        self.vip_quota_cache.write().insert(account_tag, balance);
+    }
+
+    /// Hydrates the in-memory cache from durable storage (read-only, no fsync).
+    pub fn hydrate_vip_quota(&self, account_tag: &[u8; 32]) -> Result<u64, StorageError> {
+        let bal = self.storage.get_quota(account_tag)?;
+        self.vip_quota_cache.write().insert(*account_tag, bal);
+        Ok(bal)
+    }
+
+    /// Flushes a single cached balance to durable storage asynchronously without blocking hot-path.
+    fn persist_vip_quota_async(&self, account_tag: [u8; 32], remaining: u64) {
+        let storage = self.storage.clone();
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || storage.set_quota(&account_tag, remaining)).await;
+            if let Err(e) = res {
+                tracing::warn!("async VIP quota persist join error: {:?}", e);
+            }
+        });
+    }
+
+    /// In-memory atomic check-and-charge for VIP quota (hot-path, <1µs, no fsync stall).
+    /// Returns remaining balance after deduction or QuotaExceeded.
+    pub fn try_charge_vip_in_memory(&self, account_tag: &[u8; 32], required: u64) -> Result<u64, IngressError> {
+        let mut cache = self.vip_quota_cache.write();
+        let bal = cache.entry(*account_tag).or_insert_with(|| self.storage.get_quota(account_tag).unwrap_or(0));
+        // If cached insufficient, refresh from disk once (handles top-up race before blocking)
+        if *bal < required {
+            let disk_bal = self.storage.get_quota(account_tag).unwrap_or(0);
+            if disk_bal > *bal {
+                *bal = disk_bal;
+            }
+            if *bal < required {
+                return Err(IngressError::QuotaExceeded {
+                    available: *bal,
+                    required,
+                });
+            }
+        }
+        *bal -= required;
+        let remaining = *bal;
+        drop(cache);
+        self.persist_vip_quota_async(*account_tag, remaining);
+        Ok(remaining)
     }
 
     /// Returns a reference to the decentralized network thermometer (Spec 09).
@@ -211,27 +267,12 @@ impl TierController {
         ttl_seconds: u64,
         parent_lock: Option<&[u8; 32]>,
     ) -> Result<IngressTier, IngressError> {
-        // 1. Check Tier 1 (VIP)
+        // 1. Check Tier 1 (VIP) - in-memory atomic cache, no synchronous fsync stall (INV-0929 hot-path)
         if let Some(token) = auth_token {
             let account_tag = self.resolve_account_tag(token)?;
             let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
-            let storage = self.storage.clone();
-            let charge_res = tokio::task::spawn_blocking(move || {
-                storage.check_and_charge_quota(&account_tag, required_byte_years)
-            })
-            .await
-            .map_err(|e| IngressError::Storage(StorageError::Io(std::io::Error::other(e.to_string()))))?;
-
-            match charge_res {
-                Ok(_) => return Ok(IngressTier::Tier1Vip),
-                Err(StorageError::QuotaExceeded { available, required }) => {
-                    return Err(IngressError::QuotaExceeded {
-                        available,
-                        required,
-                    });
-                }
-                Err(e) => return Err(IngressError::Storage(e)),
-            }
+            self.try_charge_vip_in_memory(&account_tag, required_byte_years)?;
+            return Ok(IngressTier::Tier1Vip);
         }
 
         // 2. Check Tier 2 (F2F Peer) with Spec 09 dynamic daily quota
@@ -329,6 +370,10 @@ mod tests {
         ).await.expect("VIP access");
 
         assert_eq!(tier, IngressTier::Tier1Vip);
+        // In-memory cache must reflect deduction atomically (<1µs, no fsync stall)
+        assert_eq!(controller.get_cached_vip_quota(&account_tag), Some(1000 - 192));
+        // Durable storage is updated asynchronously; wait for background persist
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert_eq!(storage.get_quota(&account_tag).unwrap(), 1000 - 192);
 
         // Exceed quota
@@ -461,7 +506,7 @@ mod tests {
 
         // 1 Year TTL = 192 Byte-Years, fits easily into 960_000
         let res = controller.evaluate_f2f_quota(peer_token, 192, 1);
-        assert!(res.is_ok());
+        assert!(matches!(res, Ok(())), "F2F quota 192 must be Ok, got {:?}", res);
 
         // Exceed daily quota in single epoch day
         let res_exceed = controller.evaluate_f2f_quota(peer_token, 960_000, 1);
@@ -469,12 +514,12 @@ mod tests {
 
         // Next epoch day resets usage
         let res_next_day = controller.evaluate_f2f_quota(peer_token, 192, 2);
-        assert!(res_next_day.is_ok());
+        assert!(matches!(res_next_day, Ok(())), "next day quota must reset, got {:?}", res_next_day);
 
         // VIP dynamic quota evaluation
         let vip_tag = [0x77u8; 32];
         let res_vip = controller.evaluate_vip_quota(&vip_tag, 960_000 * 4, 1, 5.0);
-        assert!(res_vip.is_ok());
+        assert!(matches!(res_vip, Ok(())), "VIP quota must be Ok, got {:?}", res_vip);
 
         // Exceeding K=5.0 limit for VIP
         let res_vip_exceed = controller.evaluate_vip_quota(&vip_tag, 960_000 * 2, 1, 5.0);

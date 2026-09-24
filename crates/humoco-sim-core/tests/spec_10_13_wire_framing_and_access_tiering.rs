@@ -54,9 +54,9 @@ fn test_inv1001_144_byte_binary_layout_and_32b_wireheader() {
     assert!(matches!(parse_wire_header(&write_hdr, 1, true), Err(humoco_sim_core::wire::WireError::ZeroRttForbiddenForWrites)));
     // 0-RTT allowed for reads
     let read_hdr = WireHeader::new(MsgType::StatusQuery as u16, 2, 1, 0, 0).to_bytes();
-    assert!(parse_wire_header(&read_hdr, 2, true).is_ok());
+    assert_eq!(parse_wire_header(&read_hdr, 2, true).unwrap().msg_type, MsgType::StatusQuery as u16);
     let active_sync = WireHeader::new(MsgType::ActiveSyncRequest as u16, 3, 1, 0, 0).to_bytes();
-    assert!(parse_wire_header(&active_sync, 3, true).is_ok());
+    assert_eq!(parse_wire_header(&active_sync, 3, true).unwrap().msg_type, MsgType::ActiveSyncRequest as u16);
 }
 
 // INV-1301: 3-Tier Access Control (Tier1 VIP, Tier2 F2F Friend, Tier3 Light/Public mit Argon2id/PoW)

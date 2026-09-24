@@ -194,8 +194,7 @@ fn test_inv0605_offline_pending_grace_reconnect_idempotent() {
     let results = client.reconnect_and_submit(&mut server, SimTime(500));
     assert_eq!(results.len(), 3);
     for r in &results {
-        assert!(r.is_ok());
-        assert!(matches!(r.as_ref().unwrap(), IngressVerdict::NewLock { .. }));
+        assert!(matches!(r.as_ref().unwrap(), IngressVerdict::NewLock { .. }), "offline grace submit must be NewLock, got {:?}", r);
     }
     assert_eq!(server.ram.len(), 3, "all 3 offline locks now on server");
     assert_eq!(client.pending_offline.len(), 0, "pending cleared after reconnect");
@@ -342,8 +341,8 @@ fn test_inv0605_zero_trust_fake_server_identity_and_statistical_rank_rejection()
         });
     }
     let res_ok = verify_zero_trust_quorum(&lock_id, SHARD_ID, &honest_signers, &consensus_filter, 1.5);
-    assert!(
-        res_ok.is_ok(),
+    assert_eq!(
+        res_ok, Ok(()),
         "Echtes Quorum der Top-Knoten muss in < 1 ms verifiziert werden: {:?}",
         res_ok
     );
@@ -370,8 +369,8 @@ fn test_inv0605_zero_trust_fake_server_identity_and_statistical_rank_rejection()
     }
     assert_eq!(emergency_signers.len(), 14);
     let res_emergency = verify_zero_trust_quorum(&lock_id, SHARD_ID, &emergency_signers, &consensus_filter, 1.5);
-    assert!(
-        res_emergency.is_ok(),
+    assert_eq!(
+        res_emergency, Ok(()),
         "Notfall-Quorum mit Nachrückern bis Rang 35 muss dank Top-5-Anker & Median toleriert werden: {:?}",
         res_emergency
     );

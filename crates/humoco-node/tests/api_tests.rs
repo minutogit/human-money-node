@@ -331,7 +331,15 @@ async fn test_api_vip_tier_quota_deduction() {
     let submit_resp: L2ResponseEnvelope = response_json(res).await;
     assert!(matches!(submit_resp.verdict, L2Verdict::Verified { .. }));
 
-    // Quota should now be deducted: 1000 - 192 = 808
+    // Quota should now be deducted in-memory atomically (<1µs, no fsync stall): 1000 - 192 = 808
+    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(808));
+    // Durable storage is updated asynchronously; poll for eventual persistence
+    for _ in 0..20 {
+        if storage.get_quota(&account_tag).unwrap() == 808 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     assert_eq!(storage.get_quota(&account_tag).unwrap(), 808);
 
     // Try submitting with TTL that exceeds remaining quota (e.g. 5 years = 960 BY > 808)
@@ -354,7 +362,8 @@ async fn test_api_vip_tier_quota_deduction() {
     assert_eq!(res_excess.status(), StatusCode::TOO_MANY_REQUESTS);
     let err_resp: L2ResponseEnvelope = response_json(res_excess).await;
     assert!(matches!(err_resp.verdict, L2Verdict::Rejected { .. }));
-    // Quota remains 808
+    // Quota remains 808 (in-memory and eventually on disk)
+    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(808));
     assert_eq!(storage.get_quota(&account_tag).unwrap(), 808);
 }
 

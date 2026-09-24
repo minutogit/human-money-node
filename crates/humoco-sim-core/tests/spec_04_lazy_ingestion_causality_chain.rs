@@ -67,7 +67,7 @@ fn test_lazy_ingestion_valid_3_hop_chain_accepted_in_ram() {
     // Use stateless for performance <2ms without side effect first
     let res = verify_causality_proof_chain_stateless(&chain, &allowed);
     let elapsed = start.elapsed();
-    assert!(res.is_ok(), "Valid 3-hop chain must be accepted, got {:?}", res);
+    assert_eq!(res, Ok(()), "Valid 3-hop chain must be accepted, got {:?}", res);
     assert!(
         elapsed.as_millis() < 2 || elapsed.as_micros() < 5000,
         "Validation must be <2ms (or at least <5ms), took {:?}",
@@ -76,7 +76,7 @@ fn test_lazy_ingestion_valid_3_hop_chain_accepted_in_ram() {
     // Now stateful verification also succeeds and would commit to RAM (local seen set)
     let mut seen = HashSet::new();
     let res2 = verify_causality_proof_chain(&chain, &allowed, &mut seen);
-    assert!(res2.is_ok(), "Stateful verification must also accept");
+    assert_eq!(res2, Ok(()), "Stateful verification must also accept");
     assert!(seen.contains(&chain.target_lock.parent_lock));
     // Simulate RAM commit: insertion into map
     let mut ram: std::collections::BTreeMap<[u8; 32], LockRecord> = std::collections::BTreeMap::new();
@@ -126,7 +126,7 @@ fn test_lazy_ingestion_first_seen_collision_detection() {
     let mut seen = HashSet::new();
     // First insertion should succeed
     let res1 = verify_causality_proof_chain(&chain, &allowed, &mut seen);
-    assert!(res1.is_ok(), "First chain insertion must succeed: {:?}", res1);
+    assert_eq!(res1, Ok(()), "First chain insertion must succeed: {:?}", res1);
 
     // Build second chain with same parent_lock (same genesis chain) -> collision
     let h3 = make_hash(0x33);
@@ -208,15 +208,16 @@ fn test_causality_proofchain_hop_limit_boundary() {
     let (chain_1024, allowed_1024) = build_chain_with_n_hops(1024);
     assert_eq!(chain_1024.hops.len(), 1024);
     let res_1024 = verify_causality_proof_chain_stateless(&chain_1024, &allowed_1024);
-    assert!(
-        res_1024.is_ok(),
+    assert_eq!(
+        res_1024,
+        Ok(()),
         "CausalityProofChain with 1024 hops must be accepted, got {:?}",
         res_1024
     );
     // Also stateful variant
     let mut seen = HashSet::new();
     let res_1024_stateful = verify_causality_proof_chain(&chain_1024, &allowed_1024, &mut seen);
-    assert!(res_1024_stateful.is_ok(), "Stateful verification with 1024 hops must be Ok, got {:?}", res_1024_stateful);
+    assert_eq!(res_1024_stateful, Ok(()), "Stateful verification with 1024 hops must be Ok, got {:?}", res_1024_stateful);
 
     // 1025 hops must be rejected with BrokenChainLink { hop_index: 1025 }
     let (chain_1025, allowed_1025) = build_chain_with_n_hops(1025);

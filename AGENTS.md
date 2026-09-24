@@ -169,6 +169,17 @@ Before writing new code for a new feature or requirement, apply this test:
    * Consensus core (`humoco-node`) = QUIC + RAM index + redb + ingress.
    * Administration, billing & dashboards attach externally via the local control socket (`/tmp/humoco.sock`).
 
+### 🚫 Explicit Negative Guard-Rails (Anti-Hallucination Filter):
+1. **Zero Financial Deposits / No Staking on Layer 2:**
+   * Layer 2 knows no monetary stakes, collateral deposits, or financial liability/bonding for friends or endorsed peers.
+   * Equivocation penalties operate purely cryptographically: permanent `NodePubKey` ban, Argon2d shard-ticket invalidation, branch voiding via $\min(H_{\text{canon}})$, and complete Web-of-Trust severance.
+2. **Safe Standard Library (`from_le_bytes`) over Unsafe Crates:**
+   * Wire header & binary parsing strictly uses safe standard library methods (`from_le_bytes`, `to_le_bytes`, `try_from`, `checked_*`).
+   * No external transmutation crates (`bytemuck`, `zerocopy`) are needed; `#![forbid(unsafe_code)]` is strictly preserved.
+3. **Non-Authoritative Telemetry (`INV-1701`):**
+   * Telemetry, latency measurements, and health probes are purely diagnostic for human operators and dashboards.
+   * No telemetry metric or latency value may ever trigger an automated peer ban or network slashing (`triggers_auto_ban() == false`).
+
 ---
 
 ## 🚨 4. The 10 Iron-Clad Programming Rules

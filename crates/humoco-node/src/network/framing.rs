@@ -83,6 +83,16 @@ impl SyncPayload {
     }
 }
 
+/// Safely converts a payload `usize` length to `u32` for wire framing, preventing truncation.
+pub fn checked_payload_len(len: usize) -> Result<u32, NodeError> {
+    u32::try_from(len).map_err(|_| {
+        NodeError::Network(format!(
+            "Payload length {} exceeds maximum u32 wire framing limit",
+            len
+        ))
+    })
+}
+
 /// Returns the maximum allowed payload length based on the message type (INV: DoS / OOM protection).
 pub fn max_payload_len_for_msg_type(msg_type: u16) -> usize {
     if msg_type == MsgType::ActiveSyncRequest as u16
@@ -268,5 +278,17 @@ mod tests {
         let res = read_frame_with_timeout(&mut client_stream, timeout_dur).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Read timeout exceeded"));
+    }
+
+    #[test]
+    fn test_checked_payload_len() {
+        assert_eq!(checked_payload_len(0).unwrap(), 0);
+        assert_eq!(checked_payload_len(1024).unwrap(), 1024);
+        assert_eq!(checked_payload_len(u32::MAX as usize).unwrap(), u32::MAX);
+        #[cfg(target_pointer_width = "64")]
+        {
+            let oversized = (u32::MAX as usize) + 1;
+            assert!(checked_payload_len(oversized).is_err());
+        }
     }
 }

@@ -15,7 +15,7 @@ pub const CONNECTION_CONCURRENCY_LIMIT: usize = 256;
 
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
-use crate::network::framing::{read_frame, write_frame};
+use crate::network::framing::{checked_payload_len, read_frame, write_frame};
 use crate::network::manager::PeerManager;
 use crate::network::tls::{
     build_quinn_client_config_with_identity, build_quinn_server_config,
@@ -109,9 +109,15 @@ pub fn verify_equivocation_first_party(
             1,
             &att.lock_id,
         );
+
+        #[cfg(any(test, debug_assertions))]
+        let sim_test_fallback = humoco_sim_core::crypto::verify_attestation(att);
+        #[cfg(not(any(test, debug_assertions)))]
+        let sim_test_fallback = false;
+
         vk.verify_strict(&d_prov, &sig).is_ok()
             || vk.verify_strict(&d_final, &sig).is_ok()
-            || humoco_sim_core::crypto::verify_attestation(att)
+            || sim_test_fallback
     };
 
     verify_att(&a) && verify_att(&b)
@@ -265,12 +271,13 @@ impl RequestHandler for NodeRequestHandler {
                                         now_ms,
                                     );
                                     let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                                    let payload_len = checked_payload_len(resp_bytes.len())?;
                                     let resp_header = WireHeader::new(
                                         MsgType::LockVerifyResponse as u16,
                                         header.session_seq + 1,
                                         header.epoch_id,
                                         0,
-                                        resp_bytes.len() as u32,
+                                        payload_len,
                                     );
                                     return Ok((resp_header, resp_bytes));
                                 }
@@ -325,12 +332,13 @@ impl RequestHandler for NodeRequestHandler {
                                         now_ms,
                                     );
                                     let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                                    let payload_len = checked_payload_len(resp_bytes.len())?;
                                     let resp_header = WireHeader::new(
                                         MsgType::LockVerifyResponse as u16,
                                         header.session_seq + 1,
                                         header.epoch_id,
                                         0,
-                                        resp_bytes.len() as u32,
+                                        payload_len,
                                     );
                                     return Ok((resp_header, resp_bytes));
                                 }
@@ -359,12 +367,13 @@ impl RequestHandler for NodeRequestHandler {
                                 now_ms,
                             );
                             let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                            let payload_len = checked_payload_len(resp_bytes.len())?;
                             let resp_header = WireHeader::new(
                                 MsgType::LockVerifyResponse as u16,
                                 header.session_seq + 1,
                                 header.epoch_id,
                                 0,
-                                resp_bytes.len() as u32,
+                                payload_len,
                             );
                             return Ok((resp_header, resp_bytes));
                         }
@@ -412,12 +421,13 @@ impl RequestHandler for NodeRequestHandler {
                             now_ms,
                         );
                         let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                        let payload_len = checked_payload_len(resp_bytes.len())?;
                         let resp_header = WireHeader::new(
                             MsgType::StatusResponse as u16,
                             header.session_seq + 1,
                             header.epoch_id,
                             0,
-                            resp_bytes.len() as u32,
+                            payload_len,
                         );
                         return Ok((resp_header, resp_bytes));
                     }
@@ -480,12 +490,13 @@ impl RequestHandler for NodeRequestHandler {
                 );
                 let lock_count = locks.len() as u64;
                 let resp_bytes = bincode::serialize(&(digest, lock_count)).unwrap_or_default();
+                let payload_len = checked_payload_len(resp_bytes.len())?;
                 let resp_header = WireHeader::new(
                     MsgType::ShardDigestResponse as u16,
                     header.session_seq + 1,
                     header.epoch_id,
                     0,
-                    resp_bytes.len() as u32,
+                    payload_len,
                 );
                 return Ok((resp_header, resp_bytes));
             } else if msg_type == MsgType::ActiveSyncRequest as u16 {
@@ -504,7 +515,8 @@ impl RequestHandler for NodeRequestHandler {
                 }
                 let sync_payload = crate::network::framing::SyncPayload::new(locks, hmc_locks);
                 let serialized = bincode::serialize(&sync_payload).unwrap_or_default();
-                let resp_header = WireHeader::new(MsgType::ActiveSyncDone as u16, header.session_seq + 1, header.epoch_id, 0, serialized.len() as u32);
+                let payload_len = checked_payload_len(serialized.len())?;
+                let resp_header = WireHeader::new(MsgType::ActiveSyncDone as u16, header.session_seq + 1, header.epoch_id, 0, payload_len);
                 return Ok((resp_header, serialized));
             }
             let default_h = DefaultRequestHandler;
@@ -806,7 +818,8 @@ impl QuicTransport {
         };
         let payload = bincode::serialize(&hb)
             .map_err(|e| NodeError::Network(format!("heartbeat serialize: {}", e)))?;
-        let header = WireHeader::new(MsgType::Heartbeat as u16, seq, 0, 0, payload.len() as u32);
+        let payload_len = checked_payload_len(payload.len())?;
+        let header = WireHeader::new(MsgType::Heartbeat as u16, seq, 0, 0, payload_len);
         let conn = self.connect_peer_unchecked(addr).await?;
         self.send_unidirectional(&conn, &header, &payload).await
     }
@@ -819,7 +832,8 @@ impl QuicTransport {
         seq: u64,
     ) -> Result<([u8; 32], u64), NodeError> {
         let payload = shard_id.to_le_bytes().to_vec();
-        let header = WireHeader::new(MsgType::ShardDigestRequest as u16, seq, 0, 0, payload.len() as u32);
+        let payload_len = checked_payload_len(payload.len())?;
+        let header = WireHeader::new(MsgType::ShardDigestRequest as u16, seq, 0, 0, payload_len);
         let (resp_hdr, resp_payload) = self.send_request(conn, &header, &payload).await?;
         if resp_hdr.msg_type != MsgType::ShardDigestResponse as u16 {
             return Err(NodeError::Network(format!(
@@ -985,12 +999,13 @@ impl QuicTransport {
                                                 "Rejected direct RPC from unauthorized peer (neither F2F nor known via gossip)"
                                             );
                                             let resp_payload = b"unauthorized";
+                                            let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
                                             let resp_header = WireHeader::new(
                                                 MsgType::StatusResponse as u16,
                                                 header.session_seq + 1,
                                                 header.epoch_id,
                                                 0,
-                                                resp_payload.len() as u32,
+                                                payload_len,
                                             );
                                             if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
                                                 debug!(error = %e, "Failed to write unauthorized response frame");

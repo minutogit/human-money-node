@@ -81,6 +81,16 @@ impl ControlServer {
             }
         })?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(&self.socket_path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(&self.socket_path, perms);
+            }
+        }
+
         info!(
             socket_path = %self.socket_path.display(),
             "Control RPC Unix domain socket server started"
@@ -335,29 +345,43 @@ impl ControlServer {
                     }
                 }
                 ControlRequest::CreateBackup { destination_path } => {
-                    // Allow pending async flush batch to commit for maximum snapshot consistency
-                    for _ in 0..10 {
-                        if state.engine.flush_sender_len() == 0 {
-                            tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
-                            break;
+                    let dest_trimmed = destination_path.trim();
+                    if dest_trimmed.is_empty() {
+                        ControlResponse::Error {
+                            message: "Destination path cannot be empty".to_string(),
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-                    }
-
-                    let dest_path = PathBuf::from(&destination_path);
-                    let target_path = if dest_path.is_dir() {
-                        dest_path.join("humoco_backup.redb")
+                    } else if std::path::Path::new(dest_trimmed)
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    {
+                        ControlResponse::Error {
+                            message: "Invalid destination path: Path traversal ('..') is strictly forbidden".to_string(),
+                        }
                     } else {
-                        dest_path
-                    };
-                    match state.storage.create_backup(&target_path) {
-                        Ok(locks_count) => ControlResponse::BackupCreated {
-                            path: target_path.display().to_string(),
-                            locks_count,
-                        },
-                        Err(err) => ControlResponse::Error {
-                            message: format!("Failed to create backup: {}", err),
-                        },
+                        // Allow pending async flush batch to commit for maximum snapshot consistency
+                        for _ in 0..10 {
+                            if state.engine.flush_sender_len() == 0 {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+                                break;
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                        }
+
+                        let dest_path = PathBuf::from(dest_trimmed);
+                        let target_path = if dest_path.is_dir() {
+                            dest_path.join("humoco_backup.redb")
+                        } else {
+                            dest_path
+                        };
+                        match state.storage.create_backup(&target_path) {
+                            Ok(locks_count) => ControlResponse::BackupCreated {
+                                path: target_path.display().to_string(),
+                                locks_count,
+                            },
+                            Err(err) => ControlResponse::Error {
+                                message: format!("Failed to create backup: {}", err),
+                            },
+                        }
                     }
                 }
             };

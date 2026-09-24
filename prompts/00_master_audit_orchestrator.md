@@ -73,8 +73,11 @@ Evaluate the collective findings of the 3 parallel runs:
 ### Step 5: Critical Invariant Filter, Synthesis & Action Plan
 
 > ⚠️ **CRITICAL AUDIT INVARIANT – DO NOT ACCEPT SUB-WORKER FINDINGS BLINDLY:**
-> - Filter all AI findings strictly against the **3-Stage KISS Extension Filter** and the **10 Iron-Clad Rules** in `AGENTS.md`.
-> - **Reject** suggestions that introduce unnecessary background polling (e.g. continuous random storage pings), break `INV-1701` (e.g. coupling client ingress to peer telemetry, risking self-induced PoS DoS), or enforce unrealistic latency SLAs (<500ms for global P2P).
+> - Filter all AI findings strictly against the **3-Stage KISS Extension Filter**, the **Explicit Negative Guard-Rails**, and the **10 Iron-Clad Rules** in `AGENTS.md`.
+> - **Negative Guard-Rail 1 (Zero Financial Deposits / No Staking):** Reject suggestions introducing staking, collateral deposits, or financial liability/bonding for peers. Slashing on L2 is purely cryptographic (NodePubKey ban, ticket loss, WoT severance).
+> - **Negative Guard-Rail 2 (Safe Stdlib over Unsafe Crates):** Reject suggestions adding `bytemuck` or `zerocopy`. Standard library byte conversions (`from_le_bytes`, `to_le_bytes`, `try_from`, `checked_*`) maintain `#![forbid(unsafe_code)]` with zero overhead.
+> - **Negative Guard-Rail 3 (Non-Authoritative Telemetry / INV-1701):** Reject suggestions coupling peer telemetry/latencies to automated node bans or client ingress routing (`triggers_auto_ban() == false`).
+> - **Reject** suggestions that introduce unnecessary background polling (e.g. continuous random storage pings) or enforce unrealistic latency SLAs (<500ms for global P2P).
 > - Prioritize mathematical invariants, subtraction of accidental complexity, and clean compiler proofs.
 
 Consolidate all validated findings into an executive summary:

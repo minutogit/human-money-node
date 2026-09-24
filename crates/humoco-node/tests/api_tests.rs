@@ -1349,12 +1349,11 @@ async fn test_api_pow_adaptive_backpressure_and_stateless_hashcash() {
 
     let now = test_now_ms();
     let parent_hex = "55".repeat(32);
-    let parent_bytes = [0x55u8; 32];
     let sender_key = SigningKey::from_bytes(&[13u8; 32]);
     let req_payload = make_test_hmc_genesis(&parent_hex, now + 600_000, &sender_key);
 
     // 1. Submit with insufficient difficulty (nonce = 0 doesn't satisfy difficulty 8)
-    let (challenge, difficulty, _) = pow_engine.generate_challenge_for_parent(&parent_bytes);
+    let (challenge, difficulty, _) = pow_engine.generate_challenge();
 
     let res = app
         .clone()

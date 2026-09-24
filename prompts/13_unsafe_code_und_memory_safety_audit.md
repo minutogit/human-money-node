@@ -25,9 +25,9 @@ Analyze the codebase specifically for the following 5 hazard zones:
      - Are there aliasing violations (`&mut` overlapping with `&`)?
 
 2. 🛡️ Safe alternatives & zero-copy:
-   - Can the `unsafe` block be eliminated entirely?
-   - Can safe casting via `bytemuck`, `zerocopy`, or safe slice decoding (`from_le_bytes`, `to_le_bytes`) be used instead without losing performance?
-   - Why was `unsafe` needed at this location in the first place?
+   - Prefer safe slice decoding via std methods (`from_le_bytes`, `to_le_bytes`, `try_from`, `checked_*`).
+   - Do NOT introduce external transmutation crates (`bytemuck`, `zerocopy`); uphold `#![forbid(unsafe_code)]` in the production daemon (`humoco-node`).
+   - Why was `unsafe` needed at any location in the first place?
 
 3. 💥 Integer overflows & truncation:
    - Search for all arithmetic operations (`+`, `-`, `*`, `as u32`, `as u16`).
@@ -41,6 +41,11 @@ Analyze the codebase specifically for the following 5 hazard zones:
 5. 🛠️ Concrete hardening measures:
    - For each `unsafe` block, document:
      A) Proof of whether it is 100% UB-free.
-     B) A proposal for a 100% safe alternative.
+     B) A proposal for a 100% safe alternative using stdlib primitives.
      C) Test instructions for `cargo miri test`.
+
+### 🚫 Explicit Negative Guard-Rails for This Audit:
+1. **Zero Financial Deposits / No Staking on Layer 2:** Reject any suggestions requiring monetary deposits or staking slashing.
+2. **Safe Standard Library (`from_le_bytes`) over Unsafe Crates:** Reject suggestions adding `bytemuck` or `zerocopy`. Standard library byte conversions with `#![forbid(unsafe_code)]` are mandatory.
+3. **Non-Authoritative Telemetry (`INV-1701`):** Telemetry metrics are purely diagnostic and never trigger automated bans.
 ```

@@ -29,13 +29,20 @@ Analyze the code for the following 5 censorship and sabotage scenarios:
 3. 👥 WoT Infiltration & Endorsement Bomb (Spec 07):
    - An attacker operates an honest node for 6 months, earns the trust of neighboring friends, and collects endorsements.
    - After 6 months, the attacker vouches for 30 Sybil nodes and flips them all to hostile at once.
-   - Check: Does F2F median protection apply (Spec 07)? Are sponsors held liable when their Sybils are slashed (liable endorsements on L1)?
+   - Check: Does F2F median protection apply (Spec 07)?
+   - Guard-Rail: Recall that on Layer 2 there are **Zero Financial Deposits / No Staking** and no monetary bonding liability for friends; slashing on L2 operates purely cryptographically (permanent NodePubKey ban, Argon2d ticket loss, voiding via min(H_canon), and complete WoT severance).
 
 4. 🕳️ Grey-Hole / Selective Dropping (Stealth Sabotage):
    - A saboteur does not drop all packets (which would trigger an immediate ban) but drops exactly 15% of data streams and delays lock attestations by 800 ms to break the $< 5\,\text{ms}$ PoS guarantee.
    - Check: How does the PeerManager respond (Spec 15)? Does it switch to `Degrading` on repeated delays and replace the node in the active quorum with rank 21?
+   - Guard-Rail: **Non-Authoritative Telemetry (INV-1701):** Telemetry and latencies are purely diagnostic for human operators; high latencies or missing pings must never trigger an automated network ban (`triggers_auto_ban() == false`).
 
 5. 🛠️ Concrete Hardening Measures:
    - Find vulnerabilities in the code where a single saboteur can harm consensus or a merchant.
    - Provide code fixes for automatic censorship detection and enforced multi-homing.
+
+### 🚫 Explicit Negative Guard-Rails for This Audit:
+1. **Zero Financial Deposits / No Staking on Layer 2:** Reject any suggestions requiring monetary deposits, stake slashing, or financial liability chains.
+2. **Safe Standard Library (`from_le_bytes`) over Unsafe Crates:** Do not propose external transmute crates (`bytemuck`, `zerocopy`); uphold `#![forbid(unsafe_code)]`.
+3. **Non-Authoritative Telemetry (`INV-1701`):** Telemetry and latency statistics never trigger automated bans.
 ```

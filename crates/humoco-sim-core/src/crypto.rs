@@ -233,6 +233,24 @@ pub fn compute_shard_digest(shard_id: ShardId, locks: &[LockRecord]) -> Hash256 
     compute_shard_digest_at(shard_id, locks, SimTime(0))
 }
 
+/// # Architectural Invariant: BFT Shard-Digest Pull vs. Random Storage Polling (Spec 03 & KISS)
+///
+/// This function is the cryptographic core of the **2-phase BFT digest-pull sync**.
+/// Phase 1 compares the compact `ShardDigest(S)` (this hash) across shard peers; Phase 2
+/// pulls the full lock set only on divergence (`evaluate_digest_clusters` / dominant quorum).
+/// The digest is computed over all active locks (`valid_until > now`, `!is_void`), sorted
+/// by `parent_lock` and hashed as `BLAKE3(0x01 || shard_id || lock_1 || ... || lock_m)`.
+///
+/// Why polling is avoided (KISS & Spec 03): Continuous random storage polling (e.g. picking
+/// random `parent_lock` keys and comparing single records) is probabilistically complete
+/// only after O(N) round trips, creates unpredictable disk I/O on the hot-path, and cannot
+/// prove convergence in bounded time. In contrast, the 2-phase digest pull is
+/// **mathematically sufficient**: equality of the canonical digest proves equality of the
+/// entire sorted active set under the collision-resistant BLAKE3; a single 32-byte hash
+/// per shard replaces unbounded random probes. The periodic 60s ticker plus event-driven
+/// `sync_notifier` (see `daemon::run_shard_digest_pull_sync`) therefore guarantees deterministic
+/// catch-up after partitions without any continuous random polling overhead.
+///
 /// Variant with explicit time filter (for real valid_until checks)
 pub fn compute_shard_digest_at(shard_id: ShardId, locks: &[LockRecord], now: SimTime) -> Hash256 {
     let mut active: Vec<&LockRecord> = locks

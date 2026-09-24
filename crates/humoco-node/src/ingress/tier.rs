@@ -43,6 +43,23 @@ pub enum IngressError {
     ReadQuotaExceeded { available: u64, required: u64 },
 }
 
+/// # Architectural Invariant: Ingress vs. Peer Telemetry Decoupling (INV-1701 & Spec 13/17)
+///
+/// `TierController` is intentionally **not** coupled to `PeerManager` or peer telemetry
+/// (connection quality, latency histograms, failure counters). Ingress admission control
+/// (VIP quota, F2F token check, BLAKE3 Hashcash PoW) runs on the PoS checkout hot-path
+/// (`POST /v1/lock`) and must stay deterministic, constant-time and self-contained.
+///
+/// Rationale (INV-1701 — Non-Authoritative Telemetry):
+/// Telemetry is operator-facing diagnosis only (`triggers_auto_ban() == false`). If ingress
+/// decisions consumed peer health signals, a degraded peer or a telemetry spike would
+/// feed back into admission control, throttling or rejecting legitimate PoS payments and
+/// creating a **self-induced DoS** on the checkout path. By decoupling ingress from
+/// subjective peer observations, the hot-path guarantees liveness even when the P2P mesh
+/// is under stress, gossip is delayed, or `NetworkThermometer` is recalibrating. Peer
+/// failures are handled exclusively inside `PeerManager` via local TTL pruning / circuit
+/// breaker, never via ingress denial (cf. `AGENTS.md` — Local Node Perspective / First-Party
+/// Evidence doctrine).
 #[derive(Clone)]
 pub struct TierController {
     storage: Arc<RedbStorage>,

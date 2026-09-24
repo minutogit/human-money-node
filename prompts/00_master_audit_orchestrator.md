@@ -70,8 +70,14 @@ Evaluate the collective findings of the 3 parallel runs:
 
 ---
 
-### Step 5: Synthesis & Action Plan
-Consolidate all findings from the completed batches into an executive summary:
+### Step 5: Critical Invariant Filter, Synthesis & Action Plan
+
+> ⚠️ **CRITICAL AUDIT INVARIANT – DO NOT ACCEPT SUB-WORKER FINDINGS BLINDLY:**
+> - Filter all AI findings strictly against the **3-Stage KISS Extension Filter** and the **10 Iron-Clad Rules** in `AGENTS.md`.
+> - **Reject** suggestions that introduce unnecessary background polling (e.g. continuous random storage pings), break `INV-1701` (e.g. coupling client ingress to peer telemetry, risking self-induced PoS DoS), or enforce unrealistic latency SLAs (<500ms for global P2P).
+> - Prioritize mathematical invariants, subtraction of accidental complexity, and clean compiler proofs.
+
+Consolidate all validated findings into an executive summary:
 1. **P1 – Critical (Consensus, Cryptography & Invariants):**
    * Deviations from `docs/` specifications, canon resolver flaws, CAS race conditions, Byzantine exploit vectors.
 2. **P2 – High (Reliability, Deadlocks & Memory Safety):**

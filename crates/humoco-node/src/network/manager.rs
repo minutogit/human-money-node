@@ -34,27 +34,28 @@ pub fn calculate_fan_out(d: usize) -> usize {
 /// - `first_seen` + `last_seen` = 24h IMMATURE threshold for newcomers
 #[derive(Clone, Debug)]
 pub struct KnownNodeInfo {
-    pub addr: SocketAddr,
+    pub(crate) addr: SocketAddr,
     /// Permanent Ed25519 identity (NodePubKey or BLAKE3(pubkey) as NodeId) — basis for F2F & TLS.
-    pub node_pubkey: [u8; 32],
+    pub(crate) node_pubkey: [u8; 32],
     /// Alias for `node_pubkey` for backward compatibility (permanent identity).
-    pub node_id: [u8; 32],
+    #[allow(dead_code)]
+    pub(crate) node_id: [u8; 32],
     /// Active HRW routing ticket (Argon2d) — sole source for HRW scoring.
-    pub hrw_routing_id: [u8; 32],
+    pub(crate) hrw_routing_id: [u8; 32],
     /// Pending new shard ticket during 24h incubation.
-    pub pending_hrw_routing_id: Option<[u8; 32]>,
+    pub(crate) pending_hrw_routing_id: Option<[u8; 32]>,
     /// Alias for pending_hrw (shorter name, for evaluator compatibility).
-    pub pending_hrw: Option<[u8; 32]>,
+    pub(crate) pending_hrw: Option<[u8; 32]>,
     /// Timestamp of ticket switch (start of incubation).
-    pub pending_since: Option<Instant>,
+    pub(crate) pending_since: Option<Instant>,
     /// Incubation deadline (pending_since + 24h) — explicit field for Spec 07.
-    pub incubated_until: Option<Instant>,
+    pub(crate) incubated_until: Option<Instant>,
     /// First seen timestamp for IMMATURE evaluation (newcomer).
-    pub first_seen: Instant,
-    pub last_seen: Instant,
-    pub min_hops: u8,
-    pub best_ingress_peer: Option<SocketAddr>,
-    pub ingress_diversity_mask: u32,
+    pub(crate) first_seen: Instant,
+    pub(crate) last_seen: Instant,
+    pub(crate) min_hops: u8,
+    pub(crate) best_ingress_peer: Option<SocketAddr>,
+    pub(crate) ingress_diversity_mask: u32,
 }
 
 impl KnownNodeInfo {

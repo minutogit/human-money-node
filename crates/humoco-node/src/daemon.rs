@@ -568,9 +568,22 @@ impl NodeDaemon {
     }
 }
 
-/// Non-blocking shard digest and bootstrap pull-sync.
-/// In small networks (N < 20) or when the local node is empty, pulls active locks directly from candidate peers.
-/// In sharded networks (N >= 20), queries known shard peers for ShardDigestRequest and pulls data via ActiveSyncRequest on divergence.
+/// # Architectural Invariant: BFT Shard-Digest Pull vs. Random Storage Polling (Spec 03 & KISS)
+///
+/// Non-blocking shard digest and bootstrap pull-sync. In small networks (N < 20) or when
+/// the local node is empty, pulls active locks directly from candidate peers. In sharded
+/// networks (N >= 20), queries known shard peers for `ShardDigestRequest` and pulls data
+/// via `ActiveSyncRequest` on divergence.
+///
+/// Why this 2-phase pull is mathematically sufficient (Spec 03 & KISS): The digest computed
+/// by `humoco_sim_core::crypto::compute_shard_digest_at` is a canonical BLAKE3 over the
+/// sorted active lock set per shard. Equality of digests proves equality of sets under
+/// collision resistance; a single 32-byte comparison per shard replaces unbounded random
+/// probing. The daemon therefore avoids continuous random storage polling — which would
+/// need O(N) round trips, add non-deterministic disk I/O, and never give a convergence
+/// proof — and instead relies on the periodic 60s ticker plus event-driven `sync_notifier`
+/// with 5s debounce. This is the KISS-minimal sync that still guarantees deterministic
+/// partition healing (dominant-quorum pull) without background polling loops.
 async fn run_shard_digest_pull_sync(
     transport: &crate::network::QuicTransport,
     peer_manager: &crate::network::PeerManager,

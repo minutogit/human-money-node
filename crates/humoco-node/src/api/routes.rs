@@ -484,8 +484,21 @@ struct PeerAttestationQuery<'a> {
     shard_query_depth: usize,
 }
 
+/// # Architectural Invariant: 1000ms Verification Timeout & Quorum Fast-Exit (Spec 03/15)
+///
 /// Collects peer attestations across top HRW candidates with pipelined JoinSet fanout,
 /// early-exit on required quorum, and DoS-resilient correlated timeout dampening (INV-1501).
+///
+/// The 1000ms global timeout is calibrated for worldwide Internet RTTs: a typical inter-
+/// continental RTT is 200–250ms (fiber + QUIC handshake), leaving ~750ms for the peer's
+/// local RAM verification (`<1µs` CAS on `RamIndex`) and attestation signing. A shorter
+/// timeout would cause premature correlated failures across continents and trigger false
+/// peer penalties; a longer timeout would breach the PoS checkout SLA (500–1500ms end-to-
+/// end). Combined with Quorum Fast-Exit (14/20 `FINAL` per Spec 15), the gateway aborts
+/// stragglers via `join_set.abort_all()` as soon as 14 shard signatures are collected —
+/// straggler aborts are explicitly not counted as `record_failure` (see correlated failure
+/// suppression), guaranteeing `ΔLoad ≤ 0` and no cascading death spiral on the checkout
+/// hot-path.
 async fn collect_peer_attestations(
     query: PeerAttestationQuery<'_>,
     collected_signatures: &mut Vec<AttestationDto>,

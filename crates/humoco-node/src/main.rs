@@ -2,6 +2,9 @@ use clap::Parser;
 use humoco_node::cli::Cli;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() {
     let env_filter = EnvFilter::try_from_default_env()

@@ -7,7 +7,11 @@
 use crate::types::NodeId;
 use std::collections::HashMap;
 
-/// Exact size of a `StoredLock` in shard RAM (144B wire + 32B canon hash + 8B TTL + 8B padding)
+/// Exact size of a `StoredLock` in shard RAM (144B wire + 32B canon hash + 8B TTL + 8B padding).
+///
+/// # Architectural Invariant (Spec 09 vs. Spec 12 Reconciliation):
+/// - `192` Bytes is the normative consensus multiplier for the Byte-Years quota formula (Spec 09:20).
+/// - Spec 12:116 refers to `≈224` Bytes as the internal in-memory footprint when including runtime hash map pointers.
 pub const STORED_LOCK_BYTES: u64 = 192;
 
 /// Standard seconds per calendar year (365 days)

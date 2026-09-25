@@ -792,9 +792,11 @@ impl FirstSeenPacer {
     }
 }
 
-/// Computes the HRW score (Highest Random Weight / Rendezvous Hashing) for
-/// a node and a shard.
+/// Simulation-only helper computing HRW score from integer `NodeId` (0..N).
 /// Score(Node_i, S) = BLAKE3(NodeID_i || Shard_ID)
+///
+/// NOTE: For all production routing, client verification, and network decisions, use
+/// `compute_hrw_score_f64` / `hrw_score_32` with the 32-byte cryptographic `HrwRoutingId` (Spec 03, INV-0301).
 pub fn hrw_score(node_id: NodeId, shard_id: ShardId) -> Hash256 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&node_id.to_le_bytes());

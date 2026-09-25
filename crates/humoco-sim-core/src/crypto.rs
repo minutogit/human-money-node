@@ -55,8 +55,15 @@ pub fn compute_genesis_root(protocol_version: u32, t0_unix_sec: u64) -> Hash256 
     *hasher.finalize().as_bytes()
 }
 
-/// Computes the canonical hash for the deterministic resolver (docs/02:97)
-/// H_canon(Lock) = BLAKE3(len || "HUMOCO_V1_CANON_RESOLVER" || Parent_Hash || Receiver_Pub || Sig/Nonce)
+/// Computes the canonical hash for the deterministic resolver (docs/02:97, Spec 02, 08)
+/// H_canon(Lock) = BLAKE3(len || "HUMOCO_V1_CANON_RESOLVER" || Parent_Hash || Receiver_Pub || Sig/Witness)
+///
+/// # Architectural Invariant & Design Note:
+/// - `min(H_canon)` is a purely deterministic tie-breaker on network merges (order-independent), NOT a proof-of-work.
+/// - Security against double-spending relies on the irrefutable EquivocationProof (`HUMOCO_V1_EQUIVOCATION`),
+///   which permanently bans the offending node identity (`NodePubKey`), revokes the shard ticket (`HrwRoutingId`),
+///   and severs all Web-of-Trust edges.
+/// - The `nonce` parameter takes the 64-byte Ed25519 signature entropy or transaction witness slice.
 pub fn compute_canonical_hash(
     parent_lock: &Hash256,
     receiver_pub: &Hash256,

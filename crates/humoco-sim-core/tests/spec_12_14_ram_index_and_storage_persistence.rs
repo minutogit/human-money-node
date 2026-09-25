@@ -92,6 +92,24 @@ fn test_inv1202_ingress_time_window() {
     let mut idx2 = RamIndex::new();
     let res3 = idx2.try_insert(rec_exceed, now, root_small);
     assert!(matches!(res3, Err(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow)), "valid_until > root must be rejected");
+
+    // 11-Year Max TTL Boundary Check (Zero State Bloat / L1 Standard Reconciliation)
+    let max_ttl_ms = humoco_sim_core::storage::MAX_LOCK_TTL_MS;
+    assert_eq!(max_ttl_ms, 11 * 31_536_000 * 1_000); // exactly 11 years
+
+    // Exactly at 11 years -> accepted
+    let root_11y = SimTime(now.0 + max_ttl_ms);
+    let rec_11y = LockRecord::new(make_parent(0xDD), make_receiver(0x04), b"11y".to_vec(), now, root_11y);
+    assert!(ingress_time_window_valid(now, root_11y, root_11y), "validity at exactly 11 years must be accepted");
+    let res_11y = idx2.try_insert(rec_11y, now, root_11y);
+    assert!(matches!(res_11y, Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew)));
+
+    // Exceeding 11 years by 1ms -> rejected (protects against eternal state bloat)
+    let root_11y_plus_1 = SimTime(now.0 + max_ttl_ms + 1);
+    let rec_11y_plus_1 = LockRecord::new(make_parent(0xEE), make_receiver(0x05), b"11y+1".to_vec(), now, root_11y_plus_1);
+    assert!(!ingress_time_window_valid(now, root_11y_plus_1, root_11y_plus_1), "validity > 11 years must be rejected");
+    let res_11y_plus_1 = idx2.try_insert(rec_11y_plus_1, now, root_11y_plus_1);
+    assert!(matches!(res_11y_plus_1, Err(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow)));
 }
 
 // INV-1203: Zero-Cost TTL-Tilgung nach root.valid_until + 30s Grace

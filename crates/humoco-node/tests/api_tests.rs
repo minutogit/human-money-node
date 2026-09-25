@@ -2553,5 +2553,60 @@ async fn test_checkout_edge_case_empty_and_single_hop_chains() {
     assert_eq!(res_follow.status(), StatusCode::CREATED);
 }
 
+#[tokio::test]
+async fn test_max_11_years_ttl_ingress_boundary_enforcement() {
+    use humoco_node::api::hmc::{L2ResponseEnvelope, L2Verdict};
+    use humoco_sim_core::storage::MAX_LOCK_TTL_MS;
 
+    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
+    tier_controller.register_f2f_peer("ttl_test_peer");
 
+    let now_ms = test_now_ms();
+    let k_gen = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+
+    // 1. Genesis lock with valid_until within 11 years (e.g. 10 years) -> ACCEPTED (201 Created)
+    let voucher_valid = format!("voucher_10y_{}", now_ms);
+    let valid_10y_ms = now_ms + (10 * 31_536_000 * 1_000);
+    let req_10y = make_genesis_hmc_req(&voucher_valid, &k_gen, valid_10y_ms, 100);
+
+    let res_valid = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/lock")
+            .header("content-type", "application/json")
+            .header("X-Peer-Token", "ttl_test_peer")
+            .body(Body::from(serde_json::to_vec(&req_10y).unwrap()))
+            .unwrap()
+    ).await.unwrap();
+
+    assert_eq!(res_valid.status(), StatusCode::CREATED);
+    let env_valid: L2ResponseEnvelope = response_json(res_valid).await;
+    match env_valid.verdict {
+        L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, req_10y.transaction_hash),
+        _ => panic!("10-year lock should be verified successfully"),
+    }
+
+    // 2. Genesis lock exceeding 11 years (e.g. 11 years + 10 days) -> REJECTED (400 Bad Request)
+    let voucher_exceed = format!("voucher_exceed_{}", now_ms);
+    let exceed_ms = now_ms + MAX_LOCK_TTL_MS + (10 * 86_400 * 1_000);
+    let req_exceed = make_genesis_hmc_req(&voucher_exceed, &k_gen, exceed_ms, 200);
+
+    let res_exceed = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/lock")
+            .header("content-type", "application/json")
+            .header("X-Peer-Token", "ttl_test_peer")
+            .body(Body::from(serde_json::to_vec(&req_exceed).unwrap()))
+            .unwrap()
+    ).await.unwrap();
+
+    assert_eq!(res_exceed.status(), StatusCode::BAD_REQUEST);
+    let env_exceed: L2ResponseEnvelope = response_json(res_exceed).await;
+    match env_exceed.verdict {
+        L2Verdict::Rejected { reason } => {
+            assert!(reason.contains("Invalid ingress time window"), "Rejection must specify time window violation: {}", reason);
+        }
+        _ => panic!("Lock exceeding 11 years must be rejected"),
+    }
+}

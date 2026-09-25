@@ -4,11 +4,19 @@ use std::time::Instant;
 
 use crate::types::{Hash256, LockRecord, SimTime};
 
-/// Ingress time window: now+30s < valid_until <= root.valid_until (INV-1202)
+/// Maximum voucher and lock validity duration: 11 years (10 years standard range max + 1 year buffer)
+/// Reconciles with L1 voucher standard max issuance (10Y) + rounding & grace periods.
+/// Protects L2 RAM index against permanent state bloat and eternal griefing attacks.
+pub const MAX_LOCK_TTL_YEARS: u64 = 11;
+pub const MAX_LOCK_TTL_SECONDS: u64 = MAX_LOCK_TTL_YEARS * crate::quota::SECONDS_PER_YEAR; // 346_896_000 seconds
+pub const MAX_LOCK_TTL_MS: u64 = MAX_LOCK_TTL_SECONDS * 1_000; // 346_896_000_000 ms
+
+/// Ingress time window: now+30s < valid_until <= root.valid_until <= now + MAX_LOCK_TTL_MS (INV-1202)
 pub fn ingress_time_window_valid(now: SimTime, valid_until: SimTime, root_valid_until: SimTime) -> bool {
-    // valid_until must be strictly > now + 30s and <= root_valid_until
+    // valid_until must be strictly > now + 30s, <= root_valid_until, and root_valid_until <= now + 11 years
     let min_valid = now.0.saturating_add(30_000);
-    valid_until.0 > min_valid && valid_until.0 <= root_valid_until.0
+    let max_valid = now.0.saturating_add(MAX_LOCK_TTL_MS);
+    valid_until.0 > min_valid && valid_until.0 <= root_valid_until.0 && root_valid_until.0 <= max_valid
 }
 
 /// Should prune if now > root.valid_until + 30s grace (INV-1203)

@@ -534,6 +534,14 @@ impl RequestHandler for NodeRequestHandler {
         let peer_manager = self.peer_manager.clone();
         let identity = self.identity.clone();
         Box::pin(async move {
+            if header.msg_type == MsgType::HeartbeatAck as u16 {
+                if (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0 {
+                    if let Some(pm) = peer_manager.as_ref() {
+                        pm.set_ticket_outdated(true);
+                    }
+                }
+                return Ok(());
+            }
             if header.msg_type == MsgType::EquivocationProof as u16 {
                 let now_ms = peer_manager
                     .as_ref()
@@ -1041,6 +1049,7 @@ impl QuicTransport {
                             let h = handler.clone();
                             let pm = peer_manager.clone();
                             let sem = stream_semaphore.clone();
+                            let conn_clone = conn.clone();
                             tokio::spawn(async move {
                                 let _permit = match sem.try_acquire_owned() {
                                     Ok(p) => p,
@@ -1070,6 +1079,14 @@ impl QuicTransport {
                                             return;
                                         }
 
+                                        // HeartbeatAck handling:
+                                        if header.msg_type == MsgType::HeartbeatAck as u16 {
+                                            if (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0 {
+                                                pm.set_ticket_outdated(true);
+                                                warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from F2F peer: shard ticket is outdated");
+                                            }
+                                        }
+
                                         // If an authentic Heartbeat is received from an F2F friend, update known_network_nodes and clock:
                                         if header.msg_type == MsgType::Heartbeat as u16 {
                                             let hops = header.reserved;
@@ -1086,20 +1103,16 @@ impl QuicTransport {
                                             let res1 = bincode::deserialize::<crate::network::framing::HeartbeatWirePayload>(&payload);
                                             let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
 
-                                            if let Ok(hb) = res1 {
-                                                let is_direct = remote_node_id == Some(hb.node_id);
-                                                if is_direct && hops > 0 {
-                                                    warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
-                                                    return;
-                                                }
-                                                if !is_direct && hops == 0 {
-                                                    warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
-                                                    return;
-                                                }
-                                                pm.learn_node_from_gossip(hb.node_id, hb.addr, hops as u8, Some(remote_addr)).await;
-                                                pm.clock().record_heartbeat(is_f2f, hb.timestamp_ms);
+                                            let info_opt = if let Ok(hb) = res1 {
+                                                Some((hb.node_id, hb.addr, Some(hb.timestamp_ms)))
                                             } else if let Ok((adv_id, adv_addr)) = res2 {
-                                                let is_direct = remote_node_id == Some(adv_id);
+                                                Some((adv_id, adv_addr, None))
+                                            } else {
+                                                None
+                                            };
+
+                                            if let Some((node_id, addr_val, timestamp_ms)) = info_opt {
+                                                let is_direct = remote_node_id == Some(node_id);
                                                 if is_direct && hops > 0 {
                                                     warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
                                                     return;
@@ -1108,7 +1121,41 @@ impl QuicTransport {
                                                     warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
                                                     return;
                                                 }
-                                                pm.learn_node_from_gossip(adv_id, adv_addr, hops as u8, Some(remote_addr)).await;
+
+                                                // Check ticket PoW validity
+                                                let node_work = pm.get_known_node_info(&node_id).await.map(|k| k.work_score).unwrap_or(1);
+                                                let (is_acceptable, _median) = pm.is_ticket_acceptable(node_work);
+
+                                                if !is_acceptable {
+                                                    if hops == 0 {
+                                                        // Direct F2F friend with outdated ticket: send HeartbeatAck with FLAG_POW_OUTDATED
+                                                        warn!(
+                                                            node = %hex::encode(node_id),
+                                                            "Direct F2F friend has outdated shard ticket; sending FLAG_POW_OUTDATED feedback"
+                                                        );
+                                                        let ack_hdr = WireHeader::new(
+                                                            MsgType::HeartbeatAck as u16,
+                                                            header.session_seq + 1,
+                                                            header.epoch_id,
+                                                            humoco_sim_core::wire::FLAG_POW_OUTDATED,
+                                                            0,
+                                                        );
+                                                        let _ = send_unidirectional_frame(&conn_clone, &ack_hdr, &[]).await;
+                                                    } else {
+                                                        // Multi-hop gossip: silently drop outdated ticket
+                                                        warn!(
+                                                            node = %hex::encode(node_id),
+                                                            hops,
+                                                            "GOSSIP BARRIER: Dropped multi-hop gossip with outdated PoW"
+                                                        );
+                                                    }
+                                                    return;
+                                                }
+
+                                                pm.learn_node_from_gossip(node_id, addr_val, hops as u8, Some(remote_addr)).await;
+                                                if let Some(ts) = timestamp_ms {
+                                                    pm.clock().record_heartbeat(is_f2f, ts);
+                                                }
                                             }
                                         }
 

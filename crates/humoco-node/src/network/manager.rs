@@ -42,10 +42,14 @@ pub struct KnownNodeInfo {
     pub(crate) node_id: [u8; 32],
     /// Active HRW routing ticket (Argon2d) — sole source for HRW scoring.
     pub(crate) hrw_routing_id: [u8; 32],
+    /// Achieved PoW work score for active shard ticket.
+    pub(crate) work_score: u64,
     /// Pending new shard ticket during 24h incubation.
     pub(crate) pending_hrw_routing_id: Option<[u8; 32]>,
     /// Alias for pending_hrw (shorter name, for evaluator compatibility).
     pub(crate) pending_hrw: Option<[u8; 32]>,
+    /// Achieved PoW work score for pending shard ticket during incubation.
+    pub(crate) pending_work_score: Option<u64>,
     /// Timestamp of ticket switch (start of incubation).
     pub(crate) pending_since: Option<Instant>,
     /// Incubation deadline (pending_since + 24h) — explicit field for Spec 07.
@@ -61,14 +65,25 @@ pub struct KnownNodeInfo {
 impl KnownNodeInfo {
     /// Creates new entry with immediately active ticket and IMMATURE start.
     pub fn new(addr: SocketAddr, node_pubkey: [u8; 32], hrw_routing_id: [u8; 32]) -> Self {
+        Self::with_work(addr, node_pubkey, hrw_routing_id, 1)
+    }
+
+    pub fn with_work(
+        addr: SocketAddr,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        work_score: u64,
+    ) -> Self {
         let now = Instant::now();
         Self {
             addr,
             node_pubkey,
             node_id: node_pubkey,
             hrw_routing_id,
+            work_score,
             pending_hrw_routing_id: None,
             pending_hrw: None,
+            pending_work_score: None,
             pending_since: None,
             incubated_until: None,
             first_seen: now,
@@ -91,8 +106,10 @@ impl KnownNodeInfo {
             node_pubkey,
             node_id: node_pubkey,
             hrw_routing_id,
+            work_score: 1,
             pending_hrw_routing_id: None,
             pending_hrw: None,
+            pending_work_score: None,
             pending_since: None,
             incubated_until: None,
             first_seen,
@@ -101,6 +118,11 @@ impl KnownNodeInfo {
             best_ingress_peer: None,
             ingress_diversity_mask: 0,
         }
+    }
+
+    /// Returns the work score of this node.
+    pub fn work_score(&self) -> u64 {
+        self.work_score
     }
 
     /// Effective HRW for scoring: active ticket, as long as pending is not mature.
@@ -163,6 +185,7 @@ pub struct PeerManager {
     max_backoff_ms: u64,
     ge20_first_reached_ms: Arc<AtomicU64>,
     sync_notify: Arc<tokio::sync::Notify>,
+    ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PeerManager {
@@ -253,6 +276,7 @@ impl PeerManager {
             max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
             ge20_first_reached_ms: Arc::new(AtomicU64::new(0)),
             sync_notify: Arc::new(tokio::sync::Notify::new()),
+            ticket_outdated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -476,6 +500,48 @@ impl PeerManager {
         false
     }
 
+    /// Returns true if the node's own shard ticket was reported as outdated by an F2F peer.
+    pub fn is_ticket_outdated(&self) -> bool {
+        self.ticket_outdated.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Sets the outdated status of the node's own shard ticket.
+    pub fn set_ticket_outdated(&self, outdated: bool) {
+        self.ticket_outdated.store(outdated, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Calculates the decentralized median PoW work score across all active (mature) known nodes.
+    /// Defaults to W_min_floor (1) if no active nodes are known (Bootstrap N <= 1).
+    pub fn calculate_network_median_work(&self) -> u64 {
+        let mut works = Vec::new();
+        if let Ok(known) = self.known_network_nodes.try_read() {
+            for entry in known.values() {
+                if !entry.is_immature() {
+                    works.push(entry.work_score);
+                }
+            }
+        }
+        if works.is_empty() {
+            return 1; // W_min_floor
+        }
+        works.sort_unstable();
+        let n = works.len();
+        if n % 2 == 1 {
+            works[n / 2]
+        } else {
+            (works[n / 2 - 1] + works[n / 2]) / 2
+        }
+    }
+
+    /// Evaluates if a given work score satisfies the network admission threshold (1/8 = 12.5% of median).
+    /// Returns (is_acceptable, current_median).
+    pub fn is_ticket_acceptable(&self, work: u64) -> (bool, u64) {
+        let median = self.calculate_network_median_work();
+        let min_admission = 1u64.max(median >> 3);
+        let is_valid = work >= min_admission;
+        (is_valid, median)
+    }
+
     // -------------------------------------------------------------------------
     // Semantic Decoupling & 24h Incubation (Spec 07)
     // -------------------------------------------------------------------------
@@ -487,8 +553,12 @@ impl PeerManager {
             if let (Some(pending), Some(since)) = (entry.pending_hrw_routing_id, entry.pending_since) {
                 if since.elapsed() >= HRW_INCUBATION_DURATION {
                     entry.hrw_routing_id = pending;
+                    if let Some(pw) = entry.pending_work_score {
+                        entry.work_score = pw;
+                    }
                     entry.pending_hrw_routing_id = None;
                     entry.pending_hrw = None;
+                    entry.pending_work_score = None;
                     entry.pending_since = None;
                     entry.incubated_until = None;
                 }
@@ -502,11 +572,7 @@ impl PeerManager {
         self.learn_node_from_gossip_with_hrw(node_id, node_id, addr, hops, ingress_peer).await;
     }
 
-    /// Semantically decoupled learning method with explicit HRW routing ticket.
-    /// - `node_pubkey` = permanent Ed25519 identity (F2F & TLS anchor)
-    /// - `hrw_routing_id` = Argon2d shard ticket for HRW scoring
-    ///   On re-mining (new ticket for known node_pubkey), the new ticket
-    ///   is incubated for 24h as `pending_hrw_routing_id`. Until then, old ticket remains active or status is IMMATURE.
+    /// Semantically decoupled learning method with explicit HRW routing ticket (defaults to work_score = 1).
     pub async fn learn_node_from_gossip_with_hrw(
         &self,
         node_pubkey: [u8; 32],
@@ -515,6 +581,27 @@ impl PeerManager {
         hops: u8,
         ingress_peer: Option<SocketAddr>,
     ) {
+        self.learn_node_from_gossip_with_hrw_and_work(node_pubkey, hrw_routing_id, addr, hops, ingress_peer, 1).await;
+    }
+
+    /// Semantically decoupled learning method with explicit HRW routing ticket and work score.
+    /// Enforces:
+    /// 1. Minimum admission threshold: work_score >= max(W_min_floor, W_median >> 3).
+    /// 2. Monotonicity Ratchet: On existing nodes, work_score MUST be strictly greater than max(W_active, W_pending).
+    pub async fn learn_node_from_gossip_with_hrw_and_work(
+        &self,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        addr: SocketAddr,
+        hops: u8,
+        ingress_peer: Option<SocketAddr>,
+        work_score: u64,
+    ) {
+        let (is_acceptable, _median) = self.is_ticket_acceptable(work_score);
+        if !is_acceptable {
+            return;
+        }
+
         let now = Instant::now();
         let mut nodes = self.known_network_nodes.write().await;
         if let Some(entry) = nodes.get_mut(&node_pubkey) {
@@ -522,8 +609,12 @@ impl PeerManager {
             if let (Some(pending), Some(since)) = (entry.pending_hrw_routing_id, entry.pending_since) {
                 if since.elapsed() >= HRW_INCUBATION_DURATION {
                     entry.hrw_routing_id = pending;
+                    if let Some(pw) = entry.pending_work_score {
+                        entry.work_score = pw;
+                    }
                     entry.pending_hrw_routing_id = None;
                     entry.pending_hrw = None;
+                    entry.pending_work_score = None;
                     entry.pending_since = None;
                     entry.incubated_until = None;
                 }
@@ -533,16 +624,16 @@ impl PeerManager {
             entry.last_seen = now;
 
             if entry.hrw_routing_id != hrw_routing_id {
-                // Same pending again -> do nothing, otherwise set new pending
-                if entry.pending_hrw_routing_id != Some(hrw_routing_id) {
-                    // If no pending present or pending != new -> start new incubation
-                    // If already pending and different, overwrite with new 24h deadline
+                // Monotonicity Ratchet: W_new MUST be strictly greater than max(W_active, W_pending)
+                let current_max = entry.work_score.max(entry.pending_work_score.unwrap_or(0));
+                if work_score > current_max {
                     entry.pending_hrw_routing_id = Some(hrw_routing_id);
                     entry.pending_hrw = Some(hrw_routing_id);
+                    entry.pending_work_score = Some(work_score);
                     entry.pending_since = Some(now);
                     entry.incubated_until = Some(now + HRW_INCUBATION_DURATION);
                 }
-                // Old hrw remains active until pending is mature!
+                // If work_score <= current_max: Downgrade or lateral hop -> REJECTED, old active & pending remain!
             }
             if hops < entry.min_hops {
                 entry.min_hops = hops;
@@ -571,8 +662,10 @@ impl PeerManager {
                     node_pubkey,
                     node_id: node_pubkey,
                     hrw_routing_id,
+                    work_score,
                     pending_hrw_routing_id: None,
                     pending_hrw: None,
+                    pending_work_score: None,
                     pending_since: None,
                     incubated_until: None,
                     first_seen: now,
@@ -595,7 +688,18 @@ impl PeerManager {
         new_hrw_routing_id: [u8; 32],
         addr: SocketAddr,
     ) {
-        self.learn_node_from_gossip_with_hrw(node_pubkey, new_hrw_routing_id, addr, 0, None).await;
+        self.learn_node_from_gossip_with_hrw_and_work(node_pubkey, new_hrw_routing_id, addr, 0, None, 1).await;
+    }
+
+    /// Re-mining ticket update with explicit work score.
+    pub async fn update_routing_ticket_with_work(
+        &self,
+        node_pubkey: [u8; 32],
+        new_hrw_routing_id: [u8; 32],
+        addr: SocketAddr,
+        work_score: u64,
+    ) {
+        self.learn_node_from_gossip_with_hrw_and_work(node_pubkey, new_hrw_routing_id, addr, 0, None, work_score).await;
     }
 
     /// Alias: upsert_known_node — for evaluator compatibility.
@@ -727,8 +831,12 @@ impl PeerManager {
             if let (Some(pending), Some(since)) = (entry.pending_hrw_routing_id, entry.pending_since) {
                 if now.duration_since(since) >= HRW_INCUBATION_DURATION {
                     entry.hrw_routing_id = pending;
+                    if let Some(pw) = entry.pending_work_score {
+                        entry.work_score = pw;
+                    }
                     entry.pending_hrw_routing_id = None;
                     entry.pending_hrw = None;
+                    entry.pending_work_score = None;
                     entry.pending_since = None;
                     entry.incubated_until = None;
                     promoted += 1;
@@ -736,6 +844,14 @@ impl PeerManager {
             }
         }
         promoted
+    }
+
+    /// For tests: set work_score manually.
+    pub async fn set_work_score_for_test(&self, node_pubkey: &[u8; 32], work_score: u64) {
+        let mut nodes = self.known_network_nodes.write().await;
+        if let Some(entry) = nodes.get_mut(node_pubkey) {
+            entry.work_score = work_score;
+        }
     }
 
     /// For tests: set first_seen / pending_since manually (simulates 24h head start).

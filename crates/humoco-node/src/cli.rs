@@ -431,6 +431,10 @@ pub async fn execute_status(config_path: Option<PathBuf>) -> Result<(), NodeErro
             hrw_routing_id,
             t0,
             nonce,
+            own_work,
+            net_median_work,
+            headroom_pct,
+            ticket_outdated,
             uptime_sec,
             active_locks,
             peers_connected,
@@ -480,6 +484,23 @@ pub async fn execute_status(config_path: Option<PathBuf>) -> Result<(), NodeErro
                 };
                 println!("Public Key:        {}", pk);
                 println!("Connection String: {}@{}", pk, conn_addr);
+            }
+            if ticket_outdated {
+                println!("PoW Headroom:      🔴 Outdated (Ticket rejected by F2F peers, re-mining required)");
+            } else if let Some(pct) = headroom_pct {
+                let traffic_light = if pct >= 25 {
+                    "🟢 Healthy"
+                } else if pct > 16 {
+                    "🟡 Warning (Low Headroom)"
+                } else if pct >= 12 {
+                    "🟠 Re-Mining Recommended"
+                } else {
+                    "🔴 Critical (< 12.5%)"
+                };
+                let own = own_work.unwrap_or(1);
+                let med = net_median_work.unwrap_or(1);
+                println!("PoW Work Score:    {} (Network Median: {})", own, med);
+                println!("PoW Headroom:      {} ({}%)", traffic_light, pct);
             }
             println!("Uptime:            {}s", uptime_sec);
             println!("Active Locks:      {}", active_locks);
@@ -791,6 +812,47 @@ pub async fn execute_doctor(config_path: Option<PathBuf>) -> Result<(), NodeErro
         }
         _ => {
             println!("[i] Control Socket: Daemon OFFLINE (socket at {})", socket_path.display());
+        }
+    }
+
+    // 8. PoW Headroom & Shard Ticket Health (Check 7)
+    match &daemon_status {
+        Ok(ControlResponse::Status {
+            ticket_outdated,
+            headroom_pct,
+            own_work,
+            net_median_work,
+            ..
+        }) => {
+            if *ticket_outdated {
+                println!("[✗] PoW Headroom & Shard Ticket: OUTDATED (Ticket rejected by F2F peers, re-mining required)");
+            } else if let Some(pct) = headroom_pct {
+                if *pct < 12 {
+                    println!("[✗] PoW Headroom & Shard Ticket: CRITICAL ({}% of median, ticket expired/unacceptable)", pct);
+                } else if *pct < 25 {
+                    println!("[!] PoW Headroom & Shard Ticket: LOW ({}% of median, re-mining recommended)", pct);
+                } else {
+                    println!(
+                        "[✓] PoW Headroom & Shard Ticket Health: OK (Work: {}, Median: {}, Headroom: {}%)",
+                        own_work.unwrap_or(1),
+                        net_median_work.unwrap_or(1),
+                        pct
+                    );
+                }
+            } else {
+                println!("[✓] PoW Headroom & Shard Ticket Health: OK (Standalone / Fast-Path)");
+            }
+        }
+        _ => {
+            if cfg.identity.key_path.exists() {
+                if let Ok(id) = NodeIdentity::load_from_file(&cfg.identity.key_path) {
+                    println!("[✓] PoW Headroom & Shard Ticket Health: Offline valid (Local Work Score: {})", id.work_score());
+                } else {
+                    println!("[✗] PoW Headroom & Shard Ticket Health: Key invalid");
+                }
+            } else {
+                println!("[!] PoW Headroom & Shard Ticket Health: Key missing");
+            }
         }
     }
 

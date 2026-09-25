@@ -18,6 +18,46 @@ pub const DOMAIN_GENESIS: &[u8] = b"HUMOCO_V1_GENESIS";
 pub const DOMAIN_INGRESS_DECL: &[u8] = b"HUMOCO_V1_INGRESS_DECL";
 pub const DOMAIN_BRIDGE_LOCK: &[u8] = b"HUMOCO_V1_BRIDGE_LOCK";
 pub const DOMAIN_HYBRID_NODE_ID: &[u8] = b"HUMOCO_V2_HYBRID_NODE_ID";
+pub const DOMAIN_HRW_ROUTING_TICKET: &[u8] = b"HUMOCO_V1_HRW_ROUTING_TICKET";
+
+/// Computes the deterministic work score W from a 32-byte PoW proof hash.
+///
+/// Uses leading zeros and the top 64-bit prefix for O(1) arithmetic without big-int crates.
+/// Guarantees panic-freedom, monotonicity, and non-zero positive work (minimum floor >= 1).
+pub fn compute_work_from_hash(hash: &[u8; 32]) -> u64 {
+    let mut prefix_bytes = [0u8; 8];
+    prefix_bytes.copy_from_slice(&hash[0..8]);
+    let prefix = u64::from_be_bytes(prefix_bytes);
+
+    if prefix == 0 {
+        // Hash has at least 64 leading zero bits -> saturated maximum work
+        return u64::MAX;
+    }
+
+    // W = 2^64 / (prefix + 1)
+    let work = ((1u128 << 64) / ((prefix as u128) + 1)) as u64;
+    work.max(1)
+}
+
+/// Computes the uniform 256-bit HrwRoutingId via BLAKE3 domain separation (Whitening).
+///
+/// WhitenedId = BLAKE3(len || DOMAIN_HRW_ROUTING_TICKET || NodePubKey || Nonce_LE || T0_LE || PoW_Proof)
+pub fn compute_whitened_hrw_id(
+    node_pubkey: &[u8; 32],
+    nonce: u64,
+    t0: u64,
+    pow_proof: &[u8; 32],
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    let tag_len = DOMAIN_HRW_ROUTING_TICKET.len() as u8;
+    hasher.update(&[tag_len]);
+    hasher.update(DOMAIN_HRW_ROUTING_TICKET);
+    hasher.update(node_pubkey);
+    hasher.update(&nonce.to_le_bytes());
+    hasher.update(&t0.to_le_bytes());
+    hasher.update(pow_proof);
+    *hasher.finalize().as_bytes()
+}
 
 /// Returns the domain tag for provisional quorum certificates for the given network.
 pub fn domain_approve_prov(network_id: NetworkId) -> &'static [u8] {
@@ -636,6 +676,62 @@ mod tests {
         // Network domain getters
         assert_eq!(domain_attestation(NetworkId::Mainnet), HUMOCO_V1_ATTESTATION_MAINNET);
         assert_eq!(domain_attestation(NetworkId::Testnet), HUMOCO_V1_ATTESTATION_TESTNET);
+    }
+
+    #[test]
+    fn test_compute_work_from_hash_determinism_and_boundaries() {
+        // 0 leading zero bits (all 0xFF) -> work = 1
+        let max_hash = [0xFFu8; 32];
+        assert_eq!(compute_work_from_hash(&max_hash), 1);
+
+        // 8 leading zero bits (first byte 0x00, rest 0xFF) -> work = 256
+        let mut hash_8zeros = [0xFFu8; 32];
+        hash_8zeros[0] = 0x00;
+        assert_eq!(compute_work_from_hash(&hash_8zeros), 256);
+
+        // 16 leading zero bits (first 2 bytes 0x00, rest 0xFF) -> work = 65536
+        let mut hash_16zeros = [0xFFu8; 32];
+        hash_16zeros[0] = 0x00;
+        hash_16zeros[1] = 0x00;
+        assert_eq!(compute_work_from_hash(&hash_16zeros), 65536);
+
+        // Boundary: all zeros -> u64::MAX
+        let zero_hash = [0x00u8; 32];
+        assert_eq!(compute_work_from_hash(&zero_hash), u64::MAX);
+
+        // Monotonicity: smaller hash value => higher work
+        let mut smaller_hash = hash_16zeros;
+        smaller_hash[2] = 0x7F;
+        assert!(compute_work_from_hash(&smaller_hash) > compute_work_from_hash(&hash_16zeros));
+    }
+
+    #[test]
+    fn test_compute_whitened_hrw_id_uniformity() {
+        let pubkey = [0x42u8; 32];
+        let nonce = 12345u64;
+        let t0 = 1_700_000_000u64;
+
+        // Even with a pow_proof that has 32 zero bytes (leading zeros)
+        let pow_proof = [0x00u8; 32];
+        let whitened = compute_whitened_hrw_id(&pubkey, nonce, t0, &pow_proof);
+
+        // Whitened ID must NOT have leading zero bytes (full 256-bit entropy)
+        assert_ne!(whitened, [0u8; 32]);
+        assert_ne!(whitened[0], 0x00);
+
+        // Deterministic
+        let whitened2 = compute_whitened_hrw_id(&pubkey, nonce, t0, &pow_proof);
+        assert_eq!(whitened, whitened2);
+
+        // Domain tag length prefix verification
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&[DOMAIN_HRW_ROUTING_TICKET.len() as u8]);
+        hasher.update(DOMAIN_HRW_ROUTING_TICKET);
+        hasher.update(&pubkey);
+        hasher.update(&nonce.to_le_bytes());
+        hasher.update(&t0.to_le_bytes());
+        hasher.update(&pow_proof);
+        assert_eq!(whitened, *hasher.finalize().as_bytes());
     }
 }
 

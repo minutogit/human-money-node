@@ -215,6 +215,15 @@ impl ControlServer {
                     } else {
                         Some(t0.saturating_add(24 * 3600).saturating_mul(1000))
                     };
+                    let own_work = state.identity.work_score();
+                    let net_median = state.peer_manager.calculate_network_median_work();
+                    let headroom_pct = if net_median > 0 {
+                        let ratio = (own_work as f64) / (net_median as f64);
+                        Some((ratio * 100.0).round() as u32)
+                    } else {
+                        Some(100)
+                    };
+                    let ticket_outdated = state.peer_manager.is_ticket_outdated();
                     ControlResponse::Status {
                         node_id: state.identity.node_id_hex(),
                         public_key: Some(state.identity.public_key_hex()),
@@ -223,6 +232,10 @@ impl ControlServer {
                         t0: Some(t0),
                         nonce: Some(nonce),
                         incubation_until_ms,
+                        own_work: Some(own_work),
+                        net_median_work: Some(net_median),
+                        headroom_pct,
+                        ticket_outdated,
                         uptime_sec,
                         active_locks,
                         peers_connected,

@@ -1,6 +1,6 @@
 [package]
 name = "humoco-node"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Human Money Node (humoco-node) - Decentralized Collision Lock Registry Daemon"
 license = "MIT"

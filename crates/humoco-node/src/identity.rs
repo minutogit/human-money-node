@@ -27,12 +27,8 @@ pub fn compute_hybrid_node_id(ed25519_pub: &[u8; 32], pqc_pub: &[u8]) -> [u8; 32
     *hasher.finalize().as_bytes()
 }
 
-/// Computes the HRW routing ID via Argon2d (memory-hard) or BLAKE3 fast-path.
-///
-/// - If `nonce == 0 && t0 == 0` (fast tests / legacy): `BLAKE3(pubkey)`
-/// - Otherwise: `Argon2d(m=64MiB, t=3, p=1, v=0x13)` over `pubkey || nonce_le || t0_le` with
-///   constant domain salt `HUMOCO_ARGON2D_ROUTING_SALT_V1`.
-pub fn compute_hrw_routing_id(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> [u8; 32] {
+/// Computes the raw Argon2d PoW proof hash over NodePubKey || Nonce || T0.
+pub fn compute_pow_proof(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> [u8; 32] {
     if nonce == 0 && t0 == 0 {
         return *blake3::hash(node_pubkey).as_bytes();
     }
@@ -51,6 +47,27 @@ pub fn compute_hrw_routing_id(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> [u
         .hash_password_into(&input, HUMOCO_ARGON2D_SALT, &mut out)
         .expect("argon2 hashing must succeed");
     out
+}
+
+/// Computes the HRW routing ID via 2-stage PoW proof + BLAKE3 whitening (or BLAKE3 fast-path).
+///
+/// - If `nonce == 0 && t0 == 0` (fast tests / legacy): `BLAKE3(pubkey)`
+/// - Otherwise: `compute_whitened_hrw_id(pubkey, nonce, t0, &compute_pow_proof(pubkey, nonce, t0))`
+pub fn compute_hrw_routing_id(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> [u8; 32] {
+    if nonce == 0 && t0 == 0 {
+        return *blake3::hash(node_pubkey).as_bytes();
+    }
+    let pow_proof = compute_pow_proof(node_pubkey, nonce, t0);
+    humoco_sim_core::crypto::compute_whitened_hrw_id(node_pubkey, nonce, t0, &pow_proof)
+}
+
+/// Computes the work score for given identity parameters.
+pub fn compute_work_score(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> u64 {
+    if nonce == 0 && t0 == 0 {
+        return 1;
+    }
+    let pow_proof = compute_pow_proof(node_pubkey, nonce, t0);
+    humoco_sim_core::crypto::compute_work_from_hash(&pow_proof)
 }
 
 #[derive(Clone)]
@@ -239,6 +256,11 @@ impl NodeIdentity {
     /// Returns the T0 genesis timestamp used for HRW derivation.
     pub fn t0(&self) -> u64 {
         self.t0
+    }
+
+    /// Returns the work score achieved by this node identity.
+    pub fn work_score(&self) -> u64 {
+        compute_work_score(self.node_pubkey(), self.nonce, self.t0)
     }
 
     /// Returns the hex-encoded representation of the public key.
@@ -551,5 +573,15 @@ mod tests {
         let identity = NodeIdentity::generate();
         let did = identity.did_key();
         assert!(did.starts_with("did:key:z6Mk"), "Ed25519 multicodec did:key should start with did:key:z6Mk, got: {}", did);
+    }
+
+    #[test]
+    fn test_fast_path_and_work_score() {
+        let identity = NodeIdentity::generate();
+        assert_eq!(identity.nonce(), 0);
+        assert_eq!(identity.t0(), 0);
+        assert_eq!(identity.work_score(), 1);
+        let expected_blake = *blake3::hash(identity.verifying_key().as_bytes()).as_bytes();
+        assert_eq!(*identity.hrw_routing_id(), expected_blake);
     }
 }

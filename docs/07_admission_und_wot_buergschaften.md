@@ -7,11 +7,17 @@ This document specifies the **organic admission procedure for nodes**, the **Fri
 
 ---
 
-## 1. Universal Foundation: Argon2d Minting for ALL Nodes
+## 1. Universal Foundation: 2-Stage Argon2d Minting & Whitening for ALL Nodes
 
-Every node in the network must solve a memory- and compute-intensive **Argon2d PoW challenge** upon creation to cryptographically bind its dynamic shard ticket `HrwRoutingId` to its permanent `NodePubKey` (Ed25519):
+Every node in the network solves a memory- and compute-intensive **Argon2d PoW challenge** upon creation to cryptographically bind its dynamic shard ticket `HrwRoutingId` to its permanent `NodePubKey` (Ed25519) in two stages:
 
-$$\text{HrwRoutingId} = \text{Argon2d}\Big(\text{NodePubKey}_{\text{Ed25519}} \mathbin{\Vert} \text{Nonce} \mathbin{\Vert} T_0\Big)$$
+1. **Stage 1 – Work Proof ($\text{PoW\_Proof}$):**
+   $$\text{PoW\_Proof} = \text{Argon2d}\Big(m=64\,\text{MiB}, t=3, p=1\Big)\Big(\text{NodePubKey}_{\text{Ed25519}} \mathbin{\Vert} \text{Nonce} \mathbin{\Vert} T_0\Big)$$
+   * Deterministic work score calculation: $W = \text{compute\_work\_from\_hash}(\text{PoW\_Proof})$.
+
+2. **Stage 2 – Uniform Shard Ticket ($\text{HrwRoutingId}$ via BLAKE3 Whitening):**
+   $$\text{HrwRoutingId} = \text{BLAKE3}\Big(\text{len} \mathbin{\Vert} \text{DOMAIN\_HRW\_ROUTING\_TICKET} \mathbin{\Vert} \text{NodePubKey} \mathbin{\Vert} \text{Nonce}_{\text{LE}} \mathbin{\Vert} T0_{\text{LE}} \mathbin{\Vert} \text{PoW\_Proof}\Big)$$
+   * Full 256-bit entropy without leading zeros, providing uniform distribution across all 65,536 shards in HRW rendezvous hashing.
 
 > **Semantic decoupling:** `NodePubKey` (Ed25519) = permanent identity for F2F friendship edges and TLS (lifetime). `HrwRoutingId` (Argon2d ticket) = dynamic PoW ticket exclusively for HRW sharding. Re-mining renews only the `HrwRoutingId`, never the `NodePubKey`.
 
@@ -24,46 +30,45 @@ $$\text{HrwRoutingId} = \text{Argon2d}\Big(\text{NodePubKey}_{\text{Ed25519}} \m
 ### 1.1 The Fixed Minimum Floor (Hard Floor)
 
 Immutable in protocol code:
-* **Absolute minimum ($D_{\text{min\_floor}}$):** A valid `HrwRoutingId` PoW requires at least approx. **1 hour compute time on modern servers** or **4 hours on a Raspberry Pi** ($m = 1\,\text{GB} - 2\,\text{GB}$, $t = 120 - 240$, $p = 1 - 4$).
-* **Zero downward tolerance:** No peer in the network ever accepts an `HrwRoutingId` whose PoW lies below this code-level minimum floor.
-
-| Hardware Class | Power Consumption | Compute Time (Minimum Floor) | Energy Consumption | Real Cost (Setup) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Raspberry Pi 4 / 5** | $\approx 5\,\text{W}$ | **4 hours** | $20\,\text{Wh} = 0{,}020\,\text{kWh}$ | $\mathbf{\approx 0{,}007\,\text{€}}$ *(< 1 cent)* |
-| **Fast PC / Ryzen Server** | $\approx 100\,\text{W}$ | **1 hour** | $100\,\text{Wh} = 0{,}100\,\text{kWh}$ | $\mathbf{\approx 0{,}035\,\text{€}}$ *(3.5 cents)* |
-| **Cloud Server (EPYC in DC)** | $\approx 220\,\text{W}$ | **1 hour** | $220\,\text{Wh} = 0{,}220\,\text{kWh}$ | $\mathbf{\approx 0{,}044\,\text{€}}$ *(4.4 cents)* |
+* **Absolute minimum ($W_{\text{min\_floor}} \ge 1$):** A valid `HrwRoutingId` PoW requires at least the code-level minimum floor.
+* **Admission Threshold ($W_{\text{min\_admission}}$):** $W_{\text{min\_admission}} = \max(W_{\text{min\_floor}}, \; W_{\text{net\_median}} \gg 3)$ (1/8 = 12.5% of network median).
+* **Zero downward tolerance:** No peer in the network accepts an `HrwRoutingId` whose PoW lies below this threshold.
 
 ---
 
-### 1.2 The 2-Stage Model & 24h Deep-Mining Buffer
+### 1.2 The Monotonicity Ratchet ($W_{\text{new}} > \max(W_{\text{active}}, W_{\text{pending}})$)
 
-1. **Stage 1 (Setup & Immediate Start):** Node computes the fixed minimum floor ($D_{\text{min\_floor}}$, 1h server / 4h Pi) and is immediately admitted to the network.
-2. **Stage 2 (24h Deep-Mining for Long-Term Headroom):** By default the node continues computing in background up to 24 hours.
-   - **Cost:** Costs on a server $\approx 0{,}84\,\text{€}$ or on a Pi $\approx 0{,}04\,\text{€}$.
-   - **Benefit:** Achieves a **$10\times\text{--}20\times$ security headroom**. The node survives future hardware acceleration and $4\times$ attack spikes for **at least 5 years without need for action**.
+* **Rule:** On ticket migration / re-mining on an existing `NodePubKey`, the new ticket **MUST** have a strictly higher work score than all previous (active and still incubating) tickets:
+  $$W_{\text{new}} > \max(W_{\text{active}}, W_{\text{pending}})$$
+* **Effect:** Lateral shard-hopping and downgrades are mathematically impossible.
 
 ---
 
-### 1.3 The Headroom Metric & Autonomous Re-Mining
+### 1.3 The Headroom Metric, 4-Stage Traffic Light & F2F Direct Feedback
 
-Each node continuously compares its own PoW value ($D_{\text{own}}$) with the F2F median required in the network ($D_{\text{net\_median}}$):
+Each node continuously compares its own PoW value ($W_{\text{own}}$) with the decentralized network median ($W_{\text{net\_median}}$):
 
-$$H = \frac{D_{\text{own}}}{D_{\text{net\_median}}}$$
+$$H = \frac{W_{\text{own}}}{W_{\text{net\_median}}}$$
 
 ```mermaid
 flowchart TD
     subgraph Headroom-Ampel & Lifecycle
-        G["🟢 H >= 4.0: 'Perfectly protected'<br>(Survives any 4x attack spike, idle for years)"]
-        Y["🟡 2.0 <= H < 4.0: 'Normal'<br>(Stable in normal operation)"]
-        O["🟠 1.2 <= H < 2.0: 'Early warning'<br>(Dashboard recommends re-mining)"]
-        R["🔴 H < 1.2: 'Critical'<br>(Autonomous background re-mining starts)"]
+        G["🟢 H >= 0.25 (> 1/4): 'Healthy / Normal'<br>(Standard operation, full participation)"]
+        Y["🟡 0.16 < H < 0.25 (1/6 .. 1/4): 'Warning'<br>(Dashboard warning: Low Headroom)"]
+        O["🟠 0.125 <= H <= 0.16 (1/8 .. 1/6): 'Re-Mining'<br>(Autonomous background re-mining recommended)"]
+        R["🔴 H < 0.125 (< 1/8): 'Outdated'<br>(Ticket rejected by F2F peers via FLAG_POW_OUTDATED)"]
     end
 ```
 
+#### F2F Direct Feedback (`FLAG_POW_OUTDATED`):
+* When a direct F2F friend ($\text{hops} = 0$) sends a heartbeat with an outdated ticket ($H < 0{,}125$), the receiving node replies with a `HeartbeatAck` containing `FLAG_POW_OUTDATED`.
+* Multi-hop forwarded gossip ($\text{hops} > 0$) with outdated PoW is silently dropped without feedback.
+* The TLS/QUIC F2F friendship connection remains 100% open and active (friendship is bound to `NodePubKey`, not the shard ticket).
+
 #### NodePubKey Invariance on Re-Mining (Friendships Remain Intact!):
 * **`NodePubKey` remains permanent:** F2F friendship edges and peering certificates refer exclusively to the immutable `NodePubKey` (Ed25519). Friends do **not need to reconnect** on re-mining!
-* **`HrwRoutingIdMigrationNotice` (formerly `NodeIDMigrationNotice`):** Node signs its new, stronger `HrwRoutingId` with its existing `NodePrivKey`.
-* **Zero downtime:** Re-mining runs at lowest system priority (`nice 19`, 1 CPU thread, $< 3\,\text{W}$ on Pi). Node continues serving transactions and quorums uninterrupted. After completion it deterministically switches to the new HRW shard after the 24h incubation wall expires.
+* **`HrwRoutingIdMigrationNotice`:** Node signs its new, stronger `HrwRoutingId` with its existing `NodePrivKey`.
+* **Zero downtime:** Re-mining runs at lowest system priority (`nice 19`, 1 CPU thread). Node continues serving transactions and quorums uninterrupted. After completion it deterministically switches to the new HRW shard after the 24h incubation wall expires.
 
 #### 24h Incubation Wall for Shard Tickets (Shard-Hopping Protection):
 * A new `HrwRoutingId` (initial minting or re-mining) is immediately propagated via F2F gossip so all peers can verify and cache it.

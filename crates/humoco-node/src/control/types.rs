@@ -106,6 +106,14 @@ pub enum ControlResponse {
         nonce: Option<u64>,
         #[serde(default)]
         incubation_until_ms: Option<u64>,
+        #[serde(default)]
+        own_work: Option<u64>,
+        #[serde(default)]
+        net_median_work: Option<u64>,
+        #[serde(default)]
+        headroom_pct: Option<u32>,
+        #[serde(default)]
+        ticket_outdated: bool,
         uptime_sec: u64,
         active_locks: usize,
         peers_connected: usize,
@@ -184,6 +192,10 @@ mod tests {
             t0: Some(12345),
             nonce: Some(999),
             incubation_until_ms: Some(12345 + 24 * 3600 * 1000),
+            own_work: Some(100),
+            net_median_work: Some(100),
+            headroom_pct: Some(100),
+            ticket_outdated: false,
             uptime_sec: 42,
             active_locks: 10,
             peers_connected: 2,

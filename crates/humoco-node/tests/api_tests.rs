@@ -2610,3 +2610,66 @@ async fn test_max_11_years_ttl_ingress_boundary_enforcement() {
         _ => panic!("Lock exceeding 11 years must be rejected"),
     }
 }
+
+#[tokio::test]
+async fn test_node_status_and_metrics_telemetry_gauges() {
+    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_app();
+
+    // 1. Check /v1/node-status returns free_tier_enabled: true
+    let res_status = app.clone().oneshot(
+        Request::builder()
+            .method("GET")
+            .uri("/v1/node-status")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res_status.status(), StatusCode::OK);
+    let status_dto: NodeStatusResponse = response_json(res_status).await;
+    assert!(status_dto.free_tier_enabled);
+
+    // 2. Check /metrics contains the 3 new gauges
+    let res_metrics = app.clone().oneshot(
+        Request::builder()
+            .method("GET")
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res_metrics.status(), StatusCode::OK);
+    let body_bytes = res_metrics.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(body_str.contains("humoco_gateway_concentration_ratio"));
+    assert!(body_str.contains("humoco_shard_subnet_dominance_max"));
+    assert!(body_str.contains("humoco_free_tier_enabled 1"));
+
+    // 3. Check /dashboard/data contains telemetry fields
+    let res_dash = app.clone().oneshot(
+        Request::builder()
+            .method("GET")
+            .uri("/dashboard/data")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res_dash.status(), StatusCode::OK);
+    let dash_bytes = res_dash.into_body().collect().await.unwrap().to_bytes();
+    let dash_json: serde_json::Value = serde_json::from_slice(&dash_bytes).unwrap();
+    assert_eq!(dash_json["free_tier_enabled"], true);
+    assert!(dash_json.get("gateway_concentration_ratio").is_some());
+    assert!(dash_json.get("shard_subnet_dominance_max").is_some());
+    assert!(dash_json.get("warnings").is_some());
+
+    // 4. Check HTML dashboard renders
+    let res_html = app.oneshot(
+        Request::builder()
+            .method("GET")
+            .uri("/dashboard")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res_html.status(), StatusCode::OK);
+    let html_bytes = res_html.into_body().collect().await.unwrap().to_bytes();
+    let html_str = String::from_utf8_lossy(&html_bytes);
+    assert!(html_str.contains("Ingress &amp; Telemetrie"));
+    assert!(html_str.contains("Top-2 Konzentration"));
+}
+

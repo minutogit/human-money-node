@@ -267,12 +267,37 @@ sudo systemctl restart humoco-node
 
 Prüfen, ob die F2F-Verbindung aktiv ist:
 ```bash
-humoco peers
-```
+### Die 5-Finger-Regel für F2F-Kanten (5-Finger Rule for F2F Edges)
+
+Bevor Sie eine F2F-Freundschaftskante in Ihre `humoco.toml` eintragen, prüfen Sie strikt die folgende 5-Punkte-Checkliste:
+
+1. 👤 **Persönliche Bekanntschaft (Personal Acquaintance):** Sie kennen die Person hinter dem Knoten im realen Leben und haben die Identität verifiziert.
+2. 📍 **Physischer Standort bekannt (Physical Location Knowledge):** Sie wissen, in welchem Ort / welcher Region der Knoten betrieben wird (Schutz vor anonymen Botnet-Clustern).
+3. 🔄 **Symmetrie & Gegenseitigkeit (Symmetry):** Beide Seiten tragen den Peer gegenseitig ein. Einseitige Peering-Versuche werden ignoriert.
+4. 🔍 **Bestehende Freunde prüfen (Existing Friends Check):** Prüfen Sie stichprobenartig, mit wem Ihr Peer verbunden ist, um isolierte Sybil-Inseln zu vermeiden.
+5. 🚫 **Null-Handels-Politik (Zero Trade/Bribe Policy):** F2F-Slots dürfen niemals für Geld, Token oder Gefälligkeiten gehandelt werden. Sie basieren rein auf sozialem Vertrauen.
 
 ---
 
-## 💎 8. VIP-Quotas & Händler-Guthaben (Control-Socket)
+## 🛒 8. Für Händler & Kassenbetreiber (For Merchants & PoS Operators)
+
+Für Händler, Filialisten und Kassenbetreiber (PoS) gelten besondere Anforderungen an Verfügbarkeit, Ausfallsicherheit und Latenz ($< 500\,\text{ms}$).
+
+> [!IMPORTANT]
+> **Vollständiger Leitfaden:** Siehe [`docs/MERCHANT_GUIDE.md`](MERCHANT_GUIDE.md) für detaillierte Hardware-Empfehlungen (Raspberry Pi 5 / Mini PC für ~30–70 €), Kosten-Matrizen und Latenz-Tuning.
+
+### Kritische Betriebsregeln für Kassen & PoS-Systeme:
+1. **Die 3-Gateway-Regel (3-Gateway Rule):**
+   * Konfigurieren Sie in Kassen-Terminals **mindestens 3 unabhängige Gateway-Betreiber**.
+   * Verteilen Sie die Gateways über **mindestens 2 verschiedene Autonome Systeme (ASNs)** (z. B. Hetzner + OVH + lokaler Provider).
+   * Leiten Sie **niemals mehr als 50 %** Ihres Lock-Traffics über einen einzigen Betreiber.
+2. **Universelles Sicherheitsnetz: Tier-3 Free Fallback:**
+   * Konfigurieren Sie Terminals so, dass sie bei Ausfall aller VIP-Endpunkte oder abgelaufenen Quotas **automatisch auf das zustandslose BLAKE3-Hashcash-PoW** (Free Tier) zurückgreifen (4-Stufen-Fallback-Kaskade).
+   * Dadurch wird verhindert, dass Kassen bei ISP-Störungen oder Backend-Wartungen blockieren.
+
+---
+
+## 💎 9. VIP-Quotas & Händler-Guthaben (Control-Socket)
 
 Kassen und VIP-Kunden erhalten bevorzugte Bearbeitung ohne PoW über Byte-Jahre-Guthaben.
 
@@ -289,7 +314,7 @@ humoco quota get --account "shop_berlin_01"
 
 ---
 
-## 🔍 9. Troubleshooting & Überwachung
+## 🔍 10. Troubleshooting & Überwachung
 
 ### 1. Log-Inspektion
 ```bash
@@ -343,7 +368,7 @@ Zeigt:
 
 ---
 
-## 📈 10. Prometheus Monitoring
+## 📈 11. Prometheus Monitoring
 
 Der Node stellt unter `http://127.0.0.1:8080/metrics` standardkonforme Prometheus-Metriken bereit:
 * `humoco_locks_total`: Gesamtzahl verifizierter Locks

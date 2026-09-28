@@ -57,11 +57,46 @@ impl NodeMetrics {
 /// Handler for GET /metrics rendering Prometheus / OpenMetrics format.
 pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     let active_locks = state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
-    let peers_connected = if let Some(ref pm) = state.peer_manager {
-        pm.connected_peer_count().await
-    } else {
-        0
-    };
+    let (peers_connected, gateway_concentration_ratio, shard_subnet_dominance_max) =
+        if let Some(ref pm) = state.peer_manager {
+            let conn = pm.connected_peer_count().await;
+            let active_nodes = pm.active_known_nodes().await;
+            let diversity_data = pm.get_ingress_diversity_data().await;
+            let mut ingress_counts: std::collections::HashMap<std::net::SocketAddr, usize> =
+                std::collections::HashMap::new();
+            for (best_ingress_peer, _) in diversity_data {
+                if let Some(peer) = best_ingress_peer {
+                    *ingress_counts.entry(peer).or_insert(0) += 1;
+                }
+            }
+            let source_counts: Vec<usize> = ingress_counts.values().copied().collect();
+            let conc_ratio =
+                humoco_sim_core::telemetry::evaluate_gateway_concentration_ratio(&source_counts);
+
+            let mut subnet_map: std::collections::HashMap<[u8; 3], usize> =
+                std::collections::HashMap::new();
+            for (_, addr) in &active_nodes {
+                match addr.ip() {
+                    std::net::IpAddr::V4(ipv4) => {
+                        let oct = ipv4.octets();
+                        *subnet_map.entry([oct[0], oct[1], oct[2]]).or_insert(0) += 1;
+                    }
+                    std::net::IpAddr::V6(ipv6) => {
+                        let seg = ipv6.segments();
+                        *subnet_map
+                            .entry([(seg[0] >> 8) as u8, seg[0] as u8, (seg[1] >> 8) as u8])
+                            .or_insert(0) += 1;
+                    }
+                }
+            }
+            let subnet_counts: Vec<usize> = subnet_map.values().copied().collect();
+            let sub_dom_max =
+                humoco_sim_core::telemetry::evaluate_subnet_dominance_max(&subnet_counts);
+            (conn, conc_ratio, sub_dom_max)
+        } else {
+            (0, 0.0, 0.0)
+        };
+    let free_tier_enabled = 1; // Default true for standard nodes
     let uptime_sec = state.start_time.elapsed().as_secs();
     let flush_queue_depth = state.engine.flush_sender_len();
 
@@ -94,6 +129,18 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     body.push_str("# HELP humoco_locks_rejected_total Total number of locks rejected due to conflicts or backpressure\n");
     body.push_str("# TYPE humoco_locks_rejected_total counter\n");
     body.push_str(&format!("humoco_locks_rejected_total {}\n", locks_rejected));
+
+    body.push_str("# HELP humoco_gateway_concentration_ratio Ratio of locks from top 2 ingress gateways\n");
+    body.push_str("# TYPE humoco_gateway_concentration_ratio gauge\n");
+    body.push_str(&format!("humoco_gateway_concentration_ratio {:.4}\n", gateway_concentration_ratio));
+
+    body.push_str("# HELP humoco_shard_subnet_dominance_max Maximum percentage of shard nodes in single subnet\n");
+    body.push_str("# TYPE humoco_shard_subnet_dominance_max gauge\n");
+    body.push_str(&format!("humoco_shard_subnet_dominance_max {:.4}\n", shard_subnet_dominance_max));
+
+    body.push_str("# HELP humoco_free_tier_enabled Whether free tier PoW ingress is enabled on this node (1 = true, 0 = false)\n");
+    body.push_str("# TYPE humoco_free_tier_enabled gauge\n");
+    body.push_str(&format!("humoco_free_tier_enabled {}\n", free_tier_enabled));
 
     (
         StatusCode::OK,

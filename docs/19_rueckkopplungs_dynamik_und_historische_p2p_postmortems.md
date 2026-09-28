@@ -125,7 +125,7 @@ Um jede Möglichkeit von Rückkopplungen, Verleumdung und Mob-Rule physikalisch 
      ┌───────────────────────────────────┐               ┌───────────────────────────────────┐
      │      100 % LOKALE SANKTION        │               │      GLOBALER FRAUD-PROOF         │
      ├───────────────────────────────────┤               ├───────────────────────────────────┤
-     │ • Score nur im eigenen RAM        │               │ • 21-Byte Beweis (2x Ed25519 Sigs)│
+     │ • Score nur im eigenen RAM        │               │ • FraudProofPayload (~350B, 2 Sigs)│
      │ • 0 Byte Gossip an Dritte         │               │ • Jeder prüft in < 100 µs selbst │
      │ • Skip & Replace auf Rang 21      │               │ • Sofortiger weltweiter Bann (O1) │
      │ • Heilt sich nach Störung selbst  │               │ • Keine Abstimmung, reine Mathe   │

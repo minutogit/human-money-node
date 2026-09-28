@@ -3,7 +3,7 @@
 > **Status:** Standard  
 > **Model:** Logic & State Graph First  
 
-This document specifies the **Client Ingress and Access Model** of a Layer-2 shard node. It defines the **3-tier access categorization** (VIP/Merchant, F2F/Friends, Anonymous Public Fallback), the **privacy-preserving local client registry**, and the **dynamically scaling, memory-hard Argon2id brake** for complete neutralization of botnet and Sybil flooding.
+This document specifies the **Client Ingress and Access Model** of a Layer-2 shard node. It defines the **3-tier access categorization** (VIP/Merchant, F2F/Friends, Anonymous Public Fallback), the **privacy-preserving local client registry**, and the **stateless, dynamically scaling BLAKE3 Hashcash brake (Cheap-Checks-First)** for complete neutralization of botnet and Sybil flooding without server-side memory exhaustion.
 
 ---
 
@@ -34,13 +34,13 @@ Each Layer-2 Node strictly partitions incoming client traffic into three classes
 
 ```mermaid
 flowchart TD
-    Incoming["Incoming Lock Request (QUIC Stream)"] --> Identify{"Authentication / Token present?"}
+    Incoming["Incoming Lock Request (REST / HTTP)"] --> Identify{"Authentication / Token present?"}
 
     Identify -- "AccountTag in DB (Tier 1: VIP)" --> VIP["🚀 Tier 1: VIP / Merchant SLA<br>• Reserved 70-80% CPU & bandwidth<br>• 0 PoW, latency < 50ms (PoS-Ready)"]
 
     Identify -- "AccountTag in DB (Tier 2: Friend)" --> Friend["🤝 Tier 2: F2F / Friends & Community<br>• Shared neighborhood quota<br>• 0 PoW, latency < 100ms"]
 
-    Identify -- "No token (Tier 3: Anonymous)" --> PublicTier["🛡️ Tier 3: Anonymous Public Fallback<br>• No registration required<br>• Stateless Argon2id Memory-Hard Challenge<br>• Dynamic scaling: 1-2s -> 30-60s under load"]
+    Identify -- "No token (Tier 3: Anonymous)" --> PublicTier["🛡️ Tier 3: Anonymous Public Fallback<br>• No registration required<br>• Stateless BLAKE3 Hashcash (10-min window)<br>• Dynamic difficulty via HTTP 429 load pushback"]
 ```
 
 ### Overview of Ingress Tier Properties
@@ -49,7 +49,7 @@ flowchart TD
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tier 1: VIP / Merchant SLA** | Merchants, PoS terminals, commercial providers | `AccountTag` (Hashed Token in Node DB) | **0 PoW** | $< 50\,\text{ms}$ | Booked quota ($\mu\text{BJ}$) |
 | **Tier 2: F2F / Friends** | Friends, family, neighborhood | `AccountTag` (Hashed Token in Node DB) | **0 PoW** | $< 100\,\text{ms}$ | F2F free quota ($M \le 1.0$) |
-| **Tier 3: Anonymous Public** | Unknown clients, P2P emergency | **None** (Entirely stateless) | **Argon2id** ($64\text{--}128\,\text{MB}$) | $1\text{--}2\,\text{s}$ (Scales up to $60\,\text{s}$) | Dynamic daily base quota |
+| **Tier 3: Anonymous Public** | Unknown clients, P2P emergency | **None** (Entirely stateless) | **BLAKE3 Hashcash** (`pow.rs`) | $< 0{,}1\,\mu\text{s}$ check | Dynamic daily base quota |
 
 ---
 
@@ -101,59 +101,50 @@ pub struct IngressAccount {
 
 ---
 
-## 4. Tier 3: Memory-Hard Botnet Protection (Argon2id Challenge)
+## 4. Tier 3: Stateless BLAKE3 Hashcash (Cheap-Checks-First)
 
-For fully unregistered requests, the Node uses a **stateless, memory-hard client puzzle**.
+For fully unregistered requests, the Node uses a **stateless, time-windowed BLAKE3 client puzzle** ([`pow.rs`](crates/humoco-node/src/ingress/pow.rs)).
 
-### 4.1 Why Memory-Hardness (Argon2id)?
-Pure compute hashes (SHA-256, BLAKE3) can be parallelized millions of times by attackers with GPU or ASIC clusters. 
-* **Argon2id forces each thread to occupy 64 to 128 MB of RAM.**
-* On a smartphone, occupying 64 MB RAM for **1 to 2 seconds** consumes negligible resources.
-* A botnet attempting to send $100{,}000$ spam requests/second would need to provide $100{,}000 \times 64\,\text{MB} = \mathbf{6{,}4\,\text{Terabytes}}$ of ultra-fast memory bandwidth per second. The attack collapses physically and economically.
+### 4.1 Why Stateless BLAKE3 Hashcash (Iron Rule 9)?
+Memory-hard algorithms (Argon2) require allocating memory pools on the server during verification. Under extreme DoS attacks, thousands of forged nonces would force the server into expensive memory-verification bottlenecks.
+* **Stateless BLAKE3 Hashcash** allows the server to verify any submitted solution in **$< 0{,}1\,\mu\text{s}$ with exactly 1 hash computation** and **$0\,\text{bytes}$ memory allocation**.
+* The server stores no issued challenges in RAM (`issued_challenges` is forbidden).
+* Challenges are deterministically bound to the 10-minute epoch window (`slot = now_sec / 600`) and the `parent_lock`:
 
-### 4.2 Dynamic Difficulty Scaling
+$$\text{Challenge} = \text{BLAKE3}(\text{len} \parallel \text{"HUMOCO\_V1\_POW\_STATELESS"} \parallel \text{parent\_lock} \parallel \text{epoch\_slot})$$
 
-The Node continuously measures its local utilization of the unregistered ingress queue and scales the challenge deterministically:
+The client finds a `nonce` such that:
+$$\text{LeadingZeros}\left(\text{BLAKE3}(\text{len} \parallel \text{"HUMOCO\_POW\_SOLUTION"} \parallel \text{Challenge} \parallel \text{nonce})\right) \ge \text{Difficulty}$$
+
+### 4.2 Dynamic Difficulty Scaling & HTTP 429 Pushback
+
+The Node continuously measures its local ingress queue utilization and scales difficulty dynamically:
 
 ```mermaid
 flowchart LR
-    Load0["🟢 Normal operation (Queue < 50%)<br>Argon2id: 64 MB RAM, 1 iteration (~1s)"] --> Load1["🟡 Elevated load (Queue 50-80%)<br>Argon2id: 128 MB RAM, 2 iterations (~3-5s)"]
-    Load1 --> Load2["🔴 Massive attack (Queue > 80%)<br>Argon2id: 256 MB RAM, 4 iterations (~30-60s)"]
+    Load0["🟢 Normal operation (Queue < 50%)<br>Difficulty: default (e.g. 8 bits, < 50ms client)"] --> Load1["🟡 Elevated load (Queue 50-80%)<br>Difficulty: default + 4 (12 bits, ~1-2s client)"]
+    Load1 --> Load2["🔴 Massive attack (Queue > 80%)<br>Difficulty: default + 8 (16 bits, ~10-30s client)"]
 ```
 
-$$\text{Challenge} = \text{BLAKE3}(\text{"HUMOCO\_V1\_CHALLENGE"} \parallel \text{Client\_IP\_Prefix} \parallel \text{Epoch\_Minute} \parallel \text{Difficulty} \parallel \text{Node\_Secret})$$
+* **Adaptive Load Feedback (HTTP 429):** If difficulty is insufficient under load, the server responds with `HTTP 429 Too Many Requests` and header `X-Required-Difficulty: <N>`.
+* **$\Delta\text{Load} \le 0$ Invariant:** Computational load is pushed entirely back to the client; the server remains in idle.
 
-The client must find a `nonce` such that:
-$$\text{Argon2id}(\text{Challenge} \parallel \text{nonce}, \text{mem} = M, \text{time} = T) < \text{Target}(\text{Difficulty})$$
-
-### 4.3 Server Protection against Memory Exhaustion & Pre-Filter Cascade (DoS Tradeoff)
-
-Under a DoS attack there are two attack vectors:
-1. **Mass invalid signatures:** Cheap for the attacker, but discardable via Ed25519 in $50\,\mu\text{s}$.
-2. **Mass forged Argon2id nonces:** The attacker sends valid signatures but random nonces to force the 50 ms Argon2id verification on the server.
-
-To fend off both attack vectors without CPU or RAM exhaustion of the overall system, a strict cascade with resource isolation applies:
+### 4.3 Server Protection Cascade & Atomic Replay Guard
 
 ```mermaid
 flowchart TD
-    Incoming["Incoming unregistered packet (QUIC)"] --> Step1["1. Validate WireHeader & Stateless Cookie<br>Duration: < 1 µs"]
-    Step1 --> Step2["2. Verify client Ed25519 signature<br>Duration: only 0.05 ms (50 µs)! ⚡"]
-    Step2 -- "Signature invalid" --> Drop1["🛑 Immediate drop in 50 µs (Zero Argon2 CPU)"]
-    Step2 -- "Signature valid" --> Step3["3. Bounded Worker Pool & Queue Check<br>Max. 4 threads / 256 MB fixed RAM"]
-    Step3 -- "Queue full / Overload" --> Drop2["🛑 RED drop in 0 µs (No Argon2 computation)"]
-    Step3 -- "Slot free" --> Step4["4. Verify Argon2id nonce (50 ms)"]
-    Step4 -- "Nonce invalid" --> Drop3["⚠️ Isolate QUIC session (No CGNAT IP ban)"]
+    Incoming["Incoming unregistered lock request (REST)"] --> Step1["1. Validate JSON / Wire format & Parent Lock<br>Duration: < 1 µs"]
+    Step1 --> Step2["2. Compute Stateless Challenge & 1x BLAKE3 Hash<br>Duration: < 0.1 µs ⚡ (Zero RAM allocation)"]
+    Step2 -- "Difficulty not met" --> Drop1["🛑 HTTP 429 Too Many Requests (X-Required-Difficulty)"]
+    Step2 -- "Difficulty met" --> Step3["3. Atomic Replay Guard (seen_solutions)<br>O(1) deduplication in active 10-min window"]
+    Step3 -- "Nonce already seen" --> Drop2["🛑 HTTP 409 Conflict (Replay detected)"]
+    Step3 -- "Valid new solution" --> Step4["4. Process Lock in RAM Index (< 1 µs)"]
 ```
 
-1. **Stage 1: Stateless Cookie & WireHeader ($<1\,\mu\text{s}$):** Prevents IP spoofing and filters unstructured wire garbage immediately.
-2. **Stage 2: Ed25519 Pre-Filter ($50\,\mu\text{s}$):** Prevents arbitrary random bits without cryptographic authorship from ever reaching the worker pool.
-3. **Stage 3: Isolated Bounded Worker Pool with RED ($10\text{--}50\,\text{ms}$):**
-   * The compute- and memory-intensive Argon2id verification is strictly confined to an **isolated worker pool** (e.g., 4 threads with fixed 256 MB RAM).
-   * **Queue Limit & RED (Random Early Drop):** When the worker pool is saturated, excess alleged Tier-3 proofs are **immediately discarded in $0\,\mu\text{s}$** without executing the Argon2id check.
-   * **Complete Tier-1/Data-Plane Isolation ([INV-1301]):** Shard consensus, quorum signatures and Tier-1 merchant ingress run on entirely separate threads and cores. A massive Tier-3 Argon2id spam can never bring the node down.
-4. **Session Ban instead of IP Ban (Anti-CGNAT Collateral Protection):** 
-   * Since in mobile networks thousands of smartphones share the same Carrier-Grade NAT (CGNAT) IPv4, the Node **never bans broad IP ranges** on invalid nonces.
-   * Instead, the **specific QUIC Connection ID and the ephemeral key** are isolated in a targeted manner.
+1. **Stage 1: Stateless Validation ($< 1\,\mu\text{s}$):** Deterministic challenge regeneration without DB access.
+2. **Stage 2: Cheap 1-Hash Verification ($< 0{,}1\,\mu\text{s}$):** Single BLAKE3 hash filters millions of illegitimate packets instantly.
+3. **Stage 3: Atomic Replay Guard ($O(1)$):** Deduplicates used nonces within the active 10-minute epoch window.
+4. **Complete Tier-1 Data-Plane Isolation ([INV-1301]):** Shard consensus and Tier-1 merchant ingress run on dedicated worker channels. Public spam cannot affect merchant checkouts.
 
 ---
 
@@ -171,6 +162,6 @@ To prevent lazy gateway nodes from earning ingress fees from end clients without
 1. **[INV-1301] VIP Data-Plane Isolation:** Overload or botnet attacks on Tier 3 (Anonymous) must never impair the latency and bandwidth of Tier 1 (VIP / Merchant).
 2. **[INV-1302] Zero-Knowledge Account Tagging:** The local registry stores exclusively hashed account tags (`BLAKE3(PubKey || Salt)`), no plaintext identities or persistent IP addresses.
 3. **[INV-1303] Stateless Tier-3 Challenges:** Generation and verification of Tier-3 PoW puzzles requires no persistent storage on the server ($O(1)$ memory overhead).
-4. **[INV-1304] Asymmetric Cost Barrier:** The cost of verifying an Argon2id solution on the server is strictly capped by fixed worker slots; the cost for mass attacks scales linearly with $N \times 64\,\text{MB}$.
-5. **[INV-1305] Autonomous Emergency Brake:** Each Node operator can locally raise the Argon2id difficulty for Tier 3 without network consensus up to 60 seconds or temporarily throttle the anonymous port under extreme flooding.
+4. **[INV-1304] Asymmetric Cost Barrier:** The cost of verifying a BLAKE3 Hashcash solution on the server is exactly 1 hash ($< 0{,}1\,\mu\text{s}$); the cost for mass attacks scales exponentially with $2^{\text{Difficulty}}$ for the attacker.
+5. **[INV-1305] Autonomous Emergency Brake:** Each Node operator can locally raise the PoW difficulty for Tier 3 without network consensus or temporarily throttle anonymous ingress under extreme flooding.
 6. **[INV-1306] Reciprocal Ingress Prioritization:** Gateway ingress into foreign shards is tied to continuous reciprocity; inactive nodes are deprioritized at the peering edges via local suspension (`missing_count >= 3`).

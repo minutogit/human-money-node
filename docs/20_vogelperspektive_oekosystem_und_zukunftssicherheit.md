@@ -83,7 +83,7 @@ sequenceDiagram
 ### Ingress-Stufen (Spec 13):
 * **Tier 1 (VIP / SLA):** Händler/Kassen mit vorab bezahltem API-Key oder signiertem Auth-Token. Prioritäre Abarbeitung in $< 5\,\text{ms}$.
 * **Tier 2 (F2F Friends):** Befreundete Nachbarknoten. Gegenseitige kostenlose Freikontingente im Mesh.
-* **Tier 3 (Public / Anonym):** Öffentliche Wallets ohne Registrierung. Schutz vor Missbrauch über dynamisches **Argon2id Proof-of-Work (PoW)**.
+* **Tier 3 (Public / Anonym):** Öffentliche Wallets ohne Registrierung. Schutz vor Missbrauch über zustandsloses **BLAKE3 Hashcash (PoW)** mit dynamischer Lastanpassung (*Netzwerk-Thermometer*).
 
 ---
 

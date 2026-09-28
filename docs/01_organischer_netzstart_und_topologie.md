@@ -101,6 +101,24 @@ sequenceDiagram
     end
 ```
 
+### 3.3 The Bootstrap Discovery Path (`[discovery].bootstrap_gateways`)
+
+For initial network discovery (PEX) before a node operator has manually exchanged F2F credentials, the node supports an optional bootstrap discovery configuration:
+
+```toml
+[discovery]
+bootstrap_gateways = [
+    "https://bootstrap1.humoco.org",
+    "https://bootstrap2.humoco.org",
+]
+```
+
+#### Standardized Exception to [INV-0103] & Security Bounds:
+1. **Read-Only Peer Exchange (PEX):** Queries to bootstrap gateways are strictly limited to fetching public shard endpoints via `GET /peers` and reading median network time.
+2. **Zero Gossip Privileges:** Bootstrap discovery connections **NEVER** grant F2F gossip rights. The node does **not** forward heartbeats or topology rumors across bootstrap discovery channels.
+3. **Zero Consensus / Voting Rights:** Bootstrap gateways have **no voting or quorum privileges** on behalf of the local node.
+4. **Ephemeral Transition:** As soon as the node establishes genuine F2F peering edges (`[f2f].peers`), bootstrap discovery connections are decommissioned or relegated to fallback state.
+
 ---
 
 ## 4. Invariants of Network Bootstrap
@@ -110,3 +128,4 @@ sequenceDiagram
 3. **[INV-0103] Strict F2F Gossip Peering:** Persistent P2P gossip and topology connections may be established exclusively along verified F2F friendship edges (eclipse immunity).
 4. **[INV-0104] Authorized Co-Shard Connections:** Direct data-plane connections between shard quorum nodes are permissible only between nodes that are both qualified in $N_{\text{active}}$ and lie within the HRW quorum for the same shard.
 5. **[INV-0105] Throttling via F2F Edges & PoW:** New peers cannot flood the network with mass Sybil instances, since each identity requires at least the Argon2d minimum floor $D_{\text{min\_floor}}$ ($\ge 1\,\text{h}$ server / $\ge 4\,\text{h}$ Raspberry Pi) and is bound to F2F edges.
+6. **[INV-0106] Bounded Bootstrap Discovery Exception:** Connections to `bootstrap_gateways` serve strictly as read-only PEX discovery endpoints; they never bridge the F2F gossip barrier or grant consensus voting rights.

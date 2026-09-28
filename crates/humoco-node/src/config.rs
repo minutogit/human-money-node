@@ -47,6 +47,14 @@ pub struct NodeConfig {
     pub lifecycle: LifecycleConfig,
     #[serde(default)]
     pub alerts: AlertConfig,
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DiscoveryConfig {
+    #[serde(default)]
+    pub bootstrap_gateways: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -449,6 +457,12 @@ peers = [
 [quotas]
 # Default byte-years quota per peer
 default_byte_years = {}
+
+[discovery]
+# List of bootstrap gateways for initial discovery and client fallback
+bootstrap_gateways = [
+    # "https://gateway1.humoco.org",
+]
 "#,
             self.network.p2p_listen_addr,
             adv_line,
@@ -479,6 +493,7 @@ mod tests {
         assert_eq!(config.network.advertised_addr, None);
         assert_eq!(config.quotas.default_byte_years, DEFAULT_BYTE_YEARS);
         assert!(config.f2f.peers.is_empty());
+        assert!(config.discovery.bootstrap_gateways.is_empty());
     }
 
     #[test]
@@ -487,6 +502,7 @@ mod tests {
         config.network.advertised_addr = Some("203.0.113.195:9090".parse().unwrap());
         config.f2f.peers.push("192.168.1.100:9090".to_string());
         config.quotas.default_byte_years = 500_000_000;
+        config.discovery.bootstrap_gateways.push("https://bootstrap.humoco.org".to_string());
 
         let toml_str = toml::to_string_pretty(&config).expect("Serialize to TOML");
         let parsed: NodeConfig = toml::from_str(&toml_str).expect("Deserialize from TOML");
@@ -523,6 +539,21 @@ mod tests {
             DEFAULT_RPC_LISTEN_ADDR.parse().unwrap()
         );
         assert_eq!(NodeConfig::generate_default_toml(), template);
+    }
+
+    #[test]
+    fn test_discovery_config_parsing() {
+        let toml_str = r#"
+        [discovery]
+        bootstrap_gateways = [
+            "https://gateway1.humoco.org",
+            "https://gateway2.humoco.org"
+        ]
+        "#;
+        let config: NodeConfig = toml::from_str(toml_str).expect("Parse discovery section");
+        assert_eq!(config.discovery.bootstrap_gateways.len(), 2);
+        assert_eq!(config.discovery.bootstrap_gateways[0], "https://gateway1.humoco.org");
+        assert_eq!(config.discovery.bootstrap_gateways[1], "https://gateway2.humoco.org");
     }
 
     #[test]

@@ -39,6 +39,10 @@ pub struct DashboardData {
     pub pos_latency_avg_ms: f64,
     pub pos_sla_compliant: bool,
     pub broom_patterns_detected: usize,
+    pub gateway_concentration_ratio: f64,
+    pub shard_subnet_dominance_max: f64,
+    pub free_tier_enabled: bool,
+    pub warnings: Vec<String>,
     pub recent_locks: Vec<RecentLockDto>,
 }
 
@@ -82,32 +86,90 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let uptime_formatted = format_uptime(uptime);
     let peering_string = determine_peering_string(state);
 
-    let (connected_peers, configured_peers, active_nodes_count, broom_patterns_detected) =
-        if let Some(ref pm) = state.peer_manager {
-            let conn = pm.connected_peer_count().await;
-            let conf = pm.all_peer_addrs().await.len();
-            let act = pm.active_known_nodes().await.len();
-            
-            let diversity_data = pm.get_ingress_diversity_data().await;
-            let mut ingress_counts: std::collections::HashMap<SocketAddr, (usize, u32)> = std::collections::HashMap::new();
-            for (best_ingress_peer, ingress_diversity_mask) in diversity_data {
-                if let Some(peer) = best_ingress_peer {
-                    let entry = ingress_counts.entry(peer).or_insert((0, ingress_diversity_mask));
-                    entry.0 += 1;
-                    entry.1 |= ingress_diversity_mask;
-                }
-            }
-            let mut brooms = 0;
-            for (_, (count, mask)) in ingress_counts {
-                if count >= 10 && mask.count_ones() <= 1 {
-                    brooms += 1;
-                }
-            }
+    let (
+        connected_peers,
+        configured_peers,
+        active_nodes_count,
+        broom_patterns_detected,
+        gateway_concentration_ratio,
+        shard_subnet_dominance_max,
+        warnings,
+    ) = if let Some(ref pm) = state.peer_manager {
+        let conn = pm.connected_peer_count().await;
+        let conf = pm.all_peer_addrs().await.len();
+        let active_nodes = pm.active_known_nodes().await;
+        let act = active_nodes.len();
 
-            (conn, conf, act, brooms)
-        } else {
-            (0, 0, 0, 0)
-        };
+        let diversity_data = pm.get_ingress_diversity_data().await;
+        let mut ingress_counts: std::collections::HashMap<SocketAddr, (usize, u32)> =
+            std::collections::HashMap::new();
+        for (best_ingress_peer, ingress_diversity_mask) in diversity_data {
+            if let Some(peer) = best_ingress_peer {
+                let entry = ingress_counts
+                    .entry(peer)
+                    .or_insert((0, ingress_diversity_mask));
+                entry.0 += 1;
+                entry.1 |= ingress_diversity_mask;
+            }
+        }
+        let mut brooms = 0;
+        let mut source_counts = Vec::new();
+        for (_, (count, mask)) in &ingress_counts {
+            source_counts.push(*count);
+            if *count >= 10 && mask.count_ones() <= 1 {
+                brooms += 1;
+            }
+        }
+        let conc_ratio =
+            humoco_sim_core::telemetry::evaluate_gateway_concentration_ratio(&source_counts);
+
+        // Subnet dominance
+        let mut subnet_map: std::collections::HashMap<[u8; 3], usize> =
+            std::collections::HashMap::new();
+        for (_, addr) in &active_nodes {
+            match addr.ip() {
+                std::net::IpAddr::V4(ipv4) => {
+                    let oct = ipv4.octets();
+                    *subnet_map.entry([oct[0], oct[1], oct[2]]).or_insert(0) += 1;
+                }
+                std::net::IpAddr::V6(ipv6) => {
+                    let seg = ipv6.segments();
+                    *subnet_map
+                        .entry([(seg[0] >> 8) as u8, seg[0] as u8, (seg[1] >> 8) as u8])
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+        let subnet_counts: Vec<usize> = subnet_map.values().copied().collect();
+        let sub_dom_max =
+            humoco_sim_core::telemetry::evaluate_subnet_dominance_max(&subnet_counts);
+
+        let mut warns = Vec::new();
+        if let Some(w) =
+            humoco_sim_core::telemetry::detect_gateway_concentration(&source_counts)
+        {
+            warns.push(w.message);
+        }
+        if let Some(w) =
+            humoco_sim_core::telemetry::detect_shard_operator_dominance(0, &subnet_counts)
+        {
+            warns.push(w.message);
+        }
+
+        (
+            conn,
+            conf,
+            act,
+            brooms,
+            conc_ratio,
+            sub_dom_max,
+            warns,
+        )
+    } else {
+        (0, 0, 0, 0, 0.0, 0.0, Vec::new())
+    };
+
+    let free_tier_enabled = true;
 
     let (status, status_badge) = if state.peer_manager.is_none() || configured_peers == 0 {
         ("VILLAGE MODE".to_string(), "VILLAGE MODE (N=1)".to_string())
@@ -160,6 +222,10 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         pos_latency_avg_ms,
         pos_sla_compliant,
         broom_patterns_detected,
+        gateway_concentration_ratio,
+        shard_subnet_dominance_max,
+        free_tier_enabled,
+        warnings,
         recent_locks,
     }
 }
@@ -219,6 +285,14 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
     } else {
         r#"<div class="card-sub" id="broom-patterns-sub" style="color: var(--green); margin-top: 0.25rem;">✅ Topologie gesund (Kein Tunneling)</div>"#.to_string()
     };
+
+    let mut warnings_html = String::new();
+    for w in &data.warnings {
+        warnings_html.push_str(&format!(
+            r#"<div style="color: var(--amber); font-size: 0.8125rem; margin-top: 0.25rem;">⚠️ {}</div>"#,
+            w
+        ));
+    }
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -429,6 +503,16 @@ footer {{
       <div class="card-value" id="locks-val">{active_locks}</div>
       <div class="card-sub" id="flush-depth-sub">Flush-Queue Tiefe: {flush_depth} / 10000</div>
     </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>🌐 Ingress &amp; Telemetrie</span>
+        <span class="badge badge-green" id="free-tier-badge">Free Tier PoW: {free_tier_status}</span>
+      </div>
+      <div class="card-value" id="conc-val">{conc_percent:.1}% <span style="font-size: 1rem; font-weight: normal; color: var(--text-muted);">Top-2 Konzentration</span></div>
+      <div class="card-sub" id="subnet-dom-sub">Max Subnetz-Dominanz: {dom_percent:.1}%</div>
+      <div id="warnings-box">{warnings_html}</div>
+    </div>
   </div>
 
   <div class="card identity-card">
@@ -521,6 +605,20 @@ async function refreshDashboard() {{
       broomSub.style.fontWeight = 'normal';
     }}
 
+    // Ingress & Telemetrie
+    document.getElementById('conc-val').innerHTML = (d.gateway_concentration_ratio * 100).toFixed(1) + '% <span style="font-size: 1rem; font-weight: normal; color: var(--text-muted);">Top-2 Konzentration</span>';
+    document.getElementById('subnet-dom-sub').innerText = 'Max Subnetz-Dominanz: ' + (d.shard_subnet_dominance_max * 100).toFixed(1) + '%';
+    const warnBox = document.getElementById('warnings-box');
+    if (d.warnings && d.warnings.length > 0) {{
+      let wHtml = '';
+      for (const w of d.warnings) {{
+        wHtml += '<div style="color: var(--amber); font-size: 0.8125rem; margin-top: 0.25rem;">⚠️ ' + w + '</div>';
+      }}
+      warnBox.innerHTML = wHtml;
+    }} else {{
+      warnBox.innerHTML = '';
+    }}
+
     // Storage
     document.getElementById('locks-val').innerText = d.active_locks;
     document.getElementById('flush-depth-sub').innerText = 'Flush-Queue Tiefe: ' + d.flush_queue_depth + ' / 10000';
@@ -560,6 +658,10 @@ setInterval(refreshDashboard, 5000);
         broom_html = broom_html,
         active_locks = data.active_locks,
         flush_depth = data.flush_queue_depth,
+        free_tier_status = if data.free_tier_enabled { "Aktiv" } else { "Deaktiviert" },
+        conc_percent = data.gateway_concentration_ratio * 100.0,
+        dom_percent = data.shard_subnet_dominance_max * 100.0,
+        warnings_html = warnings_html,
         qr_svg = qr_svg,
         node_id = data.node_id,
         peering_str = data.peering_string,

@@ -2,10 +2,13 @@
 //! Deterministische, Zero-I/O Tests – keine externen Crates außer blake3.
 
 use humoco_sim_core::telemetry::{
-    detect_clock_skew, detect_single_bridge_botnet, detect_single_edge_censorship_risk,
-    evaluate_multi_node_cluster, evaluate_starvation, hash_degree_map, is_deactivated_by_starvation,
+    detect_clock_skew, detect_gateway_concentration, detect_gateway_no_free_tier,
+    detect_shard_operator_dominance, detect_single_bridge_botnet, detect_single_edge_censorship_risk,
+    evaluate_gateway_concentration_ratio, evaluate_multi_node_cluster, evaluate_starvation,
+    evaluate_subnet_dominance_max, hash_degree_map, is_deactivated_by_starvation,
     is_purged_by_starvation, starvation_at_time, DiagnosticWarning, IngressAuditTracker,
     PrometheusMetrics, ShardPerformanceTracker, StarvationStage, TopologyReport, WarningLevel,
+    WARN_GATEWAY_CONCENTRATION, WARN_GATEWAY_NO_FREE_TIER, INFO_SHARD_OPERATOR_DOMINANCE,
 };
 use humoco_sim_core::types::SimTime;
 use std::collections::HashMap;
@@ -22,8 +25,11 @@ fn test_inv1701_telemetry_is_non_authoritative_no_auto_ban() {
         WarningLevel::WarnSingleEdgeCensorshipRisk,
         WarningLevel::WarnLocalClockSkew,
         WarningLevel::WarnLocalShardPerformanceDegraded,
+        WarningLevel::WarnGatewayConcentration,
+        WarningLevel::WarnGatewayNoFreeTier,
         WarningLevel::InfoNeighborShardActivity,
         WarningLevel::InfoAuditIngressHigh,
+        WarningLevel::InfoShardOperatorDominance,
     ] {
         assert!(
             !lvl.triggers_auto_ban(),
@@ -550,3 +556,56 @@ fn test_inv1702_1704_1705_combined_topology_health() {
     report.add_warning(shard.check_neighbor(99, 0, 150).unwrap());
     assert!(!report.is_healthy());
 }
+
+#[test]
+fn test_inv1701_gateway_concentration_and_dominance_helpers() {
+    // 1. Gateway Concentration
+    assert_eq!(WarningLevel::WarnGatewayConcentration.as_str(), WARN_GATEWAY_CONCENTRATION);
+    assert!(!WarningLevel::WarnGatewayConcentration.triggers_auto_ban());
+    assert!(WarningLevel::WarnGatewayConcentration.is_warn());
+
+    let counts = vec![90, 10]; // total 100, top 2 = 100 (100%)
+    let ratio = evaluate_gateway_concentration_ratio(&counts);
+    assert!((ratio - 1.0).abs() < 1e-6);
+    let warn = detect_gateway_concentration(&counts);
+    assert!(warn.is_some());
+    assert_eq!(warn.as_ref().unwrap().level, WarningLevel::WarnGatewayConcentration);
+
+    // Below threshold total locks (< 20)
+    let small_counts = vec![9, 1];
+    assert!(detect_gateway_concentration(&small_counts).is_none());
+
+    // Diversified (top 2 = 40 out of 100 -> 40%)
+    let div_counts = vec![20, 20, 20, 20, 20];
+    assert_eq!(evaluate_gateway_concentration_ratio(&div_counts), 0.4);
+    assert!(detect_gateway_concentration(&div_counts).is_none());
+
+    // 2. Shard Operator Subnet Dominance
+    assert_eq!(WarningLevel::InfoShardOperatorDominance.as_str(), INFO_SHARD_OPERATOR_DOMINANCE);
+    assert!(!WarningLevel::InfoShardOperatorDominance.triggers_auto_ban());
+    assert!(WarningLevel::InfoShardOperatorDominance.is_info());
+
+    let subnet_counts = vec![4, 1, 1]; // 4 out of 6 in single subnet = 66.7% (> 50%)
+    let max_sub_ratio = evaluate_subnet_dominance_max(&subnet_counts);
+    assert!((max_sub_ratio - (4.0 / 6.0)).abs() < 1e-6);
+    let dom_info = detect_shard_operator_dominance(12, &subnet_counts);
+    assert!(dom_info.is_some());
+    assert_eq!(dom_info.as_ref().unwrap().level, WarningLevel::InfoShardOperatorDominance);
+
+    // Balanced subnets: 1, 1, 1, 1
+    let balanced = vec![1, 1, 1, 1];
+    assert!(detect_shard_operator_dominance(12, &balanced).is_none());
+
+    // 3. Fallback Gateway No Free Tier
+    assert_eq!(WarningLevel::WarnGatewayNoFreeTier.as_str(), WARN_GATEWAY_NO_FREE_TIER);
+    assert!(!WarningLevel::WarnGatewayNoFreeTier.triggers_auto_ban());
+    assert!(WarningLevel::WarnGatewayNoFreeTier.is_warn());
+
+    let no_free_tier_warn = detect_gateway_no_free_tier("https://gw-vip-only.humoco.org", false);
+    assert!(no_free_tier_warn.is_some());
+    assert_eq!(no_free_tier_warn.as_ref().unwrap().level, WarningLevel::WarnGatewayNoFreeTier);
+
+    let free_tier_ok = detect_gateway_no_free_tier("https://gw-public.humoco.org", true);
+    assert!(free_tier_ok.is_none());
+}
+

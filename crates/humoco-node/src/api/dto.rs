@@ -86,10 +86,16 @@ pub struct NodeStatusResponse {
     pub total_locks: usize,
     #[serde(default = "default_network_str")]
     pub network: String,
+    #[serde(default = "default_true")]
+    pub free_tier_enabled: bool,
 }
 
 fn default_network_str() -> String {
     "mainnet".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Information about an active network peer for client discovery (PEX).

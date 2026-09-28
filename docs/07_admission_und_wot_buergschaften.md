@@ -95,6 +95,24 @@ Instead of complex numerical trust-mass calculations ($M \ge 1.0$) or bureaucrat
 2. **Edge throttling as Sybil barrier:** If an attacker injects hundreds of fake nodes behind a single bridge node, the biomimetic edge budget ($R_{\text{soft}}$, see `docs/11`) stochastically throttles $> 99{,}9\%$ of unauthorized heartbeats.
 3. **Human gatekeeper:** There is no autonomous admission via pure uptime without human attachment (no over-complex Proof-of-Longevity). Every node in the network has a real human origin.
 
+### 2.1 The "5-Finger Rule" for F2F Edges (Peering Checklist)
+
+To prevent social engineering, sycophant clusters, and unvetted cloud-botnet injection, every node operator must verify the **5-Finger Rule** before adding any peer to `[f2f].peers`:
+
+```mermaid
+flowchart LR
+    F1["1. 👤 Personal Acquaintance\n(Real-world identity known)"] --> F2["2. 📍 Physical Location\n(Geographic plausibility)"]
+    F2 --> F3["3. 🔄 Symmetry\n(Mutual agreement & config)"]
+    F3 --> F4["4. 🔍 Existing Friends Check\n(No isolated bot circles)"]
+    F4 --> F5["5. 🚫 Zero Trade / Bribes\n(Pure social trust, no money)"]
+```
+
+1. 👤 **Personal Acquaintance (1st Finger):** The node operator is known personally in the real world (or through a verified cryptographic Web-of-Trust interaction). Never peer with anonymous internet strangers.
+2. 📍 **Physical Location Knowledge (2nd Finger):** You know the approximate physical municipality or region where the node operates. This ensures topological grounding and fends off virtual cloud sybil farms.
+3. 🔄 **Symmetry & Reciprocity (3rd Finger):** Peering is strictly bidirectional. Both operators explicitly agree and register each other's `NodePubKey` and endpoint in `[f2f].peers`. Unilateral peering requests are rejected.
+4. 🔍 **Existing Friends Check (4th Finger):** Cross-examine the candidate's existing peering connections to verify that they are integrated into diverse, genuine community subgraphs rather than an isolated sycophant circle.
+5. 🚫 **Zero Trade / Bribe Policy (5th Finger):** F2F friendship slots must **never be bought, sold, rented, or bartered** for money, tokens, or collateral deposits. The network operates under Zero Financial Deposits; trust is purely social.
+
 ---
 
 ## 3. The Node Presence State Machine (`NodePresence`)
@@ -230,3 +248,4 @@ flowchart TD
 7. **[INV-0707] Seamless successor guarantee:** Departure of a node changes shard quorums deterministically via HRW ranking; successors load exclusively active locks from RAM of remaining shard nodes.
 8. **[INV-0708] Transport-native departure (Zero gossip flood):** Orderly node departures occur exclusively transport-natively via QUIC `CONNECTION_CLOSE (0x00)` to 1-hop peers. No global application gossip leave message exists, which physically excludes gossip flooding and flapping attacks.
 9. **[INV-0709] NodePubKey stability & autonomous re-mining with 24h wall:** F2F friendships and peering certificates are permanently bound to `NodePubKey` (Ed25519). Re-mining to increase security margin ($H \ge 4{,}0$) renews exclusively the `HrwRoutingId` via `HrwRoutingIdMigrationNotice` (signed with `NodePrivKey`) without rebuilding friendship edges and without downtime; the new `HrwRoutingId` is subject to the 24h incubation wall (propagated immediately, active in HRW after 24h).
+10. **[INV-0710] 5-Finger Social Peering Doctrine:** F2F peering requires strict adherence to the 5-Finger Rule (personal acquaintance, physical location knowledge, symmetry, existing friends check, zero trade/bribe policy) to preserve genuine social topology and eliminate unvetted botnet clusters.

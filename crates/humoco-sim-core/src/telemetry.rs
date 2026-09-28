@@ -11,6 +11,16 @@ use crate::types::{NodeId, SimTime};
 // WarningLevel
 // ---------------------------------------------------------------------------
 
+pub const WARN_SINGLE_BRIDGE_BOTNET: &str = "WARN_SINGLE_BRIDGE_BOTNET";
+pub const WARN_SINGLE_EDGE_CENSORSHIP_RISK: &str = "WARN_SINGLE_EDGE_CENSORSHIP_RISK";
+pub const WARN_LOCAL_CLOCK_SKEW: &str = "WARN_LOCAL_CLOCK_SKEW";
+pub const WARN_LOCAL_SHARD_PERFORMANCE_DEGRADED: &str = "WARN_LOCAL_SHARD_PERFORMANCE_DEGRADED";
+pub const WARN_GATEWAY_CONCENTRATION: &str = "WARN_GATEWAY_CONCENTRATION";
+pub const WARN_GATEWAY_NO_FREE_TIER: &str = "WARN_GATEWAY_NO_FREE_TIER";
+pub const INFO_NEIGHBOR_SHARD_ACTIVITY: &str = "INFO_NEIGHBOR_SHARD_ACTIVITY";
+pub const INFO_AUDIT_INGRESS_HIGH: &str = "INFO_AUDIT_INGRESS_HIGH";
+pub const INFO_SHARD_OPERATOR_DOMINANCE: &str = "INFO_SHARD_OPERATOR_DOMINANCE";
+
 /// Diagnostic level for dashboard warnings.
 /// Corresponds to the JSON level strings from docs/17 §4.2-4.4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -23,21 +33,30 @@ pub enum WarningLevel {
     WarnLocalClockSkew,
     /// Local shard validation rate <80% – ingress rights at risk of expiry.
     WarnLocalShardPerformanceDegraded,
+    /// High percentage of locks originate from <= 2 ingress sources.
+    WarnGatewayConcentration,
+    /// Configured fallback gateway has free_tier_enabled == false.
+    WarnGatewayNoFreeTier,
     /// Neighbor co-signed 0/150 locks in the assigned shard over 24h (optional, informational only).
     InfoNeighborShardActivity,
     /// Neighbor consumes >=80% of its daily ingress on day 1 – plausibility check.
     InfoAuditIngressHigh,
+    /// Many shard nodes reside in the same IP subnet.
+    InfoShardOperatorDominance,
 }
 
 impl WarningLevel {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::WarnSingleBridgeBotnet => "WARN_SINGLE_BRIDGE_BOTNET",
-            Self::WarnSingleEdgeCensorshipRisk => "WARN_SINGLE_EDGE_CENSORSHIP_RISK",
-            Self::WarnLocalClockSkew => "WARN_LOCAL_CLOCK_SKEW",
-            Self::WarnLocalShardPerformanceDegraded => "WARN_LOCAL_SHARD_PERFORMANCE_DEGRADED",
-            Self::InfoNeighborShardActivity => "INFO_NEIGHBOR_SHARD_ACTIVITY",
-            Self::InfoAuditIngressHigh => "INFO_AUDIT_INGRESS_HIGH",
+            Self::WarnSingleBridgeBotnet => WARN_SINGLE_BRIDGE_BOTNET,
+            Self::WarnSingleEdgeCensorshipRisk => WARN_SINGLE_EDGE_CENSORSHIP_RISK,
+            Self::WarnLocalClockSkew => WARN_LOCAL_CLOCK_SKEW,
+            Self::WarnLocalShardPerformanceDegraded => WARN_LOCAL_SHARD_PERFORMANCE_DEGRADED,
+            Self::WarnGatewayConcentration => WARN_GATEWAY_CONCENTRATION,
+            Self::WarnGatewayNoFreeTier => WARN_GATEWAY_NO_FREE_TIER,
+            Self::InfoNeighborShardActivity => INFO_NEIGHBOR_SHARD_ACTIVITY,
+            Self::InfoAuditIngressHigh => INFO_AUDIT_INGRESS_HIGH,
+            Self::InfoShardOperatorDominance => INFO_SHARD_OPERATOR_DOMINANCE,
         }
     }
 
@@ -54,13 +73,17 @@ impl WarningLevel {
                 | Self::WarnSingleEdgeCensorshipRisk
                 | Self::WarnLocalClockSkew
                 | Self::WarnLocalShardPerformanceDegraded
+                | Self::WarnGatewayConcentration
+                | Self::WarnGatewayNoFreeTier
         )
     }
 
     pub fn is_info(&self) -> bool {
         matches!(
             self,
-            Self::InfoNeighborShardActivity | Self::InfoAuditIngressHigh
+            Self::InfoNeighborShardActivity
+                | Self::InfoAuditIngressHigh
+                | Self::InfoShardOperatorDominance
         )
     }
 }
@@ -619,6 +642,93 @@ pub fn starvation_at_time(revoke_at: SimTime, now: SimTime) -> StarvationStage {
     evaluate_starvation(hours)
 }
 
+/// Evaluates gateway concentration ratio: the fraction of locks/traffic originating
+/// from the top <= 2 ingress sources (0.0 to 1.0).
+pub fn evaluate_gateway_concentration_ratio(source_counts: &[usize]) -> f64 {
+    let total: usize = source_counts.iter().sum();
+    if total == 0 {
+        return 0.0;
+    }
+    let mut sorted = source_counts.to_vec();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let top_2_sum: usize = sorted.iter().take(2).sum();
+    top_2_sum as f64 / total as f64
+}
+
+/// Detects gateway concentration: if >= 20 total locks and >= 80% originate from <= 2 ingress sources.
+/// INV-1701: non-authoritative warning only.
+pub fn detect_gateway_concentration(source_counts: &[usize]) -> Option<DiagnosticWarning> {
+    let total: usize = source_counts.iter().sum();
+    if total >= 20 {
+        let ratio = evaluate_gateway_concentration_ratio(source_counts);
+        if ratio >= 0.8 {
+            return Some(DiagnosticWarning::local(
+                WarningLevel::WarnGatewayConcentration,
+                format!(
+                    "High gateway concentration: top ingress sources provide {:.1}% of {} total locks (>= 80% threshold). Consider diversifying ingress endpoints.",
+                    ratio * 100.0,
+                    total
+                ),
+            ));
+        }
+    }
+    None
+}
+
+/// Evaluates maximum shard subnet dominance ratio (0.0 to 1.0).
+pub fn evaluate_subnet_dominance_max(subnet_node_counts: &[usize]) -> f64 {
+    let total: usize = subnet_node_counts.iter().sum();
+    if total == 0 {
+        return 0.0;
+    }
+    let max_in_subnet = subnet_node_counts.iter().copied().max().unwrap_or(0);
+    max_in_subnet as f64 / total as f64
+}
+
+/// Detects shard operator dominance: when a single subnet hosts > 50% of nodes in a shard (N >= 3).
+/// INV-1701: non-authoritative informational notice only.
+pub fn detect_shard_operator_dominance(
+    shard_id: u16,
+    subnet_node_counts: &[usize],
+) -> Option<DiagnosticWarning> {
+    let total: usize = subnet_node_counts.iter().sum();
+    if total >= 3 {
+        let max_ratio = evaluate_subnet_dominance_max(subnet_node_counts);
+        if max_ratio > 0.5 {
+            return Some(DiagnosticWarning::local(
+                WarningLevel::InfoShardOperatorDominance,
+                format!(
+                    "Shard {} operator dominance: single subnet contains {:.1}% of shard nodes ({} of {}).",
+                    shard_id,
+                    max_ratio * 100.0,
+                    subnet_node_counts.iter().copied().max().unwrap_or(0),
+                    total
+                ),
+            ));
+        }
+    }
+    None
+}
+
+/// Detects if a configured fallback gateway has disabled free tier PoW ingress.
+/// INV-1701: non-authoritative warning only.
+pub fn detect_gateway_no_free_tier(
+    gateway_endpoint: &str,
+    free_tier_enabled: bool,
+) -> Option<DiagnosticWarning> {
+    if !free_tier_enabled {
+        Some(DiagnosticWarning::local(
+            WarningLevel::WarnGatewayNoFreeTier,
+            format!(
+                "Configured gateway '{}' has disabled free tier ingress (free_tier_enabled = false).",
+                gateway_endpoint
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Deterministische Hash-Helfer
 // ---------------------------------------------------------------------------
@@ -647,8 +757,11 @@ mod tests {
             WarningLevel::WarnSingleEdgeCensorshipRisk,
             WarningLevel::WarnLocalClockSkew,
             WarningLevel::WarnLocalShardPerformanceDegraded,
+            WarningLevel::WarnGatewayConcentration,
+            WarningLevel::WarnGatewayNoFreeTier,
             WarningLevel::InfoNeighborShardActivity,
             WarningLevel::InfoAuditIngressHigh,
+            WarningLevel::InfoShardOperatorDominance,
         ] {
             assert!(!lvl.triggers_auto_ban(), "Level {:?} must never auto-ban", lvl);
         }

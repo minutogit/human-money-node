@@ -184,17 +184,17 @@ Nein. Die Architektur schützt das Netzwerk durch **5 ineinandergreifende mathem
 
 ```mermaid
 flowchart TD
-    Attack["Angreifer will mit neuem Knoten Schaden anrichten"] --> B1["1. Hardware-Bremse: 1-3h Argon2id-PoW<br>HRW-Grinding unmöglich!"]
-    B1 --> B2["2. Hysterese: 8 Stunden Heartbeat-Pflicht<br>Keine Blitz-Angriffe möglich!"]
+    Attack["Angreifer will mit neuem Knoten Schaden anrichten"] --> B1["1. Hardware-Bremse: 1-3h Argon2d-PoW<br>HRW-Grinding unmöglich!"]
+    B1 --> B2["2. Hysterese: 24 Stunden Inkubationswand<br>Keine Blitz-Angriffe möglich!"]
     B2 --> B3["3. BFT-Quorum: 14 von 20 Stimmen nötig<br>1 neuer böser Knoten hat nur 5% Stimmgewicht!"]
     B3 --> B4["4. Deterministische First-Seen-Rule<br>Lock-Prüfung erfolgt atomar im RAM (< 1 µs)"]
     B4 --> B5["5. Sofortiger Tombstone-Bann<br>Doppel-Signatur = Lebenslanger Bann & WoT-Ausschluss"]
 ```
 
-1. **Immunität gegen Shard-Preemption (Argon2id PoW):**  
-   Ein Angreifer kann sich seine Shards nicht aussuchen. Die Zuordnung erfolgt über HRW-Rendezvous-Hashing ($\text{BLAKE3}(\text{NodeID} \parallel \text{Shard\_ID})$). Da die Erzeugung jeder `NodeID` $1\text{--}3\,\text{Stunden}$ echte CPU- und RAM-Energie bindet, ist das gezielte Grinden von Millionen Identitäten für einen Shard-Angriff astronomisch teuer.
-2. **Keine Blitz-Injektion (8h Hysterese-Fenster):**  
-   Ein Knoten kann nicht „in Sekunde 1“ zuschlagen. Er muss 8 Stunden lang stündliche Heartbeats über das epidemische Small-World-Netzwerk senden, damit er weltweit im $N_{\text{aktiv}}$-Pool landet.
+1. **Immunität gegen Shard-Preemption (Argon2d PoW):**  
+   Ein Angreifer kann sich seine Shards nicht aussuchen. Die Zuordnung erfolgt über HRW-Rendezvous-Hashing ($\text{BLAKE3}(\text{HrwRoutingId} \parallel \text{Shard\_ID})$). Da die Erzeugung jedes Shard-Tickets $1\text{--}3\,\text{Stunden}$ echte CPU- und RAM-Energie bindet ([`identity.rs`](crates/humoco-node/src/identity.rs)), ist das gezielte Grinden von Millionen Identitäten für einen Shard-Angriff astronomisch teuer.
+2. **Keine Blitz-Injektion (24h Inkubationswand):**  
+   Ein Knoten kann nicht „in Sekunde 1“ zuschlagen. Er muss 24 Stunden lang im Netzwerk reifen, bevor sein Shard-Ticket in der HRW-Berechnung aktiv gewertet wird.
 3. **Machtlosigkeit im 14/20 BFT-Quorum:**  
    Selbst wenn der Knoten für einen Shard in die Top-20 gewählt wird, besitzt er **nur 1 von 20 Stimmen (5 %)**:
    * **Falscher Lock-Versuch:** Er kann keinen ungültigen Lock erzwingen, da die anderen 19 ehrlichen Shard-Nodes den First-Seen-Beweis prüfen und die Signatur verweigern ($1 < 14$).
@@ -204,7 +204,7 @@ flowchart TD
    * **Direkte Data-Plane:** Co-Shard-Partner kontaktieren den neuen Knoten direkt via QUIC.
    * **Abhängigkeit:** Der neue Knoten kann für seine Shards arbeiten, ist für den Gossip-Uplink aber auf seinen Freund angewiesen – was den gesunden Anreiz setzt, sich mit weiteren Freunden zu vernetzen (*Multi-Homing*).
 5. **Drakonische Selbstzerstörung bei Betrug:**  
-   Signiert der neue Knoten zwei kollidierende Locks, erzeugt dies einen 21-Byte `HUMOCO_V1_EQUIVOCATION`-Beweis. Der Knoten wird augenblicklich weltweit getombstoned, sein gemintes Shard-Ticket entwertet und alle Freundschaftskanten gekappt.
+   Signiert der neue Knoten zwei kollidierende Locks, erzeugt dies einen kryptographisch verifizierbaren Betrugsbeweis ([`FraudProofPayload`](crates/humoco-sim-core/src/fraud.rs), ~350 Bytes), gebunden an den 22-Byte Domain-Tag `HUMOCO_V1_EQUIVOCATION`. Der Knoten wird augenblicklich weltweit getombstoned, sein gemintes Shard-Ticket entwertet und alle Freundschaftskanten gekappt.
 
 ---
 
@@ -315,18 +315,18 @@ flowchart LR
 ## 11. Hardware-Exhaustion Deep-Dive (RAM, CPU & Disk)
 
 ### Frage
-> *„Kann ein Angreifer mit 100 Millionen gefälschten Lock-Anfragen oder manipulierten Argon2id-Puzzles den RAM, die CPU oder die Festplatte eines Shard-Knotens sprengen?“*
+> *„Kann ein Angreifer mit 100 Millionen gefälschten Lock-Anfragen den RAM, die CPU oder die Festplatte eines Shard-Knotens sprengen?“*
 
 ### Antwort & 3-Dimensionale Schutzkaskade
 
 ```mermaid
 flowchart TD
     subgraph RAM_Defense["🧠 RAM-Schutz (State Bloat)"]
-        R1["• Feste 144 Byte pro LockEntry<br>• Ingress kostet µBJ (Speicher * Zeit)<br>• Physische Tilgung bei root.valid_until<br>• Fixer Argon2-Pool: max. 256 MB"]
+        R1["• Feste 192 Byte pro StoredLock (~224B Index)<br>• Ingress kostet µBJ (Speicher * Zeit)<br>• Physische Tilgung bei root.valid_until + 30s<br>• Zustandslose PoW-Prüfung (< 0.1 µs, 0 Byte RAM)"]
     end
 
     subgraph CPU_Defense["⚡ CPU-Schutz (Rechenstau)"]
-        C1["• Ed25519-Vorfilter in 50 µs vor teurem PoW<br>• Zero-Copy rkyv Parsing (0 µs Allokation)<br>• BLAKE3 SIMD Hashing & atomarer RAM Lookup (< 1 µs)"]
+        C1["• Stateless BLAKE3 Hashcash (< 0.1 µs Verifikation)<br>• Dynamic PoW Pushback (HTTP 429 & X-Required-Difficulty)<br>• Atomarer First-Seen RAM Lookup (< 1 µs)"]
     end
 
     subgraph Disk_Defense["💾 Disk-Schutz (I/O & Storage)"]
@@ -335,17 +335,18 @@ flowchart TD
 ```
 
 1. **RAM-Erschöpfung unmöglich:**  
-   * Jeder LockEntry belegt invariant exakt **$144\,\text{Byte}$** im kompakten RAM-Index.
+   * Jeder StoredLock belegt invariant exakt **$192\,\text{Byte}$** ([`quota.rs`](crates/humoco-sim-core/src/quota.rs)) im kompakten RAM-Index.
    * Der Ingress-Umschlag bindet $\mu\text{BJ}$ ($\text{Speicher} \times \text{TTL}$). Das Ingress-Kontingent eines Angreifers ist in Sekunden erschöpft.
-   * Nach Ablauf von `root.valid_until` wird der RAM-Eintrag restlos freigegeben.
-   * Die Argon2id-Verifikation läuft in einem streng isolierten Threadpool ($\le 4$ Slots à $64\,\text{MB} = \mathbf{256\,\text{MB}}$ fixer Server-RAM).
+   * Nach Ablauf von `root.valid_until` plus 30s Grace Period wird der RAM-Eintrag restlos freigegeben.
+   * Die zustandslose BLAKE3-Prüfung allokiert **$0\,\text{Bytes}$** Server-RAM.
 2. **CPU-Erschöpfung unmöglich:**  
-   * **Ed25519-Vorfilter ($50\,\mu\text{s}$):** Müll-Pakete werden vor dem 50-ms-Argon2id-Check blitzschnell abgewiesen.
-   * **Zero-Copy Parsing:** `rkyv` liest Datenstrukturen direkt im Puffer ohne Heap-Allokationen.
-   * **First-Seen RAM-Lookup:** Der Index-Check erfolgt atomar in $< 1\,\mu\text{s}$.
+   * **Stateless BLAKE3 Hashcash ($< 0{,}1\,\mu\text{s}$):** Müll-Pakete werden mit 1 Hash blitzschnell abgewiesen.
+   * **Adaptive Last-Rücklagerung:** Bei Überlast antwortet das Gateway mit `HTTP 429` und verlagert die Rechenlast vollständig auf den Angreifer ($\Delta\text{Last} \le 0$).
+   * **First-Seen RAM-Lookup:** Der Index-Check erfolgt im RAM-Lock in $< 1\,\mu\text{s}$.
 3. **Disk-Erschöpfung unmöglich:**  
    * Shard-Nodes lehnen unaufgeforderte Datenketten kategorisch ab (`INV-0301`).
    * Transaktionshistorien reisen ausschließlich im Wallet des Nutzers. Server persistieren nur atomare Lock-Zertifikate aktiver Gutscheine.
+   * **Reservation-First Backpressure:** Der RAM-Index wird erst mutiert, wenn asynchrone Disk-Kapazität im MPSC-Kanal reserviert wurde.
 
 ---
 

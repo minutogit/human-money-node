@@ -275,6 +275,7 @@ async fn get_node_status(
             version: env!("CARGO_PKG_VERSION").into(),
             total_locks,
             network,
+            free_tier_enabled: true,
         }),
     )
 }

@@ -604,7 +604,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
     let (status, body) = node
         .http_request(
             "POST",
-            "/lock",
+            "/v1/lock",
             Some(&json_body),
             &[
                 ("Content-Type", "application/json"),
@@ -637,7 +637,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
     let (status, body) = node
         .http_request(
             "POST",
-            "/status",
+            "/v1/status",
             Some(&json_body),
             &[("Content-Type", "application/json")],
         )
@@ -700,7 +700,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
     let (status, body) = node
         .http_request(
             "POST",
-            "/lock",
+            "/v1/lock",
             Some(&json_body),
             &[
                 ("Content-Type", "application/json"),
@@ -739,7 +739,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
     let (status, body) = node
         .http_request(
             "POST",
-            "/status",
+            "/v1/status",
             Some(&json_body),
             &[("Content-Type", "application/json")],
         )
@@ -762,7 +762,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
     let (status, body) = node
         .http_request(
             "POST",
-            "/lock",
+            "/v1/lock",
             Some(&json_body),
             &[("Content-Type", "application/json")],
         )

@@ -4,6 +4,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use sha2::Sha512;
+use zeroize::Zeroize;
 
 use crate::error::NodeError;
 
@@ -154,17 +155,19 @@ impl NodeIdentity {
     pub fn from_mnemonic(phrase: &str, passphrase: Option<&str>) -> Result<Self, NodeError> {
         let mnemonic = bip39::Mnemonic::parse_normalized(phrase)
             .map_err(|err| NodeError::Identity(format!("Invalid mnemonic phrase: {err}")))?;
-        let bip39_seed = mnemonic.to_seed_normalized(passphrase.unwrap_or(""));
+        let mut bip39_seed = mnemonic.to_seed_normalized(passphrase.unwrap_or(""));
 
         let mut mac = <Hmac<Sha512> as Mac>::new_from_slice(b"ed25519 seed")
             .map_err(|err| NodeError::Identity(format!("HMAC initialization failed: {err}")))?;
         mac.update(&bip39_seed);
+        bip39_seed.zeroize();
         let result = mac.finalize().into_bytes();
 
         let mut ed25519_seed = [0u8; 32];
         ed25519_seed.copy_from_slice(&result[..32]);
 
         let signing_key = SigningKey::from_bytes(&ed25519_seed);
+        ed25519_seed.zeroize();
         Ok(Self::from_signing_key(signing_key))
     }
 

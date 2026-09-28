@@ -489,7 +489,7 @@ mod tests {
 
         let digest_multi = compute_shard_digest_at(shard_id, &locks, now);
         // Only lock_after_now is active; digest should match single active lock
-        let digest_single = compute_shard_digest_at(shard_id, &[lock_after_now.clone()], now);
+        let digest_single = compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_after_now), now);
         assert_eq!(digest_multi, digest_single);
 
         // Active locks with identical parent_lock order & lexicographical sorting
@@ -526,8 +526,8 @@ mod tests {
         assert_eq!(digest_sorted1, digest_sorted2);
 
         // Test compute_shard_digest (defaults to SimTime(0))
-        let digest_zero = compute_shard_digest(shard_id, &[lock_at_now.clone()]);
-        let digest_zero_explicit = compute_shard_digest_at(shard_id, &[lock_at_now.clone()], SimTime(0));
+        let digest_zero = compute_shard_digest(shard_id, std::slice::from_ref(&lock_at_now));
+        let digest_zero_explicit = compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_at_now), SimTime(0));
         assert_eq!(digest_zero, digest_zero_explicit);
     }
 

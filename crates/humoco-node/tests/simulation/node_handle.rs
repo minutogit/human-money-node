@@ -295,7 +295,7 @@ impl SimNodeHandle {
         Ok((status, body_part.to_vec()))
     }
 
-    /// Submits an HMC L2 lock request to `POST /lock`.
+    /// Submits an HMC L2 lock request to `POST /v1/lock`.
     pub async fn post_lock(
         &self,
         req: &L2LockRequest,
@@ -304,7 +304,7 @@ impl SimNodeHandle {
         let (status, body) = self
             .http_request(
                 "POST",
-                "/lock",
+                "/v1/lock",
                 Some(&json_body),
                 &[
                     ("Content-Type", "application/json"),
@@ -316,7 +316,7 @@ impl SimNodeHandle {
         Ok((status, envelope))
     }
 
-    /// Submits an HMC chain lock request to `POST /v1/lock` (also accepts `/lock`).
+    /// Submits an HMC chain lock request to `POST /v1/lock` (also accepts `/v1/lock/chain`).
     pub async fn post_chain_lock(
         &self,
         req: &L2ChainLockRequest,
@@ -325,7 +325,7 @@ impl SimNodeHandle {
         let (status, body) = self
             .http_request(
                 "POST",
-                "/lock",
+                "/v1/lock",
                 Some(&json_body),
                 &[
                     ("Content-Type", "application/json"),
@@ -337,7 +337,7 @@ impl SimNodeHandle {
         Ok((status, envelope))
     }
 
-    /// Queries voucher status via `POST /status`.
+    /// Queries voucher status via `POST /v1/status`.
     pub async fn query_status(
         &self,
         query: &L2StatusQuery,
@@ -346,7 +346,7 @@ impl SimNodeHandle {
         let (status, body) = self
             .http_request(
                 "POST",
-                "/status",
+                "/v1/status",
                 Some(&json_body),
                 &[("Content-Type", "application/json")],
             )

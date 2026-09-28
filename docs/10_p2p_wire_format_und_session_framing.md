@@ -31,7 +31,7 @@ Every P2P message on a QUIC connection begins with an exactly **32-byte**, 8-byt
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                         Payload Length                        |  [24..28]
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                            Reserved                           |  [28..32]
+| Crypto Suite  | Min Compat Ver|           Reserved            |  [28..32]
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                   Payload (rkyv, 0..N Bytes)                  |  [32..32+N]
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -71,8 +71,14 @@ pub struct WireHeader {
     /// Exact byte size of the following rkyv payload
     pub payload_len: u32,
     
+    /// Crypto suite identifier (0 = Ed25519Blake3 default, 1 = Ed25519Blake3, 2 = Hybrid/PQC)
+    pub crypto_suite: u8,
+
+    /// Minimum protocol version compatibility
+    pub min_compat_ver: u8,
+
     /// 8-byte alignment padding / reserved for future protocol extensions
-    pub reserved: u32,
+    pub reserved: u16,
 }
 
 impl WireHeader {
@@ -273,31 +279,34 @@ For all write messages:
 
 ---
 
-## 5. Jury-Free Ingress Accounting & Stochastic Receipt Gossip
+## 5. Jury-Free Ingress Accounting & Strict 2-Stream Mesh Gossip
 
-In earlier drafts (ADR-011) an assigned auditor jury randomly sampled whether gateways truthfully declared their ingress traffic. In the new HuMoCo Layer 2 design this jury is **fully eliminated** and replaced by **signed envelopes** and **stochastic receipt gossip**.
+In earlier drafts (ADR-011) an assigned auditor jury randomly sampled whether gateways truthfully declared their ingress traffic. In the current HuMoCo Layer 2 architecture, auditor juries and epidemic lock gossip are **fully eliminated**:
+- **Checkout Hot-Path (PoS / Ingress) is 100% Shard-Direct RPC, 0% Gossip:** Locks are created via client-to-gateway ingress (`POST /v1/lock`), verified via Shard-Direct RPC (`LockVerifyRequest` / `LockVerifyResponse`), and synchronized via Spec 03 Digest Pull (`ShardDigestRequest` / `ActiveSyncRequest`). Locks are NEVER gossiped.
+- **Strict 2-Stream Mesh Gossip:** P2P Mesh Gossip across F2F edges consists strictly of exactly two streams:
+  1. **Hourly Heartbeat / Presence Gossip (Spec 11):** 1 packet per hour, $\text{TTL} = 16$, Dunbar fan-out $k = \min(d, \lceil\sqrt{d}\rceil + 1)$. Used exclusively for presence discovery, topological awareness, and median clock synchronization.
+  2. **Equivocation Proofs (Spec 10):** Cryptographic first-party fraud evidence (`FRAUD_EQUIVOCATION`) forwarded with priority to isolate and ban double-signing offenders immediately.
 
 ```mermaid
 flowchart TD
     subgraph GatewayIngress["1. Ingress Declaration (Hot Path)"]
         G["Gateway G signs SignedIngressEnvelope<br>(monotone gateway_seq + timestamp_ms)"]
-        G -->|QUIC 1-RTT Stream| Shard["Top-20 Shard Nodes"]
+        G -->|QUIC 1-RTT Stream| Shard["Top-20 Shard Nodes (Shard-Direct RPC)"]
     end
 
-    subgraph ShardProcessing["2. Local Processing & Sampling"]
-        Shard -->|O(1) First-Seen Lock in RAM| Success["Lock successfully locked"]
-        Shard -->|Stochastic dice decision (p = 0.02%)| SampleChoice{"Rolled: p < 0.0002?"}
+    subgraph ShardProcessing["2. Local Processing & Hot-Path Resolution"]
+        Shard -->|O(1) First-Seen Lock in RAM| Success["Lock successfully verified (< 5ms)"]
+        Shard -->|Direct RPC Response| G
     end
 
-    subgraph BackgroundGossip["3. Background Gossip Mesh (2.5 KB/s)"]
-        SampleChoice -->|YES (1 of 5,000)| GossipMsg["SignedGossipReceipt (96B) into P2P gossip"]
-        SampleChoice -->|NO (99.98%)| Silent["No gossip (Zero Overhead)"]
-        GossipMsg --> Mesh["P2P Gossip Mesh"]
+    subgraph MeshGossip["3. Strict 2-Stream F2F Mesh Gossip"]
+        H["1. Hourly Heartbeat / Presence Gossip (1 pkt/hour)"] --> Mesh["F2F Mesh"]
+        E["2. Equivocation Proofs (HUMOCO_V1_EQUIVOCATION)"] --> Mesh
     end
 
-    subgraph FraudDetection["4. O(1) Collision Trap & Gradient Check"]
-        Mesh --> Peer["Uninvolved Peer X"]
-        Peer --> Collision{"Collision in LRU cache?<br>1. Double-signing (same seq/bytes)<br>2. Time-warp (t backwards)<br>3. Gradient: Delta Byte-Years / Delta t > Quota?"}
+    subgraph FraudDetection["4. O(1) Collision Trap & Fraud Exclusion"]
+        Mesh --> Peer["F2F Neighbor Node"]
+        Peer --> Collision{"Equivocation Detected?<br>1. Double-signing (same slot/parent_lock)<br>2. Time-warp / sequence regression"}
         Collision -->|Fraud proven| Evidence["HUMOCO_V1_EQUIVOCATION (160B)"]
         Evidence --> Slash["🔴 Permanent P2P ban & WoT exclusion (Identity Revocation)"]
     end
@@ -365,30 +374,11 @@ pub struct SignedIngressEnvelope {
 }
 ```
 
-### 5.2 The Stochastic Receipt Gossip (`SignedGossipReceipt`)
+### 5.2 Strict 2-Stream Mesh Gossip Principle
 
-Each of the 20 shard nodes independently decides with a probability of **$p = 0{,}02\,\%$** (1 in 5,000 locks) to scatter a compact **96-byte receipt** into the P2P gossip channel:
-
-```rust
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C, align(8))]
-pub struct SignedGossipReceipt {
-    pub gateway_pubkey: [u8; 32],
-    pub cumulative_micro_byte_years: u64,
-    pub current_anl_24h: u64,
-    pub timestamp_ms: u64,
-    pub epoch_day: u32,
-    pub epoch_seq: u32,
-    pub shard_id: u16,
-    pub _padding: [u8; 6],
-    pub lock_hash: [u8; 32],
-}
-```
-
-* **Effective shard gossip rate:** With 20 shard nodes, the probability that a lock is gossipped by at least one node is:
-  $$P_{\text{Shard}} = 1 - (1 - 0{,}0002)^{20} \approx 0{,}40\,\%$$
-* **Global bandwidth requirement:** At a worldwide $10{,}000\,\text{transactions/s}$ this mechanism generates only negligible background noise of **$\approx 3{,}8\,\text{KB/s}$**.
+Epidemic gossip for individual lock transactions is completely eliminated. The P2P network operates strictly on two streams:
+1. **Presence & Time Sync Stream:** 1 heartbeat packet per node per hour across direct F2F edges.
+2. **Equivocation Fraud Proof Stream:** Immediate, high-priority forwarding of cryptographically verified `EquivocationProof` packets.
 
 ### 5.3 The 3 Mathematical Fraud Proof Pillars in $O(1)$ (Slashing Evidence)
 
@@ -580,7 +570,7 @@ pub fn parse_and_validate_wire_header(
 3. **[INV-1003] Domain Separation Invariance:** All signatures bind the system-specific `DOMAIN_TAG` in the BLAKE3 preimage. Class-swapping between provisional and final confirmations is mathematically excluded.
 4. **[INV-1004] 0-RTT Write Protection:** State-changing operations (`LockVerifyRequest`, `EquivocationProof`) must never be accepted in QUIC 0-RTT early data.
 5. **[INV-1005] Jury-Free Ingress Verification:** Ingress accounting is performed exclusively directly and objectively by the receiving shard nodes; no control juries exist for load declarations.
-6. **[INV-1006] Stochastic Receipt Sampling:** Shard nodes stochastically scatter $p = 0{,}02\,\%$ of all processed locks as 64-byte `SignedGossipReceipt` into the P2P gossip channel.
+6. **[INV-1006] Strict 2-Stream Mesh Gossip:** P2P gossip across F2F friendship edges is strictly restricted to exactly two streams: (1) Hourly Heartbeats for presence and clock sync, and (2) first-party `EquivocationProof` packets. Checkout hot-path locks are never gossiped.
 7. **[INV-1007] Non-Repudiation Ingress:** Every lock forwarding requires a validly signed `SignedIngressEnvelope` of the gateway; sequence splits constitute an incontestable fraud proof.
 8. **[INV-1008] Reciprocal Shard & Stream Integrity:** Gateways secure their P2P ingress priority through active participation in assigned shard quorums; on persistent refusal (`missing_count >= 3`) local stream suspension applies without need for circular epoch attestations.
 9. **[INV-1009] PULL-Sync Replay Safety:** `ActiveSyncRequest` is permitted in QUIC 0-RTT early data because requesting quorated lock lists is strictly idempotent and triggers no state mutations on the server.

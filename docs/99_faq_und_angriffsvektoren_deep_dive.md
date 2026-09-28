@@ -23,15 +23,15 @@ flowchart TD
     Honest --> ShardCheck["Jeder Shard berechnet ΔByte_s / Δt<br>-> Erkennt globale Quoten-Überlastung in O(1)<br>-> Sofortiger Socket-Drop (HTTP 429)"]
 
     Choice -->|Strategie B: Betrügerische Zähler-Spaltung| Fork["G signiert gleiche Byte-s für unterschiedliche Locks doppelt"]
-    Fork --> Gossip["Stochastischer Receipt-Gossip (p = 0.02%) greift"]
-    Gossip --> Slash["Kollision oder Gradienten-Verletzung nach ~2.2 Min (99% Konfidenz)<br>-> 🔴 Permanenter Bann & WoT-Ausschluss"]
+    Fork --> ShardEvidence["Shard-Direct RPC & Sync-Digest decken Signatur-Kollision auf"]
+    ShardEvidence --> Equivocation["HUMOCO_V1_EQUIVOCATION als Prio-Gossip Stream 2"]
+    Equivocation --> Slash["🔴 Sofortiger permanenter P2P-Bann & WoT-Ausschluss"]
 ```
 
 1. **Wenn $G$ ehrlich hochzählt:**  
    Jeder Shard, bei dem sich $G$ meldet, berechnet den Gradienten $\frac{\Delta \text{cumulative\_byte\_seconds}}{\Delta t}$. Steigt dieser schneller als die durch WoT erlaubte $\text{Ingress-Quota}(G)$, drosselt der Shard $G$ sofort am lokalen Socket.
 2. **Wenn $G$ den Zähler spaltet oder fälscht (Double-Signing / Time-Warp):**  
-   Die Shards streuen stochastisch $p = 0{,}02\,\%$ aller verarbeiteten Locks als 96-Byte `SignedGossipReceipt` in den P2P-Gossip. Bei 20 Shard-Nodes liegt die Shard-Gossip-Rate bei $\approx 0{,}4\,\%$.  
-   Das **Geburtstagsparadoxon** und die Gradientenprüfung garantieren: Nach durchschnittlich **$2{,}2\,\text{Minuten}$** kollidieren zwei Stichproben in einem Peer-Cache. Das resultierende `HUMOCO_V1_EQUIVOCATION`-Paket führt zum sofortigen permanenten P2P-Bann der Gateway-Identität (`NodePubKey`), zur Entwertung seines Shard-Tickets und zum vollständigen Abbruch aller WoT-Freundschaftskanten.
+   Sobald zwei kollidierende Signaturen desselben Gateways im Shard-Direct RPC oder beim Spec-03-Digest-Pull aufeinandertreffen, entsteht ein mathematisch unanfechtbarer `HUMOCO_V1_EQUIVOCATION`-Beweis. Dieser wird mit höchster Priorität über den 2. P2P-Gossip-Stream weitergeleitet und führt zum sofortigen permanenten P2P-Bann der Gateway-Identität (`NodePubKey`), zur Entwertung seines Shard-Tickets und zum vollständigen Abbruch aller WoT-Freundschaftskanten.
 
 ---
 
@@ -117,7 +117,7 @@ Eine lineare Hash-Kette funktioniert bei multi-sharded Systemen nicht ohne massi
 * Um $H_{50}$ in Shard 2 gegen den 24h-End-Hash $H_{100}$ zu prüfen, müsste Shard 2 alle $50$ Zwischen-Hashes kennen, die an Shard 1, Shard 5 etc. gesendet wurden.
 * Dies würde entweder das Nachladen fremder Daten oder komplexe *Merkle Mountain Ranges (MMR)* mit großen Proof-Pfaden im Wire-Format erfordern.
 * **Die überlegene Lösung (Occam's Razor):**  
-  Stochastischer Receipt-Gossip ($p = 0{,}02\,\%$) benötigt **0 Byte Zwischenzustände**, erzeugt nur **$2{,}5\,\text{KB/s}$ globales Rauschen** und detektiert Betrug in unter **3 Minuten**.
+  Der Kassenpfad läuft 100 % per Shard-Direct RPC und benötigt **0 Byte Zwischenzustände**. P2P-Mesh-Gossip ist streng auf stündliche Heartbeats und unanfechtbare Equivocation-Fraud-Proofs beschränkt. Betrug wird durch synchrone First-Party-Kollisionen im Shard-Direct RPC und Sync-Digest sofort erkannt.
 
 ---
 

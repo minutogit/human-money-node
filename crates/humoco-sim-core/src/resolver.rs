@@ -318,8 +318,8 @@ mod tests {
         let (res_equiv, proofs_equiv) = resolve_split_brain_with_proof(
             &mut l1_copy,
             &mut l2_copy,
-            &[att1.clone()],
-            &[att2.clone()],
+            std::slice::from_ref(&att1),
+            std::slice::from_ref(&att2),
         );
         assert!(matches!(
             res_equiv,
@@ -350,7 +350,7 @@ mod tests {
         let (_res_diff_p, proofs_diff_p) = resolve_split_brain_with_proof(
             &mut l1_copy2,
             &mut l2_copy2,
-            &[att1.clone()],
+            std::slice::from_ref(&att1),
             &[att2_diff_parent],
         );
         assert!(proofs_diff_p.is_empty());
@@ -368,7 +368,7 @@ mod tests {
         let (_res_same_id, proofs_same_id) = resolve_split_brain_with_proof(
             &mut l1_copy3,
             &mut l2_copy3,
-            &[att1.clone()],
+            std::slice::from_ref(&att1),
             &[att2_same_id],
         );
         assert!(proofs_same_id.is_empty());
@@ -398,8 +398,8 @@ mod tests {
         let (_res_fallback, proofs_fallback) = resolve_split_brain_with_proof(
             &mut l1_signers,
             &mut l2_signers,
-            &[att1_99.clone()],
-            &[att2_99.clone()],
+            std::slice::from_ref(&att1_99),
+            std::slice::from_ref(&att2_99),
         );
         assert_eq!(proofs_fallback.len(), 1);
 
@@ -411,7 +411,7 @@ mod tests {
         let (_res_fb_miss, proofs_fb_miss) = resolve_split_brain_with_proof(
             &mut l1_fallback_missing,
             &mut l2_fallback_missing,
-            &[att1_99.clone()],
+            std::slice::from_ref(&att1_99),
             &[],
         );
         assert!(proofs_fb_miss.is_empty());
@@ -422,8 +422,8 @@ mod tests {
         let (res_ident, proofs_ident) = resolve_split_brain_with_proof(
             &mut l1_id,
             &mut l1_id_copy,
-            &[att1.clone()],
-            &[att1.clone()],
+            std::slice::from_ref(&att1),
+            std::slice::from_ref(&att1),
         );
         assert_eq!(res_ident, ResolutionResult::Identical);
         assert!(proofs_ident.is_empty());
@@ -434,8 +434,8 @@ mod tests {
         let (res_noconf, proofs_noconf) = resolve_split_brain_with_proof(
             &mut l1_diff_p,
             &mut l2_diff_p,
-            &[att1.clone()],
-            &[att2.clone()],
+            std::slice::from_ref(&att1),
+            std::slice::from_ref(&att2),
         );
         assert_eq!(res_noconf, ResolutionResult::NoConflict);
         assert!(proofs_noconf.is_empty());

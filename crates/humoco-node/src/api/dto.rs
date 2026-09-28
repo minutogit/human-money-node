@@ -1,45 +1,6 @@
 use serde::{Deserialize, Serialize};
 use humoco_sim_core::types::LockRecord;
 
-/// Request payload for submitting a new lock to the Layer-2 register.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LockSubmitRequest {
-    /// 32-byte hex-encoded parent lock hash
-    pub parent_lock: String,
-    /// 32-byte hex-encoded receiver public key hash
-    pub receiver_pub: String,
-    /// Nonce string (hex-encoded or utf8)
-    pub nonce: String,
-    /// Millisecond SimTime expiration for this lock
-    pub valid_until: u64,
-    /// Millisecond SimTime expiration of the root / shard anchor
-    pub root_valid_until: u64,
-    /// Optional timestamp in milliseconds when the client created this lock request
-    #[serde(default)]
-    pub created_at: Option<u64>,
-    /// Optional VIP Bearer token or account tag hex
-    #[serde(default)]
-    pub auth_token: Option<String>,
-    /// Optional F2F peer authentication token
-    #[serde(default)]
-    pub peer_token: Option<String>,
-    /// Optional Argon2id PoW challenge string (for Public tier)
-    #[serde(default)]
-    pub pow_challenge: Option<String>,
-    /// Optional Argon2id PoW solution nonce (for Public tier)
-    #[serde(default)]
-    pub pow_nonce: Option<u64>,
-    /// Optional crypto suite identifier (1 = Ed25519, 2 = Hybrid/PQC)
-    #[serde(default)]
-    pub crypto_suite: Option<u8>,
-    /// Whether this is a quantum-bridge lock
-    #[serde(default)]
-    pub is_bridge_lock: Option<bool>,
-    /// PQC receiver for quantum-bridge locks
-    #[serde(default)]
-    pub pqc_receiver: Option<String>,
-}
-
 /// Signed attestation from a consensus or ingress node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttestationDto {
@@ -62,19 +23,6 @@ pub struct QuorumCertificateDto {
     pub signatures: Vec<AttestationDto>,
     #[serde(default)]
     pub signer_bitmap: u32,
-}
-
-/// Response returned upon lock submission.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LockSubmitResponse {
-    pub status: String,
-    pub lock_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attestation: Option<AttestationDto>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quorum_certificate: Option<QuorumCertificateDto>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
 }
 
 /// Request for synchronizing missing locks via sparse locators.

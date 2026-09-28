@@ -107,11 +107,11 @@ $$H_{\text{canon}}(\text{Lock}) = \text{BLAKE3}\Big(\text{len} \mathbin{\Vert} \
 
 What happens if a malicious server node issues a signed quorum OK to two different clients for the same `parent_lock`?
 
-1. **Detection via Stochastic Receipt Gossip:**
-   * Checkouts/gateways and shard nodes stochastically gossip processed lock confirmations as `SignedGossipReceipt` into the P2P mesh with low probability ($p = 0{,}02\,\%$).
-   * Alternatively, wallets can randomly report a sample to independent shard peers during verification.
+1. **Strict 2-Stream Mesh & Hot-Path Shard-Direct Processing:**
+   * Hot-path checkout locks are processed 100% via Shard-Direct RPC and synchronized via Spec 03 Digest Pull (`ShardDigestRequest` / `ActiveSyncRequest`). Locks are NEVER gossiped across the P2P mesh.
+   * P2P gossip across F2F edges is strictly confined to (1) Hourly Heartbeats (presence and clock sync) and (2) high-priority `EquivocationProof` fraud packets.
 2. **Mathematical Fraud Proof (`HUMOCO_V1_EQUIVOCATION`):**
-   * As soon as two signed statements by the same node key for the same `parent_lock` meet anywhere in the network, the mathematically irrefutable fraud proof exists.
+   * As soon as two signed statements by the same node key for the same slot / `parent_lock` meet anywhere in the network (e.g., presented by smart clients during PoS checkout or discovered via sync digest), the mathematically irrefutable first-party fraud proof exists.
 3. **Consequence (`ServerBann`):**
    * The node is instantly banned for life across the entire P2P network (`ServerBann`).
    * Its mined Argon2d shard ticket (`HrwRoutingId`) is immediately invalidated and all F2F friendship edges in the Web of Trust are irrevocably severed (complete Identity Revocation & WoT Severance).

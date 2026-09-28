@@ -29,22 +29,22 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 |---|---|---|---|---|---|---|---|---|
 | **01** | `01_subtraktion_und_vereinfachung.md` | 2. Architektur | 2026-09-24 | zen-3-pro / gemini-2.5-pro | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **02** | `02_security_und_byzantine_hardening.md` | 3. Byzantine | 2026-09-24 | muse-spark | 10 | 0 | `🟢 Clean` | **Niedrig** |
-| **03** | `03_todes_spiralen_und_deadlock_audit.md` | 4. Dynamik | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **03** | `03_todes_spiralen_und_deadlock_audit.md` | 4. Dynamik | 2026-09-28 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **04** | `04_invarianten_und_spezifikations_waechter.md` | 2. Architektur | 2026-09-24 | muse-spark | 9 | 0 | `🟢 Clean` | **Niedrig** |
 | **05** | `05_performance_und_latency_audit.md` | 2. Architektur | 2026-09-24 | muse-spark | 7 | 0 | `🟢 Clean` | **Niedrig** |
 | **06** | `06_chaos_und_fuzz_test_generator.md` | 5. Chaos | 2026-09-24 | muse-spark | 12 | 0 | `🟢 Clean` | **Niedrig** |
-| **07** | `07_faulheit_und_free_riding_audit.md` | 4. Dynamik | 2026-09-24 | muse-spark | 6 | 0 | `🟢 Clean` | **Niedrig** |
-| **08** | `08_sabotage_zensur_und_eclipse_audit.md` | 3. Byzantine | 2026-09-24 | muse-spark | 6 | 0 | `🟢 Clean` | **Niedrig** |
-| **09** | `09_knoten_hack_und_key_compromise_audit.md` | 3. Byzantine | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **10** | `10_kartellbildung_und_shard_takeover_audit.md` | 3. Byzantine | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **07** | `07_faulheit_und_free_riding_audit.md` | 4. Dynamik | 2026-09-28 | subagents / gemini-3.7-flash | 6 | 0 | `🟢 Clean` | **Niedrig** |
+| **08** | `08_sabotage_zensur_und_eclipse_audit.md` | 3. Byzantine | 2026-09-28 | subagents / gemini-3.7-flash | 6 | 0 | `🟢 Clean` | **Niedrig** |
+| **09** | `09_knoten_hack_und_key_compromise_audit.md` | 3. Byzantine | 2026-09-28 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **10** | `10_kartellbildung_und_shard_takeover_audit.md` | 3. Byzantine | 2026-09-28 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **11** | `11_time_warp_und_uhren_manipulation_audit.md` | 4. Dynamik | 2026-09-24 | zen-3-pro / gemini-2.5-pro | 2 | 0 | `🟢 Clean` | **Niedrig** |
-| **12** | `12_mutation_testing_und_test_blindspot_audit.md` | 1. Testing | 2026-09-24 | muse-spark | 8 | 0 | `🟢 Clean` | **Niedrig** |
+| **12** | `12_mutation_testing_und_test_blindspot_audit.md` | 1. Testing | 2026-09-28 | subagents / gemini-3.7-flash | 8 | 0 | `🟢 Clean` | **Niedrig** |
 | **13** | `13_unsafe_code_und_memory_safety_audit.md` | 1. Safety | 2026-09-24 | muse-spark | 4 | 0 | `🟢 Clean` | **Niedrig** |
 | **14** | `14_property_based_testing_und_fuzzing.md` | 1. Testing | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **15** | `15_clean_code_und_idiomatic_rust_audit.md` | 1. Clean Code | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **16** | `16_supply_chain_und_dependency_audit.md` | 1. Supply Chain | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **17** | `17_update_and_supply_chain_verification.md` | 1. Sovereign | 2026-09-24 | muse-spark | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **18** | `18_legacy_code_and_architectural_drift_audit.md` | 2. Architektur | 2026-09-24 | zen-3-pro / gemini-2.5-pro | 12 | 0 | `🟢 Clean` | **Niedrig** |
+| **18** | `18_legacy_code_and_architectural_drift_audit.md` | 2. Architektur | 2026-09-28 | subagents / gemini-3.7-flash | 12 | 0 | `🟢 Clean` | **Niedrig** |
 
 ---
 
@@ -64,5 +64,7 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | 2026-09-24 20:54 | [09, 10, 03] | muse-spark | 15 | Audit 09: Post-Breach Containment & Fund-Sicherheit bewiesen ($0 Fund-Verlust, Client-Custody). Audit 10: 14/20 Shard-Kartell-Resilienz, ökonomische Selbstvernichtung via Equivocation & HRW-Sybil-Kosten. Audit 03: Nichtlineare Systemdynamik, $\Delta \text{Load} \le 0$ Hot-Path, Backpressure-Deadlock-Freiheit, Reconnect-Jitter & Graceful-Shutdown JoinSets. | `prompts/reports/2026-09-24_*.md` |
 | 2026-09-24 22:50 | [01, 11, 18] | zen-3-pro / gemini-2.5-pro | 19 | Audit 01: Wire Subtraktion (`ShardMapPing`/`Pong` entfernt), Hot-Path Map-Clone in `/v1/sync` und Chain-Lock `L2LockEntry` Doppel-Klonen eliminiert. Audit 11: Decentralized Time-Binding (`current_epoch_day_at`) für Quoten-Ingress gehärtet. Audit 18: Wire Message Types in Doku 10 & Code 100% synchronisiert, Dead Types bereinigt. | `prompts/reports/2026-09-24_*.md` |
 | 2026-09-25 21:50 | [02, 04, 05] | muse-spark | 25 | Audit 02: Byzantine Security 100% bestätigt (min(H_canon) Arbiter-Klarstellung, Equivocation-First Invariante). Audit 04: Bitgenaue Invarianten-Reconciliation (INV-1204 192B Consensus vs 224B RAM Doc-Clarification in `quota.rs`, INV-0301 Sim-NodeId vs `HrwRoutingId` in `types.rs`, Resolver-Kommentare in `crypto.rs`). Audit 05: Hot-Path Ingress Latenz & CAS Locking verifiziert. 100% Tests grün. | `prompts/reports/2026-09-25_*.md` |
+| 2026-09-28 21:00 | [08, 10, 12, 07] | subagents / gemini-3.7-flash | 25 | Audit 08: Eclipse- & Gaslighting-Schutz bewiesen (ProofChain, 409-Signaturbeweise). Audit 10: 14/20 Kartellbildung mathematisch abgewehrt (Client-Side Custody, atomares Equivocation-Slashing). Audit 12: 14/14 Mutanten getötet (100% Mutation-Kill-Rate). Audit 07: Free-Riding & Silent Signer mitigiert (Rank-21 Promotion in 0ms, BFT Shard-Digest Pull). | `prompts/reports/2026-09-28_*.md` |
+| 2026-09-28 21:30 | [09, 03, 18] | subagents / gemini-3.7-flash | 22 | Audit 09: Post-Breach Containment bewiesen ($0 Kundengeld-Verlust, O(1) Selbstbann bei Equivocation). Audit 03: Todes-Spiralen- & Deadlock-Immunität bestätigt (Delta Load <= 0, Reservation-First, CancellationToken Join). Audit 18: Legacy DTOs (LockSubmitRequest) & tote Wire-Pfade identifiziert. | `prompts/reports/2026-09-28_*.md` |
 
 

@@ -1080,11 +1080,11 @@ impl QuicTransport {
                                         }
 
                                         // HeartbeatAck handling:
-                                        if header.msg_type == MsgType::HeartbeatAck as u16 {
-                                            if (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0 {
-                                                pm.set_ticket_outdated(true);
-                                                warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from F2F peer: shard ticket is outdated");
-                                            }
+                                        if header.msg_type == MsgType::HeartbeatAck as u16
+                                            && (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0
+                                        {
+                                            pm.set_ticket_outdated(true);
+                                            warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from F2F peer: shard ticket is outdated");
                                         }
 
                                         // If an authentic Heartbeat is received from an F2F friend, update known_network_nodes and clock:

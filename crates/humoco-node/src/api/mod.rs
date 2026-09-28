@@ -8,7 +8,7 @@ pub mod routes;
 pub use dashboard::{dashboard_data, render_dashboard, DashboardData};
 
 pub use dto::{
-    AttestationDto, ErrorResponse, LockRecordDto, LockSubmitRequest, LockSubmitResponse,
+    AttestationDto, ErrorResponse, LockRecordDto,
     NodeStatusResponse, PowChallengeResponse, SyncRequest, SyncResponse,
 };
 pub use hmc::{

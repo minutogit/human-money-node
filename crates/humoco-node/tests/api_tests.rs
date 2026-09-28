@@ -523,7 +523,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
                 .unwrap(),
@@ -540,7 +540,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "hmc_test_token")
                 .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
@@ -565,7 +565,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "hmc_test_token")
                 .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
@@ -607,7 +607,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/status")
+                .uri("/v1/status")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&query).unwrap()))
                 .unwrap(),
@@ -675,7 +675,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "hmc_test_token")
                 .body(Body::from(serde_json::to_vec(&ds_req).unwrap()))
@@ -743,7 +743,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "hmc_test_token")
                 .body(Body::from(serde_json::to_vec(&ds_req2).unwrap()))
@@ -772,7 +772,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "hmc_test_token")
                 .body(Body::from(serde_json::to_vec(&no_ds_req).unwrap()))
@@ -805,7 +805,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/status")
+                .uri("/v1/status")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&unknown_query).unwrap()))
                 .unwrap(),
@@ -826,7 +826,7 @@ async fn test_api_hmc_native_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&bad_sig_req).unwrap()))
                 .unwrap(),
@@ -1647,7 +1647,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "read_quorum_test_token")
                 .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
@@ -1672,7 +1672,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/status")
+                .uri("/v1/status")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&query_json).unwrap()))
                 .unwrap(),
@@ -1705,7 +1705,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/status")
+                .uri("/v1/status")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&query_q1).unwrap()))
                 .unwrap(),
@@ -1733,7 +1733,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/status")
+                .uri("/v1/status")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&query_q3).unwrap()))
                 .unwrap(),
@@ -1798,7 +1798,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "token_multi")
                 .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
@@ -1823,7 +1823,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/status")
+                .uri("/v1/status")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&query_multi).unwrap()))
                 .unwrap(),
@@ -1906,7 +1906,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "leap_lock_test_token")
                 .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
@@ -1969,7 +1969,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "leap_lock_test_token")
                 .body(Body::from(serde_json::to_vec(&leap_req).unwrap()))
@@ -1993,7 +1993,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "leap_lock_test_token")
                 .body(Body::from(serde_json::to_vec(&leap_req).unwrap()))
@@ -2054,7 +2054,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lock")
+                .uri("/v1/lock")
                 .header("content-type", "application/json")
                 .header("X-Peer-Token", "leap_lock_test_token")
                 .body(Body::from(serde_json::to_vec(&conflict_req).unwrap()))
@@ -2087,7 +2087,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/status")
+                .uri("/v1/status")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&query_by_tag).unwrap()))
                 .unwrap(),
@@ -2122,7 +2122,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/status")
+                .uri("/v1/status")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&query_by_tid).unwrap()))
                 .unwrap(),
@@ -2159,13 +2159,13 @@ async fn test_api_pex_peers_and_node_status_network() {
     let status_dto: humoco_node::api::dto::NodeStatusResponse = response_json(res_status).await;
     assert_eq!(status_dto.network, "mainnet");
 
-    // 2. GET /peers must return PeersResponse
+    // 2. GET /api/v1/network/peers must return PeersResponse
     let res_peers = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/peers")
+                .uri("/api/v1/network/peers")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2176,12 +2176,12 @@ async fn test_api_pex_peers_and_node_status_network() {
     assert_eq!(peers_dto.network, "mainnet");
     assert!(peers_dto.active_nodes_count >= 1);
 
-    // 3. Alias /api/v1/network/peers must return identical structure
+    // 3. Alias /peers must return identical structure
     let res_alias = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/network/peers")
+                .uri("/peers")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2332,7 +2332,7 @@ async fn test_checkout_case_2_brand_new_genesis_voucher() {
     match env.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, genesis.transaction_hash), _ => panic!("expected Verified genesis") };
     // Verify via status query
     let status_q = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: bs58::encode(&genesis.transaction_hash).into_string(), locator_prefixes: vec![], read_quorum: 1 };
-    let res_q = app.clone().oneshot(Request::builder().method("POST").uri("/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&status_q).unwrap())).unwrap()).await.unwrap();
+    let res_q = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&status_q).unwrap())).unwrap()).await.unwrap();
     assert_eq!(res_q.status(), StatusCode::OK);
     let env_q: L2ResponseEnvelope = response_json(res_q).await;
     match env_q.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, genesis.transaction_hash), _ => panic!("status should be Verified") };
@@ -2362,7 +2362,7 @@ async fn test_checkout_case_3_offline_voucher_full_chain() {
     for hop in [&genesis, &hop2, &hop3] {
         let tag = if hop.is_genesis { bs58::encode(&hop.transaction_hash).into_string() } else { hop.ds_tag.clone().unwrap() };
         let q = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: hop.sender_ephemeral_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: tag, locator_prefixes: vec![], read_quorum: 1 };
-        let r = app.clone().oneshot(Request::builder().method("POST").uri("/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q).unwrap())).unwrap()).await.unwrap();
+        let r = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q).unwrap())).unwrap()).await.unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let e: L2ResponseEnvelope = response_json(r).await;
         match e.verdict { L2Verdict::Verified { .. } => {}, _ => panic!("hop not found") };
@@ -2455,13 +2455,13 @@ async fn test_checkout_case_6_intermediate_hop_double_spend_rollback() {
     match env_conf.verdict { L2Verdict::Conflict { existing_lock } => assert_eq!(existing_lock.t_id, hop_a.transaction_hash), _ => panic!("expected Conflict with existing hop_a") };
     // Verify hop_c was NOT inserted (rollback) – query by its tag should be Unknown/Missing
     let q_c = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: k_c.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: tag_c, locator_prefixes: vec![], read_quorum: 1 };
-    let res_qc = app.clone().oneshot(Request::builder().method("POST").uri("/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q_c).unwrap())).unwrap()).await.unwrap();
+    let res_qc = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q_c).unwrap())).unwrap()).await.unwrap();
     let _env_qc: L2ResponseEnvelope = response_json(res_qc).await;
     // hop_c's parent tag_b corresponds to hop_b which was not inserted, so querying tag_b should return Verified for hop_a? Actually tag_gen still maps to hop_a Verified. But tag_b not present, query should be Missing or Verified not found.
     // Instead verify hop_c not present via its t_id lookup (challenge = tag_b should still show hop_a)
     // Query for hop_c's own tag (its ds_tag is tag_b, t_id is hop_c.tx) – but hop_c not inserted, so its t_id lookup should be Missing
     let q_c2 = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: k_c.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: bs58::encode(&hop_c.transaction_hash).into_string(), locator_prefixes: vec![], read_quorum: 1 };
-    let res_qc2 = app.oneshot(Request::builder().method("POST").uri("/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q_c2).unwrap())).unwrap()).await.unwrap();
+    let res_qc2 = app.oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q_c2).unwrap())).unwrap()).await.unwrap();
     let env_qc2: L2ResponseEnvelope = response_json(res_qc2).await;
     match env_qc2.verdict { L2Verdict::MissingLocks { .. } | L2Verdict::UnknownVoucher => {}, L2Verdict::Verified { .. } => panic!("hop_c should not have been inserted after rollback"), _ => {} };
 }

@@ -215,10 +215,13 @@ impl HmcRamIndex {
         }
 
         // Fast-forward leap lock support: check if challenge_ds_tag matches the transaction_hash (t_id) of any lock in this voucher
-        for tag in voucher_tags {
-            if let Some(entry) = self.locks.get(tag) {
-                if bs58::encode(&entry.t_id).into_string() == challenge_ds_tag {
-                    return L2Verdict::Verified { lock_entry: entry.clone() };
+        let mut challenge_tid = [0u8; 32];
+        if bs58::decode(challenge_ds_tag).onto(&mut challenge_tid).is_ok() {
+            for tag in voucher_tags {
+                if let Some(entry) = self.locks.get(tag) {
+                    if entry.t_id == challenge_tid {
+                        return L2Verdict::Verified { lock_entry: entry.clone() };
+                    }
                 }
             }
         }
@@ -735,7 +738,7 @@ impl DualTierEngine {
                 let lookup_tag = if hop.is_genesis {
                     bs58::encode(&hop.transaction_hash).into_string()
                 } else {
-                    hop.ds_tag.clone().unwrap()
+                    hop.ds_tag.clone().unwrap_or_default()
                 };
 
                 let entry = L2LockEntry::from(hop);

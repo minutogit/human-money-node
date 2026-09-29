@@ -28,7 +28,7 @@ pub enum NetworkId {
     Testnet,
 }
 
-/// Crypto suite identifier for backward-compatible wire headers & LockEnvelope
+/// Crypto suite identifier for backward-compatible wire headers
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CryptoSuiteId {
@@ -1155,11 +1155,11 @@ pub fn verify_causality_proof_chain_stateless(
         }
     }
     // 4. Final link: target_lock.parent_lock must equal last hop next_hash (or genesis if no hops)
-    let expected_parent = if chain.hops.is_empty() {
-        chain.genesis_root
-    } else {
-        chain.hops.last().unwrap().next_hash
-    };
+    let expected_parent = chain
+        .hops
+        .last()
+        .map(|h| h.next_hash)
+        .unwrap_or(chain.genesis_root);
     if chain.target_lock.parent_lock != expected_parent {
         return Err(CausalityError::BrokenChainLink {
             hop_index: chain.hops.len(),

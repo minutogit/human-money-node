@@ -33,11 +33,6 @@ pub fn compute_stateless_challenge(parent_lock: &[u8; 32], epoch_slot: u64) -> [
     *hasher.finalize().as_bytes()
 }
 
-/// Legacy helper for challenge hashing
-pub fn compute_challenge_hash(_secret: &[u8; 32], expires_at: u64, _salt: &[u8; 16], parent_lock: &[u8; 32]) -> [u8; 32] {
-    let slot = expires_at / DEFAULT_EPOCH_DURATION_SEC;
-    compute_stateless_challenge(parent_lock, slot)
-}
 
 /// Nonce-Verifikation: BLAKE3("HUMOCO_POW_SOLUTION" || challenge || nonce)
 pub fn compute_solution_hash(challenge: &[u8; 32], nonce: u64) -> [u8; 32] {

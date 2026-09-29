@@ -52,7 +52,7 @@ pub fn determine_peering_string(state: &AppState) -> String {
     let addr = if let Some(ref t) = state.transport {
         t.local_addr().ok().map(|a| {
             if a.ip().is_unspecified() {
-                SocketAddr::new("127.0.0.1".parse().unwrap(), a.port())
+                SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), a.port())
             } else {
                 a
             }
@@ -114,7 +114,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         }
         let mut brooms = 0;
         let mut source_counts = Vec::new();
-        for (_, (count, mask)) in &ingress_counts {
+        for (count, mask) in ingress_counts.values() {
             source_counts.push(*count);
             if *count >= 10 && mask.count_ones() <= 1 {
                 brooms += 1;

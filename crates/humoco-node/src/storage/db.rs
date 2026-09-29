@@ -496,7 +496,7 @@ impl RedbStorage {
                 .deletable_at
                 .as_deref()
                 .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(365 * 24 * 3600 * 1000);
+                .unwrap_or(0);
             if !should_prune(SimTime(now_ms), SimTime(valid_until_ms)) {
                 results.push((k_guard.value().to_string(), entry));
             }

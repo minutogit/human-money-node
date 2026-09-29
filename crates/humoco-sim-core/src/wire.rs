@@ -106,16 +106,6 @@ pub const FLAG_BRIDGE_LOCK: u32 = 0x0000_0020;
 pub const FLAG_PEER_SUSPENDED: u32 = 0x0000_0040;
 pub const FLAG_POW_OUTDATED: u32 = 0x0000_0080;
 
-/// Witness-separation LockEnvelope (suite_id + witness-separated fields)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LockEnvelope {
-    pub suite_id: u8,
-    pub parent_lock: [u8; 32],
-    pub receiver_data: Vec<u8>,
-    pub valid_until: u64,
-    pub witness_signature: Vec<u8>,
-    pub status: u8,
-}
 
 /// 144-Byte LockEntry (INV-1001)
 #[repr(C, align(8))]

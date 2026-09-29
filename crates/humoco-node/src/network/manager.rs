@@ -643,7 +643,8 @@ impl PeerManager {
             }
             if let Some(peer) = ingress_peer {
                 let hash = blake3::hash(peer.to_string().as_bytes());
-                let val = u32::from_le_bytes(hash.as_bytes()[0..4].try_into().unwrap());
+                let hb = hash.as_bytes();
+                let val = u32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
                 let bit = 1 << (val % 32);
                 entry.ingress_diversity_mask |= bit;
             }
@@ -651,7 +652,8 @@ impl PeerManager {
             let mut mask = 0;
             if let Some(peer) = ingress_peer {
                 let hash = blake3::hash(peer.to_string().as_bytes());
-                let val = u32::from_le_bytes(hash.as_bytes()[0..4].try_into().unwrap());
+                let hb = hash.as_bytes();
+                let val = u32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
                 mask = 1 << (val % 32);
             }
             // Newcomer: IMMATURE phase starts, active ticket stored immediately, but HRW-eligible only after 24h

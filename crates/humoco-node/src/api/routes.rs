@@ -1269,6 +1269,16 @@ async fn submit_hmc_chain_lock(
     headers: HeaderMap,
     Json(chain_req): Json<L2ChainLockRequest>,
 ) -> Response {
+    if chain_req.chain.is_empty() {
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: "Empty chain: at least one lock required".into(),
+            },
+        );
+        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+    }
+
     let start = std::time::Instant::now();
     // Banned check for batch auth and each hop
     if state.engine.is_node_banned(&chain_req.auth.ephemeral_pubkey).await {
@@ -1369,7 +1379,18 @@ async fn submit_hmc_chain_lock(
     let quorum_certificate = match &verdict {
         L2Verdict::Verified { lock_entry } => {
             // Last hop lookup for shard derivation
-            let last_hop = chain_req.chain.last().unwrap();
+            let last_hop = match chain_req.chain.last() {
+                Some(hop) => hop,
+                None => {
+                    let envelope = wrap_and_sign_verdict(
+                        &state.identity,
+                        L2Verdict::Rejected {
+                            reason: "Chain cannot be empty".into(),
+                        },
+                    );
+                    return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+                }
+            };
             let lookup_tag = if last_hop.is_genesis {
                 bs58::encode(&last_hop.transaction_hash).into_string()
             } else {

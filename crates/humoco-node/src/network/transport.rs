@@ -1153,8 +1153,11 @@ impl QuicTransport {
                                                 }
 
                                                 pm.learn_node_from_gossip(node_id, addr_val, hops as u8, Some(remote_addr)).await;
-                                                if let Some(ts) = timestamp_ms {
-                                                    pm.clock().record_heartbeat(is_f2f, ts);
+                                                // Allow heartbeats up to 4 hops across trusted F2F edges for fast median convergence (propagation delay < 500ms is negligible against 30-45s tolerance)
+                                                if hops <= 4 {
+                                                    if let Some(ts) = timestamp_ms {
+                                                        pm.clock().record_heartbeat(is_f2f, ts);
+                                                    }
                                                 }
                                             }
                                         }

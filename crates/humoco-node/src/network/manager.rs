@@ -399,7 +399,86 @@ impl PeerManager {
     /// Removes a peer address from management.
     pub async fn remove_peer(&self, addr: &SocketAddr) -> bool {
         let mut peers = self.peers.write().await;
-        peers.remove(addr).is_some()
+        if let Some(mut p) = peers.remove(addr) {
+            if let Some(conn) = p.connection.take() {
+                conn.close(0u32.into(), b"peer removed");
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Removes a peer by public key or address/hostname.
+    /// Returns the pubkey in hex if available, or the removed address representation.
+    pub async fn remove_peer_by_spec(
+        &self,
+        key_opt: Option<[u8; 32]>,
+        endpoint_opt: Option<&str>,
+    ) -> Option<String> {
+        let mut removed_pubkey = None;
+
+        // 1. If key is known, remove from f2f_friends and known_network_nodes
+        if let Some(ref key) = key_opt {
+            removed_pubkey = Some(hex::encode(key));
+            let mut friends = self.f2f_friends.write().await;
+            friends.remove(key);
+            let mut known = self.known_network_nodes.write().await;
+            known.remove(key);
+        }
+
+        // 2. Remove matching peer from peers map
+        let mut target_addrs = Vec::new();
+        if let Some(endpoint) = endpoint_opt {
+            if let Ok(addr) = endpoint.parse::<SocketAddr>() {
+                target_addrs.push(addr);
+            }
+        }
+
+        {
+            let mut peers = self.peers.write().await;
+            // Also find addrs by key
+            if let Some(ref key) = key_opt {
+                for (addr, p) in peers.iter() {
+                    if p.node_id.as_ref() == Some(key) && !target_addrs.contains(addr) {
+                        target_addrs.push(*addr);
+                    }
+                }
+            }
+
+            for addr in target_addrs {
+                if let Some(mut p) = peers.remove(&addr) {
+                    if let Some(conn) = p.connection.take() {
+                        conn.close(0u32.into(), b"peer removed");
+                    }
+                    if removed_pubkey.is_none() {
+                        if let Some(nid) = p.node_id {
+                            removed_pubkey = Some(hex::encode(nid));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Remove from dns_peers
+        {
+            let mut dns = self.dns_peers.write().await;
+            dns.retain(|entry| {
+                if let Some(ref key) = key_opt {
+                    if entry.entry.pubkey.as_ref() == Some(key) {
+                        return false;
+                    }
+                }
+                if let Some(endpoint) = endpoint_opt {
+                    if entry.entry.raw_endpoint == endpoint {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+
+        removed_pubkey
     }
 
     /// Gets a snapshot copy of a peer's info.

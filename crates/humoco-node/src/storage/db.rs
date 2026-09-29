@@ -3,7 +3,7 @@ use std::sync::Arc;
 use humoco_sim_core::types::LockRecord;
 use humoco_sim_core::storage::should_prune;
 use humoco_sim_core::types::SimTime;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use thiserror::Error;
 use tracing::warn;
 
@@ -67,6 +67,7 @@ pub const TABLE_BANNED_NODES: TableDefinition<&[u8; 32], u64> = TableDefinition:
 #[derive(Clone)]
 pub struct RedbStorage {
     db: Arc<Database>,
+    path: std::path::PathBuf,
 }
 
 impl RedbStorage {
@@ -99,7 +100,27 @@ impl RedbStorage {
 
         Ok(Self {
             db: Arc::new(db),
+            path: path.to_path_buf(),
         })
+    }
+
+    /// Returns database storage statistics: (active_locks, db_size_bytes, page_allocations).
+    pub fn get_stats(&self) -> Result<(u64, u64, Option<u64>), StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
+        let lock_count = table_locks.len()?;
+        let db_size_bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        let page_allocations = if let Ok(write_txn) = self.db.begin_write() {
+            write_txn.stats().ok().map(|s| s.allocated_pages())
+        } else {
+            None
+        };
+        Ok((lock_count, db_size_bytes, page_allocations))
+    }
+
+    /// Returns the filesystem path to the underlying database file.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Stores a lock record and updates the TTL index.

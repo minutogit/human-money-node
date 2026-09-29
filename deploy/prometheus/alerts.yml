@@ -1,0 +1,42 @@
+groups:
+  - name: humoco_node_alerts
+    rules:
+      - alert: StorageFlushQueueBackpressure
+        expr: humoco_flush_queue_depth > 100
+        for: 1m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "High storage flush queue depth on HuMoCo node"
+          description: "Async disk flush queue depth is {{ $value }} (threshold: > 100). The node is under high write backpressure."
+
+      - alert: NoConnectedPeers
+        expr: humoco_p2p_connected_peers == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: network
+        annotations:
+          summary: "HuMoCo node has no connected P2P peers"
+          description: "The node has had 0 connected peers for more than 5 minutes. Node may be network-isolated or partitioned."
+
+      - alert: HighGatewayConcentration
+        expr: humoco_gateway_concentration_ratio > 0.80
+        for: 10m
+        labels:
+          severity: warning
+          component: ingress
+        annotations:
+          summary: "High ingress gateway concentration on HuMoCo node"
+          description: "Top-2 gateway concentration ratio is {{ $value | printf \"%.2f\" }} (> 0.80 for 10m). Traffic routing may be overly centralized."
+
+      - alert: HighPoSLatency
+        expr: rate(humoco_pos_latency_seconds_sum[5m]) / rate(humoco_pos_latency_seconds_count[5m]) > 0.005
+        for: 3m
+        labels:
+          severity: warning
+          component: pos_hotpath
+        annotations:
+          summary: "PoS hot-path lock verification latency exceeded 5ms"
+          description: "Average PoS lock processing time is {{ $value | printf \"%.4f\" }}s, violating the < 5ms hot-path SLA."

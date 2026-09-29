@@ -29,6 +29,10 @@ pub enum ControlRequest {
     AddPeer {
         peer_str: String,
     },
+    RemovePeer {
+        peer_str: String,
+    },
+    GetDbStats,
     GetRecentLocks {
         limit: usize,
     },
@@ -129,6 +133,14 @@ pub enum ControlResponse {
         balance: u64,
     },
     PeerAdded,
+    PeerRemoved {
+        pubkey_hex: String,
+    },
+    DbStats {
+        active_locks: u64,
+        db_size_bytes: u64,
+        page_allocations: Option<u64>,
+    },
     RecentLocks {
         locks: Vec<RecentLockSummaryDto>,
     },
@@ -243,5 +255,29 @@ mod tests {
         let ser_recent = serde_json::to_string(&recent_req).expect("serialize recent req");
         let de_recent: ControlRequest = serde_json::from_str(&ser_recent).expect("deserialize recent req");
         assert_eq!(recent_req, de_recent);
+
+        let remove_req = ControlRequest::RemovePeer { peer_str: "alice@127.0.0.1:9090".into() };
+        let ser_remove = serde_json::to_string(&remove_req).expect("serialize remove req");
+        let de_remove: ControlRequest = serde_json::from_str(&ser_remove).expect("deserialize remove req");
+        assert_eq!(remove_req, de_remove);
+
+        let removed_resp = ControlResponse::PeerRemoved { pubkey_hex: "01020304".into() };
+        let ser_removed = serde_json::to_string(&removed_resp).expect("serialize removed resp");
+        let de_removed: ControlResponse = serde_json::from_str(&ser_removed).expect("deserialize removed resp");
+        assert_eq!(removed_resp, de_removed);
+
+        let stats_req = ControlRequest::GetDbStats;
+        let ser_stats_req = serde_json::to_string(&stats_req).expect("serialize stats req");
+        let de_stats_req: ControlRequest = serde_json::from_str(&ser_stats_req).expect("deserialize stats req");
+        assert_eq!(stats_req, de_stats_req);
+
+        let stats_resp = ControlResponse::DbStats {
+            active_locks: 100,
+            db_size_bytes: 4096,
+            page_allocations: Some(16),
+        };
+        let ser_stats = serde_json::to_string(&stats_resp).expect("serialize stats resp");
+        let de_stats: ControlResponse = serde_json::from_str(&ser_stats).expect("deserialize stats resp");
+        assert_eq!(stats_resp, de_stats);
     }
 }

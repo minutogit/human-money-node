@@ -114,8 +114,19 @@ async fn test_control_socket_status_and_peers() {
     let p2 = peers.iter().find(|p| p.addr == addr2.to_string()).unwrap();
     assert_eq!(p2.status, "Degrading");
 
+    // Test get_db_stats
+    let db_stats = client.get_db_stats().await.expect("get_db_stats");
+    assert_eq!(db_stats.active_locks, 1);
+    assert!(db_stats.db_size_bytes > 0);
+
+    // Test remove_peer
+    let removed = client.remove_peer(&addr2.to_string()).await.expect("remove_peer");
+    assert!(!removed.is_empty());
+    let peers_after = client.list_peers().await.expect("list_peers after remove");
+    assert_eq!(peers_after.len(), 1);
+
     // 3. Shutdown
-    client.shutdown().await.expect("shutdown");
+    client.shutdown(5).await.expect("shutdown");
     let server_res = server_handle.await.expect("server handle join");
     assert!(server_res.is_ok());
 
@@ -177,7 +188,7 @@ async fn test_control_quota_topup_and_get() {
     assert_eq!(stored_quota, 15_500);
 
     // Shutdown
-    client.shutdown().await.expect("shutdown");
+    client.shutdown(5).await.expect("shutdown");
     let _ = server_handle.await;
 }
 
@@ -424,6 +435,6 @@ async fn test_control_extensions_batch3() {
     assert_eq!(root_valid, 500_000);
 
     // Shutdown
-    client.shutdown().await.expect("shutdown");
+    client.shutdown(5).await.expect("shutdown");
     let _ = server_handle.await;
 }

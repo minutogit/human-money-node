@@ -1,15 +1,20 @@
 [package]
 name = "humoco-node"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Human Money Node (humoco-node) - Decentralized Collision Lock Registry Daemon"
 license = "MIT"
+
+[[bin]]
+name = "humoco"
+path = "src/main.rs"
 
 [dependencies]
 humoco-sim-core = { path = "../humoco-sim-core" }
 tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "macros", "signal", "net", "io-util", "sync", "time", "fs"] }
 tokio-util = "0.7"
 clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = { version = "4.5", path = "../clap_complete" }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 tracing = "0.1"

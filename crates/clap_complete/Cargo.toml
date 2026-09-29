@@ -1,0 +1,9 @@
+[package]
+name = "clap_complete"
+version = "4.5.66"
+edition = "2021"
+description = "Command line argument completion for clap"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+clap = { version = "4.5", default-features = false }

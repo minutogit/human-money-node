@@ -1519,6 +1519,7 @@ async fn test_healthcheck_split_live_and_ready() {
     assert_eq!(res_health.status(), StatusCode::OK);
 
     let res_status = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1529,6 +1530,21 @@ async fn test_healthcheck_split_live_and_ready() {
         .await
         .unwrap();
     assert_eq!(res_status.status(), StatusCode::OK);
+
+    // 4. GET /healthz returns 200 OK {"status": "ok"}
+    let res_healthz = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_healthz.status(), StatusCode::OK);
+    let val_healthz: serde_json::Value = response_json(res_healthz).await;
+    assert_eq!(val_healthz["status"], "ok");
 }
 
 #[tokio::test]

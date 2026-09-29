@@ -10,6 +10,13 @@ pub struct ControlClient {
     socket_path: PathBuf,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DbStats {
+    pub active_locks: u64,
+    pub db_size_bytes: u64,
+    pub page_allocations: Option<u64>,
+}
+
 impl ControlClient {
     pub fn new(socket_path: PathBuf) -> Self {
         Self { socket_path }
@@ -49,6 +56,64 @@ impl ControlClient {
             .map_err(|err| NodeError::Cli(format!("JSON deserialization error: {}", err)))?;
 
         Ok(response)
+    }
+
+    pub async fn shutdown(&self, timeout_secs: u64) -> Result<(), NodeError> {
+        match self.send_request(ControlRequest::Shutdown).await? {
+            ControlResponse::Ok => {
+                if timeout_secs > 0 {
+                    let start = std::time::Instant::now();
+                    let max_wait = std::time::Duration::from_secs(timeout_secs);
+                    while self.socket_path.exists() && start.elapsed() < max_wait {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    if self.socket_path.exists() {
+                        return Err(NodeError::Daemon(format!(
+                            "Timed out after {}s waiting for daemon to terminate",
+                            timeout_secs
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            ControlResponse::Error { message } => Err(NodeError::Daemon(message)),
+            _ => Err(NodeError::Daemon(
+                "Unexpected response variant from control server".into(),
+            )),
+        }
+    }
+
+    pub async fn remove_peer(&self, peer_str: &str) -> Result<String, NodeError> {
+        match self
+            .send_request(ControlRequest::RemovePeer {
+                peer_str: peer_str.to_string(),
+            })
+            .await?
+        {
+            ControlResponse::PeerRemoved { pubkey_hex } => Ok(pubkey_hex),
+            ControlResponse::Error { message } => Err(NodeError::Daemon(message)),
+            _ => Err(NodeError::Daemon(
+                "Unexpected response variant from control server".into(),
+            )),
+        }
+    }
+
+    pub async fn get_db_stats(&self) -> Result<DbStats, NodeError> {
+        match self.send_request(ControlRequest::GetDbStats).await? {
+            ControlResponse::DbStats {
+                active_locks,
+                db_size_bytes,
+                page_allocations,
+            } => Ok(DbStats {
+                active_locks,
+                db_size_bytes,
+                page_allocations,
+            }),
+            ControlResponse::Error { message } => Err(NodeError::Daemon(message)),
+            _ => Err(NodeError::Daemon(
+                "Unexpected response variant from control server".into(),
+            )),
+        }
     }
 
     pub async fn get_status(&self) -> Result<ControlResponse, NodeError> {
@@ -96,15 +161,6 @@ impl ControlClient {
         }
     }
 
-    pub async fn shutdown(&self) -> Result<(), NodeError> {
-        match self.send_request(ControlRequest::Shutdown).await? {
-            ControlResponse::Ok => Ok(()),
-            ControlResponse::Error { message } => Err(NodeError::Daemon(message)),
-            _ => Err(NodeError::Daemon(
-                "Unexpected response variant from control server".into(),
-            )),
-        }
-    }
 
     pub async fn add_peer(&self, peer_str: &str) -> Result<ControlResponse, NodeError> {
         self.send_request(ControlRequest::AddPeer {

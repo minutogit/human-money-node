@@ -344,7 +344,7 @@ async fn test_5_2_doctor_check_7_healthy_and_outdated() {
     std::fs::write(&cfg_path, cfg.generate_toml_template()).unwrap();
 
     // Doctor offline check
-    let res_offline = humoco_node::cli::execute_doctor(Some(cfg_path.clone())).await;
+    let res_offline = humoco_node::cli::execute_doctor(Some(cfg_path.clone()), false).await;
     assert!(res_offline.is_ok());
 
     // Doctor online check with server
@@ -365,12 +365,12 @@ async fn test_5_2_doctor_check_7_healthy_and_outdated() {
     tokio::spawn(async move { server.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let res_online_healthy = humoco_node::cli::execute_doctor(Some(cfg_path.clone())).await;
+    let res_online_healthy = humoco_node::cli::execute_doctor(Some(cfg_path.clone()), false).await;
     assert!(res_online_healthy.is_ok());
 
     // Mark outdated and re-run
     pm.set_ticket_outdated(true);
-    let res_online_outdated = humoco_node::cli::execute_doctor(Some(cfg_path)).await;
+    let res_online_outdated = humoco_node::cli::execute_doctor(Some(cfg_path), false).await;
     assert!(res_online_outdated.is_ok());
 
     cancel.cancel();

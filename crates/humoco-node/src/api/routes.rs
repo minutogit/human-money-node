@@ -114,6 +114,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(sync_router)
         .route("/v1/pow-challenge", get(get_pow_challenge))
         .route("/health", get(get_node_status))
+        .route("/healthz", get(health_ok))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
         .route("/v1/node-status", get(get_node_status))
@@ -1443,6 +1444,11 @@ async fn submit_hmc_chain_lock(
     };
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
     (status, Json(envelope)).into_response()
+}
+
+/// Handler for GET /healthz (Kubernetes/L2 basic health check)
+async fn health_ok() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
 /// Handler for GET /health/live (Kubernetes/Systemd liveness probe)

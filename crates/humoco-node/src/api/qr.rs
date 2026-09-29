@@ -83,8 +83,9 @@ fn compute_format_bits() -> u16 {
 }
 
 #[allow(clippy::needless_range_loop)]
-/// Generates an inline SVG QR code representing `text`.
-pub fn generate_qr_svg(text: &str) -> String {
+/// Generates the raw boolean module matrix for Version 6 (41x41) QR code.
+/// `true` = dark module (black), `false` = light module (white).
+pub fn generate_qr_matrix(text: &str) -> [[bool; SIZE]; SIZE] {
     let bytes = text.as_bytes();
     let mut bit_buf = Vec::new();
 
@@ -244,6 +245,13 @@ pub fn generate_qr_svg(text: &str) -> String {
         modules[r2][c2] = bit;
     }
 
+    modules
+}
+
+/// Generates an inline SVG QR code representing `text`.
+pub fn generate_qr_svg(text: &str) -> String {
+    let modules = generate_qr_matrix(text);
+
     // Render SVG with horizontal run-length compression
     let quiet = 2;
     let total_size = SIZE + quiet * 2;
@@ -276,6 +284,51 @@ pub fn generate_qr_svg(text: &str) -> String {
         total = total_size,
         d = path_d.trim_end()
     )
+}
+
+/// Generates a compact ANSI/Unicode QR code for direct terminal rendering.
+/// Uses half-block characters (▀, ▄, █, space) to fit 2 QR rows per terminal line.
+/// The resulting QR code is only 23 lines high and 45 columns wide (including quiet zone).
+pub fn generate_qr_ansi(text: &str) -> String {
+    let modules = generate_qr_matrix(text);
+    let quiet = 2;
+    let total_size = SIZE + quiet * 2; // 45
+    let mut output = String::new();
+
+    let get_module = |y: usize, x: usize| -> bool {
+        if y < quiet || y >= quiet + SIZE || x < quiet || x >= quiet + SIZE {
+            false // Light / white in quiet zone
+        } else {
+            modules[y - quiet][x - quiet]
+        }
+    };
+
+    let mut y = 0;
+    while y < total_size {
+        for x in 0..total_size {
+            let top_dark = get_module(y, x);
+            let bot_dark = if y + 1 < total_size {
+                get_module(y + 1, x)
+            } else {
+                false
+            };
+
+            // Standard terminal rendering (dark background, light foreground):
+            // false (light module) -> rendered as white
+            // true (dark module) -> rendered as black
+            let ch = match (!top_dark, !bot_dark) {
+                (true, true) => '█',   // Both light
+                (true, false) => '▀',  // Top light, bottom dark
+                (false, true) => '▄',  // Top dark, bottom light
+                (false, false) => ' ', // Both dark
+            };
+            output.push(ch);
+        }
+        output.push('\n');
+        y += 2;
+    }
+
+    output
 }
 
 fn push_bits(buf: &mut Vec<bool>, val: u16, len: usize) {
@@ -330,5 +383,17 @@ mod tests {
         assert!(svg.ends_with("</svg>"));
         assert!(svg.contains("class=\"qr-svg\""));
         assert!(svg.contains("viewBox=\"0 0 45 45\""));
+    }
+
+    #[test]
+    fn test_qr_ansi_generation() {
+        let text = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a@127.0.0.1:9090";
+        let ansi = generate_qr_ansi(text);
+        let lines: Vec<&str> = ansi.lines().collect();
+        // 45 modules tall with 2 rows per character = 23 lines
+        assert_eq!(lines.len(), 23);
+        for line in lines {
+            assert_eq!(line.chars().count(), 45);
+        }
     }
 }

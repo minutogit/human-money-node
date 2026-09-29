@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/humoco-sim-core",
     "crates/humoco-node",
+    "crates/clap_complete",
 ]
 
 [profile.dev]

@@ -291,8 +291,42 @@ impl ControlServer {
                     }
                 }
                 ControlRequest::Shutdown => {
-                    state.cancel_token.cancel();
+                    let cancel = state.cancel_token.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        cancel.cancel();
+                    });
                     ControlResponse::Ok
+                }
+                ControlRequest::RemovePeer { peer_str } => {
+                    match parse_peer_string(&peer_str) {
+                        Ok((key_opt, endpoint_opt)) => {
+                            let removed_hex = state
+                                .peer_manager
+                                .remove_peer_by_spec(key_opt, endpoint_opt.as_deref())
+                                .await;
+                            let pubkey_hex = removed_hex.unwrap_or_else(|| peer_str.clone());
+                            ControlResponse::PeerRemoved { pubkey_hex }
+                        }
+                        Err(err) => ControlResponse::Error {
+                            message: format!("Invalid peer specification: {}", err),
+                        },
+                    }
+                }
+                ControlRequest::GetDbStats => {
+                    let ram_locks = state.engine.ram.read().await.len() as u64;
+                    match state.storage.get_stats() {
+                        Ok((disk_locks, db_size_bytes, page_allocations)) => {
+                            ControlResponse::DbStats {
+                                active_locks: ram_locks.max(disk_locks),
+                                db_size_bytes,
+                                page_allocations,
+                            }
+                        }
+                        Err(err) => ControlResponse::Error {
+                            message: format!("Failed to get DB statistics: {}", err),
+                        },
+                    }
                 }
                 ControlRequest::AddPeer { peer_str } => {
                     match parse_peer_string(&peer_str) {

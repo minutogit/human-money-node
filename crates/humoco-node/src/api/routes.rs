@@ -46,6 +46,8 @@ pub struct AppState {
     pub lifecycle: crate::config::LifecycleConfig,
     pub network_id: humoco_sim_core::types::NetworkId,
     pub shard_query_depth: usize,
+    pub system_stats: Arc<crate::api::system_stats::SystemStatsCollector>,
+    pub auth: Arc<crate::api::auth::AdminTokenManager>,
 }
 
 impl AppState {
@@ -56,6 +58,9 @@ impl AppState {
         tier_controller: Arc<TierController>,
         pow_engine: Arc<PowEngine>,
     ) -> Self {
+        let metrics = Arc::new(crate::api::metrics::NodeMetrics::default());
+        let system_stats = Arc::new(crate::api::system_stats::SystemStatsCollector::new("."));
+        let auth = Arc::new(crate::api::auth::AdminTokenManager::with_token("hmc_adm_dev", true));
         Self {
             engine,
             storage,
@@ -65,10 +70,12 @@ impl AppState {
             peer_manager: None,
             transport: None,
             start_time: std::time::Instant::now(),
-            metrics: Arc::new(crate::api::metrics::NodeMetrics::default()),
+            metrics,
             lifecycle: crate::config::LifecycleConfig::default(),
             network_id: humoco_sim_core::types::NetworkId::default(),
             shard_query_depth: 3,
+            system_stats,
+            auth,
         }
     }
 
@@ -84,6 +91,19 @@ impl AppState {
 
     pub fn with_shard_query_depth(mut self, depth: usize) -> Self {
         self.shard_query_depth = depth;
+        self
+    }
+
+    pub fn with_system_stats(
+        mut self,
+        system_stats: Arc<crate::api::system_stats::SystemStatsCollector>,
+    ) -> Self {
+        self.system_stats = system_stats;
+        self
+    }
+
+    pub fn with_auth(mut self, auth: Arc<crate::api::auth::AdminTokenManager>) -> Self {
+        self.auth = auth;
         self
     }
 
@@ -122,6 +142,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/network/peers", get(get_peers))
         .route("/dashboard", get(crate::api::dashboard::render_dashboard))
         .route("/dashboard/data", get(crate::api::dashboard::dashboard_data))
+        .route("/dashboard/vouchers", get(crate::api::dashboard::dashboard_vouchers))
+        .route("/dashboard/voucher/:voucher_id", get(crate::api::dashboard::dashboard_voucher_detail))
+        .route("/dashboard/lock/:lookup_tag", get(crate::api::dashboard::dashboard_lock_raw))
         .route("/metrics", get(crate::api::metrics::prometheus_metrics))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(CorsLayer::permissive())
@@ -143,6 +166,7 @@ async fn submit_lock(
     headers: HeaderMap,
     body_bytes: bytes::Bytes,
 ) -> Response {
+    state.metrics.record_write();
     let start = std::time::Instant::now();
     match serde_json::from_slice::<IngressLockPayload>(&body_bytes) {
         Ok(IngressLockPayload::Chain(chain_req)) => {
@@ -178,6 +202,7 @@ async fn sync_locks(
     State(state): State<AppState>,
     Json(payload): Json<SyncRequest>,
 ) -> (StatusCode, Json<SyncResponse>) {
+    state.metrics.record_read();
     let locators: HashSet<String> = payload.sparse_locators.into_iter().collect();
 
     let now_ms = state.net_time_ms();
@@ -247,6 +272,7 @@ async fn sync_locks(
 async fn get_pow_challenge(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<PowChallengeResponse>) {
+    state.metrics.record_read();
     let (challenge, difficulty, expires_at) = state.pow_engine.generate_challenge();
     (
         StatusCode::OK,
@@ -262,6 +288,7 @@ async fn get_pow_challenge(
 async fn get_node_status(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<NodeStatusResponse>) {
+    state.metrics.record_read();
     let total_locks = state.engine.ram.read().await.len();
     let network = match state.network_id {
         humoco_sim_core::types::NetworkId::Mainnet => "mainnet".to_string(),
@@ -881,6 +908,7 @@ async fn query_status(
     headers: HeaderMap,
     Json(payload): Json<L2StatusQuery>,
 ) -> Response {
+    state.metrics.record_read();
     let now_ms = state.net_time_ms();
     let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
     let client_node_id: u16 = if let Some(auth) = headers.get("Authorization").and_then(|h| h.to_str().ok()) {
@@ -1107,9 +1135,12 @@ async fn submit_hmc_lock(
                 req: Box::new(req.clone()),
                 root_valid_until,
             }).ok();
+            let start_quorum = std::time::Instant::now();
             let quorum_certificate = Some(assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await);
+            state.metrics.record_quorum_latency(start_quorum.elapsed());
+            state.metrics.record_local_latency(std::time::Duration::from_micros(1));
             let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
-            state.metrics.record_pos_latency(start.elapsed());
+            state.metrics.record_e2e_latency(start.elapsed());
             return (StatusCode::OK, Json(envelope)).into_response();
         }
     }
@@ -1216,10 +1247,12 @@ async fn submit_hmc_lock(
     }
 
     // 4. Ingress into DualTierEngine (ClientApi origin) with ingress window enforcement
+    let start_local = std::time::Instant::now();
     let (verdict, is_new) = state
         .engine
         .ingress_hmc_lock_with_origin(lookup_tag.clone(), entry.clone(), IngressOrigin::ClientApi, Some(now_ms))
         .await;
+    state.metrics.record_local_latency(start_local.elapsed());
 
     // 5. Assemble QuorumCertificate for successful verdicts
     let quorum_certificate = match &verdict {
@@ -1232,7 +1265,10 @@ async fn submit_hmc_lock(
                 req: Box::new(req.clone()),
                 root_valid_until,
             }).ok();
-            Some(assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await)
+            let start_quorum = std::time::Instant::now();
+            let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+            state.metrics.record_quorum_latency(start_quorum.elapsed());
+            Some(cert)
         }
     };
 
@@ -1242,15 +1278,10 @@ async fn submit_hmc_lock(
             state.metrics.record_lock_rejected();
             StatusCode::CONFLICT
         }
-        _ if is_new => {
-            state.metrics.record_pos_latency(start.elapsed());
-            StatusCode::CREATED
-        }
-        _ => {
-            state.metrics.record_pos_latency(start.elapsed());
-            StatusCode::OK
-        }
+        _ if is_new => StatusCode::CREATED,
+        _ => StatusCode::OK,
     };
+    state.metrics.record_e2e_latency(start.elapsed());
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
     let mut resp = (status, Json(envelope)).into_response();
     if should_warn {
@@ -1372,10 +1403,12 @@ async fn submit_hmc_chain_lock(
     }
 
     // Atomares Ketten-Locking via engine
+    let start_local = std::time::Instant::now();
     let (verdict, is_new) = state
         .engine
         .ingress_hmc_chain_lock(chain_req.clone(), IngressOrigin::ClientApi, Some(now_ms))
         .await;
+    state.metrics.record_local_latency(start_local.elapsed());
 
     let quorum_certificate = match &verdict {
         L2Verdict::Verified { lock_entry } => {
@@ -1404,17 +1437,18 @@ async fn submit_hmc_chain_lock(
                 root_valid_until,
             })
             .ok();
-            Some(
-                assemble_quorum_certificate(
-                    &state,
-                    lock_entry.t_id,
-                    parent_bytes,
-                    shard_id,
-                    now_ms,
-                    wire_payload,
-                )
-                .await,
+            let start_quorum = std::time::Instant::now();
+            let cert = assemble_quorum_certificate(
+                &state,
+                lock_entry.t_id,
+                parent_bytes,
+                shard_id,
+                now_ms,
+                wire_payload,
             )
+            .await;
+            state.metrics.record_quorum_latency(start_quorum.elapsed());
+            Some(cert)
         }
         _ => None,
     };
@@ -1429,19 +1463,11 @@ async fn submit_hmc_chain_lock(
             StatusCode::TOO_MANY_REQUESTS
         }
         L2Verdict::Rejected { .. } => StatusCode::BAD_REQUEST,
-        L2Verdict::Verified { .. } if is_new => {
-            state.metrics.record_pos_latency(start.elapsed());
-            StatusCode::CREATED
-        }
-        L2Verdict::Verified { .. } => {
-            state.metrics.record_pos_latency(start.elapsed());
-            StatusCode::OK
-        }
-        _ => {
-            state.metrics.record_pos_latency(start.elapsed());
-            StatusCode::OK
-        }
+        L2Verdict::Verified { .. } if is_new => StatusCode::CREATED,
+        L2Verdict::Verified { .. } => StatusCode::OK,
+        _ => StatusCode::OK,
     };
+    state.metrics.record_e2e_latency(start.elapsed());
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
     (status, Json(envelope)).into_response()
 }

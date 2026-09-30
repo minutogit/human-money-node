@@ -27,6 +27,23 @@ pub fn calculate_fan_out(d: usize) -> usize {
     std::cmp::min(d, sqrt_ceil + 1)
 }
 
+/// Public DTO representing a network node in the Node Explorer dashboard.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NetworkNodeDto {
+    pub node_id: String,
+    pub public_key: String,
+    pub address: String,
+    pub is_f2f: bool,
+    pub is_local: bool,
+    pub connection_status: String,
+    pub min_hops: u8,
+    pub hrw_routing_id: String,
+    pub work_score: u64,
+    pub is_immature: bool,
+    pub pending_ticket: Option<String>,
+    pub incubation_remaining_sec: Option<u64>,
+}
+
 /// Semantically decoupled node information:
 /// - `node_pubkey` / `node_id` = permanent Ed25519 identity (BLAKE3(pubkey)), immutable for F2F & TLS
 /// - `hrw_routing_id` = Argon2d Shard Ticket for HRW routing, may change via re-mining (24h incubation)
@@ -977,6 +994,147 @@ impl PeerManager {
         }
         let nodes = self.known_network_nodes.read().await;
         nodes.get(node_id).map(|k| k.addr)
+    }
+
+    /// Collects a comprehensive list of all known nodes in the network for the Node Explorer dashboard.
+    pub async fn get_network_nodes_explorer(
+        &self,
+        local_pubkey: &[u8; 32],
+        local_addr: Option<SocketAddr>,
+        local_hrw: [u8; 32],
+    ) -> Vec<NetworkNodeDto> {
+        let mut map: HashMap<[u8; 32], NetworkNodeDto> = HashMap::new();
+        let banned = self.banned_nodes.read().await;
+        let friends = self.f2f_friends.read().await;
+        let peers = self.peers.read().await;
+        let known = self.known_network_nodes.read().await;
+
+        // 1. Add Local Node
+        let local_addr_str = local_addr
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "127.0.0.1:9090".to_string());
+        map.insert(
+            *local_pubkey,
+            NetworkNodeDto {
+                node_id: hex::encode(local_pubkey),
+                public_key: hex::encode(local_pubkey),
+                address: local_addr_str,
+                is_f2f: false,
+                is_local: true,
+                connection_status: "Local Node (Self)".to_string(),
+                min_hops: 0,
+                hrw_routing_id: hex::encode(local_hrw),
+                work_score: 1,
+                is_immature: false,
+                pending_ticket: None,
+                incubation_remaining_sec: None,
+            },
+        );
+
+        // 2. Add F2F Friends & configured peers
+        for (friend_id, friend_addr_opt) in friends.iter() {
+            if friend_id == local_pubkey {
+                continue;
+            }
+            let is_banned = banned.contains(friend_id);
+            let addr_str = friend_addr_opt
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+            let is_connected = if let Some(addr) = friend_addr_opt {
+                peers.get(addr).map(|p| p.status == PeerStatus::Connected).unwrap_or(false)
+            } else {
+                false
+            };
+
+            let status_str = if is_banned {
+                "Banned (Equivocation)".to_string()
+            } else if is_connected {
+                "Connected (F2F Friend)".to_string()
+            } else {
+                "Configured (F2F Friend)".to_string()
+            };
+
+            let hrw = known.get(friend_id).map(|k| k.hrw_routing_id).unwrap_or(*friend_id);
+            let work = known.get(friend_id).map(|k| k.work_score).unwrap_or(1);
+            let is_im = known.get(friend_id).map(|k| k.first_seen.elapsed() < HRW_INCUBATION_DURATION).unwrap_or(false);
+
+            map.insert(
+                *friend_id,
+                NetworkNodeDto {
+                    node_id: hex::encode(friend_id),
+                    public_key: hex::encode(friend_id),
+                    address: addr_str,
+                    is_f2f: true,
+                    is_local: false,
+                    connection_status: status_str,
+                    min_hops: 1,
+                    hrw_routing_id: hex::encode(hrw),
+                    work_score: work,
+                    is_immature: is_im,
+                    pending_ticket: None,
+                    incubation_remaining_sec: None,
+                },
+            );
+        }
+
+        // 3. Add Gossip-learned Known Nodes
+        for (node_pubkey, info) in known.iter() {
+            if node_pubkey == local_pubkey {
+                continue;
+            }
+            let is_banned = banned.contains(node_pubkey);
+            let is_friend = friends.contains_key(node_pubkey);
+            let is_connected = peers.get(&info.addr).map(|p| p.status == PeerStatus::Connected).unwrap_or(false);
+
+            let status_str = if is_banned {
+                "Banned (Equivocation)".to_string()
+            } else if is_friend && is_connected {
+                "Connected (F2F Friend)".to_string()
+            } else if is_friend {
+                "Configured (F2F Friend)".to_string()
+            } else if is_connected {
+                "Connected (Shard Direct)".to_string()
+            } else {
+                "Learned via Gossip".to_string()
+            };
+
+            let pending_hex = info.pending_hrw_routing_id.map(hex::encode);
+            let rem_sec = info.pending_remaining().map(|d| d.as_secs());
+            let is_immature = info.first_seen.elapsed() < HRW_INCUBATION_DURATION;
+
+            map.insert(
+                *node_pubkey,
+                NetworkNodeDto {
+                    node_id: hex::encode(node_pubkey),
+                    public_key: hex::encode(node_pubkey),
+                    address: info.addr.to_string(),
+                    is_f2f: is_friend,
+                    is_local: false,
+                    connection_status: status_str,
+                    min_hops: info.min_hops,
+                    hrw_routing_id: hex::encode(info.hrw_routing_id),
+                    work_score: info.work_score,
+                    is_immature,
+                    pending_ticket: pending_hex,
+                    incubation_remaining_sec: rem_sec,
+                },
+            );
+        }
+
+        let mut list: Vec<NetworkNodeDto> = map.into_values().collect();
+        // Sort: Local node first, then F2F friends, then by min_hops, then address
+        list.sort_by(|a, b| {
+            match (a.is_local, b.is_local) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => match (a.is_f2f, b.is_f2f) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.min_hops.cmp(&b.min_hops).then_with(|| a.address.cmp(&b.address)),
+                },
+            }
+        });
+        list
     }
 
     /// Registers a peer's Ed25519 verifying key associated with its 32-byte Node ID.

@@ -605,4 +605,44 @@ impl RedbStorage {
         write_txn.commit()?;
         Ok(locks_count)
     }
+
+    /// Retrieves all HMC locks belonging to a specific voucher_id from redb.
+    pub fn get_hmc_locks_for_voucher(
+        &self,
+        voucher_id: &str,
+    ) -> Result<Vec<(String, crate::api::hmc::L2LockEntry)>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let vidx = read_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+        let locks_table = read_txn.open_table(TABLE_HMC_LOCKS)?;
+        let mut results = Vec::new();
+
+        let range = vidx.range((voucher_id, "")..)?;
+        for entry in range {
+            let (k, _) = entry?;
+            let (vid, tag) = k.value();
+            if vid != voucher_id {
+                break;
+            }
+            if let Some(val) = locks_table.get(tag)? {
+                let entry: crate::api::hmc::L2LockEntry = serde_json::from_slice(val.value())?;
+                results.push((tag.to_string(), entry));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Retrieves all active voucher IDs indexed in redb.
+    pub fn all_active_vouchers(&self) -> Result<Vec<String>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let vidx = read_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+        let mut vouchers = std::collections::HashSet::new();
+        for entry in vidx.iter()? {
+            let (k, _) = entry?;
+            let (vid, _) = k.value();
+            vouchers.insert(vid.to_string());
+        }
+        let mut list: Vec<String> = vouchers.into_iter().collect();
+        list.sort();
+        Ok(list)
+    }
 }

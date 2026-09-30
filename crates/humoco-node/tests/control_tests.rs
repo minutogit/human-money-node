@@ -225,20 +225,14 @@ async fn test_prometheus_metrics_endpoint() {
     let _ = engine.ingress_lock(lock1, SimTime(0), SimTime(600_000)).await;
     let _ = engine.ingress_lock(lock2, SimTime(0), SimTime(600_000)).await;
 
-    let app_state = AppState {
+    let mut app_state = AppState::new(
         engine,
         storage,
         identity,
         tier_controller,
         pow_engine,
-        peer_manager: Some(peer_manager),
-        transport: None,
-        start_time: std::time::Instant::now(),
-        metrics: Arc::new(humoco_node::api::metrics::NodeMetrics::default()),
-        lifecycle: humoco_node::config::LifecycleConfig::default(),
-        network_id: humoco_sim_core::types::NetworkId::default(),
-        shard_query_depth: 3,
-    };
+    );
+    app_state.peer_manager = Some(peer_manager);
 
     let router = build_router(app_state);
 

@@ -1,19 +1,103 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use parking_lot::RwLock;
 use axum::{
     extract::State,
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::api::routes::AppState;
 
-/// Lock operation metrics tracker for Prometheus exposition.
+/// Rolling latency ring buffer for the last N samples (default 100).
+#[derive(Debug)]
+pub struct RollingLatencyBuffer<const N: usize = 100> {
+    samples: RwLock<VecDeque<u64>>, // in microseconds
+}
+
+impl<const N: usize> Default for RollingLatencyBuffer<N> {
+    fn default() -> Self {
+        Self {
+            samples: RwLock::new(VecDeque::with_capacity(N)),
+        }
+    }
+}
+
+impl<const N: usize> RollingLatencyBuffer<N> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&self, duration: Duration) {
+        let micros = duration.as_micros() as u64;
+        let mut guard = self.samples.write();
+        if guard.len() >= N {
+            guard.pop_front();
+        }
+        guard.push_back(micros);
+    }
+
+    pub fn count(&self) -> usize {
+        self.samples.read().len()
+    }
+
+    pub fn avg_ms(&self) -> f64 {
+        let guard = self.samples.read();
+        if guard.is_empty() {
+            0.0
+        } else {
+            let sum: u64 = guard.iter().copied().sum();
+            (sum as f64) / (guard.len() as f64 * 1000.0)
+        }
+    }
+
+    pub fn min_ms(&self) -> f64 {
+        let guard = self.samples.read();
+        guard.iter().copied().min().map(|m| (m as f64) / 1000.0).unwrap_or(0.0)
+    }
+
+    pub fn max_ms(&self) -> f64 {
+        let guard = self.samples.read();
+        guard.iter().copied().max().map(|m| (m as f64) / 1000.0).unwrap_or(0.0)
+    }
+
+    pub fn p95_ms(&self) -> f64 {
+        let guard = self.samples.read();
+        if guard.is_empty() {
+            return 0.0;
+        }
+        let mut sorted: Vec<u64> = guard.iter().copied().collect();
+        sorted.sort_unstable();
+        let idx = ((sorted.len() as f64) * 0.95).ceil() as usize;
+        let p95_idx = idx.saturating_sub(1).min(sorted.len() - 1);
+        (sorted[p95_idx] as f64) / 1000.0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyTierStats {
+    pub avg_ms: f64,
+    pub p95_ms: f64,
+    pub min_ms: f64,
+    pub max_ms: f64,
+    pub sample_count: usize,
+    pub sla_compliant: bool,
+}
+
+/// Lock operation metrics tracker with separated 3-tier latencies (Rolling 100).
 #[derive(Debug, Default)]
 pub struct NodeMetrics {
+    pub local_latency: RollingLatencyBuffer<100>,
+    pub quorum_latency: RollingLatencyBuffer<100>,
+    pub e2e_latency: RollingLatencyBuffer<100>,
     pub pos_latency_count: AtomicU64,
     pub pos_latency_sum_micros: AtomicU64,
     pub locks_rejected: AtomicU64,
+    pub total_writes: AtomicU64,
+    pub total_reads: AtomicU64,
+    pub ttl_purged_count: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -21,15 +105,58 @@ impl NodeMetrics {
         Self::default()
     }
 
-    /// Records a successful PoS lock verification duration.
-    pub fn record_pos_latency(&self, duration: Duration) {
+    /// Records local In-RAM collision check & attestation latency (< 1µs - 5ms SLA).
+    pub fn record_local_latency(&self, duration: Duration) {
+        self.local_latency.record(duration);
+    }
+
+    /// Records P2P mesh quorum roundtrip latency (Gateway <-> Shards, < 500ms SLA).
+    pub fn record_quorum_latency(&self, duration: Duration) {
+        self.quorum_latency.record(duration);
+    }
+
+    /// Records end-to-end HTTP request processing latency.
+    pub fn record_e2e_latency(&self, duration: Duration) {
+        self.e2e_latency.record(duration);
         self.pos_latency_count.fetch_add(1, Ordering::Relaxed);
         self.pos_latency_sum_micros.fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+    }
+
+    /// Legacy helper: records to e2e latency.
+    pub fn record_pos_latency(&self, duration: Duration) {
+        self.record_e2e_latency(duration);
     }
 
     /// Records a rejected lock due to conflict (409) or backpressure/quota (429).
     pub fn record_lock_rejected(&self) {
         self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increments the total write transactions counter.
+    pub fn record_write(&self) {
+        self.total_writes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increments the total read queries counter.
+    pub fn record_read(&self) {
+        self.total_reads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increments the number of purged expired TTL locks.
+    pub fn record_ttl_purged(&self, count: u64) {
+        self.ttl_purged_count.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn total_writes(&self) -> u64 {
+        self.total_writes.load(Ordering::Relaxed)
+    }
+
+    pub fn total_reads(&self) -> u64 {
+        self.total_reads.load(Ordering::Relaxed)
+    }
+
+    pub fn ttl_purged_count(&self) -> u64 {
+        self.ttl_purged_count.load(Ordering::Relaxed)
     }
 
     pub fn pos_latency_count(&self) -> u64 {
@@ -46,6 +173,45 @@ impl NodeMetrics {
             0.0
         } else {
             (self.pos_latency_sum_micros.load(Ordering::Relaxed) as f64) / (count as f64 * 1000.0)
+        }
+    }
+
+    pub fn local_stats(&self) -> LatencyTierStats {
+        let count = self.local_latency.count();
+        let avg = self.local_latency.avg_ms();
+        LatencyTierStats {
+            avg_ms: avg,
+            p95_ms: self.local_latency.p95_ms(),
+            min_ms: self.local_latency.min_ms(),
+            max_ms: self.local_latency.max_ms(),
+            sample_count: count,
+            sla_compliant: count == 0 || avg < 5.0,
+        }
+    }
+
+    pub fn quorum_stats(&self) -> LatencyTierStats {
+        let count = self.quorum_latency.count();
+        let avg = self.quorum_latency.avg_ms();
+        LatencyTierStats {
+            avg_ms: avg,
+            p95_ms: self.quorum_latency.p95_ms(),
+            min_ms: self.quorum_latency.min_ms(),
+            max_ms: self.quorum_latency.max_ms(),
+            sample_count: count,
+            sla_compliant: count == 0 || avg < 500.0,
+        }
+    }
+
+    pub fn e2e_stats(&self) -> LatencyTierStats {
+        let count = self.e2e_latency.count();
+        let avg = self.e2e_latency.avg_ms();
+        LatencyTierStats {
+            avg_ms: avg,
+            p95_ms: self.e2e_latency.p95_ms(),
+            min_ms: self.e2e_latency.min_ms(),
+            max_ms: self.e2e_latency.max_ms(),
+            sample_count: count,
+            sla_compliant: count == 0 || avg < 1500.0,
         }
     }
 

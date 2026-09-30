@@ -32,6 +32,44 @@ pub struct LockInspection {
     pub signers_count: usize,
 }
 
+/// Lightweight summary of an active voucher in the node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoucherSummaryDto {
+    pub voucher_id: String,
+    pub root_valid_until_ms: u64,
+    pub root_valid_until_formatted: String,
+    pub created_at_ms: u64,
+    pub locks_count: usize,
+    pub genesis_tag: Option<String>,
+    pub status: String,
+}
+
+/// Detailed voucher inspection including all hops in the lock chain and raw entries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoucherDetailDto {
+    pub voucher_id: String,
+    pub root_valid_until_ms: u64,
+    pub root_valid_until_formatted: String,
+    pub created_at_ms: u64,
+    pub genesis_tag: Option<String>,
+    pub total_byte_years: u64,
+    pub locks: Vec<VoucherLockHopDto>,
+}
+
+/// Single hop in a voucher lock lineage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoucherLockHopDto {
+    pub lookup_tag: String,
+    pub is_genesis: bool,
+    pub t_id_hex: String,
+    pub sender_pub_hex: String,
+    pub receiver_pub_hex: Option<String>,
+    pub encrypted_timestamp: u128,
+    pub deletable_at: Option<String>,
+    pub status: String,
+    pub raw_json: serde_json::Value,
+}
+
 /// Zero-contention FIFO ring buffer for the latest max 32 locks (Spec 06 & Spec 12).
 #[derive(Debug, Clone)]
 pub struct RecentLockBuffer {

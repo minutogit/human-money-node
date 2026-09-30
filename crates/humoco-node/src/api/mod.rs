@@ -1,11 +1,18 @@
+pub mod auth;
 pub mod dashboard;
 pub mod dto;
 pub mod hmc;
 pub mod metrics;
 pub mod qr;
 pub mod routes;
+pub mod system_stats;
 
-pub use dashboard::{dashboard_data, render_dashboard, DashboardData};
+pub use auth::AdminTokenManager;
+pub use dashboard::{
+    dashboard_data, render_dashboard, DashboardData, DashboardDataDto, F2fFriendDto,
+    F2fOverviewDto, RecentLockDto, ShardScoreSampleDto, ThermometerStatsDto, TierOverviewDto,
+    VipAccountDto,
+};
 
 pub use dto::{
     AttestationDto, ErrorResponse, LockRecordDto,
@@ -18,3 +25,5 @@ pub use hmc::{
 };
 pub use metrics::prometheus_metrics;
 pub use routes::{build_router, AppState};
+pub use system_stats::{SparklinesDto, SystemStatsCollector, SystemStatsDto};
+

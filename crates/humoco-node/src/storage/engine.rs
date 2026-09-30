@@ -9,7 +9,8 @@ use super::db::{RedbStorage, StorageError};
 use crate::api::hmc::{L2LockEntry, L2Verdict};
 use crate::storage::filter::SpentLockFilter;
 use crate::storage::recent::{
-    LockInspection, RecentLockBuffer, RecentLockStatus, RecentLockSummary,
+    LockInspection, RecentLockBuffer, RecentLockStatus, RecentLockSummary, VoucherDetailDto,
+    VoucherLockHopDto, VoucherSummaryDto,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -995,6 +996,192 @@ impl DualTierEngine {
     /// Returns the root validity timestamp (in ms) for an HMC voucher, if known.
     pub async fn get_hmc_voucher_root_valid(&self, voucher_id: &str) -> Option<u64> {
         self.hmc_ram.read().await.get_voucher_root_valid(voucher_id)
+    }
+
+    /// Returns a list of all active vouchers known to this node (from RAM and redb).
+    pub async fn get_all_active_vouchers(&self) -> Vec<VoucherSummaryDto> {
+        let mut vouchers_map: HashMap<String, (u64, usize, Option<String>)> = HashMap::new();
+
+        // 1. Collect from RAM
+        {
+            let hmc = self.hmc_ram.read().await;
+            for (vid, tags) in &hmc.vouchers {
+                let root_valid = hmc.voucher_roots.get(vid).copied().unwrap_or(0);
+                let genesis = tags.iter().find(|t| !t.starts_with("ds_")).cloned();
+                vouchers_map.insert(vid.clone(), (root_valid, tags.len(), genesis));
+            }
+        }
+
+        // 2. Collect from redb
+        if let Ok(db_vouchers) = self.db.all_active_vouchers() {
+            for vid in db_vouchers {
+                if !vouchers_map.contains_key(&vid) {
+                    if let Ok(locks) = self.db.get_hmc_locks_for_voucher(&vid) {
+                        let root_valid = locks.iter().find_map(|(_, entry)| {
+                            entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok())
+                        }).unwrap_or(0);
+                        let genesis = locks.iter().find(|(tag, _)| !tag.starts_with("ds_")).map(|(tag, _)| tag.clone());
+                        vouchers_map.insert(vid, (root_valid, locks.len(), genesis));
+                    }
+                }
+            }
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut results = Vec::new();
+        for (vid, (root_valid, count, genesis)) in vouchers_map {
+            let status = if root_valid == 0 {
+                "Unknown".to_string()
+            } else if now_ms > root_valid {
+                "Expired".to_string()
+            } else {
+                "Active".to_string()
+            };
+            let formatted = if root_valid > 0 {
+                let rem_sec = root_valid.saturating_sub(now_ms) / 1000;
+                format!("TTL: {}s remaining", rem_sec)
+            } else {
+                "N/A".to_string()
+            };
+            results.push(VoucherSummaryDto {
+                voucher_id: vid,
+                root_valid_until_ms: root_valid,
+                root_valid_until_formatted: formatted,
+                created_at_ms: 0,
+                locks_count: count,
+                genesis_tag: genesis,
+                status,
+            });
+        }
+        results.sort_by(|a, b| b.root_valid_until_ms.cmp(&a.root_valid_until_ms));
+        results
+    }
+
+    /// Returns detailed lineage and all lock hops for a voucher.
+    pub async fn get_voucher_lineage(&self, voucher_id: &str) -> Option<VoucherDetailDto> {
+        let mut locks_map: HashMap<String, L2LockEntry> = HashMap::new();
+
+        // 1. Query redb
+        if let Ok(db_locks) = self.db.get_hmc_locks_for_voucher(voucher_id) {
+            for (tag, entry) in db_locks {
+                locks_map.insert(tag, entry);
+            }
+        }
+
+        // 2. Query RAM (overwrites with freshest live state)
+        {
+            let hmc = self.hmc_ram.read().await;
+            if let Some(tags) = hmc.vouchers.get(voucher_id) {
+                for tag in tags {
+                    if let Some(entry) = hmc.locks.get(tag) {
+                        locks_map.insert(tag.clone(), entry.clone());
+                    }
+                }
+            }
+        }
+
+        if locks_map.is_empty() {
+            return None;
+        }
+
+        let mut hops = Vec::new();
+        let mut genesis_tag = None;
+        let mut root_valid_until_ms = 0;
+        let mut created_at_ms = 0;
+
+        for (tag, entry) in locks_map {
+            let is_genesis = !tag.starts_with("ds_");
+            if is_genesis {
+                genesis_tag = Some(tag.clone());
+                if let Some(del) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                    root_valid_until_ms = del;
+                }
+                created_at_ms = entry.encrypted_timestamp as u64;
+            }
+
+            let raw_json = serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null);
+            let receiver_pub_hex = entry.receiver_ephemeral_pub_hash.map(hex::encode);
+
+            hops.push(VoucherLockHopDto {
+                lookup_tag: tag,
+                is_genesis,
+                t_id_hex: hex::encode(entry.t_id),
+                sender_pub_hex: hex::encode(entry.sender_ephemeral_pub),
+                receiver_pub_hex,
+                encrypted_timestamp: entry.encrypted_timestamp,
+                deletable_at: entry.deletable_at,
+                status: "Verified".to_string(),
+                raw_json,
+            });
+        }
+
+        // Sort hops: Genesis lock first, then chronological by encrypted_timestamp
+        hops.sort_by(|a, b| {
+            match (a.is_genesis, b.is_genesis) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.encrypted_timestamp.cmp(&b.encrypted_timestamp),
+            }
+        });
+
+        if root_valid_until_ms == 0 {
+            if let Some(r) = self.get_hmc_voucher_root_valid(voucher_id).await {
+                root_valid_until_ms = r;
+            }
+        }
+
+        let total_byte_years = (hops.len() as u64) * 144;
+        let formatted = if root_valid_until_ms > 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let rem_sec = root_valid_until_ms.saturating_sub(now_ms) / 1000;
+            format!("{} ms (TTL: {}s)", root_valid_until_ms, rem_sec)
+        } else {
+            "Unknown".to_string()
+        };
+
+        Some(VoucherDetailDto {
+            voucher_id: voucher_id.to_string(),
+            root_valid_until_ms,
+            root_valid_until_formatted: formatted,
+            created_at_ms,
+            genesis_tag,
+            total_byte_years,
+            locks: hops,
+        })
+    }
+
+    /// Retrieves raw JSON data for any given lock lookup tag (RAM or Disk).
+    pub async fn get_raw_lock_data(&self, lookup_tag: &str) -> Option<serde_json::Value> {
+        // Check HMC RAM
+        {
+            let hmc = self.hmc_ram.read().await;
+            if let Some(entry) = hmc.locks.get(lookup_tag) {
+                return serde_json::to_value(entry).ok();
+            }
+        }
+        // Check standard RAM
+        if let Ok(bytes) = hex::decode(lookup_tag) {
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                let ram = self.ram.read().await;
+                if let Some(rec) = ram.get(&arr) {
+                    return serde_json::to_value(rec).ok();
+                }
+            }
+        }
+        // Check redb HMC locks
+        if let Ok(Some(entry)) = self.db.get_hmc_lock(lookup_tag) {
+            return serde_json::to_value(&entry).ok();
+        }
+        None
     }
 
     /// Flush worker loop: Batches incoming flush operations with 50ms timeout or batch size of 100.

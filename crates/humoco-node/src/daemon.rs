@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use humoco_sim_core::types::{ClusterResult, ShardDigestResponse, SimTime};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -451,6 +452,28 @@ impl NodeDaemon {
             }
         });
 
+        // Initialize Admin Token Manager
+        let admin_token_mgr = Arc::new(
+            crate::api::AdminTokenManager::load_or_create(&self.config.storage.data_dir, false)
+                .map_err(|err| NodeError::IoWithPath {
+                    path: self.config.storage.data_dir.join("admin.token"),
+                    source: err,
+                })?,
+        );
+        info!(
+            token_path = ?admin_token_mgr.token_path(),
+            "Admin token initialized successfully"
+        );
+
+        // Initialize System-Observatory Stats Collector & Sparklines Worker
+        let node_metrics = std::sync::Arc::new(crate::api::metrics::NodeMetrics::default());
+        let system_stats = Arc::new(crate::api::SystemStatsCollector::new(&self.config.storage.data_dir));
+        let stats_handle = system_stats.clone().spawn_background_collector(
+            node_metrics.clone(),
+            Some(peer_manager.clone()),
+            self.cancel_token.clone(),
+        );
+
         // Initialize REST API Router and HTTP Server
         let app_state = crate::api::AppState {
             engine: engine.clone(),
@@ -461,10 +484,12 @@ impl NodeDaemon {
             peer_manager: Some(peer_manager.clone()),
             transport: Some(transport.clone()),
             start_time: std::time::Instant::now(),
-            metrics: std::sync::Arc::new(crate::api::metrics::NodeMetrics::default()),
+            metrics: node_metrics,
             lifecycle: self.config.lifecycle.clone(),
             network_id: self.config.network.network_id,
             shard_query_depth: self.config.network.shard_query_depth,
+            system_stats,
+            auth: admin_token_mgr,
         };
         let app = crate::api::build_router(app_state);
 
@@ -574,6 +599,7 @@ impl NodeDaemon {
         let _ = malus_decay_handle.await;
         let _ = dns_re_resolve_handle.await;
         let _ = alert_handle.await;
+        let _ = stats_handle.await;
         let _ = flush_handle.await;
         info!("HuMoCo node daemon stopped.");
         Ok(())

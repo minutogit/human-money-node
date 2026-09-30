@@ -9,6 +9,10 @@ license = "MIT"
 name = "humoco"
 path = "src/main.rs"
 
+[[bin]]
+name = "cluster-sim"
+path = "src/bin/cluster_sim.rs"
+
 [dependencies]
 humoco-sim-core = { path = "../humoco-sim-core" }
 tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "macros", "signal", "net", "io-util", "sync", "time", "fs"] }
@@ -47,9 +51,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 cuckoofilter = "0.5"
 mimalloc = { version = "0.1", default-features = false }
 zeroize = "1.8"
+tempfile = "3.10"
 
 [dev-dependencies]
-tempfile = "3.10"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 

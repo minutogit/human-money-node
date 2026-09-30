@@ -1435,8 +1435,8 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("Recent Locks Ring Buffer") || body_str.contains("Recent Locks Ringpuffer"));
     assert!(body_str.contains("Copy") || body_str.contains("Kopieren"));
 
-    // Size under 20 KiB
-    assert!(body_str.len() < 20 * 1024, "Dashboard HTML must be under 20 KiB, was {}", body_str.len());
+    // Size under 64 KiB
+    assert!(body_str.len() < 64 * 1024, "Dashboard HTML must be under 64 KiB, was {}", body_str.len());
 
     // Air-gap check: ZERO external script or link tags with http:// or https://
     let lower = body_str.to_lowercase();

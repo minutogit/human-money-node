@@ -785,7 +785,7 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HuMoCo Layer-2 Node Control Center</title>
+<title>HuMoCo Node Control Center (v2.0)</title>
 <style>
 :root {{
   --bg: #090d16;
@@ -814,26 +814,29 @@ body {{
   color: var(--text);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   line-height: 1.5;
-  padding: 1.5rem;
+  padding: 1.25rem;
 }}
-.container {{ max-width: 1280px; margin: 0 auto; }}
+.container {{ max-width: 1360px; margin: 0 auto; }}
 header {{
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 1rem;
   padding-bottom: 1.25rem;
   margin-bottom: 1.25rem;
   border-bottom: 1px solid var(--border);
 }}
-.header-title {{ display: flex; align-items: center; gap: 0.75rem; }}
-.header-title h1 {{ font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }}
-.header-meta {{ display: flex; align-items: center; gap: 0.75rem; }}
+.header-left {{ display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }}
+.header-title {{ font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 0.5rem; }}
+.header-pills {{ display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }}
+.header-right {{ display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }}
+
 .badge {{
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  padding: 0.25rem 0.75rem;
+  padding: 0.25rem 0.7rem;
   border-radius: 9999px;
   font-size: 0.8125rem;
   font-weight: 600;
@@ -846,11 +849,25 @@ header {{
 .badge-purple {{ background: var(--purple-bg); color: var(--purple); border: 1px solid rgba(168,85,247,0.3); }}
 .badge-cyan {{ background: var(--cyan-bg); color: var(--cyan); border: 1px solid rgba(6,182,212,0.3); }}
 
+.pill {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}}
+.pill strong {{ color: var(--text); font-weight: 600; }}
+
 /* Navigation Tabs */
 .tabs-nav {{
   display: flex;
   gap: 0.5rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
   padding-bottom: 0.5rem;
@@ -859,7 +876,7 @@ header {{
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-muted);
-  padding: 0.5rem 1rem;
+  padding: 0.6rem 1.1rem;
   border-radius: 0.5rem;
   font-size: 0.9rem;
   font-weight: 600;
@@ -882,10 +899,20 @@ header {{
 
 .grid {{
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 1.25rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
 }}
+.grid-2 {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+  gap: 1.25rem;
+  margin-bottom: 1.25rem;
+}}
+@media (max-width: 640px) {{
+  .grid-2 {{ grid-template-columns: 1fr; }}
+}}
+
 .card {{
   background: var(--surface);
   border: 1px solid var(--border);
@@ -910,6 +937,9 @@ header {{
   font-weight: 700;
   color: var(--text);
   margin-bottom: 0.35rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
 }}
 .card-sub {{ font-size: 0.8125rem; color: var(--text-muted); }}
 
@@ -938,7 +968,7 @@ header {{
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.8125rem;
   background: var(--surface-alt);
-  padding: 0.4rem 0.6rem;
+  padding: 0.35rem 0.55rem;
   border-radius: 0.375rem;
   border: 1px solid var(--border);
   word-break: break-all;
@@ -949,16 +979,20 @@ header {{
   align-items: center;
   margin-top: 0.5rem;
 }}
+
 .btn {{
   background: var(--blue);
   color: #ffffff;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 0.375rem;
-  padding: 0.4rem 0.75rem;
+  padding: 0.45rem 0.85rem;
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   white-space: nowrap;
 }}
 .btn:hover {{ opacity: 0.9; }}
@@ -968,6 +1002,12 @@ header {{
   color: var(--text);
 }}
 .btn-secondary:hover {{ background: var(--surface-hover); }}
+.btn-danger {{
+  background: var(--red-bg);
+  color: var(--red);
+  border: 1px solid rgba(239,68,68,0.3);
+}}
+.btn-danger:hover {{ background: rgba(239,68,68,0.25); }}
 
 .table-card {{ grid-column: 1 / -1; margin-top: 1rem; }}
 table {{
@@ -982,30 +1022,50 @@ th {{
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
   font-weight: 600;
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }}
 td {{
   padding: 0.75rem;
   border-bottom: 1px solid var(--border);
   color: var(--text);
+  vertical-align: middle;
 }}
 tr:hover td {{ background: var(--surface-alt); }}
 .empty-cell {{ text-align: center; color: var(--text-muted); padding: 2.5rem 0; }}
 
-/* Shard Bar */
-.shard-bar {{
-  display: flex;
+.progress-bar {{
   width: 100%;
-  height: 24px;
+  height: 8px;
   background: var(--surface-alt);
-  border-radius: 6px;
+  border-radius: 9999px;
   overflow: hidden;
-  border: 1px solid var(--border);
-  margin: 1rem 0;
+  margin: 0.5rem 0;
 }}
-.shard-seg {{
+.progress-fill {{
   height: 100%;
-  transition: width 0.3s;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+  border-radius: 9999px;
+  transition: width 0.3s ease;
 }}
+
+.sparkline-box {{
+  margin-top: 0.75rem;
+  height: 40px;
+  width: 100%;
+}}
+
+.input-text {{
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  padding: 0.45rem 0.75rem;
+  color: var(--text);
+  font-size: 0.875rem;
+  outline: none;
+}}
+.input-text:focus {{ border-color: var(--blue); }}
 
 /* Modal Overlay */
 .modal-overlay {{
@@ -1067,128 +1127,206 @@ footer {{
   text-align: center;
   font-size: 0.75rem;
   color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
 }}
 </style>
 </head>
 <body>
 <div class="container">
+  <!-- Top Header -->
   <header>
-    <div class="header-title">
-      <h1>HuMoCo Layer-2 Node Control Center</h1>
+    <div class="header-left">
+      <div class="header-title">
+        <span>🟢</span>
+        <span>HuMoCo Node Control Center (v2.0)</span>
+      </div>
       <span id="status-badge" class="badge badge-green">{status_badge}</span>
     </div>
-    <div class="header-meta">
-      <span class="card-sub">Uptime: <strong id="uptime-text">{uptime}</strong></span>
-      <span class="badge badge-blue">v{version}</span>
+
+    <!-- 3-Tier Latencies Pills -->
+    <div class="header-pills">
+      <div class="pill">⚡ In-RAM: <strong id="hdr-lat-local">{local_avg:.2} ms</strong> (&lt; 5ms SLA)</div>
+      <div class="pill">🌐 Quorum: <strong id="hdr-lat-quorum">{quorum_avg:.2} ms</strong> (&lt; 500ms SLA)</div>
+      <div class="pill">🛒 Kasse: <strong id="hdr-lat-e2e">{e2e_avg:.2} ms</strong></div>
+    </div>
+
+    <!-- Fast Stats & Admin Button -->
+    <div class="header-right">
+      <div class="pill">Peers: <strong id="hdr-peers">{connected_peers}/{configured_peers}</strong></div>
+      <div class="pill">Port: <strong>8080/9090</strong></div>
+      <div class="pill">Shard: <strong id="hdr-shard">{shard_mode}</strong></div>
+      <button id="admin-btn" class="btn btn-secondary" onclick="handleAdminBtnClick()">🔒 Admin-Modus</button>
     </div>
   </header>
 
-  <!-- Navigation Tabs -->
+  <!-- 4-Tab Navigation -->
   <div class="tabs-nav">
-    <button class="tab-btn active" onclick="switchTab('tab-performance')">📊 Performance &amp; Latenzen</button>
-    <button class="tab-btn" onclick="switchTab('tab-network')">🌐 Knoten-Explorer</button>
-    <button class="tab-btn" onclick="switchTab('tab-shards')">🧩 Shard-Topologie</button>
-    <button class="tab-btn" onclick="switchTab('tab-vouchers')">🎟️ Gutscheine &amp; Rohdaten</button>
-    <button class="tab-btn" onclick="switchTab('tab-locks')">⏱️ Live-Locks</button>
+    <button id="tab-btn-cockpit" class="tab-btn active" onclick="switchTab('tab-cockpit')">⚡ Cockpit &amp; System</button>
+    <button id="tab-btn-network" class="tab-btn" onclick="switchTab('tab-network')">🌐 Netzwerk &amp; F2F</button>
+    <button id="tab-btn-tiers" class="tab-btn" onclick="switchTab('tab-tiers')">🎛️ Tiers &amp; Quoten</button>
+    <button id="tab-btn-vouchers" class="tab-btn" onclick="switchTab('tab-vouchers')">🎟️ Gutscheine &amp; Logs</button>
   </div>
 
-  <!-- TAB 1: PERFORMANCE & LATENZ -->
-  <div id="tab-performance" class="tab-content active">
+  <!-- TAB 1: COCKPIT & SYSTEM -->
+  <div id="tab-cockpit" class="tab-content active">
     <div class="grid">
-      <!-- 1. Lokale Shard-Verarbeitung (< 5ms SLA) -->
+      <!-- 1. Schreib-Durchsatz -->
       <div class="card">
         <div class="card-header">
-          <span>⚡ Lokale In-RAM Shard-Latenz (PoS)</span>
-          <span id="sla-local-badge" class="badge badge-green">🟢 &lt; 5ms SLA Met</span>
+          <span>✍️ Schreib-Durchsatz</span>
+          <span class="badge badge-green">Hot-Path</span>
         </div>
-        <div class="card-value" id="lat-local-val">{local_avg:.2} ms</div>
-        <div class="card-sub" id="lat-local-sub">Ø Rolling 100: {local_avg:.2}ms | P95: {local_p95:.2}ms (SLA &lt; 5ms)</div>
+        <div class="card-value">
+          <span id="writes-rate">{free_req_sec:.1}</span>
+          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">TX/s (EMA)</span>
+        </div>
+        <div class="card-sub">Heute: <strong id="writes-today">{today_write_used}</strong> Schreiboperationen</div>
+        <div id="writes-sparkline" class="sparkline-box"></div>
       </div>
 
-      <!-- 2. P2P Shard-Quorum (Gateway-Roundtrip < 500ms) -->
+      <!-- 2. Lese-Durchsatz -->
       <div class="card">
         <div class="card-header">
-          <span>🌐 P2P Quorum-Konsens (Gateway)</span>
-          <span id="sla-quorum-badge" class="badge badge-green">🟢 &lt; 500ms SLA</span>
+          <span>🔍 Lese-Durchsatz</span>
+          <span class="badge badge-blue">RAM-Index</span>
         </div>
-        <div class="card-value" id="lat-quorum-val">{quorum_avg:.2} ms</div>
-        <div class="card-sub" id="lat-quorum-sub">QUIC Shard-Roundtrip (14/20 Quorum) | P95: {quorum_p95:.2}ms</div>
+        <div class="card-value">
+          <span id="reads-rate">0.0</span>
+          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">Req/s</span>
+        </div>
+        <div class="card-sub">Heute: <strong id="reads-today">{today_read_used}</strong> Leseabfragen</div>
+        <div id="reads-sparkline" class="sparkline-box"></div>
       </div>
 
-      <!-- 3. End-to-End Kassenpfad -->
+      <!-- 3. Hardware & Ressourcen -->
       <div class="card">
         <div class="card-header">
-          <span>🛒 End-to-End Kassen-Latenz</span>
-          <span class="badge badge-blue">PoS Kassenpfad</span>
+          <span>💻 Hardware &amp; Ressourcen</span>
+          <span class="badge badge-purple">Node Stats</span>
         </div>
-        <div class="card-value" id="lat-e2e-val">{e2e_avg:.2} ms</div>
-        <div class="card-sub" id="lat-e2e-sub">Client HTTP &rarr; 200 OK | Stichproben: <span id="sample-count-text">{sample_count}</span></div>
+        <div style="margin-bottom: 0.5rem;">
+          <div style="display: flex; justify-content: space-between; font-size: 0.8125rem;">
+            <span>CPU-Auslastung:</span>
+            <strong id="sys-cpu-val">{cpu_percent:.1}%</strong>
+          </div>
+          <div class="progress-bar">
+            <div id="sys-cpu-bar" class="progress-fill" style="width: {cpu_percent}%;"></div>
+          </div>
+        </div>
+        <div class="card-sub" style="line-height: 1.6;">
+          <div>RSS RAM: <strong id="sys-rss-val">{rss_mb:.1} MB</strong></div>
+          <div>redb Disk-Datei: <strong id="sys-redb-val">{redb_kb} KB</strong></div>
+          <div>Netto Lock Footprint: <strong id="sys-netto-val">{netto_locks} B</strong> (144 B * N)</div>
+          <div>TTL-Pruning: <strong id="sys-purged-val">{ttl_purged}</strong> gelöschte Sperren</div>
+        </div>
       </div>
 
-      <!-- 4. Peering & Mesh Status -->
+      <!-- 4. Knoten-Kapazitätsrechner & Skalierung -->
       <div class="card">
         <div class="card-header">
-          <span>🛡️ Peering &amp; Mesh</span>
-          <span class="badge badge-blue">{mesh_mode}</span>
+          <span>🚀 Knoten-Kapazität &amp; Skalierung</span>
+          <span class="badge badge-cyan">Projektion</span>
         </div>
-        <div class="card-value" id="peers-val">{connected_peers} <span style="font-size: 1rem; font-weight: normal; color: var(--text-muted);">/ {configured_peers} Peers</span></div>
-        <div class="card-sub" id="active-nodes-sub">Aktive Netzwerkknoten (F2F): {active_nodes}</div>
-      </div>
-
-      <!-- 5. Storage & redb Flush -->
-      <div class="card">
-        <div class="card-header">
-          <span>📊 Storage &amp; Locks</span>
-          <span class="badge badge-green">redb ACID</span>
+        <div class="card-sub" style="line-height: 1.7; font-size: 0.85rem; margin-top: 0.25rem;">
+          <div>Single-Core Peak: <strong id="cap-single-val" style="color: var(--text);">{peak_tps_single}</strong> TPS</div>
+          <div>Multi-Core Peak: <strong id="cap-multi-val" style="color: var(--text);">{peak_tps_multi}</strong> TPS</div>
+          <div>Storage Ceiling: <strong id="cap-storage-val" style="color: var(--text);">{max_storage_locks}</strong> Sperren</div>
+          <div>Byte-Years Kapazität: <strong id="cap-byte-years-val" style="color: var(--text);">{byte_years_capacity}</strong> Byte-Jahre</div>
         </div>
-        <div class="card-value" id="locks-val">{active_locks}</div>
-        <div class="card-sub" id="flush-depth-sub">Flush-Queue Tiefe: {flush_depth} / 10000</div>
-      </div>
-
-      <!-- 6. Ingress & Telemetrie -->
-      <div class="card">
-        <div class="card-header">
-          <span>🌐 Ingress &amp; Telemetrie</span>
-          <span class="badge badge-green" id="free-tier-badge">Free Tier PoW: Aktiv</span>
-        </div>
-        <div class="card-value" id="conc-val">{conc_percent:.1}% <span style="font-size: 1rem; font-weight: normal; color: var(--text-muted);">Top-2 Konzentration</span></div>
-        <div class="card-sub" id="subnet-dom-sub">Max Subnetz-Dominanz: {dom_percent:.1}%</div>
-        <div id="warnings-box"></div>
       </div>
     </div>
 
-    <!-- Node Identity Box -->
+    <!-- Node Identity & Peering Box -->
     <div class="card identity-card">
       <div class="qr-box">{qr_svg}</div>
       <div>
         <div class="card-header"><span>📱 Lokale Knoten-Identität &amp; Peering-String</span></div>
         <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 0.25rem;">NodePubKey: <span class="code" id="node-id-text">{node_id}</span></div>
-        <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 0.25rem;">Argon2d Ticket: <span class="code">{hrw_id}</span></div>
+        <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 0.25rem;">Argon2d Ticket: <span class="code" id="hrw-ticket-text">{hrw_id}</span></div>
         <div class="peering-row">
           <span class="code" id="peering-text" style="flex: 1;">{peering_str}</span>
-          <button class="btn" id="copy-btn" onclick="copyPeering()">Copy</button>
+          <button class="btn" id="copy-btn" onclick="copyPeering()">Kopieren</button>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- TAB 2: KNOTEN-EXPLORER -->
+  <!-- TAB 2: NETZWERK & F2F -->
   <div id="tab-network" class="tab-content">
+    <div class="grid-2">
+      <!-- Network Thermometer Card (Spec 09) -->
+      <div class="card">
+        <div class="card-header">
+          <span>🌡️ Netzwerk-Thermometer (Spec 09)</span>
+          <span class="badge badge-cyan">Dynamische Last</span>
+        </div>
+        <div class="card-sub" style="line-height: 1.8; font-size: 0.875rem;">
+          <div>Gossip Write Load: <strong id="thermo-write-load" style="color: var(--text);">{gossip_write_load:.2}</strong></div>
+          <div>Gossip Read Load: <strong id="thermo-read-load" style="color: var(--text);">{gossip_read_load:.2}</strong></div>
+          <div>28-Tage Median NCB_eff (min 10k): <strong id="thermo-ncb-eff" style="color: var(--text);">{ncb_eff:.0}</strong></div>
+          <div>28-Tage Read Median NCB_read_eff (min 50k): <strong id="thermo-ncb-read-eff" style="color: var(--text);">{ncb_read_eff:.0}</strong></div>
+          <div>24h Rolling Avg: <strong id="thermo-rolling-avg" style="color: var(--text);">{gossip_write_load:.2}</strong></div>
+          <div>Top-2 Konzentration: <strong id="conc-val" style="color: var(--text);">{conc_percent:.1}%</strong> | Max Subnetz-Dominanz: <strong id="subnet-dom-sub" style="color: var(--text);">{dom_percent:.1}%</strong></div>
+        </div>
+      </div>
+
+      <!-- F2F Web-of-Trust Card -->
+      <div class="card">
+        <div class="card-header">
+          <span>🤝 F2F Web-of-Trust Freunde</span>
+          <span class="badge badge-green">Gossip-Barriere</span>
+        </div>
+        <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+          Eigener PubKey: <span class="code" id="my-pubkey-text">{node_id}</span>
+          <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; margin-left: 0.35rem;" onclick="copyMyPubkey()">Kopieren</button>
+        </div>
+
+        <!-- Admin Only: Add Friend Form -->
+        <div class="admin-only" style="display: none; background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.75rem;">
+          <div style="font-weight: 600; font-size: 0.8125rem; margin-bottom: 0.5rem;">🤝 Freund hinzufügen (Admin)</div>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <input id="friend-pubkey-input" class="input-text" placeholder="Ed25519 PubKey (64 Hex-Zeichen)" style="flex: 2; min-width: 200px;">
+            <input id="friend-label-input" class="input-text" placeholder="Label (z.B. Bob)" style="flex: 1; min-width: 100px;">
+            <button class="btn" onclick="adminAddFriend()">Hinzufügen</button>
+          </div>
+        </div>
+
+        <div style="overflow-x: auto; max-height: 250px;">
+          <table>
+            <thead>
+              <tr>
+                <th>NodePubKey</th>
+                <th>Adresse</th>
+                <th>Status</th>
+                <th>Aktion</th>
+              </tr>
+            </thead>
+            <tbody id="friends-tbody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Peer Explorer Table ("Nerd-Mode") -->
     <div class="card table-card">
       <div class="card-header">
-        <span>🌐 Bekannte Netzwerkknoten &amp; Peers</span>
+        <span>🌐 Peer Explorer ("Nerd-Mode" &bull; Bekannte Netzwerkknoten)</span>
         <span class="card-sub" id="network-count-sub">{active_nodes} Knoten registriert</span>
       </div>
       <div style="overflow-x: auto;">
         <table>
           <thead>
             <tr>
-              <th>Knoten (NodePubKey)</th>
+              <th>NodePubKey</th>
               <th>IP-Adresse / Port</th>
               <th>Beziehung</th>
               <th>Status</th>
               <th>Hops</th>
               <th>Shard-Ticket (Argon2d)</th>
+              <th>Inkubation (24h)</th>
             </tr>
           </thead>
           <tbody id="nodes-tbody">
@@ -1199,34 +1337,92 @@ footer {{
     </div>
   </div>
 
-  <!-- TAB 3: SHARD-TOPOLOGIE -->
-  <div id="tab-shards" class="tab-content">
-    <div class="card">
-      <div class="card-header">
-        <span>🧩 1.024-Shard Topologie &amp; HRW-Zuständigkeit</span>
-        <span class="badge badge-purple" id="shard-mode-badge">{shard_mode}</span>
-      </div>
-      <div style="margin: 0.5rem 0;">
-        <div style="font-size: 0.9rem; margin-bottom: 0.25rem;">Zuständigkeitsabdeckung: <strong id="shard-ratio-text">{shard_ratio:.1}%</strong> (1.024 Shards gesamt)</div>
-        <div class="shard-bar">
-          <div class="shard-seg" style="width: 100%; background: linear-gradient(90deg, #10b981, #3b82f6, #a855f7);"></div>
+  <!-- TAB 3: TIERS & QUOTEN -->
+  <div id="tab-tiers" class="tab-content">
+    <div class="grid">
+      <!-- Tier 1: Free Tier -->
+      <div class="card">
+        <div class="card-header">
+          <span>🌍 Free Tier</span>
+          <span class="badge badge-green">Stateless PoW</span>
         </div>
-      </div>
-      <div class="card-sub" style="margin-bottom: 1rem;">
-        In Netzwerken mit N &lt; 20 Knoten (Global Mesh) ist jeder Knoten für alle 1.024 Shards verantwortlich (Q = ⌊2/3 N⌋ + 1). Ab N &ge; 20 greift die deterministische Top-20 HRW-Partitionierung (14/20 Finalität).
+        <div class="card-value">
+          <span id="tier-free-pow-val">{free_pow_diff}</span>
+          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">Bits PoW</span>
+        </div>
+        <div class="card-sub">Aktuelle Last: <strong id="tier-free-req-val">{free_req_sec:.1}</strong> req/s</div>
       </div>
 
-      <div class="card-header" style="margin-top: 1rem;"><span>Stichproben-Shard-Scores (Lokaler Knoten)</span></div>
+      <!-- Tier 2: Friends Tier -->
+      <div class="card">
+        <div class="card-header">
+          <span>🤝 Friends Tier</span>
+          <span class="badge badge-blue">30% Reserviert</span>
+        </div>
+        <div class="card-value">
+          <span id="tier-friends-used-val">{friends_used_pct:.1}%</span>
+          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">genutzt</span>
+        </div>
+        <div class="card-sub">Gossip-gesichert &bull; Prioritätswarteschlange</div>
+      </div>
+
+      <!-- Tier 3: VIP Tier -->
+      <div class="card">
+        <div class="card-header">
+          <span>💳 VIP Tier</span>
+          <span class="badge badge-purple">50% Reserviert</span>
+        </div>
+        <div class="card-value">
+          <span id="tier-vip-used-val">{vip_used_pct:.1}%</span>
+          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">genutzt</span>
+        </div>
+        <div class="card-sub">Byte-Years Quoten &bull; SLA-Garantie</div>
+      </div>
+    </div>
+
+    <!-- Daily Quota Card -->
+    <div class="card" style="margin-bottom: 1.25rem;">
+      <div class="card-header">
+        <span>📊 Tägliches Quotenlimit &amp; Byte-Jahre Verbrauch</span>
+        <span class="badge badge-cyan">24h Fenster</span>
+      </div>
+      <div style="margin: 0.5rem 0;">
+        <div style="display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 0.35rem;">
+          <span>Heute verbraucht: <strong id="quota-used-val">{today_write_used}</strong> / <span id="quota-limit-val">{daily_write_quota}</span> Byte-Jahre</span>
+          <strong id="quota-pct-text">{friends_used_pct:.1}%</strong>
+        </div>
+        <div class="progress-bar">
+          <div id="quota-bar" class="progress-fill" style="width: {friends_used_pct:.1}%;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- VIP Accounts Card -->
+    <div class="card table-card">
+      <div class="card-header">
+        <span>💳 Registrierte VIP-Accounts &amp; Quoten-Guthaben</span>
+        <span class="card-sub">Byte-Years Balance</span>
+      </div>
+
+      <!-- Admin Only: Topup VIP Quota Form -->
+      <div class="admin-only" style="display: none; background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 1rem;">
+        <div style="font-weight: 600; font-size: 0.8125rem; margin-bottom: 0.5rem;">💳 VIP Guthaben aufladen (Admin)</div>
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+          <input id="vip-tag-input" class="input-text" placeholder="Account Tag (64 Hex-Zeichen)" style="flex: 2; min-width: 200px;">
+          <input id="vip-amount-input" class="input-text" type="number" placeholder="Byte-Jahre (z.B. 5000)" style="flex: 1; min-width: 120px;">
+          <button class="btn" onclick="adminTopupQuota()">Aufladen</button>
+        </div>
+      </div>
+
       <div style="overflow-x: auto;">
         <table>
           <thead>
             <tr>
-              <th>Shard ID</th>
-              <th>HRW Score (BLAKE3)</th>
-              <th>Status</th>
+              <th>Account Tag (Hex)</th>
+              <th>Byte-Jahre Guthaben</th>
             </tr>
           </thead>
-          <tbody id="shards-tbody">
+          <tbody id="vip-accounts-tbody">
             <!-- Dynamically populated -->
           </tbody>
         </table>
@@ -1234,8 +1430,33 @@ footer {{
     </div>
   </div>
 
-  <!-- TAB 4: GUTSCHEINE & ROHDATEN -->
+  <!-- TAB 4: GUTSCHEINE & LOGS -->
   <div id="tab-vouchers" class="tab-content">
+    <!-- Recent Locks Table -->
+    <div class="card table-card" style="margin-top: 0; margin-bottom: 1.25rem;">
+      <div class="card-header">
+        <span>⏱️ Recent Locks Ring Buffer (&lt; 1µs In-RAM)</span>
+        <span class="card-sub">Neueste Sperr-Ereignisse</span>
+      </div>
+      <div style="overflow-x: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp (ms)</th>
+              <th>Parent Lock / Lookup Tag</th>
+              <th>Child Lock (t_id)</th>
+              <th>Status</th>
+              <th>Rohdaten</th>
+            </tr>
+          </thead>
+          <tbody id="locks-tbody">
+            <!-- Dynamically populated -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Active Vouchers Table -->
     <div class="card table-card">
       <div class="card-header">
         <span>🎟️ Aktive Gutschein-Wurzeln &amp; Lock-Lineage</span>
@@ -1261,43 +1482,39 @@ footer {{
     </div>
   </div>
 
-  <!-- TAB 5: LIVE-LOCKS -->
-  <div id="tab-locks" class="tab-content">
-    <div class="card table-card">
-      <div class="card-header">
-        <span>⏱️ Recent Locks Ring Buffer (&lt; 1µs In-RAM)</span>
-        <span class="card-sub">Neueste Sperr-Ereignisse</span>
-      </div>
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>Timestamp (ms)</th>
-              <th>Parent Lock / Lookup Tag</th>
-              <th>Child Lock (t_id)</th>
-              <th>Status</th>
-              <th>Rohdaten</th>
-            </tr>
-          </thead>
-          <tbody id="locks-tbody">
-            <!-- Dynamically populated -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
   <footer>
-    HuMoCo Layer-2 Daemon &bull; Offline Air-Gap Dashboard v2 &bull; Auto-Refresh 3s
+    HuMoCo Layer-2 Daemon &bull; Offline Air-Gap Dashboard v2 &bull; Auto-Refresh 2s
   </footer>
 </div>
 
-<!-- Modal: Raw JSON Inspector -->
-<div id="json-modal" class="modal-overlay" onclick="closeModalOnOverlay(event)">
+<!-- Modal 1: Voucher Root Inspector -->
+<div id="voucher-modal" class="modal-overlay" onclick="closeModalOnOverlay(event, 'voucher-modal')">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3 id="voucher-modal-title">🎟️ Gutschein-Lineage Wurzel-Inspektor</h3>
+      <button class="btn btn-secondary" onclick="closeModal('voucher-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="voucher-modal-details" style="margin-bottom: 0.75rem;"></div>
+      <div id="voucher-modal-table-container"></div>
+      <div style="margin-top: 1rem;">
+        <button class="btn btn-secondary" onclick="toggleVoucherRawJson()">📄 Raw JSON anzeigen / verbergen</button>
+        <pre id="voucher-modal-json" class="json-viewer" style="display: none; margin-top: 0.5rem;"></pre>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" id="voucher-copy-btn" onclick="copyVoucherJson()">JSON Kopieren</button>
+      <button class="btn btn-secondary" onclick="closeModal('voucher-modal')">Schließen</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal 2: Raw JSON Inspector -->
+<div id="json-modal" class="modal-overlay" onclick="closeModalOnOverlay(event, 'json-modal')">
   <div class="modal-box">
     <div class="modal-header">
       <h3 id="modal-title">📄 Rohdaten-Inspector</h3>
-      <button class="btn btn-secondary" onclick="closeModal()">✕</button>
+      <button class="btn btn-secondary" onclick="closeModal('json-modal')">✕</button>
     </div>
     <div class="modal-body">
       <div id="modal-details" style="margin-bottom: 0.75rem;"></div>
@@ -1305,19 +1522,160 @@ footer {{
     </div>
     <div class="modal-footer">
       <button class="btn" id="modal-copy-btn" onclick="copyModalJson()">JSON Kopieren</button>
-      <button class="btn btn-secondary" onclick="closeModal()">Schließen</button>
+      <button class="btn btn-secondary" onclick="closeModal('json-modal')">Schließen</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal 3: Admin Auth Modal -->
+<div id="admin-modal" class="modal-overlay" onclick="closeModalOnOverlay(event, 'admin-modal')">
+  <div class="modal-box" style="max-width: 480px;">
+    <div class="modal-header">
+      <h3>🔒 Admin-Modus freischalten</h3>
+      <button class="btn btn-secondary" onclick="closeModal('admin-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="margin-bottom: 0.75rem; color: var(--text-muted); font-size: 0.85rem;">
+        Geben Sie das Admin-Token des HuMoCo Daemons ein, um F2F-Freunde zu verwalten und VIP-Quoten aufzuladen.
+      </p>
+      <input id="admin-token-input" type="password" class="input-text" placeholder="Admin Bearer Token" style="width: 100%;">
+      <div id="admin-auth-error" style="color: var(--red); font-size: 0.8125rem; margin-top: 0.5rem; display: none;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('admin-modal')">Abbrechen</button>
+      <button class="btn" onclick="submitAdminToken()">Aktivieren</button>
     </div>
   </div>
 </div>
 
 <script>
 let currentDashboardData = null;
+let currentVoucherDetail = null;
+let adminToken = localStorage.getItem('humoco_admin_token') || '';
+
+function updateAdminUI() {{
+  const btn = document.getElementById('admin-btn');
+  const adminEls = document.querySelectorAll('.admin-only');
+  if (adminToken) {{
+    btn.innerHTML = '🔓 Admin aktiv (Logout)';
+    btn.className = 'btn btn-danger';
+    adminEls.forEach(el => el.style.display = 'block');
+  }} else {{
+    btn.innerHTML = '🔒 Admin-Modus';
+    btn.className = 'btn btn-secondary';
+    adminEls.forEach(el => el.style.display = 'none');
+  }}
+}}
+
+function handleAdminBtnClick() {{
+  if (adminToken) {{
+    localStorage.removeItem('humoco_admin_token');
+    adminToken = '';
+    updateAdminUI();
+    refreshDashboard();
+  }} else {{
+    document.getElementById('admin-auth-error').style.display = 'none';
+    document.getElementById('admin-token-input').value = '';
+    document.getElementById('admin-modal').classList.add('active');
+  }}
+}}
+
+async function submitAdminToken() {{
+  const val = document.getElementById('admin-token-input').value.trim();
+  if (!val) return;
+  try {{
+    const res = await fetch('/dashboard/admin/verify-token', {{
+      method: 'POST',
+      headers: {{ 'Authorization': 'Bearer ' + val }}
+    }});
+    if (res.ok) {{
+      adminToken = val;
+      localStorage.setItem('humoco_admin_token', val);
+      closeModal('admin-modal');
+      updateAdminUI();
+      refreshDashboard();
+    }} else {{
+      const errEl = document.getElementById('admin-auth-error');
+      errEl.innerText = 'Ungültiges Admin-Token.';
+      errEl.style.display = 'block';
+    }}
+  }} catch (e) {{
+    const errEl = document.getElementById('admin-auth-error');
+    errEl.innerText = 'Verbindungsfehler: ' + e.message;
+    errEl.style.display = 'block';
+  }}
+}}
+
+async function adminAddFriend() {{
+  const pubkey = document.getElementById('friend-pubkey-input').value.trim();
+  const label = document.getElementById('friend-label-input').value.trim();
+  if (!pubkey) return;
+  try {{
+    const res = await fetch('/dashboard/admin/friends', {{
+      method: 'POST',
+      headers: {{
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + adminToken
+      }},
+      body: JSON.stringify({{ pubkey, label: label || null }})
+    }});
+    if (res.ok) {{
+      document.getElementById('friend-pubkey-input').value = '';
+      document.getElementById('friend-label-input').value = '';
+      refreshDashboard();
+    }} else {{
+      const err = await res.json();
+      alert('Fehler: ' + (err.message || res.statusText));
+    }}
+  }} catch (e) {{ alert('Fehler: ' + e.message); }}
+}}
+
+async function adminRemoveFriend(pubkey) {{
+  if (!confirm('Freund ' + truncateHash(pubkey) + ' wirklich entfernen?')) return;
+  try {{
+    const res = await fetch('/dashboard/admin/friends/' + encodeURIComponent(pubkey), {{
+      method: 'DELETE',
+      headers: {{ 'Authorization': 'Bearer ' + adminToken }}
+    }});
+    if (res.ok) {{
+      refreshDashboard();
+    }} else {{
+      const err = await res.json();
+      alert('Fehler: ' + (err.message || res.statusText));
+    }}
+  }} catch (e) {{ alert('Fehler: ' + e.message); }}
+}}
+
+async function adminTopupQuota() {{
+  const tag = document.getElementById('vip-tag-input').value.trim();
+  const amount = parseInt(document.getElementById('vip-amount-input').value, 10);
+  if (!tag || isNaN(amount) || amount <= 0) return;
+  try {{
+    const res = await fetch('/dashboard/admin/quota', {{
+      method: 'POST',
+      headers: {{
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + adminToken
+      }},
+      body: JSON.stringify({{ account_tag: tag, byte_years: amount }})
+    }});
+    if (res.ok) {{
+      document.getElementById('vip-tag-input').value = '';
+      document.getElementById('vip-amount-input').value = '';
+      refreshDashboard();
+    }} else {{
+      const err = await res.json();
+      alert('Fehler: ' + (err.message || res.statusText));
+    }}
+  }} catch (e) {{ alert('Fehler: ' + e.message); }}
+}}
 
 function switchTab(tabId) {{
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   
-  event.currentTarget.classList.add('active');
+  const btn = document.querySelector('[onclick="switchTab(\'' + tabId + '\')"]');
+  if (btn) btn.classList.add('active');
   const target = document.getElementById(tabId);
   if (target) target.classList.add('active');
 }}
@@ -1332,16 +1690,23 @@ function copyPeering() {{
   }}).catch(() => {{}});
 }}
 
-function closeModal() {{
-  document.getElementById('json-modal').classList.remove('active');
+function copyMyPubkey() {{
+  const text = document.getElementById('my-pubkey-text').innerText;
+  navigator.clipboard.writeText(text).catch(() => {{}});
 }}
 
-function closeModalOnOverlay(e) {{
-  if (e.target.id === 'json-modal') closeModal();
+function closeModal(modalId) {{
+  document.getElementById(modalId).classList.remove('active');
+}}
+
+function closeModalOnOverlay(e, modalId) {{
+  if (e.target.id === modalId) closeModal(modalId);
 }}
 
 document.addEventListener('keydown', (e) => {{
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') {{
+    document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+  }}
 }});
 
 function copyModalJson() {{
@@ -1354,9 +1719,42 @@ function copyModalJson() {{
   }}).catch(() => {{}});
 }}
 
+function copyVoucherJson() {{
+  if (!currentVoucherDetail) return;
+  navigator.clipboard.writeText(JSON.stringify(currentVoucherDetail, null, 2)).then(() => {{
+    const btn = document.getElementById('voucher-copy-btn');
+    const orig = btn.innerText;
+    btn.innerText = 'Kopiert!';
+    setTimeout(() => {{ btn.innerText = orig; }}, 1500);
+  }}).catch(() => {{}});
+}}
+
+function toggleVoucherRawJson() {{
+  const pre = document.getElementById('voucher-modal-json');
+  pre.style.display = pre.style.display === 'none' ? 'block' : 'none';
+}}
+
 function truncateHash(hex) {{
   if (!hex || hex.length <= 16) return hex || '';
   return hex.slice(0, 8) + '…' + hex.slice(-8);
+}}
+
+function renderSparklineSvg(arr, color) {{
+  if (!arr || arr.length === 0) return '';
+  const max = Math.max(...arr, 1.0);
+  const width = 280;
+  const height = 40;
+  const pts = arr.map((val, i) => {{
+    const x = (i / (arr.length - 1 || 1)) * width;
+    const y = height - ((val / max) * (height - 6)) - 3;
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }});
+  const polyline = pts.join(' ');
+  const polyArea = '0,' + height + ' ' + polyline + ' ' + width + ',' + height;
+  return '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" style="width: 100%; height: 40px; display: block;">' +
+    '<polygon points="' + polyArea + '" fill="' + color + '" fill-opacity="0.15" />' +
+    '<polyline points="' + polyline + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />' +
+    '</svg>';
 }}
 
 async function openLockInspector(lookupTag) {{
@@ -1376,25 +1774,27 @@ async function openVoucherInspector(voucherId) {{
     const res = await fetch('/dashboard/voucher/' + encodeURIComponent(voucherId));
     if (!res.ok) return;
     const detail = await res.json();
-    document.getElementById('modal-title').innerText = '🎟️ Gutschein-Lineage: ' + voucherId;
+    currentVoucherDetail = detail;
+    document.getElementById('voucher-modal-title').innerText = '🎟️ Gutschein-Lineage: ' + voucherId;
     
-    let html = '<div style="margin-bottom: 0.75rem;">';
+    let html = '<div style="margin-bottom: 0.75rem; line-height: 1.6;">';
     html += '<div><strong>Wurzel-Anker (valid_until):</strong> ' + detail.root_valid_until_formatted + '</div>';
     html += '<div><strong>Genesis Tag:</strong> <span class="code">' + (detail.genesis_tag || 'N/A') + '</span></div>';
     html += '<div><strong>Gesamt-Sperren in Kette:</strong> ' + detail.locks.length + ' (' + detail.total_byte_years + ' Byte-Jahre Budget)</div>';
     html += '</div>';
 
-    html += '<h4 style="margin: 0.75rem 0 0.25rem 0;">Ketten-Historie (Lock-Hops):</h4>';
-    html += '<table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
+    let tableHtml = '<h4 style="margin: 0.75rem 0 0.25rem 0; font-size: 0.9rem;">Ketten-Historie (Lock-Hops):</h4>';
+    tableHtml += '<div style="overflow-x: auto;"><table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
     for (const h of detail.locks) {{
       const typeBadge = h.is_genesis ? '<span class="badge badge-amber">GENESIS</span>' : '<span class="badge badge-blue">SPEND</span>';
-      html += '<tr><td>' + typeBadge + '</td><td class="code" title="' + h.lookup_tag + '">' + truncateHash(h.lookup_tag) + '</td><td class="code">' + truncateHash(h.t_id_hex) + '</td><td class="code">' + truncateHash(h.sender_pub_hex) + '</td></tr>';
+      tableHtml += '<tr><td>' + typeBadge + '</td><td class="code" title="' + h.lookup_tag + '">' + truncateHash(h.lookup_tag) + '</td><td class="code">' + truncateHash(h.t_id_hex) + '</td><td class="code">' + truncateHash(h.sender_pub_hex) + '</td></tr>';
     }}
-    html += '</tbody></table>';
+    tableHtml += '</tbody></table></div>';
 
-    document.getElementById('modal-details').innerHTML = html;
-    document.getElementById('modal-json').innerText = JSON.stringify(detail, null, 2);
-    document.getElementById('json-modal').classList.add('active');
+    document.getElementById('voucher-modal-details').innerHTML = html;
+    document.getElementById('voucher-modal-table-container').innerHTML = tableHtml;
+    document.getElementById('voucher-modal-json').innerText = JSON.stringify(detail, null, 2);
+    document.getElementById('voucher-modal').classList.add('active');
   }} catch (e) {{}}
 }}
 
@@ -1405,81 +1805,101 @@ async function refreshDashboard() {{
     const d = await res.json();
     currentDashboardData = d;
     
-    // Status
+    // Header Status & Latency Pills
     const badge = document.getElementById('status-badge');
     badge.innerText = d.status_badge;
     badge.className = 'badge ' + (d.status === 'ONLINE' ? 'badge-green' : (d.status === 'VILLAGE MODE' ? 'badge-amber' : 'badge-red'));
 
-    // Uptime
-    document.getElementById('uptime-text').innerText = d.uptime_formatted;
+    document.getElementById('hdr-lat-local').innerText = d.local_latency.avg_ms.toFixed(2) + ' ms';
+    document.getElementById('hdr-lat-quorum').innerText = d.quorum_latency.avg_ms.toFixed(2) + ' ms';
+    document.getElementById('hdr-lat-e2e').innerText = d.e2e_latency.avg_ms.toFixed(2) + ' ms';
+    document.getElementById('hdr-peers').innerText = d.connected_peers + '/' + d.configured_peers;
+    document.getElementById('hdr-shard').innerText = d.shard_mode;
 
-    // 1. Lokale Shard-Latenz
-    document.getElementById('lat-local-val').innerText = d.local_latency.avg_ms.toFixed(2) + ' ms';
-    document.getElementById('lat-local-sub').innerText = 'Ø Rolling 100: ' + d.local_latency.avg_ms.toFixed(2) + 'ms | P95: ' + d.local_latency.p95_ms.toFixed(2) + 'ms (SLA < 5ms)';
-    const slaLocal = document.getElementById('sla-local-badge');
-    if (d.local_latency.sla_compliant) {{
-      slaLocal.className = 'badge badge-green';
-      slaLocal.innerHTML = '🟢 &lt; 5ms SLA Eingehalten';
-    }} else {{
-      slaLocal.className = 'badge badge-red';
-      slaLocal.innerHTML = '🔴 &gt; 5ms SLA Warnung';
+    // Cockpit & System
+    const latestWrite = (d.sparklines && d.sparklines.writes) ? (d.sparklines.writes[d.sparklines.writes.length - 1] || 0) : 0;
+    const latestRead = (d.sparklines && d.sparklines.reads) ? (d.sparklines.reads[d.sparklines.reads.length - 1] || 0) : 0;
+    document.getElementById('writes-rate').innerText = latestWrite.toFixed(1);
+    document.getElementById('writes-today').innerText = d.thermometer.today_write_used;
+    document.getElementById('reads-rate').innerText = latestRead.toFixed(1);
+    document.getElementById('reads-today').innerText = d.thermometer.today_read_used;
+
+    if (d.sparklines) {{
+      document.getElementById('writes-sparkline').innerHTML = renderSparklineSvg(d.sparklines.writes, '#10b981');
+      document.getElementById('reads-sparkline').innerHTML = renderSparklineSvg(d.sparklines.reads, '#3b82f6');
     }}
 
-    // 2. Quorum-Latenz
-    document.getElementById('lat-quorum-val').innerText = d.quorum_latency.avg_ms.toFixed(2) + ' ms';
-    document.getElementById('lat-quorum-sub').innerText = 'QUIC Shard-Roundtrip (14/20 Quorum) | P95: ' + d.quorum_latency.p95_ms.toFixed(2) + 'ms';
-    const slaQuorum = document.getElementById('sla-quorum-badge');
-    if (d.quorum_latency.sla_compliant) {{
-      slaQuorum.className = 'badge badge-green';
-      slaQuorum.innerHTML = '🟢 &lt; 500ms SLA';
+    // Hardware
+    document.getElementById('sys-cpu-val').innerText = d.system.cpu_percent.toFixed(1) + '%';
+    document.getElementById('sys-cpu-bar').style.width = Math.min(100, Math.max(0, d.system.cpu_percent)) + '%';
+    document.getElementById('sys-rss-val').innerText = d.system.rss_mb.toFixed(1) + ' MB';
+    document.getElementById('sys-redb-val').innerText = Math.round(d.system.redb_bytes / 1024) + ' KB';
+    document.getElementById('sys-netto-val').innerText = d.system.netto_locks_bytes + ' B';
+    document.getElementById('sys-purged-val').innerText = d.system.ttl_purged_count;
+
+    // Scaling
+    document.getElementById('cap-single-val').innerText = d.system.peak_tps_single_core;
+    document.getElementById('cap-multi-val').innerText = d.system.peak_tps_multi_core;
+    document.getElementById('cap-storage-val').innerText = d.system.max_storage_locks;
+    document.getElementById('cap-byte-years-val').innerText = d.system.byte_years_capacity;
+
+    // Thermometer
+    document.getElementById('thermo-write-load').innerText = d.thermometer.gossip_write_load.toFixed(2);
+    document.getElementById('thermo-read-load').innerText = d.thermometer.gossip_read_load.toFixed(2);
+    document.getElementById('thermo-ncb-eff').innerText = Math.round(d.thermometer.ncb_eff);
+    document.getElementById('thermo-ncb-read-eff').innerText = Math.round(d.thermometer.ncb_read_eff);
+    document.getElementById('thermo-rolling-avg').innerText = d.thermometer.gossip_write_load.toFixed(2);
+    document.getElementById('conc-val').innerText = (d.gateway_concentration_ratio * 100).toFixed(1) + '%';
+    document.getElementById('subnet-dom-sub').innerText = (d.shard_subnet_dominance_max * 100).toFixed(1) + '%';
+
+    // F2F Friends Table
+    const friendsTbody = document.getElementById('friends-tbody');
+    if (d.f2f && d.f2f.friends && d.f2f.friends.length > 0) {{
+      let html = '';
+      for (const f of d.f2f.friends) {{
+        const statusBadge = f.is_connected ? '<span class="badge badge-green">Verbunden</span>' : '<span class="badge badge-amber">Getrennt</span>';
+        const actionBtn = adminToken ? '<button class="btn btn-danger" style="padding: 0.2rem 0.5rem;" onclick="adminRemoveFriend(\'' + f.public_key + '\')">🗑️</button>' : '-';
+        html += '<tr><td><span class="code" title="' + f.public_key + '">' + truncateHash(f.public_key) + '</span></td><td>' + f.address + '</td><td>' + statusBadge + '</td><td>' + actionBtn + '</td></tr>';
+      }}
+      friendsTbody.innerHTML = html;
     }} else {{
-      slaQuorum.className = 'badge badge-amber';
-      slaQuorum.innerHTML = '⚠️ Hohe Quorum-Latenz';
+      friendsTbody.innerHTML = '<tr><td colspan="4" class="empty-cell">Keine F2F Freunde konfiguriert</td></tr>';
     }}
 
-    // 3. E2E Kassen-Latenz
-    document.getElementById('lat-e2e-val').innerText = d.e2e_latency.avg_ms.toFixed(2) + ' ms';
-    document.getElementById('lat-e2e-sub').innerText = 'Client HTTP → 200 OK | P95: ' + d.e2e_latency.p95_ms.toFixed(2) + 'ms (Rolling 100)';
-    document.getElementById('sample-count-text').innerText = d.e2e_latency.sample_count;
-
-    // Peers & Mesh
-    document.getElementById('peers-val').innerHTML = d.connected_peers + ' <span style="font-size: 1rem; font-weight: normal; color: var(--text-muted);">/ ' + d.configured_peers + ' Peers</span>';
-    document.getElementById('active-nodes-sub').innerText = 'Aktive Netzwerkknoten (F2F): ' + d.active_nodes_count;
-
-    // Storage
-    document.getElementById('locks-val').innerText = d.active_locks;
-    document.getElementById('flush-depth-sub').innerText = 'Flush-Queue Tiefe: ' + d.flush_queue_depth + ' / 10000';
-
-    // Telemetrie
-    document.getElementById('conc-val').innerHTML = (d.gateway_concentration_ratio * 100).toFixed(1) + '% <span style="font-size: 1rem; font-weight: normal; color: var(--text-muted);">Top-2</span>';
-    document.getElementById('subnet-dom-sub').innerText = 'Max Subnetz-Dominanz: ' + (d.shard_subnet_dominance_max * 100).toFixed(1) + '%';
-
-    // Network Explorer Table
+    // Network Nodes Explorer Table
     const nodesTbody = document.getElementById('nodes-tbody');
     if (d.network_nodes && d.network_nodes.length > 0) {{
       let html = '';
       for (const n of d.network_nodes) {{
         const roleBadge = n.is_local ? '<span class="badge badge-purple">LOCAL (Self)</span>' : (n.is_f2f ? '<span class="badge badge-blue">F2F Friend</span>' : '<span class="badge badge-cyan">Gossip Shard</span>');
         const statusBadge = n.connection_status.includes('Connected') ? '<span class="badge badge-green">' + n.connection_status + '</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>';
-        const pShort = truncateHash(n.public_key);
-        const hrwShort = truncateHash(n.hrw_routing_id);
-        html += '<tr><td><span class="code" title="' + n.public_key + '">' + pShort + '</span></td><td>' + n.address + '</td><td>' + roleBadge + '</td><td>' + statusBadge + '</td><td>' + n.min_hops + '</td><td><span class="code" title="' + n.hrw_routing_id + '">' + hrwShort + '</span> (Work: ' + n.work_score + ')</td></tr>';
+        const incubText = n.is_immature ? '<span class="badge badge-amber">24h Inkubation (' + (n.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Aktiv</span>';
+        html += '<tr><td><span class="code" title="' + n.public_key + '">' + truncateHash(n.public_key) + '</span></td><td>' + n.address + '</td><td>' + roleBadge + '</td><td>' + statusBadge + '</td><td>' + n.min_hops + '</td><td><span class="code" title="' + n.hrw_routing_id + '">' + truncateHash(n.hrw_routing_id) + '</span> (Work: ' + n.work_score + ')</td><td>' + incubText + '</td></tr>';
       }}
       nodesTbody.innerHTML = html;
       document.getElementById('network-count-sub').innerText = d.network_nodes.length + ' Knoten registriert';
     }}
 
-    // Shard Topology Table
-    document.getElementById('shard-mode-badge').innerText = d.shard_mode;
-    document.getElementById('shard-ratio-text').innerText = (d.shard_responsibility_ratio * 100).toFixed(1) + '%';
-    const shardsTbody = document.getElementById('shards-tbody');
-    if (d.sample_shard_scores && d.sample_shard_scores.length > 0) {{
+    // Tiers & Quotas
+    document.getElementById('tier-free-pow-val').innerText = d.tiers.free_pow_diff;
+    document.getElementById('tier-free-req-val').innerText = d.tiers.free_req_sec.toFixed(1);
+    document.getElementById('tier-friends-used-val').innerText = d.tiers.friends_used_pct.toFixed(1) + '%';
+    document.getElementById('tier-vip-used-val').innerText = d.tiers.vip_used_pct.toFixed(1) + '%';
+    document.getElementById('quota-used-val').innerText = d.thermometer.today_write_used;
+    document.getElementById('quota-limit-val').innerText = d.thermometer.daily_write_quota;
+    document.getElementById('quota-pct-text').innerText = d.tiers.friends_used_pct.toFixed(1) + '%';
+    document.getElementById('quota-bar').style.width = Math.min(100, Math.max(0, d.tiers.friends_used_pct)) + '%';
+
+    // VIP Accounts Table
+    const vipTbody = document.getElementById('vip-accounts-tbody');
+    if (d.tiers && d.tiers.vip_accounts && d.tiers.vip_accounts.length > 0) {{
       let html = '';
-      for (const s of d.sample_shard_scores) {{
-        const statusBadge = s.is_responsible ? '<span class="badge badge-green">Aktiv (Zuständig)</span>' : '<span class="badge badge-amber">Standby</span>';
-        html += '<tr><td><strong>Shard #' + s.shard_id + '</strong></td><td><code>' + s.score.toFixed(6) + '</code></td><td>' + statusBadge + '</td></tr>';
+      for (const a of d.tiers.vip_accounts) {{
+        html += '<tr><td><span class="code" title="' + a.account_tag + '">' + a.account_tag + '</span></td><td><strong>' + a.balance_byte_years + '</strong> Byte-Jahre</td></tr>';
       }}
-      shardsTbody.innerHTML = html;
+      vipTbody.innerHTML = html;
+    }} else {{
+      vipTbody.innerHTML = '<tr><td colspan="2" class="empty-cell">Keine VIP Accounts hinterlegt</td></tr>';
     }}
 
     // Vouchers Table
@@ -1489,14 +1909,14 @@ async function refreshDashboard() {{
       for (const v of d.active_vouchers) {{
         const genShort = v.genesis_tag ? truncateHash(v.genesis_tag) : 'N/A';
         const statusBadge = v.status === 'Active' ? '<span class="badge badge-green">Aktiv</span>' : '<span class="badge badge-amber">' + v.status + '</span>';
-        html += '<tr><td><strong>' + v.voucher_id + '</strong></td><td>' + v.root_valid_until_formatted + '</td><td class="code">' + genShort + '</td><td>' + v.locks_count + ' Sperren</td><td>' + statusBadge + '</td><td><button class="btn btn-secondary" onclick="openVoucherInspector(\'' + v.voucher_id + '\')">🔍 Details &amp; JSON</button></td></tr>';
+        html += '<tr><td><strong>' + v.voucher_id + '</strong></td><td>' + v.root_valid_until_formatted + '</td><td class="code">' + genShort + '</td><td>' + v.locks_count + ' Sperren</td><td>' + statusBadge + '</td><td><button class="btn btn-secondary" onclick="openVoucherInspector(\'' + v.voucher_id + '\')">🔍 Wurzel-Inspektor</button></td></tr>';
       }}
       vouchersTbody.innerHTML = html;
     }} else {{
       vouchersTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine aktiven Gutscheine im Speicher</td></tr>';
     }}
 
-    // Live Locks Table
+    // Recent Locks Table
     const locksTbody = document.getElementById('locks-tbody');
     if (d.recent_locks && d.recent_locks.length > 0) {{
       let html = '';
@@ -1515,34 +1935,46 @@ async function refreshDashboard() {{
 }}
 
 // Initial load & periodic refresh
+updateAdminUI();
 refreshDashboard();
-setInterval(refreshDashboard, 3000);
+setInterval(refreshDashboard, 2000);
 </script>
 </body>
 </html>"#,
         status_badge = data.status_badge,
-        uptime = data.uptime_formatted,
-        version = env!("CARGO_PKG_VERSION"),
         local_avg = data.local_latency.avg_ms,
-        local_p95 = data.local_latency.p95_ms,
         quorum_avg = data.quorum_latency.avg_ms,
-        quorum_p95 = data.quorum_latency.p95_ms,
         e2e_avg = data.e2e_latency.avg_ms,
-        sample_count = data.e2e_latency.sample_count,
-        mesh_mode = if data.configured_peers == 0 { "Village" } else { "Cluster" },
         connected_peers = data.connected_peers,
         configured_peers = data.configured_peers,
-        active_nodes = data.active_nodes_count,
-        active_locks = data.active_locks,
-        flush_depth = data.flush_queue_depth,
-        conc_percent = data.gateway_concentration_ratio * 100.0,
-        dom_percent = data.shard_subnet_dominance_max * 100.0,
+        shard_mode = data.shard_mode,
+        free_req_sec = data.tiers.free_req_sec,
+        today_write_used = data.thermometer.today_write_used,
+        today_read_used = data.thermometer.today_read_used,
+        cpu_percent = data.system.cpu_percent,
+        rss_mb = data.system.rss_mb,
+        redb_kb = data.system.redb_bytes / 1024,
+        netto_locks = data.system.netto_locks_bytes,
+        ttl_purged = data.system.ttl_purged_count,
+        peak_tps_single = data.system.peak_tps_single_core,
+        peak_tps_multi = data.system.peak_tps_multi_core,
+        max_storage_locks = data.system.max_storage_locks,
+        byte_years_capacity = data.system.byte_years_capacity,
         qr_svg = qr_svg,
         node_id = data.node_id,
         hrw_id = data.hrw_routing_id,
         peering_str = data.peering_string,
-        shard_mode = data.shard_mode,
-        shard_ratio = data.shard_responsibility_ratio * 100.0
+        gossip_write_load = data.thermometer.gossip_write_load,
+        gossip_read_load = data.thermometer.gossip_read_load,
+        ncb_eff = data.thermometer.ncb_eff,
+        ncb_read_eff = data.thermometer.ncb_read_eff,
+        conc_percent = data.gateway_concentration_ratio * 100.0,
+        dom_percent = data.shard_subnet_dominance_max * 100.0,
+        active_nodes = data.active_nodes_count,
+        free_pow_diff = data.tiers.free_pow_diff,
+        friends_used_pct = data.tiers.friends_used_pct,
+        vip_used_pct = data.tiers.vip_used_pct,
+        daily_write_quota = data.thermometer.daily_write_quota
     );
 
     (

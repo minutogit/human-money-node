@@ -1425,15 +1425,42 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
 
-    // Verify visual components
-    assert!(body_str.contains("HuMoCo Layer-2 Node"));
-    assert!(body_str.contains("VILLAGE MODE") || body_str.contains("ONLINE"));
-    assert!(body_str.contains("PoS"));
-    assert!(body_str.contains("Peering"));
-    assert!(body_str.contains("Storage"));
-    assert!(body_str.contains("qr-svg"));
+    // Verify branding & live status badge
+    assert!(body_str.contains("HuMoCo Node Control Center (v2.0)"));
+    assert!(body_str.contains("VILLAGE MODE") || body_str.contains("ONLINE") || body_str.contains("HEALTHY"));
+
+    // Verify 3-Tier Latencies Pills & Fast Stats
+    assert!(body_str.contains("In-RAM"));
+    assert!(body_str.contains("Quorum"));
+    assert!(body_str.contains("Kasse"));
+    assert!(body_str.contains("8080/9090"));
+    assert!(body_str.contains("Admin-Modus"));
+
+    // Verify 4-Tab Navigation Identifiers
+    assert!(body_str.contains("Cockpit &amp; System") || body_str.contains("Cockpit & System"));
+    assert!(body_str.contains("Netzwerk &amp; F2F") || body_str.contains("Netzwerk & F2F"));
+    assert!(body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten"));
+    assert!(body_str.contains("Gutscheine &amp; Logs") || body_str.contains("Gutscheine & Logs"));
+
+    // Verify Visual Cards & Systems
+    assert!(body_str.contains("Schreib-Durchsatz"));
+    assert!(body_str.contains("Lese-Durchsatz"));
+    assert!(body_str.contains("Hardware &amp; Ressourcen") || body_str.contains("Hardware & Ressourcen"));
+    assert!(body_str.contains("Knoten-Kapazität") || body_str.contains("Knoten-Kapazitätsrechner"));
+    assert!(body_str.contains("Netzwerk-Thermometer"));
+    assert!(body_str.contains("F2F Web-of-Trust Freunde"));
+    assert!(body_str.contains("Peer Explorer"));
+    assert!(body_str.contains("Free Tier"));
+    assert!(body_str.contains("VIP Tier"));
     assert!(body_str.contains("Recent Locks Ring Buffer") || body_str.contains("Recent Locks Ringpuffer"));
-    assert!(body_str.contains("Copy") || body_str.contains("Kopieren"));
+    assert!(body_str.contains("Aktive Gutschein-Wurzeln"));
+    assert!(body_str.contains("qr-svg"));
+    assert!(body_str.contains("Kopieren") || body_str.contains("Copy"));
+
+    // Verify Modals
+    assert!(body_str.contains("voucher-modal"));
+    assert!(body_str.contains("json-modal"));
+    assert!(body_str.contains("admin-modal"));
 
     // Size under 64 KiB
     assert!(body_str.len() < 64 * 1024, "Dashboard HTML must be under 64 KiB, was {}", body_str.len());
@@ -2685,7 +2712,7 @@ async fn test_node_status_and_metrics_telemetry_gauges() {
     assert_eq!(res_html.status(), StatusCode::OK);
     let html_bytes = res_html.into_body().collect().await.unwrap().to_bytes();
     let html_str = String::from_utf8_lossy(&html_bytes);
-    assert!(html_str.contains("Ingress &amp; Telemetrie"));
+    assert!(html_str.contains("Netzwerk-Thermometer") || html_str.contains("Ingress &amp; Telemetrie"));
     assert!(html_str.contains("Top-2 Konzentration"));
 }
 

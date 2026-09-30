@@ -2689,3 +2689,258 @@ async fn test_node_status_and_metrics_telemetry_gauges() {
     assert!(html_str.contains("Top-2 Konzentration"));
 }
 
+#[tokio::test]
+async fn test_admin_verify_token_endpoint() {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_admin_auth.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("secret_token_42", false));
+    let mut state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    );
+    state = state.with_auth(auth);
+
+    let app = build_router(state);
+
+    // 1. Without Authorization header -> 401
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/verify-token")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. With invalid token -> 401
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/verify-token")
+            .header("Authorization", "Bearer wrong_token")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 3. With valid Bearer token -> 200
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/verify-token")
+            .header("Authorization", "Bearer secret_token_42")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 4. With raw token -> 200
+    let res = app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/verify-token")
+            .header("Authorization", "secret_token_42")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_admin_friends_mutation() {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_admin_friends.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+    let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
+
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("admin_secret_99", false));
+    let mut state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    );
+    state.peer_manager = Some(peer_manager.clone());
+    state = state.with_auth(auth);
+
+    let app = build_router(state);
+
+    let test_friend_key = [7u8; 32];
+    let test_friend_hex = hex::encode(test_friend_key);
+
+    // 1. POST without auth -> 401
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/friends")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"pubkey": "{}"}}"#, test_friend_hex)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. POST with invalid hex -> 400
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/friends")
+            .header("Authorization", "Bearer admin_secret_99")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"pubkey": "not_hex"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 3. POST with valid auth and valid pubkey -> 200
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/friends")
+            .header("Authorization", "Bearer admin_secret_99")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"pubkey": "{}", "label": "Bob"}}"#, test_friend_hex)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["status"], "ok");
+    assert_eq!(body_json["pubkey"], test_friend_hex);
+
+    // Verify peer_manager has the friend
+    assert!(peer_manager.is_f2f_friend(&test_friend_key).await);
+
+    // 4. DELETE with invalid hex -> 400
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri("/dashboard/admin/friends/invalid_key")
+            .header("Authorization", "Bearer admin_secret_99")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 5. DELETE without auth -> 401
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/dashboard/admin/friends/{}", test_friend_hex))
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 6. DELETE with valid auth -> 200
+    let res = app.oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/dashboard/admin/friends/{}", test_friend_hex))
+            .header("Authorization", "Bearer admin_secret_99")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Verify peer_manager removed the friend
+    assert!(!peer_manager.is_f2f_friend(&test_friend_key).await);
+}
+
+#[tokio::test]
+async fn test_admin_quota_mutation() {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_admin_quota.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("admin_secret_vip", false));
+    let mut state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    );
+    state = state.with_auth(auth);
+
+    let app = build_router(state);
+
+    let test_account_tag = [42u8; 32];
+    let test_tag_hex = hex::encode(test_account_tag);
+
+    // 1. POST /dashboard/admin/quota without auth -> 401
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/quota")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"account_tag": "{}", "byte_years": 5000}}"#, test_tag_hex)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. POST with invalid hex -> 400
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/quota")
+            .header("Authorization", "Bearer admin_secret_vip")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"account_tag": "bad_tag", "byte_years": 5000}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 3. POST top-up 5000 byte-years -> 200
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/quota")
+            .header("Authorization", "Bearer admin_secret_vip")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"account_tag": "{}", "byte_years": 5000}}"#, test_tag_hex)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["status"], "ok");
+    assert_eq!(body_json["account_tag"], test_tag_hex);
+    assert_eq!(body_json["new_balance"], 5000);
+
+    // 4. POST another 2500 byte-years -> 200 (balance 7500)
+    let res = app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/quota")
+            .header("Authorization", "Bearer admin_secret_vip")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(r#"{{"account_tag": "{}", "byte_years": 2500}}"#, test_tag_hex)))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["new_balance"], 7500);
+
+    // Verify cache in tier_controller
+    assert_eq!(tier_controller.get_cached_vip_quota(&test_account_tag), Some(7500));
+}
+

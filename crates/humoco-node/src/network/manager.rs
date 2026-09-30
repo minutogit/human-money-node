@@ -572,6 +572,90 @@ impl PeerManager {
         self.notify_sync_trigger();
     }
 
+    /// Adds a trusted F2F peer by its Ed25519 public key.
+    /// Inserts into trusted F2F friends and updates peer connection status if already known.
+    pub async fn add_trusted_f2f_peer(&self, pubkey: [u8; 32]) {
+        let mut friends = self.f2f_friends.write().await;
+        let existing_addr = friends.get(&pubkey).copied().flatten();
+        friends.insert(pubkey, existing_addr);
+
+        let mut nid_opt = None;
+        if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pubkey) {
+            let nid = *blake3::hash(vk.as_bytes()).as_bytes();
+            nid_opt = Some(nid);
+            let nid_addr = friends.get(&nid).copied().flatten();
+            friends.insert(nid, existing_addr.or(nid_addr));
+
+            let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
+            self.verifying_keys.write().await.insert(nid, vk);
+            self.u16_to_vk.write().await.insert(u16_id, vk);
+        }
+
+        // If this node is known in known_network_nodes, resolve its address
+        let known_addr = {
+            let known = self.known_network_nodes.read().await;
+            known.get(&pubkey).map(|info| info.addr).or_else(|| {
+                if let Some(nid) = nid_opt {
+                    known.get(&nid).map(|info| info.addr)
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let Some(addr) = known_addr.or(existing_addr) {
+            friends.insert(pubkey, Some(addr));
+            if let Some(nid) = nid_opt {
+                friends.insert(nid, Some(addr));
+            }
+            let mut peers = self.peers.write().await;
+            let entry = peers.entry(addr).or_insert_with(|| PeerInfo::with_type(addr, PeerConnectionType::FriendToFriend));
+            entry.node_id = Some(pubkey);
+            entry.conn_type = PeerConnectionType::FriendToFriend;
+        } else {
+            // Check if any peer has matching node_id
+            let mut peers = self.peers.write().await;
+            for (addr, peer) in peers.iter_mut() {
+                if peer.node_id == Some(pubkey) || (nid_opt.is_some() && peer.node_id == nid_opt) {
+                    peer.conn_type = PeerConnectionType::FriendToFriend;
+                    friends.insert(pubkey, Some(*addr));
+                    if let Some(nid) = nid_opt {
+                        friends.insert(nid, Some(*addr));
+                    }
+                }
+            }
+        }
+        drop(friends);
+        self.notify_sync_trigger();
+    }
+
+    /// Removes a trusted F2F peer by its Ed25519 public key.
+    pub async fn remove_trusted_f2f_peer(&self, pubkey: &[u8; 32]) {
+        let mut friends = self.f2f_friends.write().await;
+        friends.remove(pubkey);
+
+        let mut nid_opt = None;
+        if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey) {
+            let nid = *blake3::hash(vk.as_bytes()).as_bytes();
+            nid_opt = Some(nid);
+            friends.remove(&nid);
+
+            let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
+            self.verifying_keys.write().await.remove(&nid);
+            self.u16_to_vk.write().await.remove(&u16_id);
+        }
+        drop(friends);
+
+        let mut peers = self.peers.write().await;
+        for peer in peers.values_mut() {
+            if peer.node_id.as_ref() == Some(pubkey) || (nid_opt.is_some() && peer.node_id.as_ref() == nid_opt.as_ref()) {
+                peer.conn_type = PeerConnectionType::ShardDirect;
+            }
+        }
+        drop(peers);
+        self.notify_sync_trigger();
+    }
+
     /// Checks if a given node_id is an authorized direct F2F friend.
     /// Based strictly on permanent NodePubKey / NodeId (BLAKE3(pubkey)), not on HRW ticket.
     pub async fn is_f2f_friend(&self, node_id: &[u8; 32]) -> bool {

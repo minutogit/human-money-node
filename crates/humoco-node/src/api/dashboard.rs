@@ -63,6 +63,37 @@ pub struct F2fOverviewDto {
     pub friends: Vec<F2fFriendDto>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddFriendRequest {
+    pub pubkey: String,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddFriendResponse {
+    pub status: String,
+    pub pubkey: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveFriendResponse {
+    pub status: String,
+    pub removed: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopupQuotaRequest {
+    pub account_tag: String,
+    pub byte_years: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopupQuotaResponse {
+    pub status: String,
+    pub account_tag: String,
+    pub new_balance: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RecentLockDto {
     pub parent_lock_hex: String,
@@ -420,7 +451,15 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     };
     let vip_reserved_pct = 50.0;
     let vip_used_pct = 0.0;
-    let vip_accounts = Vec::new();
+    let vip_accounts = state
+        .tier_controller
+        .list_cached_vip_quotas()
+        .into_iter()
+        .map(|(tag, bal)| VipAccountDto {
+            account_tag: hex::encode(tag),
+            balance_byte_years: bal,
+        })
+        .collect();
 
     let tiers = TierOverviewDto {
         free_pow_diff,
@@ -496,6 +535,196 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         sparklines,
         tiers,
         f2f,
+    }
+}
+
+/// Helper to verify admin authorization header.
+fn verify_admin_auth(state: &AppState, headers: &axum::http::HeaderMap) -> Result<(), Response> {
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    if !state.auth.verify_token(auth_header) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized",
+                "message": "Invalid or missing admin authorization token"
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// Handler for POST /dashboard/admin/verify-token
+pub async fn admin_verify_token(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "message": "Admin token valid"
+        })),
+    )
+        .into_response()
+}
+
+/// Handler for POST /dashboard/admin/friends
+pub async fn admin_add_friend(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<AddFriendRequest>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let trimmed = payload.pubkey.trim();
+    let key_bytes = match hex::decode(trimmed) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "BadRequest",
+                    "message": "Invalid hex Ed25519 public key (must be 64 hex characters / 32 bytes)"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(ref pm) = state.peer_manager {
+        pm.add_trusted_f2f_peer(key_bytes).await;
+        (
+            StatusCode::OK,
+            Json(AddFriendResponse {
+                status: "ok".into(),
+                pubkey: hex::encode(key_bytes),
+            }),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "PeerManagerUnavailable",
+                "message": "P2P peer manager is not initialized"
+            })),
+        )
+            .into_response()
+    }
+}
+
+/// Handler for DELETE /dashboard/admin/friends/:key
+pub async fn admin_remove_friend(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let trimmed = key.trim();
+    let key_bytes = match hex::decode(trimmed) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "BadRequest",
+                    "message": "Invalid hex Ed25519 public key (must be 64 hex characters / 32 bytes)"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(ref pm) = state.peer_manager {
+        pm.remove_trusted_f2f_peer(&key_bytes).await;
+        (
+            StatusCode::OK,
+            Json(RemoveFriendResponse {
+                status: "ok".into(),
+                removed: hex::encode(key_bytes),
+            }),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "PeerManagerUnavailable",
+                "message": "P2P peer manager is not initialized"
+            })),
+        )
+            .into_response()
+    }
+}
+
+/// Handler for POST /dashboard/admin/quota
+pub async fn admin_topup_quota(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<TopupQuotaRequest>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let trimmed = payload.account_tag.trim();
+    let tag_bytes = match hex::decode(trimmed) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "BadRequest",
+                    "message": "Invalid hex account tag (must be 64 hex characters / 32 bytes)"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match state.tier_controller.topup_vip_quota(tag_bytes, payload.byte_years) {
+        Ok(new_balance) => (
+            StatusCode::OK,
+            Json(TopupQuotaResponse {
+                status: "ok".into(),
+                account_tag: hex::encode(tag_bytes),
+                new_balance,
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "QuotaError",
+                "message": e.to_string()
+            })),
+        )
+            .into_response(),
     }
 }
 

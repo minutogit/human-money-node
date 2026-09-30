@@ -6,7 +6,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use ed25519_dalek::Signer;
@@ -145,6 +145,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/dashboard/vouchers", get(crate::api::dashboard::dashboard_vouchers))
         .route("/dashboard/voucher/:voucher_id", get(crate::api::dashboard::dashboard_voucher_detail))
         .route("/dashboard/lock/:lookup_tag", get(crate::api::dashboard::dashboard_lock_raw))
+        .route("/dashboard/admin/verify-token", post(crate::api::dashboard::admin_verify_token))
+        .route("/dashboard/admin/friends", post(crate::api::dashboard::admin_add_friend))
+        .route("/dashboard/admin/friends/:key", delete(crate::api::dashboard::admin_remove_friend))
+        .route("/dashboard/admin/quota", post(crate::api::dashboard::admin_topup_quota))
         .route("/metrics", get(crate::api::metrics::prometheus_metrics))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(CorsLayer::permissive())

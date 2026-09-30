@@ -95,6 +95,28 @@ impl TierController {
         self.vip_quota_cache.write().insert(account_tag, balance);
     }
 
+    /// Tops up VIP quota for an account, updating cache and persisting asynchronously.
+    pub fn topup_vip_quota(&self, account_tag: [u8; 32], byte_years: u64) -> Result<u64, IngressError> {
+        let mut cache = self.vip_quota_cache.write();
+        let bal = cache
+            .entry(account_tag)
+            .or_insert_with(|| self.storage.get_quota(&account_tag).unwrap_or(0));
+        *bal = bal.saturating_add(byte_years);
+        let new_balance = *bal;
+        drop(cache);
+        self.persist_vip_quota_async(account_tag, new_balance);
+        Ok(new_balance)
+    }
+
+    /// Returns all cached VIP quota balances.
+    pub fn list_cached_vip_quotas(&self) -> Vec<([u8; 32], u64)> {
+        self.vip_quota_cache
+            .read()
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect()
+    }
+
     /// Hydrates the in-memory cache from durable storage (read-only, no fsync).
     pub fn hydrate_vip_quota(&self, account_tag: &[u8; 32]) -> Result<u64, StorageError> {
         let bal = self.storage.get_quota(account_tag)?;

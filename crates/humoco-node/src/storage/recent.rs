@@ -56,6 +56,9 @@ pub struct VoucherDetailDto {
     pub locks: Vec<VoucherLockHopDto>,
 }
 
+/// Alias for VoucherDetailDto representing the full voucher lineage.
+pub type VoucherLineageDto = VoucherDetailDto;
+
 /// Single hop in a voucher lock lineage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoucherLockHopDto {

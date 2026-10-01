@@ -349,7 +349,6 @@ impl ControlServer {
                                 state.peer_manager.register_f2f_friend(key, addr_opt).await;
                                 if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key) {
                                     let nid = *blake3::hash(vk.as_bytes()).as_bytes();
-                                    state.peer_manager.register_f2f_friend(nid, addr_opt).await;
                                     state.peer_manager.register_verifying_key(nid, vk).await;
                                     state.peer_manager.register_verifying_key(key, vk).await;
                                 }

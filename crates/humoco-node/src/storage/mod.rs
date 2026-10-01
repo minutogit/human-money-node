@@ -8,5 +8,5 @@ pub use engine::{compute_hmc_canonical_hash, DualTierEngine, FlushOp, HmcRamInde
 pub use filter::SpentLockFilter;
 pub use recent::{
     DEFAULT_RECENT_LOCKS_CAPACITY, LockInspection, RecentLockBuffer, RecentLockStatus,
-    RecentLockSummary,
+    RecentLockSummary, VoucherDetailDto, VoucherLineageDto, VoucherLockHopDto, VoucherSummaryDto,
 };

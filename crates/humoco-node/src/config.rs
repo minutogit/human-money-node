@@ -127,6 +127,10 @@ pub struct NetworkConfig {
     pub network_id: humoco_sim_core::types::NetworkId,
     #[serde(default = "default_shard_query_depth")]
     pub shard_query_depth: usize,
+    #[serde(default)]
+    pub simulation_mode: bool,
+    #[serde(default)]
+    pub fast_ticker_interval_secs: Option<u64>,
 }
 
 fn default_shard_query_depth() -> usize {
@@ -323,6 +327,8 @@ impl Default for NetworkConfig {
             control_socket: None,
             network_id: humoco_sim_core::types::NetworkId::default(),
             shard_query_depth: default_shard_query_depth(),
+            simulation_mode: false,
+            fast_ticker_interval_secs: None,
         }
     }
 }
@@ -491,6 +497,8 @@ mod tests {
             DEFAULT_RPC_LISTEN_ADDR.parse().unwrap()
         );
         assert_eq!(config.network.advertised_addr, None);
+        assert!(!config.network.simulation_mode);
+        assert_eq!(config.network.fast_ticker_interval_secs, None);
         assert_eq!(config.quotas.default_byte_years, DEFAULT_BYTE_YEARS);
         assert!(config.f2f.peers.is_empty());
         assert!(config.discovery.bootstrap_gateways.is_empty());

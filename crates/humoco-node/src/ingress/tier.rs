@@ -140,18 +140,11 @@ impl TierController {
     pub fn try_charge_vip_in_memory(&self, account_tag: &[u8; 32], required: u64) -> Result<u64, IngressError> {
         let mut cache = self.vip_quota_cache.write();
         let bal = cache.entry(*account_tag).or_insert_with(|| self.storage.get_quota(account_tag).unwrap_or(0));
-        // If cached insufficient, refresh from disk once (handles top-up race before blocking)
         if *bal < required {
-            let disk_bal = self.storage.get_quota(account_tag).unwrap_or(0);
-            if disk_bal > *bal {
-                *bal = disk_bal;
-            }
-            if *bal < required {
-                return Err(IngressError::QuotaExceeded {
-                    available: *bal,
-                    required,
-                });
-            }
+            return Err(IngressError::QuotaExceeded {
+                available: *bal,
+                required,
+            });
         }
         *bal -= required;
         let remaining = *bal;

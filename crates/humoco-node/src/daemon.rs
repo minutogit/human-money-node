@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use humoco_sim_core::types::{ClusterResult, ShardDigestResponse, SimTime};
+use rand::Rng;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -208,6 +209,9 @@ impl NodeDaemon {
         );
 
         // --- Phase 3 Autonomous Background Motors ---
+        let is_simulation = self.config.network.simulation_mode
+            || self.config.network.fast_ticker_interval_secs.is_some();
+        let fast_interval = self.config.network.fast_ticker_interval_secs;
 
         // 1. F2F Heartbeat-Emitter (hourly with jitter, signed payload)
         let hb_pm = peer_manager.clone();
@@ -215,10 +219,15 @@ impl NodeDaemon {
         let hb_identity = self.identity.clone();
         let hb_cancel = self.cancel_token.clone();
         let hb_local_addr = p2p_bound_addr;
+        let hb_sim_mode = is_simulation;
         let heartbeat_handle = tokio::spawn(async move {
             let mut seq: u64 = 0;
             loop {
-                let sleep_secs = crate::network::PeerManager::heartbeat_jitter_secs();
+                let sleep_secs = if hb_sim_mode {
+                    rand::thread_rng().gen_range(4..=6)
+                } else {
+                    crate::network::PeerManager::heartbeat_jitter_secs()
+                };
                 let sleep_dur = std::time::Duration::from_secs(sleep_secs);
                 tokio::select! {
                     _ = hb_cancel.cancelled() => {
@@ -253,8 +262,9 @@ impl NodeDaemon {
         let prune_engine = engine.clone();
         let prune_cancel = self.cancel_token.clone();
         let prune_pm = peer_manager.clone();
+        let prune_interval_secs = if is_simulation { 2 } else { 30 };
         let ttl_prune_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(prune_interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await;
             loop {
@@ -280,15 +290,21 @@ impl NodeDaemon {
             }
         });
 
-        // 3. Network-Thermometer & Quota Ticker (Spec 09: daily rolling update of 28-day ring buffer)
+        // 3. Network-Thermometer Hourly Aggregation & Daily Quota Ticker (Spec 09)
         let thermo_tier = tier_controller.clone();
         let thermo_storage = storage.clone();
         let thermo_pm = peer_manager.clone();
         let thermo_cancel = self.cancel_token.clone();
+        let thermo_interval_secs = if is_simulation {
+            fast_interval.unwrap_or(5)
+        } else {
+            3600
+        };
         let quota_ticker_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86_400));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(thermo_interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await; // Initial tick
+            let mut hourly_ticks: u32 = 0;
             loop {
                 tokio::select! {
                     _ = thermo_cancel.cancelled() => {
@@ -297,6 +313,7 @@ impl NodeDaemon {
                     }
                     _ = interval.tick() => {
                         let now_ms = thermo_pm.net_time_ms();
+                        let epoch_hour = now_ms / (3_600 * 1000);
                         let valid_locks = thermo_storage.all_valid_locks(now_ms).unwrap_or_default();
                         let total_byte_years: u64 = valid_locks.iter()
                             .map(|(rec, _)| {
@@ -304,13 +321,29 @@ impl NodeDaemon {
                                 humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_sec)
                             })
                             .sum();
-                        let daily_median = total_byte_years.max(humoco_sim_core::quota::HARD_FLOOR_BASELINE_DAILY);
-                        thermo_tier.record_daily_median(daily_median);
-                        let daily_read_median = humoco_sim_core::quota::HARD_FLOOR_READ_BASELINE_DAILY;
-                        thermo_tier.record_daily_read_median(daily_read_median);
-                        let ncb = thermo_tier.effective_ncb();
-                        let ncb_read = thermo_tier.effective_read_ncb();
-                        debug!(daily_median, ncb, daily_read_median, ncb_read, "Network thermometer recorded daily medians to 28-day ring buffers");
+                        let hourly_byte_years = total_byte_years;
+                        thermo_tier.record_hourly_median(
+                            epoch_hour,
+                            hourly_byte_years.max(humoco_sim_core::quota::HARD_FLOOR_BASELINE_DAILY / 24),
+                        );
+                        hourly_ticks += 1;
+                        if hourly_ticks >= 24 {
+                            hourly_ticks = 0;
+                            let daily_median = total_byte_years.max(humoco_sim_core::quota::HARD_FLOOR_BASELINE_DAILY);
+                            thermo_tier.record_daily_median(daily_median);
+                            let daily_read_median = humoco_sim_core::quota::HARD_FLOOR_READ_BASELINE_DAILY;
+                            thermo_tier.record_daily_read_median(daily_read_median);
+                            let ncb = thermo_tier.effective_ncb();
+                            let ncb_read = thermo_tier.effective_read_ncb();
+                            debug!(
+                                epoch_hour,
+                                daily_median,
+                                ncb,
+                                daily_read_median,
+                                ncb_read,
+                                "Network thermometer recorded daily medians to 28-day ring buffers"
+                            );
+                        }
                     }
                 }
             }
@@ -941,5 +974,31 @@ mod tests {
 
         let result = handle.await.expect("task join");
         assert!(matches!(result, Ok(())), "daemon run must be Ok, got {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_daemon_lifecycle_in_simulation_mode() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = NodeConfig::default();
+        config.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
+        config.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+        config.network.simulation_mode = true;
+        config.network.fast_ticker_interval_secs = Some(1);
+        config.storage.data_dir = temp.path().join("data");
+        let identity = NodeIdentity::generate();
+
+        let cancel_token = CancellationToken::new();
+        let daemon = NodeDaemon::with_cancel_token(config, identity, cancel_token.clone());
+
+        let handle = tokio::spawn(async move {
+            daemon.run().await
+        });
+
+        // Let simulation tickers tick
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+        cancel_token.cancel();
+
+        let result = handle.await.expect("task join");
+        assert!(matches!(result, Ok(())), "daemon run in simulation mode must be Ok, got {:?}", result);
     }
 }

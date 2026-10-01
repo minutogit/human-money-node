@@ -124,6 +124,8 @@ pub struct DashboardData {
     pub connected_peers: usize,
     pub configured_peers: usize,
     pub active_nodes_count: usize,
+    pub total_writes: u64,
+    pub total_reads: u64,
 
     // 3-Tier Latencies (Rolling 100)
     pub local_latency: LatencyTierStats,
@@ -150,6 +152,7 @@ pub struct DashboardData {
     pub network_nodes: Vec<NetworkNodeDto>,
 
     // Vouchers
+    pub total_active_vouchers_count: usize,
     pub active_vouchers: Vec<VoucherSummaryDto>,
 
     // Recent Locks
@@ -376,8 +379,12 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         })
         .collect();
 
+    let total_writes = state.metrics.total_writes();
+    let total_reads = state.metrics.total_reads();
+
     // Active Vouchers
-    let active_vouchers = state.engine.get_all_active_vouchers().await;
+    let total_active_vouchers_count = state.engine.get_total_active_vouchers_count().await;
+    let active_vouchers = state.engine.get_recent_active_vouchers(15).await;
 
     // Recent Locks
     let recent_raw = state.engine.get_recent_locks(15);
@@ -405,11 +412,14 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         state.metrics.ttl_purged_count(),
     );
 
-    // 2. Thermometer stats
+    // 2. Sparklines
+    let sparklines = state.system_stats.get_sparklines();
+
+    // 3. Thermometer stats
     let ncb_eff = state.tier_controller.effective_ncb() as f64;
     let ncb_read_eff = state.tier_controller.effective_read_ncb() as f64;
     let gossip_write_load = state.tier_controller.rolling_24h_average() as f64;
-    let gossip_read_load = 0.0;
+    let gossip_read_load = sparklines.reads.last().copied().unwrap_or(0.0) as f64;
     let daily_write_quota = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
     let local_node_id_u16 = state.identity.node_id_u16();
@@ -436,9 +446,6 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         today_write_used,
         today_read_used,
     };
-
-    // 3. Sparklines
-    let sparklines = state.system_stats.get_sparklines();
 
     // 4. Tiers Overview
     let free_pow_diff = state.pow_engine.default_difficulty();
@@ -512,6 +519,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         connected_peers,
         configured_peers,
         active_nodes_count,
+        total_writes,
+        total_reads,
         local_latency,
         quorum_latency,
         e2e_latency,
@@ -528,6 +537,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         shard_responsibility_ratio,
         sample_shard_scores,
         network_nodes,
+        total_active_vouchers_count,
         active_vouchers,
         recent_locks,
         system,
@@ -536,6 +546,11 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         tiers,
         f2f,
     }
+}
+
+/// Convenience alias for collect_dashboard_data
+pub async fn get_dashboard_data(state: &AppState) -> DashboardData {
+    collect_dashboard_data(state).await
 }
 
 /// Helper to verify admin authorization header.
@@ -1181,7 +1196,7 @@ footer {{
           <span id="writes-rate">{free_req_sec:.1}</span>
           <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">TX/s (EMA)</span>
         </div>
-        <div class="card-sub">Heute: <strong id="writes-today">{today_write_used}</strong> Schreiboperationen</div>
+        <div class="card-sub">Heute: <strong id="writes-today">{total_writes}</strong> Schreiboperationen</div>
         <div id="writes-sparkline" class="sparkline-box"></div>
       </div>
 
@@ -1192,10 +1207,10 @@ footer {{
           <span class="badge badge-blue">RAM-Index</span>
         </div>
         <div class="card-value">
-          <span id="reads-rate">0.0</span>
+          <span id="reads-rate">{reads_rate:.1}</span>
           <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">Req/s</span>
         </div>
-        <div class="card-sub">Heute: <strong id="reads-today">{today_read_used}</strong> Leseabfragen</div>
+        <div class="card-sub">Heute: <strong id="reads-today">{total_reads}</strong> Leseabfragen</div>
         <div id="reads-sparkline" class="sparkline-box"></div>
       </div>
 
@@ -1460,7 +1475,11 @@ footer {{
     <div class="card table-card">
       <div class="card-header">
         <span>🎟️ Aktive Gutschein-Wurzeln &amp; Lock-Lineage</span>
-        <span class="card-sub">Client-Side Custody &bull; Double-Spend Prävention</span>
+        <span class="card-sub" id="vouchers-count-sub">{total_active_vouchers} Gutscheine aktiv (Top 15 angezeigt)</span>
+      </div>
+      <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+        <input id="voucher-search-input" class="input-text" placeholder="🎟️ Gutschein-ID oder Lock-Tag eingeben..." style="flex: 1;" onkeydown="if (event.key === 'Enter') searchVoucher()">
+        <button class="btn" onclick="searchVoucher()">🔍 Suchen &amp; Prüfen</button>
       </div>
       <div style="overflow-x: auto;">
         <table>
@@ -1770,32 +1789,47 @@ async function openLockInspector(lookupTag) {{
 }}
 
 async function openVoucherInspector(voucherId) {{
+  const input = document.getElementById('voucher-search-input');
+  if (input) input.value = voucherId;
+  searchVoucher();
+}}
+
+async function searchVoucher() {{
+  const input = document.getElementById('voucher-search-input');
+  const term = input ? input.value.trim() : '';
+  if (!term) return;
   try {{
-    const res = await fetch('/dashboard/voucher/' + encodeURIComponent(voucherId));
-    if (!res.ok) return;
-    const detail = await res.json();
-    currentVoucherDetail = detail;
-    document.getElementById('voucher-modal-title').innerText = '🎟️ Gutschein-Lineage: ' + voucherId;
-    
-    let html = '<div style="margin-bottom: 0.75rem; line-height: 1.6;">';
-    html += '<div><strong>Wurzel-Anker (valid_until):</strong> ' + detail.root_valid_until_formatted + '</div>';
-    html += '<div><strong>Genesis Tag:</strong> <span class="code">' + (detail.genesis_tag || 'N/A') + '</span></div>';
-    html += '<div><strong>Gesamt-Sperren in Kette:</strong> ' + detail.locks.length + ' (' + detail.total_byte_years + ' Byte-Jahre Budget)</div>';
-    html += '</div>';
+    const res = await fetch('/dashboard/voucher/' + encodeURIComponent(term));
+    if (res.ok) {{
+      const detail = await res.json();
+      currentVoucherDetail = detail;
+      document.getElementById('voucher-modal-title').innerText = '🎟️ Gutschein-Lineage: ' + detail.voucher_id;
+      
+      let html = '<div style="margin-bottom: 0.75rem; line-height: 1.6;">';
+      html += '<div><strong>Gutschein-ID:</strong> <span class="code">' + detail.voucher_id + '</span></div>';
+      html += '<div><strong>Wurzel-Anker (valid_until):</strong> ' + detail.root_valid_until_formatted + '</div>';
+      html += '<div><strong>Genesis Tag:</strong> <span class="code">' + (detail.genesis_tag || 'N/A') + '</span></div>';
+      html += '<div><strong>Gesamt-Sperren in Kette:</strong> ' + detail.locks.length + ' (' + detail.total_byte_years + ' Byte-Jahre Budget)</div>';
+      html += '</div>';
 
-    let tableHtml = '<h4 style="margin: 0.75rem 0 0.25rem 0; font-size: 0.9rem;">Ketten-Historie (Lock-Hops):</h4>';
-    tableHtml += '<div style="overflow-x: auto;"><table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
-    for (const h of detail.locks) {{
-      const typeBadge = h.is_genesis ? '<span class="badge badge-amber">GENESIS</span>' : '<span class="badge badge-blue">SPEND</span>';
-      tableHtml += '<tr><td>' + typeBadge + '</td><td class="code" title="' + h.lookup_tag + '">' + truncateHash(h.lookup_tag) + '</td><td class="code">' + truncateHash(h.t_id_hex) + '</td><td class="code">' + truncateHash(h.sender_pub_hex) + '</td></tr>';
+      let tableHtml = '<h4 style="margin: 0.75rem 0 0.25rem 0; font-size: 0.9rem;">Ketten-Historie (Lock-Hops):</h4>';
+      tableHtml += '<div style="overflow-x: auto;"><table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
+      for (const h of detail.locks) {{
+        const typeBadge = h.is_genesis ? '<span class="badge badge-amber">GENESIS</span>' : '<span class="badge badge-blue">SPEND</span>';
+        tableHtml += '<tr><td>' + typeBadge + '</td><td class="code" title="' + h.lookup_tag + '">' + truncateHash(h.lookup_tag) + '</td><td class="code">' + truncateHash(h.t_id_hex) + '</td><td class="code">' + truncateHash(h.sender_pub_hex) + '</td></tr>';
+      }}
+      tableHtml += '</tbody></table></div>';
+
+      document.getElementById('voucher-modal-details').innerHTML = html;
+      document.getElementById('voucher-modal-table-container').innerHTML = tableHtml;
+      document.getElementById('voucher-modal-json').innerText = JSON.stringify(detail, null, 2);
+      document.getElementById('voucher-modal').classList.add('active');
+    }} else {{
+      alert('Gutschein oder Lookup-Tag "' + term + '" nicht gefunden.');
     }}
-    tableHtml += '</tbody></table></div>';
-
-    document.getElementById('voucher-modal-details').innerHTML = html;
-    document.getElementById('voucher-modal-table-container').innerHTML = tableHtml;
-    document.getElementById('voucher-modal-json').innerText = JSON.stringify(detail, null, 2);
-    document.getElementById('voucher-modal').classList.add('active');
-  }} catch (e) {{}}
+  }} catch (e) {{
+    alert('Fehler bei der Gutschein-Suche: ' + e.message);
+  }}
 }}
 
 async function refreshDashboard() {{
@@ -1820,9 +1854,9 @@ async function refreshDashboard() {{
     const latestWrite = (d.sparklines && d.sparklines.writes) ? (d.sparklines.writes[d.sparklines.writes.length - 1] || 0) : 0;
     const latestRead = (d.sparklines && d.sparklines.reads) ? (d.sparklines.reads[d.sparklines.reads.length - 1] || 0) : 0;
     document.getElementById('writes-rate').innerText = latestWrite.toFixed(1);
-    document.getElementById('writes-today').innerText = d.thermometer.today_write_used;
+    document.getElementById('writes-today').innerText = d.total_writes;
     document.getElementById('reads-rate').innerText = latestRead.toFixed(1);
-    document.getElementById('reads-today').innerText = d.thermometer.today_read_used;
+    document.getElementById('reads-today').innerText = d.total_reads;
 
     if (d.sparklines) {{
       document.getElementById('writes-sparkline').innerHTML = renderSparklineSvg(d.sparklines.writes, '#10b981');
@@ -1904,6 +1938,10 @@ async function refreshDashboard() {{
 
     // Vouchers Table
     const vouchersTbody = document.getElementById('vouchers-tbody');
+    const vouchersCountSub = document.getElementById('vouchers-count-sub');
+    if (vouchersCountSub) {{
+      vouchersCountSub.innerText = (d.total_active_vouchers_count || 0) + ' Gutscheine aktiv (Top 15 angezeigt)';
+    }}
     if (d.active_vouchers && d.active_vouchers.length > 0) {{
       let html = '';
       for (const v of d.active_vouchers) {{
@@ -1949,8 +1987,10 @@ setInterval(refreshDashboard, 2000);
         configured_peers = data.configured_peers,
         shard_mode = data.shard_mode,
         free_req_sec = data.tiers.free_req_sec,
-        today_write_used = data.thermometer.today_write_used,
-        today_read_used = data.thermometer.today_read_used,
+        total_writes = data.total_writes,
+        total_reads = data.total_reads,
+        reads_rate = data.sparklines.reads.last().copied().unwrap_or(0.0),
+        total_active_vouchers = data.total_active_vouchers_count,
         cpu_percent = data.system.cpu_percent,
         rss_mb = data.system.rss_mb,
         redb_kb = data.system.redb_bytes / 1024,
@@ -1974,6 +2014,7 @@ setInterval(refreshDashboard, 2000);
         free_pow_diff = data.tiers.free_pow_diff,
         friends_used_pct = data.tiers.friends_used_pct,
         vip_used_pct = data.tiers.vip_used_pct,
+        today_write_used = data.thermometer.today_write_used,
         daily_write_quota = data.thermometer.daily_write_quota
     );
 

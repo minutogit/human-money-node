@@ -1457,10 +1457,13 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("qr-svg"));
     assert!(body_str.contains("Kopieren") || body_str.contains("Copy"));
 
-    // Verify Modals
+    // Verify Modals & Search bar
     assert!(body_str.contains("voucher-modal"));
     assert!(body_str.contains("json-modal"));
     assert!(body_str.contains("admin-modal"));
+    assert!(body_str.contains("voucher-search-input"));
+    assert!(body_str.contains("searchVoucher"));
+    assert!(body_str.contains("vouchers-count-sub"));
 
     // Size under 64 KiB
     assert!(body_str.len() < 64 * 1024, "Dashboard HTML must be under 64 KiB, was {}", body_str.len());
@@ -1473,6 +1476,7 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
 
     // Also test GET /dashboard/data
     let res_data = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1489,6 +1493,22 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(data_json.get("status").is_some());
     assert!(data_json.get("peering_string").is_some());
     assert!(data_json.get("recent_locks").is_some());
+    assert!(data_json.get("total_writes").is_some());
+    assert!(data_json.get("total_reads").is_some());
+    assert!(data_json.get("total_active_vouchers_count").is_some());
+
+    // Test GET /dashboard/voucher/unknown_voucher
+    let res_v = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/voucher/non_existent_voucher")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_v.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

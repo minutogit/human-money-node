@@ -511,4 +511,70 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
     assert_eq!(hmc_inspection.lock_id_hex, hex::encode(hmc_entry.t_id));
 }
 
+#[tokio::test]
+async fn test_voucher_query_methods() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test_vouchers.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _worker_handle) = DualTierEngine::new(Arc::clone(&storage));
+
+    let tag1 = "tag_01".to_string();
+    let entry1 = humoco_node::api::hmc::L2LockEntry {
+        t_id: [0x01; 32],
+        layer2_voucher_id: "voucher_alpha".to_string(),
+        sender_ephemeral_pub: [0x11; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x11; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 1000,
+        deletable_at: Some("2000000000000".to_string()),
+        privacy_guard: None,
+    };
+
+    let tag2 = "tag_02".to_string();
+    let entry2 = humoco_node::api::hmc::L2LockEntry {
+        t_id: [0x02; 32],
+        layer2_voucher_id: "voucher_beta".to_string(),
+        sender_ephemeral_pub: [0x22; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x22; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 2000,
+        deletable_at: Some("2500000000000".to_string()),
+        privacy_guard: None,
+    };
+
+    let _ = engine.ingress_hmc_lock(tag1.clone(), entry1.clone()).await;
+    let _ = engine.ingress_hmc_lock(tag2.clone(), entry2.clone()).await;
+
+    // Test get_total_active_vouchers_count
+    let count = engine.get_total_active_vouchers_count().await;
+    assert_eq!(count, 2);
+
+    // Test get_recent_active_vouchers with limit
+    let recent1 = engine.get_recent_active_vouchers(1).await;
+    assert_eq!(recent1.len(), 1);
+    assert_eq!(recent1[0].voucher_id, "voucher_beta"); // Higher root_valid_until_ms first
+
+    let recent_all = engine.get_recent_active_vouchers(10).await;
+    assert_eq!(recent_all.len(), 2);
+
+    // Test get_voucher_lineage by voucher_id
+    let lin_by_vid = engine.get_voucher_lineage("voucher_alpha").await;
+    assert!(lin_by_vid.is_some());
+    assert_eq!(lin_by_vid.unwrap().voucher_id, "voucher_alpha");
+
+    // Test get_voucher_lineage by lookup_tag
+    let lin_by_tag = engine.get_voucher_lineage(&tag1).await;
+    assert!(lin_by_tag.is_some());
+    assert_eq!(lin_by_tag.unwrap().voucher_id, "voucher_alpha");
+
+    // Test non-existent
+    assert!(engine.get_voucher_lineage("non_existent").await.is_none());
+}
+
 

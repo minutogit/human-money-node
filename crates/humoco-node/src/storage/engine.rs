@@ -998,6 +998,107 @@ impl DualTierEngine {
         self.hmc_ram.read().await.get_voucher_root_valid(voucher_id)
     }
 
+    /// Returns at most `limit` recent active vouchers without scanning the entire database if not needed.
+    pub async fn get_recent_active_vouchers(&self, limit: usize) -> Vec<VoucherSummaryDto> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let mut vouchers_map: HashMap<String, (u64, usize, Option<String>)> = HashMap::new();
+
+        // 1. Fast collect from in-memory RAM
+        {
+            let hmc = self.hmc_ram.read().await;
+            for (vid, tags) in &hmc.vouchers {
+                let root_valid = hmc.voucher_roots.get(vid).copied().unwrap_or(0);
+                let genesis = tags
+                    .iter()
+                    .find(|t| hmc.locks.get(*t).map_or(false, |e| e.deletable_at.is_some()))
+                    .cloned();
+                vouchers_map.insert(vid.clone(), (root_valid, tags.len(), genesis));
+            }
+        }
+
+        // 2. If limit not satisfied from RAM, query redb up to limit
+        if vouchers_map.len() < limit {
+            if let Ok(db_vouchers) = self.db.all_active_vouchers() {
+                for vid in db_vouchers {
+                    if !vouchers_map.contains_key(&vid) {
+                        if let Ok(locks) = self.db.get_hmc_locks_for_voucher(&vid) {
+                            let root_valid = locks
+                                .iter()
+                                .find_map(|(_, entry)| {
+                                    entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok())
+                                })
+                                .unwrap_or(0);
+                            let genesis = locks
+                                .iter()
+                                .find(|(_, entry)| entry.deletable_at.is_some())
+                                .map(|(tag, _)| tag.clone());
+                            vouchers_map.insert(vid, (root_valid, locks.len(), genesis));
+                        }
+                    }
+                    if vouchers_map.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut results = Vec::with_capacity(vouchers_map.len().min(limit));
+        for (vid, (root_valid, count, genesis)) in vouchers_map {
+            let status = if root_valid == 0 {
+                "Unknown".to_string()
+            } else if now_ms > root_valid {
+                "Expired".to_string()
+            } else {
+                "Active".to_string()
+            };
+            let formatted = if root_valid > 0 {
+                let rem_sec = root_valid.saturating_sub(now_ms) / 1000;
+                format!("TTL: {}s remaining", rem_sec)
+            } else {
+                "N/A".to_string()
+            };
+            results.push(VoucherSummaryDto {
+                voucher_id: vid,
+                root_valid_until_ms: root_valid,
+                root_valid_until_formatted: formatted,
+                created_at_ms: 0,
+                locks_count: count,
+                genesis_tag: genesis,
+                status,
+            });
+        }
+        results.sort_by(|a, b| b.root_valid_until_ms.cmp(&a.root_valid_until_ms));
+        if results.len() > limit {
+            results.truncate(limit);
+        }
+        results
+    }
+
+    /// Returns the total distinct count of active vouchers (RAM + redb distinct).
+    pub async fn get_total_active_vouchers_count(&self) -> usize {
+        let mut set = HashSet::new();
+        {
+            let hmc = self.hmc_ram.read().await;
+            for vid in hmc.vouchers.keys() {
+                set.insert(vid.clone());
+            }
+        }
+        if let Ok(db_vouchers) = self.db.all_active_vouchers() {
+            for vid in db_vouchers {
+                set.insert(vid);
+            }
+        }
+        set.len()
+    }
+
     /// Returns a list of all active vouchers known to this node (from RAM and redb).
     pub async fn get_all_active_vouchers(&self) -> Vec<VoucherSummaryDto> {
         let mut vouchers_map: HashMap<String, (u64, usize, Option<String>)> = HashMap::new();
@@ -1061,8 +1162,28 @@ impl DualTierEngine {
         results
     }
 
-    /// Returns detailed lineage and all lock hops for a voucher.
-    pub async fn get_voucher_lineage(&self, voucher_id: &str) -> Option<VoucherDetailDto> {
+    /// Returns detailed lineage and all lock hops for a voucher, resolving either by layer2_voucher_id or lookup_tag.
+    pub async fn get_voucher_lineage(&self, voucher_id_or_tag: &str) -> Option<VoucherDetailDto> {
+        let trimmed = voucher_id_or_tag.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // 0. Resolve voucher_id if a lookup_tag was provided
+        let mut resolved_voucher_id = trimmed.to_string();
+        {
+            let hmc = self.hmc_ram.read().await;
+            if let Some(entry) = hmc.locks.get(trimmed) {
+                resolved_voucher_id = entry.layer2_voucher_id.clone();
+            }
+        }
+        if resolved_voucher_id == trimmed {
+            if let Ok(Some(entry)) = self.db.get_hmc_lock(trimmed) {
+                resolved_voucher_id = entry.layer2_voucher_id;
+            }
+        }
+
+        let voucher_id = &resolved_voucher_id;
         let mut locks_map: HashMap<String, L2LockEntry> = HashMap::new();
 
         // 1. Query redb

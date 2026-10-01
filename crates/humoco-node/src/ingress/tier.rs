@@ -133,6 +133,25 @@ impl TierController {
             .collect()
     }
 
+    /// Returns all VIP accounts, resolving each registered quota tag to its friendly token name (if known) or hex-string.
+    pub fn list_vip_accounts(&self) -> Vec<(String, u64)> {
+        let tokens_map = self.vip_tokens.read().unwrap_or_else(|e| e.into_inner());
+        let mut tag_to_name = HashMap::new();
+        for (name, tag) in tokens_map.iter() {
+            tag_to_name.insert(*tag, name.clone());
+        }
+        drop(tokens_map);
+
+        let cache = self.vip_quota_cache.read();
+        let mut list = Vec::with_capacity(cache.len());
+        for (tag, balance) in cache.iter() {
+            let name = tag_to_name.get(tag).cloned().unwrap_or_else(|| hex::encode(tag));
+            list.push((name, *balance));
+        }
+        list.sort_by(|a, b| a.0.cmp(&b.0));
+        list
+    }
+
     /// Hydrates the in-memory cache from durable storage (read-only, no fsync).
     pub fn hydrate_vip_quota(&self, account_tag: &[u8; 32]) -> Result<u64, StorageError> {
         let bal = self.storage.get_quota(account_tag)?;
@@ -350,6 +369,16 @@ impl TierController {
             let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
             self.try_charge_vip_in_memory(&account_tag, required_byte_years)?;
             self.vip_writes_today.fetch_add(1, Ordering::Relaxed);
+            let vip_node_id: NodeId = u16::from_be_bytes([account_tag[0], account_tag[1]]);
+            let epoch_day = match now_ms {
+                Some(ms) => self.current_epoch_day_at(ms),
+                None => self.current_epoch_day(),
+            };
+            let daily_quota = self.calculate_daily_quota(5.0, 1.0);
+            self.thermometer
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_accept_lock(epoch_day, vip_node_id, required_byte_years, daily_quota);
             return Ok(IngressTier::Tier1Vip);
         }
 
@@ -371,8 +400,21 @@ impl TierController {
         }
 
         // 3. Check Tier 3 (Public - BLAKE3 PoW)
+        let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
+        let epoch_day = match now_ms {
+            Some(ms) => self.current_epoch_day_at(ms),
+            None => self.current_epoch_day(),
+        };
+        let p = parent_lock.copied().unwrap_or([0u8; 32]);
+        let free_node_id: NodeId = u16::from_be_bytes([p[0], p[1]]);
+        let daily_quota = self.calculate_daily_quota(1.0, 1.0);
+
         if self.pow_engine.default_difficulty() == 0 {
             self.free_writes_today.fetch_add(1, Ordering::Relaxed);
+            self.thermometer
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
             return Ok(IngressTier::Tier3Public);
         }
 
@@ -383,10 +425,13 @@ impl TierController {
             (Some(challenge), Some(nonce)) => {
                 self.pow_engine.verify_pow_for_parent(challenge, nonce, dynamic_difficulty, parent_lock).await?;
                 self.free_writes_today.fetch_add(1, Ordering::Relaxed);
+                self.thermometer
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
                 Ok(IngressTier::Tier3Public)
             }
             _ => {
-                let p = parent_lock.copied().unwrap_or([0u8; 32]);
                 let (challenge, _, expires_at) = self.pow_engine.generate_challenge_for_parent(&p);
                 Err(IngressError::PoWRequired {
                     challenge,

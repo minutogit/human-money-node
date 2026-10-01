@@ -100,7 +100,27 @@ async fn post_lock_http(
     let auth_header = match tier {
         SimTier::F2F => "X-Peer-Token: cluster_sim_token\r\n".to_string(),
         SimTier::Vip(token) => format!("Authorization: Bearer {}\r\n", token),
-        SimTier::Free => "".to_string(),
+        SimTier::Free => {
+            let parent_bytes = match req {
+                IngressRequest::Single(single_req) if !single_req.is_genesis => {
+                    let tag = single_req.ds_tag.as_deref().unwrap_or_default();
+                    *blake3::hash(tag.as_bytes()).as_bytes()
+                }
+                _ => [0u8; 32],
+            };
+            let now_sec = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let slot = now_sec / 600;
+            let challenge_bytes = humoco_node::ingress::pow::compute_stateless_challenge(&parent_bytes, slot);
+            let challenge_hex = hex::encode(challenge_bytes);
+            let nonce = humoco_node::ingress::pow::solve_blake3_hashcash(&challenge_hex, 8, 100_000).unwrap_or(0);
+            format!(
+                "X-PoW-Challenge: {}\r\nX-PoW-Nonce: {}\r\n",
+                challenge_hex, nonce
+            )
+        }
     };
 
     let req_str = format!(
@@ -359,6 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let mut rng = rand::thread_rng();
     let mut active_vouchers: Vec<SimVoucher> = Vec::new();
+    let mut spent_history: Vec<(String, UnspentOutput)> = Vec::new();
     let mut write_counter: u64 = 0;
     let mut total_reads_count: u64 = 0;
 
@@ -369,6 +390,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut batch_reads_latency_sum: Duration = Duration::ZERO;
     let mut last_read_batch_print = Instant::now();
     let mut last_virtual_hour: u64 = 0;
+    let mut node4_flapping_state: Option<Instant> = None;
 
     let shutdown_signal = tokio::signal::ctrl_c();
     tokio::pin!(shutdown_signal);
@@ -409,6 +431,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     );
                 }
 
+                // Node 4 transient flapping / self-healing demonstration (every ~25s real time)
+                if node4_flapping_state.is_none() && write_counter > 10 && rng.gen_bool(0.005) {
+                    let node4_peer_str = format!("{}@{}", instances[3].identity.public_key_hex(), instances[3].p2p_addr);
+                    let client1 = humoco_node::control::ControlClient::new(instances[0].control_socket.clone());
+                    let _ = client1.remove_peer(&node4_peer_str).await;
+                    println!("  \x1b[90m⚡ [NODE FLAP SIM]\x1b[0m \x1b[1;33mSimuliere temporäre Trennung von Knoten 4 (Transient Degradation)...\x1b[0m");
+                    node4_flapping_state = Some(Instant::now());
+                } else if let Some(flap_start) = node4_flapping_state {
+                    if flap_start.elapsed() >= Duration::from_secs(3) {
+                        let node4_peer_str = format!("{}@{}", instances[3].identity.public_key_hex(), instances[3].p2p_addr);
+                        let client1 = humoco_node::control::ControlClient::new(instances[0].control_socket.clone());
+                        let _ = client1.add_peer(&node4_peer_str).await;
+                        println!("  \x1b[90m💚 [NODE HEAL SIM]\x1b[0m \x1b[1;32mKnoten 4 wieder verbunden (Self-Healing ONLINE)...\x1b[0m");
+                        node4_flapping_state = None;
+                    }
+                }
+
                 // Periodic aggregated read batch output
                 if last_read_batch_print.elapsed() >= Duration::from_millis(1500) {
                     if batch_reads_count > 0 {
@@ -433,97 +472,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                 if is_write {
                     write_counter += 1;
-                    // Decide write action: Genesis Lock (~30%) or Spend / Split Lock (~70%)
-                    let should_create_genesis = active_vouchers.is_empty() || rng.gen_bool(0.30);
+                    // Check if we should inject an intentional double-spend collision (~2% probability)
+                    let should_inject_collision = !spent_history.is_empty() && rng.gen_bool(0.02);
 
-                    let (req, lock_type, tag_display) = if should_create_genesis {
-                        let v_num: u64 = rng.gen_range(100000..999999);
-                        let v_hash = *blake3::hash(format!("genesis_{}_{}", v_num, write_counter).as_bytes()).as_bytes();
-                        let v_id = bs58::encode(&v_hash).into_string();
+                    let (req, lock_type, tag_display) = if should_inject_collision {
+                        let (voucher_id, prev_output) = &spent_history[rng.gen_range(0..spent_history.len())];
+                        let fake_receiver_key = SigningKey::generate(&mut rng);
+                        let fake_receiver_pub = fake_receiver_key.verifying_key().to_bytes();
+                        let fake_receiver_ephemeral_pub_hash = Some(*blake3::hash(&fake_receiver_pub).as_bytes());
 
-                        // Staggered voucher validity:
-                        // 40% short-lived (1–3 virtual hours = 3_600_000 to 10_800_000 sim_ms)
-                        // 40% medium-lived (12–24 virtual hours = 43_200_000 to 86_400_000 sim_ms)
-                        // 20% long-lived (several virtual days = 172_800_000 to 604_800_000 sim_ms)
-                        let r_ttl: f64 = rng.gen_range(0.0..1.0);
-                        let duration_virtual_ms = if r_ttl < 0.40 {
-                            rng.gen_range(3_600_000..=10_800_000)
-                        } else if r_ttl < 0.80 {
-                            rng.gen_range(43_200_000..=86_400_000)
-                        } else {
-                            rng.gen_range(172_800_000..=604_800_000)
-                        };
-                        let valid_until = sim_now_ms + duration_virtual_ms;
-
-                        let issuer_key = SigningKey::generate(&mut rng);
-                        let genesis = make_hmc_genesis(&v_id, valid_until, sim_now_ms, &issuer_key);
-                        let genesis_tx_hash = genesis.transaction_hash;
-                        let genesis_tag = bs58::encode(&genesis_tx_hash).into_string();
-                        let genesis_spend_tag = bs58::encode(
-                            blake3::hash(format!("{}:out0", genesis_tag).as_bytes()).as_bytes(),
-                        )
-                        .into_string();
-
-                        let unspent = UnspentOutput {
-                            ds_tag: genesis_spend_tag,
-                            owner_key: issuer_key,
-                            chain_history: vec![genesis.clone()],
-                            last_timestamp: sim_now_ms as u128,
-                        };
-
-                        active_vouchers.push(SimVoucher {
-                            voucher_id: v_id.clone(),
-                            valid_until_ms: valid_until,
-                            unspent_outputs: vec![unspent],
-                        });
-
-                        if active_vouchers.len() > 100 {
-                            active_vouchers.remove(0);
-                        }
-
-                        let tag_display = format!("Tag: {}...", &genesis_tag[..8.min(genesis_tag.len())]);
-                        (IngressRequest::Single(genesis), "GENESIS LOCK", tag_display)
-                    } else {
-                        let v_idx = rng.gen_range(0..active_vouchers.len());
-                        let voucher = &mut active_vouchers[v_idx];
-                        let out_idx = rng.gen_range(0..voucher.unspent_outputs.len());
-                        let output = voucher.unspent_outputs.remove(out_idx);
-
-                        let receiver_key = SigningKey::generate(&mut rng);
-                        let receiver_pub = receiver_key.verifying_key().to_bytes();
-                        let receiver_ephemeral_pub_hash = Some(*blake3::hash(&receiver_pub).as_bytes());
-
-                        let is_split = rng.gen_bool(0.30);
-                        let (change_key_opt, change_ephemeral_pub_hash) = if is_split {
-                            let change_key = SigningKey::generate(&mut rng);
-                            let change_pub = change_key.verifying_key().to_bytes();
-                            let change_hash = *blake3::hash(&change_pub).as_bytes();
-                            (Some(change_key), Some(change_hash))
-                        } else {
-                            (None, None)
-                        };
-
-                        let timestamp = (sim_now_ms as u128).max(output.last_timestamp + 1000);
-                        let sender_pub = output.owner_key.verifying_key().to_bytes();
+                        let timestamp = (sim_now_ms as u128).max(prev_output.last_timestamp + 2000);
+                        let sender_pub = prev_output.owner_key.verifying_key().to_bytes();
 
                         let mut h = blake3::Hasher::new();
-                        h.update(output.ds_tag.as_bytes());
+                        h.update(prev_output.ds_tag.as_bytes());
                         h.update(&timestamp.to_le_bytes());
                         h.update(&sender_pub);
                         let tx_hash = *h.finalize().as_bytes();
 
-                        let mut spend = L2LockRequest {
+                        let mut conflicting_spend = L2LockRequest {
                             auth: L2AuthPayload {
                                 ephemeral_pubkey: sender_pub,
                                 auth_signature: None,
                             },
-                            layer2_voucher_id: voucher.voucher_id.clone(),
-                            ds_tag: Some(output.ds_tag.clone()),
+                            layer2_voucher_id: voucher_id.clone(),
+                            ds_tag: Some(prev_output.ds_tag.clone()),
                             transaction_hash: tx_hash,
                             is_genesis: false,
                             sender_ephemeral_pub: sender_pub,
-                            receiver_ephemeral_pub_hash,
-                            change_ephemeral_pub_hash,
+                            receiver_ephemeral_pub_hash: fake_receiver_ephemeral_pub_hash,
+                            change_ephemeral_pub_hash: None,
                             layer2_signature: [0u8; 64],
                             trap_r: Some("none".into()),
                             trap_s: Some("none".into()),
@@ -531,52 +509,183 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             deletable_at: None,
                             privacy_guard: None,
                         };
-                        let payload_hash = calculate_l2_payload_hash(&spend);
-                        spend.layer2_signature = output.owner_key.sign(&payload_hash).to_bytes();
+                        let payload_hash = calculate_l2_payload_hash(&conflicting_spend);
+                        conflicting_spend.layer2_signature = prev_output.owner_key.sign(&payload_hash).to_bytes();
 
-                        let mut updated_chain = output.chain_history.clone();
-                        updated_chain.push(spend);
+                        let mut conflicting_chain = prev_output.chain_history.clone();
+                        conflicting_chain.push(conflicting_spend);
 
                         let chain_req = L2ChainLockRequest {
                             auth: L2AuthPayload {
                                 ephemeral_pubkey: sender_pub,
                                 auth_signature: None,
                             },
-                            layer2_voucher_id: voucher.voucher_id.clone(),
-                            chain: updated_chain.clone(),
+                            layer2_voucher_id: voucher_id.clone(),
+                            chain: conflicting_chain,
                         };
 
-                        let receiver_tag = bs58::encode(&tx_hash).into_string();
-                        voucher.unspent_outputs.push(UnspentOutput {
-                            ds_tag: receiver_tag,
-                            owner_key: receiver_key,
-                            chain_history: updated_chain.clone(),
-                            last_timestamp: timestamp,
-                        });
+                        let tag_display = format!("Parent: {}... (Collision 409)", &prev_output.ds_tag[..8.min(prev_output.ds_tag.len())]);
+                        (IngressRequest::Chain(chain_req), "DOUBLE-SPEND", tag_display)
+                    } else {
+                        // Decide write action: Genesis Lock (~30%) or Spend / Split Lock (~70%)
+                        let should_create_genesis = active_vouchers.is_empty() || rng.gen_bool(0.30);
 
-                        if let (Some(change_key), Some(change_hash)) = (change_key_opt, change_ephemeral_pub_hash) {
-                            let change_tag = bs58::encode(&change_hash).into_string();
+                        if should_create_genesis {
+                            let v_num: u64 = rng.gen_range(100000..999999);
+                            let v_hash = *blake3::hash(format!("genesis_{}_{}", v_num, write_counter).as_bytes()).as_bytes();
+                            let v_id = bs58::encode(&v_hash).into_string();
+
+                            // Staggered voucher validity:
+                            // 15% ultra short-lived (35–60 virtual seconds = rapid TTL pruning in ~50ms wall-clock)
+                            // 35% short-lived (1–3 virtual hours = 3_600_000 to 10_800_000 sim_ms)
+                            // 35% medium-lived (12–24 virtual hours = 43_200_000 to 86_400_000 sim_ms)
+                            // 15% long-lived (several virtual days = 172_800_000 to 604_800_000 sim_ms)
+                            let r_ttl: f64 = rng.gen_range(0.0..1.0);
+                            let duration_virtual_ms = if r_ttl < 0.15 {
+                                rng.gen_range(35_000..=60_000)
+                            } else if r_ttl < 0.50 {
+                                rng.gen_range(3_600_000..=10_800_000)
+                            } else if r_ttl < 0.85 {
+                                rng.gen_range(43_200_000..=86_400_000)
+                            } else {
+                                rng.gen_range(172_800_000..=604_800_000)
+                            };
+                            let valid_until = sim_now_ms + duration_virtual_ms;
+
+                            let issuer_key = SigningKey::generate(&mut rng);
+                            let genesis = make_hmc_genesis(&v_id, valid_until, sim_now_ms, &issuer_key);
+                            let genesis_tx_hash = genesis.transaction_hash;
+                            let genesis_tag = bs58::encode(&genesis_tx_hash).into_string();
+                            let genesis_spend_tag = bs58::encode(
+                                blake3::hash(format!("{}:out0", genesis_tag).as_bytes()).as_bytes(),
+                            )
+                            .into_string();
+
+                            let unspent = UnspentOutput {
+                                ds_tag: genesis_spend_tag,
+                                owner_key: issuer_key,
+                                chain_history: vec![genesis.clone()],
+                                last_timestamp: sim_now_ms as u128,
+                            };
+
+                            active_vouchers.push(SimVoucher {
+                                voucher_id: v_id.clone(),
+                                valid_until_ms: valid_until,
+                                unspent_outputs: vec![unspent],
+                            });
+
+                            if active_vouchers.len() > 100 {
+                                active_vouchers.remove(0);
+                            }
+
+                            let tag_display = format!("Tag: {}...", &genesis_tag[..8.min(genesis_tag.len())]);
+                            (IngressRequest::Single(genesis), "GENESIS LOCK", tag_display)
+                        } else {
+                            let v_idx = rng.gen_range(0..active_vouchers.len());
+                            let voucher = &mut active_vouchers[v_idx];
+                            let out_idx = rng.gen_range(0..voucher.unspent_outputs.len());
+                            let output = voucher.unspent_outputs.remove(out_idx);
+
+                            // Save to spent history for potential double-spend collision injection
+                            spent_history.push((voucher.voucher_id.clone(), UnspentOutput {
+                                ds_tag: output.ds_tag.clone(),
+                                owner_key: SigningKey::from_bytes(&output.owner_key.to_bytes()),
+                                chain_history: output.chain_history.clone(),
+                                last_timestamp: output.last_timestamp,
+                            }));
+                            if spent_history.len() > 50 {
+                                spent_history.remove(0);
+                            }
+
+                            let receiver_key = SigningKey::generate(&mut rng);
+                            let receiver_pub = receiver_key.verifying_key().to_bytes();
+                            let receiver_ephemeral_pub_hash = Some(*blake3::hash(&receiver_pub).as_bytes());
+
+                            let is_split = rng.gen_bool(0.30);
+                            let (change_key_opt, change_ephemeral_pub_hash) = if is_split {
+                                let change_key = SigningKey::generate(&mut rng);
+                                let change_pub = change_key.verifying_key().to_bytes();
+                                let change_hash = *blake3::hash(&change_pub).as_bytes();
+                                (Some(change_key), Some(change_hash))
+                            } else {
+                                (None, None)
+                            };
+
+                            let timestamp = (sim_now_ms as u128).max(output.last_timestamp + 1000);
+                            let sender_pub = output.owner_key.verifying_key().to_bytes();
+
+                            let mut h = blake3::Hasher::new();
+                            h.update(output.ds_tag.as_bytes());
+                            h.update(&timestamp.to_le_bytes());
+                            h.update(&sender_pub);
+                            let tx_hash = *h.finalize().as_bytes();
+
+                            let mut spend = L2LockRequest {
+                                auth: L2AuthPayload {
+                                    ephemeral_pubkey: sender_pub,
+                                    auth_signature: None,
+                                },
+                                layer2_voucher_id: voucher.voucher_id.clone(),
+                                ds_tag: Some(output.ds_tag.clone()),
+                                transaction_hash: tx_hash,
+                                is_genesis: false,
+                                sender_ephemeral_pub: sender_pub,
+                                receiver_ephemeral_pub_hash,
+                                change_ephemeral_pub_hash,
+                                layer2_signature: [0u8; 64],
+                                trap_r: Some("none".into()),
+                                trap_s: Some("none".into()),
+                                encrypted_timestamp: timestamp,
+                                deletable_at: None,
+                                privacy_guard: None,
+                            };
+                            let payload_hash = calculate_l2_payload_hash(&spend);
+                            spend.layer2_signature = output.owner_key.sign(&payload_hash).to_bytes();
+
+                            let mut updated_chain = output.chain_history.clone();
+                            updated_chain.push(spend);
+
+                            let chain_req = L2ChainLockRequest {
+                                auth: L2AuthPayload {
+                                    ephemeral_pubkey: sender_pub,
+                                    auth_signature: None,
+                                },
+                                layer2_voucher_id: voucher.voucher_id.clone(),
+                                chain: updated_chain.clone(),
+                            };
+
+                            let receiver_tag = bs58::encode(&tx_hash).into_string();
                             voucher.unspent_outputs.push(UnspentOutput {
-                                ds_tag: change_tag,
-                                owner_key: change_key,
-                                chain_history: updated_chain,
+                                ds_tag: receiver_tag,
+                                owner_key: receiver_key,
+                                chain_history: updated_chain.clone(),
                                 last_timestamp: timestamp,
                             });
+
+                            if let (Some(change_key), Some(change_hash)) = (change_key_opt, change_ephemeral_pub_hash) {
+                                let change_tag = bs58::encode(&change_hash).into_string();
+                                voucher.unspent_outputs.push(UnspentOutput {
+                                    ds_tag: change_tag,
+                                    owner_key: change_key,
+                                    chain_history: updated_chain,
+                                    last_timestamp: timestamp,
+                                });
+                            }
+
+                            let (lock_type, tag_display) = if is_split {
+                                (
+                                    "SPLIT LOCK  ",
+                                    format!("Parent: {}... (Split 2x)", &output.ds_tag[..8.min(output.ds_tag.len())]),
+                                )
+                            } else {
+                                (
+                                    "SPEND LOCK  ",
+                                    format!("Parent: {}...", &output.ds_tag[..8.min(output.ds_tag.len())]),
+                                )
+                            };
+
+                            (IngressRequest::Chain(chain_req), lock_type, tag_display)
                         }
-
-                        let (lock_type, tag_display) = if is_split {
-                            (
-                                "SPLIT LOCK  ",
-                                format!("Parent: {}... (Split 2x)", &output.ds_tag[..8.min(output.ds_tag.len())]),
-                            )
-                        } else {
-                            (
-                                "SPEND LOCK  ",
-                                format!("Parent: {}...", &output.ds_tag[..8.min(output.ds_tag.len())]),
-                            )
-                        };
-
-                        (IngressRequest::Chain(chain_req), lock_type, tag_display)
                     };
 
                     let r_tier: f64 = rng.gen_range(0.0..1.0);

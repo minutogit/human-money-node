@@ -452,7 +452,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let daily_write_quota = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
     let local_node_id_u16 = state.identity.node_id_u16();
-    let (today_write_used, today_read_used, total_write_used, total_read_used) = {
+    let (today_write_used_raw, today_read_used_raw, total_write_used, total_read_used) = {
         let thermo_arc = state.tier_controller.thermometer();
         let thermo = thermo_arc
             .read()
@@ -464,6 +464,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
             thermo.total_daily_read_usage(),
         )
     };
+    let today_write_used = total_write_used.max(today_write_used_raw);
+    let today_read_used = total_read_used.max(today_read_used_raw);
     let (vip_writes_today, f2f_writes_today, free_writes_today) = state.tier_controller.tier_counters();
 
     let thermometer = ThermometerStatsDto {
@@ -486,20 +488,21 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let free_pow_diff = state.pow_engine.default_difficulty();
     let free_req_sec = sparklines.writes.last().copied().unwrap_or(0.0) as f64;
     let friends_reserved_pct = 30.0;
-    let friends_used_pct = if daily_write_quota > 0 {
-        ((today_write_used as f64 / daily_write_quota as f64) * 100.0).min(100.0)
+    let friends_used_pct = ((total_write_used as f64 / daily_write_quota.max(1) as f64) * 100.0).clamp(0.0, 100.0);
+    let vip_reserved_pct = 50.0;
+    let total_tier_writes = vip_writes_today + f2f_writes_today + free_writes_today;
+    let vip_used_pct = if total_tier_writes > 0 {
+        ((vip_writes_today as f64 / total_tier_writes as f64) * 100.0).clamp(0.0, 100.0)
     } else {
         0.0
     };
-    let vip_reserved_pct = 50.0;
-    let vip_used_pct = 0.0;
     let vip_accounts = state
         .tier_controller
-        .list_cached_vip_quotas()
+        .list_vip_accounts()
         .into_iter()
-        .map(|(tag, bal)| VipAccountDto {
-            account_tag: hex::encode(tag),
-            balance_byte_years: bal,
+        .map(|(account_tag, balance_byte_years)| VipAccountDto {
+            account_tag,
+            balance_byte_years,
         })
         .collect();
 
@@ -748,30 +751,16 @@ pub async fn admin_topup_quota(
     }
 
     let trimmed = payload.account_tag.trim();
-    let tag_bytes = match hex::decode(trimmed) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            arr
-        }
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "BadRequest",
-                    "message": "Invalid hex account tag (must be 64 hex characters / 32 bytes)"
-                })),
-            )
-                .into_response();
-        }
-    };
+    let tag_bytes = crate::control::parse_account_tag(trimmed);
+    state.tier_controller.register_vip_token(trimmed, tag_bytes);
+    state.tier_controller.register_vip_tag(tag_bytes);
 
     match state.tier_controller.topup_vip_quota(tag_bytes, payload.byte_years) {
         Ok(new_balance) => (
             StatusCode::OK,
             Json(TopupQuotaResponse {
                 status: "ok".into(),
-                account_tag: hex::encode(tag_bytes),
+                account_tag: trimmed.to_string(),
                 new_balance,
             }),
         )

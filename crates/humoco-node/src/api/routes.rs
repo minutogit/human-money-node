@@ -170,11 +170,10 @@ async fn submit_lock(
     headers: HeaderMap,
     body_bytes: bytes::Bytes,
 ) -> Response {
-    state.metrics.record_write();
     let start = std::time::Instant::now();
     match serde_json::from_slice::<IngressLockPayload>(&body_bytes) {
         Ok(IngressLockPayload::Chain(chain_req)) => {
-            return submit_hmc_chain_lock(State(state), headers, Json(chain_req)).await;
+            return submit_hmc_chain_lock_inner(state, headers, chain_req, start).await;
         }
         Ok(IngressLockPayload::Single(hmc_req)) => {
             return submit_hmc_lock(state, headers, hmc_req, start).await;
@@ -1002,6 +1001,7 @@ async fn submit_hmc_lock(
     req: L2LockRequest,
     start: std::time::Instant,
 ) -> Response {
+    state.metrics.record_write();
     // 0. Check if submitter or ephemeral key is banned/slashed
     if state.engine.is_node_banned(&req.sender_ephemeral_pub).await
         || state.engine.is_node_banned(&req.auth.ephemeral_pubkey).await
@@ -1338,6 +1338,17 @@ async fn submit_hmc_chain_lock(
     headers: HeaderMap,
     Json(chain_req): Json<L2ChainLockRequest>,
 ) -> Response {
+    let start = std::time::Instant::now();
+    submit_hmc_chain_lock_inner(state, headers, chain_req, start).await
+}
+
+async fn submit_hmc_chain_lock_inner(
+    state: AppState,
+    headers: HeaderMap,
+    chain_req: L2ChainLockRequest,
+    start: std::time::Instant,
+) -> Response {
+    state.metrics.record_write();
     if chain_req.chain.is_empty() {
         let envelope = wrap_and_sign_verdict(
             &state.identity,
@@ -1348,7 +1359,6 @@ async fn submit_hmc_chain_lock(
         return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
     }
 
-    let start = std::time::Instant::now();
     // Banned check for batch auth and each hop
     if state.engine.is_node_banned(&chain_req.auth.ephemeral_pubkey).await {
         let envelope = wrap_and_sign_verdict(

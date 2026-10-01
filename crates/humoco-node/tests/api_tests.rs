@@ -2943,17 +2943,22 @@ async fn test_admin_quota_mutation() {
     ).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
-    // 2. POST with invalid hex -> 400
+    // 2. POST with plain-text token name -> 200 OK
     let res = app.clone().oneshot(
         Request::builder()
             .method("POST")
             .uri("/dashboard/admin/quota")
             .header("Authorization", "Bearer admin_secret_vip")
             .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"account_tag": "bad_tag", "byte_years": 5000}"#))
+            .body(Body::from(r#"{"account_tag": "pos_terminal_vip_1", "byte_years": 1000}"#))
             .unwrap(),
     ).await.unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["status"], "ok");
+    assert_eq!(body_json["account_tag"], "pos_terminal_vip_1");
+    assert_eq!(body_json["new_balance"], 1000);
 
     // 3. POST top-up 5000 byte-years -> 200
     let res = app.clone().oneshot(

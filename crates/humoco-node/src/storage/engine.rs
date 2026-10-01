@@ -1007,7 +1007,7 @@ impl DualTierEngine {
             let hmc = self.hmc_ram.read().await;
             for (vid, tags) in &hmc.vouchers {
                 let root_valid = hmc.voucher_roots.get(vid).copied().unwrap_or(0);
-                let genesis = tags.iter().find(|t| !t.starts_with("ds_")).cloned();
+                let genesis = tags.iter().find(|t| hmc.locks.get(*t).map_or(false, |e| e.deletable_at.is_some())).cloned();
                 vouchers_map.insert(vid.clone(), (root_valid, tags.len(), genesis));
             }
         }
@@ -1020,7 +1020,7 @@ impl DualTierEngine {
                         let root_valid = locks.iter().find_map(|(_, entry)| {
                             entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok())
                         }).unwrap_or(0);
-                        let genesis = locks.iter().find(|(tag, _)| !tag.starts_with("ds_")).map(|(tag, _)| tag.clone());
+                        let genesis = locks.iter().find(|(_, entry)| entry.deletable_at.is_some()).map(|(tag, _)| tag.clone());
                         vouchers_map.insert(vid, (root_valid, locks.len(), genesis));
                     }
                 }
@@ -1094,7 +1094,7 @@ impl DualTierEngine {
         let mut created_at_ms = 0;
 
         for (tag, entry) in locks_map {
-            let is_genesis = !tag.starts_with("ds_");
+            let is_genesis = entry.deletable_at.is_some();
             if is_genesis {
                 genesis_tag = Some(tag.clone());
                 if let Some(del) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {

@@ -24,6 +24,20 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+struct UnspentOutput {
+    ds_tag: String,
+    owner_key: SigningKey,
+    chain_history: Vec<L2LockRequest>,
+    last_timestamp: u128,
+}
+
+struct SimVoucher {
+    voucher_id: String,
+    #[allow(dead_code)]
+    valid_until_ms: u64,
+    unspent_outputs: Vec<UnspentOutput>,
+}
+
 fn make_hmc_genesis(
     voucher_id: &str,
     valid_until_ms: u64,
@@ -51,39 +65,6 @@ fn make_hmc_genesis(
         trap_s: Some("none".into()),
         encrypted_timestamp: timestamp_ms as u128,
         deletable_at: Some(del_str),
-        privacy_guard: None,
-    };
-    let payload_hash = calculate_l2_payload_hash(&req);
-    req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
-    req
-}
-
-fn make_hmc_spend(
-    voucher_id: &str,
-    ds_tag: &str,
-    tx_hash: [u8; 32],
-    timestamp_ms: u64,
-    sender_key: &SigningKey,
-) -> L2LockRequest {
-    let sender_pub = sender_key.verifying_key().to_bytes();
-
-    let mut req = L2LockRequest {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: sender_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: voucher_id.to_string(),
-        ds_tag: Some(ds_tag.to_string()),
-        transaction_hash: tx_hash,
-        is_genesis: false,
-        sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
-        layer2_signature: [0u8; 64],
-        trap_r: Some("none".into()),
-        trap_s: Some("none".into()),
-        encrypted_timestamp: timestamp_ms as u128,
-        deletable_at: None,
         privacy_guard: None,
     };
     let payload_hash = calculate_l2_payload_hash(&req);
@@ -260,10 +241,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("\x1b[1;33m⚡ Starte kontinuierlichen Client-Traffic (1 Transaktion pro Sekunde via wechselnde Gateways)...\x1b[0m");
     println!("\x1b[90m   (Drücke Strg+C zum Beenden)\x1b[0m\n");
 
-    let client_key = SigningKey::from_bytes(&[42u8; 32]);
-    let client_pub = client_key.verifying_key().to_bytes();
     let mut rng = rand::thread_rng();
-    let mut active_vouchers: Vec<(String, L2LockRequest)> = Vec::new();
+    let mut active_vouchers: Vec<SimVoucher> = Vec::new();
     let mut tx_counter: u64 = 0;
 
     let shutdown_signal = tokio::signal::ctrl_c();
@@ -286,37 +265,139 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let gateway = &instances[gateway_idx];
                 let current_time = now_ms();
 
-                // Decide action: create new genesis voucher (~40%) or spend existing (~60%)
+                // Clean up vouchers with no unspent outputs
+                active_vouchers.retain(|v| !v.unspent_outputs.is_empty());
+
+                // Decide action: create new genesis voucher (~35%) or spend existing (~65%)
                 let should_create_genesis = active_vouchers.is_empty() || rng.gen_bool(0.35);
 
                 let (req, lock_type, tag_display) = if should_create_genesis {
                     let v_num: u64 = rng.gen_range(100000..999999);
                     let v_id = format!("v_{}_{}", v_num, tx_counter);
                     let valid_until = current_time + 3_600_000; // 1h validity
-                    let genesis = make_hmc_genesis(&v_id, valid_until, current_time, &client_key);
-                    active_vouchers.push((v_id.clone(), genesis.clone()));
+
+                    let issuer_key = SigningKey::generate(&mut rng);
+                    let genesis = make_hmc_genesis(&v_id, valid_until, current_time, &issuer_key);
+                    let genesis_tx_hash = genesis.transaction_hash;
+                    let genesis_tag = bs58::encode(&genesis_tx_hash).into_string();
+                    let genesis_spend_tag = bs58::encode(
+                        blake3::hash(format!("{}:out0", genesis_tag).as_bytes()).as_bytes(),
+                    )
+                    .into_string();
+
+                    let unspent = UnspentOutput {
+                        ds_tag: genesis_spend_tag,
+                        owner_key: issuer_key,
+                        chain_history: vec![genesis.clone()],
+                        last_timestamp: current_time as u128,
+                    };
+
+                    active_vouchers.push(SimVoucher {
+                        voucher_id: v_id.clone(),
+                        valid_until_ms: valid_until,
+                        unspent_outputs: vec![unspent],
+                    });
+
                     if active_vouchers.len() > 50 {
                         active_vouchers.remove(0);
                     }
-                    let tag_display = format!("Voucher: {}", v_id);
+
+                    let tag_display = format!("Tag: {}...", &genesis_tag[..8.min(genesis_tag.len())]);
                     (IngressRequest::Single(genesis), "GENESIS LOCK", tag_display)
                 } else {
                     let v_idx = rng.gen_range(0..active_vouchers.len());
-                    let (v_id, genesis) = &active_vouchers[v_idx];
-                    let ds_tag = format!("ds_{}_{}", tx_counter, rng.gen_range(1000..9999));
-                    let mut tx_hash = [0u8; 32];
-                    rng.fill(&mut tx_hash);
-                    let spend = make_hmc_spend(v_id, &ds_tag, tx_hash, current_time + 1000, &client_key);
-                    let chain_req = L2ChainLockRequest {
+                    let voucher = &mut active_vouchers[v_idx];
+                    let out_idx = rng.gen_range(0..voucher.unspent_outputs.len());
+                    let output = voucher.unspent_outputs.remove(out_idx);
+
+                    let receiver_key = SigningKey::generate(&mut rng);
+                    let receiver_pub = receiver_key.verifying_key().to_bytes();
+                    let receiver_ephemeral_pub_hash = Some(*blake3::hash(&receiver_pub).as_bytes());
+
+                    let is_split = rng.gen_bool(0.30);
+                    let (change_key_opt, change_ephemeral_pub_hash) = if is_split {
+                        let change_key = SigningKey::generate(&mut rng);
+                        let change_pub = change_key.verifying_key().to_bytes();
+                        let change_hash = *blake3::hash(&change_pub).as_bytes();
+                        (Some(change_key), Some(change_hash))
+                    } else {
+                        (None, None)
+                    };
+
+                    let timestamp = (current_time as u128).max(output.last_timestamp + 1000);
+                    let sender_pub = output.owner_key.verifying_key().to_bytes();
+
+                    let mut h = blake3::Hasher::new();
+                    h.update(output.ds_tag.as_bytes());
+                    h.update(&timestamp.to_le_bytes());
+                    h.update(&sender_pub);
+                    let tx_hash = *h.finalize().as_bytes();
+
+                    let mut spend = L2LockRequest {
                         auth: L2AuthPayload {
-                            ephemeral_pubkey: client_pub,
+                            ephemeral_pubkey: sender_pub,
                             auth_signature: None,
                         },
-                        layer2_voucher_id: v_id.clone(),
-                        chain: vec![genesis.clone(), spend],
+                        layer2_voucher_id: voucher.voucher_id.clone(),
+                        ds_tag: Some(output.ds_tag.clone()),
+                        transaction_hash: tx_hash,
+                        is_genesis: false,
+                        sender_ephemeral_pub: sender_pub,
+                        receiver_ephemeral_pub_hash,
+                        change_ephemeral_pub_hash,
+                        layer2_signature: [0u8; 64],
+                        trap_r: Some("none".into()),
+                        trap_s: Some("none".into()),
+                        encrypted_timestamp: timestamp,
+                        deletable_at: None,
+                        privacy_guard: None,
                     };
-                    let tag_display = format!("Parent: {}...", &ds_tag[..8.min(ds_tag.len())]);
-                    (IngressRequest::Chain(chain_req), "SPEND LOCK  ", tag_display)
+                    let payload_hash = calculate_l2_payload_hash(&spend);
+                    spend.layer2_signature = output.owner_key.sign(&payload_hash).to_bytes();
+
+                    let mut updated_chain = output.chain_history.clone();
+                    updated_chain.push(spend);
+
+                    let chain_req = L2ChainLockRequest {
+                        auth: L2AuthPayload {
+                            ephemeral_pubkey: sender_pub,
+                            auth_signature: None,
+                        },
+                        layer2_voucher_id: voucher.voucher_id.clone(),
+                        chain: updated_chain.clone(),
+                    };
+
+                    let receiver_tag = bs58::encode(&tx_hash).into_string();
+                    voucher.unspent_outputs.push(UnspentOutput {
+                        ds_tag: receiver_tag,
+                        owner_key: receiver_key,
+                        chain_history: updated_chain.clone(),
+                        last_timestamp: timestamp,
+                    });
+
+                    if let (Some(change_key), Some(change_hash)) = (change_key_opt, change_ephemeral_pub_hash) {
+                        let change_tag = bs58::encode(&change_hash).into_string();
+                        voucher.unspent_outputs.push(UnspentOutput {
+                            ds_tag: change_tag,
+                            owner_key: change_key,
+                            chain_history: updated_chain,
+                            last_timestamp: timestamp,
+                        });
+                    }
+
+                    let (lock_type, tag_display) = if is_split {
+                        (
+                            "SPLIT LOCK  ",
+                            format!("Parent: {}... (Split 2x)", &output.ds_tag[..8.min(output.ds_tag.len())]),
+                        )
+                    } else {
+                        (
+                            "SPEND LOCK  ",
+                            format!("Parent: {}...", &output.ds_tag[..8.min(output.ds_tag.len())]),
+                        )
+                    };
+
+                    (IngressRequest::Chain(chain_req), lock_type, tag_display)
                 };
 
                 match post_lock_http(gateway.rpc_addr, &req).await {
@@ -324,14 +405,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         let verdict_str = match &resp.verdict {
                             humoco_node::api::hmc::L2Verdict::Verified { .. } | humoco_node::api::hmc::L2Verdict::Ok { .. } => "\x1b[1;32mVerified (200 OK)\x1b[0m",
                             humoco_node::api::hmc::L2Verdict::Conflict { .. } => "\x1b[1;31mConflict (409)\x1b[0m",
-                            humoco_node::api::hmc::L2Verdict::Rejected { .. } => "\x1b[1;33mRejected\x1b[0m",
+                            humoco_node::api::hmc::L2Verdict::Rejected { reason } => {
+                                eprintln!("\x1b[1;33m[TX #{:04}] Rejected: {}\x1b[0m", tx_counter, reason);
+                                "\x1b[1;33mRejected\x1b[0m"
+                            }
                             _ => "\x1b[1;33mOther\x1b[0m",
                         };
                         let quorum_info = resp.quorum_certificate.as_ref().map(|q| {
                             format!("\x1b[1;36m[{}/{} Shard-Signaturen]\x1b[0m", q.signer_count, q.active_nodes_count)
                         }).unwrap_or_else(|| "\x1b[90m[Lokal]\x1b[0m".to_string());
                         println!(
-                            "\x1b[1;37m[TX #{:04}]\x1b[0m Gateway \x1b[1;34mKnoten {} (: {})\x1b[0m | \x1b[1;35m{}\x1b[0m | {:<22} | {} {} | Latenz: \x1b[1;32m{:.2}ms\x1b[0m",
+                            "\x1b[1;37m[TX #{:04}]\x1b[0m Gateway \x1b[1;34mKnoten {} (: {})\x1b[0m | \x1b[1;35m{}\x1b[0m | {:<25} | {} {} | Latenz: \x1b[1;32m{:.2}ms\x1b[0m",
                             tx_counter,
                             gateway.id + 1,
                             gateway.rpc_addr.port(),

@@ -512,7 +512,7 @@ impl NodeDaemon {
             engine: engine.clone(),
             storage: storage.clone(),
             identity: self.identity.clone(),
-            tier_controller,
+            tier_controller: tier_controller.clone(),
             pow_engine,
             peer_manager: Some(peer_manager.clone()),
             transport: Some(transport.clone()),
@@ -563,7 +563,8 @@ impl NodeDaemon {
             self.identity.clone(),
             self.config.storage.data_dir.clone(),
             self.cancel_token.clone(),
-        );
+        )
+        .with_tier_controller(tier_controller.clone());
         let control_handle = tokio::spawn(async move {
             if let Err(err) = control_server.run().await {
                 tracing::error!(error = %err, "Control socket server encountered an error");

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use parking_lot::RwLock as PlRwLock;
 use thiserror::Error;
@@ -69,6 +70,9 @@ pub struct TierController {
     f2f_tokens: Arc<RwLock<HashSet<String>>>,
     thermometer: Arc<RwLock<NetworkThermometer>>,
     vip_quota_cache: Arc<PlRwLock<HashMap<[u8; 32], u64>>>,
+    vip_writes_today: Arc<AtomicU64>,
+    f2f_writes_today: Arc<AtomicU64>,
+    free_writes_today: Arc<AtomicU64>,
 }
 
 impl TierController {
@@ -82,7 +86,19 @@ impl TierController {
             f2f_tokens: Arc::new(RwLock::new(HashSet::new())),
             thermometer: Arc::new(RwLock::new(NetworkThermometer::new())),
             vip_quota_cache: Arc::new(PlRwLock::new(HashMap::new())),
+            vip_writes_today: Arc::new(AtomicU64::new(0)),
+            f2f_writes_today: Arc::new(AtomicU64::new(0)),
+            free_writes_today: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Returns the tier write counters: (vip, f2f, free).
+    pub fn tier_counters(&self) -> (u64, u64, u64) {
+        (
+            self.vip_writes_today.load(Ordering::Relaxed),
+            self.f2f_writes_today.load(Ordering::Relaxed),
+            self.free_writes_today.load(Ordering::Relaxed),
+        )
     }
 
     /// Returns the cached VIP quota for an account, if present in the in-memory cache.
@@ -333,6 +349,7 @@ impl TierController {
             let account_tag = self.resolve_account_tag(token)?;
             let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
             self.try_charge_vip_in_memory(&account_tag, required_byte_years)?;
+            self.vip_writes_today.fetch_add(1, Ordering::Relaxed);
             return Ok(IngressTier::Tier1Vip);
         }
 
@@ -346,6 +363,7 @@ impl TierController {
                     None => self.current_epoch_day(),
                 };
                 self.evaluate_f2f_quota(token, required_byte_years, epoch_day)?;
+                self.f2f_writes_today.fetch_add(1, Ordering::Relaxed);
                 return Ok(IngressTier::Tier2F2F);
             } else {
                 return Err(IngressError::InvalidPeerToken);
@@ -354,6 +372,7 @@ impl TierController {
 
         // 3. Check Tier 3 (Public - BLAKE3 PoW)
         if self.pow_engine.default_difficulty() == 0 {
+            self.free_writes_today.fetch_add(1, Ordering::Relaxed);
             return Ok(IngressTier::Tier3Public);
         }
 
@@ -363,6 +382,7 @@ impl TierController {
         match (pow_challenge, pow_nonce) {
             (Some(challenge), Some(nonce)) => {
                 self.pow_engine.verify_pow_for_parent(challenge, nonce, dynamic_difficulty, parent_lock).await?;
+                self.free_writes_today.fetch_add(1, Ordering::Relaxed);
                 Ok(IngressTier::Tier3Public)
             }
             _ => {

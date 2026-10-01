@@ -50,6 +50,12 @@ pub struct RecentLockSummaryDto {
     pub child_lock_hex: String,
     pub timestamp_ms: u64,
     pub status: String,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub byte_years: u64,
+    #[serde(default)]
+    pub voucher_id: Option<String>,
 }
 
 impl From<crate::storage::recent::RecentLockSummary> for RecentLockSummaryDto {
@@ -64,6 +70,9 @@ impl From<crate::storage::recent::RecentLockSummary> for RecentLockSummaryDto {
             child_lock_hex: r.child_lock_hex,
             timestamp_ms: r.timestamp_ms,
             status: status_str,
+            tier: r.tier,
+            byte_years: r.byte_years,
+            voucher_id: r.voucher_id,
         }
     }
 }

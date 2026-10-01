@@ -1186,7 +1186,7 @@ async fn submit_hmc_lock(
         Some(&parent_bytes)
     };
 
-    if let Err(err) = state
+    let ingress_tier = match state
         .tier_controller
         .evaluate_and_charge_with_time(
             auth_token,
@@ -1199,77 +1199,95 @@ async fn submit_hmc_lock(
         )
         .await
     {
-        let mut required_diff_hdr = None;
-        let (status, reason) = match err {
-            IngressError::PoWRequired { .. } => (
-                StatusCode::UNAUTHORIZED,
-                "Proof-of-Work challenge response required".into(),
-            ),
-            IngressError::InvalidPoW(err) => {
-                if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = err {
-                    required_diff_hdr = Some(required);
-                    (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
-                    )
-                } else {
-                    (
-                        StatusCode::UNAUTHORIZED,
-                        format!("Invalid Proof of Work: {}", err),
-                    )
+        Ok(tier) => tier,
+        Err(err) => {
+            let mut required_diff_hdr = None;
+            let (status, reason) = match err {
+                IngressError::PoWRequired { .. } => (
+                    StatusCode::UNAUTHORIZED,
+                    "Proof-of-Work challenge response required".into(),
+                ),
+                IngressError::InvalidPoW(err) => {
+                    if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = err {
+                        required_diff_hdr = Some(required);
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
+                        )
+                    } else {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            format!("Invalid Proof of Work: {}", err),
+                        )
+                    }
+                }
+                IngressError::QuotaExceeded { available, required } => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "VIP Quota exceeded: required {} byte-years, available {}",
+                        required, available
+                    ),
+                ),
+                IngressError::ReadQuotaExceeded { available, required } => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Read quota exceeded: required {} reads, available {}",
+                        required, available
+                    ),
+                ),
+                IngressError::InvalidAuthToken => (
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid VIP authentication token".into(),
+                ),
+                IngressError::InvalidPeerToken => (
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid F2F peer token".into(),
+                ),
+                IngressError::Storage(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Storage error: {}", e),
+                ),
+            };
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                state.metrics.record_lock_rejected();
+            }
+            let envelope = wrap_and_sign_verdict(
+                &state.identity,
+                L2Verdict::Rejected { reason },
+            );
+            let mut resp = (status, Json(envelope)).into_response();
+            if let Some(req_diff) = required_diff_hdr {
+                if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
+                    resp.headers_mut().insert(
+                        axum::http::HeaderName::from_static("x-required-difficulty"),
+                        hdr_val,
+                    );
                 }
             }
-            IngressError::QuotaExceeded { available, required } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                format!(
-                    "VIP Quota exceeded: required {} byte-years, available {}",
-                    required, available
-                ),
-            ),
-            IngressError::ReadQuotaExceeded { available, required } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                format!(
-                    "Read quota exceeded: required {} reads, available {}",
-                    required, available
-                ),
-            ),
-            IngressError::InvalidAuthToken => (
-                StatusCode::UNAUTHORIZED,
-                "Invalid VIP authentication token".into(),
-            ),
-            IngressError::InvalidPeerToken => (
-                StatusCode::UNAUTHORIZED,
-                "Invalid F2F peer token".into(),
-            ),
-            IngressError::Storage(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Storage error: {}", e),
-            ),
-        };
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            state.metrics.record_lock_rejected();
+            return resp;
         }
-        let envelope = wrap_and_sign_verdict(
-            &state.identity,
-            L2Verdict::Rejected { reason },
-        );
-        let mut resp = (status, Json(envelope)).into_response();
-        if let Some(req_diff) = required_diff_hdr {
-            if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
-                resp.headers_mut().insert(
-                    axum::http::HeaderName::from_static("x-required-difficulty"),
-                    hdr_val,
-                );
-            }
-        }
-        return resp;
-    }
+    };
+
+    let tier_str = match ingress_tier {
+        crate::ingress::IngressTier::Tier1Vip => "VIP",
+        crate::ingress::IngressTier::Tier2F2F => "F2F",
+        crate::ingress::IngressTier::Tier3Public => "Free",
+    };
+    let byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
 
     // 4. Ingress into DualTierEngine (ClientApi origin) with ingress window enforcement
     let start_local = std::time::Instant::now();
     let (verdict, is_new) = state
         .engine
-        .ingress_hmc_lock_with_origin(lookup_tag.clone(), entry.clone(), IngressOrigin::ClientApi, Some(now_ms))
+        .ingress_hmc_lock_with_metadata(
+            lookup_tag.clone(),
+            entry.clone(),
+            IngressOrigin::ClientApi,
+            Some(now_ms),
+            Some(tier_str),
+            Some(byte_years),
+            Some(req.layer2_voucher_id.clone()),
+        )
         .await;
     state.metrics.record_local_latency(start_local.elapsed());
 
@@ -1382,50 +1400,66 @@ async fn submit_hmc_chain_lock(
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
-    if let Err(err) = state
+    let ingress_tier = match state
         .tier_controller
         .evaluate_and_charge_with_time(auth_token, peer_token, pow_challenge, pow_nonce, ttl_seconds, None, Some(now_ms))
         .await
     {
-        let (status, reason) = match err {
-            IngressError::PoWRequired { .. } => (
-                StatusCode::UNAUTHORIZED,
-                "Proof-of-Work challenge response required".into(),
-            ),
-            IngressError::InvalidPoW(e) => {
-                if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = e {
-                    (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
-                    )
-                } else {
-                    (StatusCode::UNAUTHORIZED, format!("Invalid Proof of Work: {}", e))
+        Ok(tier) => tier,
+        Err(err) => {
+            let (status, reason) = match err {
+                IngressError::PoWRequired { .. } => (
+                    StatusCode::UNAUTHORIZED,
+                    "Proof-of-Work challenge response required".into(),
+                ),
+                IngressError::InvalidPoW(e) => {
+                    if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = e {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
+                        )
+                    } else {
+                        (StatusCode::UNAUTHORIZED, format!("Invalid Proof of Work: {}", e))
+                    }
                 }
+                IngressError::QuotaExceeded { available, required } => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("VIP Quota exceeded: required {} byte-years, available {}", required, available),
+                ),
+                IngressError::ReadQuotaExceeded { available, required } => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("Read quota exceeded: required {} reads, available {}", required, available),
+                ),
+                IngressError::InvalidAuthToken => (StatusCode::UNAUTHORIZED, "Invalid VIP authentication token".into()),
+                IngressError::InvalidPeerToken => (StatusCode::UNAUTHORIZED, "Invalid F2F peer token".into()),
+                IngressError::Storage(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Storage error: {}", e)),
+            };
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                state.metrics.record_lock_rejected();
             }
-            IngressError::QuotaExceeded { available, required } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                format!("VIP Quota exceeded: required {} byte-years, available {}", required, available),
-            ),
-            IngressError::ReadQuotaExceeded { available, required } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                format!("Read quota exceeded: required {} reads, available {}", required, available),
-            ),
-            IngressError::InvalidAuthToken => (StatusCode::UNAUTHORIZED, "Invalid VIP authentication token".into()),
-            IngressError::InvalidPeerToken => (StatusCode::UNAUTHORIZED, "Invalid F2F peer token".into()),
-            IngressError::Storage(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Storage error: {}", e)),
-        };
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            state.metrics.record_lock_rejected();
+            let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
+            return (status, Json(envelope)).into_response();
         }
-        let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
-        return (status, Json(envelope)).into_response();
-    }
+    };
+
+    let tier_str = match ingress_tier {
+        crate::ingress::IngressTier::Tier1Vip => "VIP",
+        crate::ingress::IngressTier::Tier2F2F => "F2F",
+        crate::ingress::IngressTier::Tier3Public => "Free",
+    };
+    let byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
 
     // Atomares Ketten-Locking via engine
     let start_local = std::time::Instant::now();
     let (verdict, is_new) = state
         .engine
-        .ingress_hmc_chain_lock(chain_req.clone(), IngressOrigin::ClientApi, Some(now_ms))
+        .ingress_hmc_chain_lock_with_tier(
+            chain_req.clone(),
+            IngressOrigin::ClientApi,
+            Some(now_ms),
+            Some(tier_str),
+            Some(byte_years),
+        )
         .await;
     state.metrics.record_local_latency(start_local.elapsed());
 

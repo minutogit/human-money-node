@@ -29,6 +29,16 @@ pub struct ThermometerStatsDto {
     pub daily_read_quota: u64,
     pub today_write_used: u64,
     pub today_read_used: u64,
+    #[serde(default)]
+    pub total_write_used: u64,
+    #[serde(default)]
+    pub total_read_used: u64,
+    #[serde(default)]
+    pub vip_writes_today: u64,
+    #[serde(default)]
+    pub f2f_writes_today: u64,
+    #[serde(default)]
+    pub free_writes_today: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +110,12 @@ pub struct RecentLockDto {
     pub child_lock_hex: String,
     pub timestamp_ms: u64,
     pub status: String,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub byte_years: u64,
+    #[serde(default)]
+    pub voucher_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -401,6 +417,9 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
                 child_lock_hex: r.child_lock_hex,
                 timestamp_ms: r.timestamp_ms,
                 status: status_str,
+                tier: r.tier,
+                byte_years: r.byte_years,
+                voucher_id: r.voucher_id,
             }
         })
         .collect();
@@ -423,18 +442,19 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let daily_write_quota = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
     let local_node_id_u16 = state.identity.node_id_u16();
-    let today_write_used = state
-        .tier_controller
-        .thermometer()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_node_usage(local_node_id_u16);
-    let today_read_used = state
-        .tier_controller
-        .thermometer()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_node_read_usage(local_node_id_u16);
+    let (today_write_used, today_read_used, total_write_used, total_read_used) = {
+        let thermo_arc = state.tier_controller.thermometer();
+        let thermo = thermo_arc
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        (
+            thermo.get_node_usage(local_node_id_u16),
+            thermo.get_node_read_usage(local_node_id_u16),
+            thermo.total_daily_write_usage(),
+            thermo.total_daily_read_usage(),
+        )
+    };
+    let (vip_writes_today, f2f_writes_today, free_writes_today) = state.tier_controller.tier_counters();
 
     let thermometer = ThermometerStatsDto {
         gossip_write_load,
@@ -445,6 +465,11 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         daily_read_quota,
         today_write_used,
         today_read_used,
+        total_write_used,
+        total_read_used,
+        vip_writes_today,
+        f2f_writes_today,
+        free_writes_today,
     };
 
     // 4. Tiers Overview
@@ -1463,6 +1488,8 @@ footer {{
               <th>Timestamp (ms)</th>
               <th>Parent Lock / Lookup Tag</th>
               <th>Child Lock (t_id)</th>
+              <th>Tier &amp; Quota</th>
+              <th>Gutschein-ID</th>
               <th>Status</th>
               <th>Rohdaten</th>
             </tr>
@@ -1932,7 +1959,7 @@ async function refreshDashboard() {{
     if (d.tiers && d.tiers.vip_accounts && d.tiers.vip_accounts.length > 0) {{
       let html = '';
       for (const a of d.tiers.vip_accounts) {{
-        html += '<tr><td><span class="code" title="' + a.account_tag + '">' + a.account_tag + '</span></td><td><strong>' + a.balance_byte_years + '</strong> Byte-Jahre</td></tr>';
+        html += '<tr><td><span class="code" title="' + a.account_tag + '">' + a.account_tag + '</span></td><td><strong style="color: var(--purple);">' + a.balance_byte_years.toLocaleString() + '</strong> Byte-Jahre</td></tr>';
       }}
       vipTbody.innerHTML = html;
     }} else {{
@@ -1965,11 +1992,22 @@ async function refreshDashboard() {{
         const b = l.status === 'Verified' ? '<span class="badge badge-green">Verified</span>' : (l.status === 'Provisional' ? '<span class="badge badge-amber">Provisional</span>' : '<span class="badge badge-red">Conflict</span>');
         const pShort = truncateHash(l.parent_lock_hex);
         const cShort = truncateHash(l.child_lock_hex);
-        html += '<tr><td>' + l.timestamp_ms + '</td><td class="code" title="' + l.parent_lock_hex + '">' + pShort + '</td><td class="code" title="' + l.child_lock_hex + '">' + cShort + '</td><td>' + b + '</td><td><button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openLockInspector(\'' + l.parent_lock_hex + '\')">📄 JSON</button></td></tr>';
+        let tierBadge = '<span class="badge badge-cyan">P2P Sync</span>';
+        if (l.tier === 'VIP') {{
+          tierBadge = '<span class="badge badge-purple">VIP (' + (l.byte_years || 0) + ' BY)</span>';
+        }} else if (l.tier === 'F2F') {{
+          tierBadge = '<span class="badge badge-blue">F2F (' + (l.byte_years || 0) + ' BY)</span>';
+        }} else if (l.tier === 'Free') {{
+          tierBadge = '<span class="badge badge-green">Free (PoW)</span>';
+        }} else if (l.tier) {{
+          tierBadge = '<span class="badge badge-cyan">' + l.tier + '</span>';
+        }}
+        const vLink = l.voucher_id ? '<button class="btn btn-secondary" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;" onclick="openVoucherInspector(\'' + l.voucher_id + '\')">🎟️ ' + truncateHash(l.voucher_id) + '</button>' : '<span style="color: var(--text-muted);">-</span>';
+        html += '<tr><td>' + l.timestamp_ms + '</td><td class="code" title="' + l.parent_lock_hex + '">' + pShort + '</td><td class="code" title="' + l.child_lock_hex + '">' + cShort + '</td><td>' + tierBadge + '</td><td>' + vLink + '</td><td>' + b + '</td><td><button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openLockInspector(\'' + l.parent_lock_hex + '\')">📄 JSON</button></td></tr>';
       }}
       locksTbody.innerHTML = html;
     }} else {{
-      locksTbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine Sperren im Ringbuffer</td></tr>';
+      locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren im Ringbuffer</td></tr>';
     }}
 
   }} catch (e) {{}}

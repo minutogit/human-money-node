@@ -18,6 +18,12 @@ pub struct RecentLockSummary {
     pub child_lock_hex: String,
     pub timestamp_ms: u64,
     pub status: RecentLockStatus,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub byte_years: u64,
+    #[serde(default)]
+    pub voucher_id: Option<String>,
 }
 
 /// Detailed live inspection of a lock from the RAM index.
@@ -147,6 +153,9 @@ mod tests {
                 } else {
                     RecentLockStatus::Conflict
                 },
+                tier: if i % 2 == 0 { "VIP".to_string() } else { "Free".to_string() },
+                byte_years: if i % 2 == 0 { 120 } else { 0 },
+                voucher_id: Some(format!("voucher_{}", i)),
             });
         }
 
@@ -183,6 +192,9 @@ mod tests {
                         child_lock_hex: format!("c_{}_{}", t, i),
                         timestamp_ms: (t * 100 + i) as u64,
                         status: RecentLockStatus::Verified,
+                        tier: "P2P-Sync".to_string(),
+                        byte_years: 0,
+                        voucher_id: None,
                     });
                     let _ = b.read().get_recent(5);
                 }

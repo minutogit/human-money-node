@@ -22,6 +22,7 @@ struct ControlState {
     data_dir: PathBuf,
     start_time: std::time::Instant,
     cancel_token: CancellationToken,
+    tier_controller: Option<Arc<crate::ingress::TierController>>,
 }
 
 pub struct ControlServer {
@@ -49,8 +50,14 @@ impl ControlServer {
                 data_dir,
                 start_time: std::time::Instant::now(),
                 cancel_token,
+                tier_controller: None,
             },
         }
+    }
+
+    pub fn with_tier_controller(mut self, tier_controller: Arc<crate::ingress::TierController>) -> Self {
+        self.state.tier_controller = Some(tier_controller);
+        self
     }
 
     pub fn with_start_time(mut self, start_time: std::time::Instant) -> Self {
@@ -272,22 +279,46 @@ impl ControlServer {
                     byte_years,
                 } => {
                     let tag_bytes = parse_account_tag(&account_tag);
-                    let current = state.storage.get_quota(&tag_bytes).unwrap_or(0);
-                    let new_balance = current.saturating_add(byte_years);
-                    match state.storage.set_quota(&tag_bytes, new_balance) {
-                        Ok(()) => ControlResponse::QuotaUpdated { new_balance },
-                        Err(err) => ControlResponse::Error {
-                            message: format!("Failed to update quota in storage: {}", err),
-                        },
+                    if let Some(ref tc) = state.tier_controller {
+                        tc.register_vip_token(account_tag.clone(), tag_bytes);
+                        tc.register_vip_tag(tag_bytes);
+                        match tc.topup_vip_quota(tag_bytes, byte_years) {
+                            Ok(new_balance) => ControlResponse::QuotaUpdated { new_balance },
+                            Err(err) => ControlResponse::Error {
+                                message: format!("Failed to update quota: {}", err),
+                            },
+                        }
+                    } else {
+                        let current = state.storage.get_quota(&tag_bytes).unwrap_or(0);
+                        let new_balance = current.saturating_add(byte_years);
+                        match state.storage.set_quota(&tag_bytes, new_balance) {
+                            Ok(()) => ControlResponse::QuotaUpdated { new_balance },
+                            Err(err) => ControlResponse::Error {
+                                message: format!("Failed to update quota in storage: {}", err),
+                            },
+                        }
                     }
                 }
                 ControlRequest::GetQuota { account_tag } => {
                     let tag_bytes = parse_account_tag(&account_tag);
-                    match state.storage.get_quota(&tag_bytes) {
-                        Ok(balance) => ControlResponse::Quota { balance },
-                        Err(err) => ControlResponse::Error {
-                            message: format!("Failed to retrieve quota from storage: {}", err),
-                        },
+                    if let Some(ref tc) = state.tier_controller {
+                        if let Some(balance) = tc.get_cached_vip_quota(&tag_bytes) {
+                            ControlResponse::Quota { balance }
+                        } else {
+                            match state.storage.get_quota(&tag_bytes) {
+                                Ok(balance) => ControlResponse::Quota { balance },
+                                Err(err) => ControlResponse::Error {
+                                    message: format!("Failed to retrieve quota from storage: {}", err),
+                                },
+                            }
+                        }
+                    } else {
+                        match state.storage.get_quota(&tag_bytes) {
+                            Ok(balance) => ControlResponse::Quota { balance },
+                            Err(err) => ControlResponse::Error {
+                                message: format!("Failed to retrieve quota from storage: {}", err),
+                            },
+                        }
                     }
                 }
                 ControlRequest::Shutdown => {

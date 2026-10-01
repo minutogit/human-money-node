@@ -73,6 +73,13 @@ fn make_hmc_genesis(
     req
 }
 
+#[derive(Debug, Clone)]
+enum SimTier {
+    F2F,
+    Vip(&'static str),
+    Free,
+}
+
 #[derive(serde::Serialize)]
 #[serde(untagged)]
 enum IngressRequest {
@@ -83,15 +90,22 @@ enum IngressRequest {
 async fn post_lock_http(
     rpc_addr: SocketAddr,
     req: &IngressRequest,
+    tier: &SimTier,
 ) -> Result<(StatusCode, Duration, L2ResponseEnvelope), Box<dyn std::error::Error + Send + Sync>> {
     let start = Instant::now();
     let json_body = serde_json::to_string(req)?;
     let mut stream = tokio::net::TcpStream::connect(rpc_addr).await?;
     let body_bytes = json_body.as_bytes();
 
+    let auth_header = match tier {
+        SimTier::F2F => "X-Peer-Token: cluster_sim_token\r\n".to_string(),
+        SimTier::Vip(token) => format!("Authorization: Bearer {}\r\n", token),
+        SimTier::Free => "".to_string(),
+    };
+
     let req_str = format!(
-        "POST /v1/lock HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: application/json\r\nX-Peer-Token: cluster_sim_token\r\nContent-Length: {}\r\n\r\n",
-        rpc_addr, body_bytes.len()
+        "POST /v1/lock HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n",
+        rpc_addr, auth_header, body_bytes.len()
     );
 
     stream.write_all(req_str.as_bytes()).await?;
@@ -312,7 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
     }
 
-    // 3. Connect all nodes via Control Client (bidirectional F2F peering)
+    // 3. Connect all nodes via Control Client (bidirectional F2F peering) and pre-seed VIP accounts
     for (i, inst) in instances.iter().enumerate() {
         let client = humoco_node::control::ControlClient::new(inst.control_socket.clone());
         for (j, peer) in instances.iter().enumerate() {
@@ -321,6 +335,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let _ = client.add_peer(&peer_str).await;
             }
         }
+        // Pre-seed 2 VIP accounts per node with 500,000 Byte-Years
+        let _ = client.topup_quota("pos_terminal_vip_1", 500_000).await;
+        let _ = client.topup_quota("merchant_checkout_vip_2", 500_000).await;
     }
 
     // Wait for QUIC connection establishment
@@ -562,7 +579,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         (IngressRequest::Chain(chain_req), lock_type, tag_display)
                     };
 
-                    match post_lock_http(gateway.rpc_addr, &req).await {
+                    let r_tier: f64 = rng.gen_range(0.0..1.0);
+                    let (sim_tier, tier_label) = if r_tier < 0.50 {
+                        (SimTier::F2F, "\x1b[1;34mF2F (Mesh)\x1b[0m")
+                    } else if r_tier < 0.80 {
+                        let vip_token = if rng.gen_bool(0.5) {
+                            "pos_terminal_vip_1"
+                        } else {
+                            "merchant_checkout_vip_2"
+                        };
+                        // Auto-Replenishment: if VIP quota is below 10,000 BY, top up automatically
+                        let client = humoco_node::control::ControlClient::new(gateway.control_socket.clone());
+                        if let Ok(bal) = client.get_quota(vip_token).await {
+                            if bal < 10_000 {
+                                let _ = client.topup_quota(vip_token, 500_000).await;
+                            }
+                        }
+                        (SimTier::Vip(vip_token), "\x1b[1;35mVIP (PoS)\x1b[0m")
+                    } else {
+                        (SimTier::Free, "\x1b[1;32mFree (Pub)\x1b[0m")
+                    };
+
+                    match post_lock_http(gateway.rpc_addr, &req, &sim_tier).await {
                         Ok((_status, duration, resp)) => {
                             let verdict_str = match &resp.verdict {
                                 L2Verdict::Verified { .. } | L2Verdict::Ok { .. } => "\x1b[1;32mVerified (200 OK)\x1b[0m",
@@ -577,10 +615,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 format!("\x1b[1;36m[{}/{} Shard-Signaturen]\x1b[0m", q.signer_count, q.active_nodes_count)
                             }).unwrap_or_else(|| "\x1b[90m[Lokal]\x1b[0m".to_string());
                             println!(
-                                "\x1b[1;37m[TX #{:04}]\x1b[0m Gateway \x1b[1;34mKnoten {} (: {})\x1b[0m | \x1b[1;35m{}\x1b[0m | {:<25} | {} {} | Latenz: \x1b[1;32m{:.2}ms\x1b[0m",
+                                "\x1b[1;37m[TX #{:04}]\x1b[0m Gateway \x1b[1;34mKnoten {} (: {})\x1b[0m | {} | \x1b[1;35m{}\x1b[0m | {:<25} | {} {} | Latenz: \x1b[1;32m{:.2}ms\x1b[0m",
                                 write_counter,
                                 gateway.id + 1,
                                 gateway.rpc_addr.port(),
+                                tier_label,
                                 lock_type,
                                 tag_display,
                                 verdict_str,

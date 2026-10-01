@@ -516,6 +516,9 @@ impl DualTierEngine {
                 child_lock_hex,
                 timestamp_ms: now.0,
                 status: recent_status,
+                tier: "P2P-Sync".to_string(),
+                byte_years: 0,
+                voucher_id: None,
             });
         }
 
@@ -545,13 +548,32 @@ impl DualTierEngine {
     }
 
     /// Ingress an HMC lock entry on the hot path (< 1µs in RAM) with an explicit IngressOrigin and queue an async flush operation if newly accepted.
-    /// On double-signing (same sender on colliding tag), evidence is persisted in redb and the offender is banned.
     pub async fn ingress_hmc_lock_with_origin(
         &self,
         lookup_tag: String,
         entry: L2LockEntry,
         origin: IngressOrigin,
         now_ms: Option<u64>,
+    ) -> (L2Verdict, bool) {
+        let default_tier = match origin {
+            IngressOrigin::ClientApi => "Free",
+            IngressOrigin::PartitionSync => "P2P-Sync",
+        };
+        self.ingress_hmc_lock_with_metadata(lookup_tag, entry, origin, now_ms, Some(default_tier), Some(0), None).await
+    }
+
+    /// Ingress an HMC lock entry on the hot path (< 1µs in RAM) with explicit IngressOrigin, metadata, and queue an async flush operation if newly accepted.
+    /// On double-signing (same sender on colliding tag), evidence is persisted in redb and the offender is banned.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ingress_hmc_lock_with_metadata(
+        &self,
+        lookup_tag: String,
+        entry: L2LockEntry,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+        tier: Option<&str>,
+        byte_years: Option<u64>,
+        voucher_id: Option<String>,
     ) -> (L2Verdict, bool) {
         // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
         let permit = match self.tx.try_reserve() {
@@ -625,6 +647,11 @@ impl DualTierEngine {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let default_origin_tier = match origin {
+            IngressOrigin::ClientApi => "Free",
+            IngressOrigin::PartitionSync => "P2P-Sync",
+        };
+        let tier_str = tier.unwrap_or(default_origin_tier).to_string();
         {
             let mut recent = self.recent_locks.write();
             recent.push(RecentLockSummary {
@@ -632,6 +659,9 @@ impl DualTierEngine {
                 child_lock_hex: hex::encode(entry.t_id),
                 timestamp_ms: now_ms,
                 status: recent_status,
+                tier: tier_str,
+                byte_years: byte_years.unwrap_or(0),
+                voucher_id,
             });
         }
 
@@ -651,6 +681,23 @@ impl DualTierEngine {
         chain_req: crate::api::hmc::L2ChainLockRequest,
         origin: IngressOrigin,
         now_ms: Option<u64>,
+    ) -> (L2Verdict, bool) {
+        let default_tier = match origin {
+            IngressOrigin::ClientApi => "Free",
+            IngressOrigin::PartitionSync => "P2P-Sync",
+        };
+        self.ingress_hmc_chain_lock_with_tier(chain_req, origin, now_ms, Some(default_tier), Some(0))
+            .await
+    }
+
+    /// Atomares Ketten-Locking with explicit tier and byte_years metadata for recent locks buffer.
+    pub async fn ingress_hmc_chain_lock_with_tier(
+        &self,
+        chain_req: crate::api::hmc::L2ChainLockRequest,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+        tier: Option<&str>,
+        byte_years: Option<u64>,
     ) -> (L2Verdict, bool) {
         // Vorgabe: Empty chain rejection
         if chain_req.chain.is_empty() {
@@ -928,11 +975,19 @@ impl DualTierEngine {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
+            let default_origin_tier = match origin {
+                IngressOrigin::ClientApi => "Free",
+                IngressOrigin::PartitionSync => "P2P-Sync",
+            };
+            let tier_str = tier.unwrap_or(default_origin_tier).to_string();
             self.recent_locks.write().push(RecentLockSummary {
                 parent_lock_hex: tag,
                 child_lock_hex: hex::encode(lock_entry.t_id),
                 timestamp_ms: now,
                 status: recent_status,
+                tier: tier_str,
+                byte_years: byte_years.unwrap_or(0),
+                voucher_id: Some(chain_req.layer2_voucher_id.clone()),
             });
         }
 

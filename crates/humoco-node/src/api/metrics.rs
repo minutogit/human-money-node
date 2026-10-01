@@ -222,7 +222,13 @@ impl NodeMetrics {
 
 /// Handler for GET /metrics rendering Prometheus / OpenMetrics format.
 pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let (active_byte_years, _) = state.engine.get_active_footprint_byte_years(now_ms).await;
     let active_locks = state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+    let daily_write_quota_byte_years = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let (peers_connected, gateway_concentration_ratio, shard_subnet_dominance_max) =
         if let Some(ref pm) = state.peer_manager {
             let conn = pm.connected_peer_count().await;
@@ -274,6 +280,14 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     body.push_str("# HELP humoco_locks_active_total Total number of active locks in memory\n");
     body.push_str("# TYPE humoco_locks_active_total gauge\n");
     body.push_str(&format!("humoco_locks_active_total {}\n", active_locks));
+
+    body.push_str("# HELP humoco_active_byte_years Total active storage-time footprint in Byte-Years\n");
+    body.push_str("# TYPE humoco_active_byte_years gauge\n");
+    body.push_str(&format!("humoco_active_byte_years {}\n", active_byte_years));
+
+    body.push_str("# HELP humoco_daily_write_quota_byte_years Daily write quota in Byte-Years\n");
+    body.push_str("# TYPE humoco_daily_write_quota_byte_years gauge\n");
+    body.push_str(&format!("humoco_daily_write_quota_byte_years {}\n", daily_write_quota_byte_years));
 
     body.push_str("# HELP humoco_p2p_connected_peers Number of active connected peers\n");
     body.push_str("# TYPE humoco_p2p_connected_peers gauge\n");

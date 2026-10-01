@@ -107,6 +107,10 @@ impl RamIndex {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+    /// Returns an iterator over all lock records stored in the RAM index.
+    pub fn iter(&self) -> impl Iterator<Item = &LockRecord> {
+        self.map.values()
+    }
     /// Returns a list of all currently stored locks in the RAM index with their root valid times.
     pub fn all_locks(&self) -> Vec<(LockRecord, SimTime)> {
         self.map

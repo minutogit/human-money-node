@@ -523,6 +523,7 @@ impl NodeDaemon {
             shard_query_depth: self.config.network.shard_query_depth,
             system_stats,
             auth: admin_token_mgr,
+            is_simulation,
         };
         let app = crate::api::build_router(app_state);
 

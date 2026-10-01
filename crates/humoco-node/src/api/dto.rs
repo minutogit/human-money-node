@@ -88,6 +88,12 @@ pub struct NodeStatusResponse {
     pub network: String,
     #[serde(default = "default_true")]
     pub free_tier_enabled: bool,
+    #[serde(default)]
+    pub active_byte_years: u64,
+    #[serde(default)]
+    pub daily_write_quota_byte_years: u64,
+    #[serde(default)]
+    pub daily_read_quota: u64,
 }
 
 fn default_network_str() -> String {

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use humoco_sim_core::quota::ByteYears;
 use humoco_sim_core::storage::{ingress_time_window_valid, should_prune, IngressVerdictLow, RamIndex};
 use humoco_sim_core::types::{LockRecord, SimTime};
 use tokio::sync::{mpsc, RwLock};
@@ -1152,6 +1153,36 @@ impl DualTierEngine {
             }
         }
         set.len()
+    }
+
+    /// Computes the total active storage-time footprint in Byte-Years and active lock count from in-memory RAM indices.
+    pub async fn get_active_footprint_byte_years(&self, now_ms: u64) -> (u64, usize) {
+        let mut total_byte_years = 0u64;
+        let mut count = 0usize;
+
+        {
+            let hmc = self.hmc_ram.read().await;
+            for &vu in hmc.valid_until.values() {
+                if vu > now_ms {
+                    let ttl_sec = (vu - now_ms) / 1000;
+                    total_byte_years = total_byte_years.saturating_add(ByteYears::from_ttl_seconds(ttl_sec.max(1)));
+                    count += 1;
+                }
+            }
+        }
+
+        {
+            let ram = self.ram.read().await;
+            for rec in ram.iter() {
+                if rec.valid_until.0 > now_ms {
+                    let ttl_sec = (rec.valid_until.0 - now_ms) / 1000;
+                    total_byte_years = total_byte_years.saturating_add(ByteYears::from_ttl_seconds(ttl_sec.max(1)));
+                    count += 1;
+                }
+            }
+        }
+
+        (total_byte_years, count)
     }
 
     /// Returns a list of all active vouchers known to this node (from RAM and redb).

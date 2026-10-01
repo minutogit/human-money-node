@@ -50,12 +50,24 @@ pub struct VipAccountDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TierOverviewDto {
     pub free_pow_diff: u32,
+    pub free_pow_hashes: u64,
+    pub free_pow_time_est: String,
     pub free_req_sec: f64,
+    pub free_reserved_pct: f64,
+    pub free_used_pct: f64,
+    pub free_writes_today: u64,
     pub friends_reserved_pct: f64,
     pub friends_used_pct: f64,
+    pub friends_writes_today: u64,
+    pub active_friends_count: usize,
     pub vip_reserved_pct: f64,
     pub vip_used_pct: f64,
+    pub vip_writes_today: u64,
+    pub vip_accounts_count: usize,
+    pub vip_total_balance: u64,
     pub vip_accounts: Vec<VipAccountDto>,
+    pub total_writes_today: u64,
+    pub total_quota_used_pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +198,30 @@ pub struct DashboardData {
     pub sparklines: SparklinesDto,
     pub tiers: TierOverviewDto,
     pub f2f: F2fOverviewDto,
+
+    // Network Time & Mode
+    pub network_time_ms: u64,
+    pub is_simulation: bool,
+}
+
+/// Formats epoch milliseconds as German civil date/time (DD.MM.YYYY, HH:mm:ss)
+pub fn format_epoch_millis(ms: u64) -> String {
+    let secs = ms / 1000;
+    let s = secs % 60;
+    let mins = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days_since_epoch = (secs / 86400) as i64;
+    let z = days_since_epoch + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{:02}.{:02}.{}, {:02}:{:02}:{:02}", d, month, year, h, mins, s)
 }
 
 /// Type alias for DashboardData DTO
@@ -370,8 +406,12 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         ("DEGRADED".to_string(), "DEGRADED (0 Peers)".to_string())
     };
 
-    let active_locks =
-        state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let (active_byte_years, _active_locks_count) = state.engine.get_active_footprint_byte_years(now_ms).await;
+    let active_locks = state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
     let flush_queue_depth = state.engine.flush_sender_len();
 
     // 3-Tier Latencies (Rolling 100)
@@ -451,21 +491,20 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let gossip_read_load = sparklines.reads.last().copied().unwrap_or(0.0) as f64;
     let daily_write_quota = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
-    let local_node_id_u16 = state.identity.node_id_u16();
-    let (today_write_used_raw, today_read_used_raw, total_write_used, total_read_used) = {
+    let (_today_write_used_raw, _today_read_used_raw, total_write_used, total_read_used) = {
         let thermo_arc = state.tier_controller.thermometer();
         let thermo = thermo_arc
             .read()
             .unwrap_or_else(|e| e.into_inner());
         (
-            thermo.get_node_usage(local_node_id_u16),
-            thermo.get_node_read_usage(local_node_id_u16),
+            thermo.get_node_usage(state.identity.node_id_u16()),
+            thermo.get_node_read_usage(state.identity.node_id_u16()),
             thermo.total_daily_write_usage(),
             thermo.total_daily_read_usage(),
         )
     };
-    let today_write_used = total_write_used.max(today_write_used_raw);
-    let today_read_used = total_read_used.max(today_read_used_raw);
+    let today_write_used = active_byte_years;
+    let today_read_used = state.metrics.total_reads();
     let (vip_writes_today, f2f_writes_today, free_writes_today) = state.tier_controller.tier_counters();
 
     let thermometer = ThermometerStatsDto {
@@ -484,39 +523,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         free_writes_today,
     };
 
-    // 4. Tiers Overview
-    let free_pow_diff = state.pow_engine.default_difficulty();
-    let free_req_sec = sparklines.writes.last().copied().unwrap_or(0.0) as f64;
-    let friends_reserved_pct = 30.0;
-    let friends_used_pct = ((total_write_used as f64 / daily_write_quota.max(1) as f64) * 100.0).clamp(0.0, 100.0);
-    let vip_reserved_pct = 50.0;
-    let total_tier_writes = vip_writes_today + f2f_writes_today + free_writes_today;
-    let vip_used_pct = if total_tier_writes > 0 {
-        ((vip_writes_today as f64 / total_tier_writes as f64) * 100.0).clamp(0.0, 100.0)
-    } else {
-        0.0
-    };
-    let vip_accounts = state
-        .tier_controller
-        .list_vip_accounts()
-        .into_iter()
-        .map(|(account_tag, balance_byte_years)| VipAccountDto {
-            account_tag,
-            balance_byte_years,
-        })
-        .collect();
-
-    let tiers = TierOverviewDto {
-        free_pow_diff,
-        free_req_sec,
-        friends_reserved_pct,
-        friends_used_pct,
-        vip_reserved_pct,
-        vip_used_pct,
-        vip_accounts,
-    };
-
-    // 5. F2F Overview
+    // 4. F2F Overview
     let friends_list = if let Some(ref pm) = state.peer_manager {
         let peers = pm.list_peers().await;
         let mut f_list = Vec::new();
@@ -546,10 +553,90 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     } else {
         Vec::new()
     };
+    let active_friends_count = friends_list.iter().filter(|f| f.is_connected).count();
 
     let f2f = F2fOverviewDto {
         my_pubkey: state.identity.public_key_bs58(),
         friends: friends_list,
+    };
+
+    // 5. Tiers Overview
+    let free_pow_diff = state.pow_engine.default_difficulty();
+    let free_pow_hashes = if free_pow_diff > 0 { 1u64 << free_pow_diff } else { 1 };
+    let free_pow_time_est = match free_pow_diff {
+        0 => "< 0.1 ms (Instant)",
+        1..=8 => "< 0.1 ms",
+        9..=12 => "~ 1 ms",
+        13..=16 => "~ 15 ms",
+        17..=20 => "~ 250 ms",
+        21..=24 => "~ 4 s",
+        _ => "> 10 s",
+    }.to_string();
+    let free_req_sec = sparklines.writes.last().copied().unwrap_or(0.0) as f64;
+
+    let free_reserved_pct = 20.0;
+    let friends_reserved_pct = 30.0;
+    let vip_reserved_pct = 50.0;
+
+    let total_writes_today = vip_writes_today + f2f_writes_today + free_writes_today;
+    let total_quota_used_pct = ((today_write_used as f64 / daily_write_quota.max(1) as f64) * 100.0).clamp(0.0, 100.0);
+
+    let free_quota = (daily_write_quota as f64 * 0.20).max(1.0);
+    let friends_quota = (daily_write_quota as f64 * 0.30).max(1.0);
+    let vip_quota = (daily_write_quota as f64 * 0.50).max(1.0);
+
+    let free_used_by = if total_writes_today > 0 {
+        (free_writes_today as f64 / total_writes_today as f64) * today_write_used as f64
+    } else {
+        0.0
+    };
+    let friends_used_by = if total_writes_today > 0 {
+        (f2f_writes_today as f64 / total_writes_today as f64) * today_write_used as f64
+    } else {
+        0.0
+    };
+    let vip_used_by = if total_writes_today > 0 {
+        (vip_writes_today as f64 / total_writes_today as f64) * today_write_used as f64
+    } else {
+        0.0
+    };
+
+    let free_used_pct = ((free_used_by / free_quota) * 100.0).clamp(0.0, 100.0);
+    let friends_used_pct = ((friends_used_by / friends_quota) * 100.0).clamp(0.0, 100.0);
+    let vip_used_pct = ((vip_used_by / vip_quota) * 100.0).clamp(0.0, 100.0);
+
+    let vip_accounts: Vec<VipAccountDto> = state
+        .tier_controller
+        .list_vip_accounts()
+        .into_iter()
+        .map(|(account_tag, balance_byte_years)| VipAccountDto {
+            account_tag,
+            balance_byte_years,
+        })
+        .collect();
+    let vip_accounts_count = vip_accounts.len();
+    let vip_total_balance: u64 = vip_accounts.iter().map(|a| a.balance_byte_years).sum();
+
+    let tiers = TierOverviewDto {
+        free_pow_diff,
+        free_pow_hashes,
+        free_pow_time_est,
+        free_req_sec,
+        free_reserved_pct,
+        free_used_pct,
+        free_writes_today,
+        friends_reserved_pct,
+        friends_used_pct,
+        friends_writes_today: f2f_writes_today,
+        active_friends_count,
+        vip_reserved_pct,
+        vip_used_pct,
+        vip_writes_today,
+        vip_accounts_count,
+        vip_total_balance,
+        vip_accounts,
+        total_writes_today,
+        total_quota_used_pct,
     };
 
     DashboardData {
@@ -592,6 +679,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         sparklines,
         tiers,
         f2f,
+        network_time_ms: state.net_time_ms(),
+        is_simulation: state.is_simulation,
     }
 }
 
@@ -826,6 +915,8 @@ pub async fn dashboard_lock_raw(
 pub async fn render_dashboard(State(state): State<AppState>) -> Response {
     let data = collect_dashboard_data(&state).await;
     let qr_svg = generate_qr_svg(&data.peering_string);
+    let net_time_formatted = format_epoch_millis(data.network_time_ms);
+    let sim_badge_style = if data.is_simulation { "display: inline-block; " } else { "display: none; " };
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -835,349 +926,67 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HuMoCo Node Control Center (v2.0)</title>
 <style>
-:root {{
-  --bg: #090d16;
-  --surface: #111827;
-  --surface-alt: #1a2234;
-  --surface-hover: #232d42;
-  --border: #2e384d;
-  --text: #f3f4f6;
-  --text-muted: #94a3b8;
-  --green: #10b981;
-  --green-bg: rgba(16,185,129,0.15);
-  --amber: #f59e0b;
-  --amber-bg: rgba(245,158,11,0.15);
-  --red: #ef4444;
-  --red-bg: rgba(239,68,68,0.15);
-  --blue: #3b82f6;
-  --blue-bg: rgba(59,130,246,0.15);
-  --purple: #a855f7;
-  --purple-bg: rgba(168,85,247,0.15);
-  --cyan: #06b6d4;
-  --cyan-bg: rgba(6,182,212,0.15);
-}}
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{
-  background: var(--bg);
-  color: var(--text);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  line-height: 1.5;
-  padding: 1.25rem;
-}}
-.container {{ max-width: 1360px; margin: 0 auto; }}
-header {{
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  padding-bottom: 1.25rem;
-  margin-bottom: 1.25rem;
-  border-bottom: 1px solid var(--border);
-}}
-.header-left {{ display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }}
-.header-title {{ font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 0.5rem; }}
-.header-pills {{ display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }}
-.header-right {{ display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }}
-
-.badge {{
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.25rem 0.7rem;
-  border-radius: 9999px;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  white-space: nowrap;
-}}
-.badge-green {{ background: var(--green-bg); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }}
-.badge-amber {{ background: var(--amber-bg); color: var(--amber); border: 1px solid rgba(245,158,11,0.3); }}
-.badge-red {{ background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }}
-.badge-blue {{ background: var(--blue-bg); color: var(--blue); border: 1px solid rgba(59,130,246,0.3); }}
-.badge-purple {{ background: var(--purple-bg); color: var(--purple); border: 1px solid rgba(168,85,247,0.3); }}
-.badge-cyan {{ background: var(--cyan-bg); color: var(--cyan); border: 1px solid rgba(6,182,212,0.3); }}
-
-.pill {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 0.5rem;
-  padding: 0.3rem 0.65rem;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--text-muted);
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-}}
-.pill strong {{ color: var(--text); font-weight: 600; }}
-
-/* Navigation Tabs */
-.tabs-nav {{
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1.25rem;
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  padding-bottom: 0.5rem;
-}}
-.tab-btn {{
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-muted);
-  padding: 0.6rem 1.1rem;
-  border-radius: 0.5rem;
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  transition: all 0.2s;
-  white-space: nowrap;
-}}
-.tab-btn:hover {{ background: var(--surface-alt); color: var(--text); }}
-.tab-btn.active {{
-  background: var(--blue-bg);
-  color: var(--blue);
-  border-color: rgba(59,130,246,0.4);
-}}
-
-.tab-content {{ display: none; }}
-.tab-content.active {{ display: block; }}
-
-.grid {{
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 1.25rem;
-  margin-bottom: 1.25rem;
-}}
-.grid-2 {{
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
-  gap: 1.25rem;
-  margin-bottom: 1.25rem;
-}}
-@media (max-width: 640px) {{
-  .grid-2 {{ grid-template-columns: 1fr; }}
-}}
-
-.card {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 0.75rem;
-  padding: 1.25rem;
-  display: flex;
-  flex-direction: column;
-}}
-.card-header {{
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.75rem;
-  color: var(--text-muted);
-  font-size: 0.85rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}}
-.card-value {{
-  font-size: 1.75rem;
-  font-weight: 700;
-  color: var(--text);
-  margin-bottom: 0.35rem;
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-}}
-.card-sub {{ font-size: 0.8125rem; color: var(--text-muted); }}
-
-.identity-card {{
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: 140px 1fr;
-  gap: 1.5rem;
-  align-items: center;
-}}
-@media (max-width: 640px) {{
-  .identity-card {{ grid-template-columns: 1fr; }}
-}}
-.qr-box {{
-  width: 140px;
-  height: 140px;
-  background: #ffffff;
-  border-radius: 0.5rem;
-  padding: 0.35rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}}
-.qr-svg {{ width: 100%; height: 100%; display: block; }}
-.code {{
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.8125rem;
-  background: var(--surface-alt);
-  padding: 0.35rem 0.55rem;
-  border-radius: 0.375rem;
-  border: 1px solid var(--border);
-  word-break: break-all;
-}}
-.peering-row {{
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  margin-top: 0.5rem;
-}}
-
-.btn {{
-  background: var(--blue);
-  color: #ffffff;
-  border: 1px solid transparent;
-  border-radius: 0.375rem;
-  padding: 0.45rem 0.85rem;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  white-space: nowrap;
-}}
-.btn:hover {{ opacity: 0.9; }}
-.btn-secondary {{
-  background: var(--surface-alt);
-  border: 1px solid var(--border);
-  color: var(--text);
-}}
-.btn-secondary:hover {{ background: var(--surface-hover); }}
-.btn-danger {{
-  background: var(--red-bg);
-  color: var(--red);
-  border: 1px solid rgba(239,68,68,0.3);
-}}
-.btn-danger:hover {{ background: rgba(239,68,68,0.25); }}
-
-.table-card {{ grid-column: 1 / -1; margin-top: 1rem; }}
-table {{
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 0.5rem;
-  font-size: 0.875rem;
-}}
-th {{
-  text-align: left;
-  padding: 0.75rem;
-  color: var(--text-muted);
-  border-bottom: 1px solid var(--border);
-  font-weight: 600;
-  font-size: 0.8125rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}}
-td {{
-  padding: 0.75rem;
-  border-bottom: 1px solid var(--border);
-  color: var(--text);
-  vertical-align: middle;
-}}
-tr:hover td {{ background: var(--surface-alt); }}
-.empty-cell {{ text-align: center; color: var(--text-muted); padding: 2.5rem 0; }}
-
-.progress-bar {{
-  width: 100%;
-  height: 8px;
-  background: var(--surface-alt);
-  border-radius: 9999px;
-  overflow: hidden;
-  margin: 0.5rem 0;
-}}
-.progress-fill {{
-  height: 100%;
-  background: linear-gradient(90deg, var(--blue), var(--cyan));
-  border-radius: 9999px;
-  transition: width 0.3s ease;
-}}
-
-.sparkline-box {{
-  margin-top: 0.75rem;
-  height: 40px;
-  width: 100%;
-}}
-
-.input-text {{
-  background: var(--surface-alt);
-  border: 1px solid var(--border);
-  border-radius: 0.375rem;
-  padding: 0.45rem 0.75rem;
-  color: var(--text);
-  font-size: 0.875rem;
-  outline: none;
-}}
-.input-text:focus {{ border-color: var(--blue); }}
-
-/* Modal Overlay */
-.modal-overlay {{
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.75);
-  backdrop-filter: blur(4px);
-  z-index: 1000;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-}}
-.modal-overlay.active {{ display: flex; }}
-.modal-box {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 0.75rem;
-  max-width: 850px;
-  width: 100%;
-  max-height: 88vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
-}}
-.modal-header {{
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid var(--border);
-}}
-.modal-header h3 {{ font-size: 1.1rem; font-weight: 700; }}
-.modal-body {{
-  padding: 1.25rem;
-  overflow-y: auto;
-  font-size: 0.875rem;
-}}
-.modal-footer {{
-  padding: 0.75rem 1.25rem;
-  border-top: 1px solid var(--border);
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
-}}
-pre.json-viewer {{
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 0.5rem;
-  padding: 1rem;
-  overflow-x: auto;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  font-size: 0.8125rem;
-  color: #38bdf8;
-}}
-
-footer {{
-  margin-top: 2rem;
-  text-align: center;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  border-top: 1px solid var(--border);
-  padding-top: 1rem;
-}}
+:root{{--bg:#090d16;--surface:#111827;--surface-alt:#1a2234;--surface-hover:#232d42;--border:#2e384d;--text:#f3f4f6;--text-muted:#94a3b8;--green:#10b981;--green-bg:rgba(16,185,129,0.15);--amber:#f59e0b;--amber-bg:rgba(245,158,11,0.15);--red:#ef4444;--red-bg:rgba(239,68,68,0.15);--blue:#3b82f6;--blue-bg:rgba(59,130,246,0.15);--purple:#a855f7;--purple-bg:rgba(168,85,247,0.15);--cyan:#06b6d4;--cyan-bg:rgba(6,182,212,0.15)}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;line-height:1.5;padding:1.25rem}}
+.container{{max-width:1360px;margin:0 auto}}
+header{{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:1rem;padding-bottom:1.25rem;margin-bottom:1.25rem;border-bottom:1px solid var(--border)}}
+.header-left,.header-pills,.header-right{{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap}}
+.header-title{{font-size:1.35rem;font-weight:700;letter-spacing:-0.02em;display:flex;align-items:center;gap:0.5rem}}
+.badge{{display:inline-flex;align-items:center;gap:0.35rem;padding:0.25rem 0.7rem;border-radius:9999px;font-size:0.8125rem;font-weight:600;white-space:nowrap}}
+.badge-green{{background:var(--green-bg);color:var(--green);border:1px solid rgba(16,185,129,0.3)}}
+.badge-amber{{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,158,11,0.3)}}
+.badge-red{{background:var(--red-bg);color:var(--red);border:1px solid rgba(239,68,68,0.3)}}
+.badge-blue{{background:var(--blue-bg);color:var(--blue);border:1px solid rgba(59,130,246,0.3)}}
+.badge-purple{{background:var(--purple-bg);color:var(--purple);border:1px solid rgba(168,85,247,0.3)}}
+.badge-cyan{{background:var(--cyan-bg);color:var(--cyan);border:1px solid rgba(6,182,212,0.3)}}
+.pill{{background:var(--surface);border:1px solid var(--border);border-radius:0.5rem;padding:0.3rem 0.65rem;font-size:0.8125rem;font-weight:500;color:var(--text-muted);display:inline-flex;align-items:center;gap:0.35rem}}
+.pill strong{{color:var(--text);font-weight:600}}
+.tabs-nav{{display:flex;gap:0.5rem;margin-bottom:1.25rem;border-bottom:1px solid var(--border);overflow-x:auto;padding-bottom:0.5rem}}
+.tab-btn{{background:transparent;border:1px solid transparent;color:var(--text-muted);padding:0.6rem 1.1rem;border-radius:0.5rem;font-size:0.9rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:0.5rem;transition:all 0.2s;white-space:nowrap}}
+.tab-btn:hover{{background:var(--surface-alt);color:var(--text)}}
+.tab-btn.active{{background:var(--blue-bg);color:var(--blue);border-color:rgba(59,130,246,0.4)}}
+.tab-content{{display:none}}
+.tab-content.active{{display:block}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.25rem;margin-bottom:1.25rem}}
+.grid-2{{display:grid;grid-template-columns:repeat(auto-fit,minmax(450px,1fr));gap:1.25rem;margin-bottom:1.25rem}}
+@media (max-width:640px){{.grid-2{{grid-template-columns:1fr}}}}
+.card{{background:var(--surface);border:1px solid var(--border);border-radius:0.75rem;padding:1.25rem;display:flex;flex-direction:column}}
+.card-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;color:var(--text-muted);font-size:0.85rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em}}
+.card-value{{font-size:1.75rem;font-weight:700;color:var(--text);margin-bottom:0.35rem;display:flex;align-items:baseline;gap:0.5rem}}
+.card-sub{{font-size:0.8125rem;color:var(--text-muted)}}
+.identity-card{{grid-column:1 / -1;display:grid;grid-template-columns:140px 1fr;gap:1.5rem;align-items:center}}
+@media (max-width:640px){{.identity-card{{grid-template-columns:1fr}}}}
+.qr-box{{width:140px;height:140px;background:#fff;border-radius:0.5rem;padding:0.35rem;display:flex;align-items:center;justify-content:center}}
+.qr-svg{{width:100%;height:100%;display:block}}
+.code{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:0.8125rem;background:var(--surface-alt);padding:0.35rem 0.55rem;border-radius:0.375rem;border:1px solid var(--border);word-break:break-all}}
+.peering-row{{display:flex;gap:0.5rem;align-items:center;margin-top:0.5rem}}
+.btn{{background:var(--blue);color:#fff;border:1px solid transparent;border-radius:0.375rem;padding:0.45rem 0.85rem;font-size:0.8125rem;font-weight:600;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:0.35rem;white-space:nowrap}}
+.btn:hover{{opacity:0.9}}
+.btn-secondary{{background:var(--surface-alt);border:1px solid var(--border);color:var(--text)}}
+.btn-secondary:hover{{background:var(--surface-hover)}}
+.btn-danger{{background:var(--red-bg);color:var(--red);border:1px solid rgba(239,68,68,0.3)}}
+.btn-danger:hover{{background:rgba(239,68,68,0.25)}}
+.table-card{{grid-column:1 / -1;margin-top:1rem}}
+table{{width:100%;border-collapse:collapse;margin-top:0.5rem;font-size:0.875rem}}
+th{{text-align:left;padding:0.75rem;color:var(--text-muted);border-bottom:1px solid var(--border);font-weight:600;font-size:0.8125rem;text-transform:uppercase;letter-spacing:0.04em}}
+td{{padding:0.75rem;border-bottom:1px solid var(--border);color:var(--text);vertical-align:middle}}
+tr:hover td{{background:var(--surface-alt)}}
+.empty-cell{{text-align:center;color:var(--text-muted);padding:2.5rem 0}}
+.progress-bar{{width:100%;height:8px;background:var(--surface-alt);border-radius:9999px;overflow:hidden;margin:0.5rem 0}}
+.progress-fill{{height:100%;background:linear-gradient(90deg,var(--blue),var(--cyan));border-radius:9999px;transition:width 0.3s ease}}
+.sparkline-box{{margin-top:0.75rem;height:40px;width:100%}}
+.input-text{{background:var(--surface-alt);border:1px solid var(--border);border-radius:0.375rem;padding:0.45rem 0.75rem;color:var(--text);font-size:0.875rem;outline:none}}
+.input-text:focus{{border-color:var(--blue)}}
+.modal-overlay{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);z-index:1000;align-items:center;justify-content:center;padding:1rem}}
+.modal-overlay.active{{display:flex}}
+.modal-box{{background:var(--surface);border:1px solid var(--border);border-radius:0.75rem;max-width:850px;width:100%;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5)}}
+.modal-header{{display:flex;justify-content:space-between;align-items:center;padding:1rem 1.25rem;border-bottom:1px solid var(--border)}}
+.modal-header h3{{font-size:1.1rem;font-weight:700}}
+.modal-body{{padding:1.25rem;overflow-y:auto;font-size:0.875rem}}
+.modal-footer{{padding:0.75rem 1.25rem;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:0.5rem}}
+pre.json-viewer{{background:var(--bg);border:1px solid var(--border);border-radius:0.5rem;padding:1rem;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8125rem;color:#38bdf8}}
+footer{{margin-top:2rem;text-align:center;font-size:0.75rem;color:var(--text-muted);border-top:1px solid var(--border);padding-top:1rem}}
 </style>
 </head>
 <body>
@@ -1190,6 +999,7 @@ footer {{
         <span>HuMoCo Node Control Center (v2.0)</span>
       </div>
       <span id="status-badge" class="badge badge-green">{status_badge}</span>
+      <div class="pill">🕰️ <strong id="hdr-net-time">{net_time_formatted}</strong> <span id="hdr-sim-badge" class="badge badge-cyan" style="{sim_badge_style}padding: 0.15rem 0.4rem; font-size: 0.7rem;">⚡ Sim (5s = 1h)</span></div>
     </div>
 
     <!-- 3-Tier Latencies Pills -->
@@ -1398,39 +1208,48 @@ footer {{
       <div class="card">
         <div class="card-header">
           <span>🌍 Free Tier</span>
-          <span class="badge badge-green">Stateless PoW</span>
+          <span class="badge badge-green" id="tier-free-badge">20% Kontingent</span>
         </div>
         <div class="card-value">
-          <span id="tier-free-pow-val">{free_pow_diff}</span>
-          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">Bits PoW</span>
+          <span id="tier-free-used-val">{free_used_pct:.1}%</span>
+          <span style="font-size: 0.95rem; color: var(--text-muted); font-weight: normal;">genutzt (<strong id="tier-free-writes-val" style="color: var(--text);">{free_writes_today}</strong> Sperren)</span>
         </div>
-        <div class="card-sub">Aktuelle Last: <strong id="tier-free-req-val">{free_req_sec:.1}</strong> req/s</div>
+        <div class="progress-bar" style="height: 4px; margin: 0.35rem 0 0.5rem 0;">
+          <div id="tier-free-bar" class="progress-fill" style="width: {free_used_pct:.1}%; background: var(--green);"></div>
+        </div>
+        <div class="card-sub" id="tier-free-sub">PoW: <strong id="tier-free-pow-val">{free_pow_diff}</strong> Bits (Ø <span id="tier-free-hashes-val">{free_pow_hashes}</span> Hashes &bull; <span id="tier-free-time-val">{free_pow_time_est}</span>) &bull; Last: <strong id="tier-free-req-val">{free_req_sec:.1}</strong> req/s</div>
       </div>
 
       <!-- Tier 2: Friends Tier -->
       <div class="card">
         <div class="card-header">
           <span>🤝 Friends Tier</span>
-          <span class="badge badge-blue">30% Reserviert</span>
+          <span class="badge badge-blue" id="tier-friends-badge">30% Reserviert</span>
         </div>
         <div class="card-value">
           <span id="tier-friends-used-val">{friends_used_pct:.1}%</span>
-          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">genutzt</span>
+          <span style="font-size: 0.95rem; color: var(--text-muted); font-weight: normal;">genutzt (<strong id="tier-friends-writes-val" style="color: var(--text);">{friends_writes_today}</strong> Sperren)</span>
         </div>
-        <div class="card-sub">Gossip-gesichert &bull; Prioritätswarteschlange</div>
+        <div class="progress-bar" style="height: 4px; margin: 0.35rem 0 0.5rem 0;">
+          <div id="tier-friends-bar" class="progress-fill" style="width: {friends_used_pct:.1}%; background: var(--blue);"></div>
+        </div>
+        <div class="card-sub" id="tier-friends-sub">Gossip-gesichert &bull; Prioritätswarteschlange &bull; <strong id="tier-friends-count-val">{active_friends_count}</strong> Freunde aktiv</div>
       </div>
 
       <!-- Tier 3: VIP Tier -->
       <div class="card">
         <div class="card-header">
           <span>💳 VIP Tier</span>
-          <span class="badge badge-purple">50% Reserviert</span>
+          <span class="badge badge-purple" id="tier-vip-badge">50% Reserviert</span>
         </div>
         <div class="card-value">
           <span id="tier-vip-used-val">{vip_used_pct:.1}%</span>
-          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">genutzt</span>
+          <span style="font-size: 0.95rem; color: var(--text-muted); font-weight: normal;">genutzt (<strong id="tier-vip-writes-val" style="color: var(--text);">{vip_writes_today}</strong> Sperren)</span>
         </div>
-        <div class="card-sub">Byte-Years Quoten &bull; SLA-Garantie</div>
+        <div class="progress-bar" style="height: 4px; margin: 0.35rem 0 0.5rem 0;">
+          <div id="tier-vip-bar" class="progress-fill" style="width: {vip_used_pct:.1}%; background: var(--purple);"></div>
+        </div>
+        <div class="card-sub" id="tier-vip-sub">SLA-Garantie &bull; <strong id="tier-vip-accounts-val">{vip_accounts_count}</strong> VIP-Accounts &bull; <strong id="tier-vip-balance-val">{vip_total_balance}</strong> BY Saldo</div>
       </div>
     </div>
 
@@ -1442,11 +1261,14 @@ footer {{
       </div>
       <div style="margin: 0.5rem 0;">
         <div style="display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 0.35rem;">
-          <span>Heute verbraucht: <strong id="quota-used-val">{today_write_used}</strong> / <span id="quota-limit-val">{daily_write_quota}</span> Byte-Jahre</span>
-          <strong id="quota-pct-text">{friends_used_pct:.1}%</strong>
+          <span>Heute verbraucht: <strong id="quota-used-val">{today_write_used}</strong> Byte-Jahre (<span id="quota-locks-val">{total_writes_today}</span> Sperren) / <span id="quota-limit-val">{daily_write_quota}</span> Byte-Jahre</span>
+          <strong id="quota-pct-text">{total_quota_used_pct:.1}%</strong>
         </div>
         <div class="progress-bar">
-          <div id="quota-bar" class="progress-fill" style="width: {friends_used_pct:.1}%;"></div>
+          <div id="quota-bar" class="progress-fill" style="width: {total_quota_used_pct:.1}%;"></div>
+        </div>
+        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.4rem;">
+          ℹ️ <strong>Byte-Jahre Speicherzeit-Produkt:</strong> 1 Sperre = 1 Byte-Jahr bei Kurzzeit-TTL (&le; 1 Tag) bis 960 Byte-Jahre bei 5 Jahren Wurzel-Gültigkeit (192 Bytes &times; Gültigkeitsdauer).
         </div>
       </div>
     </div>
@@ -1847,38 +1669,29 @@ function openNodeInspector(pubkey) {{
     : (node.connection_status.includes('Suspended') ? '<span class="badge badge-red">' + node.connection_status + '</span>' : '<span class="badge badge-amber">' + node.connection_status + '</span>');
   
   const rttText = node.rtt_ms != null ? node.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
-  const failText = node.last_failure_sec != null ? 'vor ' + node.last_failure_sec + ' Sekunden' : '<span style="color: var(--green);">Kein Ausfall registriert</span>';
-  const ingressText = node.best_ingress_peer ? 'Gelernt über F2F-Freund ' + node.best_ingress_peer : (node.is_local ? 'Lokaler Knoten (Self)' : (node.is_f2f ? 'Direkte F2F-Freundschaft' : 'Direkte Verbindung / Standby'));
-  const incubText = node.is_immature ? '<span class="badge badge-amber">24h Schonfrist (noch ' + (node.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Voll Aktiviert</span>';
+  const failText = node.last_failure_sec != null ? 'vor ' + node.last_failure_sec + 's' : '<span style="color: var(--green);">Kein Ausfall</span>';
+  const ingressText = node.best_ingress_peer ? 'via ' + node.best_ingress_peer : (node.is_local ? 'Lokal (Self)' : (node.is_f2f ? 'F2F Direkt' : 'Direkt / Standby'));
+  const incubText = node.is_immature ? '<span class="badge badge-amber">24h (' + (node.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Aktiv</span>';
   
-  let html = '<div style="line-height: 1.6; font-size: 0.875rem;">';
-  
-  // 1. Identity
-  html += '<div style="background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.75rem;">';
-  html += '<h4 style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: var(--purple);">🔑 Identität &amp; Kryptographie</h4>';
-  html += '<div><strong>NodePubKey (Ed25519):</strong> <span class="code" id="node-modal-pubkey">' + node.public_key + '</span> <button class="btn btn-secondary" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;" onclick="copyNodePubkey()">Kopieren</button></div>';
-  html += '<div><strong>IP-Adresse / Port:</strong> <span class="code">' + node.address + '</span></div>';
-  html += '<div><strong>Shard-Ticket (Argon2d):</strong> <span class="code">' + node.hrw_routing_id + '</span> (Work-Score: <strong>' + node.work_score + '</strong>)</div>';
+  let html = '<div style="line-height: 1.5; font-size: 0.875rem;">';
+  html += '<div style="background: var(--surface-alt); padding: 0.6rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.6rem;">';
+  html += '<h4 style="margin: 0 0 0.4rem 0; font-size: 0.85rem; color: var(--purple);">🔑 Identität &amp; Kryptographie</h4>';
+  html += '<div><strong>NodePubKey:</strong> <span class="code" id="node-modal-pubkey">' + node.public_key + '</span> <button class="btn btn-secondary" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;" onclick="copyNodePubkey()">Kopieren</button></div>';
+  html += '<div><strong>Adresse:</strong> <span class="code">' + node.address + '</span></div>';
+  html += '<div><strong>Shard-Ticket:</strong> <span class="code">' + node.hrw_routing_id + '</span> (Score: <strong>' + node.work_score + '</strong>)</div>';
   html += '</div>';
 
-  // 2. Health & Reliability
-  html += '<div style="background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.75rem;">';
-  html += '<h4 style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: var(--green);">💓 Verbindungs-Gesundheit &amp; Zuverlässigkeit (Spec 15 &amp; 19)</h4>';
+  html += '<div style="background: var(--surface-alt); padding: 0.6rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.6rem;">';
+  html += '<h4 style="margin: 0 0 0.4rem 0; font-size: 0.85rem; color: var(--green);">💓 Verbindungs-Gesundheit</h4>';
   html += '<div><strong>Status:</strong> ' + statusBadge + '</div>';
-  html += '<div><strong>Ausfallzähler (missing_count):</strong> <strong>' + node.missing_count + '</strong> von 3 <span style="font-size: 0.75rem; color: var(--text-muted);">(Debounced Tit-for-Tat; heilt -1/h)</span></div>';
-  html += '<div><strong>Live-Latenz (QUIC RTT):</strong> ' + rttText + '</div>';
-  html += '<div><strong>Letzter Fehler:</strong> ' + failText + '</div>';
+  html += '<div><strong>Ausfälle:</strong> <strong>' + node.missing_count + '</strong> / 3 (Tit-for-Tat; heilt -1/h)</div>';
+  html += '<div><strong>RTT:</strong> ' + rttText + ' &bull; <strong>Letzter Fehler:</strong> ' + failText + '</div>';
   html += '</div>';
 
-  // 3. Routing & Topology
-  html += '<div style="background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border);">';
-  html += '<h4 style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: var(--blue);">📡 Mesh-Routing &amp; Topologie (Spec 11)</h4>';
-  html += '<div><strong>Hop-Distanz:</strong> ' + node.min_hops + ' Hops</div>';
-  html += '<div><strong>Ingress-Pfad (via):</strong> ' + ingressText + '</div>';
-  html += '<div><strong>Inkubations-Status:</strong> ' + incubText + '</div>';
-  html += '</div>';
-
-  html += '</div>';
+  html += '<div style="background: var(--surface-alt); padding: 0.6rem; border-radius: 0.5rem; border: 1px solid var(--border);">';
+  html += '<h4 style="margin: 0 0 0.4rem 0; font-size: 0.85rem; color: var(--blue);">📡 Topologie &amp; Routing</h4>';
+  html += '<div><strong>Distanz:</strong> ' + node.min_hops + ' Hops &bull; <strong>Pfad:</strong> ' + ingressText + ' &bull; <strong>Inkubation:</strong> ' + incubText + '</div>';
+  html += '</div></div>';
 
   document.getElementById('node-modal-details').innerHTML = html;
   document.getElementById('node-modal').classList.add('active');
@@ -1886,10 +1699,7 @@ function openNodeInspector(pubkey) {{
 
 function copyNodePubkey() {{
   const el = document.getElementById('node-modal-pubkey');
-  if (!el) return;
-  navigator.clipboard.writeText(el.innerText).then(() => {{
-    alert('NodePubKey kopiert!');
-  }}).catch(() => {{}});
+  if (el) navigator.clipboard.writeText(el.innerText).then(() => alert('NodePubKey kopiert!')).catch(() => {{}});
 }}
 
 function filterNodesTable() {{
@@ -1900,19 +1710,14 @@ function filterNodesTable() {{
   if (!currentDashboardData.network_nodes || currentDashboardData.network_nodes.length === 0) return;
   
   let html = '';
-  let count = 0;
   for (const n of currentDashboardData.network_nodes) {{
     if (term) {{
-      const match = n.public_key.toLowerCase().includes(term)
-        || n.address.toLowerCase().includes(term)
-        || n.connection_status.toLowerCase().includes(term)
-        || n.hrw_routing_id.toLowerCase().includes(term);
+      const match = n.public_key.toLowerCase().includes(term) || n.address.toLowerCase().includes(term) || n.connection_status.toLowerCase().includes(term) || n.hrw_routing_id.toLowerCase().includes(term);
       if (!match) continue;
     }}
-    count++;
-    const roleBadge = n.is_local ? '<span class="badge badge-purple">LOCAL (Self)</span>' : (n.is_f2f ? '<span class="badge badge-blue">F2F Friend</span>' : '<span class="badge badge-cyan">Gossip Shard</span>');
+    const roleBadge = n.is_local ? '<span class="badge badge-purple">LOCAL</span>' : (n.is_f2f ? '<span class="badge badge-blue">F2F Friend</span>' : '<span class="badge badge-cyan">Shard</span>');
     const statusBadge = n.connection_status.includes('Connected')
-      ? (n.missing_count === 0 ? '<span class="badge badge-green">Connected (0 Ausfälle)</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>')
+      ? (n.missing_count === 0 ? '<span class="badge badge-green">Connected (0)</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>')
       : (n.connection_status.includes('Suspended') ? '<span class="badge badge-red">' + n.connection_status + '</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>');
     const rttText = n.rtt_ms != null ? n.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
     const routeText = n.min_hops + ' Hop' + (n.min_hops === 1 ? '' : 's') + (n.best_ingress_peer ? ' via ' + truncateHash(n.best_ingress_peer) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : '')));
@@ -1951,14 +1756,12 @@ async function searchVoucher() {{
       currentVoucherDetail = detail;
       document.getElementById('voucher-modal-title').innerText = '🎟️ Gutschein-Lineage: ' + detail.voucher_id;
       
-      let html = '<div style="margin-bottom: 0.75rem; line-height: 1.6;">';
-      html += '<div><strong>Gutschein-ID:</strong> <span class="code">' + detail.voucher_id + '</span></div>';
-      html += '<div><strong>Wurzel-Anker (valid_until):</strong> ' + detail.root_valid_until_formatted + '</div>';
-      html += '<div><strong>Genesis Tag:</strong> <span class="code">' + (detail.genesis_tag || 'N/A') + '</span></div>';
-      html += '<div><strong>Gesamt-Sperren in Kette:</strong> ' + detail.locks.length + ' (' + detail.total_byte_years + ' Byte-Jahre Budget)</div>';
+      let html = '<div style="margin-bottom: 0.6rem; line-height: 1.5;">';
+      html += '<div><strong>Gutschein-ID:</strong> <span class="code">' + detail.voucher_id + '</span> &bull; <strong>Wurzel-Gültigkeit:</strong> ' + detail.root_valid_until_formatted + '</div>';
+      html += '<div><strong>Genesis Tag:</strong> <span class="code">' + (detail.genesis_tag || 'N/A') + '</span> &bull; <strong>Sperren in Kette:</strong> ' + detail.locks.length + ' (' + detail.total_byte_years + ' BY)</div>';
       html += '</div>';
 
-      let tableHtml = '<h4 style="margin: 0.75rem 0 0.25rem 0; font-size: 0.9rem;">Ketten-Historie (Lock-Hops):</h4>';
+      let tableHtml = '<h4 style="margin: 0.5rem 0 0.2rem 0; font-size: 0.85rem;">Ketten-Historie:</h4>';
       tableHtml += '<div style="overflow-x: auto;"><table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
       for (const h of detail.locks) {{
         const typeBadge = h.is_genesis ? '<span class="badge badge-amber">GENESIS</span>' : '<span class="badge badge-blue">SPEND</span>';
@@ -1974,7 +1777,7 @@ async function searchVoucher() {{
       alert('Gutschein oder Lookup-Tag "' + term + '" nicht gefunden.');
     }}
   }} catch (e) {{
-    alert('Fehler bei der Gutschein-Suche: ' + e.message);
+    alert('Fehler bei der Suche: ' + e.message);
   }}
 }}
 
@@ -1985,10 +1788,22 @@ async function refreshDashboard() {{
     const d = await res.json();
     currentDashboardData = d;
     
-    // Header Status & Latency Pills
+    // Header Status & Latency Pills & Clock
     const badge = document.getElementById('status-badge');
     badge.innerText = d.status_badge;
     badge.className = 'badge ' + (d.status === 'ONLINE' ? 'badge-green' : (d.status === 'VILLAGE MODE' ? 'badge-amber' : 'badge-red'));
+
+    if (d.network_time_ms) {{
+      const dt = new Date(d.network_time_ms);
+      const pad = (n) => String(n).padStart(2, '0');
+      const timeStr = pad(dt.getDate()) + '.' + pad(dt.getMonth() + 1) + '.' + dt.getFullYear() + ', ' + pad(dt.getHours()) + ':' + pad(dt.getMinutes()) + ':' + pad(dt.getSeconds());
+      const netTimeEl = document.getElementById('hdr-net-time');
+      if (netTimeEl) netTimeEl.innerText = timeStr;
+    }}
+    const simBadge = document.getElementById('hdr-sim-badge');
+    if (simBadge) {{
+      simBadge.style.display = d.is_simulation ? 'inline-block' : 'none';
+    }}
 
     document.getElementById('hdr-lat-local').innerText = d.local_latency.avg_ms.toFixed(2) + ' ms';
     document.getElementById('hdr-lat-quorum').innerText = d.quorum_latency.avg_ms.toFixed(2) + ' ms';
@@ -2081,14 +1896,36 @@ async function refreshDashboard() {{
     }}
 
     // Tiers & Quotas
-    document.getElementById('tier-free-pow-val').innerText = d.tiers.free_pow_diff;
-    document.getElementById('tier-free-req-val').innerText = d.tiers.free_req_sec.toFixed(1);
-    document.getElementById('tier-friends-used-val').innerText = d.tiers.friends_used_pct.toFixed(1) + '%';
-    document.getElementById('tier-vip-used-val').innerText = d.tiers.vip_used_pct.toFixed(1) + '%';
-    document.getElementById('quota-used-val').innerText = d.thermometer.today_write_used;
-    document.getElementById('quota-limit-val').innerText = d.thermometer.daily_write_quota;
-    document.getElementById('quota-pct-text').innerText = d.tiers.friends_used_pct.toFixed(1) + '%';
-    document.getElementById('quota-bar').style.width = Math.min(100, Math.max(0, d.tiers.friends_used_pct)) + '%';
+    if (d.tiers) {{
+      // Free Tier
+      if (document.getElementById('tier-free-used-val')) document.getElementById('tier-free-used-val').innerText = (d.tiers.free_used_pct || 0).toFixed(1) + '%';
+      if (document.getElementById('tier-free-writes-val')) document.getElementById('tier-free-writes-val').innerText = d.tiers.free_writes_today || 0;
+      if (document.getElementById('tier-free-bar')) document.getElementById('tier-free-bar').style.width = Math.min(100, Math.max(0, d.tiers.free_used_pct || 0)) + '%';
+      if (document.getElementById('tier-free-pow-val')) document.getElementById('tier-free-pow-val').innerText = d.tiers.free_pow_diff;
+      if (document.getElementById('tier-free-hashes-val')) document.getElementById('tier-free-hashes-val').innerText = (d.tiers.free_pow_hashes || 1).toLocaleString();
+      if (document.getElementById('tier-free-time-val')) document.getElementById('tier-free-time-val').innerText = d.tiers.free_pow_time_est || '< 0.1 ms';
+      if (document.getElementById('tier-free-req-val')) document.getElementById('tier-free-req-val').innerText = (d.tiers.free_req_sec || 0).toFixed(1);
+
+      // Friends Tier
+      if (document.getElementById('tier-friends-used-val')) document.getElementById('tier-friends-used-val').innerText = (d.tiers.friends_used_pct || 0).toFixed(1) + '%';
+      if (document.getElementById('tier-friends-writes-val')) document.getElementById('tier-friends-writes-val').innerText = d.tiers.friends_writes_today || 0;
+      if (document.getElementById('tier-friends-bar')) document.getElementById('tier-friends-bar').style.width = Math.min(100, Math.max(0, d.tiers.friends_used_pct || 0)) + '%';
+      if (document.getElementById('tier-friends-count-val')) document.getElementById('tier-friends-count-val').innerText = d.tiers.active_friends_count || 0;
+
+      // VIP Tier
+      if (document.getElementById('tier-vip-used-val')) document.getElementById('tier-vip-used-val').innerText = (d.tiers.vip_used_pct || 0).toFixed(1) + '%';
+      if (document.getElementById('tier-vip-writes-val')) document.getElementById('tier-vip-writes-val').innerText = d.tiers.vip_writes_today || 0;
+      if (document.getElementById('tier-vip-bar')) document.getElementById('tier-vip-bar').style.width = Math.min(100, Math.max(0, d.tiers.vip_used_pct || 0)) + '%';
+      if (document.getElementById('tier-vip-accounts-val')) document.getElementById('tier-vip-accounts-val').innerText = d.tiers.vip_accounts_count || 0;
+      if (document.getElementById('tier-vip-balance-val')) document.getElementById('tier-vip-balance-val').innerText = (d.tiers.vip_total_balance || 0).toLocaleString();
+
+      // Daily Quota Card
+      if (document.getElementById('quota-locks-val')) document.getElementById('quota-locks-val').innerText = d.tiers.total_writes_today || 0;
+      if (document.getElementById('quota-pct-text')) document.getElementById('quota-pct-text').innerText = (d.tiers.total_quota_used_pct || 0).toFixed(1) + '%';
+      if (document.getElementById('quota-bar')) document.getElementById('quota-bar').style.width = Math.min(100, Math.max(0, d.tiers.total_quota_used_pct || 0)) + '%';
+    }}
+    if (document.getElementById('quota-used-val')) document.getElementById('quota-used-val').innerText = (d.thermometer.today_write_used || 0).toLocaleString();
+    if (document.getElementById('quota-limit-val')) document.getElementById('quota-limit-val').innerText = (d.thermometer.daily_write_quota || 0).toLocaleString();
 
     // VIP Accounts Table
     const vipTbody = document.getElementById('vip-accounts-tbody');
@@ -2189,10 +2026,23 @@ setInterval(refreshDashboard, 2000);
         dom_percent = data.shard_subnet_dominance_max * 100.0,
         active_nodes = data.active_nodes_count,
         free_pow_diff = data.tiers.free_pow_diff,
+        free_pow_hashes = data.tiers.free_pow_hashes,
+        free_pow_time_est = data.tiers.free_pow_time_est,
+        free_used_pct = data.tiers.free_used_pct,
+        free_writes_today = data.tiers.free_writes_today,
         friends_used_pct = data.tiers.friends_used_pct,
+        friends_writes_today = data.tiers.friends_writes_today,
+        active_friends_count = data.tiers.active_friends_count,
         vip_used_pct = data.tiers.vip_used_pct,
+        vip_writes_today = data.tiers.vip_writes_today,
+        vip_accounts_count = data.tiers.vip_accounts_count,
+        vip_total_balance = data.tiers.vip_total_balance,
+        total_writes_today = data.tiers.total_writes_today,
+        total_quota_used_pct = data.tiers.total_quota_used_pct,
         today_write_used = data.thermometer.today_write_used,
-        daily_write_quota = data.thermometer.daily_write_quota
+        daily_write_quota = data.thermometer.daily_write_quota,
+        net_time_formatted = net_time_formatted,
+        sim_badge_style = sim_badge_style
     );
 
     (

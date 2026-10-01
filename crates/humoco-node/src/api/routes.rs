@@ -48,6 +48,7 @@ pub struct AppState {
     pub shard_query_depth: usize,
     pub system_stats: Arc<crate::api::system_stats::SystemStatsCollector>,
     pub auth: Arc<crate::api::auth::AdminTokenManager>,
+    pub is_simulation: bool,
 }
 
 impl AppState {
@@ -76,7 +77,13 @@ impl AppState {
             shard_query_depth: 3,
             system_stats,
             auth,
+            is_simulation: false,
         }
+    }
+
+    pub fn with_simulation_mode(mut self, is_simulation: bool) -> Self {
+        self.is_simulation = is_simulation;
+        self
     }
 
     pub fn with_lifecycle(mut self, lifecycle: crate::config::LifecycleConfig) -> Self {
@@ -292,7 +299,14 @@ async fn get_node_status(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<NodeStatusResponse>) {
     state.metrics.record_read();
-    let total_locks = state.engine.ram.read().await.len();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let (active_byte_years, _) = state.engine.get_active_footprint_byte_years(now_ms).await;
+    let total_locks = state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+    let daily_write_quota_byte_years = state.tier_controller.calculate_daily_quota(1.0, 1.0);
+    let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
     let network = match state.network_id {
         humoco_sim_core::types::NetworkId::Mainnet => "mainnet".to_string(),
         humoco_sim_core::types::NetworkId::Testnet => "testnet".to_string(),
@@ -307,6 +321,9 @@ async fn get_node_status(
             total_locks,
             network,
             free_tier_enabled: true,
+            active_byte_years,
+            daily_write_quota_byte_years,
+            daily_read_quota,
         }),
     )
 }

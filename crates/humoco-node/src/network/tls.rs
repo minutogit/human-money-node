@@ -184,8 +184,7 @@ pub fn extract_peer_node_id(
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes)
         .map_err(|e| NodeError::Tls(format!("Invalid Ed25519 public key in certificate: {}", e)))?;
 
-    let node_id = *blake3::hash(verifying_key.as_bytes()).as_bytes();
-    Ok((node_id, verifying_key))
+    Ok((pubkey_bytes, verifying_key))
 }
 
 /// Helper to extract peer node ID and verifying key directly from a Quinn Connection.

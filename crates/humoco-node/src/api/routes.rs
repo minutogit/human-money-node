@@ -415,25 +415,38 @@ pub fn create_attestation(
 /// Computes the 32-bit signer bitmap for a quorum certificate.
 /// Ranks all active HRW ids plus self by HRW score, truncates to 32, and
 /// maps each collected signature's node_id to its HRW rank bit position.
-fn compute_signer_bitmap(
-    active_for_bitmap: Vec<([u8; 32], std::net::SocketAddr)>,
+async fn compute_signer_bitmap(
+    peer_mgr: Option<&crate::network::PeerManager>,
+    active_for_bitmap: &[([u8; 32], std::net::SocketAddr)],
     self_hrw: [u8; 32],
+    self_pubkey: [u8; 32],
     shard_id: u16,
     collected_signatures: &[AttestationDto],
 ) -> u32 {
-    let mut all_ids: Vec<[u8; 32]> = active_for_bitmap.into_iter().map(|(nid, _)| nid).collect();
-    all_ids.push(self_hrw);
-    all_ids.sort_by(|a, b| {
+    let mut all_hrw: Vec<[u8; 32]> = active_for_bitmap.iter().map(|(hrw, _)| *hrw).collect();
+    all_hrw.push(self_hrw);
+    all_hrw.sort_by(|a, b| {
         let sa = humoco_sim_core::client_flow::compute_hrw_score_f64(a, shard_id);
         let sb = humoco_sim_core::client_flow::compute_hrw_score_f64(b, shard_id);
-        sb.total_cmp(&sa)
+        sb.total_cmp(&sa).then_with(|| b.cmp(a))
     });
-    all_ids.truncate(32);
+    all_hrw.truncate(32);
     let mut bitmap: u32 = 0;
     for sig in collected_signatures {
-        for (idx, nid) in all_ids.iter().enumerate() {
-            let nid_u16 = u16::from_be_bytes([nid[0], nid[1]]);
-            if nid_u16 == sig.node_id {
+        for (idx, hrw_id) in all_hrw.iter().enumerate() {
+            let pubkey_u16 = if hrw_id == &self_hrw {
+                u16::from_be_bytes([self_pubkey[0], self_pubkey[1]])
+            } else if let Some(mgr) = peer_mgr {
+                if let Some(pubkey) = mgr.get_pubkey_by_hrw_routing_id(hrw_id).await {
+                    u16::from_be_bytes([pubkey[0], pubkey[1]])
+                } else {
+                    u16::from_be_bytes([hrw_id[0], hrw_id[1]])
+                }
+            } else {
+                u16::from_be_bytes([hrw_id[0], hrw_id[1]])
+            };
+
+            if pubkey_u16 == sig.node_id {
                 bitmap |= 1u32 << idx;
                 break;
             }
@@ -747,7 +760,8 @@ async fn assemble_quorum_certificate(
                 0
             };
 
-            let signer_bitmap = compute_signer_bitmap(active_for_bitmap, self_hrw, shard_id, &collected_signatures);
+            let self_pubkey = *state.identity.node_pubkey();
+            let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
 
             QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),
@@ -869,7 +883,8 @@ async fn assemble_status_quorum_certificate(
                 0
             };
 
-            let signer_bitmap = compute_signer_bitmap(active_for_bitmap, self_hrw, shard_id, &collected_signatures);
+            let self_pubkey = *state.identity.node_pubkey();
+            let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
 
             QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),

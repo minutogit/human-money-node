@@ -102,7 +102,7 @@ impl NodeIdentity {
     /// Constructs a NodeIdentity from SigningKey with explicit PoW parameters.
     pub fn from_signing_key_with_pow(signing_key: SigningKey, nonce: u64, t0: u64) -> Self {
         let verifying_key = signing_key.verifying_key();
-        let node_id = *blake3::hash(verifying_key.as_bytes()).as_bytes();
+        let node_id = *verifying_key.as_bytes();
         let hrw_routing_id = compute_hrw_routing_id(verifying_key.as_bytes(), nonce, t0);
         Self {
             signing_key,
@@ -390,7 +390,7 @@ impl NodeIdentity {
                 key_array.copy_from_slice(&bytes[0..32]);
                 let signing_key = SigningKey::from_bytes(&key_array);
                 let verifying_key = signing_key.verifying_key();
-                let node_id = *blake3::hash(verifying_key.as_bytes()).as_bytes();
+                let node_id = *verifying_key.as_bytes();
 
                 let mut nonce_bytes = [0u8; 8];
                 nonce_bytes.copy_from_slice(&bytes[32..40]);
@@ -431,12 +431,14 @@ mod tests {
     #[test]
     fn test_generate_and_node_id_derivation() {
         let identity = NodeIdentity::generate();
-        let expected_node_id = *blake3::hash(identity.verifying_key().as_bytes()).as_bytes();
+        let expected_node_id = *identity.verifying_key().as_bytes();
         assert_eq!(*identity.node_id(), expected_node_id);
         assert_eq!(identity.node_id_hex().len(), 64);
         assert_eq!(identity.public_key_hex().len(), 64);
-        // HrwRoutingId fast path (nonce 0, t0 0) equals BLAKE3(pubkey) == node_id
-        assert_eq!(*identity.hrw_routing_id(), expected_node_id);
+        assert_eq!(identity.node_id_hex(), identity.public_key_hex());
+        // HrwRoutingId fast path (nonce 0, t0 0) equals BLAKE3(pubkey)
+        let expected_blake = *blake3::hash(identity.verifying_key().as_bytes()).as_bytes();
+        assert_eq!(*identity.hrw_routing_id(), expected_blake);
         assert_eq!(identity.nonce(), 0);
         assert_eq!(identity.t0(), 0);
     }

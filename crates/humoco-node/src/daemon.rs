@@ -240,7 +240,7 @@ impl NodeDaemon {
                             debug!("Heartbeat tick: no F2F friends configured");
                             continue;
                         }
-                        let node_id = *hb_identity.node_id();
+                        let node_id = *hb_identity.node_pubkey();
                         for peer_addr in peers {
                             if hb_cancel.is_cancelled() { break; }
                             seq = seq.wrapping_add(1);

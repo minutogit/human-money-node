@@ -1226,8 +1226,8 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
     let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
 
-    let self_node_id = *identity.node_id();
-    let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(&self_node_id, shard_id);
+    let self_hrw = *identity.hrw_routing_id();
+    let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(&self_hrw, shard_id);
 
     // Register 25 known peers that have a strictly HIGHER score than self for this shard
     // so that self's rank is > 20 (specifically rank 26).

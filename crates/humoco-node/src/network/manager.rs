@@ -234,10 +234,8 @@ impl PeerManager {
         for key in &trusted_pubkeys {
             friend_map.insert(*key, None);
             if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(key) {
-                let nid = *blake3::hash(vk.as_bytes()).as_bytes();
-                friend_map.insert(nid, None);
-                let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
-                vk_map.insert(nid, vk);
+                let u16_id = u16::from_be_bytes([key[0], key[1]]);
+                vk_map.insert(*key, vk);
                 u16_map.insert(u16_id, vk);
             }
         }
@@ -248,10 +246,8 @@ impl PeerManager {
                 info.node_id = Some(*key);
                 friend_map.insert(*key, Some(*addr));
                 if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(key) {
-                    let nid = *blake3::hash(vk.as_bytes()).as_bytes();
-                    friend_map.insert(nid, Some(*addr));
-                    let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
-                    vk_map.insert(nid, vk);
+                    let u16_id = u16::from_be_bytes([key[0], key[1]]);
+                    vk_map.insert(*key, vk);
                     u16_map.insert(u16_id, vk);
                 }
             }
@@ -372,10 +368,8 @@ impl PeerManager {
                         friends_guard.insert(key, Some(new_addr));
 
                         if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key) {
-                            let nid = *blake3::hash(vk.as_bytes()).as_bytes();
-                            friends_guard.insert(nid, Some(new_addr));
-                            let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
-                            self.verifying_keys.write().await.insert(nid, vk);
+                            let u16_id = u16::from_be_bytes([key[0], key[1]]);
+                            self.verifying_keys.write().await.insert(key, vk);
                             self.u16_to_vk.write().await.insert(u16_id, vk);
                         }
                     }
@@ -554,13 +548,14 @@ impl PeerManager {
     }
 
     /// Registers an explicit direct F2F friend.
-    /// F2F friendship is strictly bound to permanent Ed25519 NodePubKey (NodeId = BLAKE3(pubkey)).
+    /// F2F friendship is strictly bound to permanent Ed25519 NodePubKey.
     pub async fn register_f2f_friend(&self, node_id: [u8; 32], addr: Option<SocketAddr>) {
         let mut friends = self.f2f_friends.write().await;
         friends.insert(node_id, addr);
         if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&node_id) {
-            let nid = *blake3::hash(vk.as_bytes()).as_bytes();
-            friends.insert(nid, addr);
+            let u16_id = u16::from_be_bytes([node_id[0], node_id[1]]);
+            self.verifying_keys.write().await.insert(node_id, vk);
+            self.u16_to_vk.write().await.insert(u16_id, vk);
         }
         if let Some(a) = addr {
             let mut peers = self.peers.write().await;
@@ -579,35 +574,20 @@ impl PeerManager {
         let existing_addr = friends.get(&pubkey).copied().flatten();
         friends.insert(pubkey, existing_addr);
 
-        let mut nid_opt = None;
         if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pubkey) {
-            let nid = *blake3::hash(vk.as_bytes()).as_bytes();
-            nid_opt = Some(nid);
-            let nid_addr = friends.get(&nid).copied().flatten();
-            friends.insert(nid, existing_addr.or(nid_addr));
-
-            let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
-            self.verifying_keys.write().await.insert(nid, vk);
+            let u16_id = u16::from_be_bytes([pubkey[0], pubkey[1]]);
+            self.verifying_keys.write().await.insert(pubkey, vk);
             self.u16_to_vk.write().await.insert(u16_id, vk);
         }
 
         // If this node is known in known_network_nodes, resolve its address
         let known_addr = {
             let known = self.known_network_nodes.read().await;
-            known.get(&pubkey).map(|info| info.addr).or_else(|| {
-                if let Some(nid) = nid_opt {
-                    known.get(&nid).map(|info| info.addr)
-                } else {
-                    None
-                }
-            })
+            known.get(&pubkey).map(|info| info.addr)
         };
 
         if let Some(addr) = known_addr.or(existing_addr) {
             friends.insert(pubkey, Some(addr));
-            if let Some(nid) = nid_opt {
-                friends.insert(nid, Some(addr));
-            }
             let mut peers = self.peers.write().await;
             let entry = peers.entry(addr).or_insert_with(|| PeerInfo::with_type(addr, PeerConnectionType::FriendToFriend));
             entry.node_id = Some(pubkey);
@@ -616,12 +596,9 @@ impl PeerManager {
             // Check if any peer has matching node_id
             let mut peers = self.peers.write().await;
             for (addr, peer) in peers.iter_mut() {
-                if peer.node_id == Some(pubkey) || (nid_opt.is_some() && peer.node_id == nid_opt) {
+                if peer.node_id == Some(pubkey) {
                     peer.conn_type = PeerConnectionType::FriendToFriend;
                     friends.insert(pubkey, Some(*addr));
-                    if let Some(nid) = nid_opt {
-                        friends.insert(nid, Some(*addr));
-                    }
                 }
             }
         }
@@ -634,21 +611,16 @@ impl PeerManager {
         let mut friends = self.f2f_friends.write().await;
         friends.remove(pubkey);
 
-        let mut nid_opt = None;
-        if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey) {
-            let nid = *blake3::hash(vk.as_bytes()).as_bytes();
-            nid_opt = Some(nid);
-            friends.remove(&nid);
-
-            let u16_id = u16::from_be_bytes([nid[0], nid[1]]);
-            self.verifying_keys.write().await.remove(&nid);
+        if let Ok(_vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey) {
+            let u16_id = u16::from_be_bytes([pubkey[0], pubkey[1]]);
+            self.verifying_keys.write().await.remove(pubkey);
             self.u16_to_vk.write().await.remove(&u16_id);
         }
         drop(friends);
 
         let mut peers = self.peers.write().await;
         for peer in peers.values_mut() {
-            if peer.node_id.as_ref() == Some(pubkey) || (nid_opt.is_some() && peer.node_id.as_ref() == nid_opt.as_ref()) {
+            if peer.node_id.as_ref() == Some(pubkey) {
                 peer.conn_type = PeerConnectionType::ShardDirect;
             }
         }
@@ -657,7 +629,7 @@ impl PeerManager {
     }
 
     /// Checks if a given node_id is an authorized direct F2F friend.
-    /// Based strictly on permanent NodePubKey / NodeId (BLAKE3(pubkey)), not on HRW ticket.
+    /// Based strictly on permanent NodePubKey / NodeId, not on HRW ticket.
     pub async fn is_f2f_friend(&self, node_id: &[u8; 32]) -> bool {
         let friends = self.f2f_friends.read().await;
         friends.contains_key(node_id)
@@ -942,6 +914,15 @@ impl PeerManager {
         self.get_effective_hrw_routing_id(node_pubkey).await
     }
 
+    /// Finds a node's permanent NodePubKey given its active HRW routing ticket.
+    pub async fn get_pubkey_by_hrw_routing_id(&self, hrw_id: &[u8; 32]) -> Option<[u8; 32]> {
+        let nodes = self.known_network_nodes.read().await;
+        nodes
+            .values()
+            .find(|info| &info.hrw_routing_id == hrw_id)
+            .map(|info| info.node_pubkey)
+    }
+
     /// Returns pending ticket if present (still incubating).
     pub async fn get_pending_hrw_routing_id(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
         let nodes = self.known_network_nodes.read().await;
@@ -1121,14 +1102,16 @@ impl PeerManager {
                 continue;
             }
             let is_banned = banned.contains(friend_id);
-            let addr_str = friend_addr_opt
+            let info_opt = known.get(friend_id);
+
+            let resolved_addr = friend_addr_opt.or_else(|| info_opt.map(|k| k.addr));
+            let addr_str = resolved_addr
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
-            let is_connected = if let Some(addr) = friend_addr_opt {
-                peers.get(addr).map(|p| p.status == PeerStatus::Connected).unwrap_or(false)
-            } else {
-                false
-            };
+
+            let is_connected = resolved_addr
+                .and_then(|addr| peers.get(&addr).map(|p| p.status == PeerStatus::Connected))
+                .unwrap_or(false);
 
             let status_str = if is_banned {
                 "Banned (Equivocation)".to_string()
@@ -1138,9 +1121,16 @@ impl PeerManager {
                 "Configured (F2F Friend)".to_string()
             };
 
-            let hrw = known.get(friend_id).map(|k| k.hrw_routing_id).unwrap_or(*friend_id);
-            let work = known.get(friend_id).map(|k| k.work_score).unwrap_or(1);
-            let is_im = known.get(friend_id).map(|k| k.first_seen.elapsed() < HRW_INCUBATION_DURATION).unwrap_or(false);
+            let hrw = info_opt.map(|k| k.hrw_routing_id).unwrap_or(*friend_id);
+            let work = info_opt.map(|k| k.work_score).unwrap_or(1);
+            let is_im = info_opt
+                .map(|k| k.first_seen.elapsed() < HRW_INCUBATION_DURATION)
+                .unwrap_or(false);
+            let pending_bs58 = info_opt
+                .and_then(|k| k.pending_hrw_routing_id.map(|t| bs58::encode(&t).into_string()));
+            let rem_sec = info_opt
+                .and_then(|k| k.pending_remaining().map(|d| d.as_secs()));
+            let min_hops = info_opt.map(|k| k.min_hops.max(1)).unwrap_or(1);
 
             map.insert(
                 *friend_id,
@@ -1151,31 +1141,26 @@ impl PeerManager {
                     is_f2f: true,
                     is_local: false,
                     connection_status: status_str,
-                    min_hops: 1,
+                    min_hops,
                     hrw_routing_id: bs58::encode(&hrw).into_string(),
                     work_score: work,
                     is_immature: is_im,
-                    pending_ticket: None,
-                    incubation_remaining_sec: None,
+                    pending_ticket: pending_bs58,
+                    incubation_remaining_sec: rem_sec,
                 },
             );
         }
 
-        // 3. Add Gossip-learned Known Nodes
+        // 3. Add Gossip-learned Known Nodes (non-friends)
         for (node_pubkey, info) in known.iter() {
-            if node_pubkey == local_pubkey {
+            if node_pubkey == local_pubkey || friends.contains_key(node_pubkey) {
                 continue;
             }
             let is_banned = banned.contains(node_pubkey);
-            let is_friend = friends.contains_key(node_pubkey);
             let is_connected = peers.get(&info.addr).map(|p| p.status == PeerStatus::Connected).unwrap_or(false);
 
             let status_str = if is_banned {
                 "Banned (Equivocation)".to_string()
-            } else if is_friend && is_connected {
-                "Connected (F2F Friend)".to_string()
-            } else if is_friend {
-                "Configured (F2F Friend)".to_string()
             } else if is_connected {
                 "Connected (Shard Direct)".to_string()
             } else {
@@ -1192,7 +1177,7 @@ impl PeerManager {
                     node_id: bs58::encode(node_pubkey).into_string(),
                     public_key: bs58::encode(node_pubkey).into_string(),
                     address: info.addr.to_string(),
-                    is_f2f: is_friend,
+                    is_f2f: false,
                     is_local: false,
                     connection_status: status_str,
                     min_hops: info.min_hops,

@@ -277,6 +277,26 @@ impl NodeIdentity {
         hex_chars.join("")
     }
 
+    /// Returns the Base58-encoded representation of the public key.
+    pub fn public_key_bs58(&self) -> String {
+        bs58::encode(self.verifying_key.as_bytes()).into_string()
+    }
+
+    /// Returns the Base58-encoded representation of the node ID.
+    pub fn node_id_bs58(&self) -> String {
+        bs58::encode(&self.node_id).into_string()
+    }
+
+    /// Returns the Base58-encoded representation of the HRW routing ID.
+    pub fn hrw_routing_id_bs58(&self) -> String {
+        bs58::encode(&self.hrw_routing_id).into_string()
+    }
+
+    /// Returns the standard Base58 peering string `<pubkey_bs58>@<addr>`.
+    pub fn peering_string_bs58(&self, addr: &str) -> String {
+        format!("{}@{}", self.public_key_bs58(), addr)
+    }
+
     /// Returns the W3C `did:key` representation of the Ed25519 public key.
     /// Format: `did:key:z` + Base58BTC(0xed, 0x01, <32-byte pubkey>)
     pub fn did_key(&self) -> String {
@@ -587,4 +607,22 @@ mod tests {
         let expected_blake = *blake3::hash(identity.verifying_key().as_bytes()).as_bytes();
         assert_eq!(*identity.hrw_routing_id(), expected_blake);
     }
+
+    #[test]
+    fn test_base58_encodings() {
+        let identity = NodeIdentity::generate();
+        let pk_bs58 = identity.public_key_bs58();
+        let node_bs58 = identity.node_id_bs58();
+        let hrw_bs58 = identity.hrw_routing_id_bs58();
+        let peering = identity.peering_string_bs58("127.0.0.1:9090");
+
+        assert!(pk_bs58.len() >= 43 && pk_bs58.len() <= 44);
+        assert!(node_bs58.len() >= 43 && node_bs58.len() <= 44);
+        assert!(hrw_bs58.len() >= 43 && hrw_bs58.len() <= 44);
+        assert_eq!(peering, format!("{}@127.0.0.1:9090", pk_bs58));
+
+        let decoded_pk = bs58::decode(&pk_bs58).into_vec().expect("valid base58");
+        assert_eq!(&decoded_pk[..], identity.verifying_key().as_bytes());
+    }
 }
+

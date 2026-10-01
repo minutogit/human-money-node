@@ -678,15 +678,15 @@ pub fn execute_init(
         } else {
             cfg.network.p2p_listen_addr.to_string()
         };
-        let conn_string = format!("{}@{}", identity.public_key_hex(), conn_addr);
+        let conn_string = format!("{}@{}", identity.public_key_bs58(), conn_addr);
 
         if json {
             let out = InitJsonOutput {
                 config_path: target_path.display().to_string(),
                 key_path: cfg.identity.key_path.display().to_string(),
-                node_id: identity.node_id_hex(),
-                public_key: identity.public_key_hex(),
-                hrw_routing_id: identity.hrw_routing_id_hex(),
+                node_id: identity.node_id_bs58(),
+                public_key: identity.public_key_bs58(),
+                hrw_routing_id: identity.hrw_routing_id_bs58(),
                 connection_string: conn_string.clone(),
                 recovery_mnemonic: phrase_opt,
                 mnemonic_words: actual_words,
@@ -712,14 +712,14 @@ pub fn execute_init(
             println!("│   Passphrase: {:<62} │", if passphrase.is_some() { "set" } else { "not set" });
         }
         println!("│ Node ID:                                                                     │");
-        println!("│   {:<74} │", identity.node_id_hex());
+        println!("│   {:<74} │", identity.node_id_bs58());
         println!("│                                                                              │");
         println!("│ HRW Routing ID (Argon2d Ticket, semantisch entflochten):                    │");
-        println!("│   {:<74} │", identity.hrw_routing_id_hex());
+        println!("│   {:<74} │", identity.hrw_routing_id_bs58());
         println!("│   nonce: {:<20} t0: {:<20} ({}) │", identity.nonce(), identity.t0(), if identity.t0() == 0 { "no incubation" } else { "ticket" });
         println!("│                                                                              │");
-        println!("│ Public Key (Hex):                                                            │");
-        println!("│   {:<74} │", identity.public_key_hex());
+        println!("│ Public Key (Base58):                                                         │");
+        println!("│   {:<74} │", identity.public_key_bs58());
         println!("│                                                                              │");
         println!("│ Public Key (did:key):                                                        │");
         println!("│   {:<74} │", identity.did_key());
@@ -774,8 +774,8 @@ pub fn execute_keygen(out: Option<PathBuf>, force: bool) -> Result<(), NodeError
 
     println!("Generated new Ed25519 identity keypair.");
     println!("Key saved to:  {}", target_path.display());
-    println!("Node ID:       {}", identity.node_id_hex());
-    println!("Public Key:    {}", identity.public_key_hex());
+    println!("Node ID:       {}", identity.node_id_bs58());
+    println!("Public Key:    {}", identity.public_key_bs58());
     Ok(())
 }
 
@@ -837,7 +837,7 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
                 if cfg.identity.key_path.exists() {
                     NodeIdentity::load_from_file(&cfg.identity.key_path)
                         .ok()
-                        .map(|id| id.public_key_hex())
+                        .map(|id| id.public_key_bs58())
                 } else {
                     None
                 }
@@ -846,7 +846,7 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
                 if cfg.identity.key_path.exists() {
                     NodeIdentity::load_from_file(&cfg.identity.key_path)
                         .ok()
-                        .map(|id| id.hrw_routing_id_hex())
+                        .map(|id| id.hrw_routing_id_bs58())
                 } else {
                     None
                 }
@@ -956,10 +956,10 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
                 } else {
                     cfg.network.p2p_listen_addr.to_string()
                 };
-                let cs = id_opt.as_ref().map(|id| format!("{}@{}", id.public_key_hex(), conn_addr));
-                let nid = id_opt.as_ref().map(|id| id.node_id_hex());
-                let pk = id_opt.as_ref().map(|id| id.public_key_hex());
-                let hrw = id_opt.as_ref().map(|id| id.hrw_routing_id_hex());
+                let cs = id_opt.as_ref().map(|id| format!("{}@{}", id.public_key_bs58(), conn_addr));
+                let nid = id_opt.as_ref().map(|id| id.node_id_bs58());
+                let pk = id_opt.as_ref().map(|id| id.public_key_bs58());
+                let hrw = id_opt.as_ref().map(|id| id.hrw_routing_id_bs58());
                 let ws = id_opt.as_ref().map(|id| id.work_score());
                 (
                     true,
@@ -1026,7 +1026,7 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
     if cfg.identity.key_path.exists() {
         match NodeIdentity::load_from_file(&cfg.identity.key_path) {
             Ok(identity) => {
-                let pk = identity.public_key_hex();
+                let pk = identity.public_key_bs58();
                 let conn_addr = if let Some(adv) = cfg.network.advertised_addr {
                     adv.to_string()
                 } else if cfg.network.p2p_listen_addr.ip().is_unspecified() {
@@ -1037,8 +1037,8 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
                 let conn_string = format!("{}@{}", pk, conn_addr);
                 conn_string_opt = Some(conn_string.clone());
                 println!("Key Status:        Valid");
-                println!("Node ID:           {}", identity.node_id_hex());
-                println!("HRW Routing ID:    {}", identity.hrw_routing_id_hex());
+                println!("Node ID:           {}", identity.node_id_bs58());
+                println!("HRW Routing ID:    {}", identity.hrw_routing_id_bs58());
                 println!("Routing Nonce:     {}", identity.nonce());
                 println!("Routing T0:        {} ({} incubation)", identity.t0(), if identity.t0() == 0 { "no" } else { "24h" });
                 println!("Public Key:        {}", pk);
@@ -1469,13 +1469,13 @@ pub async fn execute_qr(config_path: Option<PathBuf>) -> Result<(), NodeError> {
     } else {
         cfg.network.p2p_listen_addr.to_string()
     };
-    let conn_string = format!("{}@{}", identity.public_key_hex(), conn_addr);
+    let conn_string = format!("{}@{}", identity.public_key_bs58(), conn_addr);
 
     println!("=== HuMoCo Peering QR Code ===");
     println!("Connection String: {}", conn_string);
     println!("\nScan with mobile wallet or companion app to peer:\n");
     print!("{}", generate_qr_ansi(&conn_string));
-    println!("Public Key: {}", identity.public_key_hex());
+    println!("Public Key: {}", identity.public_key_bs58());
     Ok(())
 }
 

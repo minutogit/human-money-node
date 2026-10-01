@@ -1100,14 +1100,14 @@ impl PeerManager {
         map.insert(
             *local_pubkey,
             NetworkNodeDto {
-                node_id: hex::encode(local_pubkey),
-                public_key: hex::encode(local_pubkey),
+                node_id: bs58::encode(local_pubkey).into_string(),
+                public_key: bs58::encode(local_pubkey).into_string(),
                 address: local_addr_str,
                 is_f2f: false,
                 is_local: true,
                 connection_status: "Local Node (Self)".to_string(),
                 min_hops: 0,
-                hrw_routing_id: hex::encode(local_hrw),
+                hrw_routing_id: bs58::encode(local_hrw).into_string(),
                 work_score: 1,
                 is_immature: false,
                 pending_ticket: None,
@@ -1145,14 +1145,14 @@ impl PeerManager {
             map.insert(
                 *friend_id,
                 NetworkNodeDto {
-                    node_id: hex::encode(friend_id),
-                    public_key: hex::encode(friend_id),
+                    node_id: bs58::encode(friend_id).into_string(),
+                    public_key: bs58::encode(friend_id).into_string(),
                     address: addr_str,
                     is_f2f: true,
                     is_local: false,
                     connection_status: status_str,
                     min_hops: 1,
-                    hrw_routing_id: hex::encode(hrw),
+                    hrw_routing_id: bs58::encode(&hrw).into_string(),
                     work_score: work,
                     is_immature: is_im,
                     pending_ticket: None,
@@ -1182,24 +1182,24 @@ impl PeerManager {
                 "Learned via Gossip".to_string()
             };
 
-            let pending_hex = info.pending_hrw_routing_id.map(hex::encode);
+            let pending_bs58 = info.pending_hrw_routing_id.map(|t| bs58::encode(&t).into_string());
             let rem_sec = info.pending_remaining().map(|d| d.as_secs());
             let is_immature = info.first_seen.elapsed() < HRW_INCUBATION_DURATION;
 
             map.insert(
                 *node_pubkey,
                 NetworkNodeDto {
-                    node_id: hex::encode(node_pubkey),
-                    public_key: hex::encode(node_pubkey),
+                    node_id: bs58::encode(node_pubkey).into_string(),
+                    public_key: bs58::encode(node_pubkey).into_string(),
                     address: info.addr.to_string(),
                     is_f2f: is_friend,
                     is_local: false,
                     connection_status: status_str,
                     min_hops: info.min_hops,
-                    hrw_routing_id: hex::encode(info.hrw_routing_id),
+                    hrw_routing_id: bs58::encode(&info.hrw_routing_id).into_string(),
                     work_score: info.work_score,
                     is_immature,
-                    pending_ticket: pending_hex,
+                    pending_ticket: pending_bs58,
                     incubation_remaining_sec: rem_sec,
                 },
             );

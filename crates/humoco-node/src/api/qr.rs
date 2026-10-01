@@ -1,12 +1,8 @@
-//! Minimal, zero-dependency QR Code SVG Generator (ISO/IEC 18004 compliant).
-//! Generates a valid Version 6 (41x41) QR Code in Error Correction Level L with Byte encoding.
-//! Designed for peering strings (`<pubkey>@<ip>:9090`) up to 134 bytes.
+//! Minimal, zero-dependency QR Code Generator (ISO/IEC 18004 compliant).
+//! Supports dynamic QR versions (V3, V4, V5, V6) in Error Correction Level L with Byte encoding.
+//! Correctly implements Galois Field GF(2^8) Reed-Solomon error correction and codeword interleaving.
 
-const SIZE: usize = 41; // 4 * 6 + 17
-const TOTAL_CODEWORDS: usize = 172;
-const EC_CODEWORDS: usize = 36;
-const DATA_CODEWORDS: usize = 136;
-const GF_POLY: u16 = 0x11D;
+const GF_POLY: u16 = 0x11D; // x^8 + x^4 + x^3 + x^2 + 1
 
 struct Gf256 {
     exp: [u8; 512],
@@ -82,32 +78,112 @@ fn compute_format_bits() -> u16 {
     ((data << 10) | rem) ^ 0x5412
 }
 
-#[allow(clippy::needless_range_loop)]
-/// Generates the raw boolean module matrix for Version 6 (41x41) QR code.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+struct QrVersionSpec {
+    version: usize,
+    size: usize,
+    alignment_center: usize,
+    total_codewords: usize,
+    data_codewords: usize,
+    ec_codewords_per_block: usize,
+    blocks: usize,
+    remainder_bits: usize,
+}
+
+impl QrVersionSpec {
+    fn for_text_len(len: usize) -> Self {
+        // Mode (4 bits) + Count (8 bits) = 12 bits -> 2 codewords overhead.
+        // Payload capacity = data_codewords - 2
+        if len <= 53 {
+            // Version 3-L (29x29): 55 data, 15 EC (1 block), total 70
+            Self {
+                version: 3,
+                size: 29,
+                alignment_center: 22,
+                total_codewords: 70,
+                data_codewords: 55,
+                ec_codewords_per_block: 15,
+                blocks: 1,
+                remainder_bits: 0,
+            }
+        } else if len <= 78 {
+            // Version 4-L (33x33): 80 data, 20 EC (1 block), total 100
+            Self {
+                version: 4,
+                size: 33,
+                alignment_center: 26,
+                total_codewords: 100,
+                data_codewords: 80,
+                ec_codewords_per_block: 20,
+                blocks: 1,
+                remainder_bits: 0,
+            }
+        } else if len <= 106 {
+            // Version 5-L (37x37): 108 data, 26 EC (1 block), total 134
+            Self {
+                version: 5,
+                size: 37,
+                alignment_center: 30,
+                total_codewords: 134,
+                data_codewords: 108,
+                ec_codewords_per_block: 26,
+                blocks: 1,
+                remainder_bits: 0,
+            }
+        } else {
+            // Version 6-L (41x41): 136 data (2 blocks of 68), 36 EC (2 blocks of 18), total 172
+            Self {
+                version: 6,
+                size: 41,
+                alignment_center: 34,
+                total_codewords: 172,
+                data_codewords: 136,
+                ec_codewords_per_block: 18,
+                blocks: 2,
+                remainder_bits: 7,
+            }
+        }
+    }
+}
+
+/// Represents a generated QR module matrix.
+pub struct QrMatrix {
+    pub size: usize,
+    pub modules: Vec<Vec<bool>>,
+}
+
+/// Generates the raw boolean module matrix for `text`.
 /// `true` = dark module (black), `false` = light module (white).
-pub fn generate_qr_matrix(text: &str) -> [[bool; SIZE]; SIZE] {
+pub fn generate_qr_matrix(text: &str) -> QrMatrix {
     let bytes = text.as_bytes();
-    let mut bit_buf = Vec::new();
+    let spec = QrVersionSpec::for_text_len(bytes.len());
+    let max_payload = spec.data_codewords - 2;
+    let len = bytes.len().min(max_payload);
+
+    let mut bit_buf = Vec::with_capacity(spec.data_codewords * 8);
 
     // Mode: Byte (0100)
     push_bits(&mut bit_buf, 0b0100, 4);
     // Count indicator: 8 bits for Version 1..9 in Byte mode
-    let len = bytes.len().min(DATA_CODEWORDS - 2);
     push_bits(&mut bit_buf, len as u16, 8);
     // Data bytes
     for &b in &bytes[..len] {
         push_bits(&mut bit_buf, b as u16, 8);
     }
+
     // Terminator: up to 4 bits
-    let total_data_bits = DATA_CODEWORDS * 8;
+    let total_data_bits = spec.data_codewords * 8;
     let term_len = 4.min(total_data_bits.saturating_sub(bit_buf.len()));
     push_bits(&mut bit_buf, 0, term_len);
+
     // Byte boundary padding
     while bit_buf.len() % 8 != 0 {
         bit_buf.push(false);
     }
+
     // Codewords
-    let mut data_codewords = Vec::with_capacity(DATA_CODEWORDS);
+    let mut data_codewords = Vec::with_capacity(spec.data_codewords);
     for chunk in bit_buf.chunks(8) {
         let mut byte = 0u8;
         for &bit in chunk {
@@ -115,55 +191,84 @@ pub fn generate_qr_matrix(text: &str) -> [[bool; SIZE]; SIZE] {
         }
         data_codewords.push(byte);
     }
-    // Pad codewords: 0xEC, 0x11
+
+    // Pad codewords: alternate 0xEC, 0x11
     let pad = [0xEC, 0x11];
     let mut pad_idx = 0;
-    while data_codewords.len() < DATA_CODEWORDS {
+    while data_codewords.len() < spec.data_codewords {
         data_codewords.push(pad[pad_idx]);
         pad_idx = 1 - pad_idx;
     }
 
-    // Reed-Solomon Error Correction
+    // Reed-Solomon Error Correction per block
     let gf = Gf256::new();
-    let ec_codewords = rs_encode(&data_codewords, EC_CODEWORDS, &gf);
+    let data_per_block = spec.data_codewords / spec.blocks;
+    let mut ec_blocks = Vec::with_capacity(spec.blocks);
+    let mut data_blocks = Vec::with_capacity(spec.blocks);
 
-    let mut all_codewords = data_codewords;
-    all_codewords.extend_from_slice(&ec_codewords);
+    for b in 0..spec.blocks {
+        let slice = &data_codewords[b * data_per_block..(b + 1) * data_per_block];
+        data_blocks.push(slice);
+        let ec = rs_encode(slice, spec.ec_codewords_per_block, &gf);
+        ec_blocks.push(ec);
+    }
+
+    // Interleave data codewords across blocks
+    let mut interleaved = Vec::with_capacity(spec.total_codewords);
+    for i in 0..data_per_block {
+        for b in 0..spec.blocks {
+            interleaved.push(data_blocks[b][i]);
+        }
+    }
+    // Interleave error correction codewords across blocks
+    for i in 0..spec.ec_codewords_per_block {
+        for b in 0..spec.blocks {
+            interleaved.push(ec_blocks[b][i]);
+        }
+    }
 
     // Flatten to bitstream
-    let mut all_bits = Vec::with_capacity(TOTAL_CODEWORDS * 8 + 7);
-    for byte in all_codewords {
+    let mut all_bits = Vec::with_capacity(spec.total_codewords * 8 + spec.remainder_bits);
+    for byte in interleaved {
         for i in (0..8).rev() {
             all_bits.push(((byte >> i) & 1) == 1);
         }
     }
-    // 7 remainder bits for Version 6
-    all_bits.resize(all_bits.len() + 7, false);
+    // Remainder bits
+    all_bits.resize(all_bits.len() + spec.remainder_bits, false);
 
-    // Grid placement
-    let mut modules = [[false; SIZE]; SIZE];
-    let mut is_func = [[false; SIZE]; SIZE];
+    // Matrix allocation
+    let size = spec.size;
+    let mut modules = vec![vec![false; size]; size];
+    let mut is_func = vec![vec![false; size]; size];
 
     // Finders & separators
     place_finder(&mut modules, &mut is_func, 0, 0);
-    place_finder(&mut modules, &mut is_func, 0, SIZE - 7);
-    place_finder(&mut modules, &mut is_func, SIZE - 7, 0);
+    place_finder(&mut modules, &mut is_func, 0, size - 7);
+    place_finder(&mut modules, &mut is_func, size - 7, 0);
 
-    // Separators
+    // Separators around finders
     for i in 0..8 {
-        mark_func(&mut is_func, 7, i);
-        mark_func(&mut is_func, i, 7);
-        mark_func(&mut is_func, 7, SIZE - 1 - i);
-        mark_func(&mut is_func, i, SIZE - 8);
-        mark_func(&mut is_func, SIZE - 8, i);
-        mark_func(&mut is_func, SIZE - 1 - i, 7);
+        mark_func(&mut is_func, size, 7, i);
+        mark_func(&mut is_func, size, i, 7);
+        mark_func(&mut is_func, size, 7, size - 1 - i);
+        mark_func(&mut is_func, size, i, size - 8);
+        mark_func(&mut is_func, size, size - 8, i);
+        mark_func(&mut is_func, size, size - 1 - i, 7);
     }
 
-    // Alignment pattern at (34, 34) for Version 6
-    place_alignment(&mut modules, &mut is_func, 34, 34);
+    // Alignment pattern
+    if spec.alignment_center > 0 {
+        place_alignment(
+            &mut modules,
+            &mut is_func,
+            spec.alignment_center,
+            spec.alignment_center,
+        );
+    }
 
     // Timing patterns
-    for i in 8..(SIZE - 8) {
+    for i in 8..(size - 8) {
         let is_black = i % 2 == 0;
         modules[6][i] = is_black;
         is_func[6][i] = true;
@@ -171,9 +276,9 @@ pub fn generate_qr_matrix(text: &str) -> [[bool; SIZE]; SIZE] {
         is_func[i][6] = true;
     }
 
-    // Dark module at (SIZE - 8, 8) = (33, 8)
-    modules[SIZE - 8][8] = true;
-    is_func[SIZE - 8][8] = true;
+    // Dark module at (SIZE - 8, 8)
+    modules[size - 8][8] = true;
+    is_func[size - 8][8] = true;
 
     // Reserve format bits
     for i in 0..9 {
@@ -181,13 +286,13 @@ pub fn generate_qr_matrix(text: &str) -> [[bool; SIZE]; SIZE] {
         is_func[i][8] = true;
     }
     for i in 0..8 {
-        is_func[8][SIZE - 1 - i] = true;
-        is_func[SIZE - 1 - i][8] = true;
+        is_func[8][size - 1 - i] = true;
+        is_func[size - 1 - i][8] = true;
     }
 
-    // Data traversal (zig-zag from right to left)
+    // Data traversal (zig-zag from right to left in 2-column tracks)
     let mut bit_idx = 0;
-    let mut col = SIZE as isize - 1;
+    let mut col = size as isize - 1;
     let mut upward = true;
 
     while col > 0 {
@@ -195,9 +300,9 @@ pub fn generate_qr_matrix(text: &str) -> [[bool; SIZE]; SIZE] {
             col -= 1; // Skip vertical timing column
         }
         let rows: Vec<usize> = if upward {
-            (0..SIZE).rev().collect()
+            (0..size).rev().collect()
         } else {
-            (0..SIZE).collect()
+            (0..size).collect()
         };
 
         for r in rows {
@@ -220,7 +325,7 @@ pub fn generate_qr_matrix(text: &str) -> [[bool; SIZE]; SIZE] {
         col -= 2;
     }
 
-    // Write format bits
+    // Write format bits (15 bits, Level L, Mask 0)
     let format_val = compute_format_bits();
     for i in 0..15 {
         let bit = ((format_val >> i) & 1) == 1;
@@ -238,31 +343,32 @@ pub fn generate_qr_matrix(text: &str) -> [[bool; SIZE]; SIZE] {
 
         // Bottom-left & Top-right
         let (r2, c2) = if i < 7 {
-            (SIZE - 1 - (i as usize), 8)
+            (size - 1 - (i as usize), 8)
         } else {
-            (8, SIZE - 8 + (i as usize - 7))
+            (8, size - 8 + (i as usize - 7))
         };
         modules[r2][c2] = bit;
     }
 
-    modules
+    QrMatrix { size, modules }
 }
 
 /// Generates an inline SVG QR code representing `text`.
 pub fn generate_qr_svg(text: &str) -> String {
-    let modules = generate_qr_matrix(text);
+    let qr = generate_qr_matrix(text);
+    let size = qr.size;
 
-    // Render SVG with horizontal run-length compression
-    let quiet = 2;
-    let total_size = SIZE + quiet * 2;
+    // Render SVG with 4-module quiet zone for robust camera edge detection
+    let quiet = 4;
+    let total_size = size + quiet * 2;
     let mut path_d = String::new();
 
-    for r in 0..SIZE {
+    for r in 0..size {
         let mut c = 0;
-        while c < SIZE {
-            if modules[r][c] {
+        while c < size {
+            if qr.modules[r][c] {
                 let start_c = c;
-                while c < SIZE && modules[r][c] {
+                while c < size && qr.modules[r][c] {
                     c += 1;
                 }
                 let w = c - start_c;
@@ -280,7 +386,7 @@ pub fn generate_qr_svg(text: &str) -> String {
     }
 
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total} {total}" shape-rendering="crispEdges" class="qr-svg"><rect width="{total}" height="{total}" fill="#ffffff" rx="2"/><path fill="#111827" d="{d}"/></svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total} {total}" shape-rendering="crispEdges" class="qr-svg"><rect width="{total}" height="{total}" fill="#ffffff"/><path fill="#111827" d="{d}"/></svg>"##,
         total = total_size,
         d = path_d.trim_end()
     )
@@ -288,18 +394,18 @@ pub fn generate_qr_svg(text: &str) -> String {
 
 /// Generates a compact ANSI/Unicode QR code for direct terminal rendering.
 /// Uses half-block characters (▀, ▄, █, space) to fit 2 QR rows per terminal line.
-/// The resulting QR code is only 23 lines high and 45 columns wide (including quiet zone).
 pub fn generate_qr_ansi(text: &str) -> String {
-    let modules = generate_qr_matrix(text);
+    let qr = generate_qr_matrix(text);
+    let size = qr.size;
     let quiet = 2;
-    let total_size = SIZE + quiet * 2; // 45
+    let total_size = size + quiet * 2;
     let mut output = String::new();
 
     let get_module = |y: usize, x: usize| -> bool {
-        if y < quiet || y >= quiet + SIZE || x < quiet || x >= quiet + SIZE {
+        if y < quiet || y >= quiet + size || x < quiet || x >= quiet + size {
             false // Light / white in quiet zone
         } else {
-            modules[y - quiet][x - quiet]
+            qr.modules[y - quiet][x - quiet]
         }
     };
 
@@ -313,9 +419,9 @@ pub fn generate_qr_ansi(text: &str) -> String {
                 false
             };
 
-            // Standard terminal rendering (dark background, light foreground):
-            // false (light module) -> rendered as white
-            // true (dark module) -> rendered as black
+            // Terminal rendering (light on dark):
+            // false (light module) -> rendered as solid light
+            // true (dark module) -> rendered as dark space
             let ch = match (!top_dark, !bot_dark) {
                 (true, true) => '█',   // Both light
                 (true, false) => '▀',  // Top light, bottom dark
@@ -337,7 +443,7 @@ fn push_bits(buf: &mut Vec<bool>, val: u16, len: usize) {
     }
 }
 
-fn place_finder(modules: &mut [[bool; SIZE]; SIZE], is_func: &mut [[bool; SIZE]; SIZE], r: usize, c: usize) {
+fn place_finder(modules: &mut [Vec<bool>], is_func: &mut [Vec<bool>], r: usize, c: usize) {
     for dr in 0..7 {
         for dc in 0..7 {
             let is_black = dr == 0 || dr == 6 || dc == 0 || dc == 6 || ((2..=4).contains(&dr) && (2..=4).contains(&dc));
@@ -347,7 +453,7 @@ fn place_finder(modules: &mut [[bool; SIZE]; SIZE], is_func: &mut [[bool; SIZE];
     }
 }
 
-fn place_alignment(modules: &mut [[bool; SIZE]; SIZE], is_func: &mut [[bool; SIZE]; SIZE], center_r: usize, center_c: usize) {
+fn place_alignment(modules: &mut [Vec<bool>], is_func: &mut [Vec<bool>], center_r: usize, center_c: usize) {
     for dr in 0..5 {
         for dc in 0..5 {
             let r = center_r - 2 + dr;
@@ -359,8 +465,8 @@ fn place_alignment(modules: &mut [[bool; SIZE]; SIZE], is_func: &mut [[bool; SIZ
     }
 }
 
-fn mark_func(is_func: &mut [[bool; SIZE]; SIZE], r: usize, c: usize) {
-    if r < SIZE && c < SIZE {
+fn mark_func(is_func: &mut [Vec<bool>], size: usize, r: usize, c: usize) {
+    if r < size && c < size {
         is_func[r][c] = true;
     }
 }
@@ -377,23 +483,53 @@ mod tests {
     }
 
     #[test]
+    fn test_qr_versions_selection() {
+        // V3 (<= 53 B)
+        let v3 = QrVersionSpec::for_text_len(40);
+        assert_eq!(v3.version, 3);
+        assert_eq!(v3.size, 29);
+        assert_eq!(v3.blocks, 1);
+
+        // V4 (<= 78 B)
+        let v4 = QrVersionSpec::for_text_len(60);
+        assert_eq!(v4.version, 4);
+        assert_eq!(v4.size, 33);
+        assert_eq!(v4.blocks, 1);
+
+        // V5 (<= 106 B)
+        let v5 = QrVersionSpec::for_text_len(90);
+        assert_eq!(v5.version, 5);
+        assert_eq!(v5.size, 37);
+        assert_eq!(v5.blocks, 1);
+
+        // V6 (<= 134 B)
+        let v6 = QrVersionSpec::for_text_len(120);
+        assert_eq!(v6.version, 6);
+        assert_eq!(v6.size, 41);
+        assert_eq!(v6.blocks, 2);
+    }
+
+    #[test]
     fn test_qr_svg_generation() {
-        let svg = generate_qr_svg("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a@127.0.0.1:9090");
+        let peering = "9ZNTfG4NyQgxy2SWjSiQoUyBPEvXT2xq7f2U6bK8d5wH@127.0.0.1:9090";
+        let svg = generate_qr_svg(peering);
         assert!(svg.starts_with("<svg"));
         assert!(svg.ends_with("</svg>"));
         assert!(svg.contains("class=\"qr-svg\""));
-        assert!(svg.contains("viewBox=\"0 0 45 45\""));
+        // Version 4 (33x33) + quiet (4*2) = 41x41 viewBox
+        assert!(svg.contains("viewBox=\"0 0 41 41\""));
     }
 
     #[test]
     fn test_qr_ansi_generation() {
-        let text = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a@127.0.0.1:9090";
+        let text = "9ZNTfG4NyQgxy2SWjSiQoUyBPEvXT2xq7f2U6bK8d5wH@127.0.0.1:9090";
         let ansi = generate_qr_ansi(text);
         let lines: Vec<&str> = ansi.lines().collect();
-        // 45 modules tall with 2 rows per character = 23 lines
-        assert_eq!(lines.len(), 23);
+        // Version 4: 33 + quiet(2*2) = 37 modules tall with 2 rows per character = 19 lines
+        assert_eq!(lines.len(), 19);
         for line in lines {
-            assert_eq!(line.chars().count(), 45);
+            assert_eq!(line.chars().count(), 37);
         }
     }
 }
+

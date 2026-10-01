@@ -171,7 +171,7 @@ pub type DashboardDataDto = DashboardData;
 
 /// Computes the node's peering string `<pubkey>@<ip>:9090`
 pub fn determine_peering_string(state: &AppState) -> String {
-    let pubkey = state.identity.public_key_hex();
+    let pubkey = state.identity.public_key_bs58();
     let addr = if let Some(ref t) = state.transport {
         t.local_addr().ok().map(|a| {
             if a.ip().is_unspecified() {
@@ -316,8 +316,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
             0.0,
             Vec::new(),
             vec![NetworkNodeDto {
-                node_id: hex::encode(local_pubkey_bytes),
-                public_key: hex::encode(local_pubkey_bytes),
+                node_id: bs58::encode(local_pubkey_bytes).into_string(),
+                public_key: bs58::encode(local_pubkey_bytes).into_string(),
                 address: local_addr
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "127.0.0.1:9090".to_string()),
@@ -325,7 +325,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
                 is_local: true,
                 connection_status: "Standalone (Village Mode)".to_string(),
                 min_hops: 0,
-                hrw_routing_id: hex::encode(local_hrw),
+                hrw_routing_id: bs58::encode(local_hrw).into_string(),
                 work_score: 1,
                 is_immature: false,
                 pending_ticket: None,
@@ -484,11 +484,14 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         let mut f_list = Vec::new();
         for p in peers {
             if p.conn_type == PeerConnectionType::FriendToFriend {
-                let nid_hex = p.node_id.map(hex::encode).unwrap_or_else(|| "".to_string());
+                let nid_bs58 = p
+                    .node_id
+                    .map(|bytes| bs58::encode(bytes).into_string())
+                    .unwrap_or_default();
                 let last_seen_sec = p.last_seen.map(|t| t.elapsed().as_secs());
                 f_list.push(F2fFriendDto {
-                    node_id: nid_hex.clone(),
-                    public_key: nid_hex,
+                    node_id: nid_bs58.clone(),
+                    public_key: nid_bs58,
                     address: p.addr.to_string(),
                     is_connected: p.is_connected(),
                     last_seen_sec,
@@ -501,16 +504,16 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     };
 
     let f2f = F2fOverviewDto {
-        my_pubkey: state.identity.public_key_hex(),
+        my_pubkey: state.identity.public_key_bs58(),
         friends: friends_list,
     };
 
     DashboardData {
         status,
         status_badge,
-        node_id: state.identity.node_id_hex(),
-        public_key: state.identity.public_key_hex(),
-        hrw_routing_id: hex::encode(local_hrw),
+        node_id: state.identity.node_id_bs58(),
+        public_key: state.identity.public_key_bs58(),
+        hrw_routing_id: state.identity.hrw_routing_id_bs58(),
         peering_string,
         uptime_seconds: uptime.as_secs(),
         uptime_formatted,

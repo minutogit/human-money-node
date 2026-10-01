@@ -475,6 +475,10 @@ pub struct PeerJsonOutput {
     pub missing_count: u32,
     pub min_hops: Option<u8>,
     pub ingress_peer: Option<String>,
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+    #[serde(default)]
+    pub last_failure_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1096,6 +1100,8 @@ pub async fn execute_peers(config_path: Option<PathBuf>, json: bool) -> Result<(
                         missing_count: p.missing_count,
                         min_hops: p.min_hops,
                         ingress_peer: p.ingress_peer,
+                        rtt_ms: p.rtt_ms,
+                        last_failure_sec: p.last_failure_sec,
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?);
@@ -1104,12 +1110,14 @@ pub async fn execute_peers(config_path: Option<PathBuf>, json: bool) -> Result<(
 
             println!("=== HuMoCo Layer-2 Connected Peers (LIVE) ===");
             println!("Total peers: {}", peers.len());
-            println!("{:<22} {:<66} {:<12} {:<10} {:<10} {:<22}", "ADDRESS", "NODE ID", "STATUS", "MISSING", "MIN HOPS", "VIA (INGRESS)");
+            println!("{:<22} {:<66} {:<12} {:<9} {:<10} {:<10} {:<10} {:<22}", "ADDRESS", "NODE ID", "STATUS", "MISSING", "RTT", "FAIL AGO", "MIN HOPS", "VIA (INGRESS)");
             for p in &peers {
                 let node_id_str = p.node_id.as_deref().unwrap_or("-");
                 let hops_str = p.min_hops.map(|h| h.to_string()).unwrap_or_else(|| "-".to_string());
                 let ingress_str = p.ingress_peer.as_deref().unwrap_or("-");
-                println!("{:<22} {:<66} {:<12} {:<10} {:<10} {:<22}", p.addr, node_id_str, p.status, p.missing_count, hops_str, ingress_str);
+                let rtt_str = p.rtt_ms.map(|r| format!("{} ms", r)).unwrap_or_else(|| "-".to_string());
+                let fail_str = p.last_failure_sec.map(|f| format!("{}s", f)).unwrap_or_else(|| "-".to_string());
+                println!("{:<22} {:<66} {:<12} {:<9} {:<10} {:<10} {:<10} {:<22}", p.addr, node_id_str, p.status, p.missing_count, rtt_str, fail_str, hops_str, ingress_str);
             }
             return Ok(());
         }
@@ -1128,6 +1136,8 @@ pub async fn execute_peers(config_path: Option<PathBuf>, json: bool) -> Result<(
                     missing_count: 0,
                     min_hops: None,
                     ingress_peer: None,
+                    rtt_ms: None,
+                    last_failure_sec: None,
                 })
                 .collect()
         } else {

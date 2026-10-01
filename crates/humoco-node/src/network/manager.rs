@@ -42,6 +42,14 @@ pub struct NetworkNodeDto {
     pub is_immature: bool,
     pub pending_ticket: Option<String>,
     pub incubation_remaining_sec: Option<u64>,
+    #[serde(default)]
+    pub missing_count: u32,
+    #[serde(default)]
+    pub last_failure_sec: Option<u64>,
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+    #[serde(default)]
+    pub best_ingress_peer: Option<String>,
 }
 
 /// Semantically decoupled node information:
@@ -1093,6 +1101,10 @@ impl PeerManager {
                 is_immature: false,
                 pending_ticket: None,
                 incubation_remaining_sec: None,
+                missing_count: 0,
+                last_failure_sec: None,
+                rtt_ms: Some(0),
+                best_ingress_peer: None,
             },
         );
 
@@ -1109,14 +1121,19 @@ impl PeerManager {
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let is_connected = resolved_addr
-                .and_then(|addr| peers.get(&addr).map(|p| p.status == PeerStatus::Connected))
-                .unwrap_or(false);
+            let peer_opt = resolved_addr.and_then(|addr| peers.get(&addr));
+            let missing_count = peer_opt.map(|p| p.missing_count).unwrap_or(0);
+            let last_failure_sec = peer_opt.and_then(|p| p.last_failure.map(|t| t.elapsed().as_secs()));
+            let rtt_ms = peer_opt.and_then(|p| p.connection.as_ref().map(|c| c.rtt().as_millis() as u32));
 
             let status_str = if is_banned {
                 "Banned (Equivocation)".to_string()
-            } else if is_connected {
-                "Connected (F2F Friend)".to_string()
+            } else if let Some(p) = peer_opt {
+                match p.status {
+                    PeerStatus::Connected => "Connected (F2F Friend)".to_string(),
+                    PeerStatus::Degrading => format!("Degrading ({}/3)", p.missing_count),
+                    PeerStatus::Suspended => "Suspended (3/3)".to_string(),
+                }
             } else {
                 "Configured (F2F Friend)".to_string()
             };
@@ -1131,6 +1148,7 @@ impl PeerManager {
             let rem_sec = info_opt
                 .and_then(|k| k.pending_remaining().map(|d| d.as_secs()));
             let min_hops = info_opt.map(|k| k.min_hops.max(1)).unwrap_or(1);
+            let best_ingress_peer = info_opt.and_then(|k| k.best_ingress_peer.map(|a| a.to_string()));
 
             map.insert(
                 *friend_id,
@@ -1147,6 +1165,10 @@ impl PeerManager {
                     is_immature: is_im,
                     pending_ticket: pending_bs58,
                     incubation_remaining_sec: rem_sec,
+                    missing_count,
+                    last_failure_sec,
+                    rtt_ms,
+                    best_ingress_peer,
                 },
             );
         }
@@ -1157,12 +1179,19 @@ impl PeerManager {
                 continue;
             }
             let is_banned = banned.contains(node_pubkey);
-            let is_connected = peers.get(&info.addr).map(|p| p.status == PeerStatus::Connected).unwrap_or(false);
+            let peer_opt = peers.get(&info.addr);
+            let missing_count = peer_opt.map(|p| p.missing_count).unwrap_or(0);
+            let last_failure_sec = peer_opt.and_then(|p| p.last_failure.map(|t| t.elapsed().as_secs()));
+            let rtt_ms = peer_opt.and_then(|p| p.connection.as_ref().map(|c| c.rtt().as_millis() as u32));
 
             let status_str = if is_banned {
                 "Banned (Equivocation)".to_string()
-            } else if is_connected {
-                "Connected (Shard Direct)".to_string()
+            } else if let Some(p) = peer_opt {
+                match p.status {
+                    PeerStatus::Connected => "Connected (Shard Direct)".to_string(),
+                    PeerStatus::Degrading => format!("Degrading ({}/3)", p.missing_count),
+                    PeerStatus::Suspended => "Suspended (3/3)".to_string(),
+                }
             } else {
                 "Learned via Gossip".to_string()
             };
@@ -1170,6 +1199,7 @@ impl PeerManager {
             let pending_bs58 = info.pending_hrw_routing_id.map(|t| bs58::encode(&t).into_string());
             let rem_sec = info.pending_remaining().map(|d| d.as_secs());
             let is_immature = info.first_seen.elapsed() < HRW_INCUBATION_DURATION;
+            let best_ingress_peer = info.best_ingress_peer.map(|a| a.to_string());
 
             map.insert(
                 *node_pubkey,
@@ -1186,6 +1216,10 @@ impl PeerManager {
                     is_immature,
                     pending_ticket: pending_bs58,
                     incubation_remaining_sec: rem_sec,
+                    missing_count,
+                    last_failure_sec,
+                    rtt_ms,
+                    best_ingress_peer,
                 },
             );
         }

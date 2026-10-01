@@ -11,6 +11,10 @@ pub struct PeerStatusDto {
     pub min_hops: Option<u8>,
     #[serde(default)]
     pub ingress_peer: Option<String>,
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+    #[serde(default)]
+    pub last_failure_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

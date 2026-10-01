@@ -263,6 +263,8 @@ impl ControlServer {
                                 }
                             }
                         }
+                        let rtt_ms = p.connection.as_ref().map(|c| c.rtt().as_millis() as u32);
+                        let last_failure_sec = p.last_failure.map(|t| t.elapsed().as_secs());
                         peer_dtos.push(PeerStatusDto {
                             addr: p.addr.to_string(),
                             node_id: p.node_id.map(hex::encode),
@@ -270,6 +272,8 @@ impl ControlServer {
                             missing_count: p.missing_count,
                             min_hops,
                             ingress_peer,
+                            rtt_ms,
+                            last_failure_sec,
                         });
                     }
                     ControlResponse::Peers { peers: peer_dtos }

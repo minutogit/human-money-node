@@ -65,6 +65,12 @@ pub struct F2fFriendDto {
     pub address: String,
     pub is_connected: bool,
     pub last_seen_sec: Option<u64>,
+    #[serde(default)]
+    pub missing_count: u32,
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+    #[serde(default)]
+    pub last_failure_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +352,10 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
                 is_immature: false,
                 pending_ticket: None,
                 incubation_remaining_sec: None,
+                missing_count: 0,
+                last_failure_sec: None,
+                rtt_ms: Some(0),
+                best_ingress_peer: None,
             }],
         )
     };
@@ -514,12 +524,18 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
                     .map(|bytes| bs58::encode(bytes).into_string())
                     .unwrap_or_default();
                 let last_seen_sec = p.last_seen.map(|t| t.elapsed().as_secs());
+                let missing_count = p.missing_count;
+                let rtt_ms = p.connection.as_ref().map(|c| c.rtt().as_millis() as u32);
+                let last_failure_sec = p.last_failure.map(|t| t.elapsed().as_secs());
                 f_list.push(F2fFriendDto {
                     node_id: nid_bs58.clone(),
                     public_key: nid_bs58,
                     address: p.addr.to_string(),
                     is_connected: p.is_connected(),
                     last_seen_sec,
+                    missing_count,
+                    rtt_ms,
+                    last_failure_sec,
                 });
             }
         }
@@ -1341,7 +1357,8 @@ footer {{
               <tr>
                 <th>NodePubKey</th>
                 <th>Adresse</th>
-                <th>Status</th>
+                <th>Status &amp; Zuverlässigkeit</th>
+                <th>Latenz (RTT)</th>
                 <th>Aktion</th>
               </tr>
             </thead>
@@ -1355,9 +1372,12 @@ footer {{
 
     <!-- Peer Explorer Table ("Nerd-Mode") -->
     <div class="card table-card">
-      <div class="card-header">
+      <div class="card-header" style="flex-wrap: wrap; gap: 0.5rem;">
         <span>🌐 Peer Explorer ("Nerd-Mode" &bull; Bekannte Netzwerkknoten)</span>
         <span class="card-sub" id="network-count-sub">{active_nodes} Knoten registriert</span>
+      </div>
+      <div style="padding: 0.5rem 1rem 0 1rem;">
+        <input id="node-search-input" class="input-text" placeholder="🔍 Suche nach PubKey, IP, Beziehung oder Status..." oninput="filterNodesTable()" style="width: 100%; max-width: 450px;">
       </div>
       <div style="overflow-x: auto;">
         <table>
@@ -1366,10 +1386,12 @@ footer {{
               <th>NodePubKey</th>
               <th>IP-Adresse / Port</th>
               <th>Beziehung</th>
-              <th>Status</th>
-              <th>Hops</th>
+              <th>Status &amp; Zuverlässigkeit</th>
+              <th>Latenz (RTT)</th>
+              <th>Hops &amp; Route</th>
               <th>Shard-Ticket (Argon2d)</th>
               <th>Inkubation (24h)</th>
+              <th>Aktion</th>
             </tr>
           </thead>
           <tbody id="nodes-tbody">
@@ -1597,6 +1619,22 @@ footer {{
   </div>
 </div>
 
+<!-- Modal 4: Node Inspector / Peer-Diagnose -->
+<div id="node-modal" class="modal-overlay" onclick="closeModalOnOverlay(event, 'node-modal')">
+  <div class="modal-box" style="max-width: 680px;">
+    <div class="modal-header">
+      <h3 id="node-modal-title">🔍 Knoten-Diagnose</h3>
+      <button class="btn btn-secondary" onclick="closeModal('node-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="node-modal-details"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('node-modal')">Schließen</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let currentDashboardData = null;
 let currentVoucherDetail = null;
@@ -1806,6 +1844,95 @@ function renderSparklineSvg(arr, color) {{
     '</svg>';
 }}
 
+function openNodeInspector(pubkey) {{
+  if (!currentDashboardData || !currentDashboardData.network_nodes) return;
+  const node = currentDashboardData.network_nodes.find(n => n.public_key === pubkey || n.node_id === pubkey);
+  if (!node) {{
+    alert('Knoten nicht gefunden: ' + pubkey);
+    return;
+  }}
+  document.getElementById('node-modal-title').innerText = '🔍 Knoten-Diagnose: ' + truncateHash(node.public_key);
+  
+  const statusBadge = node.connection_status.includes('Connected')
+    ? (node.missing_count === 0 ? '<span class="badge badge-green">Connected (0 Ausfälle)</span>' : '<span class="badge badge-amber">' + node.connection_status + '</span>')
+    : (node.connection_status.includes('Suspended') ? '<span class="badge badge-red">' + node.connection_status + '</span>' : '<span class="badge badge-amber">' + node.connection_status + '</span>');
+  
+  const rttText = node.rtt_ms != null ? node.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
+  const failText = node.last_failure_sec != null ? 'vor ' + node.last_failure_sec + ' Sekunden' : '<span style="color: var(--green);">Kein Ausfall registriert</span>';
+  const ingressText = node.best_ingress_peer ? 'Gelernt über F2F-Freund ' + node.best_ingress_peer : (node.is_local ? 'Lokaler Knoten (Self)' : (node.is_f2f ? 'Direkte F2F-Freundschaft' : 'Direkte Verbindung / Standby'));
+  const incubText = node.is_immature ? '<span class="badge badge-amber">24h Schonfrist (noch ' + (node.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Voll Aktiviert</span>';
+  
+  let html = '<div style="line-height: 1.6; font-size: 0.875rem;">';
+  
+  // 1. Identity
+  html += '<div style="background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.75rem;">';
+  html += '<h4 style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: var(--purple);">🔑 Identität &amp; Kryptographie</h4>';
+  html += '<div><strong>NodePubKey (Ed25519):</strong> <span class="code" id="node-modal-pubkey">' + node.public_key + '</span> <button class="btn btn-secondary" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;" onclick="copyNodePubkey()">Kopieren</button></div>';
+  html += '<div><strong>IP-Adresse / Port:</strong> <span class="code">' + node.address + '</span></div>';
+  html += '<div><strong>Shard-Ticket (Argon2d):</strong> <span class="code">' + node.hrw_routing_id + '</span> (Work-Score: <strong>' + node.work_score + '</strong>)</div>';
+  html += '</div>';
+
+  // 2. Health & Reliability
+  html += '<div style="background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.75rem;">';
+  html += '<h4 style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: var(--green);">💓 Verbindungs-Gesundheit &amp; Zuverlässigkeit (Spec 15 &amp; 19)</h4>';
+  html += '<div><strong>Status:</strong> ' + statusBadge + '</div>';
+  html += '<div><strong>Ausfallzähler (missing_count):</strong> <strong>' + node.missing_count + '</strong> von 3 <span style="font-size: 0.75rem; color: var(--text-muted);">(Debounced Tit-for-Tat; heilt -1/h)</span></div>';
+  html += '<div><strong>Live-Latenz (QUIC RTT):</strong> ' + rttText + '</div>';
+  html += '<div><strong>Letzter Fehler:</strong> ' + failText + '</div>';
+  html += '</div>';
+
+  // 3. Routing & Topology
+  html += '<div style="background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border);">';
+  html += '<h4 style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: var(--blue);">📡 Mesh-Routing &amp; Topologie (Spec 11)</h4>';
+  html += '<div><strong>Hop-Distanz:</strong> ' + node.min_hops + ' Hops</div>';
+  html += '<div><strong>Ingress-Pfad (via):</strong> ' + ingressText + '</div>';
+  html += '<div><strong>Inkubations-Status:</strong> ' + incubText + '</div>';
+  html += '</div>';
+
+  html += '</div>';
+
+  document.getElementById('node-modal-details').innerHTML = html;
+  document.getElementById('node-modal').classList.add('active');
+}}
+
+function copyNodePubkey() {{
+  const el = document.getElementById('node-modal-pubkey');
+  if (!el) return;
+  navigator.clipboard.writeText(el.innerText).then(() => {{
+    alert('NodePubKey kopiert!');
+  }}).catch(() => {{}});
+}}
+
+function filterNodesTable() {{
+  const input = document.getElementById('node-search-input');
+  if (!input || !currentDashboardData) return;
+  const term = input.value.trim().toLowerCase();
+  const nodesTbody = document.getElementById('nodes-tbody');
+  if (!currentDashboardData.network_nodes || currentDashboardData.network_nodes.length === 0) return;
+  
+  let html = '';
+  let count = 0;
+  for (const n of currentDashboardData.network_nodes) {{
+    if (term) {{
+      const match = n.public_key.toLowerCase().includes(term)
+        || n.address.toLowerCase().includes(term)
+        || n.connection_status.toLowerCase().includes(term)
+        || n.hrw_routing_id.toLowerCase().includes(term);
+      if (!match) continue;
+    }}
+    count++;
+    const roleBadge = n.is_local ? '<span class="badge badge-purple">LOCAL (Self)</span>' : (n.is_f2f ? '<span class="badge badge-blue">F2F Friend</span>' : '<span class="badge badge-cyan">Gossip Shard</span>');
+    const statusBadge = n.connection_status.includes('Connected')
+      ? (n.missing_count === 0 ? '<span class="badge badge-green">Connected (0 Ausfälle)</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>')
+      : (n.connection_status.includes('Suspended') ? '<span class="badge badge-red">' + n.connection_status + '</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>');
+    const rttText = n.rtt_ms != null ? n.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
+    const routeText = n.min_hops + ' Hop' + (n.min_hops === 1 ? '' : 's') + (n.best_ingress_peer ? ' via ' + truncateHash(n.best_ingress_peer) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : '')));
+    const incubText = n.is_immature ? '<span class="badge badge-amber">24h (' + (n.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Aktiv</span>';
+    html += '<tr><td><span class="code" title="' + n.public_key + '">' + truncateHash(n.public_key) + '</span></td><td>' + n.address + '</td><td>' + roleBadge + '</td><td>' + statusBadge + '</td><td>' + rttText + '</td><td>' + routeText + '</td><td><span class="code" title="' + n.hrw_routing_id + '">' + truncateHash(n.hrw_routing_id) + '</span></td><td>' + incubText + '</td><td><button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openNodeInspector(\'' + n.public_key + '\')">🔍 Info</button></td></tr>';
+  }}
+  nodesTbody.innerHTML = html || '<tr><td colspan="9" class="empty-cell">Keine Knoten gefunden</td></tr>';
+}}
+
 async function openLockInspector(lookupTag) {{
   try {{
     const res = await fetch('/dashboard/lock/' + encodeURIComponent(lookupTag));
@@ -1921,27 +2048,47 @@ async function refreshDashboard() {{
     if (d.f2f && d.f2f.friends && d.f2f.friends.length > 0) {{
       let html = '';
       for (const f of d.f2f.friends) {{
-        const statusBadge = f.is_connected ? '<span class="badge badge-green">Verbunden</span>' : '<span class="badge badge-amber">Getrennt</span>';
-        const actionBtn = adminToken ? '<button class="btn btn-danger" style="padding: 0.2rem 0.5rem;" onclick="adminRemoveFriend(\'' + f.public_key + '\')">🗑️</button>' : '-';
-        html += '<tr><td><span class="code" title="' + f.public_key + '">' + truncateHash(f.public_key) + '</span></td><td>' + f.address + '</td><td>' + statusBadge + '</td><td>' + actionBtn + '</td></tr>';
+        let statusBadge = '<span class="badge badge-green">Verbunden (0 Ausfälle)</span>';
+        if (!f.is_connected) {{
+          statusBadge = '<span class="badge badge-amber">Getrennt</span>';
+        }} else if (f.missing_count >= 3) {{
+          statusBadge = '<span class="badge badge-red">Suspended (3/3)</span>';
+        }} else if (f.missing_count > 0) {{
+          statusBadge = '<span class="badge badge-amber">Degrading (' + f.missing_count + '/3)</span>';
+        }}
+        const rttText = f.rtt_ms != null ? f.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
+        let actionBtn = '<button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openNodeInspector(\'' + f.public_key + '\')">🔍 Info</button>';
+        if (adminToken) {{
+          actionBtn += ' <button class="btn btn-danger" style="padding: 0.2rem 0.5rem; margin-left: 0.25rem;" onclick="adminRemoveFriend(\'' + f.public_key + '\')">🗑️</button>';
+        }}
+        html += '<tr><td><span class="code" title="' + f.public_key + '">' + truncateHash(f.public_key) + '</span></td><td>' + f.address + '</td><td>' + statusBadge + '</td><td>' + rttText + '</td><td>' + actionBtn + '</td></tr>';
       }}
       friendsTbody.innerHTML = html;
     }} else {{
-      friendsTbody.innerHTML = '<tr><td colspan="4" class="empty-cell">Keine F2F Freunde konfiguriert</td></tr>';
+      friendsTbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine F2F Freunde konfiguriert</td></tr>';
     }}
 
     // Network Nodes Explorer Table
-    const nodesTbody = document.getElementById('nodes-tbody');
-    if (d.network_nodes && d.network_nodes.length > 0) {{
-      let html = '';
-      for (const n of d.network_nodes) {{
-        const roleBadge = n.is_local ? '<span class="badge badge-purple">LOCAL (Self)</span>' : (n.is_f2f ? '<span class="badge badge-blue">F2F Friend</span>' : '<span class="badge badge-cyan">Gossip Shard</span>');
-        const statusBadge = n.connection_status.includes('Connected') ? '<span class="badge badge-green">' + n.connection_status + '</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>';
-        const incubText = n.is_immature ? '<span class="badge badge-amber">24h Inkubation (' + (n.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Aktiv</span>';
-        html += '<tr><td><span class="code" title="' + n.public_key + '">' + truncateHash(n.public_key) + '</span></td><td>' + n.address + '</td><td>' + roleBadge + '</td><td>' + statusBadge + '</td><td>' + n.min_hops + '</td><td><span class="code" title="' + n.hrw_routing_id + '">' + truncateHash(n.hrw_routing_id) + '</span> (Work: ' + n.work_score + ')</td><td>' + incubText + '</td></tr>';
+    const searchInput = document.getElementById('node-search-input');
+    if (searchInput && searchInput.value.trim()) {{
+      filterNodesTable();
+    }} else {{
+      const nodesTbody = document.getElementById('nodes-tbody');
+      if (d.network_nodes && d.network_nodes.length > 0) {{
+        let html = '';
+        for (const n of d.network_nodes) {{
+          const roleBadge = n.is_local ? '<span class="badge badge-purple">LOCAL (Self)</span>' : (n.is_f2f ? '<span class="badge badge-blue">F2F Friend</span>' : '<span class="badge badge-cyan">Gossip Shard</span>');
+          const statusBadge = n.connection_status.includes('Connected')
+            ? (n.missing_count === 0 ? '<span class="badge badge-green">Connected (0 Ausfälle)</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>')
+            : (n.connection_status.includes('Suspended') ? '<span class="badge badge-red">' + n.connection_status + '</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>');
+          const rttText = n.rtt_ms != null ? n.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
+          const routeText = n.min_hops + ' Hop' + (n.min_hops === 1 ? '' : 's') + (n.best_ingress_peer ? ' via ' + truncateHash(n.best_ingress_peer) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : '')));
+          const incubText = n.is_immature ? '<span class="badge badge-amber">24h (' + (n.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Aktiv</span>';
+          html += '<tr><td><span class="code" title="' + n.public_key + '">' + truncateHash(n.public_key) + '</span></td><td>' + n.address + '</td><td>' + roleBadge + '</td><td>' + statusBadge + '</td><td>' + rttText + '</td><td>' + routeText + '</td><td><span class="code" title="' + n.hrw_routing_id + '">' + truncateHash(n.hrw_routing_id) + '</span></td><td>' + incubText + '</td><td><button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openNodeInspector(\'' + n.public_key + '\')">🔍 Info</button></td></tr>';
+        }}
+        nodesTbody.innerHTML = html;
+        document.getElementById('network-count-sub').innerText = d.network_nodes.length + ' Knoten registriert';
       }}
-      nodesTbody.innerHTML = html;
-      document.getElementById('network-count-sub').innerText = d.network_nodes.length + ' Knoten registriert';
     }}
 
     // Tiers & Quotas

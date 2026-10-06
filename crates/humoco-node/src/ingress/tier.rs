@@ -16,6 +16,29 @@ pub enum IngressTier {
     Tier3Public,
 }
 
+/// DTO for registered F2F ingress client credentials.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct F2fClientDto {
+    pub token_hash: String,
+    pub label: String,
+    pub writes_today: u64,
+    pub daily_limit: u64,
+    pub whale_brake_active: bool,
+    pub last_active_sec: Option<u64>,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+/// Internal metadata stored for registered F2F client tokens.
+#[derive(Debug, Clone)]
+pub struct F2fClientMeta {
+    pub token: String,
+    pub token_hash: String,
+    pub label: String,
+    pub registered_at_ms: u64,
+    pub last_active_ms: Option<u64>,
+}
+
 #[derive(Debug, Error)]
 pub enum IngressError {
     #[error("Invalid or unknown VIP auth token")]
@@ -68,6 +91,7 @@ pub struct TierController {
     vip_tokens: Arc<RwLock<HashMap<String, [u8; 32]>>>,
     vip_tags: Arc<RwLock<HashSet<[u8; 32]>>>,
     f2f_tokens: Arc<RwLock<HashSet<String>>>,
+    f2f_clients: Arc<RwLock<HashMap<String, F2fClientMeta>>>,
     thermometer: Arc<RwLock<NetworkThermometer>>,
     vip_quota_cache: Arc<PlRwLock<HashMap<[u8; 32], u64>>>,
     vip_writes_today: Arc<AtomicU64>,
@@ -84,6 +108,7 @@ impl TierController {
             vip_tokens: Arc::new(RwLock::new(HashMap::new())),
             vip_tags: Arc::new(RwLock::new(HashSet::new())),
             f2f_tokens: Arc::new(RwLock::new(HashSet::new())),
+            f2f_clients: Arc::new(RwLock::new(HashMap::new())),
             thermometer: Arc::new(RwLock::new(NetworkThermometer::new())),
             vip_quota_cache: Arc::new(PlRwLock::new(HashMap::new())),
             vip_writes_today: Arc::new(AtomicU64::new(0)),
@@ -324,9 +349,98 @@ impl TierController {
         self.vip_tags.write().unwrap_or_else(|e| e.into_inner()).insert(account_tag);
     }
 
+    /// Registers a trusted F2F client with optional friendly label and stores metadata.
+    pub fn register_f2f_client(&self, token: &str, label: Option<&str>) {
+        let token_trimmed = token.trim();
+        let token_hash = hex::encode(blake3::hash(token_trimmed.as_bytes()).as_bytes());
+        let client_label = match label {
+            Some(l) if !l.trim().is_empty() => l.trim().to_string(),
+            _ => format!("Client-{}", &token_hash[..8]),
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let meta = F2fClientMeta {
+            token: token_trimmed.to_string(),
+            token_hash: token_hash.clone(),
+            label: client_label,
+            registered_at_ms: now_ms,
+            last_active_ms: None,
+        };
+
+        self.f2f_clients
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token_hash, meta);
+        self.f2f_tokens
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token_trimmed.to_string());
+    }
+
     /// Registers a trusted F2F peer token.
     pub fn register_f2f_peer(&self, token: impl Into<String>) {
-        self.f2f_tokens.write().unwrap_or_else(|e| e.into_inner()).insert(token.into());
+        let token_str = token.into();
+        self.register_f2f_client(&token_str, None);
+    }
+
+    /// Removes an F2F client by token string or token hash. Returns true if removed.
+    pub fn remove_f2f_client(&self, token_or_hash: &str) -> bool {
+        let target = token_or_hash.trim();
+        let mut clients = self.f2f_clients.write().unwrap_or_else(|e| e.into_inner());
+        let mut tokens = self.f2f_tokens.write().unwrap_or_else(|e| e.into_inner());
+
+        let mut found_hash = None;
+        let mut found_token = None;
+
+        for (h, meta) in clients.iter() {
+            if h == target || meta.token == target {
+                found_hash = Some(h.clone());
+                found_token = Some(meta.token.clone());
+                break;
+            }
+        }
+
+        if let Some(h) = found_hash {
+            clients.remove(&h);
+            if let Some(t) = found_token {
+                tokens.remove(&t);
+            }
+            true
+        } else {
+            tokens.remove(target)
+        }
+    }
+
+    /// Lists all registered F2F clients with their today's writes and quota status.
+    pub fn list_f2f_clients(&self, now_ms: u64, _epoch_day: u64) -> Vec<F2fClientDto> {
+        let clients = self.f2f_clients.read().unwrap_or_else(|e| e.into_inner());
+        let thermo = self.thermometer.read().unwrap_or_else(|e| e.into_inner());
+        let daily_limit = thermo.calculate_daily_quota(1.0, 1.0);
+
+        let mut list = Vec::with_capacity(clients.len());
+        for meta in clients.values() {
+            let raw_hash = *blake3::hash(meta.token.as_bytes()).as_bytes();
+            let peer_node_id: NodeId = u16::from_be_bytes([raw_hash[0], raw_hash[1]]);
+            let writes_today = thermo.get_node_usage(peer_node_id);
+            let whale_brake_active = writes_today >= daily_limit;
+            let last_active_sec = meta.last_active_ms.map(|t| now_ms.saturating_sub(t) / 1000);
+
+            list.push(F2fClientDto {
+                token_hash: meta.token_hash.clone(),
+                label: meta.label.clone(),
+                writes_today,
+                daily_limit,
+                whale_brake_active,
+                last_active_sec,
+                token: Some(meta.token.clone()),
+            });
+        }
+
+        list.sort_by(|a, b| a.label.cmp(&b.label));
+        list
     }
 
     /// [INV-0929] Evaluates tier credentials, validates authorization, deducts quota (for VIP), or validates PoW (for Public).
@@ -384,15 +498,35 @@ impl TierController {
 
         // 2. Check Tier 2 (F2F Peer) with Spec 09 dynamic daily quota
         if let Some(token) = peer_token {
-            let is_valid = self.f2f_tokens.read().unwrap_or_else(|e| e.into_inner()).contains(token);
+            let token_trimmed = token.trim();
+            let is_valid = self.f2f_tokens.read().unwrap_or_else(|e| e.into_inner()).contains(token_trimmed);
             if is_valid {
                 let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
                 let epoch_day = match now_ms {
                     Some(ms) => self.current_epoch_day_at(ms),
                     None => self.current_epoch_day(),
                 };
-                self.evaluate_f2f_quota(token, required_byte_years, epoch_day)?;
+                self.evaluate_f2f_quota(token_trimmed, required_byte_years, epoch_day)?;
                 self.f2f_writes_today.fetch_add(1, Ordering::Relaxed);
+
+                // Update last active timestamp
+                let token_hash = hex::encode(blake3::hash(token_trimmed.as_bytes()).as_bytes());
+                let activity_ms = match now_ms {
+                    Some(ms) => ms,
+                    None => std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                };
+                if let Some(meta) = self
+                    .f2f_clients
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_mut(&token_hash)
+                {
+                    meta.last_active_ms = Some(activity_ms);
+                }
+
                 return Ok(IngressTier::Tier2F2F);
             } else {
                 return Err(IngressError::InvalidPeerToken);
@@ -502,7 +636,12 @@ mod tests {
         // In-memory cache must reflect deduction atomically (<1µs, no fsync stall)
         assert_eq!(controller.get_cached_vip_quota(&account_tag), Some(1000 - 192));
         // Durable storage is updated asynchronously; wait for background persist
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        for _ in 0..30 {
+            if storage.get_quota(&account_tag).unwrap() == 1000 - 192 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert_eq!(storage.get_quota(&account_tag).unwrap(), 1000 - 192);
 
         // Exceed quota
@@ -653,5 +792,68 @@ mod tests {
         // Exceeding K=5.0 limit for VIP
         let res_vip_exceed = controller.evaluate_vip_quota(&vip_tag, 960_000 * 2, 1, 5.0);
         assert!(matches!(res_vip_exceed, Err(IngressError::QuotaExceeded { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_tier_controller_f2f_client_registration_and_list() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test_f2f_clients.redb");
+        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+        let pow = Arc::new(PowEngine::new([0x11; 32], 8));
+        let controller = TierController::new(storage, pow);
+
+        let token = "my_pos_terminal_token_xyz";
+        controller.register_f2f_client(token, Some("Kasse-1"));
+
+        let now_ms = 1_700_000_000_000;
+        let epoch_day = controller.current_epoch_day_at(now_ms);
+
+        let clients = controller.list_f2f_clients(now_ms, epoch_day);
+        assert_eq!(clients.len(), 1);
+        let c = &clients[0];
+        assert_eq!(c.label, "Kasse-1");
+        assert_eq!(c.writes_today, 0);
+        assert_eq!(c.daily_limit, 960_000);
+        assert!(!c.whale_brake_active);
+        assert_eq!(c.last_active_sec, None);
+
+        // Perform an authenticated F2F write
+        let tier = controller
+            .evaluate_and_charge_with_time(None, Some(token), None, None, 60, None, Some(now_ms))
+            .await
+            .expect("F2F write allowed");
+        assert_eq!(tier, IngressTier::Tier2F2F);
+
+        // Check list after 10 seconds
+        let clients_after = controller.list_f2f_clients(now_ms + 10_000, epoch_day);
+        assert_eq!(clients_after.len(), 1);
+        assert_eq!(clients_after[0].last_active_sec, Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_tier_controller_f2f_client_removal() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test_f2f_remove.redb");
+        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+        let pow = Arc::new(PowEngine::new([0x11; 32], 8));
+        let controller = TierController::new(storage, pow);
+
+        let token = "removable_client_token";
+        controller.register_f2f_client(token, Some("Kasse-Alt"));
+
+        let token_hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+
+        // Remove by hash
+        assert!(controller.remove_f2f_client(&token_hash));
+        assert_eq!(controller.list_f2f_clients(0, 0).len(), 0);
+
+        // Re-register and remove by token
+        controller.register_f2f_client(token, None);
+        assert_eq!(controller.list_f2f_clients(0, 0).len(), 1);
+        assert!(controller.remove_f2f_client(token));
+        assert_eq!(controller.list_f2f_clients(0, 0).len(), 0);
+
+        // Non-existent returns false
+        assert!(!controller.remove_f2f_client("non_existent"));
     }
 }

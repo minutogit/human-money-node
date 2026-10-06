@@ -507,6 +507,15 @@ impl NodeDaemon {
             self.cancel_token.clone(),
         );
 
+        // Initialize History Sampler & Security Event Log (Phase 2)
+        let history_sampler = Arc::new(crate::api::HistorySampler::default());
+        let event_log = Arc::new(crate::api::EventLog::default());
+        event_log.record(
+            crate::api::EventKind::System,
+            crate::api::HealthLevel::Ok,
+            format!("HuMoCo node daemon started (NodePubKey: {})", self.identity.node_id_bs58()),
+        );
+
         // Initialize REST API Router and HTTP Server
         let app_state = crate::api::AppState {
             engine: engine.clone(),
@@ -524,7 +533,23 @@ impl NodeDaemon {
             system_stats,
             auth: admin_token_mgr,
             is_simulation,
+            config: Arc::new(self.config.clone()),
+            history_sampler: history_sampler.clone(),
+            event_log: event_log.clone(),
         };
+
+        // Spawn history sampling task (60s tick in normal mode, 5s in simulation mode)
+        let sample_interval = if is_simulation {
+            std::time::Duration::from_secs(5)
+        } else {
+            std::time::Duration::from_secs(60)
+        };
+        let history_handle = history_sampler.spawn_sampling_task(
+            app_state.clone(),
+            sample_interval,
+            self.cancel_token.clone(),
+        );
+
         let app = crate::api::build_router(app_state);
 
         let rpc_listener = tokio::net::TcpListener::bind(self.config.network.rpc_listen_addr)
@@ -635,6 +660,7 @@ impl NodeDaemon {
         let _ = dns_re_resolve_handle.await;
         let _ = alert_handle.await;
         let _ = stats_handle.await;
+        let _ = history_handle.await;
         let _ = flush_handle.await;
         info!("HuMoCo node daemon stopped.");
         Ok(())

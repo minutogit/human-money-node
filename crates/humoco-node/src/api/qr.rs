@@ -155,6 +155,7 @@ pub struct QrMatrix {
 
 /// Generates the raw boolean module matrix for `text`.
 /// `true` = dark module (black), `false` = light module (white).
+#[allow(clippy::needless_range_loop)]
 pub fn generate_qr_matrix(text: &str) -> QrMatrix {
     let bytes = text.as_bytes();
     let spec = QrVersionSpec::for_text_len(bytes.len());

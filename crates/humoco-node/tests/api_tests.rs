@@ -1438,8 +1438,8 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
 
     // Verify 4-Tab Navigation Identifiers
     assert!(body_str.contains("Cockpit &amp; System") || body_str.contains("Cockpit & System"));
-    assert!(body_str.contains("Netzwerk &amp; F2F") || body_str.contains("Netzwerk & F2F"));
-    assert!(body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten"));
+    assert!(body_str.contains("Netzwerk &amp; Mesh") || body_str.contains("Netzwerk & Mesh") || body_str.contains("Netzwerk &amp; F2F") || body_str.contains("Netzwerk & F2F"));
+    assert!(body_str.contains("Zugang &amp; Freunde") || body_str.contains("Zugang & Freunde") || body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten"));
     assert!(body_str.contains("Gutscheine &amp; Logs") || body_str.contains("Gutscheine & Logs"));
 
     // Verify Visual Cards & Systems
@@ -1448,7 +1448,7 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("Hardware &amp; Ressourcen") || body_str.contains("Hardware & Ressourcen"));
     assert!(body_str.contains("Knoten-Kapazität") || body_str.contains("Knoten-Kapazitätsrechner"));
     assert!(body_str.contains("Netzwerk-Thermometer"));
-    assert!(body_str.contains("F2F Web-of-Trust Freunde"));
+    assert!(body_str.contains("P2P Nachbarknoten") || body_str.contains("F2F Web-of-Trust Freunde"));
     assert!(body_str.contains("Peer Explorer"));
     assert!(body_str.contains("Free Tier"));
     assert!(body_str.contains("VIP Tier"));
@@ -1465,8 +1465,8 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("searchVoucher"));
     assert!(body_str.contains("vouchers-count-sub"));
 
-    // Size under 64 KiB
-    assert!(body_str.len() < 64 * 1024, "Dashboard HTML must be under 64 KiB, was {}", body_str.len());
+    // Size under 128 KiB (self-contained offline air-gapped dashboard)
+    assert!(body_str.len() < 128 * 1024, "Dashboard HTML must be under 128 KiB, was {}", body_str.len());
 
     // Air-gap check: ZERO external script or link tags with http:// or https://
     let lower = body_str.to_lowercase();
@@ -1499,6 +1499,7 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
 
     // Test GET /dashboard/voucher/unknown_voucher
     let res_v = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1509,6 +1510,39 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
         .await
         .unwrap();
     assert_eq!(res_v.status(), StatusCode::NOT_FOUND);
+
+    // Test GET /dashboard/history
+    let res_hist = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/history?window=1h")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_hist.status(), StatusCode::OK);
+    let hist_bytes = res_hist.into_body().collect().await.unwrap().to_bytes();
+    let hist_json: serde_json::Value = serde_json::from_slice(&hist_bytes).unwrap();
+    assert!(hist_json.get("points").is_some());
+
+    // Test GET /dashboard/events
+    let res_ev = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/events?limit=50")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_ev.status(), StatusCode::OK);
+    let ev_bytes = res_ev.into_body().collect().await.unwrap().to_bytes();
+    let ev_json: serde_json::Value = serde_json::from_slice(&ev_bytes).unwrap();
+    assert!(ev_json.get("events").is_some());
 }
 
 #[tokio::test]
@@ -2908,6 +2942,140 @@ async fn test_admin_friends_mutation() {
 }
 
 #[tokio::test]
+async fn test_admin_mesh_and_ingress_client_routes() {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_admin_mesh_ingress.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+    let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
+
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("admin_secret_99", false));
+    let event_log = Arc::new(humoco_node::api::events::EventLog::default());
+    let mut state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    );
+    state.peer_manager = Some(peer_manager.clone());
+    state = state.with_auth(auth).with_event_log(event_log.clone());
+
+    let app = build_router(state);
+
+    let test_peer_key = [9u8; 32];
+    let test_peer_hex = hex::encode(test_peer_key);
+
+    // 1. POST /dashboard/admin/mesh/peers with dual_role_ingress: true
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/mesh/peers")
+            .header("Authorization", "Bearer admin_secret_99")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"pubkey": "{}", "label": "PeerAlice", "dual_role_ingress": true}}"#,
+                test_peer_hex
+            )))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["status"], "ok");
+    assert_eq!(body_json["pubkey"], test_peer_hex);
+
+    // Verify peer manager and tier controller both registered the peer
+    assert!(peer_manager.is_f2f_friend(&test_peer_key).await);
+    let clients = tier_controller.list_f2f_clients(1000, 0);
+    assert!(clients.iter().any(|c| c.label == "PeerAlice" || c.token_hash == hex::encode(blake3::hash(test_peer_hex.as_bytes()).as_bytes())));
+
+    // Verify events recorded
+    assert!(event_log.len() >= 2);
+
+    // 2. DELETE /dashboard/admin/mesh/peers/:key
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/dashboard/admin/mesh/peers/{}", test_peer_hex))
+            .header("Authorization", "Bearer admin_secret_99")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(!peer_manager.is_f2f_friend(&test_peer_key).await);
+
+    // 3. POST /dashboard/admin/ingress/clients with explicit token
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/ingress/clients")
+            .header("Authorization", "Bearer admin_secret_99")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"label": "Bob Wallet", "token": "f2f_custom_token_12345"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let bob_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(bob_json["status"], "ok");
+    assert_eq!(bob_json["token"], "f2f_custom_token_12345");
+    assert_eq!(bob_json["label"], "Bob Wallet");
+    assert!(bob_json["wallet_uri"].as_str().unwrap().starts_with("humoco://"));
+    assert!(bob_json["wallet_uri"].as_str().unwrap().contains("token=f2f_custom_token_12345"));
+
+    // 4. POST /dashboard/admin/ingress/clients without token -> auto-generated f2f_... token
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/ingress/clients")
+            .header("Authorization", "Bearer admin_secret_99")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"label": "Charlie PoS"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let charlie_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(charlie_json["status"], "ok");
+    let gen_token = charlie_json["token"].as_str().unwrap();
+    assert!(gen_token.starts_with("f2f_"));
+    assert_eq!(gen_token.len(), 4 + 32); // f2f_ + 32 hex chars
+    assert!(charlie_json["wallet_uri"].as_str().unwrap().contains(gen_token));
+
+    // Verify Bob and Charlie in list_f2f_clients
+    let clients = tier_controller.list_f2f_clients(1000, 0);
+    assert!(clients.iter().any(|c| c.label == "Bob Wallet"));
+    assert!(clients.iter().any(|c| c.label == "Charlie PoS"));
+
+    let bob_client = clients.iter().find(|c| c.label == "Bob Wallet").unwrap();
+    let bob_hash = bob_client.token_hash.clone();
+
+    // 5. DELETE /dashboard/admin/ingress/clients/:token_hash
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/dashboard/admin/ingress/clients/{}", bob_hash))
+            .header("Authorization", "Bearer admin_secret_99")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let del_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(del_json["status"], "ok");
+    assert_eq!(del_json["removed"], bob_hash);
+
+    // Verify Bob is removed
+    let clients_after = tier_controller.list_f2f_clients(1000, 0);
+    assert!(!clients_after.iter().any(|c| c.label == "Bob Wallet"));
+    assert!(clients_after.iter().any(|c| c.label == "Charlie PoS"));
+}
+
+#[tokio::test]
 async fn test_admin_quota_mutation() {
     let temp = tempdir().expect("tempdir");
     let db_path = temp.path().join("test_admin_quota.redb");
@@ -2995,4 +3163,633 @@ async fn test_admin_quota_mutation() {
     // Verify cache in tier_controller
     assert_eq!(tier_controller.get_cached_vip_quota(&test_account_tag), Some(7500));
 }
+
+// ============================================================================
+// Phase 4: QA & Verification Integration Tests
+// ============================================================================
+
+#[test]
+fn test_qa_key_parsing_formats() {
+    use humoco_node::api::keys::{normalize_pubkey_display, parse_client_token, parse_pubkey};
+
+    let sample_key = [0xabu8; 32];
+    let hex_lower = hex::encode(sample_key);
+    let hex_upper = hex_lower.to_uppercase();
+    let b58_str = bs58::encode(sample_key).into_string();
+
+    // 1. Hex parsing (lower, upper, 0x, 0X, with whitespace)
+    assert_eq!(parse_pubkey(&hex_lower).unwrap(), sample_key);
+    assert_eq!(parse_pubkey(&hex_upper).unwrap(), sample_key);
+    assert_eq!(parse_pubkey(&format!("0x{}", hex_lower)).unwrap(), sample_key);
+    assert_eq!(parse_pubkey(&format!("0X{}", hex_upper)).unwrap(), sample_key);
+    assert_eq!(parse_pubkey(&format!("  \n  {} \t ", hex_lower)).unwrap(), sample_key);
+
+    // 2. Base58 parsing (plain and with whitespace)
+    assert_eq!(parse_pubkey(&b58_str).unwrap(), sample_key);
+    assert_eq!(parse_pubkey(&format!("  \t {} \n ", b58_str)).unwrap(), sample_key);
+
+    // 3. Peering string formats (<pubkey>@<ip_or_host>:<port>)
+    let peering_b58 = format!("{}@127.0.0.1:9090", b58_str);
+    assert_eq!(parse_pubkey(&peering_b58).unwrap(), sample_key);
+
+    let peering_hex = format!("{}@mesh-node.example.org:9090", hex_lower);
+    assert_eq!(parse_pubkey(&peering_hex).unwrap(), sample_key);
+
+    let peering_spaces = format!("  {}  @  192.168.1.100:9090  ", hex_upper);
+    assert_eq!(parse_pubkey(&peering_spaces).unwrap(), sample_key);
+
+    // 4. Invalid key inputs
+    assert!(parse_pubkey("").is_err());
+    assert!(parse_pubkey("   ").is_err());
+    assert!(parse_pubkey("not_a_valid_key").is_err());
+    assert!(parse_pubkey("@127.0.0.1:9090").is_err());
+    assert!(parse_pubkey(&format!("{}@", b58_str)).is_err());
+    // Truncated hex (62 chars) and oversized hex (66 chars)
+    assert!(parse_pubkey(&hex_lower[..62]).is_err());
+    assert!(parse_pubkey(&format!("{}00", hex_lower)).is_err());
+    // Base58 that decodes to wrong length
+    let b58_16 = bs58::encode(&[1u8; 16]).into_string();
+    assert!(parse_pubkey(&b58_16).is_err());
+
+    // 5. Normalization display
+    let (h, b) = normalize_pubkey_display(&sample_key);
+    assert_eq!(h, hex_lower);
+    assert_eq!(b, b58_str);
+
+    // 6. Client token parsing
+    assert_eq!(parse_client_token("f2f_test_token_123").unwrap(), "f2f_test_token_123");
+    assert_eq!(parse_client_token("  token_with_whitespace  ").unwrap(), "token_with_whitespace");
+    assert!(parse_client_token("").is_err());
+    assert!(parse_client_token("short").is_err()); // < 8 chars
+    let long_token = "a".repeat(129);
+    assert!(parse_client_token(&long_token).is_err()); // > 128 chars
+}
+
+fn create_qa_mock_dashboard_data() -> humoco_node::api::DashboardData {
+    use humoco_node::api::*;
+    use humoco_node::api::metrics::LatencyTierStats;
+
+    DashboardData {
+        status: "ONLINE".to_string(),
+        status_badge: "ONLINE".to_string(),
+        node_id: "node_123".to_string(),
+        public_key: "pk_123".to_string(),
+        hrw_routing_id: "hrw_123".to_string(),
+        peering_string: "pk_123@127.0.0.1:9090".to_string(),
+        uptime_seconds: 7200,
+        uptime_formatted: "2h 0m 0s".to_string(),
+        active_locks: 5,
+        flush_queue_depth: 10,
+        connected_peers: 3,
+        configured_peers: 3,
+        active_nodes_count: 4,
+        total_writes: 50,
+        total_reads: 200,
+        local_latency: LatencyTierStats {
+            avg_ms: 0.8,
+            p95_ms: 1.5,
+            min_ms: 0.3,
+            max_ms: 3.0,
+            sample_count: 50,
+            sla_compliant: true,
+        },
+        quorum_latency: LatencyTierStats {
+            avg_ms: 20.0,
+            p95_ms: 35.0,
+            min_ms: 10.0,
+            max_ms: 50.0,
+            sample_count: 50,
+            sla_compliant: true,
+        },
+        e2e_latency: LatencyTierStats {
+            avg_ms: 22.0,
+            p95_ms: 40.0,
+            min_ms: 11.0,
+            max_ms: 60.0,
+            sample_count: 50,
+            sla_compliant: true,
+        },
+        pos_latency_count: 50,
+        pos_latency_avg_ms: 0.8,
+        pos_sla_compliant: true,
+        broom_patterns_detected: 0,
+        gateway_concentration_ratio: 0.1,
+        shard_subnet_dominance_max: 0.2,
+        free_tier_enabled: true,
+        warnings: Vec::new(),
+        total_shards: 1024,
+        shard_mode: "Global Mesh".to_string(),
+        shard_responsibility_ratio: 1.0,
+        sample_shard_scores: Vec::new(),
+        network_nodes: Vec::new(),
+        total_active_vouchers_count: 1,
+        active_vouchers: Vec::new(),
+        recent_locks: Vec::new(),
+        system: humoco_node::api::system_stats::SystemStatsDto::default(),
+        thermometer: ThermometerStatsDto {
+            gossip_write_load: 0.0,
+            gossip_read_load: 0.0,
+            ncb_eff: 960_000.0,
+            ncb_read_eff: 960_000.0,
+            daily_write_quota: 960_000,
+            daily_read_quota: 960_000,
+            today_write_used: 50,
+            today_read_used: 200,
+            total_write_used: 50,
+            total_read_used: 200,
+            vip_writes_today: 5,
+            f2f_writes_today: 10,
+            free_writes_today: 35,
+        },
+        sparklines: humoco_node::api::system_stats::SparklinesDto::default(),
+        tiers: TierOverviewDto {
+            free_pow_diff: 8,
+            free_pow_hashes: 256,
+            free_pow_time_est: "< 0.1 ms".to_string(),
+            free_req_sec: 0.0,
+            free_reserved_pct: 20.0,
+            free_used_pct: 0.5,
+            free_writes_today: 35,
+            friends_reserved_pct: 30.0,
+            friends_used_pct: 1.0,
+            friends_writes_today: 10,
+            active_friends_count: 1,
+            vip_reserved_pct: 50.0,
+            vip_used_pct: 0.5,
+            vip_writes_today: 5,
+            vip_accounts_count: 1,
+            vip_total_balance: 500,
+            vip_accounts: Vec::new(),
+            total_writes_today: 50,
+            total_quota_used_pct: 0.05,
+        },
+        f2f: F2fOverviewDto {
+            my_pubkey: "pk_123".to_string(),
+            friends: Vec::new(),
+        },
+        network_time_ms: 1_700_000_000_000,
+        is_simulation: false,
+        f2f_clients: Vec::new(),
+        health: HealthSummary::default(),
+        config_view: ConfigViewDto::default(),
+        clock_drift_ms: 0,
+    }
+}
+
+#[test]
+fn test_qa_health_evaluation_all_levels() {
+    use humoco_node::api::health::{evaluate_health, HealthLevel};
+
+    // 1. Ok Level
+    let base_data = create_qa_mock_dashboard_data();
+    let summary = evaluate_health(&base_data);
+    assert_eq!(summary.level, HealthLevel::Ok);
+    assert!(summary.items.is_empty());
+
+    // 2. Warn Level triggers
+    // 2a. Flush queue warning (> 1000)
+    let mut data_q_warn = base_data.clone();
+    data_q_warn.flush_queue_depth = 1500;
+    let s_q_warn = evaluate_health(&data_q_warn);
+    assert_eq!(s_q_warn.level, HealthLevel::Warn);
+    assert!(s_q_warn.items.iter().any(|i| i.code == "QUEUE_HIGH"));
+
+    // 2b. PoS SLA violation
+    let mut data_sla = base_data.clone();
+    data_sla.pos_sla_compliant = false;
+    let s_sla = evaluate_health(&data_sla);
+    assert_eq!(s_sla.level, HealthLevel::Warn);
+    assert!(s_sla.items.iter().any(|i| i.code == "SLA_VIOLATED"));
+
+    // 2c. Broom pattern detected
+    let mut data_broom = base_data.clone();
+    data_broom.broom_patterns_detected = 3;
+    let s_broom = evaluate_health(&data_broom);
+    assert_eq!(s_broom.level, HealthLevel::Warn);
+    assert!(s_broom.items.iter().any(|i| i.code == "BROOM"));
+
+    // 2d. Gateway concentration > 50%
+    let mut data_gw = base_data.clone();
+    data_gw.gateway_concentration_ratio = 0.65;
+    let s_gw = evaluate_health(&data_gw);
+    assert_eq!(s_gw.level, HealthLevel::Warn);
+    assert!(s_gw.items.iter().any(|i| i.code == "GATEWAY_CONC"));
+
+    // 2e. Shard subnet dominance > 50%
+    let mut data_dom = base_data.clone();
+    data_dom.shard_subnet_dominance_max = 0.70;
+    let s_dom = evaluate_health(&data_dom);
+    assert_eq!(s_dom.level, HealthLevel::Warn);
+    assert!(s_dom.items.iter().any(|i| i.code == "SUBNET_DOM"));
+
+    // 2f. Clock drift > 5,000 ms
+    let mut data_drift_warn = base_data.clone();
+    data_drift_warn.clock_drift_ms = 6_000;
+    let s_drift_warn = evaluate_health(&data_drift_warn);
+    assert_eq!(s_drift_warn.level, HealthLevel::Warn);
+    assert!(s_drift_warn.items.iter().any(|i| i.code == "CLOCK_DRIFT"));
+
+    // 3. Crit Level triggers
+    // 3a. Disconnected peers when configured > 0
+    let mut data_no_peers = base_data.clone();
+    data_no_peers.connected_peers = 0;
+    data_no_peers.configured_peers = 5;
+    let s_no_peers = evaluate_health(&data_no_peers);
+    assert_eq!(s_no_peers.level, HealthLevel::Crit);
+    assert!(s_no_peers.items.iter().any(|i| i.code == "NO_PEERS"));
+
+    // 3b. Extreme flush queue depth (>= 9000)
+    let mut data_q_crit = base_data.clone();
+    data_q_crit.flush_queue_depth = 9500;
+    let s_q_crit = evaluate_health(&data_q_crit);
+    assert_eq!(s_q_crit.level, HealthLevel::Crit);
+    assert!(s_q_crit.items.iter().any(|i| i.code == "QUEUE_HIGH" && i.severity == HealthLevel::Crit));
+
+    // 3c. Extreme clock drift (> 30,000 ms)
+    let mut data_drift_crit = base_data.clone();
+    data_drift_crit.clock_drift_ms = -35_000;
+    let s_drift_crit = evaluate_health(&data_drift_crit);
+    assert_eq!(s_drift_crit.level, HealthLevel::Crit);
+    assert!(s_drift_crit.items.iter().any(|i| i.code == "CLOCK_DRIFT" && i.severity == HealthLevel::Crit));
+
+    // 3d. Dashboard exposed on non-loopback
+    let mut data_exposed = base_data.clone();
+    data_exposed.config_view.bind_addr = "0.0.0.0".to_string();
+    data_exposed.config_view.loopback_only = false;
+    let s_exposed = evaluate_health(&data_exposed);
+    assert_eq!(s_exposed.level, HealthLevel::Crit);
+    assert!(s_exposed.items.iter().any(|i| i.code == "DASHBOARD_EXPOSED"));
+}
+
+#[test]
+fn test_qa_dashboard_data_dto_backward_compatibility() {
+    use humoco_node::api::DashboardData;
+    use humoco_node::api::health::HealthLevel;
+
+    // Minimal JSON representing DashboardData before Phase 1-4 additions:
+    // Missing: f2f_clients, health, config_view, clock_drift_ms, thermometer extended counters, recent_locks extended fields
+    let legacy_json = r#"{
+        "status": "ONLINE",
+        "status_badge": "ONLINE",
+        "node_id": "legacy_node_1",
+        "public_key": "legacy_pubkey_1",
+        "hrw_routing_id": "legacy_hrw_1",
+        "peering_string": "legacy_pubkey_1@127.0.0.1:9090",
+        "uptime_seconds": 3600,
+        "uptime_formatted": "1h 0m 0s",
+        "active_locks": 12,
+        "flush_queue_depth": 0,
+        "connected_peers": 4,
+        "configured_peers": 4,
+        "active_nodes_count": 5,
+        "total_writes": 120,
+        "total_reads": 450,
+        "local_latency": {
+            "avg_ms": 0.5, "p95_ms": 1.0, "min_ms": 0.2, "max_ms": 2.0,
+            "sample_count": 100, "sla_compliant": true
+        },
+        "quorum_latency": {
+            "avg_ms": 15.0, "p95_ms": 25.0, "min_ms": 5.0, "max_ms": 40.0,
+            "sample_count": 100, "sla_compliant": true
+        },
+        "e2e_latency": {
+            "avg_ms": 18.0, "p95_ms": 30.0, "min_ms": 7.0, "max_ms": 45.0,
+            "sample_count": 100, "sla_compliant": true
+        },
+        "pos_latency_count": 100,
+        "pos_latency_avg_ms": 0.5,
+        "pos_sla_compliant": true,
+        "broom_patterns_detected": 0,
+        "gateway_concentration_ratio": 0.15,
+        "shard_subnet_dominance_max": 0.25,
+        "free_tier_enabled": true,
+        "warnings": [],
+        "total_shards": 1024,
+        "shard_mode": "Global Mesh",
+        "shard_responsibility_ratio": 1.0,
+        "sample_shard_scores": [],
+        "network_nodes": [],
+        "total_active_vouchers_count": 2,
+        "active_vouchers": [],
+        "recent_locks": [
+            {
+                "parent_lock_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+                "child_lock_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+                "timestamp_ms": 1700000000000,
+                "status": "Verified"
+            }
+        ],
+        "system": {
+            "cpu_percent": 5.0,
+            "rss_mb": 100.0,
+            "redb_bytes": 52428800,
+            "netto_locks_bytes": 1000,
+            "disk_free_bytes": 10737418240,
+            "peak_tps_single_core": 50000,
+            "peak_tps_multi_core": 120000,
+            "max_storage_locks": 50000000,
+            "byte_years_capacity": 10000000,
+            "ttl_purged_count": 0
+        },
+        "thermometer": {
+            "gossip_write_load": 0.0,
+            "gossip_read_load": 0.0,
+            "ncb_eff": 960000.0,
+            "ncb_read_eff": 960000.0,
+            "daily_write_quota": 960000,
+            "daily_read_quota": 960000,
+            "today_write_used": 120,
+            "today_read_used": 450
+        },
+        "sparklines": {
+            "writes": [],
+            "reads": [],
+            "latency": [],
+            "nodes": []
+        },
+        "tiers": {
+            "free_pow_diff": 8,
+            "free_pow_hashes": 256,
+            "free_pow_time_est": "< 0.1 ms",
+            "free_req_sec": 0.0,
+            "free_reserved_pct": 20.0,
+            "free_used_pct": 1.0,
+            "free_writes_today": 70,
+            "friends_reserved_pct": 30.0,
+            "friends_used_pct": 2.0,
+            "friends_writes_today": 30,
+            "active_friends_count": 2,
+            "vip_reserved_pct": 50.0,
+            "vip_used_pct": 1.0,
+            "vip_writes_today": 20,
+            "vip_accounts_count": 1,
+            "vip_total_balance": 1000,
+            "vip_accounts": [],
+            "total_writes_today": 120,
+            "total_quota_used_pct": 0.1
+        },
+        "f2f": {
+            "my_pubkey": "legacy_pubkey_1",
+            "friends": []
+        },
+        "network_time_ms": 1700000000000,
+        "is_simulation": false
+    }"#;
+
+    let parsed: Result<DashboardData, _> = serde_json::from_str(legacy_json);
+    assert!(parsed.is_ok(), "Failed to deserialize legacy DashboardData: {:?}", parsed.err());
+
+    let dto = parsed.unwrap();
+    // Verify default populated fields
+    assert_eq!(dto.f2f_clients.len(), 0);
+    assert_eq!(dto.health.level, HealthLevel::Ok);
+    assert!(dto.health.items.is_empty());
+    assert_eq!(dto.config_view.api_port, 8080);
+    assert_eq!(dto.config_view.bind_addr, "127.0.0.1");
+    assert!(dto.config_view.loopback_only);
+    assert_eq!(dto.clock_drift_ms, 0);
+
+    // Verify recent_locks defaults
+    assert_eq!(dto.recent_locks.len(), 1);
+    assert_eq!(dto.recent_locks[0].tier, "");
+    assert_eq!(dto.recent_locks[0].byte_years, 0);
+    assert_eq!(dto.recent_locks[0].voucher_id, None);
+
+    // Verify thermometer defaults
+    assert_eq!(dto.thermometer.total_write_used, 0);
+    assert_eq!(dto.thermometer.vip_writes_today, 0);
+    assert_eq!(dto.thermometer.f2f_writes_today, 0);
+    assert_eq!(dto.thermometer.free_writes_today, 0);
+}
+
+#[tokio::test]
+async fn test_qa_dashboard_history_and_events_endpoints_structure() {
+    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_app();
+
+    // 1. GET /dashboard/history with various windows
+    for window in &["30m", "1h", "6h", "24h", "all"] {
+        let uri = format!("/dashboard/history?window={}", window);
+        let req = Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .body(Body::empty())
+            .unwrap();
+
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let content_type = res.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(content_type.contains("application/json"));
+
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json.get("points").is_some());
+        assert!(json["points"].is_array());
+    }
+
+    // 2. GET /dashboard/events with limit and since_id parameters
+    let req_ev = Request::builder()
+        .method("GET")
+        .uri("/dashboard/events?limit=25&since_id=0")
+        .body(Body::empty())
+        .unwrap();
+
+    let res_ev = app.oneshot(req_ev).await.unwrap();
+    assert_eq!(res_ev.status(), StatusCode::OK);
+    let bytes_ev = res_ev.into_body().collect().await.unwrap().to_bytes();
+    let json_ev: serde_json::Value = serde_json::from_slice(&bytes_ev).unwrap();
+    assert!(json_ev.get("events").is_some());
+    assert!(json_ev["events"].is_array());
+}
+
+#[tokio::test]
+async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_qa_admin.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+    let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
+
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("qa_admin_secret", false));
+    let event_log = Arc::new(humoco_node::api::events::EventLog::default());
+    let mut state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    );
+    state.peer_manager = Some(peer_manager.clone());
+    state = state.with_auth(auth).with_event_log(event_log.clone());
+
+    let app = build_router(state);
+
+    let test_peer = [7u8; 32];
+    let test_peer_hex = hex::encode(test_peer);
+
+    // 1. Unauthorized requests (no token / wrong token)
+    let endpoints_to_test = vec![
+        ("POST", "/dashboard/admin/mesh/peers", r#"{"pubkey": "test"}"#),
+        ("DELETE", "/dashboard/admin/mesh/peers/somekey", ""),
+        ("POST", "/dashboard/admin/ingress/clients", r#"{"label": "test"}"#),
+        ("DELETE", "/dashboard/admin/ingress/clients/somehash", ""),
+        ("POST", "/dashboard/admin/quota", r#"{"account_tag": "test", "byte_years": 100}"#),
+    ];
+
+    for (meth, uri, body) in endpoints_to_test {
+        // Without header -> 401
+        let req_no_auth = Request::builder()
+            .method(meth)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let res = app.clone().oneshot(req_no_auth).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        // With invalid header -> 401
+        let req_bad_auth = Request::builder()
+            .method(meth)
+            .uri(uri)
+            .header("Authorization", "Bearer wrong_secret")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let res_bad = app.clone().oneshot(req_bad_auth).await.unwrap();
+        assert_eq!(res_bad.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // 2. Add mesh peer with dual_role_ingress: true
+    let req_dual = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/mesh/peers")
+        .header("Authorization", "Bearer qa_admin_secret")
+        .header("Content-Type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"pubkey": "{}", "label": "DualPeer", "dual_role_ingress": true}}"#,
+            test_peer_hex
+        )))
+        .unwrap();
+    let res_dual = app.clone().oneshot(req_dual).await.unwrap();
+    assert_eq!(res_dual.status(), StatusCode::OK);
+    assert!(peer_manager.is_f2f_friend(&test_peer).await);
+    let clients = tier_controller.list_f2f_clients(1000, 0);
+    assert!(clients.iter().any(|c| c.label == "DualPeer"));
+
+    // 3. Add client friend and then remove
+    let req_add_client = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/ingress/clients")
+        .header("Authorization", "Bearer qa_admin_secret")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"label": "Kasse-A", "token": "f2f_kasse_a_secret_token"}"#))
+        .unwrap();
+    let res_client = app.clone().oneshot(req_add_client).await.unwrap();
+    assert_eq!(res_client.status(), StatusCode::OK);
+    let client_json: serde_json::Value = serde_json::from_slice(
+        &res_client.into_body().collect().await.unwrap().to_bytes(),
+    ).unwrap();
+    assert_eq!(client_json["label"], "Kasse-A");
+
+    let client_list = tier_controller.list_f2f_clients(1000, 0);
+    let kasse_client = client_list.iter().find(|c| c.label == "Kasse-A").unwrap();
+    let token_hash = kasse_client.token_hash.clone();
+
+    // Remove client friend
+    let req_del = Request::builder()
+        .method("DELETE")
+        .uri(format!("/dashboard/admin/ingress/clients/{}", token_hash))
+        .header("Authorization", "Bearer qa_admin_secret")
+        .body(Body::empty())
+        .unwrap();
+    let res_del = app.oneshot(req_del).await.unwrap();
+    assert_eq!(res_del.status(), StatusCode::OK);
+    assert!(!tier_controller.list_f2f_clients(1000, 0).iter().any(|c| c.label == "Kasse-A"));
+}
+
+#[test]
+fn test_qa_ring_buffer_boundary_conditions() {
+    use humoco_node::api::history::{HistoryPoint, HistorySampler, HISTORY_CAPACITY};
+    use humoco_node::api::events::{EventKind, EventLog, EVENT_LOG_CAPACITY};
+    use humoco_node::api::health::HealthLevel;
+
+    // 1. HistorySampler: exact 1440 limit
+    assert_eq!(HISTORY_CAPACITY, 1440);
+    let sampler = HistorySampler::new(HISTORY_CAPACITY);
+    assert_eq!(sampler.capacity(), 1440);
+
+    for i in 1..=1440 {
+        sampler.record(HistoryPoint {
+            timestamp_sec: i as u64,
+            write_count: i as u64,
+            read_count: 0,
+            free_writes: 0,
+            f2f_writes: 0,
+            vip_writes: 0,
+            connected_peers: 1,
+            active_locks: 1,
+            queue_depth: 0,
+            pow_diff: 8,
+        });
+    }
+    assert_eq!(sampler.len(), 1440);
+    let points = sampler.query("all");
+    assert_eq!(points.len(), 1440);
+    assert_eq!(points[0].timestamp_sec, 1);
+    assert_eq!(points[1439].timestamp_sec, 1440);
+
+    // Overflow by 1: point 1 must be evicted, point 2 is first, point 1441 is last
+    sampler.record(HistoryPoint {
+        timestamp_sec: 1441,
+        write_count: 1441,
+        read_count: 0,
+        free_writes: 0,
+        f2f_writes: 0,
+        vip_writes: 0,
+        connected_peers: 1,
+        active_locks: 1,
+        queue_depth: 0,
+        pow_diff: 8,
+    });
+    assert_eq!(sampler.len(), 1440);
+    let overflow_points = sampler.query("all");
+    assert_eq!(overflow_points.len(), 1440);
+    assert_eq!(overflow_points[0].timestamp_sec, 2);
+    assert_eq!(overflow_points[1439].timestamp_sec, 1441);
+
+    // 2. EventLog: exact 1000 limit
+    assert_eq!(EVENT_LOG_CAPACITY, 1000);
+    let log = EventLog::new(EVENT_LOG_CAPACITY);
+    assert_eq!(log.capacity(), 1000);
+
+    for i in 1..=1000 {
+        log.record_at(
+            10000 + i as u64,
+            EventKind::System,
+            HealthLevel::Ok,
+            format!("Event {}", i),
+        );
+    }
+    assert_eq!(log.len(), 1000);
+    let events = log.query(None, None);
+    assert_eq!(events.len(), 1000);
+    assert_eq!(events[0].id, 1);
+    assert_eq!(events[999].id, 1000);
+
+    // Overflow by 1: event id 1 must be evicted, event 2 is first, event 1001 is last
+    log.record_at(
+        11001,
+        EventKind::PeerConnect,
+        HealthLevel::Ok,
+        "Event 1001",
+    );
+    assert_eq!(log.len(), 1000);
+    let overflow_events = log.query(None, None);
+    assert_eq!(overflow_events.len(), 1000);
+    assert_eq!(overflow_events[0].id, 2);
+    assert_eq!(overflow_events[999].id, 1001);
+}
+
 

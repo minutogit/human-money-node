@@ -49,6 +49,9 @@ pub struct AppState {
     pub system_stats: Arc<crate::api::system_stats::SystemStatsCollector>,
     pub auth: Arc<crate::api::auth::AdminTokenManager>,
     pub is_simulation: bool,
+    pub config: Arc<crate::config::NodeConfig>,
+    pub history_sampler: Arc<crate::api::history::HistorySampler>,
+    pub event_log: Arc<crate::api::events::EventLog>,
 }
 
 impl AppState {
@@ -62,6 +65,9 @@ impl AppState {
         let metrics = Arc::new(crate::api::metrics::NodeMetrics::default());
         let system_stats = Arc::new(crate::api::system_stats::SystemStatsCollector::new("."));
         let auth = Arc::new(crate::api::auth::AdminTokenManager::with_token("hmc_adm_dev", true));
+        let config = Arc::new(crate::config::NodeConfig::default());
+        let history_sampler = Arc::new(crate::api::history::HistorySampler::default());
+        let event_log = Arc::new(crate::api::events::EventLog::default());
         Self {
             engine,
             storage,
@@ -78,7 +84,31 @@ impl AppState {
             system_stats,
             auth,
             is_simulation: false,
+            config,
+            history_sampler,
+            event_log,
         }
+    }
+
+    pub fn with_history_sampler(
+        mut self,
+        history_sampler: Arc<crate::api::history::HistorySampler>,
+    ) -> Self {
+        self.history_sampler = history_sampler;
+        self
+    }
+
+    pub fn with_event_log(
+        mut self,
+        event_log: Arc<crate::api::events::EventLog>,
+    ) -> Self {
+        self.event_log = event_log;
+        self
+    }
+
+    pub fn with_config(mut self, config: Arc<crate::config::NodeConfig>) -> Self {
+        self.config = config;
+        self
     }
 
     pub fn with_simulation_mode(mut self, is_simulation: bool) -> Self {
@@ -155,12 +185,56 @@ pub fn build_router(state: AppState) -> Router {
         .route("/dashboard/admin/verify-token", post(crate::api::dashboard::admin_verify_token))
         .route("/dashboard/admin/friends", post(crate::api::dashboard::admin_add_friend))
         .route("/dashboard/admin/friends/:key", delete(crate::api::dashboard::admin_remove_friend))
+        .route("/dashboard/admin/mesh/peers", post(crate::api::dashboard::admin_add_mesh_peer))
+        .route("/dashboard/admin/mesh/peers/:key", delete(crate::api::dashboard::admin_remove_mesh_peer))
+        .route("/dashboard/admin/ingress/clients", post(crate::api::dashboard::admin_add_ingress_client))
+        .route("/dashboard/admin/ingress/clients/:token_hash", delete(crate::api::dashboard::admin_remove_ingress_client))
         .route("/dashboard/admin/quota", post(crate::api::dashboard::admin_topup_quota))
+        .route("/dashboard/history", get(get_dashboard_history))
+        .route("/dashboard/events", get(get_dashboard_events))
         .route("/metrics", get(crate::api::metrics::prometheus_metrics))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+#[derive(serde::Deserialize)]
+struct HistoryQuery {
+    window: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct HistoryResponse {
+    points: Vec<crate::api::history::HistoryPoint>,
+}
+
+async fn get_dashboard_history(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
+) -> Json<HistoryResponse> {
+    let window = query.window.as_deref().unwrap_or("24h");
+    let points = state.history_sampler.query(window);
+    Json(HistoryResponse { points })
+}
+
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    since_id: Option<u64>,
+    limit: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+struct EventsResponse {
+    events: Vec<crate::api::events::EventItem>,
+}
+
+async fn get_dashboard_events(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<EventsQuery>,
+) -> Json<EventsResponse> {
+    let events = state.event_log.query(query.since_id, query.limit);
+    Json(EventsResponse { events })
 }
 
 #[allow(clippy::large_enum_variant)]

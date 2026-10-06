@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 pub const SPARKLINE_CAPACITY: usize = 60;
 
 /// DTO for system resource stats and capacity projections.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemStatsDto {
     pub cpu_percent: f64,
     pub rss_mb: f64,
@@ -24,7 +24,7 @@ pub struct SystemStatsDto {
 }
 
 /// DTO for 60-second historical sparkline graphs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SparklinesDto {
     pub writes: Vec<f32>,
     pub reads: Vec<f32>,

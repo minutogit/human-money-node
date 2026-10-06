@@ -579,6 +579,7 @@ fn run_interactive_wizard(
     Ok((cfg, target_path, words, passphrase))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_init(
     path: Option<PathBuf>,
     force: bool,

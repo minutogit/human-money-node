@@ -31,7 +31,7 @@ impl Generator for Shell {
         let bin_name = cmd.get_name();
         let subcmds: Vec<String> = cmd.get_subcommands().map(|sc| sc.get_name().to_string()).collect();
         let opts: Vec<String> = cmd.get_opts().filter_map(|o| o.get_long().map(|l| format!("--{}", l))).collect();
-        let all_tokens: Vec<String> = subcmds.iter().cloned().chain(opts.into_iter()).collect();
+        let all_tokens: Vec<String> = subcmds.iter().cloned().chain(opts).collect();
         let token_list = all_tokens.join(" ");
 
         match self {

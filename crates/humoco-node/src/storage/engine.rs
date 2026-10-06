@@ -1069,7 +1069,7 @@ impl DualTierEngine {
                 let root_valid = hmc.voucher_roots.get(vid).copied().unwrap_or(0);
                 let genesis = tags
                     .iter()
-                    .find(|t| hmc.locks.get(*t).map_or(false, |e| e.deletable_at.is_some()))
+                    .find(|t| hmc.locks.get(*t).is_some_and(|e| e.deletable_at.is_some()))
                     .cloned();
                 vouchers_map.insert(vid.clone(), (root_valid, tags.len(), genesis));
             }
@@ -1079,8 +1079,8 @@ impl DualTierEngine {
         if vouchers_map.len() < limit {
             if let Ok(db_vouchers) = self.db.all_active_vouchers() {
                 for vid in db_vouchers {
-                    if !vouchers_map.contains_key(&vid) {
-                        if let Ok(locks) = self.db.get_hmc_locks_for_voucher(&vid) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = vouchers_map.entry(vid) {
+                        if let Ok(locks) = self.db.get_hmc_locks_for_voucher(e.key()) {
                             let root_valid = locks
                                 .iter()
                                 .find_map(|(_, entry)| {
@@ -1091,7 +1091,7 @@ impl DualTierEngine {
                                 .iter()
                                 .find(|(_, entry)| entry.deletable_at.is_some())
                                 .map(|(tag, _)| tag.clone());
-                            vouchers_map.insert(vid, (root_valid, locks.len(), genesis));
+                            e.insert((root_valid, locks.len(), genesis));
                         }
                     }
                     if vouchers_map.len() >= limit {
@@ -1194,7 +1194,7 @@ impl DualTierEngine {
             let hmc = self.hmc_ram.read().await;
             for (vid, tags) in &hmc.vouchers {
                 let root_valid = hmc.voucher_roots.get(vid).copied().unwrap_or(0);
-                let genesis = tags.iter().find(|t| hmc.locks.get(*t).map_or(false, |e| e.deletable_at.is_some())).cloned();
+                let genesis = tags.iter().find(|t| hmc.locks.get(*t).is_some_and(|e| e.deletable_at.is_some())).cloned();
                 vouchers_map.insert(vid.clone(), (root_valid, tags.len(), genesis));
             }
         }
@@ -1202,13 +1202,13 @@ impl DualTierEngine {
         // 2. Collect from redb
         if let Ok(db_vouchers) = self.db.all_active_vouchers() {
             for vid in db_vouchers {
-                if !vouchers_map.contains_key(&vid) {
-                    if let Ok(locks) = self.db.get_hmc_locks_for_voucher(&vid) {
+                if let std::collections::hash_map::Entry::Vacant(e) = vouchers_map.entry(vid) {
+                    if let Ok(locks) = self.db.get_hmc_locks_for_voucher(e.key()) {
                         let root_valid = locks.iter().find_map(|(_, entry)| {
                             entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok())
                         }).unwrap_or(0);
                         let genesis = locks.iter().find(|(_, entry)| entry.deletable_at.is_some()).map(|(tag, _)| tag.clone());
-                        vouchers_map.insert(vid, (root_valid, locks.len(), genesis));
+                        e.insert((root_valid, locks.len(), genesis));
                     }
                 }
             }

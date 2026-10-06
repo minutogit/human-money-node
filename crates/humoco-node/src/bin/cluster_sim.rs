@@ -83,6 +83,7 @@ enum SimTier {
 
 #[derive(serde::Serialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 enum IngressRequest {
     Chain(L2ChainLockRequest),
     Single(L2LockRequest),
@@ -107,6 +108,14 @@ async fn post_lock_http(
                     let tag = single_req.ds_tag.as_deref().unwrap_or_default();
                     *blake3::hash(tag.as_bytes()).as_bytes()
                 }
+                IngressRequest::Chain(chain_req) => {
+                    if let Some(last_hop) = chain_req.chain.last() {
+                        let tag = last_hop.ds_tag.as_deref().unwrap_or_default();
+                        *blake3::hash(tag.as_bytes()).as_bytes()
+                    } else {
+                        [0u8; 32]
+                    }
+                }
                 _ => [0u8; 32],
             };
             let now_sec = SystemTime::now()
@@ -116,7 +125,15 @@ async fn post_lock_http(
             let slot = now_sec / 600;
             let challenge_bytes = humoco_node::ingress::pow::compute_stateless_challenge(&parent_bytes, slot);
             let challenge_hex = hex::encode(challenge_bytes);
-            let nonce = humoco_node::ingress::pow::solve_blake3_hashcash(&challenge_hex, 8, 100_000).unwrap_or(0);
+            let start_nonce: u64 = rand::random::<u32>() as u64;
+            let mut nonce = start_nonce;
+            for n in start_nonce..(start_nonce + 200_000) {
+                let hash = humoco_node::ingress::pow::compute_solution_hash(&challenge_bytes, n);
+                if humoco_node::ingress::pow::check_difficulty(&hash, 8) {
+                    nonce = n;
+                    break;
+                }
+            }
             format!(
                 "X-PoW-Challenge: {}\r\nX-PoW-Nonce: {}\r\n",
                 challenge_hex, nonce

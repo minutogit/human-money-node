@@ -9,6 +9,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::api::events::EventKind;
+use crate::api::health::{evaluate_health, HealthLevel, HealthSummary};
+pub use crate::ingress::F2fClientDto;
 use crate::api::metrics::LatencyTierStats;
 use crate::api::qr::generate_qr_svg;
 use crate::api::routes::AppState;
@@ -18,6 +21,48 @@ use crate::network::peer::PeerConnectionType;
 use crate::storage::recent::{
     RecentLockStatus, RecentLockSummary, VoucherSummaryDto,
 };
+
+/// Quota reservation percentages across the three ingress tiers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TierSharesDto {
+    pub free: u8,
+    pub f2f: u8,
+    pub vip: u8,
+}
+
+impl Default for TierSharesDto {
+    fn default() -> Self {
+        Self {
+            free: 20,
+            f2f: 30,
+            vip: 50,
+        }
+    }
+}
+
+/// Runtime configuration view exported to dashboard clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigViewDto {
+    pub api_port: u16,
+    pub p2p_port: u16,
+    pub bind_addr: String,
+    pub footprint_bytes: u64,
+    pub tier_shares: TierSharesDto,
+    pub loopback_only: bool,
+}
+
+impl Default for ConfigViewDto {
+    fn default() -> Self {
+        Self {
+            api_port: 8080,
+            p2p_port: 9090,
+            bind_addr: "127.0.0.1".to_string(),
+            footprint_bytes: 144,
+            tier_shares: TierSharesDto::default(),
+            loopback_only: true,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThermometerStatsDto {
@@ -92,10 +137,15 @@ pub struct F2fOverviewDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddFriendRequest {
+pub struct AddMeshPeerRequest {
     pub pubkey: String,
+    #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub dual_role_ingress: Option<bool>,
 }
+
+pub type AddFriendRequest = AddMeshPeerRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddFriendResponse {
@@ -105,6 +155,27 @@ pub struct AddFriendResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveFriendResponse {
+    pub status: String,
+    pub removed: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddClientFriendRequest {
+    pub label: String,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddClientFriendResponse {
+    pub status: String,
+    pub token: String,
+    pub label: String,
+    pub wallet_uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveClientFriendResponse {
     pub status: String,
     pub removed: String,
 }
@@ -122,7 +193,7 @@ pub struct TopupQuotaResponse {
     pub new_balance: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentLockDto {
     pub parent_lock_hex: String,
     pub child_lock_hex: String,
@@ -136,14 +207,14 @@ pub struct RecentLockDto {
     pub voucher_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardScoreSampleDto {
     pub shard_id: u16,
     pub score: f64,
     pub is_responsible: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardData {
     pub status: String,
     pub status_badge: String,
@@ -202,6 +273,23 @@ pub struct DashboardData {
     // Network Time & Mode
     pub network_time_ms: u64,
     pub is_simulation: bool,
+
+    /// Registered F2F client API credentials (Tier 2 client ingress via HTTP port 8080).
+    /// Note: Distinct from internal P2P mesh topology edges in `f2f.friends` (QUIC port 9090).
+    #[serde(default)]
+    pub f2f_clients: Vec<F2fClientDto>,
+
+    /// Diagnostic health assessment (INV-1701: non-authoritative, diagnostic only, triggers no auto-ban).
+    #[serde(default)]
+    pub health: HealthSummary,
+
+    /// Runtime configuration view.
+    #[serde(default)]
+    pub config_view: ConfigViewDto,
+
+    /// Clock drift relative to F2F median in milliseconds.
+    #[serde(default)]
+    pub clock_drift_ms: i64,
 }
 
 /// Formats epoch milliseconds as German civil date/time (DD.MM.YYYY, HH:mm:ss)
@@ -435,7 +523,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let sample_shard_scores = sample_shards
         .into_iter()
         .map(|sid| {
-            let score = humoco_sim_core::client_flow::compute_hrw_score_f64(&local_hrw, sid);
+            let score = humoco_sim_core::client_flow::compute_hrw_score_f64(local_hrw, sid);
             let is_responsible = total_nodes < 20 || score > 0.05;
             ShardScoreSampleDto {
                 shard_id: sid,
@@ -639,7 +727,29 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         total_quota_used_pct,
     };
 
-    DashboardData {
+    let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
+    let f2f_clients = state.tier_controller.list_f2f_clients(now_ms, epoch_day);
+
+    let api_port = state.config.network.rpc_listen_addr.port();
+    let p2p_port = state.config.network.p2p_listen_addr.port();
+    let bind_addr = state.config.network.rpc_listen_addr.ip().to_string();
+    let loopback_only = state.config.network.rpc_listen_addr.ip().is_loopback();
+    let config_view = ConfigViewDto {
+        api_port,
+        p2p_port,
+        bind_addr,
+        footprint_bytes: 144,
+        tier_shares: TierSharesDto { free: 20, f2f: 30, vip: 50 },
+        loopback_only,
+    };
+
+    let clock_drift_ms = state
+        .peer_manager
+        .as_ref()
+        .map(|pm| pm.clock().logical_offset_ms())
+        .unwrap_or(0);
+
+    let mut data = DashboardData {
         status,
         status_badge,
         node_id: state.identity.node_id_bs58(),
@@ -681,7 +791,13 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         f2f,
         network_time_ms: state.net_time_ms(),
         is_simulation: state.is_simulation,
-    }
+        f2f_clients,
+        health: HealthSummary::default(),
+        config_view,
+        clock_drift_ms,
+    };
+    data.health = evaluate_health(&data);
+    data
 }
 
 /// Convenience alias for collect_dashboard_data
@@ -690,6 +806,7 @@ pub async fn get_dashboard_data(state: &AppState) -> DashboardData {
 }
 
 /// Helper to verify admin authorization header.
+#[allow(clippy::result_large_err)]
 fn verify_admin_auth(state: &AppState, headers: &axum::http::HeaderMap) -> Result<(), Response> {
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -727,42 +844,57 @@ pub async fn admin_verify_token(
         .into_response()
 }
 
-/// Handler for POST /dashboard/admin/friends
-pub async fn admin_add_friend(
+/// Handler for POST /dashboard/admin/mesh/peers (and alias POST /dashboard/admin/friends)
+pub async fn admin_add_mesh_peer(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    Json(payload): Json<AddFriendRequest>,
+    Json(payload): Json<AddMeshPeerRequest>,
 ) -> Response {
     if let Err(unauth) = verify_admin_auth(&state, &headers) {
         return unauth;
     }
 
-    let trimmed = payload.pubkey.trim();
-    let key_bytes = match hex::decode(trimmed) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            arr
-        }
-        _ => {
+    let key_bytes = match crate::api::keys::parse_pubkey(&payload.pubkey) {
+        Ok(arr) => arr,
+        Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": "BadRequest",
-                    "message": "Invalid hex Ed25519 public key (must be 64 hex characters / 32 bytes)"
+                    "message": format!("Invalid public key: {}", e)
                 })),
             )
                 .into_response();
         }
     };
 
+    let hex_key = hex::encode(key_bytes);
+
     if let Some(ref pm) = state.peer_manager {
         pm.add_trusted_f2f_peer(key_bytes).await;
+
+        if payload.dual_role_ingress == Some(true) {
+            state
+                .tier_controller
+                .register_f2f_client(&hex_key, payload.label.as_deref());
+            state.event_log.record(
+                EventKind::ClientRegistered,
+                HealthLevel::Ok,
+                format!("Registered F2F ingress client for peer {}", hex_key),
+            );
+        }
+
+        state.event_log.record(
+            EventKind::PeerConnect,
+            HealthLevel::Ok,
+            format!("Added trusted F2F mesh peer {}", hex_key),
+        );
+
         (
             StatusCode::OK,
             Json(AddFriendResponse {
                 status: "ok".into(),
-                pubkey: hex::encode(key_bytes),
+                pubkey: hex_key,
             }),
         )
             .into_response()
@@ -778,8 +910,17 @@ pub async fn admin_add_friend(
     }
 }
 
-/// Handler for DELETE /dashboard/admin/friends/:key
-pub async fn admin_remove_friend(
+/// Alias handler for POST /dashboard/admin/friends
+pub async fn admin_add_friend(
+    state: State<AppState>,
+    headers: axum::http::HeaderMap,
+    payload: Json<AddFriendRequest>,
+) -> Response {
+    admin_add_mesh_peer(state, headers, payload).await
+}
+
+/// Handler for DELETE /dashboard/admin/mesh/peers/:key (and alias DELETE /dashboard/admin/friends/:key)
+pub async fn admin_remove_mesh_peer(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(key): Path<String>,
@@ -788,32 +929,36 @@ pub async fn admin_remove_friend(
         return unauth;
     }
 
-    let trimmed = key.trim();
-    let key_bytes = match hex::decode(trimmed) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            arr
-        }
-        _ => {
+    let key_bytes = match crate::api::keys::parse_pubkey(&key) {
+        Ok(arr) => arr,
+        Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": "BadRequest",
-                    "message": "Invalid hex Ed25519 public key (must be 64 hex characters / 32 bytes)"
+                    "message": format!("Invalid public key: {}", e)
                 })),
             )
                 .into_response();
         }
     };
 
+    let hex_key = hex::encode(key_bytes);
+
     if let Some(ref pm) = state.peer_manager {
         pm.remove_trusted_f2f_peer(&key_bytes).await;
+
+        state.event_log.record(
+            EventKind::PeerDisconnect,
+            HealthLevel::Ok,
+            format!("Removed trusted F2F mesh peer {}", hex_key),
+        );
+
         (
             StatusCode::OK,
             Json(RemoveFriendResponse {
                 status: "ok".into(),
-                removed: hex::encode(key_bytes),
+                removed: hex_key,
             }),
         )
             .into_response()
@@ -827,6 +972,98 @@ pub async fn admin_remove_friend(
         )
             .into_response()
     }
+}
+
+/// Alias handler for DELETE /dashboard/admin/friends/:key
+pub async fn admin_remove_friend(
+    state: State<AppState>,
+    headers: axum::http::HeaderMap,
+    key: Path<String>,
+) -> Response {
+    admin_remove_mesh_peer(state, headers, key).await
+}
+
+/// Handler for POST /dashboard/admin/ingress/clients
+pub async fn admin_add_ingress_client(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<AddClientFriendRequest>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let token = match payload.token {
+        Some(ref t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            let mut bytes = [0u8; 16];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+            format!("f2f_{}", hex::encode(bytes))
+        }
+    };
+
+    let label = if payload.label.trim().is_empty() {
+        format!("Client-{}", &token[..token.len().min(8)])
+    } else {
+        payload.label.trim().to_string()
+    };
+
+    state.tier_controller.register_f2f_client(&token, Some(&label));
+
+    let rpc_addr = state.config.network.rpc_listen_addr;
+    let host = if rpc_addr.ip().is_unspecified() {
+        "127.0.0.1".to_string()
+    } else {
+        rpc_addr.ip().to_string()
+    };
+    let api_addr = format!("{}:{}", host, rpc_addr.port());
+    let wallet_uri = format!("humoco://{}?token={}", api_addr, token);
+
+    state.event_log.record(
+        EventKind::ClientRegistered,
+        HealthLevel::Ok,
+        format!("Registered F2F ingress client '{}'", label),
+    );
+
+    (
+        StatusCode::OK,
+        Json(AddClientFriendResponse {
+            status: "ok".into(),
+            token,
+            label,
+            wallet_uri,
+        }),
+    )
+        .into_response()
+}
+
+/// Handler for DELETE /dashboard/admin/ingress/clients/:token_hash
+pub async fn admin_remove_ingress_client(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(token_hash): Path<String>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let removed = state.tier_controller.remove_f2f_client(&token_hash);
+    if removed {
+        state.event_log.record(
+            EventKind::ClientRemoved,
+            HealthLevel::Ok,
+            format!("Removed F2F ingress client {}", token_hash),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "removed": token_hash,
+        })),
+    )
+        .into_response()
 }
 
 /// Handler for POST /dashboard/admin/quota
@@ -919,1080 +1156,9 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
     let sim_badge_style = if data.is_simulation { "display: inline-block; " } else { "display: none; " };
 
     let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="de">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HuMoCo Node Control Center (v2.0)</title>
-<style>
-:root{{--bg:#090d16;--surface:#111827;--surface-alt:#1a2234;--surface-hover:#232d42;--border:#2e384d;--text:#f3f4f6;--text-muted:#94a3b8;--green:#10b981;--green-bg:rgba(16,185,129,0.15);--amber:#f59e0b;--amber-bg:rgba(245,158,11,0.15);--red:#ef4444;--red-bg:rgba(239,68,68,0.15);--blue:#3b82f6;--blue-bg:rgba(59,130,246,0.15);--purple:#a855f7;--purple-bg:rgba(168,85,247,0.15);--cyan:#06b6d4;--cyan-bg:rgba(6,182,212,0.15)}}
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;line-height:1.5;padding:1.25rem}}
-.container{{max-width:1360px;margin:0 auto}}
-header{{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:1rem;padding-bottom:1.25rem;margin-bottom:1.25rem;border-bottom:1px solid var(--border)}}
-.header-left,.header-pills,.header-right{{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap}}
-.header-title{{font-size:1.35rem;font-weight:700;letter-spacing:-0.02em;display:flex;align-items:center;gap:0.5rem}}
-.badge{{display:inline-flex;align-items:center;gap:0.35rem;padding:0.25rem 0.7rem;border-radius:9999px;font-size:0.8125rem;font-weight:600;white-space:nowrap}}
-.badge-green{{background:var(--green-bg);color:var(--green);border:1px solid rgba(16,185,129,0.3)}}
-.badge-amber{{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,158,11,0.3)}}
-.badge-red{{background:var(--red-bg);color:var(--red);border:1px solid rgba(239,68,68,0.3)}}
-.badge-blue{{background:var(--blue-bg);color:var(--blue);border:1px solid rgba(59,130,246,0.3)}}
-.badge-purple{{background:var(--purple-bg);color:var(--purple);border:1px solid rgba(168,85,247,0.3)}}
-.badge-cyan{{background:var(--cyan-bg);color:var(--cyan);border:1px solid rgba(6,182,212,0.3)}}
-.pill{{background:var(--surface);border:1px solid var(--border);border-radius:0.5rem;padding:0.3rem 0.65rem;font-size:0.8125rem;font-weight:500;color:var(--text-muted);display:inline-flex;align-items:center;gap:0.35rem}}
-.pill strong{{color:var(--text);font-weight:600}}
-.tabs-nav{{display:flex;gap:0.5rem;margin-bottom:1.25rem;border-bottom:1px solid var(--border);overflow-x:auto;padding-bottom:0.5rem}}
-.tab-btn{{background:transparent;border:1px solid transparent;color:var(--text-muted);padding:0.6rem 1.1rem;border-radius:0.5rem;font-size:0.9rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:0.5rem;transition:all 0.2s;white-space:nowrap}}
-.tab-btn:hover{{background:var(--surface-alt);color:var(--text)}}
-.tab-btn.active{{background:var(--blue-bg);color:var(--blue);border-color:rgba(59,130,246,0.4)}}
-.tab-content{{display:none}}
-.tab-content.active{{display:block}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.25rem;margin-bottom:1.25rem}}
-.grid-2{{display:grid;grid-template-columns:repeat(auto-fit,minmax(450px,1fr));gap:1.25rem;margin-bottom:1.25rem}}
-@media (max-width:640px){{.grid-2{{grid-template-columns:1fr}}}}
-.card{{background:var(--surface);border:1px solid var(--border);border-radius:0.75rem;padding:1.25rem;display:flex;flex-direction:column}}
-.card-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;color:var(--text-muted);font-size:0.85rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em}}
-.card-value{{font-size:1.75rem;font-weight:700;color:var(--text);margin-bottom:0.35rem;display:flex;align-items:baseline;gap:0.5rem}}
-.card-sub{{font-size:0.8125rem;color:var(--text-muted)}}
-.identity-card{{grid-column:1 / -1;display:grid;grid-template-columns:140px 1fr;gap:1.5rem;align-items:center}}
-@media (max-width:640px){{.identity-card{{grid-template-columns:1fr}}}}
-.qr-box{{width:140px;height:140px;background:#fff;border-radius:0.5rem;padding:0.35rem;display:flex;align-items:center;justify-content:center}}
-.qr-svg{{width:100%;height:100%;display:block}}
-.code{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:0.8125rem;background:var(--surface-alt);padding:0.35rem 0.55rem;border-radius:0.375rem;border:1px solid var(--border);word-break:break-all}}
-.peering-row{{display:flex;gap:0.5rem;align-items:center;margin-top:0.5rem}}
-.btn{{background:var(--blue);color:#fff;border:1px solid transparent;border-radius:0.375rem;padding:0.45rem 0.85rem;font-size:0.8125rem;font-weight:600;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:0.35rem;white-space:nowrap}}
-.btn:hover{{opacity:0.9}}
-.btn-secondary{{background:var(--surface-alt);border:1px solid var(--border);color:var(--text)}}
-.btn-secondary:hover{{background:var(--surface-hover)}}
-.btn-danger{{background:var(--red-bg);color:var(--red);border:1px solid rgba(239,68,68,0.3)}}
-.btn-danger:hover{{background:rgba(239,68,68,0.25)}}
-.table-card{{grid-column:1 / -1;margin-top:1rem}}
-table{{width:100%;border-collapse:collapse;margin-top:0.5rem;font-size:0.875rem}}
-th{{text-align:left;padding:0.75rem;color:var(--text-muted);border-bottom:1px solid var(--border);font-weight:600;font-size:0.8125rem;text-transform:uppercase;letter-spacing:0.04em}}
-td{{padding:0.75rem;border-bottom:1px solid var(--border);color:var(--text);vertical-align:middle}}
-tr:hover td{{background:var(--surface-alt)}}
-.empty-cell{{text-align:center;color:var(--text-muted);padding:2.5rem 0}}
-.progress-bar{{width:100%;height:8px;background:var(--surface-alt);border-radius:9999px;overflow:hidden;margin:0.5rem 0}}
-.progress-fill{{height:100%;background:linear-gradient(90deg,var(--blue),var(--cyan));border-radius:9999px;transition:width 0.3s ease}}
-.sparkline-box{{margin-top:0.75rem;height:40px;width:100%}}
-.input-text{{background:var(--surface-alt);border:1px solid var(--border);border-radius:0.375rem;padding:0.45rem 0.75rem;color:var(--text);font-size:0.875rem;outline:none}}
-.input-text:focus{{border-color:var(--blue)}}
-.modal-overlay{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);z-index:1000;align-items:center;justify-content:center;padding:1rem}}
-.modal-overlay.active{{display:flex}}
-.modal-box{{background:var(--surface);border:1px solid var(--border);border-radius:0.75rem;max-width:850px;width:100%;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5)}}
-.modal-header{{display:flex;justify-content:space-between;align-items:center;padding:1rem 1.25rem;border-bottom:1px solid var(--border)}}
-.modal-header h3{{font-size:1.1rem;font-weight:700}}
-.modal-body{{padding:1.25rem;overflow-y:auto;font-size:0.875rem}}
-.modal-footer{{padding:0.75rem 1.25rem;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:0.5rem}}
-pre.json-viewer{{background:var(--bg);border:1px solid var(--border);border-radius:0.5rem;padding:1rem;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8125rem;color:#38bdf8}}
-footer{{margin-top:2rem;text-align:center;font-size:0.75rem;color:var(--text-muted);border-top:1px solid var(--border);padding-top:1rem}}
-</style>
-</head>
-<body>
-<div class="container">
-  <!-- Top Header -->
-  <header>
-    <div class="header-left">
-      <div class="header-title">
-        <span>🟢</span>
-        <span>HuMoCo Node Control Center (v2.0)</span>
-      </div>
-      <span id="status-badge" class="badge badge-green">{status_badge}</span>
-      <div class="pill">🕰️ <strong id="hdr-net-time">{net_time_formatted}</strong> <span id="hdr-sim-badge" class="badge badge-cyan" style="{sim_badge_style}padding: 0.15rem 0.4rem; font-size: 0.7rem;">⚡ Sim (5s = 1h)</span></div>
-    </div>
-
-    <!-- 3-Tier Latencies Pills -->
-    <div class="header-pills">
-      <div class="pill">⚡ In-RAM: <strong id="hdr-lat-local">{local_avg:.2} ms</strong> (&lt; 5ms SLA)</div>
-      <div class="pill">🌐 Quorum: <strong id="hdr-lat-quorum">{quorum_avg:.2} ms</strong> (&lt; 500ms SLA)</div>
-      <div class="pill">🛒 Kasse: <strong id="hdr-lat-e2e">{e2e_avg:.2} ms</strong></div>
-    </div>
-
-    <!-- Fast Stats & Admin Button -->
-    <div class="header-right">
-      <div class="pill">Peers: <strong id="hdr-peers">{connected_peers}/{configured_peers}</strong></div>
-      <div class="pill">Port: <strong>8080/9090</strong></div>
-      <div class="pill">Shard: <strong id="hdr-shard">{shard_mode}</strong></div>
-      <button id="admin-btn" class="btn btn-secondary" onclick="handleAdminBtnClick()">🔒 Admin-Modus</button>
-    </div>
-  </header>
-
-  <!-- 4-Tab Navigation -->
-  <div class="tabs-nav">
-    <button id="tab-btn-cockpit" class="tab-btn active" onclick="switchTab('tab-cockpit')">⚡ Cockpit &amp; System</button>
-    <button id="tab-btn-network" class="tab-btn" onclick="switchTab('tab-network')">🌐 Netzwerk &amp; F2F</button>
-    <button id="tab-btn-tiers" class="tab-btn" onclick="switchTab('tab-tiers')">🎛️ Tiers &amp; Quoten</button>
-    <button id="tab-btn-vouchers" class="tab-btn" onclick="switchTab('tab-vouchers')">🎟️ Gutscheine &amp; Logs</button>
-  </div>
-
-  <!-- TAB 1: COCKPIT & SYSTEM -->
-  <div id="tab-cockpit" class="tab-content active">
-    <div class="grid">
-      <!-- 1. Schreib-Durchsatz -->
-      <div class="card">
-        <div class="card-header">
-          <span>✍️ Schreib-Durchsatz</span>
-          <span class="badge badge-green">Hot-Path</span>
-        </div>
-        <div class="card-value">
-          <span id="writes-rate">{free_req_sec:.1}</span>
-          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">TX/s (EMA)</span>
-        </div>
-        <div class="card-sub">Heute: <strong id="writes-today">{total_writes}</strong> Schreiboperationen</div>
-        <div id="writes-sparkline" class="sparkline-box"></div>
-      </div>
-
-      <!-- 2. Lese-Durchsatz -->
-      <div class="card">
-        <div class="card-header">
-          <span>🔍 Lese-Durchsatz</span>
-          <span class="badge badge-blue">RAM-Index</span>
-        </div>
-        <div class="card-value">
-          <span id="reads-rate">{reads_rate:.1}</span>
-          <span style="font-size: 1rem; color: var(--text-muted); font-weight: normal;">Req/s</span>
-        </div>
-        <div class="card-sub">Heute: <strong id="reads-today">{total_reads}</strong> Leseabfragen</div>
-        <div id="reads-sparkline" class="sparkline-box"></div>
-      </div>
-
-      <!-- 3. Hardware & Ressourcen -->
-      <div class="card">
-        <div class="card-header">
-          <span>💻 Hardware &amp; Ressourcen</span>
-          <span class="badge badge-purple">Node Stats</span>
-        </div>
-        <div style="margin-bottom: 0.5rem;">
-          <div style="display: flex; justify-content: space-between; font-size: 0.8125rem;">
-            <span>CPU-Auslastung:</span>
-            <strong id="sys-cpu-val">{cpu_percent:.1}%</strong>
-          </div>
-          <div class="progress-bar">
-            <div id="sys-cpu-bar" class="progress-fill" style="width: {cpu_percent}%;"></div>
-          </div>
-        </div>
-        <div class="card-sub" style="line-height: 1.6;">
-          <div>RSS RAM: <strong id="sys-rss-val">{rss_mb:.1} MB</strong></div>
-          <div>redb Disk-Datei: <strong id="sys-redb-val">{redb_kb} KB</strong></div>
-          <div>Netto Lock Footprint: <strong id="sys-netto-val">{netto_locks} B</strong> (144 B * N)</div>
-          <div>TTL-Pruning: <strong id="sys-purged-val">{ttl_purged}</strong> gelöschte Sperren</div>
-        </div>
-      </div>
-
-      <!-- 4. Knoten-Kapazitätsrechner & Skalierung -->
-      <div class="card">
-        <div class="card-header">
-          <span>🚀 Knoten-Kapazität &amp; Skalierung</span>
-          <span class="badge badge-cyan">Projektion</span>
-        </div>
-        <div class="card-sub" style="line-height: 1.7; font-size: 0.85rem; margin-top: 0.25rem;">
-          <div>Single-Core Peak: <strong id="cap-single-val" style="color: var(--text);">{peak_tps_single}</strong> TPS</div>
-          <div>Multi-Core Peak: <strong id="cap-multi-val" style="color: var(--text);">{peak_tps_multi}</strong> TPS</div>
-          <div>Storage Ceiling: <strong id="cap-storage-val" style="color: var(--text);">{max_storage_locks}</strong> Sperren</div>
-          <div>Byte-Years Kapazität: <strong id="cap-byte-years-val" style="color: var(--text);">{byte_years_capacity}</strong> Byte-Jahre</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Node Identity & Peering Box -->
-    <div class="card identity-card">
-      <div class="qr-box">{qr_svg}</div>
-      <div>
-        <div class="card-header"><span>📱 Lokale Knoten-Identität &amp; Peering-String</span></div>
-        <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 0.25rem;">NodePubKey: <span class="code" id="node-id-text">{node_id}</span></div>
-        <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 0.25rem;">Argon2d Ticket: <span class="code" id="hrw-ticket-text">{hrw_id}</span></div>
-        <div class="peering-row">
-          <span class="code" id="peering-text" style="flex: 1;">{peering_str}</span>
-          <button class="btn" id="copy-btn" onclick="copyPeering()">Kopieren</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- TAB 2: NETZWERK & F2F -->
-  <div id="tab-network" class="tab-content">
-    <div class="grid-2">
-      <!-- Network Thermometer Card (Spec 09) -->
-      <div class="card">
-        <div class="card-header">
-          <span>🌡️ Netzwerk-Thermometer (Spec 09)</span>
-          <span class="badge badge-cyan">Dynamische Last</span>
-        </div>
-        <div class="card-sub" style="line-height: 1.8; font-size: 0.875rem;">
-          <div>Gossip Write Load: <strong id="thermo-write-load" style="color: var(--text);">{gossip_write_load:.2}</strong></div>
-          <div>Gossip Read Load: <strong id="thermo-read-load" style="color: var(--text);">{gossip_read_load:.2}</strong></div>
-          <div>28-Tage Median NCB_eff (min 10k): <strong id="thermo-ncb-eff" style="color: var(--text);">{ncb_eff:.0}</strong></div>
-          <div>28-Tage Read Median NCB_read_eff (min 50k): <strong id="thermo-ncb-read-eff" style="color: var(--text);">{ncb_read_eff:.0}</strong></div>
-          <div>24h Rolling Avg: <strong id="thermo-rolling-avg" style="color: var(--text);">{gossip_write_load:.2}</strong></div>
-          <div>Top-2 Konzentration: <strong id="conc-val" style="color: var(--text);">{conc_percent:.1}%</strong> | Max Subnetz-Dominanz: <strong id="subnet-dom-sub" style="color: var(--text);">{dom_percent:.1}%</strong></div>
-        </div>
-      </div>
-
-      <!-- F2F Web-of-Trust Card -->
-      <div class="card">
-        <div class="card-header">
-          <span>🤝 F2F Web-of-Trust Freunde</span>
-          <span class="badge badge-green">Gossip-Barriere</span>
-        </div>
-        <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 0.75rem;">
-          Eigener PubKey: <span class="code" id="my-pubkey-text">{node_id}</span>
-          <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; margin-left: 0.35rem;" onclick="copyMyPubkey()">Kopieren</button>
-        </div>
-
-        <!-- Admin Only: Add Friend Form -->
-        <div class="admin-only" style="display: none; background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.75rem;">
-          <div style="font-weight: 600; font-size: 0.8125rem; margin-bottom: 0.5rem;">🤝 Freund hinzufügen (Admin)</div>
-          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-            <input id="friend-pubkey-input" class="input-text" placeholder="Ed25519 PubKey (64 Hex-Zeichen)" style="flex: 2; min-width: 200px;">
-            <input id="friend-label-input" class="input-text" placeholder="Label (z.B. Bob)" style="flex: 1; min-width: 100px;">
-            <button class="btn" onclick="adminAddFriend()">Hinzufügen</button>
-          </div>
-        </div>
-
-        <div style="overflow-x: auto; max-height: 250px;">
-          <table>
-            <thead>
-              <tr>
-                <th>NodePubKey</th>
-                <th>Adresse</th>
-                <th>Status &amp; Zuverlässigkeit</th>
-                <th>Latenz (RTT)</th>
-                <th>Aktion</th>
-              </tr>
-            </thead>
-            <tbody id="friends-tbody">
-              <!-- Dynamically populated -->
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- Peer Explorer Table ("Nerd-Mode") -->
-    <div class="card table-card">
-      <div class="card-header" style="flex-wrap: wrap; gap: 0.5rem;">
-        <span>🌐 Peer Explorer ("Nerd-Mode" &bull; Bekannte Netzwerkknoten)</span>
-        <span class="card-sub" id="network-count-sub">{active_nodes} Knoten registriert</span>
-      </div>
-      <div style="padding: 0.5rem 1rem 0 1rem;">
-        <input id="node-search-input" class="input-text" placeholder="🔍 Suche nach PubKey, IP, Beziehung oder Status..." oninput="filterNodesTable()" style="width: 100%; max-width: 450px;">
-      </div>
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>NodePubKey</th>
-              <th>IP-Adresse / Port</th>
-              <th>Beziehung</th>
-              <th>Status &amp; Zuverlässigkeit</th>
-              <th>Latenz (RTT)</th>
-              <th>Hops &amp; Route</th>
-              <th>Shard-Ticket (Argon2d)</th>
-              <th>Inkubation (24h)</th>
-              <th>Aktion</th>
-            </tr>
-          </thead>
-          <tbody id="nodes-tbody">
-            <!-- Dynamically populated -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <!-- TAB 3: TIERS & QUOTEN -->
-  <div id="tab-tiers" class="tab-content">
-    <div class="grid">
-      <!-- Tier 1: Free Tier -->
-      <div class="card">
-        <div class="card-header">
-          <span>🌍 Free Tier</span>
-          <span class="badge badge-green" id="tier-free-badge">20% Kontingent</span>
-        </div>
-        <div class="card-value">
-          <span id="tier-free-used-val">{free_used_pct:.1}%</span>
-          <span style="font-size: 0.95rem; color: var(--text-muted); font-weight: normal;">genutzt (<strong id="tier-free-writes-val" style="color: var(--text);">{free_writes_today}</strong> Sperren)</span>
-        </div>
-        <div class="progress-bar" style="height: 4px; margin: 0.35rem 0 0.5rem 0;">
-          <div id="tier-free-bar" class="progress-fill" style="width: {free_used_pct:.1}%; background: var(--green);"></div>
-        </div>
-        <div class="card-sub" id="tier-free-sub">PoW: <strong id="tier-free-pow-val">{free_pow_diff}</strong> Bits (Ø <span id="tier-free-hashes-val">{free_pow_hashes}</span> Hashes &bull; <span id="tier-free-time-val">{free_pow_time_est}</span>) &bull; Last: <strong id="tier-free-req-val">{free_req_sec:.1}</strong> req/s</div>
-      </div>
-
-      <!-- Tier 2: Friends Tier -->
-      <div class="card">
-        <div class="card-header">
-          <span>🤝 Friends Tier</span>
-          <span class="badge badge-blue" id="tier-friends-badge">30% Reserviert</span>
-        </div>
-        <div class="card-value">
-          <span id="tier-friends-used-val">{friends_used_pct:.1}%</span>
-          <span style="font-size: 0.95rem; color: var(--text-muted); font-weight: normal;">genutzt (<strong id="tier-friends-writes-val" style="color: var(--text);">{friends_writes_today}</strong> Sperren)</span>
-        </div>
-        <div class="progress-bar" style="height: 4px; margin: 0.35rem 0 0.5rem 0;">
-          <div id="tier-friends-bar" class="progress-fill" style="width: {friends_used_pct:.1}%; background: var(--blue);"></div>
-        </div>
-        <div class="card-sub" id="tier-friends-sub">Gossip-gesichert &bull; Prioritätswarteschlange &bull; <strong id="tier-friends-count-val">{active_friends_count}</strong> Freunde aktiv</div>
-      </div>
-
-      <!-- Tier 3: VIP Tier -->
-      <div class="card">
-        <div class="card-header">
-          <span>💳 VIP Tier</span>
-          <span class="badge badge-purple" id="tier-vip-badge">50% Reserviert</span>
-        </div>
-        <div class="card-value">
-          <span id="tier-vip-used-val">{vip_used_pct:.1}%</span>
-          <span style="font-size: 0.95rem; color: var(--text-muted); font-weight: normal;">genutzt (<strong id="tier-vip-writes-val" style="color: var(--text);">{vip_writes_today}</strong> Sperren)</span>
-        </div>
-        <div class="progress-bar" style="height: 4px; margin: 0.35rem 0 0.5rem 0;">
-          <div id="tier-vip-bar" class="progress-fill" style="width: {vip_used_pct:.1}%; background: var(--purple);"></div>
-        </div>
-        <div class="card-sub" id="tier-vip-sub">SLA-Garantie &bull; <strong id="tier-vip-accounts-val">{vip_accounts_count}</strong> VIP-Accounts &bull; <strong id="tier-vip-balance-val">{vip_total_balance}</strong> BY Saldo</div>
-      </div>
-    </div>
-
-    <!-- Daily Quota Card -->
-    <div class="card" style="margin-bottom: 1.25rem;">
-      <div class="card-header">
-        <span>📊 Tägliches Quotenlimit &amp; Byte-Jahre Verbrauch</span>
-        <span class="badge badge-cyan">24h Fenster</span>
-      </div>
-      <div style="margin: 0.5rem 0;">
-        <div style="display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 0.35rem;">
-          <span>Heute verbraucht: <strong id="quota-used-val">{today_write_used}</strong> Byte-Jahre (<span id="quota-locks-val">{total_writes_today}</span> Sperren) / <span id="quota-limit-val">{daily_write_quota}</span> Byte-Jahre</span>
-          <strong id="quota-pct-text">{total_quota_used_pct:.1}%</strong>
-        </div>
-        <div class="progress-bar">
-          <div id="quota-bar" class="progress-fill" style="width: {total_quota_used_pct:.1}%;"></div>
-        </div>
-        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.4rem;">
-          ℹ️ <strong>Byte-Jahre Speicherzeit-Produkt:</strong> 1 Sperre = 1 Byte-Jahr bei Kurzzeit-TTL (&le; 1 Tag) bis 960 Byte-Jahre bei 5 Jahren Wurzel-Gültigkeit (192 Bytes &times; Gültigkeitsdauer).
-        </div>
-      </div>
-    </div>
-
-    <!-- VIP Accounts Card -->
-    <div class="card table-card">
-      <div class="card-header">
-        <span>💳 Registrierte VIP-Accounts &amp; Quoten-Guthaben</span>
-        <span class="card-sub">Byte-Years Balance</span>
-      </div>
-
-      <!-- Admin Only: Topup VIP Quota Form -->
-      <div class="admin-only" style="display: none; background: var(--surface-alt); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 1rem;">
-        <div style="font-weight: 600; font-size: 0.8125rem; margin-bottom: 0.5rem;">💳 VIP Guthaben aufladen (Admin)</div>
-        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-          <input id="vip-tag-input" class="input-text" placeholder="Account Tag (64 Hex-Zeichen)" style="flex: 2; min-width: 200px;">
-          <input id="vip-amount-input" class="input-text" type="number" placeholder="Byte-Jahre (z.B. 5000)" style="flex: 1; min-width: 120px;">
-          <button class="btn" onclick="adminTopupQuota()">Aufladen</button>
-        </div>
-      </div>
-
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>Account Tag (Hex)</th>
-              <th>Byte-Jahre Guthaben</th>
-            </tr>
-          </thead>
-          <tbody id="vip-accounts-tbody">
-            <!-- Dynamically populated -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <!-- TAB 4: GUTSCHEINE & LOGS -->
-  <div id="tab-vouchers" class="tab-content">
-    <!-- Recent Locks Table -->
-    <div class="card table-card" style="margin-top: 0; margin-bottom: 1.25rem;">
-      <div class="card-header">
-        <span>⏱️ Recent Locks Ring Buffer (&lt; 1µs In-RAM)</span>
-        <span class="card-sub">Neueste Sperr-Ereignisse</span>
-      </div>
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>Timestamp (ms)</th>
-              <th>Parent Lock / Lookup Tag</th>
-              <th>Child Lock (t_id)</th>
-              <th>Tier &amp; Quota</th>
-              <th>Gutschein-ID</th>
-              <th>Status</th>
-              <th>Rohdaten</th>
-            </tr>
-          </thead>
-          <tbody id="locks-tbody">
-            <!-- Dynamically populated -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Active Vouchers Table -->
-    <div class="card table-card">
-      <div class="card-header">
-        <span>🎟️ Aktive Gutschein-Wurzeln &amp; Lock-Lineage</span>
-        <span class="card-sub" id="vouchers-count-sub">{total_active_vouchers} Gutscheine aktiv (Top 15 angezeigt)</span>
-      </div>
-      <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
-        <input id="voucher-search-input" class="input-text" placeholder="🎟️ Gutschein-ID oder Lock-Tag eingeben..." style="flex: 1;" onkeydown="if (event.key === 'Enter') searchVoucher()">
-        <button class="btn" onclick="searchVoucher()">🔍 Suchen &amp; Prüfen</button>
-      </div>
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>Gutschein-ID</th>
-              <th>Wurzel-Gültigkeit (Root valid_until)</th>
-              <th>Genesis-Lock Tag</th>
-              <th>Sperren</th>
-              <th>Status</th>
-              <th>Aktion</th>
-            </tr>
-          </thead>
-          <tbody id="vouchers-tbody">
-            <!-- Dynamically populated -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <footer>
-    HuMoCo Layer-2 Daemon &bull; Offline Air-Gap Dashboard v2 &bull; Auto-Refresh 2s
-  </footer>
-</div>
-
-<!-- Modal 1: Voucher Root Inspector -->
-<div id="voucher-modal" class="modal-overlay" onclick="closeModalOnOverlay(event, 'voucher-modal')">
-  <div class="modal-box">
-    <div class="modal-header">
-      <h3 id="voucher-modal-title">🎟️ Gutschein-Lineage Wurzel-Inspektor</h3>
-      <button class="btn btn-secondary" onclick="closeModal('voucher-modal')">✕</button>
-    </div>
-    <div class="modal-body">
-      <div id="voucher-modal-details" style="margin-bottom: 0.75rem;"></div>
-      <div id="voucher-modal-table-container"></div>
-      <div style="margin-top: 1rem;">
-        <button class="btn btn-secondary" onclick="toggleVoucherRawJson()">📄 Raw JSON anzeigen / verbergen</button>
-        <pre id="voucher-modal-json" class="json-viewer" style="display: none; margin-top: 0.5rem;"></pre>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn" id="voucher-copy-btn" onclick="copyVoucherJson()">JSON Kopieren</button>
-      <button class="btn btn-secondary" onclick="closeModal('voucher-modal')">Schließen</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modal 2: Raw JSON Inspector -->
-<div id="json-modal" class="modal-overlay" onclick="closeModalOnOverlay(event, 'json-modal')">
-  <div class="modal-box">
-    <div class="modal-header">
-      <h3 id="modal-title">📄 Rohdaten-Inspector</h3>
-      <button class="btn btn-secondary" onclick="closeModal('json-modal')">✕</button>
-    </div>
-    <div class="modal-body">
-      <div id="modal-details" style="margin-bottom: 0.75rem;"></div>
-      <pre id="modal-json" class="json-viewer"></pre>
-    </div>
-    <div class="modal-footer">
-      <button class="btn" id="modal-copy-btn" onclick="copyModalJson()">JSON Kopieren</button>
-      <button class="btn btn-secondary" onclick="closeModal('json-modal')">Schließen</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modal 3: Admin Auth Modal -->
-<div id="admin-modal" class="modal-overlay" onclick="closeModalOnOverlay(event, 'admin-modal')">
-  <div class="modal-box" style="max-width: 480px;">
-    <div class="modal-header">
-      <h3>🔒 Admin-Modus freischalten</h3>
-      <button class="btn btn-secondary" onclick="closeModal('admin-modal')">✕</button>
-    </div>
-    <div class="modal-body">
-      <p style="margin-bottom: 0.75rem; color: var(--text-muted); font-size: 0.85rem;">
-        Geben Sie das Admin-Token des HuMoCo Daemons ein, um F2F-Freunde zu verwalten und VIP-Quoten aufzuladen.
-      </p>
-      <input id="admin-token-input" type="password" class="input-text" placeholder="Admin Bearer Token" style="width: 100%;">
-      <div id="admin-auth-error" style="color: var(--red); font-size: 0.8125rem; margin-top: 0.5rem; display: none;"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeModal('admin-modal')">Abbrechen</button>
-      <button class="btn" onclick="submitAdminToken()">Aktivieren</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modal 4: Node Inspector / Peer-Diagnose -->
-<div id="node-modal" class="modal-overlay" onclick="closeModalOnOverlay(event, 'node-modal')">
-  <div class="modal-box" style="max-width: 680px;">
-    <div class="modal-header">
-      <h3 id="node-modal-title">🔍 Knoten-Diagnose</h3>
-      <button class="btn btn-secondary" onclick="closeModal('node-modal')">✕</button>
-    </div>
-    <div class="modal-body">
-      <div id="node-modal-details"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeModal('node-modal')">Schließen</button>
-    </div>
-  </div>
-</div>
-
-<script>
-let currentDashboardData = null;
-let currentVoucherDetail = null;
-let adminToken = localStorage.getItem('humoco_admin_token') || '';
-
-function updateAdminUI() {{
-  const btn = document.getElementById('admin-btn');
-  const adminEls = document.querySelectorAll('.admin-only');
-  if (adminToken) {{
-    btn.innerHTML = '🔓 Admin aktiv (Logout)';
-    btn.className = 'btn btn-danger';
-    adminEls.forEach(el => el.style.display = 'block');
-  }} else {{
-    btn.innerHTML = '🔒 Admin-Modus';
-    btn.className = 'btn btn-secondary';
-    adminEls.forEach(el => el.style.display = 'none');
-  }}
-}}
-
-function handleAdminBtnClick() {{
-  if (adminToken) {{
-    localStorage.removeItem('humoco_admin_token');
-    adminToken = '';
-    updateAdminUI();
-    refreshDashboard();
-  }} else {{
-    document.getElementById('admin-auth-error').style.display = 'none';
-    document.getElementById('admin-token-input').value = '';
-    document.getElementById('admin-modal').classList.add('active');
-  }}
-}}
-
-async function submitAdminToken() {{
-  const val = document.getElementById('admin-token-input').value.trim();
-  if (!val) return;
-  try {{
-    const res = await fetch('/dashboard/admin/verify-token', {{
-      method: 'POST',
-      headers: {{ 'Authorization': 'Bearer ' + val }}
-    }});
-    if (res.ok) {{
-      adminToken = val;
-      localStorage.setItem('humoco_admin_token', val);
-      closeModal('admin-modal');
-      updateAdminUI();
-      refreshDashboard();
-    }} else {{
-      const errEl = document.getElementById('admin-auth-error');
-      errEl.innerText = 'Ungültiges Admin-Token.';
-      errEl.style.display = 'block';
-    }}
-  }} catch (e) {{
-    const errEl = document.getElementById('admin-auth-error');
-    errEl.innerText = 'Verbindungsfehler: ' + e.message;
-    errEl.style.display = 'block';
-  }}
-}}
-
-async function adminAddFriend() {{
-  const pubkey = document.getElementById('friend-pubkey-input').value.trim();
-  const label = document.getElementById('friend-label-input').value.trim();
-  if (!pubkey) return;
-  try {{
-    const res = await fetch('/dashboard/admin/friends', {{
-      method: 'POST',
-      headers: {{
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + adminToken
-      }},
-      body: JSON.stringify({{ pubkey, label: label || null }})
-    }});
-    if (res.ok) {{
-      document.getElementById('friend-pubkey-input').value = '';
-      document.getElementById('friend-label-input').value = '';
-      refreshDashboard();
-    }} else {{
-      const err = await res.json();
-      alert('Fehler: ' + (err.message || res.statusText));
-    }}
-  }} catch (e) {{ alert('Fehler: ' + e.message); }}
-}}
-
-async function adminRemoveFriend(pubkey) {{
-  if (!confirm('Freund ' + truncateHash(pubkey) + ' wirklich entfernen?')) return;
-  try {{
-    const res = await fetch('/dashboard/admin/friends/' + encodeURIComponent(pubkey), {{
-      method: 'DELETE',
-      headers: {{ 'Authorization': 'Bearer ' + adminToken }}
-    }});
-    if (res.ok) {{
-      refreshDashboard();
-    }} else {{
-      const err = await res.json();
-      alert('Fehler: ' + (err.message || res.statusText));
-    }}
-  }} catch (e) {{ alert('Fehler: ' + e.message); }}
-}}
-
-async function adminTopupQuota() {{
-  const tag = document.getElementById('vip-tag-input').value.trim();
-  const amount = parseInt(document.getElementById('vip-amount-input').value, 10);
-  if (!tag || isNaN(amount) || amount <= 0) return;
-  try {{
-    const res = await fetch('/dashboard/admin/quota', {{
-      method: 'POST',
-      headers: {{
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + adminToken
-      }},
-      body: JSON.stringify({{ account_tag: tag, byte_years: amount }})
-    }});
-    if (res.ok) {{
-      document.getElementById('vip-tag-input').value = '';
-      document.getElementById('vip-amount-input').value = '';
-      refreshDashboard();
-    }} else {{
-      const err = await res.json();
-      alert('Fehler: ' + (err.message || res.statusText));
-    }}
-  }} catch (e) {{ alert('Fehler: ' + e.message); }}
-}}
-
-function switchTab(tabId) {{
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  
-  const btn = document.querySelector('[onclick="switchTab(\'' + tabId + '\')"]');
-  if (btn) btn.classList.add('active');
-  const target = document.getElementById(tabId);
-  if (target) target.classList.add('active');
-}}
-
-function copyPeering() {{
-  const text = document.getElementById('peering-text').innerText;
-  navigator.clipboard.writeText(text).then(() => {{
-    const btn = document.getElementById('copy-btn');
-    const orig = btn.innerText;
-    btn.innerText = 'Kopiert!';
-    setTimeout(() => {{ btn.innerText = orig; }}, 1500);
-  }}).catch(() => {{}});
-}}
-
-function copyMyPubkey() {{
-  const text = document.getElementById('my-pubkey-text').innerText;
-  navigator.clipboard.writeText(text).catch(() => {{}});
-}}
-
-function closeModal(modalId) {{
-  document.getElementById(modalId).classList.remove('active');
-}}
-
-function closeModalOnOverlay(e, modalId) {{
-  if (e.target.id === modalId) closeModal(modalId);
-}}
-
-document.addEventListener('keydown', (e) => {{
-  if (e.key === 'Escape') {{
-    document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
-  }}
-}});
-
-function copyModalJson() {{
-  const text = document.getElementById('modal-json').innerText;
-  navigator.clipboard.writeText(text).then(() => {{
-    const btn = document.getElementById('modal-copy-btn');
-    const orig = btn.innerText;
-    btn.innerText = 'Kopiert!';
-    setTimeout(() => {{ btn.innerText = orig; }}, 1500);
-  }}).catch(() => {{}});
-}}
-
-function copyVoucherJson() {{
-  if (!currentVoucherDetail) return;
-  navigator.clipboard.writeText(JSON.stringify(currentVoucherDetail, null, 2)).then(() => {{
-    const btn = document.getElementById('voucher-copy-btn');
-    const orig = btn.innerText;
-    btn.innerText = 'Kopiert!';
-    setTimeout(() => {{ btn.innerText = orig; }}, 1500);
-  }}).catch(() => {{}});
-}}
-
-function toggleVoucherRawJson() {{
-  const pre = document.getElementById('voucher-modal-json');
-  pre.style.display = pre.style.display === 'none' ? 'block' : 'none';
-}}
-
-function truncateHash(hex) {{
-  if (!hex || hex.length <= 16) return hex || '';
-  return hex.slice(0, 8) + '…' + hex.slice(-8);
-}}
-
-function renderSparklineSvg(arr, color) {{
-  if (!arr || arr.length === 0) return '';
-  const max = Math.max(...arr, 1.0);
-  const width = 280;
-  const height = 40;
-  const pts = arr.map((val, i) => {{
-    const x = (i / (arr.length - 1 || 1)) * width;
-    const y = height - ((val / max) * (height - 6)) - 3;
-    return x.toFixed(1) + ',' + y.toFixed(1);
-  }});
-  const polyline = pts.join(' ');
-  const polyArea = '0,' + height + ' ' + polyline + ' ' + width + ',' + height;
-  return '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" style="width: 100%; height: 40px; display: block;">' +
-    '<polygon points="' + polyArea + '" fill="' + color + '" fill-opacity="0.15" />' +
-    '<polyline points="' + polyline + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />' +
-    '</svg>';
-}}
-
-function openNodeInspector(pubkey) {{
-  if (!currentDashboardData || !currentDashboardData.network_nodes) return;
-  const node = currentDashboardData.network_nodes.find(n => n.public_key === pubkey || n.node_id === pubkey);
-  if (!node) {{
-    alert('Knoten nicht gefunden: ' + pubkey);
-    return;
-  }}
-  document.getElementById('node-modal-title').innerText = '🔍 Knoten-Diagnose: ' + truncateHash(node.public_key);
-  
-  const statusBadge = node.connection_status.includes('Connected')
-    ? (node.missing_count === 0 ? '<span class="badge badge-green">Connected (0 Ausfälle)</span>' : '<span class="badge badge-amber">' + node.connection_status + '</span>')
-    : (node.connection_status.includes('Suspended') ? '<span class="badge badge-red">' + node.connection_status + '</span>' : '<span class="badge badge-amber">' + node.connection_status + '</span>');
-  
-  const rttText = node.rtt_ms != null ? node.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
-  const failText = node.last_failure_sec != null ? 'vor ' + node.last_failure_sec + 's' : '<span style="color: var(--green);">Kein Ausfall</span>';
-  const ingressText = node.best_ingress_peer ? 'via ' + node.best_ingress_peer : (node.is_local ? 'Lokal (Self)' : (node.is_f2f ? 'F2F Direkt' : 'Direkt / Standby'));
-  const incubText = node.is_immature ? '<span class="badge badge-amber">24h (' + (node.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Aktiv</span>';
-  
-  let html = '<div style="line-height: 1.5; font-size: 0.875rem;">';
-  html += '<div style="background: var(--surface-alt); padding: 0.6rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.6rem;">';
-  html += '<h4 style="margin: 0 0 0.4rem 0; font-size: 0.85rem; color: var(--purple);">🔑 Identität &amp; Kryptographie</h4>';
-  html += '<div><strong>NodePubKey:</strong> <span class="code" id="node-modal-pubkey">' + node.public_key + '</span> <button class="btn btn-secondary" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;" onclick="copyNodePubkey()">Kopieren</button></div>';
-  html += '<div><strong>Adresse:</strong> <span class="code">' + node.address + '</span></div>';
-  html += '<div><strong>Shard-Ticket:</strong> <span class="code">' + node.hrw_routing_id + '</span> (Score: <strong>' + node.work_score + '</strong>)</div>';
-  html += '</div>';
-
-  html += '<div style="background: var(--surface-alt); padding: 0.6rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 0.6rem;">';
-  html += '<h4 style="margin: 0 0 0.4rem 0; font-size: 0.85rem; color: var(--green);">💓 Verbindungs-Gesundheit</h4>';
-  html += '<div><strong>Status:</strong> ' + statusBadge + '</div>';
-  html += '<div><strong>Ausfälle:</strong> <strong>' + node.missing_count + '</strong> / 3 (Tit-for-Tat; heilt -1/h)</div>';
-  html += '<div><strong>RTT:</strong> ' + rttText + ' &bull; <strong>Letzter Fehler:</strong> ' + failText + '</div>';
-  html += '</div>';
-
-  html += '<div style="background: var(--surface-alt); padding: 0.6rem; border-radius: 0.5rem; border: 1px solid var(--border);">';
-  html += '<h4 style="margin: 0 0 0.4rem 0; font-size: 0.85rem; color: var(--blue);">📡 Topologie &amp; Routing</h4>';
-  html += '<div><strong>Distanz:</strong> ' + node.min_hops + ' Hops &bull; <strong>Pfad:</strong> ' + ingressText + ' &bull; <strong>Inkubation:</strong> ' + incubText + '</div>';
-  html += '</div></div>';
-
-  document.getElementById('node-modal-details').innerHTML = html;
-  document.getElementById('node-modal').classList.add('active');
-}}
-
-function copyNodePubkey() {{
-  const el = document.getElementById('node-modal-pubkey');
-  if (el) navigator.clipboard.writeText(el.innerText).then(() => alert('NodePubKey kopiert!')).catch(() => {{}});
-}}
-
-function filterNodesTable() {{
-  const input = document.getElementById('node-search-input');
-  if (!input || !currentDashboardData) return;
-  const term = input.value.trim().toLowerCase();
-  const nodesTbody = document.getElementById('nodes-tbody');
-  if (!currentDashboardData.network_nodes || currentDashboardData.network_nodes.length === 0) return;
-  
-  let html = '';
-  for (const n of currentDashboardData.network_nodes) {{
-    if (term) {{
-      const match = n.public_key.toLowerCase().includes(term) || n.address.toLowerCase().includes(term) || n.connection_status.toLowerCase().includes(term) || n.hrw_routing_id.toLowerCase().includes(term);
-      if (!match) continue;
-    }}
-    const roleBadge = n.is_local ? '<span class="badge badge-purple">LOCAL</span>' : (n.is_f2f ? '<span class="badge badge-blue">F2F Friend</span>' : '<span class="badge badge-cyan">Shard</span>');
-    const statusBadge = n.connection_status.includes('Connected')
-      ? (n.missing_count === 0 ? '<span class="badge badge-green">Connected (0)</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>')
-      : (n.connection_status.includes('Suspended') ? '<span class="badge badge-red">' + n.connection_status + '</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>');
-    const rttText = n.rtt_ms != null ? n.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
-    const routeText = n.min_hops + ' Hop' + (n.min_hops === 1 ? '' : 's') + (n.best_ingress_peer ? ' via ' + truncateHash(n.best_ingress_peer) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : '')));
-    const incubText = n.is_immature ? '<span class="badge badge-amber">24h (' + (n.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Aktiv</span>';
-    html += '<tr><td><span class="code" title="' + n.public_key + '">' + truncateHash(n.public_key) + '</span></td><td>' + n.address + '</td><td>' + roleBadge + '</td><td>' + statusBadge + '</td><td>' + rttText + '</td><td>' + routeText + '</td><td><span class="code" title="' + n.hrw_routing_id + '">' + truncateHash(n.hrw_routing_id) + '</span></td><td>' + incubText + '</td><td><button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openNodeInspector(\'' + n.public_key + '\')">🔍 Info</button></td></tr>';
-  }}
-  nodesTbody.innerHTML = html || '<tr><td colspan="9" class="empty-cell">Keine Knoten gefunden</td></tr>';
-}}
-
-async function openLockInspector(lookupTag) {{
-  try {{
-    const res = await fetch('/dashboard/lock/' + encodeURIComponent(lookupTag));
-    if (!res.ok) return;
-    const json = await res.json();
-    document.getElementById('modal-title').innerText = '🔒 Sperr-Rohdaten: ' + truncateHash(lookupTag);
-    document.getElementById('modal-details').innerHTML = '<strong>Lookup Tag:</strong> <span class="code">' + lookupTag + '</span>';
-    document.getElementById('modal-json').innerText = JSON.stringify(json, null, 2);
-    document.getElementById('json-modal').classList.add('active');
-  }} catch (e) {{}}
-}}
-
-async function openVoucherInspector(voucherId) {{
-  const input = document.getElementById('voucher-search-input');
-  if (input) input.value = voucherId;
-  searchVoucher();
-}}
-
-async function searchVoucher() {{
-  const input = document.getElementById('voucher-search-input');
-  const term = input ? input.value.trim() : '';
-  if (!term) return;
-  try {{
-    const res = await fetch('/dashboard/voucher/' + encodeURIComponent(term));
-    if (res.ok) {{
-      const detail = await res.json();
-      currentVoucherDetail = detail;
-      document.getElementById('voucher-modal-title').innerText = '🎟️ Gutschein-Lineage: ' + detail.voucher_id;
-      
-      let html = '<div style="margin-bottom: 0.6rem; line-height: 1.5;">';
-      html += '<div><strong>Gutschein-ID:</strong> <span class="code">' + detail.voucher_id + '</span> &bull; <strong>Wurzel-Gültigkeit:</strong> ' + detail.root_valid_until_formatted + '</div>';
-      html += '<div><strong>Genesis Tag:</strong> <span class="code">' + (detail.genesis_tag || 'N/A') + '</span> &bull; <strong>Sperren in Kette:</strong> ' + detail.locks.length + ' (' + detail.total_byte_years + ' BY)</div>';
-      html += '</div>';
-
-      let tableHtml = '<h4 style="margin: 0.5rem 0 0.2rem 0; font-size: 0.85rem;">Ketten-Historie:</h4>';
-      tableHtml += '<div style="overflow-x: auto;"><table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
-      for (const h of detail.locks) {{
-        const typeBadge = h.is_genesis ? '<span class="badge badge-amber">GENESIS</span>' : '<span class="badge badge-blue">SPEND</span>';
-        tableHtml += '<tr><td>' + typeBadge + '</td><td class="code" title="' + h.lookup_tag + '">' + truncateHash(h.lookup_tag) + '</td><td class="code">' + truncateHash(h.t_id_hex) + '</td><td class="code">' + truncateHash(h.sender_pub_hex) + '</td></tr>';
-      }}
-      tableHtml += '</tbody></table></div>';
-
-      document.getElementById('voucher-modal-details').innerHTML = html;
-      document.getElementById('voucher-modal-table-container').innerHTML = tableHtml;
-      document.getElementById('voucher-modal-json').innerText = JSON.stringify(detail, null, 2);
-      document.getElementById('voucher-modal').classList.add('active');
-    }} else {{
-      alert('Gutschein oder Lookup-Tag "' + term + '" nicht gefunden.');
-    }}
-  }} catch (e) {{
-    alert('Fehler bei der Suche: ' + e.message);
-  }}
-}}
-
-async function refreshDashboard() {{
-  try {{
-    const res = await fetch('/dashboard/data');
-    if (!res.ok) return;
-    const d = await res.json();
-    currentDashboardData = d;
-    
-    // Header Status & Latency Pills & Clock
-    const badge = document.getElementById('status-badge');
-    badge.innerText = d.status_badge;
-    badge.className = 'badge ' + (d.status === 'ONLINE' ? 'badge-green' : (d.status === 'VILLAGE MODE' ? 'badge-amber' : 'badge-red'));
-
-    if (d.network_time_ms) {{
-      const dt = new Date(d.network_time_ms);
-      const pad = (n) => String(n).padStart(2, '0');
-      const timeStr = pad(dt.getDate()) + '.' + pad(dt.getMonth() + 1) + '.' + dt.getFullYear() + ', ' + pad(dt.getHours()) + ':' + pad(dt.getMinutes()) + ':' + pad(dt.getSeconds());
-      const netTimeEl = document.getElementById('hdr-net-time');
-      if (netTimeEl) netTimeEl.innerText = timeStr;
-    }}
-    const simBadge = document.getElementById('hdr-sim-badge');
-    if (simBadge) {{
-      simBadge.style.display = d.is_simulation ? 'inline-block' : 'none';
-    }}
-
-    document.getElementById('hdr-lat-local').innerText = d.local_latency.avg_ms.toFixed(2) + ' ms';
-    document.getElementById('hdr-lat-quorum').innerText = d.quorum_latency.avg_ms.toFixed(2) + ' ms';
-    document.getElementById('hdr-lat-e2e').innerText = d.e2e_latency.avg_ms.toFixed(2) + ' ms';
-    document.getElementById('hdr-peers').innerText = d.connected_peers + '/' + d.configured_peers;
-    document.getElementById('hdr-shard').innerText = d.shard_mode;
-
-    // Cockpit & System
-    const latestWrite = (d.sparklines && d.sparklines.writes) ? (d.sparklines.writes[d.sparklines.writes.length - 1] || 0) : 0;
-    const latestRead = (d.sparklines && d.sparklines.reads) ? (d.sparklines.reads[d.sparklines.reads.length - 1] || 0) : 0;
-    document.getElementById('writes-rate').innerText = latestWrite.toFixed(1);
-    document.getElementById('writes-today').innerText = d.total_writes;
-    document.getElementById('reads-rate').innerText = latestRead.toFixed(1);
-    document.getElementById('reads-today').innerText = d.total_reads;
-
-    if (d.sparklines) {{
-      document.getElementById('writes-sparkline').innerHTML = renderSparklineSvg(d.sparklines.writes, '#10b981');
-      document.getElementById('reads-sparkline').innerHTML = renderSparklineSvg(d.sparklines.reads, '#3b82f6');
-    }}
-
-    // Hardware
-    document.getElementById('sys-cpu-val').innerText = d.system.cpu_percent.toFixed(1) + '%';
-    document.getElementById('sys-cpu-bar').style.width = Math.min(100, Math.max(0, d.system.cpu_percent)) + '%';
-    document.getElementById('sys-rss-val').innerText = d.system.rss_mb.toFixed(1) + ' MB';
-    document.getElementById('sys-redb-val').innerText = Math.round(d.system.redb_bytes / 1024) + ' KB';
-    document.getElementById('sys-netto-val').innerText = d.system.netto_locks_bytes + ' B';
-    document.getElementById('sys-purged-val').innerText = d.system.ttl_purged_count;
-
-    // Scaling
-    document.getElementById('cap-single-val').innerText = d.system.peak_tps_single_core;
-    document.getElementById('cap-multi-val').innerText = d.system.peak_tps_multi_core;
-    document.getElementById('cap-storage-val').innerText = d.system.max_storage_locks;
-    document.getElementById('cap-byte-years-val').innerText = d.system.byte_years_capacity;
-
-    // Thermometer
-    document.getElementById('thermo-write-load').innerText = d.thermometer.gossip_write_load.toFixed(2);
-    document.getElementById('thermo-read-load').innerText = d.thermometer.gossip_read_load.toFixed(2);
-    document.getElementById('thermo-ncb-eff').innerText = Math.round(d.thermometer.ncb_eff);
-    document.getElementById('thermo-ncb-read-eff').innerText = Math.round(d.thermometer.ncb_read_eff);
-    document.getElementById('thermo-rolling-avg').innerText = d.thermometer.gossip_write_load.toFixed(2);
-    document.getElementById('conc-val').innerText = (d.gateway_concentration_ratio * 100).toFixed(1) + '%';
-    document.getElementById('subnet-dom-sub').innerText = (d.shard_subnet_dominance_max * 100).toFixed(1) + '%';
-
-    // F2F Friends Table
-    const friendsTbody = document.getElementById('friends-tbody');
-    if (d.f2f && d.f2f.friends && d.f2f.friends.length > 0) {{
-      let html = '';
-      for (const f of d.f2f.friends) {{
-        let statusBadge = '<span class="badge badge-green">Verbunden (0 Ausfälle)</span>';
-        if (!f.is_connected) {{
-          statusBadge = '<span class="badge badge-amber">Getrennt</span>';
-        }} else if (f.missing_count >= 3) {{
-          statusBadge = '<span class="badge badge-red">Suspended (3/3)</span>';
-        }} else if (f.missing_count > 0) {{
-          statusBadge = '<span class="badge badge-amber">Degrading (' + f.missing_count + '/3)</span>';
-        }}
-        const rttText = f.rtt_ms != null ? f.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
-        let actionBtn = '<button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openNodeInspector(\'' + f.public_key + '\')">🔍 Info</button>';
-        if (adminToken) {{
-          actionBtn += ' <button class="btn btn-danger" style="padding: 0.2rem 0.5rem; margin-left: 0.25rem;" onclick="adminRemoveFriend(\'' + f.public_key + '\')">🗑️</button>';
-        }}
-        html += '<tr><td><span class="code" title="' + f.public_key + '">' + truncateHash(f.public_key) + '</span></td><td>' + f.address + '</td><td>' + statusBadge + '</td><td>' + rttText + '</td><td>' + actionBtn + '</td></tr>';
-      }}
-      friendsTbody.innerHTML = html;
-    }} else {{
-      friendsTbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine F2F Freunde konfiguriert</td></tr>';
-    }}
-
-    // Network Nodes Explorer Table
-    const searchInput = document.getElementById('node-search-input');
-    if (searchInput && searchInput.value.trim()) {{
-      filterNodesTable();
-    }} else {{
-      const nodesTbody = document.getElementById('nodes-tbody');
-      if (d.network_nodes && d.network_nodes.length > 0) {{
-        let html = '';
-        for (const n of d.network_nodes) {{
-          const roleBadge = n.is_local ? '<span class="badge badge-purple">LOCAL (Self)</span>' : (n.is_f2f ? '<span class="badge badge-blue">F2F Friend</span>' : '<span class="badge badge-cyan">Gossip Shard</span>');
-          const statusBadge = n.connection_status.includes('Connected')
-            ? (n.missing_count === 0 ? '<span class="badge badge-green">Connected (0 Ausfälle)</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>')
-            : (n.connection_status.includes('Suspended') ? '<span class="badge badge-red">' + n.connection_status + '</span>' : '<span class="badge badge-amber">' + n.connection_status + '</span>');
-          const rttText = n.rtt_ms != null ? n.rtt_ms + ' ms' : '<span style="color: var(--text-muted);">-</span>';
-          const routeText = n.min_hops + ' Hop' + (n.min_hops === 1 ? '' : 's') + (n.best_ingress_peer ? ' via ' + truncateHash(n.best_ingress_peer) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : '')));
-          const incubText = n.is_immature ? '<span class="badge badge-amber">24h (' + (n.incubation_remaining_sec || 0) + 's)</span>' : '<span class="badge badge-green">Aktiv</span>';
-          html += '<tr><td><span class="code" title="' + n.public_key + '">' + truncateHash(n.public_key) + '</span></td><td>' + n.address + '</td><td>' + roleBadge + '</td><td>' + statusBadge + '</td><td>' + rttText + '</td><td>' + routeText + '</td><td><span class="code" title="' + n.hrw_routing_id + '">' + truncateHash(n.hrw_routing_id) + '</span></td><td>' + incubText + '</td><td><button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openNodeInspector(\'' + n.public_key + '\')">🔍 Info</button></td></tr>';
-        }}
-        nodesTbody.innerHTML = html;
-        document.getElementById('network-count-sub').innerText = d.network_nodes.length + ' Knoten registriert';
-      }}
-    }}
-
-    // Tiers & Quotas
-    if (d.tiers) {{
-      // Free Tier
-      if (document.getElementById('tier-free-used-val')) document.getElementById('tier-free-used-val').innerText = (d.tiers.free_used_pct || 0).toFixed(1) + '%';
-      if (document.getElementById('tier-free-writes-val')) document.getElementById('tier-free-writes-val').innerText = d.tiers.free_writes_today || 0;
-      if (document.getElementById('tier-free-bar')) document.getElementById('tier-free-bar').style.width = Math.min(100, Math.max(0, d.tiers.free_used_pct || 0)) + '%';
-      if (document.getElementById('tier-free-pow-val')) document.getElementById('tier-free-pow-val').innerText = d.tiers.free_pow_diff;
-      if (document.getElementById('tier-free-hashes-val')) document.getElementById('tier-free-hashes-val').innerText = (d.tiers.free_pow_hashes || 1).toLocaleString();
-      if (document.getElementById('tier-free-time-val')) document.getElementById('tier-free-time-val').innerText = d.tiers.free_pow_time_est || '< 0.1 ms';
-      if (document.getElementById('tier-free-req-val')) document.getElementById('tier-free-req-val').innerText = (d.tiers.free_req_sec || 0).toFixed(1);
-
-      // Friends Tier
-      if (document.getElementById('tier-friends-used-val')) document.getElementById('tier-friends-used-val').innerText = (d.tiers.friends_used_pct || 0).toFixed(1) + '%';
-      if (document.getElementById('tier-friends-writes-val')) document.getElementById('tier-friends-writes-val').innerText = d.tiers.friends_writes_today || 0;
-      if (document.getElementById('tier-friends-bar')) document.getElementById('tier-friends-bar').style.width = Math.min(100, Math.max(0, d.tiers.friends_used_pct || 0)) + '%';
-      if (document.getElementById('tier-friends-count-val')) document.getElementById('tier-friends-count-val').innerText = d.tiers.active_friends_count || 0;
-
-      // VIP Tier
-      if (document.getElementById('tier-vip-used-val')) document.getElementById('tier-vip-used-val').innerText = (d.tiers.vip_used_pct || 0).toFixed(1) + '%';
-      if (document.getElementById('tier-vip-writes-val')) document.getElementById('tier-vip-writes-val').innerText = d.tiers.vip_writes_today || 0;
-      if (document.getElementById('tier-vip-bar')) document.getElementById('tier-vip-bar').style.width = Math.min(100, Math.max(0, d.tiers.vip_used_pct || 0)) + '%';
-      if (document.getElementById('tier-vip-accounts-val')) document.getElementById('tier-vip-accounts-val').innerText = d.tiers.vip_accounts_count || 0;
-      if (document.getElementById('tier-vip-balance-val')) document.getElementById('tier-vip-balance-val').innerText = (d.tiers.vip_total_balance || 0).toLocaleString();
-
-      // Daily Quota Card
-      if (document.getElementById('quota-locks-val')) document.getElementById('quota-locks-val').innerText = d.tiers.total_writes_today || 0;
-      if (document.getElementById('quota-pct-text')) document.getElementById('quota-pct-text').innerText = (d.tiers.total_quota_used_pct || 0).toFixed(1) + '%';
-      if (document.getElementById('quota-bar')) document.getElementById('quota-bar').style.width = Math.min(100, Math.max(0, d.tiers.total_quota_used_pct || 0)) + '%';
-    }}
-    if (document.getElementById('quota-used-val')) document.getElementById('quota-used-val').innerText = (d.thermometer.today_write_used || 0).toLocaleString();
-    if (document.getElementById('quota-limit-val')) document.getElementById('quota-limit-val').innerText = (d.thermometer.daily_write_quota || 0).toLocaleString();
-
-    // VIP Accounts Table
-    const vipTbody = document.getElementById('vip-accounts-tbody');
-    if (d.tiers && d.tiers.vip_accounts && d.tiers.vip_accounts.length > 0) {{
-      let html = '';
-      for (const a of d.tiers.vip_accounts) {{
-        html += '<tr><td><span class="code" title="' + a.account_tag + '">' + a.account_tag + '</span></td><td><strong style="color: var(--purple);">' + a.balance_byte_years.toLocaleString() + '</strong> Byte-Jahre</td></tr>';
-      }}
-      vipTbody.innerHTML = html;
-    }} else {{
-      vipTbody.innerHTML = '<tr><td colspan="2" class="empty-cell">Keine VIP Accounts hinterlegt</td></tr>';
-    }}
-
-    // Vouchers Table
-    const vouchersTbody = document.getElementById('vouchers-tbody');
-    const vouchersCountSub = document.getElementById('vouchers-count-sub');
-    if (vouchersCountSub) {{
-      vouchersCountSub.innerText = (d.total_active_vouchers_count || 0) + ' Gutscheine aktiv (Top 15 angezeigt)';
-    }}
-    if (d.active_vouchers && d.active_vouchers.length > 0) {{
-      let html = '';
-      for (const v of d.active_vouchers) {{
-        const genShort = v.genesis_tag ? truncateHash(v.genesis_tag) : 'N/A';
-        const statusBadge = v.status === 'Active' ? '<span class="badge badge-green">Aktiv</span>' : '<span class="badge badge-amber">' + v.status + '</span>';
-        html += '<tr><td><strong>' + v.voucher_id + '</strong></td><td>' + v.root_valid_until_formatted + '</td><td class="code">' + genShort + '</td><td>' + v.locks_count + ' Sperren</td><td>' + statusBadge + '</td><td><button class="btn btn-secondary" onclick="openVoucherInspector(\'' + v.voucher_id + '\')">🔍 Wurzel-Inspektor</button></td></tr>';
-      }}
-      vouchersTbody.innerHTML = html;
-    }} else {{
-      vouchersTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine aktiven Gutscheine im Speicher</td></tr>';
-    }}
-
-    // Recent Locks Table
-    const locksTbody = document.getElementById('locks-tbody');
-    if (d.recent_locks && d.recent_locks.length > 0) {{
-      let html = '';
-      for (const l of d.recent_locks) {{
-        const b = l.status === 'Verified' ? '<span class="badge badge-green">Verified</span>' : (l.status === 'Provisional' ? '<span class="badge badge-amber">Provisional</span>' : '<span class="badge badge-red">Conflict</span>');
-        const pShort = truncateHash(l.parent_lock_hex);
-        const cShort = truncateHash(l.child_lock_hex);
-        let tierBadge = '<span class="badge badge-cyan">P2P Sync</span>';
-        if (l.tier === 'VIP') {{
-          tierBadge = '<span class="badge badge-purple">VIP (' + (l.byte_years || 0) + ' BY)</span>';
-        }} else if (l.tier === 'F2F') {{
-          tierBadge = '<span class="badge badge-blue">F2F (' + (l.byte_years || 0) + ' BY)</span>';
-        }} else if (l.tier === 'Free') {{
-          tierBadge = '<span class="badge badge-green">Free (PoW)</span>';
-        }} else if (l.tier) {{
-          tierBadge = '<span class="badge badge-cyan">' + l.tier + '</span>';
-        }}
-        const vLink = l.voucher_id ? '<button class="btn btn-secondary" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;" onclick="openVoucherInspector(\'' + l.voucher_id + '\')">🎟️ ' + truncateHash(l.voucher_id) + '</button>' : '<span style="color: var(--text-muted);">-</span>';
-        html += '<tr><td>' + l.timestamp_ms + '</td><td class="code" title="' + l.parent_lock_hex + '">' + pShort + '</td><td class="code" title="' + l.child_lock_hex + '">' + cShort + '</td><td>' + tierBadge + '</td><td>' + vLink + '</td><td>' + b + '</td><td><button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="openLockInspector(\'' + l.parent_lock_hex + '\')">📄 JSON</button></td></tr>';
-      }}
-      locksTbody.innerHTML = html;
-    }} else {{
-      locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren im Ringbuffer</td></tr>';
-    }}
-
-  }} catch (e) {{}}
-}}
-
-// Initial load & periodic refresh
-updateAdminUI();
-refreshDashboard();
-setInterval(refreshDashboard, 2000);
-</script>
-</body>
-</html>"#,
+        include_str!("assets/dashboard.html"),
+        css = include_str!("assets/dashboard.css"),
+        js = include_str!("assets/dashboard.js"),
         status_badge = data.status_badge,
         local_avg = data.local_latency.avg_ms,
         quorum_avg = data.quorum_latency.avg_ms,

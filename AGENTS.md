@@ -106,6 +106,7 @@ flowchart TD
    * **Statelessness & Hydra Resilience:** Gateways are interchangeable messengers without their own shard state. If a public IP fails (ISP block, hoster termination), apps seamlessly rotate to the next gateway.
    * **✍️ Write Ingress (`POST /v1/lock`):**
      - *Free Tier:* Open to everyone, protected by dynamic BLAKE3 Hashcash PoW (*Network Thermometer*).
+     - *Friends Tier:* Free & PoW-exempt for friends, family, and own PoS terminals via random 128-bit secret tokens (`f2f_<hex>`).
      - *VIP Tier:* Reserved queues & guaranteed SLAs for merchants via Byte-Years tokens.
    * **🔍 Read Ingress (`POST /v1/status`, `GET /v1/node-status`, `GET /v1/pow-challenge`):**
      - Extremely fast RAM-index lookup ($< 1\,\mu\text{s}$), no disk locking, no write-queue reservation.
@@ -179,6 +180,10 @@ Before writing new code for a new feature or requirement, apply this test:
 3. **Non-Authoritative Telemetry (`INV-1701`):**
    * Telemetry, latency measurements, and health probes are purely diagnostic for human operators and dashboards.
    * No telemetry metric or latency value may ever trigger an automated peer ban or network slashing (`triggers_auto_ban() == false`).
+4. **Strict Decoupling of P2P Node Friends (Port 9090) vs. Client Ingress Friends (Port 8080) / Ban on 'Dual-Role Ingress':**
+   * P2P mesh edges (`f2f_friends`, QUIC port 9090) are purely node-to-node infrastructure for gossip and topology awareness. They have zero connection to client ingress.
+   * Full nodes participate in shard RPC directly and never submit locks as clients via another node's HTTP port 8080.
+   * A node's public key (`NodePubKey`) must NEVER be registered or accepted as an ingress bearer token (prevents unauthorized PoW bypass by third parties who learn the public key via gossip). Client friend tokens are strictly random 128-bit secrets (`f2f_<hex>`).
 
 ---
 

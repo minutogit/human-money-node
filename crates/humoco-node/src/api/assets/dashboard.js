@@ -205,7 +205,28 @@ async function adminAddMeshPeer() {
   const lInput = $('friend-label-input');
   const raw = pInput?.value.trim() || '';
   const label = lInput?.value.trim() || '';
-  if (!raw) return;
+  if (!raw) {
+    showToast('Bitte Peering-String (pubkey@ip:port) oder NodePubKey eingeben', 'error');
+    return;
+  }
+  if (raw.includes('@')) {
+    const parts = raw.split('@');
+    if (!parts[0].trim()) {
+      showToast('Ungültiger Peering-String: NodePubKey vor "@" fehlt', 'error');
+      return;
+    }
+    if (!parts[1].trim()) {
+      showToast('Ungültiger Peering-String: Adresse nach "@" fehlt (z. B. ip:port)', 'error');
+      return;
+    }
+    if (!parts[1].includes(':') || !parts[1].split(':')[1].trim()) {
+      showToast('Ungültiger Peering-String: Port fehlt (z. B. pubkey@ip:9090)', 'error');
+      return;
+    }
+  } else if (raw.length < 32) {
+    showToast('Ungültiger NodePubKey: Schlüssel ist zu kurz', 'error');
+    return;
+  }
   const pubkey = raw.includes('@') ? raw.split('@')[0].trim() : raw;
   try {
     const res = await fetchWithTimeout('/dashboard/admin/mesh/peers', {
@@ -216,7 +237,7 @@ async function adminAddMeshPeer() {
     if (res.ok) {
       if (pInput) pInput.value = '';
       if (lInput) lInput.value = '';
-      showToast('Nachbarknoten verbunden', 'success');
+      showToast('P2P-Server erfolgreich verbunden', 'success');
       refreshDashboard();
     } else {
       const err = await res.json().catch(() => ({}));

@@ -141,6 +141,7 @@ pub struct AddMeshPeerRequest {
     pub pubkey: String,
     #[serde(default)]
     pub label: Option<String>,
+    #[deprecated(note = "dual_role_ingress is deprecated and ignored; server peering and client ingress are strictly decoupled")]
     #[serde(default)]
     pub dual_role_ingress: Option<bool>,
 }
@@ -1040,17 +1041,6 @@ pub async fn admin_add_mesh_peer(
 
     if let Some(ref pm) = state.peer_manager {
         pm.add_trusted_f2f_peer(key_bytes).await;
-
-        if payload.dual_role_ingress == Some(true) {
-            state
-                .tier_controller
-                .register_f2f_client(&hex_key, payload.label.as_deref());
-            state.event_log.record(
-                EventKind::ClientRegistered,
-                HealthLevel::Ok,
-                format!("Registered F2F ingress client for peer {}", hex_key),
-            );
-        }
 
         state.event_log.record(
             EventKind::PeerConnect,

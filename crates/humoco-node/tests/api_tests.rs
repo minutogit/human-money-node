@@ -1439,7 +1439,7 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     // Verify 4-Tab Navigation Identifiers
     assert!(body_str.contains("Cockpit &amp; System") || body_str.contains("Cockpit & System"));
     assert!(body_str.contains("Netzwerk &amp; Mesh") || body_str.contains("Netzwerk & Mesh") || body_str.contains("Netzwerk &amp; F2F") || body_str.contains("Netzwerk & F2F"));
-    assert!(body_str.contains("Zugang &amp; Freunde") || body_str.contains("Zugang & Freunde") || body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten") || body_str.contains("Wallet-Zugänge"));
+    assert!(body_str.contains("Zugang &amp; Freunde") || body_str.contains("Zugang & Freunde") || body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten") || body_str.contains("Wallet-Zugänge") || body_str.contains("Gateway, Wallets &amp; Einnahmen") || body_str.contains("Gateway, Wallets & Einnahmen"));
     assert!(body_str.contains("Gutscheine &amp; Logs") || body_str.contains("Gutscheine & Logs") || body_str.contains("Gutscheine &amp; Locks") || body_str.contains("Gutscheine & Locks"));
 
     // Verify Visual Cards & Systems
@@ -1448,7 +1448,7 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("Hardware &amp; Ressourcen") || body_str.contains("Hardware & Ressourcen"));
     assert!(body_str.contains("Knoten-Kapazität") || body_str.contains("Knoten-Kapazitätsrechner"));
     assert!(body_str.contains("Netzwerk-Thermometer"));
-    assert!(body_str.contains("P2P Nachbarknoten") || body_str.contains("F2F Web-of-Trust Freunde"));
+    assert!(body_str.contains("P2P Nachbarknoten") || body_str.contains("F2F Web-of-Trust Freunde") || body_str.contains("Server-zu-Server Mesh"));
     assert!(body_str.contains("Peer Explorer"));
     assert!(body_str.contains("Free Tier"));
     assert!(body_str.contains("VIP Tier"));
@@ -3061,7 +3061,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     assert!(peer_manager.is_f2f_friend(&test_peer_key).await);
 
     // Verify events recorded
-    assert!(event_log.len() >= 1);
+    assert!(!event_log.is_empty());
 
     // 2. DELETE /dashboard/admin/mesh/peers/:key
     let res = app.clone().oneshot(
@@ -3839,7 +3839,7 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
         assert_eq!(res_bad.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // 2. Add mesh peer with dual_role_ingress: true
+    // 2. Add mesh peer (dual_role_ingress is ignored; server peering does NOT register F2F ingress client)
     let req_dual = Request::builder()
         .method("POST")
         .uri("/dashboard/admin/mesh/peers")
@@ -3854,7 +3854,7 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
     assert_eq!(res_dual.status(), StatusCode::OK);
     assert!(peer_manager.is_f2f_friend(&test_peer).await);
     let clients = tier_controller.list_f2f_clients(1000, 0);
-    assert!(clients.iter().any(|c| c.label == "DualPeer"));
+    assert!(!clients.iter().any(|c| c.label == "DualPeer"));
 
     // 3. Add client friend and then remove
     let req_add_client = Request::builder()

@@ -1,7 +1,20 @@
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use parking_lot::Mutex;
 use rand::RngCore;
+
+/// Maximum failed login attempts allowed per IP within the rate-limit window.
+pub const MAX_AUTH_FAILURES_PER_WINDOW: usize = 5;
+
+/// Sliding window duration for failed login rate limiting (1 minute).
+pub const AUTH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+
+/// Maximum number of tracked IP addresses to prevent unbounded RAM usage.
+pub const MAX_TRACKED_AUTH_IPS: usize = 1024;
 
 /// Admin Token Manager responsible for loading or generating the node operator authentication token.
 ///
@@ -13,6 +26,7 @@ pub struct AdminTokenManager {
     token: String,
     token_path: Option<PathBuf>,
     auth_disabled: bool,
+    failed_attempts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }
 
 impl AdminTokenManager {
@@ -63,6 +77,7 @@ impl AdminTokenManager {
             token,
             token_path: Some(token_path),
             auth_disabled,
+            failed_attempts: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -72,6 +87,7 @@ impl AdminTokenManager {
             token: token.into(),
             token_path: None,
             auth_disabled,
+            failed_attempts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -131,12 +147,82 @@ impl AdminTokenManager {
     pub fn is_auth_disabled(&self) -> bool {
         self.auth_disabled
     }
+
+    /// Checks whether the specified client IP is currently rate-limited due to excessive failed attempts.
+    /// Returns `true` if allowed, `false` if blocked (>= 5 failed attempts in the last 60 seconds).
+    pub fn check_rate_limit(&self, ip: &str) -> bool {
+        if self.auth_disabled {
+            return true;
+        }
+        let now = Instant::now();
+        let mut map = self.failed_attempts.lock();
+        if let Some(timestamps) = map.get_mut(ip) {
+            timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+            if timestamps.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Records a failed authentication attempt for the given client IP.
+    pub fn record_failure(&self, ip: &str) {
+        if self.auth_disabled {
+            return;
+        }
+        let now = Instant::now();
+        let mut map = self.failed_attempts.lock();
+        if map.len() >= MAX_TRACKED_AUTH_IPS {
+            map.retain(|_, timestamps| {
+                timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+                !timestamps.is_empty()
+            });
+        }
+        let timestamps = map.entry(ip.to_string()).or_default();
+        timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+        timestamps.push(now);
+    }
+
+    /// Records a successful authentication, clearing any recorded failures for the given client IP.
+    pub fn record_success(&self, ip: &str) {
+        if self.auth_disabled {
+            return;
+        }
+        let mut map = self.failed_attempts.lock();
+        map.remove(ip);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_admin_rate_limiter() {
+        let mgr = AdminTokenManager::with_token("secret", false);
+        let ip = "192.168.1.100";
+
+        // Initially allowed
+        assert!(mgr.check_rate_limit(ip));
+
+        // 4 failures -> still allowed
+        for _ in 0..4 {
+            mgr.record_failure(ip);
+            assert!(mgr.check_rate_limit(ip));
+        }
+
+        // 5th failure -> now blocked
+        mgr.record_failure(ip);
+        assert!(!mgr.check_rate_limit(ip));
+
+        // Another IP is not blocked
+        assert!(mgr.check_rate_limit("10.0.0.1"));
+
+        // Success on ip resets the counter
+        mgr.record_success(ip);
+        assert!(mgr.check_rate_limit(ip));
+    }
 
     #[test]
     fn test_generate_and_persist_admin_token() {

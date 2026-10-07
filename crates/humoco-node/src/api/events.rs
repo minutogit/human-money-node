@@ -135,6 +135,11 @@ impl EventLog {
             None => iter.cloned().collect(),
         }
     }
+
+    /// Returns all recorded events in chronological order.
+    pub fn list(&self) -> Vec<EventItem> {
+        self.query(None, None)
+    }
 }
 
 #[cfg(test)]

@@ -1293,14 +1293,14 @@ async fn submit_hmc_lock(
         Ok(tier) => tier,
         Err(err) => {
             let mut required_diff_hdr = None;
-            let (status, reason) = match err {
+            let (status, reason) = match &err {
                 IngressError::PoWRequired { .. } => (
                     StatusCode::UNAUTHORIZED,
                     "Proof-of-Work challenge response required".into(),
                 ),
                 IngressError::InvalidPoW(err) => {
                     if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = err {
-                        required_diff_hdr = Some(required);
+                        required_diff_hdr = Some(*required);
                         (
                             StatusCode::TOO_MANY_REQUESTS,
                             format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
@@ -1339,8 +1339,18 @@ async fn submit_hmc_lock(
                     format!("Storage error: {}", e),
                 ),
             };
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                state.metrics.record_lock_rejected();
+            match &err {
+                IngressError::QuotaExceeded { .. } | IngressError::ReadQuotaExceeded { .. } => {
+                    state.metrics.record_rejected_quota_429();
+                }
+                IngressError::InvalidPoW(..) | IngressError::PoWRequired { .. } => {
+                    state.metrics.record_rejected_bad_pow_400();
+                }
+                _ => {
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        state.metrics.record_rejected_capacity_429();
+                    }
+                }
             }
             let envelope = wrap_and_sign_verdict(
                 &state.identity,
@@ -1403,7 +1413,7 @@ async fn submit_hmc_lock(
     // 6. Wrap and sign response envelope with appropriate HTTP status
     let status = match &verdict {
         L2Verdict::Conflict { .. } => {
-            state.metrics.record_lock_rejected();
+            state.metrics.record_rejected_conflict_409();
             StatusCode::CONFLICT
         }
         _ if is_new => StatusCode::CREATED,
@@ -1609,14 +1619,17 @@ async fn submit_hmc_chain_lock_inner(
 
     let status = match &verdict {
         L2Verdict::Conflict { .. } => {
-            state.metrics.record_lock_rejected();
+            state.metrics.record_rejected_conflict_409();
             StatusCode::CONFLICT
         }
         L2Verdict::Rejected { reason } if reason.contains("backpressure") || reason.contains("congested") => {
-            state.metrics.record_lock_rejected();
+            state.metrics.record_rejected_capacity_429();
             StatusCode::TOO_MANY_REQUESTS
         }
-        L2Verdict::Rejected { .. } => StatusCode::BAD_REQUEST,
+        L2Verdict::Rejected { .. } => {
+            state.metrics.record_rejected_bad_pow_400();
+            StatusCode::BAD_REQUEST
+        }
         L2Verdict::Verified { .. } if is_new => StatusCode::CREATED,
         L2Verdict::Verified { .. } => StatusCode::OK,
         _ => StatusCode::OK,

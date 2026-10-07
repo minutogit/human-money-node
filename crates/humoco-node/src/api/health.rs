@@ -360,6 +360,8 @@ mod tests {
                 loopback_only: true,
             },
             f2f_clients: Vec::new(),
+            persistence: crate::api::dashboard::PersistenceDto::default(),
+            rejections: crate::api::dashboard::RejectionsDto::default(),
         }
     }
 

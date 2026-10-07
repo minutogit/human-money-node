@@ -274,6 +274,15 @@ pub enum FlushOp {
     },
 }
 
+/// Diagnostic persistence & flush telemetry statistics (INV-1701).
+#[derive(Debug, Default)]
+pub struct PersistenceStats {
+    pub last_successful_flush_ms: std::sync::atomic::AtomicU64,
+    pub flush_batches_total: std::sync::atomic::AtomicU64,
+    pub flush_errors_total: std::sync::atomic::AtomicU64,
+    pub flush_ops_total: std::sync::atomic::AtomicU64,
+}
+
 #[derive(Clone)]
 pub struct DualTierEngine {
     pub ram: Arc<RwLock<RamIndex>>,
@@ -283,6 +292,7 @@ pub struct DualTierEngine {
     pub tx: mpsc::Sender<FlushOp>,
     pub peer_manager: Arc<RwLock<Option<Arc<crate::network::PeerManager>>>>,
     pub recent_locks: Arc<parking_lot::RwLock<RecentLockBuffer>>,
+    pub stats: Arc<PersistenceStats>,
 }
 
 impl DualTierEngine {
@@ -308,8 +318,9 @@ impl DualTierEngine {
         }
         let banned_nodes = Arc::new(RwLock::new(banned_set));
         let recent_locks = Arc::new(parking_lot::RwLock::new(RecentLockBuffer::default()));
+        let stats = Arc::new(PersistenceStats::default());
 
-        let handle = Self::spawn_flush_worker(rx, Arc::clone(&db), cancel_token);
+        let handle = Self::spawn_flush_worker(rx, Arc::clone(&db), Arc::clone(&stats), cancel_token);
         (
             Self {
                 ram,
@@ -319,6 +330,7 @@ impl DualTierEngine {
                 tx,
                 peer_manager: Arc::new(RwLock::new(None)),
                 recent_locks,
+                stats,
             },
             handle,
         )
@@ -339,6 +351,7 @@ impl DualTierEngine {
         }
         let banned_nodes = Arc::new(RwLock::new(banned_set));
         let recent_locks = Arc::new(parking_lot::RwLock::new(RecentLockBuffer::default()));
+        let stats = Arc::new(PersistenceStats::default());
         Self {
             ram,
             hmc_ram,
@@ -347,6 +360,7 @@ impl DualTierEngine {
             tx,
             peer_manager: Arc::new(RwLock::new(None)),
             recent_locks,
+            stats,
         }
     }
 
@@ -1396,6 +1410,7 @@ impl DualTierEngine {
     pub fn spawn_flush_worker(
         mut rx: mpsc::Receiver<FlushOp>,
         db: Arc<RedbStorage>,
+        stats: Arc<PersistenceStats>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
@@ -1411,18 +1426,30 @@ impl DualTierEngine {
                         while let Ok(op) = rx.try_recv() {
                             batch.push(op);
                             if batch.len() >= 100 {
+                                let op_count = batch.len();
                                 let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
                                 let db_clone = Arc::clone(&db);
-                                if let Err(e) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                    error!("flush_batch panicked during shutdown drain: {:?}", e);
+                                let stats_clone = Arc::clone(&stats);
+                                if let Ok(errs) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
+                                    if errs > 0 {
+                                        stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
                                 }
                             }
                         }
                         if !batch.is_empty() {
+                            let op_count = batch.len();
                             let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
                             let db_clone = Arc::clone(&db);
-                            if let Err(e) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                error!("flush_batch panicked during shutdown final flush: {:?}", e);
+                            let stats_clone = Arc::clone(&stats);
+                            if let Ok(errs) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
+                                if errs > 0 {
+                                    stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                         tracing::info!("Flush worker cleanly drained and terminated on cancellation");
@@ -1433,19 +1460,45 @@ impl DualTierEngine {
                             Some(op) => {
                                 batch.push(op);
                                 if batch.len() >= 100 {
+                                    let op_count = batch.len();
                                     let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
                                     let db_clone = Arc::clone(&db);
-                                    if let Err(e) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                        error!("flush_batch panicked: {:?}", e);
-                                    }
+                                    let stats_clone = Arc::clone(&stats);
+                                    tokio::spawn(async move {
+                                        match tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
+                                            Ok(errs) => {
+                                                let now_ms = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_millis() as u64)
+                                                    .unwrap_or(0);
+                                                if errs == 0 {
+                                                    stats_clone.last_successful_flush_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                                                } else {
+                                                    stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
+                                                }
+                                                stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            Err(e) => {
+                                                error!("flush_batch panicked: {:?}", e);
+                                                stats_clone.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                        }
+                                    });
                                 }
                             }
                             None => {
                                 if !batch.is_empty() {
+                                    let op_count = batch.len();
                                     let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
                                     let db_clone = Arc::clone(&db);
-                                    if let Err(e) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                        error!("flush_batch panicked on channel close: {:?}", e);
+                                    let stats_clone = Arc::clone(&stats);
+                                    if let Ok(errs) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
+                                        if errs > 0 {
+                                            stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
                                     }
                                 }
                                 break;
@@ -1454,11 +1507,31 @@ impl DualTierEngine {
                     }
                     _ = interval.tick() => {
                         if !batch.is_empty() {
+                            let op_count = batch.len();
                             let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
                             let db_clone = Arc::clone(&db);
-                            if let Err(e) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                error!("flush_batch panicked on interval flush: {:?}", e);
-                            }
+                            let stats_clone = Arc::clone(&stats);
+                            tokio::spawn(async move {
+                                match tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
+                                    Ok(errs) => {
+                                        let now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as u64)
+                                            .unwrap_or(0);
+                                        if errs == 0 {
+                                            stats_clone.last_successful_flush_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                                        } else {
+                                            stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    Err(e) => {
+                                        error!("flush_batch panicked on interval flush: {:?}", e);
+                                        stats_clone.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+                            });
                         }
                     }
                 }
@@ -1467,11 +1540,13 @@ impl DualTierEngine {
     }
 
     /// Executes a batch of flush operations on the database.
-    pub fn flush_batch(batch: &mut Vec<FlushOp>, db: &RedbStorage) {
+    /// Returns the number of encountered storage errors.
+    pub fn flush_batch(batch: &mut Vec<FlushOp>, db: &RedbStorage) -> usize {
         if batch.is_empty() {
-            return;
+            return 0;
         }
 
+        let mut errors = 0;
         let mut locks_to_put = Vec::new();
         for op in batch.drain(..) {
             match op {
@@ -1481,26 +1556,31 @@ impl DualTierEngine {
                 FlushOp::PutHmcLock { lookup_tag, entry } => {
                     if let Err(e) = db.put_hmc_lock(&lookup_tag, &entry) {
                         error!("Failed to put HMC lock to redb: {}", e);
+                        errors += 1;
                     }
                 }
                 FlushOp::Prune { now_sec } => {
                     if let Err(e) = db.prune_expired_buckets(now_sec) {
                         error!("Failed to prune expired buckets in flush worker: {}", e);
+                        errors += 1;
                     }
                 }
                 FlushOp::PutEvidence { hash, raw } => {
                     if let Err(e) = db.put_evidence(&hash, &raw) {
                         error!("Failed to put evidence in flush worker: {}", e);
+                        errors += 1;
                     }
                 }
                 FlushOp::SetQuota { account_tag, byte_years } => {
                     if let Err(e) = db.set_quota(&account_tag, byte_years) {
                         error!("Failed to set quota in flush worker: {}", e);
+                        errors += 1;
                     }
                 }
                 FlushOp::BanNode { node_key, timestamp_ms } => {
                     if let Err(e) = db.ban_node(&node_key, timestamp_ms) {
                         error!("Failed to persist banned node to redb: {}", e);
+                        errors += 1;
                     }
                 }
             }
@@ -1510,8 +1590,10 @@ impl DualTierEngine {
             let items: Vec<(&LockRecord, u64)> = locks_to_put.iter().map(|(l, r)| (l, *r)).collect();
             if let Err(e) = db.put_locks_batch(items) {
                 error!("Failed to batch put locks to redb: {}", e);
+                errors += 1;
             }
         }
+        errors
     }
 
     /// Cold-start recovery: Scans unexpired locks from disk and re-populates both RAM indices.

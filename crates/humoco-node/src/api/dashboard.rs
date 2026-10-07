@@ -214,6 +214,28 @@ pub struct ShardScoreSampleDto {
     pub is_responsible: bool,
 }
 
+/// Status of the asynchronous ACID redb persistence worker.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistenceDto {
+    pub last_successful_flush_ms: u64,
+    pub last_flush_ago_sec: Option<u64>,
+    pub flush_queue_depth: usize,
+    pub flush_batches_total: u64,
+    pub flush_errors_total: u64,
+    pub flush_ops_total: u64,
+    pub redb_file_bytes: u64,
+}
+
+/// Breakdown of rejected requests across specific failure causes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RejectionsDto {
+    pub total_rejected: u64,
+    pub conflict_409: u64,
+    pub capacity_429: u64,
+    pub quota_429: u64,
+    pub bad_pow_400: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardData {
     pub status: String,
@@ -290,6 +312,14 @@ pub struct DashboardData {
     /// Clock drift relative to F2F median in milliseconds.
     #[serde(default)]
     pub clock_drift_ms: i64,
+
+    /// Persistence and asynchronous disk flush telemetry.
+    #[serde(default)]
+    pub persistence: PersistenceDto,
+
+    /// Granular breakdown of rejected lock requests.
+    #[serde(default)]
+    pub rejections: RejectionsDto,
 }
 
 /// Formats epoch milliseconds as German civil date/time (DD.MM.YYYY, HH:mm:ss)
@@ -749,6 +779,31 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         .map(|pm| pm.clock().logical_offset_ms())
         .unwrap_or(0);
 
+    let last_flush_ms = state.engine.stats.last_successful_flush_ms.load(std::sync::atomic::Ordering::Relaxed);
+    let last_flush_ago_sec = if last_flush_ms > 0 {
+        Some(now_ms.saturating_sub(last_flush_ms) / 1000)
+    } else {
+        None
+    };
+
+    let persistence = PersistenceDto {
+        last_successful_flush_ms: last_flush_ms,
+        last_flush_ago_sec,
+        flush_queue_depth,
+        flush_batches_total: state.engine.stats.flush_batches_total.load(std::sync::atomic::Ordering::Relaxed),
+        flush_errors_total: state.engine.stats.flush_errors_total.load(std::sync::atomic::Ordering::Relaxed),
+        flush_ops_total: state.engine.stats.flush_ops_total.load(std::sync::atomic::Ordering::Relaxed),
+        redb_file_bytes: system.redb_bytes,
+    };
+
+    let rejections = RejectionsDto {
+        total_rejected: state.metrics.locks_rejected(),
+        conflict_409: state.metrics.rejected_conflict_409(),
+        capacity_429: state.metrics.rejected_capacity_429(),
+        quota_429: state.metrics.rejected_quota_429(),
+        bad_pow_400: state.metrics.rejected_bad_pow_400(),
+    };
+
     let mut data = DashboardData {
         status,
         status_badge,
@@ -795,6 +850,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         health: HealthSummary::default(),
         config_view,
         clock_drift_ms,
+        persistence,
+        rejections,
     };
     data.health = evaluate_health(&data);
     data
@@ -805,6 +862,24 @@ pub async fn get_dashboard_data(state: &AppState) -> DashboardData {
     collect_dashboard_data(state).await
 }
 
+fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = forwarded.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        let trimmed = real_ip.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
 /// Helper to verify admin authorization header.
 #[allow(clippy::result_large_err)]
 fn verify_admin_auth(state: &AppState, headers: &axum::http::HeaderMap) -> Result<(), Response> {
@@ -813,6 +888,11 @@ fn verify_admin_auth(state: &AppState, headers: &axum::http::HeaderMap) -> Resul
         .and_then(|v| v.to_str().ok());
 
     if !state.auth.verify_token(auth_header) {
+        state.event_log.record(
+            EventKind::System,
+            HealthLevel::Warn,
+            "Fehlgeschlagene Admin-Authentifizierung".to_string(),
+        );
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({
@@ -830,9 +910,50 @@ pub async fn admin_verify_token(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if let Err(unauth) = verify_admin_auth(&state, &headers) {
-        return unauth;
+    let client_ip = extract_client_ip(&headers);
+    if !state.auth.check_rate_limit(&client_ip) {
+        state.event_log.record(
+            EventKind::System,
+            HealthLevel::Warn,
+            format!("Rate-Limit für Admin-Authentifizierung erreicht ({})", client_ip),
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "TooManyRequests",
+                "message": "Too many failed authentication attempts. Please try again later."
+            })),
+        )
+            .into_response();
     }
+
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    if !state.auth.verify_token(auth_header) {
+        state.auth.record_failure(&client_ip);
+        state.event_log.record(
+            EventKind::System,
+            HealthLevel::Warn,
+            "Fehlgeschlagene Admin-Authentifizierung".to_string(),
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized",
+                "message": "Invalid or missing admin authorization token"
+            })),
+        )
+            .into_response();
+    }
+
+    state.auth.record_success(&client_ip);
+    state.event_log.record(
+        EventKind::System,
+        HealthLevel::Ok,
+        "Erfolgreiche Admin-Authentifizierung".to_string(),
+    );
 
     (
         StatusCode::OK,
@@ -1082,15 +1203,25 @@ pub async fn admin_topup_quota(
     state.tier_controller.register_vip_tag(tag_bytes);
 
     match state.tier_controller.topup_vip_quota(tag_bytes, payload.byte_years) {
-        Ok(new_balance) => (
-            StatusCode::OK,
-            Json(TopupQuotaResponse {
-                status: "ok".into(),
-                account_tag: trimmed.to_string(),
-                new_balance,
-            }),
-        )
-            .into_response(),
+        Ok(new_balance) => {
+            state.event_log.record(
+                EventKind::QuotaTopup,
+                HealthLevel::Ok,
+                format!(
+                    "VIP Quota aufgeladen für '{}' (+{} BY, Saldo: {})",
+                    trimmed, payload.byte_years, new_balance
+                ),
+            );
+            (
+                StatusCode::OK,
+                Json(TopupQuotaResponse {
+                    status: "ok".into(),
+                    account_tag: trimmed.to_string(),
+                    new_balance,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({

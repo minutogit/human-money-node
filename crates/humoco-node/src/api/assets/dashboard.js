@@ -1,21 +1,66 @@
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 const $ = id => document.getElementById(id);
 const setText = (id, v) => { const el = $(id); if (el && v != null) el.innerText = v; };
 const setHtml = (id, h) => { const el = $(id); if (el && h != null) el.innerHTML = h; };
-const badge = (c, t) => `<span class="badge badge-${c}">${t}</span>`;
-const codeTag = (t, title) => `<span class="code"${title ? ` title="${title}"` : ''}>${t}</span>`;
+const badge = (c, t) => `<span class="badge badge-${escapeHtml(c)}">${escapeHtml(t)}</span>`;
+const codeTag = (t, title) => `<span class="code"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(t)}</span>`;
 const cTrunc = (h, title) => codeTag(truncateHash(h), title || h);
 let currentDashboardData = null;
 let currentVoucherDetail = null;
-let adminToken = localStorage.getItem('humoco_admin_token') || '';
+let adminToken = sessionStorage.getItem('humoco_admin_token') || '';
 let consecutiveFailures = 0;
 let pollIntervalMs = 2000;
 let pollTimer = null;
 let lastSuccessfulFetchTime = null;
 let pendingConfirmCallback = null;
-function escapeHtml(s) {
-  if (!s) return '';
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+// 15-minute inactivity session timeout
+const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
+let inactivityTimer = null;
+
+function resetInactivityTimer() {
+  if (inactivityTimer) clearTimeout(inactivityTimer);
+  if (adminToken) {
+    sessionStorage.setItem('humoco_admin_last_activity', Date.now().toString());
+    inactivityTimer = setTimeout(() => {
+      logoutAdminDueToInactivity();
+    }, INACTIVITY_TIMEOUT_MS);
+  }
 }
+
+function checkInactivityOnLoad() {
+  if (!adminToken) return;
+  const lastActive = parseInt(sessionStorage.getItem('humoco_admin_last_activity') || '0', 10);
+  if (lastActive > 0 && (Date.now() - lastActive > INACTIVITY_TIMEOUT_MS)) {
+    logoutAdminDueToInactivity();
+  } else {
+    resetInactivityTimer();
+  }
+}
+
+function logoutAdminDueToInactivity() {
+  if (adminToken) {
+    adminToken = '';
+    sessionStorage.removeItem('humoco_admin_token');
+    sessionStorage.removeItem('humoco_admin_last_activity');
+    if (inactivityTimer) {
+      clearTimeout(inactivityTimer);
+      inactivityTimer = null;
+    }
+    updateAdminUI();
+    showToast('Admin-Sitzung wegen Inaktivität (15 Min.) beendet', 'info');
+    refreshDashboard();
+  }
+}
+
+['mousedown', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
+  window.addEventListener(evt, () => {
+    if (adminToken) resetInactivityTimer();
+  }, { passive: true });
+});
 function formatHHMMSS(d) {
   if (!d) return '--:--:--';
   const p = n => String(n).padStart(2, '0');
@@ -91,7 +136,12 @@ function updateAdminUI() {
 }
 function handleAdminBtnClick() {
   if (adminToken) {
-    localStorage.removeItem('humoco_admin_token');
+    sessionStorage.removeItem('humoco_admin_token');
+    sessionStorage.removeItem('humoco_admin_last_activity');
+    if (inactivityTimer) {
+      clearTimeout(inactivityTimer);
+      inactivityTimer = null;
+    }
     adminToken = '';
     updateAdminUI();
     showToast('Admin-Modus abgemeldet', 'info');
@@ -114,7 +164,9 @@ async function submitAdminToken() {
     }, 6000);
     if (res.ok) {
       adminToken = val;
-      localStorage.setItem('humoco_admin_token', val);
+      sessionStorage.setItem('humoco_admin_token', val);
+      sessionStorage.setItem('humoco_admin_last_activity', Date.now().toString());
+      resetInactivityTimer();
       closeModal('admin-modal');
       updateAdminUI();
       showToast('Admin-Modus aktiviert', 'success');
@@ -133,23 +185,20 @@ async function submitAdminToken() {
 async function adminAddMeshPeer() {
   const pInput = $('friend-pubkey-input');
   const lInput = $('friend-label-input');
-  const dInput = $('friend-dual-role-input');
   const raw = pInput?.value.trim() || '';
   const label = lInput?.value.trim() || '';
-  const dualRole = !!dInput?.checked;
   if (!raw) return;
   const pubkey = raw.includes('@') ? raw.split('@')[0].trim() : raw;
   try {
     const res = await fetchWithTimeout('/dashboard/admin/mesh/peers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
-      body: JSON.stringify({ pubkey, label: label || null, dual_role_ingress: dualRole })
+      body: JSON.stringify({ pubkey, label: label || null })
     }, 6000);
     if (res.ok) {
       if (pInput) pInput.value = '';
       if (lInput) lInput.value = '';
-      if (dInput) dInput.checked = false;
-      showToast('Nachbarknoten verbunden' + (dualRole ? ' (auch als Ingress-Client)' : ''), 'success');
+      showToast('Nachbarknoten verbunden', 'success');
       refreshDashboard();
     } else {
       const err = await res.json().catch(() => ({}));
@@ -236,20 +285,45 @@ function adminRemoveClientFriend(tokenHash, label) {
   );
 }
 function showClientQrModal(label, token, tokenHashOrUri) {
-  let walletUri = '';
-  if (tokenHashOrUri && tokenHashOrUri.startsWith('humoco://')) {
-    walletUri = tokenHashOrUri;
-  } else {
+  const hasPlaintextToken = !!token && token.trim().length > 0;
+  const warnEl = $('client-qr-warning');
+  const uriSection = $('client-qr-uri-section');
+  const tokenLabelEl = $('client-qr-token-label');
+  const hintEl = $('client-qr-hint');
+
+  setText('client-qr-label', label || 'Client');
+
+  if (hasPlaintextToken) {
+    // Freshly created client with plaintext token
     const apiPort = currentDashboardData?.config_view?.api_port || 8080;
     const host = window.location.hostname || '127.0.0.1';
-    const tok = token || tokenHashOrUri;
-    walletUri = `humoco://${host}:${apiPort}?token=${tok}`;
+    let walletUri = (tokenHashOrUri && tokenHashOrUri.startsWith('humoco://'))
+      ? tokenHashOrUri
+      : `humoco://${host}:${apiPort}?token=${token}`;
+
+    if (tokenLabelEl) tokenLabelEl.innerText = 'Token:';
+    setText('client-qr-token', token);
+    setText('client-qr-uri', walletUri);
+    if (uriSection) uriSection.style.display = 'block';
+    if (warnEl) warnEl.style.display = 'none';
+    if (hintEl) hintEl.innerText = '💡 Scannen Sie diesen QR-Code mit der HuMoCo Wallet App oder hinterlegen Sie das Token im PoS-Terminal.';
+    const svg = generateQrSvg(walletUri);
+    setHtml('client-qr-box', svg);
+  } else {
+    // Existing client - only token_hash is known
+    const hash = tokenHashOrUri || '';
+    if (tokenLabelEl) tokenLabelEl.innerText = 'Token-Hash:';
+    setText('client-qr-token', hash ? `${hash} (Klartext nicht gespeichert)` : 'Nicht verfügbar');
+    setText('client-qr-uri', '');
+    if (uriSection) uriSection.style.display = 'none';
+    if (warnEl) {
+      warnEl.innerHTML = '⚠️ <strong>Sicherheitshinweis:</strong> Das Klartext-Token wurde nur einmalig bei Erstellung angezeigt und wird aus Sicherheitsgründen nicht auf dem Server vorgehalten. Bei Verlust des Tokens bitte einen neuen Client anlegen.';
+      warnEl.style.display = 'block';
+    }
+    if (hintEl) hintEl.innerText = 'ℹ️ Dieser Client ist mit dem obenstehenden Token-Hash auf dem Knoten registriert.';
+    setHtml('client-qr-box', '<div style="font-size:2.5rem;padding:1.5rem 0;">🔒</div>');
   }
-  setText('client-qr-label', label || 'Client');
-  setText('client-qr-token', token || tokenHashOrUri);
-  setText('client-qr-uri', walletUri);
-  const svg = generateQrSvg(walletUri);
-  setHtml('client-qr-box', svg);
+
   $('client-qr-modal')?.classList.add('active');
 }
 function copyClientUri() {
@@ -346,39 +420,40 @@ function renderNodeRow(n) {
   const statusBadge = n.connection_status.includes('Connected')
     ? (n.missing_count === 0 ? badge('green', 'Connected (0)') : badge('amber', n.connection_status))
     : (n.connection_status.includes('Suspended') ? badge('red', n.connection_status) : badge('amber', n.connection_status));
-  const rttText = n.rtt_ms != null ? n.rtt_ms + ' ms' : '<span style="color:var(--text-muted);">-</span>';
-  const routeText = `${n.min_hops} Hop${n.min_hops === 1 ? '' : 's'}${n.best_ingress_peer ? ' via ' + truncateHash(n.best_ingress_peer) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : ''))}`;
-  const incubText = n.is_immature ? badge('amber', `24h (${n.incubation_remaining_sec || 0}s)`) : badge('green', 'Aktiv');
-  return `<tr><td>${cTrunc(n.public_key)}</td><td>${n.address}</td><td>${roleBadge}</td><td>${statusBadge}</td><td>${rttText}</td><td>${routeText}</td><td>${cTrunc(n.hrw_routing_id)}</td><td>${incubText}</td><td><button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" onclick="openNodeInspector('${n.public_key}')">🔍 Info</button></td></tr>`;
+  const rttText = n.rtt_ms != null ? escapeHtml(n.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
+  const routeText = `${escapeHtml(n.min_hops)} Hop${n.min_hops === 1 ? '' : 's'}${n.best_ingress_peer ? ' via ' + escapeHtml(truncateHash(n.best_ingress_peer)) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : ''))}`;
+  const incubText = n.is_immature ? badge('amber', `24h (${escapeHtml(n.incubation_remaining_sec || 0)}s)`) : badge('green', 'Aktiv');
+  const safePubkey = escapeHtml(n.public_key || '');
+  return `<tr><td>${cTrunc(n.public_key)}</td><td>${escapeHtml(n.address)}</td><td>${roleBadge}</td><td>${statusBadge}</td><td>${rttText}</td><td>${routeText}</td><td>${cTrunc(n.hrw_routing_id)}</td><td>${incubText}</td><td><button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-pubkey="${safePubkey}" onclick="openNodeInspector(this.getAttribute('data-pubkey'))">🔍 Info</button></td></tr>`;
 }
 function openNodeInspector(pubkey) {
   if (!currentDashboardData?.network_nodes) return;
   const node = currentDashboardData.network_nodes.find(n => n.public_key === pubkey || n.node_id === pubkey);
-  if (!node) { showToast('Knoten nicht gefunden: ' + pubkey, 'warning'); return; }
+  if (!node) { showToast('Knoten nicht gefunden: ' + escapeHtml(pubkey), 'warning'); return; }
   setText('node-modal-title', '🔍 Knoten-Diagnose: ' + truncateHash(node.public_key));
   const statusBadge = node.connection_status.includes('Connected')
     ? (node.missing_count === 0 ? badge('green', 'Connected (0 Ausfälle)') : badge('amber', node.connection_status))
     : (node.connection_status.includes('Suspended') ? badge('red', node.connection_status) : badge('amber', node.connection_status));
-  const rttText = node.rtt_ms != null ? node.rtt_ms + ' ms' : '<span style="color:var(--text-muted);">-</span>';
-  const failText = node.last_failure_sec != null ? `vor ${node.last_failure_sec}s` : '<span style="color:var(--green);">Kein Ausfall</span>';
-  const ingressText = node.best_ingress_peer ? 'via ' + node.best_ingress_peer : (node.is_local ? 'Lokal (Self)' : (node.is_f2f ? 'F2F Direkt' : 'Direkt / Standby'));
-  const incubText = node.is_immature ? badge('amber', `24h (${node.incubation_remaining_sec || 0}s)`) : badge('green', 'Aktiv');
+  const rttText = node.rtt_ms != null ? escapeHtml(node.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
+  const failText = node.last_failure_sec != null ? `vor ${escapeHtml(node.last_failure_sec)}s` : '<span style="color:var(--green);">Kein Ausfall</span>';
+  const ingressText = node.best_ingress_peer ? 'via ' + escapeHtml(node.best_ingress_peer) : (node.is_local ? 'Lokal (Self)' : (node.is_f2f ? 'F2F Direkt' : 'Direkt / Standby'));
+  const incubText = node.is_immature ? badge('amber', `24h (${escapeHtml(node.incubation_remaining_sec || 0)}s)`) : badge('green', 'Aktiv');
   const html = `<div style="line-height:1.5;font-size:0.875rem;">
     <div class="inspect-box">
       <h4 style="margin:0 0 0.4rem 0;font-size:0.85rem;color:var(--purple);">🔑 Identität &amp; Kryptographie</h4>
-      <div><strong>NodePubKey:</strong> <span class="code" id="node-modal-pubkey">${node.public_key}</span> <button class="btn btn-secondary" style="padding:0.15rem 0.4rem;font-size:0.75rem;" onclick="copyNodePubkey()">Kopieren</button></div>
-      <div><strong>Adresse:</strong> <span class="code">${node.address}</span></div>
-      <div><strong>Shard-Ticket:</strong> <span class="code">${node.hrw_routing_id}</span> (Score: <strong>${node.work_score}</strong>)</div>
+      <div><strong>NodePubKey:</strong> <span class="code" id="node-modal-pubkey">${escapeHtml(node.public_key)}</span> <button class="btn btn-secondary" style="padding:0.15rem 0.4rem;font-size:0.75rem;" onclick="copyNodePubkey()">Kopieren</button></div>
+      <div><strong>Adresse:</strong> <span class="code">${escapeHtml(node.address)}</span></div>
+      <div><strong>Shard-Ticket:</strong> <span class="code">${escapeHtml(node.hrw_routing_id)}</span> (Score: <strong>${escapeHtml(node.work_score)}</strong>)</div>
     </div>
     <div class="inspect-box">
       <h4 style="margin:0 0 0.4rem 0;font-size:0.85rem;color:var(--green);">💓 Verbindungs-Gesundheit</h4>
       <div><strong>Status:</strong> ${statusBadge}</div>
-      <div><strong>Ausfälle:</strong> <strong>${node.missing_count}</strong> / 3 (Tit-for-Tat; heilt -1/h)</div>
+      <div><strong>Ausfälle:</strong> <strong>${escapeHtml(node.missing_count)}</strong> / 3 (Tit-for-Tat; heilt -1/h)</div>
       <div><strong>RTT:</strong> ${rttText} &bull; <strong>Letzter Fehler:</strong> ${failText}</div>
     </div>
     <div class="inspect-box" style="margin-bottom:0;">
       <h4 style="margin:0 0 0.4rem 0;font-size:0.85rem;color:var(--blue);">📡 Topologie &amp; Routing</h4>
-      <div><strong>Distanz:</strong> ${node.min_hops} Hops &bull; <strong>Pfad:</strong> ${ingressText} &bull; <strong>Inkubation:</strong> ${incubText}</div>
+      <div><strong>Distanz:</strong> ${escapeHtml(node.min_hops)} Hops &bull; <strong>Pfad:</strong> ${ingressText} &bull; <strong>Inkubation:</strong> ${incubText}</div>
     </div></div>`;
   setHtml('node-modal-details', html);
   $('node-modal').classList.add('active');
@@ -407,7 +482,7 @@ async function openLockInspector(lookupTag) {
     if (!res.ok) return;
     const json = await res.json();
     setText('modal-title', '🔒 Sperr-Rohdaten: ' + truncateHash(lookupTag));
-    setHtml('modal-details', `<strong>Lookup Tag:</strong> <span class="code">${lookupTag}</span>`);
+    setHtml('modal-details', `<strong>Lookup Tag:</strong> <span class="code">${escapeHtml(lookupTag)}</span>`);
     setText('modal-json', JSON.stringify(json, null, 2));
     $('json-modal').classList.add('active');
   } catch (e) {}
@@ -425,14 +500,14 @@ async function searchVoucher() {
     if (res.ok) {
       const detail = await res.json();
       currentVoucherDetail = detail;
-      setText('voucher-modal-title', '🎟️ Gutschein-Lineage: ' + detail.voucher_id);
+      setText('voucher-modal-title', '🎟️ Gutschein-Lineage: ' + truncateHash(detail.voucher_id));
       const html = `<div style="margin-bottom:0.6rem;line-height:1.5;">
-        <div><strong>Gutschein-ID:</strong> <span class="code">${detail.voucher_id}</span> &bull; <strong>Wurzel-Gültigkeit:</strong> ${detail.root_valid_until_formatted}</div>
-        <div><strong>Genesis Tag:</strong> <span class="code">${detail.genesis_tag || 'N/A'}</span> &bull; <strong>Sperren in Kette:</strong> ${detail.locks.length} (${detail.total_byte_years} BY)</div></div>`;
+        <div><strong>Gutschein-ID:</strong> <span class="code">${escapeHtml(detail.voucher_id)}</span> &bull; <strong>Wurzel-Gültigkeit:</strong> ${escapeHtml(detail.root_valid_until_formatted)}</div>
+        <div><strong>Genesis Tag:</strong> <span class="code">${escapeHtml(detail.genesis_tag || 'N/A')}</span> &bull; <strong>Sperren in Kette:</strong> ${escapeHtml(detail.locks.length)} (${escapeHtml(detail.total_byte_years)} BY)</div></div>`;
       let tableHtml = '<h4 style="margin:0.5rem 0 0.2rem 0;font-size:0.85rem;">Ketten-Historie:</h4><div style="overflow-x:auto;"><table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
       for (const h of detail.locks) {
         const typeBadge = h.is_genesis ? badge('amber', 'GENESIS') : badge('blue', 'SPEND');
-        tableHtml += `<tr><td>${typeBadge}</td><td>${cTrunc(h.lookup_tag)}</td><td class="code">${truncateHash(h.t_id_hex)}</td><td class="code">${truncateHash(h.sender_pub_hex)}</td></tr>`;
+        tableHtml += `<tr><td>${typeBadge}</td><td>${cTrunc(h.lookup_tag)}</td><td class="code">${escapeHtml(truncateHash(h.t_id_hex))}</td><td class="code">${escapeHtml(truncateHash(h.sender_pub_hex))}</td></tr>`;
       }
       tableHtml += '</tbody></table></div>';
       setHtml('voucher-modal-details', html);
@@ -440,12 +515,23 @@ async function searchVoucher() {
       setText('voucher-modal-json', JSON.stringify(detail, null, 2));
       $('voucher-modal').classList.add('active');
     } else {
-      showToast(`Gutschein oder Lookup-Tag "${term}" nicht gefunden.`, 'warning');
+      showToast(`Gutschein oder Lookup-Tag "${escapeHtml(term)}" nicht gefunden.`, 'warning');
     }
   } catch (e) {
     showToast('Fehler bei der Suche: ' + e.message, 'error');
   }
 }
+function updateTabBadge(id, count) {
+  const el = $(id);
+  if (!el) return;
+  if (count > 0) {
+    el.innerText = count;
+    el.style.display = 'inline-flex';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
 async function refreshDashboard() {
   try {
     const res = await fetchWithTimeout('/dashboard/data', {}, 6000);
@@ -460,8 +546,25 @@ async function refreshDashboard() {
     if (banner) banner.style.display = 'none';
     const badgeEl = $('status-badge');
     if (badgeEl) {
-      badgeEl.innerText = d.status_badge;
-      badgeEl.className = 'badge ' + (d.status === 'ONLINE' ? 'badge-green' : (d.status === 'VILLAGE MODE' ? 'badge-amber' : 'badge-red'));
+      if (d.status === 'ONLINE') {
+        const lvl = d.health?.level || 'Ok';
+        if (lvl === 'Crit') {
+          badgeEl.innerText = 'ONLINE (KRITISCH)';
+          badgeEl.className = 'badge badge-red';
+        } else if (lvl === 'Warn') {
+          badgeEl.innerText = 'ONLINE (WARNUNG)';
+          badgeEl.className = 'badge badge-amber';
+        } else {
+          badgeEl.innerText = d.status_badge || 'ONLINE';
+          badgeEl.className = 'badge badge-green';
+        }
+      } else if (d.status === 'VILLAGE MODE') {
+        badgeEl.innerText = d.status_badge || 'VILLAGE MODE';
+        badgeEl.className = 'badge badge-amber';
+      } else {
+        badgeEl.innerText = d.status_badge || d.status;
+        badgeEl.className = 'badge badge-red';
+      }
     }
     if (d.network_time_ms) {
       const dt = new Date(d.network_time_ms);
@@ -478,8 +581,16 @@ async function refreshDashboard() {
         driftEl.style.color = Math.abs(d.clock_drift_ms) > 2000 ? 'var(--red)' : (Math.abs(d.clock_drift_ms) > 500 ? 'var(--amber)' : 'var(--text)');
       }
     }
-    setText('hdr-lat-local', d.local_latency.avg_ms.toFixed(2) + ' ms');
-    setText('hdr-lat-quorum', d.quorum_latency.avg_ms.toFixed(2) + ' ms');
+    const locEl = $('hdr-lat-local');
+    if (locEl) {
+      locEl.innerText = d.local_latency.avg_ms.toFixed(2) + ' ms';
+      locEl.style.color = d.local_latency.avg_ms >= 5.0 ? 'var(--red)' : 'var(--text)';
+    }
+    const qEl = $('hdr-lat-quorum');
+    if (qEl) {
+      qEl.innerText = d.quorum_latency.avg_ms.toFixed(2) + ' ms';
+      qEl.style.color = d.quorum_latency.avg_ms >= 500.0 ? 'var(--red)' : 'var(--text)';
+    }
     setText('hdr-lat-e2e', d.e2e_latency.avg_ms.toFixed(2) + ' ms');
     setText('hdr-peers', `${d.connected_peers}/${d.configured_peers}`);
     setText('hdr-shard', d.shard_mode);
@@ -514,6 +625,40 @@ async function refreshDashboard() {
         if (hCard) hCard.style.borderColor = 'var(--border)';
       }
       updateDocumentHealthIndicator(level);
+      const topBanner = $('health-banner-top');
+      if (topBanner) {
+        if (level !== 'Ok') {
+          const isCrit = level === 'Crit';
+          topBanner.className = 'health-banner-top ' + (isCrit ? 'crit' : 'warn');
+          setText('health-banner-icon', isCrit ? '🚨' : '⚠️');
+          const warnMsgs = (d.health.items || []).filter(i => i.severity !== 'Ok').map(i => i.message_de);
+          const msg = warnMsgs.length > 0 ? warnMsgs.join(' • ') : (isCrit ? 'Kritischer Systemzustand erkannt!' : 'Systemwarnung vorhanden.');
+          setText('health-banner-msg', msg);
+          topBanner.style.display = 'flex';
+        } else {
+          topBanner.style.display = 'none';
+        }
+      }
+      let cockpitWarns = 0, networkWarns = 0, tiersWarns = 0;
+      if (d.health.items) {
+        for (const item of d.health.items) {
+          if (item.severity === 'Warn' || item.severity === 'Crit') {
+            if (['QUEUE_HIGH', 'SLA_VIOLATED', 'CLOCK_DRIFT', 'DASHBOARD_EXPOSED'].includes(item.code)) {
+              cockpitWarns++;
+            } else if (['NO_PEERS', 'LOW_PEERS', 'SUBNET_DOM'].includes(item.code)) {
+              networkWarns++;
+            } else if (['BROOM', 'GATEWAY_CONC'].includes(item.code)) {
+              tiersWarns++;
+            } else {
+              cockpitWarns++;
+            }
+          }
+        }
+      }
+      updateTabBadge('tab-badge-cockpit', cockpitWarns);
+      updateTabBadge('tab-badge-network', networkWarns);
+      updateTabBadge('tab-badge-tiers', tiersWarns);
+
       const itemsContainer = $('health-items-container');
       if (itemsContainer) {
         if (d.health.items?.length > 0) {
@@ -539,13 +684,74 @@ async function refreshDashboard() {
       setHtml('writes-sparkline', renderSparklineSvg(sp.writes, '#10b981'));
       setHtml('reads-sparkline', renderSparklineSvg(sp.reads, '#3b82f6'));
     }
+    const pers = d.persistence;
+    if (pers) {
+      setText('persist-queue-val', (pers.flush_queue_depth || 0).toLocaleString());
+      const qBar = $('persist-queue-bar');
+      if (qBar) {
+        const qPct = Math.min(100, ((pers.flush_queue_depth || 0) / 10000) * 100);
+        qBar.style.width = qPct + '%';
+        if (pers.flush_queue_depth >= 9000) qBar.className = 'progress-fill fill-red';
+        else if (pers.flush_queue_depth >= 1000) qBar.className = 'progress-fill fill-amber';
+        else qBar.className = 'progress-fill fill-green';
+      }
+      const sBadge = $('persist-status-badge');
+      if (sBadge) {
+        if (pers.flush_errors_total > 0) {
+          sBadge.innerText = 'Fehler!';
+          sBadge.className = 'badge badge-red';
+        } else if (pers.flush_queue_depth >= 1000) {
+          sBadge.innerText = 'Stau';
+          sBadge.className = 'badge badge-amber';
+        } else {
+          sBadge.innerText = 'Nominal';
+          sBadge.className = 'badge badge-green';
+        }
+      }
+      let lastFlushStr = 'Nie';
+      if (pers.last_successful_flush_ms > 0) {
+        if (pers.last_flush_ago_sec != null) {
+          lastFlushStr = `vor ${pers.last_flush_ago_sec}s`;
+        } else {
+          const dt = new Date(pers.last_successful_flush_ms);
+          lastFlushStr = formatHHMMSS(dt);
+        }
+      }
+      setText('persist-last-flush', lastFlushStr);
+      setText('persist-batches-val', (pers.flush_batches_total || 0).toLocaleString());
+      setText('persist-ops-val', (pers.flush_ops_total || 0).toLocaleString());
+      const errEl = $('persist-errors-val');
+      if (errEl) {
+        errEl.innerText = (pers.flush_errors_total || 0).toLocaleString();
+        errEl.style.color = pers.flush_errors_total > 0 ? 'var(--red)' : 'var(--green)';
+      }
+      setText('persist-redb-val', Math.round((pers.redb_file_bytes || 0) / 1024).toLocaleString() + ' KB');
+    }
+    const rej = d.rejections;
+    if (rej) {
+      setText('rej-total-val', (rej.total_rejected || 0).toLocaleString());
+      setText('rej-409-val', (rej.conflict_409 || 0).toLocaleString());
+      setText('rej-cap-val', (rej.capacity_429 || 0).toLocaleString());
+      setText('rej-quota-val', (rej.quota_429 || 0).toLocaleString());
+      setText('rej-pow-val', (rej.bad_pow_400 || 0).toLocaleString());
+      const rBadge = $('rej-badge');
+      if (rBadge) {
+        rBadge.innerText = `${(rej.total_rejected || 0).toLocaleString()} Gesamt`;
+        rBadge.className = 'badge ' + ((rej.total_rejected || 0) > 0 ? 'badge-amber' : 'badge-cyan');
+      }
+    }
     const sys = d.system;
     if (sys) {
       setText('sys-cpu-val', sys.cpu_percent.toFixed(1) + '%');
       const cpuBar = $('sys-cpu-bar');
-      if (cpuBar) cpuBar.style.width = Math.min(100, Math.max(0, sys.cpu_percent)) + '%';
+      if (cpuBar) {
+        const pct = Math.min(100, Math.max(0, sys.cpu_percent));
+        cpuBar.style.width = pct + '%';
+        if (pct >= 85) cpuBar.className = 'progress-fill fill-red';
+        else if (pct >= 70) cpuBar.className = 'progress-fill fill-amber';
+        else cpuBar.className = 'progress-fill fill-green';
+      }
       setText('sys-rss-val', sys.rss_mb.toFixed(1) + ' MB');
-      setText('sys-redb-val', Math.round(sys.redb_bytes / 1024) + ' KB');
       setText('sys-netto-val', sys.netto_locks_bytes + ' B');
       setText('sys-purged-val', sys.ttl_purged_count);
       setText('cap-single-val', sys.peak_tps_single_core);
@@ -573,11 +779,12 @@ async function refreshDashboard() {
           let sBadge = badge('green', 'Verbunden (0 Ausfälle)');
           if (!f.is_connected) sBadge = badge('amber', 'Getrennt');
           else if (f.missing_count >= 3) sBadge = badge('red', 'Suspended (3/3)');
-          else if (f.missing_count > 0) sBadge = badge('amber', `Degrading (${f.missing_count}/3)`);
-          const rttText = f.rtt_ms != null ? f.rtt_ms + ' ms' : '<span style="color:var(--text-muted);">-</span>';
-          let actionBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" onclick="openNodeInspector('${f.public_key}')">🔍 Info</button>`;
-          if (adminToken) actionBtn += ` <button class="btn btn-danger" style="padding:0.2rem 0.5rem;margin-left:0.25rem;" onclick="adminRemoveFriend('${f.public_key}')">🗑️</button>`;
-          html += `<tr><td>${cTrunc(f.public_key)}</td><td>${f.address}</td><td>${sBadge}</td><td>${rttText}</td><td>${actionBtn}</td></tr>`;
+          else if (f.missing_count > 0) sBadge = badge('amber', `Degrading (${escapeHtml(f.missing_count)}/3)`);
+          const rttText = f.rtt_ms != null ? escapeHtml(f.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
+          const safeKey = escapeHtml(f.public_key || '');
+          let actionBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-pubkey="${safeKey}" onclick="openNodeInspector(this.getAttribute('data-pubkey'))">🔍 Info</button>`;
+          if (adminToken) actionBtn += ` <button class="btn btn-danger" style="padding:0.2rem 0.5rem;margin-left:0.25rem;" data-pubkey="${safeKey}" onclick="adminRemoveFriend(this.getAttribute('data-pubkey'))">🗑️</button>`;
+          html += `<tr><td>${cTrunc(f.public_key)}</td><td>${escapeHtml(f.address)}</td><td>${sBadge}</td><td>${rttText}</td><td>${actionBtn}</td></tr>`;
         }
         friendsTbody.innerHTML = html;
       } else {
@@ -640,11 +847,14 @@ async function refreshDashboard() {
         let html = '';
         for (const c of d.f2f_clients) {
           const whaleBadge = c.whale_brake_active ? badge('amber', 'Aktiv (5x)') : badge('green', 'Inaktiv');
-          const lastActive = c.last_active_sec != null ? `vor ${c.last_active_sec}s` : '<span style="color:var(--text-muted);">-</span>';
+          const lastActive = c.last_active_sec != null ? `vor ${escapeHtml(c.last_active_sec)}s` : '<span style="color:var(--text-muted);">-</span>';
           const tok = c.token || '';
-          const qrBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;font-size:0.75rem;margin-right:0.35rem;" onclick="showClientQrModal('${escapeHtml(c.label)}', '${escapeHtml(tok)}', '${escapeHtml(c.token_hash)}')">QR-Code</button>`;
-          const revokeBtn = `<button class="btn btn-danger admin-only" style="${adminToken ? 'display:inline-flex;' : 'display:none;'}padding:0.2rem 0.5rem;font-size:0.75rem;" onclick="adminRemoveClientFriend('${escapeHtml(c.token_hash)}', '${escapeHtml(c.label)}')">Widerrufen</button>`;
-          html += `<tr><td><strong>${escapeHtml(c.label || 'Client')}</strong></td><td>${cTrunc(c.token_hash)}</td><td>${(c.writes_today || 0).toLocaleString()} / ${(c.daily_limit || 0).toLocaleString()}</td><td>${whaleBadge}</td><td>${lastActive}</td><td>${qrBtn}${revokeBtn}</td></tr>`;
+          const safeLabel = escapeHtml(c.label || 'Client');
+          const safeTok = escapeHtml(tok);
+          const safeHash = escapeHtml(c.token_hash || '');
+          const qrBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;font-size:0.75rem;margin-right:0.35rem;" data-label="${safeLabel}" data-tok="${safeTok}" data-hash="${safeHash}" onclick="showClientQrModal(this.getAttribute('data-label'), this.getAttribute('data-tok'), this.getAttribute('data-hash'))">QR-Code</button>`;
+          const revokeBtn = `<button class="btn btn-danger admin-only" style="${adminToken ? 'display:inline-flex;' : 'display:none;'}padding:0.2rem 0.5rem;font-size:0.75rem;" data-hash="${safeHash}" data-label="${safeLabel}" onclick="adminRemoveClientFriend(this.getAttribute('data-hash'), this.getAttribute('data-label'))">Widerrufen</button>`;
+          html += `<tr><td><strong>${safeLabel}</strong></td><td>${cTrunc(c.token_hash)}</td><td>${(c.writes_today || 0).toLocaleString()} / ${(c.daily_limit || 0).toLocaleString()}</td><td>${whaleBadge}</td><td>${lastActive}</td><td>${qrBtn}${revokeBtn}</td></tr>`;
         }
         f2fClientsTbody.innerHTML = html;
         const sub = $('f2f-clients-count-sub');
@@ -661,7 +871,8 @@ async function refreshDashboard() {
         for (const v of d.active_vouchers) {
           const genShort = v.genesis_tag ? truncateHash(v.genesis_tag) : 'N/A';
           const sBadge = v.status === 'Active' ? badge('green', 'Aktiv') : badge('amber', v.status);
-          html += `<tr><td><strong>${v.voucher_id}</strong></td><td>${v.root_valid_until_formatted}</td><td class="code">${genShort}</td><td>${v.locks_count} Sperren</td><td>${sBadge}</td><td><button class="btn btn-secondary" onclick="openVoucherInspector('${v.voucher_id}')">🔍 Wurzel-Inspektor</button></td></tr>`;
+          const safeVoucherId = escapeHtml(v.voucher_id || '');
+          html += `<tr><td><strong>${safeVoucherId}</strong></td><td>${escapeHtml(v.root_valid_until_formatted)}</td><td class="code">${escapeHtml(genShort)}</td><td>${escapeHtml(v.locks_count)} Sperren</td><td>${sBadge}</td><td><button class="btn btn-secondary" data-voucher="${safeVoucherId}" onclick="openVoucherInspector(this.getAttribute('data-voucher'))">🔍 Wurzel-Inspektor</button></td></tr>`;
         }
         vouchersTbody.innerHTML = html;
       } else {
@@ -677,12 +888,14 @@ async function refreshDashboard() {
           const pShort = truncateHash(l.parent_lock_hex);
           const cShort = truncateHash(l.child_lock_hex);
           let tierBadge = badge('cyan', 'P2P Sync');
-          if (l.tier === 'VIP') tierBadge = badge('purple', `VIP (${l.byte_years || 0} BY)`);
-          else if (l.tier === 'F2F') tierBadge = badge('blue', `F2F (${l.byte_years || 0} BY)`);
+          if (l.tier === 'VIP') tierBadge = badge('purple', `VIP (${escapeHtml(l.byte_years || 0)} BY)`);
+          else if (l.tier === 'F2F') tierBadge = badge('blue', `F2F (${escapeHtml(l.byte_years || 0)} BY)`);
           else if (l.tier === 'Free') tierBadge = badge('green', 'Free (PoW)');
           else if (l.tier) tierBadge = badge('cyan', l.tier);
-          const vLink = l.voucher_id ? `<button class="btn btn-secondary" style="padding:0.15rem 0.4rem;font-size:0.75rem;" onclick="openVoucherInspector('${l.voucher_id}')">🎟️ ${truncateHash(l.voucher_id)}</button>` : '<span style="color:var(--text-muted);">-</span>';
-          html += `<tr><td>${l.timestamp_ms}</td><td>${codeTag(pShort, l.parent_lock_hex)}</td><td>${codeTag(cShort, l.child_lock_hex)}</td><td>${tierBadge}</td><td>${vLink}</td><td>${b}</td><td><button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" onclick="openLockInspector('${l.parent_lock_hex}')">📄 JSON</button></td></tr>`;
+          const safeVoucherId = l.voucher_id ? escapeHtml(l.voucher_id) : '';
+          const safeParentHex = escapeHtml(l.parent_lock_hex || '');
+          const vLink = l.voucher_id ? `<button class="btn btn-secondary" style="padding:0.15rem 0.4rem;font-size:0.75rem;" data-voucher="${safeVoucherId}" onclick="openVoucherInspector(this.getAttribute('data-voucher'))">🎟️ ${escapeHtml(truncateHash(l.voucher_id))}</button>` : '<span style="color:var(--text-muted);">-</span>';
+          html += `<tr><td>${escapeHtml(l.timestamp_ms)}</td><td>${codeTag(pShort, l.parent_lock_hex)}</td><td>${codeTag(cShort, l.child_lock_hex)}</td><td>${tierBadge}</td><td>${vLink}</td><td>${b}</td><td><button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-parent="${safeParentHex}" onclick="openLockInspector(this.getAttribute('data-parent'))">📄 JSON</button></td></tr>`;
         }
         locksTbody.innerHTML = html;
       } else {
@@ -765,12 +978,28 @@ function renderHistoryChart(points) {
   const f2fPts = getPointsStr(p => p.f2f_writes || 0);
   const vipPts = getPointsStr(p => p.vip_writes || 0);
   const readPts = getPointsStr(p => (p.read_count || 0) / 5);
+  const tStart = points[0].timestamp_sec ? formatHHMMSS(new Date(points[0].timestamp_sec * 1000)) : '';
+  const tEnd = points[len - 1].timestamp_sec ? formatHHMMSS(new Date(points[len - 1].timestamp_sec * 1000)) : '';
+
+  let hoverDots = '';
+  for (let i = 0; i < len; i++) {
+    const p = points[i];
+    const x = len > 1 ? (i / (len - 1)) * (w - 20) + 10 : w / 2;
+    const yFree = h - 20 - (((p.free_writes || 0) / maxVal) * (h - 40));
+    const timeStr = p.timestamp_sec ? new Date(p.timestamp_sec * 1000).toLocaleTimeString() : '';
+    hoverDots += `<circle cx="${x.toFixed(1)}" cy="${yFree.toFixed(1)}" r="3" fill="var(--green)" opacity="0.6"><title>${timeStr} - Free: ${p.free_writes || 0}, F2F: ${p.f2f_writes || 0}, VIP: ${p.vip_writes || 0}, Reads: ${p.read_count || 0}</title></circle>`;
+  }
 
   container.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:100%;display:block;">
       <!-- Grid lines -->
       <line x1="10" y1="${h-20}" x2="${w-10}" y2="${h-20}" stroke="var(--border)" stroke-width="1" />
       <line x1="10" y1="${(h-20)/2}" x2="${w-10}" y2="${(h-20)/2}" stroke="var(--border)" stroke-width="1" stroke-dasharray="3,3" />
+      <!-- Labels -->
+      <text x="14" y="16" fill="var(--text-muted)" font-size="10" font-family="sans-serif">Max: ${Math.round(maxVal)} Writes/min</text>
+      <text x="14" y="${h-6}" fill="var(--text-muted)" font-size="10" font-family="sans-serif">0</text>
+      <text x="50" y="${h-6}" fill="var(--text-muted)" font-size="10" font-family="sans-serif">${tStart}</text>
+      <text x="${w-70}" y="${h-6}" fill="var(--text-muted)" font-size="10" font-family="sans-serif">${tEnd}</text>
       <!-- Reads line (Cyan) -->
       <polyline points="${readPts}" fill="none" stroke="var(--cyan)" stroke-width="2" stroke-dasharray="2,2" />
       <!-- VIP line (Purple) -->
@@ -779,6 +1008,8 @@ function renderHistoryChart(points) {
       <polyline points="${f2fPts}" fill="none" stroke="var(--blue)" stroke-width="2" />
       <!-- Free line (Green) -->
       <polyline points="${freePts}" fill="none" stroke="var(--green)" stroke-width="2" />
+      <!-- Hover data points -->
+      ${hoverDots}
     </svg>
   `;
 }
@@ -839,6 +1070,57 @@ function filterEventsTable() {
   }
   tbody.innerHTML = html;
 }
+
+function exportAuditLogJson() {
+  if (!cachedAuditEvents || cachedAuditEvents.length === 0) {
+    showToast('Keine Ereignisse zum Exportieren vorhanden', 'warning');
+    return;
+  }
+  const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(cachedAuditEvents, null, 2));
+  const a = document.createElement('a');
+  a.setAttribute('href', dataStr);
+  a.setAttribute('download', `humoco-audit-log-${new Date().toISOString().slice(0, 10)}.json`);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  showToast('JSON-Audit-Log heruntergeladen', 'success');
+}
+
+function exportAuditLogCsv() {
+  if (!cachedAuditEvents || cachedAuditEvents.length === 0) {
+    showToast('Keine Ereignisse zum Exportieren vorhanden', 'warning');
+    return;
+  }
+  const header = ['ID', 'Timestamp_Sec', 'Date_Time', 'Kind', 'Severity', 'Message'];
+  const rows = cachedAuditEvents.map(e => [
+    e.id,
+    e.timestamp_sec,
+    new Date(e.timestamp_sec * 1000).toISOString(),
+    `"${(e.kind || '').replace(/"/g, '""')}"`,
+    `"${(e.severity || '').replace(/"/g, '""')}"`,
+    `"${(e.message || '').replace(/"/g, '""')}"`
+  ]);
+  const csvContent = [header.join(','), ...rows.map(r => r.join(','))].join('\r\n');
+  const dataStr = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvContent);
+  const a = document.createElement('a');
+  a.setAttribute('href', dataStr);
+  a.setAttribute('download', `humoco-audit-log-${new Date().toISOString().slice(0, 10)}.csv`);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  showToast('CSV-Audit-Log heruntergeladen', 'success');
+}
+
+// Background tab throttling (Page Visibility API)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    pollIntervalMs = 10000;
+  } else {
+    pollIntervalMs = 2000;
+    if (pollTimer) clearTimeout(pollTimer);
+    refreshDashboard();
+  }
+});
 
 // Offline air-gap QR Code Generator (ISO/IEC 18004 Byte Mode, Level L, zero CDN)
 function generateQrSvg(text) {
@@ -1041,6 +1323,7 @@ function startPhase2Pollers() {
   eventsPollTimer = setInterval(fetchAuditEvents, 10000);
 }
 
+checkInactivityOnLoad();
 updateAdminUI();
 refreshDashboard();
 startPhase2Pollers();

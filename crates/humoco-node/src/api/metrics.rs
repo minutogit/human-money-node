@@ -95,6 +95,10 @@ pub struct NodeMetrics {
     pub pos_latency_count: AtomicU64,
     pub pos_latency_sum_micros: AtomicU64,
     pub locks_rejected: AtomicU64,
+    pub rejected_conflict_409: AtomicU64,
+    pub rejected_capacity_429: AtomicU64,
+    pub rejected_quota_429: AtomicU64,
+    pub rejected_bad_pow_400: AtomicU64,
     pub total_writes: AtomicU64,
     pub total_reads: AtomicU64,
     pub ttl_purged_count: AtomicU64,
@@ -130,6 +134,46 @@ impl NodeMetrics {
     /// Records a rejected lock due to conflict (409) or backpressure/quota (429).
     pub fn record_lock_rejected(&self) {
         self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a rejected lock specifically due to double-spend conflict (409 Conflict).
+    pub fn record_rejected_conflict_409(&self) {
+        self.rejected_conflict_409.fetch_add(1, Ordering::Relaxed);
+        self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a rejected lock due to storage backpressure / queue full (429 Too Many Requests).
+    pub fn record_rejected_capacity_429(&self) {
+        self.rejected_capacity_429.fetch_add(1, Ordering::Relaxed);
+        self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a rejected lock due to VIP/F2F quota exhaustion (429 Too Many Requests).
+    pub fn record_rejected_quota_429(&self) {
+        self.rejected_quota_429.fetch_add(1, Ordering::Relaxed);
+        self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a rejected lock due to invalid, missing or weak Proof of Work (400 / 429).
+    pub fn record_rejected_bad_pow_400(&self) {
+        self.rejected_bad_pow_400.fetch_add(1, Ordering::Relaxed);
+        self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn rejected_conflict_409(&self) -> u64 {
+        self.rejected_conflict_409.load(Ordering::Relaxed)
+    }
+
+    pub fn rejected_capacity_429(&self) -> u64 {
+        self.rejected_capacity_429.load(Ordering::Relaxed)
+    }
+
+    pub fn rejected_quota_429(&self) -> u64 {
+        self.rejected_quota_429.load(Ordering::Relaxed)
+    }
+
+    pub fn rejected_bad_pow_400(&self) -> u64 {
+        self.rejected_bad_pow_400.load(Ordering::Relaxed)
     }
 
     /// Increments the total write transactions counter.
@@ -321,6 +365,39 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     body.push_str("# HELP humoco_free_tier_enabled Whether free tier PoW ingress is enabled on this node (1 = true, 0 = false)\n");
     body.push_str("# TYPE humoco_free_tier_enabled gauge\n");
     body.push_str(&format!("humoco_free_tier_enabled {}\n", free_tier_enabled));
+
+    // Rejections breakdown
+    body.push_str("# HELP humoco_rejections_total Total number of rejected requests by reason\n");
+    body.push_str("# TYPE humoco_rejections_total counter\n");
+    body.push_str(&format!("humoco_rejections_total{{reason=\"conflict_409\"}} {}\n", state.metrics.rejected_conflict_409.load(Ordering::Relaxed)));
+    body.push_str(&format!("humoco_rejections_total{{reason=\"capacity_429\"}} {}\n", state.metrics.rejected_capacity_429.load(Ordering::Relaxed)));
+    body.push_str(&format!("humoco_rejections_total{{reason=\"quota_429\"}} {}\n", state.metrics.rejected_quota_429.load(Ordering::Relaxed)));
+    body.push_str(&format!("humoco_rejections_total{{reason=\"bad_pow_400\"}} {}\n", state.metrics.rejected_bad_pow_400.load(Ordering::Relaxed)));
+
+    // Persistence stats
+    body.push_str("# HELP humoco_persistence_flush_batches_total Total successful persistence flush batches\n");
+    body.push_str("# TYPE humoco_persistence_flush_batches_total counter\n");
+    body.push_str(&format!("humoco_persistence_flush_batches_total {}\n", state.engine.stats.flush_batches_total.load(Ordering::Relaxed)));
+
+    body.push_str("# HELP humoco_persistence_flush_ops_total Total persistence flush operations\n");
+    body.push_str("# TYPE humoco_persistence_flush_ops_total counter\n");
+    body.push_str(&format!("humoco_persistence_flush_ops_total {}\n", state.engine.stats.flush_ops_total.load(Ordering::Relaxed)));
+
+    body.push_str("# HELP humoco_persistence_flush_errors_total Total persistence flush errors\n");
+    body.push_str("# TYPE humoco_persistence_flush_errors_total counter\n");
+    body.push_str(&format!("humoco_persistence_flush_errors_total {}\n", state.engine.stats.flush_errors_total.load(Ordering::Relaxed)));
+
+    // Health status gauge: 0 = Ok, 1 = Warn, 2 = Crit
+    let health_level = if peers_connected == 0 && !state.is_simulation {
+        2 // Crit
+    } else if flush_queue_depth > 1000 || !state.metrics.local_stats().sla_compliant {
+        1 // Warn
+    } else {
+        0 // Ok
+    };
+    body.push_str("# HELP humoco_health_status Node health evaluation level (0=Ok, 1=Warn, 2=Crit)\n");
+    body.push_str("# TYPE humoco_health_status gauge\n");
+    body.push_str(&format!("humoco_health_status {}\n", health_level));
 
     (
         StatusCode::OK,

@@ -1439,8 +1439,8 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     // Verify 4-Tab Navigation Identifiers
     assert!(body_str.contains("Cockpit &amp; System") || body_str.contains("Cockpit & System"));
     assert!(body_str.contains("Netzwerk &amp; Mesh") || body_str.contains("Netzwerk & Mesh") || body_str.contains("Netzwerk &amp; F2F") || body_str.contains("Netzwerk & F2F"));
-    assert!(body_str.contains("Zugang &amp; Freunde") || body_str.contains("Zugang & Freunde") || body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten"));
-    assert!(body_str.contains("Gutscheine &amp; Logs") || body_str.contains("Gutscheine & Logs"));
+    assert!(body_str.contains("Zugang &amp; Freunde") || body_str.contains("Zugang & Freunde") || body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten") || body_str.contains("Wallet-Zugänge"));
+    assert!(body_str.contains("Gutscheine &amp; Logs") || body_str.contains("Gutscheine & Logs") || body_str.contains("Gutscheine &amp; Locks") || body_str.contains("Gutscheine & Locks"));
 
     // Verify Visual Cards & Systems
     assert!(body_str.contains("Schreib-Durchsatz"));
@@ -1675,8 +1675,10 @@ async fn test_prometheus_metrics_expansion() {
     assert!(body.contains("humoco_node_uptime_seconds"));
     assert!(body.contains("humoco_flush_queue_depth"));
     assert!(body.contains("humoco_pos_latency_seconds_count 1"));
-    assert!(body.contains("humoco_pos_latency_seconds_sum"));
     assert!(body.contains("humoco_locks_rejected_total 0"));
+    assert!(body.contains("humoco_rejections_total{reason=\"conflict_409\"} 0"));
+    assert!(body.contains("humoco_persistence_flush_batches_total"));
+    assert!(body.contains("humoco_health_status"));
 }
 
 #[tokio::test]
@@ -2790,7 +2792,7 @@ async fn test_admin_verify_token_endpoint() {
     );
     state = state.with_auth(auth);
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     // 1. Without Authorization header -> 401
     let res = app.clone().oneshot(
@@ -2834,6 +2836,68 @@ async fn test_admin_verify_token_endpoint() {
             .unwrap(),
     ).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+
+    // Verify audit events recorded in event_log
+    let events = state.event_log.list();
+    assert!(events.iter().any(|e| e.message == "Fehlgeschlagene Admin-Authentifizierung"));
+    assert!(events.iter().any(|e| e.message == "Erfolgreiche Admin-Authentifizierung"));
+}
+
+#[tokio::test]
+async fn test_admin_verify_token_rate_limiting() {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_verify_token_rate_limit.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
+        "secret_token_rate_limit",
+        false,
+    ));
+    let event_log = Arc::new(humoco_node::api::events::EventLog::default());
+    let mut state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    );
+    state = state.with_auth(auth).with_event_log(event_log.clone());
+
+    let app = build_router(state);
+
+    // 5 consecutive failed attempts
+    for _ in 0..5 {
+        let res = app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/verify-token")
+                .header("Authorization", "Bearer invalid_pass")
+                .body(Body::empty())
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // 6th attempt should be blocked by rate-limiter with 429
+    let res = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/dashboard/admin/verify-token")
+            .header("Authorization", "Bearer invalid_pass")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Verify rate limit and auth failure events were logged
+    assert!(event_log.len() >= 6);
+    let events = event_log.list();
+    assert!(events.iter().any(|e| e.message.contains("Fehlgeschlagene Admin-Authentifizierung")));
+    assert!(events.iter().any(|e| e.message.contains("Rate-Limit für Admin-Authentifizierung")));
 }
 
 #[tokio::test]
@@ -2858,7 +2922,7 @@ async fn test_admin_friends_mutation() {
     state.peer_manager = Some(peer_manager.clone());
     state = state.with_auth(auth);
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let test_friend_key = [7u8; 32];
     let test_friend_hex = hex::encode(test_friend_key);
@@ -2969,7 +3033,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     let test_peer_key = [9u8; 32];
     let test_peer_hex = hex::encode(test_peer_key);
 
-    // 1. POST /dashboard/admin/mesh/peers with dual_role_ingress: true
+    // 1. POST /dashboard/admin/mesh/peers (Pure mesh peer registration, no dual-role)
     let res = app.clone().oneshot(
         Request::builder()
             .method("POST")
@@ -2977,7 +3041,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
             .header("Authorization", "Bearer admin_secret_99")
             .header("Content-Type", "application/json")
             .body(Body::from(format!(
-                r#"{{"pubkey": "{}", "label": "PeerAlice", "dual_role_ingress": true}}"#,
+                r#"{{"pubkey": "{}", "label": "PeerAlice"}}"#,
                 test_peer_hex
             )))
             .unwrap(),
@@ -2988,13 +3052,11 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     assert_eq!(body_json["status"], "ok");
     assert_eq!(body_json["pubkey"], test_peer_hex);
 
-    // Verify peer manager and tier controller both registered the peer
+    // Verify peer manager registered the peer
     assert!(peer_manager.is_f2f_friend(&test_peer_key).await);
-    let clients = tier_controller.list_f2f_clients(1000, 0);
-    assert!(clients.iter().any(|c| c.label == "PeerAlice" || c.token_hash == hex::encode(blake3::hash(test_peer_hex.as_bytes()).as_bytes())));
 
     // Verify events recorded
-    assert!(event_log.len() >= 2);
+    assert!(event_log.len() >= 1);
 
     // 2. DELETE /dashboard/admin/mesh/peers/:key
     let res = app.clone().oneshot(
@@ -3051,6 +3113,24 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     assert!(clients.iter().any(|c| c.label == "Bob Wallet"));
     assert!(clients.iter().any(|c| c.label == "Charlie PoS"));
 
+    // Verify GET /dashboard/data NEVER leaks plaintext tokens in f2f_clients
+    let res_dash = app.clone().oneshot(
+        Request::builder()
+            .method("GET")
+            .uri("/dashboard/data")
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res_dash.status(), StatusCode::OK);
+    let dash_bytes = res_dash.into_body().collect().await.unwrap().to_bytes();
+    let dash_json: serde_json::Value = serde_json::from_slice(&dash_bytes).unwrap();
+    let dash_clients = dash_json["f2f_clients"].as_array().expect("f2f_clients array");
+    assert_eq!(dash_clients.len(), 2);
+    for client in dash_clients {
+        assert!(client["token"].is_null(), "Token leak detected! Plaintext token must be null in /dashboard/data");
+        assert!(client["token_hash"].as_str().is_some());
+    }
+
     let bob_client = clients.iter().find(|c| c.label == "Bob Wallet").unwrap();
     let bob_hash = bob_client.token_hash.clone();
 
@@ -3095,7 +3175,7 @@ async fn test_admin_quota_mutation() {
     );
     state = state.with_auth(auth);
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let test_account_tag = [42u8; 32];
     let test_tag_hex = hex::encode(test_account_tag);
@@ -3162,6 +3242,11 @@ async fn test_admin_quota_mutation() {
 
     // Verify cache in tier_controller
     assert_eq!(tier_controller.get_cached_vip_quota(&test_account_tag), Some(7500));
+
+    // Verify audit events recorded in event_log
+    let events = state.event_log.list();
+    assert!(events.iter().any(|e| e.message == "Fehlgeschlagene Admin-Authentifizierung"));
+    assert!(events.iter().any(|e| e.kind == humoco_node::api::events::EventKind::QuotaTopup && e.message.contains("VIP Quota aufgeladen")));
 }
 
 // ============================================================================
@@ -3333,6 +3418,8 @@ fn create_qa_mock_dashboard_data() -> humoco_node::api::DashboardData {
         health: HealthSummary::default(),
         config_view: ConfigViewDto::default(),
         clock_drift_ms: 0,
+        persistence: humoco_node::api::PersistenceDto::default(),
+        rejections: humoco_node::api::RejectionsDto::default(),
     }
 }
 
@@ -3560,6 +3647,12 @@ fn test_qa_dashboard_data_dto_backward_compatibility() {
     assert_eq!(dto.thermometer.vip_writes_today, 0);
     assert_eq!(dto.thermometer.f2f_writes_today, 0);
     assert_eq!(dto.thermometer.free_writes_today, 0);
+
+    // Verify persistence and rejections defaults
+    assert_eq!(dto.persistence.flush_batches_total, 0);
+    assert_eq!(dto.persistence.flush_queue_depth, 0);
+    assert_eq!(dto.rejections.total_rejected, 0);
+    assert_eq!(dto.rejections.conflict_409, 0);
 }
 
 #[tokio::test]

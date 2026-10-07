@@ -435,7 +435,7 @@ impl TierController {
                 daily_limit,
                 whale_brake_active,
                 last_active_sec,
-                token: Some(meta.token.clone()),
+                token: None,
             });
         }
 
@@ -816,6 +816,7 @@ mod tests {
         assert_eq!(c.daily_limit, 960_000);
         assert!(!c.whale_brake_active);
         assert_eq!(c.last_active_sec, None);
+        assert_eq!(c.token, None);
 
         // Perform an authenticated F2F write
         let tier = controller

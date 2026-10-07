@@ -14,8 +14,8 @@ pub mod system_stats;
 pub use auth::AdminTokenManager;
 pub use dashboard::{
     dashboard_data, render_dashboard, ConfigViewDto, DashboardData, DashboardDataDto,
-    F2fClientDto, F2fFriendDto, F2fOverviewDto, RecentLockDto, ShardScoreSampleDto,
-    ThermometerStatsDto, TierOverviewDto, TierSharesDto, VipAccountDto,
+    F2fClientDto, F2fFriendDto, F2fOverviewDto, PersistenceDto, RecentLockDto, RejectionsDto,
+    ShardScoreSampleDto, ThermometerStatsDto, TierOverviewDto, TierSharesDto, VipAccountDto,
 };
 pub use events::{EventItem, EventKind, EventLog, EVENT_LOG_CAPACITY};
 pub use health::{evaluate_health, HealthItem, HealthLevel, HealthSummary};

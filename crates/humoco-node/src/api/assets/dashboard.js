@@ -428,6 +428,49 @@ function copyMyPubkey() {
   const text = $('my-pubkey-text')?.innerText || '';
   navigator.clipboard.writeText(text).then(() => showToast('NodePubKey kopiert', 'success')).catch(() => {});
 }
+function copyHealthDiagnosis() {
+  const d = currentDashboardData;
+  if (!d) {
+    showToast('Keine Diagnosedaten verfügbar', 'warning');
+    return;
+  }
+  const driftStr = d.clock_drift_ms != null ? `${d.clock_drift_ms > 0 ? '+' : ''}${d.clock_drift_ms} ms` : 'N/A';
+  const inRamLat = d.local_latency?.avg_ms != null ? d.local_latency.avg_ms.toFixed(2) + ' ms' : 'N/A';
+  const quorumLat = d.quorum_latency?.avg_ms != null ? d.quorum_latency.avg_ms.toFixed(2) + ' ms' : 'N/A';
+  const e2eLat = d.e2e_latency?.avg_ms != null ? d.e2e_latency.avg_ms.toFixed(2) + ' ms' : 'N/A';
+  const peersStr = `${d.connected_peers ?? 0}/${d.configured_peers ?? 0} verbunden (Netz N=${(d.active_nodes_count || 0) + 1})`;
+
+  const lines = [
+    '=== HuMoCo Node Systemdiagnose ===',
+    `Node ID: ${d.node_id || 'unbekannt'}`,
+    `Status: ${d.status_badge || d.status || 'unbekannt'}`,
+    `Health Level: ${d.health?.level || 'Ok'}`,
+    `Clock Drift: ${driftStr}`,
+    `Peers: ${peersStr}`,
+    `Latenzen: In-RAM ${inRamLat} | Quorum ${quorumLat} | Kasse/E2E ${e2eLat}`,
+    ''
+  ];
+
+  const items = d.health?.items || [];
+  if (items.length > 0) {
+    lines.push('Aktive Diagnose-Meldungen:');
+    for (const item of items) {
+      lines.push(`- [${item.severity}] ${item.code}: ${item.message_de}`);
+      if (item.hint_de) {
+        lines.push(`  Hinweis: ${item.hint_de}`);
+      }
+    }
+  } else {
+    lines.push('Aktive Diagnose-Meldungen: Keine (Alle Systeme nominal)');
+  }
+
+  const text = lines.join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('Systemdiagnose in die Zwischenablage kopiert', 'success');
+  }).catch(() => {
+    showToast('Fehler beim Kopieren der Diagnose', 'error');
+  });
+}
 function closeModal(modalId) {
   const m = $(modalId);
   if (m) m.classList.remove('active');
@@ -515,12 +558,22 @@ function copyNodePubkey() {
   const el = $('node-modal-pubkey');
   if (el) navigator.clipboard.writeText(el.innerText).then(() => showToast('NodePubKey in Zwischenablage kopiert', 'success')).catch(() => {});
 }
+let currentPeerFilter = 'ALL';
+function setPeerFilter(filter) {
+  currentPeerFilter = filter;
+  document.querySelectorAll('.filter-chips .chip').forEach(c => c.classList.remove('active'));
+  $('chip-' + filter.toLowerCase())?.classList.add('active');
+  filterNodesTable();
+}
 function filterNodesTable() {
   const term = $('node-search-input')?.value.trim().toLowerCase();
   const nodesTbody = $('nodes-tbody');
   if (!currentDashboardData?.network_nodes || !nodesTbody) return;
   let html = '';
   for (const n of currentDashboardData.network_nodes) {
+    if (currentPeerFilter === 'F2F' && !n.is_f2f) continue;
+    if (currentPeerFilter === 'SHARD' && (n.is_local || n.is_f2f)) continue;
+    if (currentPeerFilter === 'INCUBATING' && !n.is_immature) continue;
     if (term) {
       const m = n.public_key.toLowerCase().includes(term) || n.address.toLowerCase().includes(term) || n.connection_status.toLowerCase().includes(term) || n.hrw_routing_id.toLowerCase().includes(term);
       if (!m) continue;
@@ -660,6 +713,11 @@ async function refreshDashboard() {
     setText('hdr-quorum', d.quorum_display || '');
     setText('hdr-shard', d.shard_mode);
     setText('shard-status-sub', d.shard_mode);
+    const respRatio = d.shard_responsibility_ratio || 0;
+    const totalShards = d.total_shards || 65536;
+    const respCount = Math.round(respRatio * totalShards);
+    const respPct = (respRatio * 100).toFixed(1);
+    setText('shard-resp-summary', `Aktive Zuständigkeit: ca. ${respCount.toLocaleString()} von ${totalShards.toLocaleString()} Shards (${respPct}%)`);
     const cv = d.config_view;
     if (cv) {
       setText('hdr-ports', `${cv.api_port}/${cv.p2p_port}`);
@@ -1016,6 +1074,7 @@ async function refreshDashboard() {
 let currentHistoryWindow = '24h';
 let cachedHistoryPoints = [];
 let cachedAuditEvents = [];
+let cachedFilteredAuditEvents = null;
 let eventsPollTimer = null;
 let historyPollTimer = null;
 
@@ -1127,6 +1186,7 @@ function filterEventsTable() {
 
   const search = $('event-search-input')?.value.trim().toLowerCase() || '';
   const severityFilter = $('event-severity-filter')?.value || 'ALL';
+  const isFiltered = Boolean(search || severityFilter !== 'ALL');
 
   const filtered = cachedAuditEvents.filter(ev => {
     if (severityFilter !== 'ALL' && ev.severity !== severityFilter) return false;
@@ -1138,7 +1198,15 @@ function filterEventsTable() {
     return true;
   });
 
-  if (countSub) countSub.innerText = `${cachedAuditEvents.length} Ereignisse geloggt (Ringbuffer max 1000)`;
+  cachedFilteredAuditEvents = isFiltered ? filtered : null;
+
+  if (countSub) {
+    if (isFiltered) {
+      countSub.innerText = `${filtered.length} von ${cachedAuditEvents.length} Ereignissen gefiltert (Ringbuffer max 1000)`;
+    } else {
+      countSub.innerText = `${cachedAuditEvents.length} Ereignisse geloggt (Ringbuffer max 1000)`;
+    }
+  }
 
   if (filtered.length === 0) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine passenden Audit-Ereignisse gefunden.</td></tr>';
@@ -1166,11 +1234,12 @@ function filterEventsTable() {
 }
 
 function exportAuditLogJson() {
-  if (!cachedAuditEvents || cachedAuditEvents.length === 0) {
+  const list = cachedFilteredAuditEvents || cachedAuditEvents;
+  if (!list || list.length === 0) {
     showToast('Keine Ereignisse zum Exportieren vorhanden', 'warning');
     return;
   }
-  const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(cachedAuditEvents, null, 2));
+  const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(list, null, 2));
   const a = document.createElement('a');
   a.setAttribute('href', dataStr);
   a.setAttribute('download', `humoco-audit-log-${new Date().toISOString().slice(0, 10)}.json`);
@@ -1181,12 +1250,13 @@ function exportAuditLogJson() {
 }
 
 function exportAuditLogCsv() {
-  if (!cachedAuditEvents || cachedAuditEvents.length === 0) {
+  const list = cachedFilteredAuditEvents || cachedAuditEvents;
+  if (!list || list.length === 0) {
     showToast('Keine Ereignisse zum Exportieren vorhanden', 'warning');
     return;
   }
   const header = ['ID', 'Timestamp_Sec', 'Date_Time', 'Kind', 'Severity', 'Message'];
-  const rows = cachedAuditEvents.map(e => [
+  const rows = list.map(e => [
     e.id,
     e.timestamp_sec,
     new Date(e.timestamp_sec * 1000).toISOString(),

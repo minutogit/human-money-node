@@ -184,6 +184,12 @@ Before writing new code for a new feature or requirement, apply this test:
    * P2P mesh edges (`f2f_friends`, QUIC port 9090) are purely node-to-node infrastructure for gossip and topology awareness. They have zero connection to client ingress.
    * Full nodes participate in shard RPC directly and never submit locks as clients via another node's HTTP port 8080.
    * A node's public key (`NodePubKey`) must NEVER be registered or accepted as an ingress bearer token (prevents unauthorized PoW bypass by third parties who learn the public key via gossip). Client friend tokens are strictly random 128-bit secrets (`f2f_<hex>`).
+5. **KISS Dashboard Boundary & Anti-Bloat Guardrail:**
+   * The web dashboard is strictly an offline, air-gapped diagnostic window (< 128 KiB).
+   * It is NOT an operating system terminal: Live tracing/stderr logs belong to `systemd` / `journalctl` / OS stdout, NOT in in-memory web log buffers.
+   * It is NOT a backup orchestrator: Hot backups run via `cron` / scripts through the local UNIX control socket (`/tmp/humoco.sock`), NOT via manual browser clicks.
+   * TTL pruning is strictly automatic (Spec 12/14); manual "prune now" buttons are prohibited placebos.
+   * No cosmetic gimmicks: No pulsing dots, no vim-like keyboard navigation traps. Pure substance only.
 
 ---
 

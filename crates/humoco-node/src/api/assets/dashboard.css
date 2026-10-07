@@ -97,3 +97,6 @@ span[title]{cursor:help;border-bottom:1px dotted var(--text-muted)}
 .callout-info{background:var(--blue-bg);border:1px solid rgba(59,130,246,0.3);color:var(--text)}
 .callout-link,.callout a{color:var(--cyan);text-decoration:none;font-weight:600}
 .callout-link:hover,.callout a:hover{text-decoration:underline}
+.chip{background:var(--surface-alt);border:1px solid var(--border);color:var(--text-muted);border-radius:9999px;padding:0.2rem 0.65rem;font-size:0.75rem;font-weight:600;cursor:pointer;transition:all 0.15s}
+.chip:hover{background:var(--surface-hover);color:var(--text)}
+.chip.active{background:var(--blue-bg);color:var(--blue);border-color:rgba(59,130,246,0.4)}

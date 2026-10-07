@@ -89,3 +89,7 @@ footer{margin-top:2rem;text-align:center;font-size:0.75rem;color:var(--text-mute
 .progress-fill.fill-green{background:var(--green)}
 .progress-fill.fill-amber{background:var(--amber)}
 .progress-fill.fill-red{background:var(--red)}
+.btn.paused{background:var(--amber-bg);color:var(--amber);border-color:rgba(245,158,11,0.4)}
+#poll-pause-btn{min-width:95px;justify-content:center}
+#sys-disk-bar{transition:width 0.3s ease, background-color 0.3s ease}
+span[title]{cursor:help;border-bottom:1px dotted var(--text-muted)}

@@ -1427,7 +1427,7 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
 
     // Verify branding & live status badge
     assert!(body_str.contains("HuMoCo Node Control Center (v2.0)"));
-    assert!(body_str.contains("VILLAGE MODE") || body_str.contains("ONLINE") || body_str.contains("HEALTHY"));
+    assert!(body_str.contains("STANDALONE") || body_str.contains("COMMUNITY") || body_str.contains("VILLAGE MODE") || body_str.contains("ONLINE") || body_str.contains("HEALTHY"));
 
     // Verify 3-Tier Latencies Pills & Fast Stats
     assert!(body_str.contains("In-RAM"));
@@ -1456,6 +1456,9 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("Aktive Gutschein-Wurzeln"));
     assert!(body_str.contains("qr-svg"));
     assert!(body_str.contains("Kopieren") || body_str.contains("Copy"));
+    assert!(body_str.contains("poll-pause-btn"));
+    assert!(body_str.contains("sys-disk-bar"));
+    assert!(body_str.contains("shards-tbody"));
 
     // Verify Modals & Search bar
     assert!(body_str.contains("voucher-modal"));
@@ -1496,6 +1499,8 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(data_json.get("total_writes").is_some());
     assert!(data_json.get("total_reads").is_some());
     assert!(data_json.get("total_active_vouchers_count").is_some());
+    assert!(data_json.get("disk_free_gb").is_some());
+    assert!(data_json.get("quorum_display").is_some());
 
     // Test GET /dashboard/voucher/unknown_voucher
     let res_v = app
@@ -3362,10 +3367,19 @@ fn create_qa_mock_dashboard_data() -> humoco_node::api::DashboardData {
         shard_subnet_dominance_max: 0.2,
         free_tier_enabled: true,
         warnings: Vec::new(),
-        total_shards: 1024,
-        shard_mode: "Global Mesh".to_string(),
+        total_shards: 65536,
+        shard_mode: "Community-Mesh (N < 20)".to_string(),
         shard_responsibility_ratio: 1.0,
-        sample_shard_scores: Vec::new(),
+        sample_shard_scores: vec![
+            ShardScoreSampleDto {
+                shard_id: 0,
+                score: 0.85,
+                is_responsible: true,
+                rank: 1,
+            },
+        ],
+        disk_free_gb: 10.0,
+        quorum_display: "14/20 (Final)".to_string(),
         network_nodes: Vec::new(),
         total_active_vouchers_count: 1,
         active_vouchers: Vec::new(),
@@ -3653,6 +3667,77 @@ fn test_qa_dashboard_data_dto_backward_compatibility() {
     assert_eq!(dto.persistence.flush_queue_depth, 0);
     assert_eq!(dto.rejections.total_rejected, 0);
     assert_eq!(dto.rejections.conflict_409, 0);
+
+    // Verify Phase 5 dashboard fields backward compatibility
+    assert_eq!(dto.disk_free_gb, 0.0);
+    assert_eq!(dto.quorum_display, "");
+
+    // Verify ShardScoreSampleDto backward compatibility without rank field
+    use humoco_node::api::ShardScoreSampleDto;
+    let legacy_shard_json = r#"{"shard_id": 42, "score": 0.85, "is_responsible": true}"#;
+    let parsed_shard: Result<ShardScoreSampleDto, _> = serde_json::from_str(legacy_shard_json);
+    assert!(parsed_shard.is_ok(), "Failed to deserialize legacy ShardScoreSampleDto: {:?}", parsed_shard.err());
+    let shard_dto = parsed_shard.unwrap();
+    assert_eq!(shard_dto.shard_id, 42);
+    assert_eq!(shard_dto.score, 0.85);
+    assert!(shard_dto.is_responsible);
+    assert_eq!(shard_dto.rank, 0);
+}
+
+#[test]
+fn test_qa_dashboard_status_badges_and_quorum_display() {
+    let compute_badge_and_quorum = |connected_peers: usize, configured_peers: usize, total_active: usize, is_stable_24h: bool| -> (String, String, String) {
+        let (status, status_badge) = if connected_peers == 0 && configured_peers > 0 {
+            ("DEGRADED".to_string(), "DEGRADED (0 Peers)".to_string())
+        } else if total_active == 1 || configured_peers == 0 {
+            ("STANDALONE".to_string(), "STANDALONE (N=1, PROVISIONAL)".to_string())
+        } else if total_active < 20 {
+            ("COMMUNITY MESH".to_string(), format!("COMMUNITY-MESH (N={}, PROVISIONAL)", total_active))
+        } else if !is_stable_24h {
+            ("STABILIZING".to_string(), "WELTNETZ (24h-Stabilisierung)".to_string())
+        } else {
+            ("ONLINE".to_string(), "WELTNETZ (FINAL)".to_string())
+        };
+
+        let (required_q, _) = humoco_sim_core::types::required_quorum(total_active);
+        let quorum_display = if total_active < 20 {
+            format!("{}/{} (Prov)", required_q, total_active)
+        } else {
+            "14/20 (Final)".to_string()
+        };
+
+        (status, status_badge, quorum_display)
+    };
+
+    // 1. DEGRADED (configured > 0 but 0 connected)
+    let (s, b, q) = compute_badge_and_quorum(0, 3, 1, false);
+    assert_eq!(s, "DEGRADED");
+    assert_eq!(b, "DEGRADED (0 Peers)");
+    assert_eq!(q, "1/1 (Prov)");
+
+    // 2. STANDALONE (configured == 0 or total_active == 1)
+    let (s, b, q) = compute_badge_and_quorum(0, 0, 1, false);
+    assert_eq!(s, "STANDALONE");
+    assert_eq!(b, "STANDALONE (N=1, PROVISIONAL)");
+    assert_eq!(q, "1/1 (Prov)");
+
+    // 3. COMMUNITY MESH (total_active < 20, e.g. 5 nodes)
+    let (s, b, q) = compute_badge_and_quorum(4, 4, 5, false);
+    assert_eq!(s, "COMMUNITY MESH");
+    assert_eq!(b, "COMMUNITY-MESH (N=5, PROVISIONAL)");
+    assert_eq!(q, "4/5 (Prov)");
+
+    // 4. STABILIZING (total_active >= 20, is_stable_24h == false)
+    let (s, b, q) = compute_badge_and_quorum(20, 20, 21, false);
+    assert_eq!(s, "STABILIZING");
+    assert_eq!(b, "WELTNETZ (24h-Stabilisierung)");
+    assert_eq!(q, "14/20 (Final)");
+
+    // 5. ONLINE / WELTNETZ (total_active >= 20, is_stable_24h == true)
+    let (s, b, q) = compute_badge_and_quorum(20, 20, 21, true);
+    assert_eq!(s, "ONLINE");
+    assert_eq!(b, "WELTNETZ (FINAL)");
+    assert_eq!(q, "14/20 (Final)");
 }
 
 #[tokio::test]

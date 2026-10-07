@@ -47,7 +47,7 @@ This document is automatically loaded on every AI agent startup in the workspace
 4. **Physics Trumps Negotiation:**
    * Partitions and isolated networks heal deterministically and timelessly via $\min(H_{\text{canon}})$.
    * In HuMoCo there are Zero Financial Deposits, no staking, and no monetary deposits (blind L2). On equivocation (double-signing), offenders are punished atomically via irrefutable proof (`HUMOCO_V1_EQUIVOCATION`): the losing branch becomes VOID via $\min(H_{\text{canon}})$, the node identity (`NodePubKey`) is permanently banned, the mined Argon2d shard ticket (`HrwRoutingId`) is invalidated, and all F2F friendship edges in the Web-of-Trust are severed entirely (Identity Revocation & WoT Severance).
-   * Dynamic network scaling: Small networks ($N=1\dots3$) start immediately with provisional quorums ($Q=1\dots2$); from $N \ge 20$ full HRW sharding applies ($14/20$ `FINAL`).
+   * Dynamic network scaling (Strict binary phase transition): Sub-quorum networks ($N = 1\dots19$, Community-Mesh / Island Network) operate on adaptive provisional quorums $Q(N) = \lfloor \frac{2}{3} N \rfloor + 1$ (Status `PROVISIONAL` 🟡, all nodes validate all 65,536 shards); from $N \ge 20$ (with 24h stability hysteresis) full federated HRW sharding applies with fixed BFT quorum $14/20$ (Status `FINAL` 🟢, node workload scales to $\approx \frac{20}{N}$).
 5. **Dual-Tier Persistence (Spec 12 & 14):**
    * **Tier 1 (RAM):** `RamIndex` with atomic first-seen collision check ($< 1\,\mu\text{s}$) for PoS latencies $< 5\,\text{ms}$.
    * **Tier 2 (Disk):** Asynchronous batch flush into the pure-Rust ACID key-value engine `redb` via bounded Tokio MPSC queues with graceful-shutdown drain.

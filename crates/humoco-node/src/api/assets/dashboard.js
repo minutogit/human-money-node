@@ -16,6 +16,24 @@ let pollIntervalMs = 2000;
 let pollTimer = null;
 let lastSuccessfulFetchTime = null;
 let pendingConfirmCallback = null;
+let isPollPaused = false;
+
+function togglePollPause() {
+  isPollPaused = !isPollPaused;
+  const btn = $('poll-pause-btn');
+  if (btn) {
+    if (isPollPaused) {
+      btn.innerHTML = '▶️ Live (2s)';
+      btn.className = 'btn btn-secondary paused';
+      showToast('Dashboard-Aktualisierung pausiert', 'info');
+    } else {
+      btn.innerHTML = '⏸️ Pause';
+      btn.className = 'btn btn-secondary';
+      showToast('Live-Aktualisierung wieder aktiv', 'info');
+      refreshDashboard();
+    }
+  }
+}
 
 // 15-minute inactivity session timeout
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
@@ -357,6 +375,18 @@ async function adminTopupQuota() {
     }
   } catch (e) { showToast('Fehler: ' + e.message, 'error'); }
 }
+function prefillVipTopup(tag) {
+  if (!adminToken) {
+    showToast('Bitte zuerst Admin-Modus aktivieren', 'warning');
+    handleAdminBtnClick();
+    return;
+  }
+  const tagInput = $('vip-tag-input');
+  const amountInput = $('vip-amount-input');
+  if (tagInput) tagInput.value = tag;
+  if (amountInput) amountInput.focus();
+  showToast(`VIP-Account ${truncateHash(tag)} zum Aufladen ausgewählt`, 'info');
+}
 function switchTab(tabId) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -417,9 +447,11 @@ function renderSparklineSvg(arr, color) {
 }
 function renderNodeRow(n) {
   const roleBadge = n.is_local ? badge('purple', 'LOCAL') : (n.is_f2f ? badge('blue', 'F2F Friend') : badge('cyan', 'Shard'));
-  const statusBadge = n.connection_status.includes('Connected')
-    ? (n.missing_count === 0 ? badge('green', 'Connected (0)') : badge('amber', n.connection_status))
-    : (n.connection_status.includes('Suspended') ? badge('red', n.connection_status) : badge('amber', n.connection_status));
+  const statusBadge = n.is_local
+    ? badge('green', 'Lokal (Self)')
+    : (n.connection_status.includes('Connected')
+        ? (n.missing_count === 0 ? badge('green', 'Connected (0)') : badge('amber', n.connection_status))
+        : (n.connection_status.includes('Suspended') ? badge('red', n.connection_status) : badge('amber', n.connection_status)));
   const rttText = n.rtt_ms != null ? escapeHtml(n.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
   const routeText = `${escapeHtml(n.min_hops)} Hop${n.min_hops === 1 ? '' : 's'}${n.best_ingress_peer ? ' via ' + escapeHtml(truncateHash(n.best_ingress_peer)) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : ''))}`;
   const incubText = n.is_immature ? badge('amber', `24h (${escapeHtml(n.incubation_remaining_sec || 0)}s)`) : badge('green', 'Aktiv');
@@ -533,6 +565,11 @@ function updateTabBadge(id, count) {
 }
 
 async function refreshDashboard() {
+  if (isPollPaused) {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
+    return;
+  }
   try {
     const res = await fetchWithTimeout('/dashboard/data', {}, 6000);
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -546,23 +583,28 @@ async function refreshDashboard() {
     if (banner) banner.style.display = 'none';
     const badgeEl = $('status-badge');
     if (badgeEl) {
-      if (d.status === 'ONLINE') {
+      const status = d.status || '';
+      const badgeText = d.status_badge || status;
+      if (status === 'ONLINE' || status === 'WELTNETZ') {
         const lvl = d.health?.level || 'Ok';
         if (lvl === 'Crit') {
-          badgeEl.innerText = 'ONLINE (KRITISCH)';
+          badgeEl.innerText = badgeText + ' (KRITISCH)';
           badgeEl.className = 'badge badge-red';
         } else if (lvl === 'Warn') {
-          badgeEl.innerText = 'ONLINE (WARNUNG)';
+          badgeEl.innerText = badgeText + ' (WARNUNG)';
           badgeEl.className = 'badge badge-amber';
         } else {
-          badgeEl.innerText = d.status_badge || 'ONLINE';
+          badgeEl.innerText = badgeText;
           badgeEl.className = 'badge badge-green';
         }
-      } else if (d.status === 'VILLAGE MODE') {
-        badgeEl.innerText = d.status_badge || 'VILLAGE MODE';
+      } else if (status === 'COMMUNITY MESH' || status === 'STANDALONE' || status === 'STABILIZING' || status === 'VILLAGE MODE') {
+        badgeEl.innerText = badgeText;
         badgeEl.className = 'badge badge-amber';
+      } else if (status === 'DEGRADED') {
+        badgeEl.innerText = badgeText;
+        badgeEl.className = 'badge badge-red';
       } else {
-        badgeEl.innerText = d.status_badge || d.status;
+        badgeEl.innerText = badgeText;
         badgeEl.className = 'badge badge-red';
       }
     }
@@ -593,7 +635,10 @@ async function refreshDashboard() {
     }
     setText('hdr-lat-e2e', d.e2e_latency.avg_ms.toFixed(2) + ' ms');
     setText('hdr-peers', `${d.connected_peers}/${d.configured_peers}`);
+    setText('hdr-net-nodes', `N=${(d.active_nodes_count || 0) + 1}`);
+    setText('hdr-quorum', d.quorum_display || '');
     setText('hdr-shard', d.shard_mode);
+    setText('shard-status-sub', d.shard_mode);
     const cv = d.config_view;
     if (cv) {
       setText('hdr-ports', `${cv.api_port}/${cv.p2p_port}`);
@@ -751,6 +796,15 @@ async function refreshDashboard() {
         else if (pct >= 70) cpuBar.className = 'progress-fill fill-amber';
         else cpuBar.className = 'progress-fill fill-green';
       }
+      if (d.disk_free_gb != null) {
+        setText('sys-disk-val', `${d.disk_free_gb.toFixed(1)} GB frei`);
+        const diskBar = $('sys-disk-bar');
+        if (diskBar) {
+          if (d.disk_free_gb < 2.0) diskBar.className = 'progress-fill fill-red';
+          else if (d.disk_free_gb < 10.0) diskBar.className = 'progress-fill fill-amber';
+          else diskBar.className = 'progress-fill fill-green';
+        }
+      }
       setText('sys-rss-val', sys.rss_mb.toFixed(1) + ' MB');
       setText('sys-netto-val', sys.netto_locks_bytes + ' B');
       setText('sys-purged-val', sys.ttl_purged_count);
@@ -803,6 +857,23 @@ async function refreshDashboard() {
         setText('network-count-sub', `${d.network_nodes.length} Knoten registriert`);
       }
     }
+    const shardsTbody = $('shards-tbody');
+    if (shardsTbody) {
+      if (d.sample_shard_scores?.length > 0) {
+        const totalActive = (d.active_nodes_count || 0) + 1;
+        let html = '';
+        for (const s of d.sample_shard_scores) {
+          const rankText = `Rang ${s.rank || 1} von ${totalActive}`;
+          const sBadge = s.is_responsible
+            ? badge('green', 'Validator (Signer)')
+            : badge('cyan', 'Gateway (Relay)');
+          html += `<tr><td><strong class="code">${escapeHtml(s.shard_id)}</strong></td><td class="code">${s.score.toFixed(4)}</td><td>${escapeHtml(rankText)}</td><td>${sBadge}</td></tr>`;
+        }
+        shardsTbody.innerHTML = html;
+      } else {
+        shardsTbody.innerHTML = '<tr><td colspan="4" class="empty-cell">Keine Shard-Daten vorhanden</td></tr>';
+      }
+    }
     const ti = d.tiers;
     if (ti) {
       setText('tier-free-used-val', (ti.free_used_pct || 0).toFixed(1) + '%');
@@ -833,11 +904,13 @@ async function refreshDashboard() {
         if (ti.vip_accounts?.length > 0) {
           let html = '';
           for (const a of ti.vip_accounts) {
-            html += `<tr><td>${codeTag(a.account_tag, a.account_tag)}</td><td><strong style="color:var(--purple);">${a.balance_byte_years.toLocaleString()}</strong> Byte-Jahre</td></tr>`;
+            const safeTag = escapeHtml(a.account_tag);
+            const topupBtn = `<button class="btn btn-secondary admin-only" style="${adminToken ? 'display:inline-flex;' : 'display:none;'}padding:0.2rem 0.5rem;font-size:0.75rem;" data-tag="${safeTag}" onclick="prefillVipTopup(this.getAttribute('data-tag'))">+ Aufladen</button>`;
+            html += `<tr><td>${codeTag(a.account_tag, a.account_tag)}</td><td><strong style="color:var(--purple);">${a.balance_byte_years.toLocaleString()}</strong> Byte-Jahre</td><td>${topupBtn}</td></tr>`;
           }
           vipTbody.innerHTML = html;
         } else {
-          vipTbody.innerHTML = '<tr><td colspan="2" class="empty-cell">Keine VIP Accounts hinterlegt</td></tr>';
+          vipTbody.innerHTML = '<tr><td colspan="3" class="empty-cell">Keine VIP Accounts hinterlegt</td></tr>';
         }
       }
     }

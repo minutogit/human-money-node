@@ -212,6 +212,8 @@ pub struct ShardScoreSampleDto {
     pub shard_id: u16,
     pub score: f64,
     pub is_responsible: bool,
+    #[serde(default)]
+    pub rank: usize,
 }
 
 /// Status of the asynchronous ACID redb persistence worker.
@@ -274,6 +276,12 @@ pub struct DashboardData {
     pub shard_mode: String,
     pub shard_responsibility_ratio: f64,
     pub sample_shard_scores: Vec<ShardScoreSampleDto>,
+
+    // Sysadmin & Quorum Observability
+    #[serde(default)]
+    pub disk_free_gb: f64,
+    #[serde(default)]
+    pub quorum_display: String,
 
     // Network & Peer Explorer
     pub network_nodes: Vec<NetworkNodeDto>,
@@ -380,6 +388,18 @@ fn format_uptime(duration: Duration) -> String {
     }
 }
 
+struct PeerExplorerSnapshot {
+    connected_peers: usize,
+    configured_peers: usize,
+    active_nodes_count: usize,
+    broom_patterns_detected: usize,
+    gateway_concentration_ratio: f64,
+    shard_subnet_dominance_max: f64,
+    warnings: Vec<String>,
+    network_nodes: Vec<NetworkNodeDto>,
+    active_hrw_nodes: Vec<([u8; 32], SocketAddr)>,
+}
+
 pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let uptime = state.start_time.elapsed();
     let uptime_formatted = format_uptime(uptime);
@@ -388,29 +408,12 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let local_hrw = state.identity.hrw_routing_id();
     let local_addr = state.transport.as_ref().and_then(|t| t.local_addr().ok());
 
-    let (
-        connected_peers,
-        configured_peers,
-        active_nodes_count,
-        broom_patterns_detected,
-        gateway_concentration_ratio,
-        shard_subnet_dominance_max,
-        warnings,
-        network_nodes,
-    ): (
-        usize,
-        usize,
-        usize,
-        usize,
-        f64,
-        f64,
-        Vec<String>,
-        Vec<NetworkNodeDto>,
-    ) = if let Some(ref pm) = state.peer_manager {
+    let peer_snapshot = if let Some(ref pm) = state.peer_manager {
         let conn = pm.connected_peer_count().await;
         let conf = pm.all_peer_addrs().await.len();
         let active_nodes = pm.active_known_nodes().await;
         let act = active_nodes.len();
+        let hrw_nodes = pm.active_hrw_nodes().await;
 
         let diversity_data = pm.get_ingress_diversity_data().await;
         let mut ingress_counts: std::collections::HashMap<SocketAddr, (usize, u32)> =
@@ -472,26 +475,27 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
             .get_network_nodes_explorer(&local_pubkey_bytes, local_addr, *local_hrw)
             .await;
 
-        (
-            conn,
-            conf,
-            act,
-            brooms,
-            conc_ratio,
-            sub_dom_max,
-            warns,
-            nodes,
-        )
+        PeerExplorerSnapshot {
+            connected_peers: conn,
+            configured_peers: conf,
+            active_nodes_count: act,
+            broom_patterns_detected: brooms,
+            gateway_concentration_ratio: conc_ratio,
+            shard_subnet_dominance_max: sub_dom_max,
+            warnings: warns,
+            network_nodes: nodes,
+            active_hrw_nodes: hrw_nodes,
+        }
     } else {
-        (
-            0,
-            0,
-            0,
-            0,
-            0.0,
-            0.0,
-            Vec::new(),
-            vec![NetworkNodeDto {
+        PeerExplorerSnapshot {
+            connected_peers: 0,
+            configured_peers: 0,
+            active_nodes_count: 0,
+            broom_patterns_detected: 0,
+            gateway_concentration_ratio: 0.0,
+            shard_subnet_dominance_max: 0.0,
+            warnings: Vec::new(),
+            network_nodes: vec![NetworkNodeDto {
                 node_id: bs58::encode(local_pubkey_bytes).into_string(),
                 public_key: bs58::encode(local_pubkey_bytes).into_string(),
                 address: local_addr
@@ -511,25 +515,56 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
                 rtt_ms: Some(0),
                 best_ingress_peer: None,
             }],
-        )
+            active_hrw_nodes: Vec::new(),
+        }
     };
+
+    let PeerExplorerSnapshot {
+        connected_peers,
+        configured_peers,
+        active_nodes_count,
+        broom_patterns_detected,
+        gateway_concentration_ratio,
+        shard_subnet_dominance_max,
+        warnings,
+        network_nodes,
+        active_hrw_nodes,
+    } = peer_snapshot;
 
     let free_tier_enabled = true;
-
-    let (status, status_badge) = if state.peer_manager.is_none() || configured_peers == 0 {
-        ("VILLAGE MODE".to_string(), "VILLAGE MODE (N=1)".to_string())
-    } else if connected_peers > 0 {
-        ("ONLINE".to_string(), "ONLINE".to_string())
-    } else {
-        ("DEGRADED".to_string(), "DEGRADED (0 Peers)".to_string())
-    };
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let (active_byte_years, _active_locks_count) = state.engine.get_active_footprint_byte_years(now_ms).await;
-    let active_locks = state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+
+    let total_active = active_nodes_count + 1; // including self
+    let (required_q, _is_final) = humoco_sim_core::types::required_quorum(total_active);
+    let is_stable_24h = if let Some(ref pm) = state.peer_manager {
+        pm.is_network_stable_ge20_for_24h(now_ms)
+    } else {
+        false
+    };
+
+    let (status, status_badge) = if connected_peers == 0 && configured_peers > 0 {
+        ("DEGRADED".to_string(), "DEGRADED (0 Peers)".to_string())
+    } else if total_active == 1 || configured_peers == 0 {
+        ("STANDALONE".to_string(), "STANDALONE (N=1, PROVISIONAL)".to_string())
+    } else if total_active < 20 {
+        ("COMMUNITY MESH".to_string(), format!("COMMUNITY-MESH (N={}, PROVISIONAL)", total_active))
+    } else if !is_stable_24h {
+        ("STABILIZING".to_string(), "WELTNETZ (24h-Stabilisierung)".to_string())
+    } else {
+        ("ONLINE".to_string(), "WELTNETZ (FINAL)".to_string())
+    };
+
+    let quorum_display = if total_active < 20 {
+        format!("{}/{} (Prov)", required_q, total_active)
+    } else {
+        "14/20 (Final)".to_string()
+    };
+
+    let (active_byte_years, active_locks) = state.engine.get_active_footprint_byte_years(now_ms).await;
     let flush_queue_depth = state.engine.flush_sender_len();
 
     // 3-Tier Latencies (Rolling 100)
@@ -542,23 +577,34 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let pos_sla_compliant = local_latency.sla_compliant;
 
     // Shard Topology
-    let total_nodes = network_nodes.len().max(1);
-    let (shard_mode, shard_responsibility_ratio) = if total_nodes < 20 {
-        ("Global Mesh (N < 20)".to_string(), 1.0f64)
+    let (shard_mode, shard_responsibility_ratio) = if total_active < 20 {
+        ("Community-Mesh (N < 20)".to_string(), 1.0f64)
     } else {
-        ("HRW Top-20 Sharding (N >= 20)".to_string(), (20.0f64 / total_nodes as f64).min(1.0f64))
+        ("HRW Top-20 Sharding (N >= 20)".to_string(), (20.0f64 / total_active as f64).min(1.0f64))
     };
 
     let sample_shards = [0, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960];
     let sample_shard_scores = sample_shards
         .into_iter()
         .map(|sid| {
-            let score = humoco_sim_core::client_flow::compute_hrw_score_f64(local_hrw, sid);
-            let is_responsible = total_nodes < 20 || score > 0.05;
+            let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(local_hrw, sid);
+            let higher_nodes_count = active_hrw_nodes
+                .iter()
+                .filter(|(hrw_id, _)| {
+                    if hrw_id == local_hrw {
+                        return false;
+                    }
+                    let score = humoco_sim_core::client_flow::compute_hrw_score_f64(hrw_id, sid);
+                    score > self_score || (score == self_score && hrw_id > local_hrw)
+                })
+                .count();
+            let self_rank = higher_nodes_count + 1;
+            let is_responsible = total_active < 20 || self_rank <= 20;
             ShardScoreSampleDto {
                 shard_id: sid,
-                score,
+                score: self_score,
                 is_responsible,
+                rank: self_rank,
             }
         })
         .collect();
@@ -598,6 +644,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         local_latency.avg_ms,
         state.metrics.ttl_purged_count(),
     );
+    let disk_free_gb = system.disk_free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
     // 2. Sparklines
     let sparklines = state.system_stats.get_sparklines();
@@ -609,14 +656,12 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let gossip_read_load = sparklines.reads.last().copied().unwrap_or(0.0) as f64;
     let daily_write_quota = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
-    let (_today_write_used_raw, _today_read_used_raw, total_write_used, total_read_used) = {
+    let (total_write_used, total_read_used) = {
         let thermo_arc = state.tier_controller.thermometer();
         let thermo = thermo_arc
             .read()
             .unwrap_or_else(|e| e.into_inner());
         (
-            thermo.get_node_usage(state.identity.node_id_u16()),
-            thermo.get_node_read_usage(state.identity.node_id_u16()),
             thermo.total_daily_write_usage(),
             thermo.total_daily_read_usage(),
         )
@@ -831,10 +876,12 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         shard_subnet_dominance_max,
         free_tier_enabled,
         warnings,
-        total_shards: 1024,
+        total_shards: 65536,
         shard_mode,
         shard_responsibility_ratio,
         sample_shard_scores,
+        disk_free_gb,
+        quorum_display,
         network_nodes,
         total_active_vouchers_count,
         active_vouchers,
@@ -1321,7 +1368,7 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
         ncb_read_eff = data.thermometer.ncb_read_eff,
         conc_percent = data.gateway_concentration_ratio * 100.0,
         dom_percent = data.shard_subnet_dominance_max * 100.0,
-        active_nodes = data.active_nodes_count,
+        active_nodes = data.active_nodes_count + 1,
         free_pow_diff = data.tiers.free_pow_diff,
         free_pow_hashes = data.tiers.free_pow_hashes,
         free_pow_time_est = data.tiers.free_pow_time_est,
@@ -1339,7 +1386,9 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
         today_write_used = data.thermometer.today_write_used,
         daily_write_quota = data.thermometer.daily_write_quota,
         net_time_formatted = net_time_formatted,
-        sim_badge_style = sim_badge_style
+        sim_badge_style = sim_badge_style,
+        disk_free_gb = data.disk_free_gb,
+        quorum_display = data.quorum_display
     );
 
     (

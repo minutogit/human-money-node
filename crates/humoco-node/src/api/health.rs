@@ -280,10 +280,12 @@ mod tests {
             shard_subnet_dominance_max: 0.3,
             free_tier_enabled: true,
             warnings: Vec::new(),
-            total_shards: 1024,
+            total_shards: 65536,
             shard_mode: "Global Mesh".to_string(),
             shard_responsibility_ratio: 1.0,
             sample_shard_scores: Vec::new(),
+            disk_free_gb: 10.0,
+            quorum_display: "14/20 (Final)".to_string(),
             network_nodes: vec![NetworkNodeDto {
                 node_id: "local".to_string(),
                 public_key: "local_pk".to_string(),

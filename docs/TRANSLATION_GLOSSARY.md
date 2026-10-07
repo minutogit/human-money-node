@@ -13,6 +13,8 @@
 | **Gutschein-Wurzel** | **Voucher Root / Root Anchor** | Origin lock (`root.valid_until`) anchoring TTL for all subsequent child locks. | *voucher tree, coupon origin* |
 | **Kassenpfad / Hot-Path** | **PoS Hot-Path / Checkout Path** | In-memory collision check ($< 1\,\mu\text{s}$) with latency SLA $< 5\,\text{ms}$. | *register path, cashbox flow* |
 | **Dorf-Merge** | **Village Merge / Local Mesh Merge** | Deterministic convergence of small isolated clusters ($N=1\dots3$) into global mesh via $\min(H_{\text{canon}})$. | *village fusion, rural merge* |
+| **Community-Mesh / Insel-Netz** | **Community Mesh / Island Network** | Autonomous sub-quorum mesh ($N = 1\dots19$) operating on adaptive provisional quorums $Q(N) = \lfloor \frac{2}{3} N \rfloor + 1$ (Status `PROVISIONAL` 🟡, all nodes validate all 65,536 shards). | *village mode, local cluster* |
+| **Weltnetz-Föderation** | **World Network / Federated Sharding** | Full BFT consensus ($N \ge 20$) with fixed 14/20 quorum (Status `FINAL` 🟢) and dynamic HRW sharding. | *global chain, world cluster* |
 | **Knoten-Souveränität** | **Node Sovereignty** | Node operators maintain absolute veto power; zero background auto-updates. | *node dominance, node power* |
 | **First-Party Evidence** | **First-Party Evidence Doctrine** | Ban and slashing only on undisputed cryptographic self-proof (`EquivocationProof`). | *own evidence, first hand proof* |
 | **Hörensagen-Verbot** | **Anti-Hearsay Principle** | Ban on network gossip about "bad peers"; prevents death spirals. | *hearsay prohibition* |

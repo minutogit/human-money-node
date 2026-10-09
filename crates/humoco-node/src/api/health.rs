@@ -217,6 +217,56 @@ pub fn evaluate_health(data: &DashboardData) -> HealthSummary {
         });
     }
 
+    // 10. PERSIST_ERROR: flush_errors_total > 0 -> crit
+    if data.persistence.flush_errors_total > 0 {
+        items.push(HealthItem {
+            code: "PERSIST_ERROR".to_string(),
+            severity: HealthLevel::Crit,
+            message_de: format!(
+                "Datenbank-Flush fehlgeschlagen ({} Fehler seit Daemon-Start erkannt).",
+                data.persistence.flush_errors_total
+            ),
+            hint_de: "Dateisystem-Rechte, I/O-Fehler und Speicherplatz prüfen. Nach Behebung Daemon neu starten.".to_string(),
+        });
+    }
+
+    // 11. DISK_SPACE_LOW: disk_free_gb < 2.0 -> crit, < 5.0 -> warn
+    if data.disk_free_gb < 2.0 {
+        items.push(HealthItem {
+            code: "DISK_SPACE_LOW".to_string(),
+            severity: HealthLevel::Crit,
+            message_de: format!(
+                "Knapper Festplattenspeicher (redb): {:.1} GB verbleibend.",
+                data.disk_free_gb
+            ),
+            hint_de: "Speicherplatz freigeben oder Partition vergrößern. Volle Festplatten gefährden die Datenintegrität.".to_string(),
+        });
+    } else if data.disk_free_gb < 5.0 {
+        items.push(HealthItem {
+            code: "DISK_SPACE_LOW".to_string(),
+            severity: HealthLevel::Warn,
+            message_de: format!(
+                "Knapper Festplattenspeicher (redb): {:.1} GB verbleibend.",
+                data.disk_free_gb
+            ),
+            hint_de: "Speicherplatz freigeben oder Partition vergrößern. Volle Festplatten gefährden die Datenintegrität.".to_string(),
+        });
+    }
+
+    // 12. FLUSH_STALE: flush_queue_depth > 0 && last_flush_ago_sec > 60 -> warn
+    if data.persistence.flush_queue_depth > 0 && data.persistence.last_flush_ago_sec.unwrap_or(0) > 60 {
+        items.push(HealthItem {
+            code: "FLUSH_STALE".to_string(),
+            severity: HealthLevel::Warn,
+            message_de: format!(
+                "Verzögerter Festplatten-Flush (Queue: {}, letzter Flush vor {}s).",
+                data.persistence.flush_queue_depth,
+                data.persistence.last_flush_ago_sec.unwrap_or(0)
+            ),
+            hint_de: "Disk-I/O beobachten; asynchroner redb Flush hinkt hinterher.".to_string(),
+        });
+    }
+
     let level = items.iter().map(|item| item.severity).max().unwrap_or(HealthLevel::Ok);
 
     HealthSummary { level, items }
@@ -527,5 +577,46 @@ mod tests {
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Crit);
         assert_eq!(summary.items.len(), 2);
+    }
+
+    #[test]
+    fn test_health_persist_error_crit() {
+        let mut data = mock_healthy_dashboard_data();
+        data.persistence.flush_errors_total = 1;
+
+        let summary = evaluate_health(&data);
+        assert_eq!(summary.level, HealthLevel::Crit);
+        assert!(summary.items.iter().any(|i| i.code == "PERSIST_ERROR" && i.severity == HealthLevel::Crit));
+    }
+
+    #[test]
+    fn test_health_disk_space_low_warn_and_crit() {
+        let mut data = mock_healthy_dashboard_data();
+        data.disk_free_gb = 4.5;
+
+        let summary = evaluate_health(&data);
+        assert_eq!(summary.level, HealthLevel::Warn);
+        assert!(summary.items.iter().any(|i| i.code == "DISK_SPACE_LOW" && i.severity == HealthLevel::Warn));
+
+        data.disk_free_gb = 1.5;
+        let summary_crit = evaluate_health(&data);
+        assert_eq!(summary_crit.level, HealthLevel::Crit);
+        assert!(summary_crit.items.iter().any(|i| i.code == "DISK_SPACE_LOW" && i.severity == HealthLevel::Crit));
+    }
+
+    #[test]
+    fn test_health_flush_stale_warn() {
+        let mut data = mock_healthy_dashboard_data();
+        data.persistence.flush_queue_depth = 5;
+        data.persistence.last_flush_ago_sec = Some(65);
+
+        let summary = evaluate_health(&data);
+        assert_eq!(summary.level, HealthLevel::Warn);
+        assert!(summary.items.iter().any(|i| i.code == "FLUSH_STALE" && i.severity == HealthLevel::Warn));
+
+        // Not stale if last_flush_ago_sec <= 60
+        data.persistence.last_flush_ago_sec = Some(30);
+        let summary_ok = evaluate_health(&data);
+        assert_eq!(summary_ok.level, HealthLevel::Ok);
     }
 }

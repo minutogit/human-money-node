@@ -10,13 +10,58 @@ const codeTag = (t, title) => `<span class="code"${title ? ` title="${escapeHtml
 const cTrunc = (h, title) => codeTag(truncateHash(h), title || h);
 let currentDashboardData = null;
 let currentVoucherDetail = null;
-let adminToken = sessionStorage.getItem('humoco_admin_token') || '';
+let adminToken = '';
 let consecutiveFailures = 0;
 let pollIntervalMs = 2000;
 let pollTimer = null;
 let lastSuccessfulFetchTime = null;
 let pendingConfirmCallback = null;
 let isPollPaused = false;
+
+function fallbackCopyTextToClipboard(text) {
+  return new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '0';
+      ta.style.width = '1px';
+      ta.style.height = '1px';
+      ta.style.padding = '0';
+      ta.style.border = 'none';
+      ta.style.outline = 'none';
+      ta.style.boxShadow = 'none';
+      ta.style.background = 'transparent';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const success = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (success) {
+        resolve();
+      } else {
+        reject(new Error('execCommand copy failed'));
+      }
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+function copyTextToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(() => fallbackCopyTextToClipboard(text));
+  }
+  return fallbackCopyTextToClipboard(text);
+}
+
+function copyJournalctlCmd() {
+  copyTextToClipboard('journalctl -u humoco-node -f')
+    .then(() => showToast('Befehl "journalctl -u humoco-node -f" kopiert', 'success'))
+    .catch(() => showToast('Kopieren fehlgeschlagen', 'error'));
+}
 
 function togglePollPause() {
   isPollPaused = !isPollPaused;
@@ -35,14 +80,13 @@ function togglePollPause() {
   }
 }
 
-// 15-minute inactivity session timeout
+// 15-minute inactivity session timeout (purely in-memory)
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 let inactivityTimer = null;
 
 function resetInactivityTimer() {
   if (inactivityTimer) clearTimeout(inactivityTimer);
   if (adminToken) {
-    sessionStorage.setItem('humoco_admin_last_activity', Date.now().toString());
     inactivityTimer = setTimeout(() => {
       logoutAdminDueToInactivity();
     }, INACTIVITY_TIMEOUT_MS);
@@ -50,20 +94,12 @@ function resetInactivityTimer() {
 }
 
 function checkInactivityOnLoad() {
-  if (!adminToken) return;
-  const lastActive = parseInt(sessionStorage.getItem('humoco_admin_last_activity') || '0', 10);
-  if (lastActive > 0 && (Date.now() - lastActive > INACTIVITY_TIMEOUT_MS)) {
-    logoutAdminDueToInactivity();
-  } else {
-    resetInactivityTimer();
-  }
+  // adminToken is in-memory only; defaults to empty on reload
 }
 
 function logoutAdminDueToInactivity() {
   if (adminToken) {
     adminToken = '';
-    sessionStorage.removeItem('humoco_admin_token');
-    sessionStorage.removeItem('humoco_admin_last_activity');
     if (inactivityTimer) {
       clearTimeout(inactivityTimer);
       inactivityTimer = null;
@@ -154,8 +190,6 @@ function updateAdminUI() {
 }
 function handleAdminBtnClick() {
   if (adminToken) {
-    sessionStorage.removeItem('humoco_admin_token');
-    sessionStorage.removeItem('humoco_admin_last_activity');
     if (inactivityTimer) {
       clearTimeout(inactivityTimer);
       inactivityTimer = null;
@@ -182,8 +216,6 @@ async function submitAdminToken() {
     }, 6000);
     if (res.ok) {
       adminToken = val;
-      sessionStorage.setItem('humoco_admin_token', val);
-      sessionStorage.setItem('humoco_admin_last_activity', Date.now().toString());
       resetInactivityTimer();
       closeModal('admin-modal');
       updateAdminUI();
@@ -368,7 +400,7 @@ function showClientQrModal(label, token, tokenHashOrUri) {
 function copyClientUri() {
   const uri = $('client-qr-uri')?.innerText?.trim();
   if (!uri) return;
-  navigator.clipboard.writeText(uri).then(
+  copyTextToClipboard(uri).then(
     () => showToast('Wallet-URI in die Zwischenablage kopiert', 'success'),
     () => showToast('Fehler beim Kopieren', 'error')
   );
@@ -418,15 +450,15 @@ function switchTab(tabId) {
 }
 function copyPeering() {
   const text = $('peering-text')?.innerText || '';
-  navigator.clipboard.writeText(text).then(() => {
+  copyTextToClipboard(text).then(() => {
     const btn = $('copy-btn');
     if (btn) { const o = btn.innerText; btn.innerText = 'Kopiert!'; setTimeout(() => { btn.innerText = o; }, 1500); }
     showToast('Peering-String kopiert', 'success');
-  }).catch(() => {});
+  }).catch(() => showToast('Fehler beim Kopieren', 'error'));
 }
 function copyMyPubkey() {
   const text = $('my-pubkey-text')?.innerText || '';
-  navigator.clipboard.writeText(text).then(() => showToast('NodePubKey kopiert', 'success')).catch(() => {});
+  copyTextToClipboard(text).then(() => showToast('NodePubKey kopiert', 'success')).catch(() => showToast('Fehler beim Kopieren', 'error'));
 }
 function copyHealthDiagnosis() {
   const d = currentDashboardData;
@@ -465,7 +497,7 @@ function copyHealthDiagnosis() {
   }
 
   const text = lines.join('\n');
-  navigator.clipboard.writeText(text).then(() => {
+  copyTextToClipboard(text).then(() => {
     showToast('Systemdiagnose in die Zwischenablage kopiert', 'success');
   }).catch(() => {
     showToast('Fehler beim Kopieren der Diagnose', 'error');
@@ -483,11 +515,11 @@ document.addEventListener('keydown', e => {
 });
 function copyModalJson() {
   const text = $('modal-json')?.innerText || '';
-  navigator.clipboard.writeText(text).then(() => showToast('JSON kopiert', 'success')).catch(() => {});
+  copyTextToClipboard(text).then(() => showToast('JSON kopiert', 'success')).catch(() => showToast('Fehler beim Kopieren', 'error'));
 }
 function copyVoucherJson() {
   if (!currentVoucherDetail) return;
-  navigator.clipboard.writeText(JSON.stringify(currentVoucherDetail, null, 2)).then(() => showToast('JSON kopiert', 'success')).catch(() => {});
+  copyTextToClipboard(JSON.stringify(currentVoucherDetail, null, 2)).then(() => showToast('JSON kopiert', 'success')).catch(() => showToast('Fehler beim Kopieren', 'error'));
 }
 function toggleVoucherRawJson() {
   const pre = $('voucher-modal-json');
@@ -556,7 +588,7 @@ function openNodeInspector(pubkey) {
 }
 function copyNodePubkey() {
   const el = $('node-modal-pubkey');
-  if (el) navigator.clipboard.writeText(el.innerText).then(() => showToast('NodePubKey in Zwischenablage kopiert', 'success')).catch(() => {});
+  if (el) copyTextToClipboard(el.innerText).then(() => showToast('NodePubKey in Zwischenablage kopiert', 'success')).catch(() => showToast('Fehler beim Kopieren', 'error'));
 }
 let currentPeerFilter = 'ALL';
 function setPeerFilter(filter) {
@@ -582,6 +614,95 @@ function filterNodesTable() {
   }
   nodesTbody.innerHTML = html || '<tr><td colspan="9" class="empty-cell">Keine Knoten gefunden</td></tr>';
 }
+let currentFriendFilter = 'ALL';
+function setFriendFilter(filter) {
+  currentFriendFilter = filter;
+  ['all', 'problem', 'connected'].forEach(f => {
+    const chip = $('chip-friend-' + f);
+    if (chip) chip.classList.toggle('active', f === filter.toLowerCase());
+  });
+  renderFriendsTable();
+}
+function renderFriendsTable() {
+  const d = currentDashboardData;
+  const friendsTbody = $('friends-tbody');
+  if (!friendsTbody || !d?.f2f) return;
+  if (d.f2f.friends?.length > 0) {
+    const filtered = d.f2f.friends.filter(f => {
+      const isProblem = !f.is_connected || (f.missing_count != null && f.missing_count > 0);
+      if (currentFriendFilter === 'PROBLEM') return isProblem;
+      if (currentFriendFilter === 'CONNECTED') return f.is_connected && (!f.missing_count || f.missing_count === 0);
+      return true;
+    });
+    if (filtered.length > 0) {
+      let html = '';
+      for (const f of filtered) {
+        const isProblem = !f.is_connected || (f.missing_count != null && f.missing_count > 0);
+        let sBadge = badge('green', 'Verbunden (0 Ausfälle)');
+        if (!f.is_connected) sBadge = badge('amber', 'Getrennt');
+        else if (f.missing_count >= 3) sBadge = badge('red', 'Suspended (3/3)');
+        else if (f.missing_count > 0) sBadge = badge('amber', `Degrading (${escapeHtml(f.missing_count)}/3)`);
+        const rttText = f.rtt_ms != null ? escapeHtml(f.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
+        const safeKey = escapeHtml(f.public_key || '');
+        let actionBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-pubkey="${safeKey}" onclick="openNodeInspector(this.getAttribute('data-pubkey'))">🔍 Info</button>`;
+        if (adminToken) actionBtn += ` <button class="btn btn-danger" style="padding:0.2rem 0.5rem;margin-left:0.25rem;" data-pubkey="${safeKey}" onclick="adminRemoveFriend(this.getAttribute('data-pubkey'))">🗑️</button>`;
+        const rowStyle = isProblem ? ' style="background: rgba(239, 68, 68, 0.08);"' : '';
+        html += `<tr${rowStyle}><td>${cTrunc(f.public_key)}</td><td>${escapeHtml(f.address)}</td><td>${sBadge}</td><td>${rttText}</td><td>${actionBtn}</td></tr>`;
+      }
+      friendsTbody.innerHTML = html;
+    } else {
+      friendsTbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine P2P-Peers für diesen Filter</td></tr>';
+    }
+  } else {
+    friendsTbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine F2F Freunde konfiguriert</td></tr>';
+  }
+}
+
+let currentLockFilter = 'ALL';
+function setLockFilter(filter) {
+  currentLockFilter = filter;
+  ['all', '409', 'vip', 'free'].forEach(f => {
+    const chip = $('chip-lock-' + f);
+    if (chip) chip.classList.toggle('active', f === filter.toLowerCase());
+  });
+  filterLocksTable();
+}
+function filterLocksTable() {
+  const d = currentDashboardData;
+  const locksTbody = $('locks-tbody');
+  if (!locksTbody || !d?.recent_locks) return;
+  if (d.recent_locks.length > 0) {
+    const filtered = d.recent_locks.filter(l => {
+      if (currentLockFilter === '409') return l.status === 'Conflict' || l.status === '409';
+      if (currentLockFilter === 'VIP') return l.tier === 'VIP';
+      if (currentLockFilter === 'FREE') return l.tier === 'Free';
+      return true;
+    });
+    if (filtered.length > 0) {
+      let html = '';
+      for (const l of filtered) {
+        const b = l.status === 'Verified' ? badge('green', 'Verified') : (l.status === 'Provisional' ? badge('amber', 'Provisional') : badge('red', 'Conflict'));
+        const pShort = truncateHash(l.parent_lock_hex);
+        const cShort = truncateHash(l.child_lock_hex);
+        let tierBadge = badge('cyan', 'P2P Sync');
+        if (l.tier === 'VIP') tierBadge = badge('purple', `VIP (${escapeHtml(l.byte_years || 0)} BY)`);
+        else if (l.tier === 'F2F') tierBadge = badge('blue', `F2F (${escapeHtml(l.byte_years || 0)} BY)`);
+        else if (l.tier === 'Free') tierBadge = badge('green', 'Free (PoW)');
+        else if (l.tier) tierBadge = badge('cyan', l.tier);
+        const safeVoucherId = l.voucher_id ? escapeHtml(l.voucher_id) : '';
+        const safeParentHex = escapeHtml(l.parent_lock_hex || '');
+        const vLink = l.voucher_id ? `<button class="btn btn-secondary" style="padding:0.15rem 0.4rem;font-size:0.75rem;" data-voucher="${safeVoucherId}" onclick="openVoucherInspector(this.getAttribute('data-voucher'))">🎟️ ${escapeHtml(truncateHash(l.voucher_id))}</button>` : '<span style="color:var(--text-muted);">-</span>';
+        html += `<tr><td>${escapeHtml(l.timestamp_ms)}</td><td>${codeTag(pShort, l.parent_lock_hex)}</td><td>${codeTag(cShort, l.child_lock_hex)}</td><td>${tierBadge}</td><td>${vLink}</td><td>${b}</td><td><button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-parent="${safeParentHex}" onclick="openLockInspector(this.getAttribute('data-parent'))">📄 JSON</button></td></tr>`;
+      }
+      locksTbody.innerHTML = html;
+    } else {
+      locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren für diesen Filter</td></tr>';
+    }
+  } else {
+    locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren im Ringbuffer</td></tr>';
+  }
+}
+
 async function openLockInspector(lookupTag) {
   try {
     const res = await fetchWithTimeout('/dashboard/lock/' + encodeURIComponent(lookupTag), {}, 6000);
@@ -591,7 +712,9 @@ async function openLockInspector(lookupTag) {
     setHtml('modal-details', `<strong>Lookup Tag:</strong> <span class="code">${escapeHtml(lookupTag)}</span>`);
     setText('modal-json', JSON.stringify(json, null, 2));
     $('json-modal').classList.add('active');
-  } catch (e) {}
+  } catch (e) {
+    showToast('Laden der Sperr-Rohdaten fehlgeschlagen: ' + e.message, 'error');
+  }
 }
 async function openVoucherInspector(voucherId) {
   const input = $('voucher-search-input');
@@ -690,28 +813,35 @@ async function refreshDashboard() {
     const simBadge = $('hdr-sim-badge');
     if (simBadge) simBadge.style.display = d.is_simulation ? 'inline-block' : 'none';
     if (d.clock_drift_ms != null) {
-      const driftEl = $('hdr-clock-drift');
+      const driftEl = $('net-clock-drift');
       if (driftEl) {
         const sign = d.clock_drift_ms > 0 ? '+' : '';
         driftEl.innerText = `${sign}${d.clock_drift_ms} ms`;
         driftEl.style.color = Math.abs(d.clock_drift_ms) > 2000 ? 'var(--red)' : (Math.abs(d.clock_drift_ms) > 500 ? 'var(--amber)' : 'var(--text)');
       }
     }
-    const locEl = $('hdr-lat-local');
-    if (locEl) {
-      locEl.innerText = d.local_latency.avg_ms.toFixed(2) + ' ms';
-      locEl.style.color = d.local_latency.avg_ms >= 5.0 ? 'var(--red)' : 'var(--text)';
+    const heroText = $('net-hero-text');
+    if (heroText) {
+      const isWeltnetz = (d.active_nodes_count || 0) + 1 >= 20 || d.shard_mode === 'WELTNETZ' || d.status === 'WELTNETZ';
+      heroText.innerHTML = isWeltnetz
+        ? '🌐 <strong>Netzwerk-Phase:</strong> Weltnetz (N &ge; 20): HRW Top-20 Sharding aktiv. BFT-Quorum 14/20.'
+        : '🌐 <strong>Netzwerk-Phase:</strong> Community-Mesh (Inselnetz): Alle Knoten validieren alle 65.536 Shards. BFT-Quorum erfüllt.';
     }
     const qEl = $('hdr-lat-quorum');
-    if (qEl) {
-      qEl.innerText = d.quorum_latency.avg_ms.toFixed(2) + ' ms';
+    if (qEl && d.quorum_latency) {
+      const qP95 = d.quorum_latency.p95_ms != null ? ` (p95: ${d.quorum_latency.p95_ms.toFixed(1)} ms)` : '';
+      qEl.innerText = d.quorum_latency.avg_ms.toFixed(2) + ' ms' + qP95;
       qEl.style.color = d.quorum_latency.avg_ms >= 500.0 ? 'var(--red)' : 'var(--text)';
     }
-    setText('hdr-lat-e2e', d.e2e_latency.avg_ms.toFixed(2) + ' ms');
+    const e2eP95 = d.e2e_latency?.p95_ms != null ? ` (p95: ${d.e2e_latency.p95_ms.toFixed(1)} ms)` : '';
+    setText('hdr-lat-e2e', d.e2e_latency.avg_ms.toFixed(2) + ' ms' + e2eP95);
+    if (d.uptime_formatted) setText('hdr-uptime', d.uptime_formatted);
+    const netPill = $('hdr-net-pill');
+    if (netPill) {
+      const n = (d.active_nodes_count || 0) + 1;
+      netPill.innerHTML = `🌐 N=${n} &bull; ${escapeHtml(d.quorum_display || 'Quorum OK')}`;
+    }
     setText('hdr-peers', `${d.connected_peers}/${d.configured_peers}`);
-    setText('hdr-net-nodes', `N=${(d.active_nodes_count || 0) + 1}`);
-    setText('hdr-quorum', d.quorum_display || '');
-    setText('hdr-shard', d.shard_mode);
     setText('shard-status-sub', d.shard_mode);
     const respRatio = d.shard_responsibility_ratio || 0;
     const totalShards = d.total_shards || 65536;
@@ -858,6 +988,11 @@ async function refreshDashboard() {
       setText('rej-cap-val', (rej.capacity_429 || 0).toLocaleString());
       setText('rej-quota-val', (rej.quota_429 || 0).toLocaleString());
       setText('rej-pow-val', (rej.bad_pow_400 || 0).toLocaleString());
+      if (rej.last_rejection_ago_sec != null) {
+        setText('rej-last-ago', `vor ${rej.last_rejection_ago_sec}s`);
+      } else {
+        setText('rej-last-ago', 'Nie');
+      }
       const rBadge = $('rej-badge');
       if (rBadge) {
         rBadge.innerText = `${(rej.total_rejected || 0).toLocaleString()} Gesamt`;
@@ -879,18 +1014,17 @@ async function refreshDashboard() {
         setText('sys-disk-val', `${d.disk_free_gb.toFixed(1)} GB frei`);
         const diskBar = $('sys-disk-bar');
         if (diskBar) {
+          const totalGb = sys ? ((sys.redb_bytes || 0) / (1024 * 1024 * 1024)) + d.disk_free_gb : d.disk_free_gb;
+          const fillPct = totalGb > 0 ? Math.min(100, Math.max(5, (d.disk_free_gb / totalGb) * 100)) : Math.min(100, Math.max(5, (d.disk_free_gb / 20.0) * 100));
+          diskBar.style.width = fillPct.toFixed(1) + '%';
           if (d.disk_free_gb < 2.0) diskBar.className = 'progress-fill fill-red';
-          else if (d.disk_free_gb < 10.0) diskBar.className = 'progress-fill fill-amber';
+          else if (d.disk_free_gb < 5.0) diskBar.className = 'progress-fill fill-amber';
           else diskBar.className = 'progress-fill fill-green';
         }
       }
       setText('sys-rss-val', sys.rss_mb.toFixed(1) + ' MB');
       setText('sys-netto-val', sys.netto_locks_bytes + ' B');
       setText('sys-purged-val', sys.ttl_purged_count);
-      setText('cap-single-val', sys.peak_tps_single_core);
-      setText('cap-multi-val', sys.peak_tps_multi_core);
-      setText('cap-storage-val', sys.max_storage_locks);
-      setText('cap-byte-years-val', sys.byte_years_capacity);
     }
     const th = d.thermometer;
     if (th) {
@@ -904,26 +1038,7 @@ async function refreshDashboard() {
     }
     setText('conc-val', (d.gateway_concentration_ratio * 100).toFixed(1) + '%');
     setText('subnet-dom-sub', (d.shard_subnet_dominance_max * 100).toFixed(1) + '%');
-    const friendsTbody = $('friends-tbody');
-    if (friendsTbody) {
-      if (d.f2f?.friends?.length > 0) {
-        let html = '';
-        for (const f of d.f2f.friends) {
-          let sBadge = badge('green', 'Verbunden (0 Ausfälle)');
-          if (!f.is_connected) sBadge = badge('amber', 'Getrennt');
-          else if (f.missing_count >= 3) sBadge = badge('red', 'Suspended (3/3)');
-          else if (f.missing_count > 0) sBadge = badge('amber', `Degrading (${escapeHtml(f.missing_count)}/3)`);
-          const rttText = f.rtt_ms != null ? escapeHtml(f.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
-          const safeKey = escapeHtml(f.public_key || '');
-          let actionBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-pubkey="${safeKey}" onclick="openNodeInspector(this.getAttribute('data-pubkey'))">🔍 Info</button>`;
-          if (adminToken) actionBtn += ` <button class="btn btn-danger" style="padding:0.2rem 0.5rem;margin-left:0.25rem;" data-pubkey="${safeKey}" onclick="adminRemoveFriend(this.getAttribute('data-pubkey'))">🗑️</button>`;
-          html += `<tr><td>${cTrunc(f.public_key)}</td><td>${escapeHtml(f.address)}</td><td>${sBadge}</td><td>${rttText}</td><td>${actionBtn}</td></tr>`;
-        }
-        friendsTbody.innerHTML = html;
-      } else {
-        friendsTbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine F2F Freunde konfiguriert</td></tr>';
-      }
-    }
+    renderFriendsTable();
     const searchInput = $('node-search-input');
     if (searchInput?.value.trim()) {
       filterNodesTable();
@@ -1031,29 +1146,7 @@ async function refreshDashboard() {
         vouchersTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine aktiven Gutscheine im Speicher</td></tr>';
       }
     }
-    const locksTbody = $('locks-tbody');
-    if (locksTbody) {
-      if (d.recent_locks?.length > 0) {
-        let html = '';
-        for (const l of d.recent_locks) {
-          const b = l.status === 'Verified' ? badge('green', 'Verified') : (l.status === 'Provisional' ? badge('amber', 'Provisional') : badge('red', 'Conflict'));
-          const pShort = truncateHash(l.parent_lock_hex);
-          const cShort = truncateHash(l.child_lock_hex);
-          let tierBadge = badge('cyan', 'P2P Sync');
-          if (l.tier === 'VIP') tierBadge = badge('purple', `VIP (${escapeHtml(l.byte_years || 0)} BY)`);
-          else if (l.tier === 'F2F') tierBadge = badge('blue', `F2F (${escapeHtml(l.byte_years || 0)} BY)`);
-          else if (l.tier === 'Free') tierBadge = badge('green', 'Free (PoW)');
-          else if (l.tier) tierBadge = badge('cyan', l.tier);
-          const safeVoucherId = l.voucher_id ? escapeHtml(l.voucher_id) : '';
-          const safeParentHex = escapeHtml(l.parent_lock_hex || '');
-          const vLink = l.voucher_id ? `<button class="btn btn-secondary" style="padding:0.15rem 0.4rem;font-size:0.75rem;" data-voucher="${safeVoucherId}" onclick="openVoucherInspector(this.getAttribute('data-voucher'))">🎟️ ${escapeHtml(truncateHash(l.voucher_id))}</button>` : '<span style="color:var(--text-muted);">-</span>';
-          html += `<tr><td>${escapeHtml(l.timestamp_ms)}</td><td>${codeTag(pShort, l.parent_lock_hex)}</td><td>${codeTag(cShort, l.child_lock_hex)}</td><td>${tierBadge}</td><td>${vLink}</td><td>${b}</td><td><button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-parent="${safeParentHex}" onclick="openLockInspector(this.getAttribute('data-parent'))">📄 JSON</button></td></tr>`;
-        }
-        locksTbody.innerHTML = html;
-      } else {
-        locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren im Ringbuffer</td></tr>';
-      }
-    }
+    filterLocksTable();
   } catch (e) {
     consecutiveFailures++;
     if (consecutiveFailures >= 3) {

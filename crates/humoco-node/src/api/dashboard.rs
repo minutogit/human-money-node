@@ -237,6 +237,7 @@ pub struct RejectionsDto {
     pub capacity_429: u64,
     pub quota_429: u64,
     pub bad_pow_400: u64,
+    pub last_rejection_ago_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -810,12 +811,23 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let p2p_port = state.config.network.p2p_listen_addr.port();
     let bind_addr = state.config.network.rpc_listen_addr.ip().to_string();
     let loopback_only = state.config.network.rpc_listen_addr.ip().is_loopback();
+    let tier_shares = state
+        .config
+        .ingress
+        .tier_shares
+        .as_ref()
+        .map(|s| TierSharesDto {
+            free: s.free,
+            f2f: s.f2f,
+            vip: s.vip,
+        })
+        .unwrap_or_default();
     let config_view = ConfigViewDto {
         api_port,
         p2p_port,
         bind_addr,
         footprint_bytes: 144,
-        tier_shares: TierSharesDto { free: 20, f2f: 30, vip: 50 },
+        tier_shares,
         loopback_only,
     };
 
@@ -848,6 +860,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         capacity_429: state.metrics.rejected_capacity_429(),
         quota_429: state.metrics.rejected_quota_429(),
         bad_pow_400: state.metrics.rejected_bad_pow_400(),
+        last_rejection_ago_sec: state.metrics.last_rejection_ago_sec(),
     };
 
     let mut data = DashboardData {
@@ -1344,10 +1357,7 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
         redb_kb = data.system.redb_bytes / 1024,
         netto_locks = data.system.netto_locks_bytes,
         ttl_purged = data.system.ttl_purged_count,
-        peak_tps_single = data.system.peak_tps_single_core,
-        peak_tps_multi = data.system.peak_tps_multi_core,
-        max_storage_locks = data.system.max_storage_locks,
-        byte_years_capacity = data.system.byte_years_capacity,
+        uptime_formatted = data.uptime_formatted,
         qr_svg = qr_svg,
         node_id = data.node_id,
         hrw_id = data.hrw_routing_id,

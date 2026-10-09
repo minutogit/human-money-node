@@ -49,6 +49,21 @@ pub struct NodeConfig {
     pub alerts: AlertConfig,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
+    #[serde(default)]
+    pub ingress: IngressConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IngressConfig {
+    #[serde(default)]
+    pub tier_shares: Option<TierSharesConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TierSharesConfig {
+    pub free: u8,
+    pub f2f: u8,
+    pub vip: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

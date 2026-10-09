@@ -99,6 +99,7 @@ pub struct NodeMetrics {
     pub rejected_capacity_429: AtomicU64,
     pub rejected_quota_429: AtomicU64,
     pub rejected_bad_pow_400: AtomicU64,
+    pub last_rejection_unix_sec: AtomicU64,
     pub total_writes: AtomicU64,
     pub total_reads: AtomicU64,
     pub ttl_purged_count: AtomicU64,
@@ -107,6 +108,28 @@ pub struct NodeMetrics {
 impl NodeMetrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn touch_last_rejection(&self) {
+        let now_sec = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.last_rejection_unix_sec.store(now_sec, Ordering::Relaxed);
+    }
+
+    /// Returns how many seconds ago the last rejection occurred, or `None` if no rejection has been recorded.
+    pub fn last_rejection_ago_sec(&self) -> Option<u64> {
+        let ts = self.last_rejection_unix_sec.load(Ordering::Relaxed);
+        if ts == 0 {
+            None
+        } else {
+            let now_sec = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            Some(now_sec.saturating_sub(ts))
+        }
     }
 
     /// Records local In-RAM collision check & attestation latency (< 1µs - 5ms SLA).
@@ -134,30 +157,35 @@ impl NodeMetrics {
     /// Records a rejected lock due to conflict (409) or backpressure/quota (429).
     pub fn record_lock_rejected(&self) {
         self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+        self.touch_last_rejection();
     }
 
     /// Records a rejected lock specifically due to double-spend conflict (409 Conflict).
     pub fn record_rejected_conflict_409(&self) {
         self.rejected_conflict_409.fetch_add(1, Ordering::Relaxed);
         self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+        self.touch_last_rejection();
     }
 
     /// Records a rejected lock due to storage backpressure / queue full (429 Too Many Requests).
     pub fn record_rejected_capacity_429(&self) {
         self.rejected_capacity_429.fetch_add(1, Ordering::Relaxed);
         self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+        self.touch_last_rejection();
     }
 
     /// Records a rejected lock due to VIP/F2F quota exhaustion (429 Too Many Requests).
     pub fn record_rejected_quota_429(&self) {
         self.rejected_quota_429.fetch_add(1, Ordering::Relaxed);
         self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+        self.touch_last_rejection();
     }
 
     /// Records a rejected lock due to invalid, missing or weak Proof of Work (400 / 429).
     pub fn record_rejected_bad_pow_400(&self) {
         self.rejected_bad_pow_400.fetch_add(1, Ordering::Relaxed);
         self.locks_rejected.fetch_add(1, Ordering::Relaxed);
+        self.touch_last_rejection();
     }
 
     pub fn rejected_conflict_409(&self) -> u64 {
@@ -174,6 +202,10 @@ impl NodeMetrics {
 
     pub fn rejected_bad_pow_400(&self) -> u64 {
         self.rejected_bad_pow_400.load(Ordering::Relaxed)
+    }
+
+    pub fn last_rejection_unix_sec(&self) -> u64 {
+        self.last_rejection_unix_sec.load(Ordering::Relaxed)
     }
 
     /// Increments the total write transactions counter.
@@ -408,4 +440,37 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rejection_metrics_tracking() {
+        let metrics = NodeMetrics::new();
+        assert_eq!(metrics.last_rejection_ago_sec(), None);
+        assert_eq!(metrics.locks_rejected(), 0);
+
+        metrics.record_rejected_conflict_409();
+        assert_eq!(metrics.locks_rejected(), 1);
+        assert_eq!(metrics.rejected_conflict_409(), 1);
+        assert!(metrics.last_rejection_ago_sec().is_some());
+        assert!(metrics.last_rejection_unix_sec() > 0);
+
+        metrics.record_rejected_capacity_429();
+        assert_eq!(metrics.locks_rejected(), 2);
+        assert_eq!(metrics.rejected_capacity_429(), 1);
+
+        metrics.record_rejected_quota_429();
+        assert_eq!(metrics.locks_rejected(), 3);
+        assert_eq!(metrics.rejected_quota_429(), 1);
+
+        metrics.record_rejected_bad_pow_400();
+        assert_eq!(metrics.locks_rejected(), 4);
+        assert_eq!(metrics.rejected_bad_pow_400(), 1);
+
+        metrics.record_lock_rejected();
+        assert_eq!(metrics.locks_rejected(), 5);
+    }
 }

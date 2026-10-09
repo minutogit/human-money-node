@@ -75,6 +75,16 @@ impl EventLog {
         self.record_at(now_sec, kind, severity, msg)
     }
 
+    /// Convenience helper to record a system-level audit event.
+    pub fn record_system(&self, severity: HealthLevel, msg: impl Into<String>) -> u64 {
+        self.record(EventKind::System, severity, msg)
+    }
+
+    /// Convenience helper to record a system-level audit event with explicit timestamp.
+    pub fn record_system_at(&self, timestamp_sec: u64, severity: HealthLevel, msg: impl Into<String>) -> u64 {
+        self.record_at(timestamp_sec, EventKind::System, severity, msg)
+    }
+
     /// Records an event with an explicit timestamp (e.g. synchronized network time or testing).
     pub fn record_at(&self, timestamp_sec: u64, kind: EventKind, severity: HealthLevel, msg: impl Into<String>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -215,5 +225,17 @@ mod tests {
         let json = serde_json::to_string(&item).expect("serialize");
         let deserialized: EventItem = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(item, deserialized);
+    }
+
+    #[test]
+    fn test_record_system() {
+        let log = EventLog::new(10);
+        let id = log.record_system(HealthLevel::Ok, "Daemon initialized");
+        assert_eq!(id, 1);
+        let items = log.list();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, EventKind::System);
+        assert_eq!(items[0].severity, HealthLevel::Ok);
+        assert_eq!(items[0].message, "Daemon initialized");
     }
 }

@@ -1426,7 +1426,7 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
 
     // Verify branding & live status badge
-    assert!(body_str.contains("HuMoCo Node Control Center (v2.0)"));
+    assert!(body_str.contains("Human Money Node Control Center") || body_str.contains("HuMoCo Node Control Center"));
     assert!(body_str.contains("STANDALONE") || body_str.contains("COMMUNITY") || body_str.contains("VILLAGE MODE") || body_str.contains("ONLINE") || body_str.contains("HEALTHY"));
 
     // Verify 3-Tier Latencies Pills & Fast Stats
@@ -1439,14 +1439,14 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     // Verify 4-Tab Navigation Identifiers
     assert!(body_str.contains("Cockpit &amp; System") || body_str.contains("Cockpit & System"));
     assert!(body_str.contains("Netzwerk &amp; Mesh") || body_str.contains("Netzwerk & Mesh") || body_str.contains("Netzwerk &amp; F2F") || body_str.contains("Netzwerk & F2F"));
-    assert!(body_str.contains("Zugang &amp; Freunde") || body_str.contains("Zugang & Freunde") || body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten") || body_str.contains("Wallet-Zugänge") || body_str.contains("Gateway, Wallets &amp; Einnahmen") || body_str.contains("Gateway, Wallets & Einnahmen"));
+    assert!(body_str.contains("Zugang &amp; Freunde") || body_str.contains("Zugang & Freunde") || body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten") || body_str.contains("Wallet-Zugänge") || body_str.contains("Gateway, Wallets &amp; Einnahmen") || body_str.contains("Gateway, Wallets & Einnahmen") || body_str.contains("Ingress, Kassen &amp; Wallets") || body_str.contains("Ingress, Kassen & Wallets"));
     assert!(body_str.contains("Gutscheine &amp; Logs") || body_str.contains("Gutscheine & Logs") || body_str.contains("Gutscheine &amp; Locks") || body_str.contains("Gutscheine & Locks"));
 
     // Verify Visual Cards & Systems
     assert!(body_str.contains("Schreib-Durchsatz"));
     assert!(body_str.contains("Lese-Durchsatz"));
     assert!(body_str.contains("Hardware &amp; Ressourcen") || body_str.contains("Hardware & Ressourcen"));
-    assert!(body_str.contains("Knoten-Kapazität") || body_str.contains("Knoten-Kapazitätsrechner"));
+    assert!(body_str.contains("Persistenz") || body_str.contains("Knoten-Kapazität") || body_str.contains("Knoten-Kapazitätsrechner"));
     assert!(body_str.contains("Netzwerk-Thermometer"));
     assert!(body_str.contains("P2P Nachbarknoten") || body_str.contains("F2F Web-of-Trust Freunde") || body_str.contains("Server-zu-Server Mesh"));
     assert!(body_str.contains("Peer Explorer"));

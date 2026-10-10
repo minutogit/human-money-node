@@ -69,6 +69,23 @@ impl AppState {
         let config = Arc::new(crate::config::NodeConfig::default());
         let history_sampler = Arc::new(crate::api::history::HistorySampler::default());
         let event_log = Arc::new(crate::api::events::EventLog::default());
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if let Ok(loaded) = storage.load_recent_audit_events(100) {
+                if !loaded.is_empty() {
+                    event_log.populate(loaded);
+                }
+            }
+            let (audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<crate::api::events::EventItem>(100);
+            event_log.set_persister(audit_tx);
+            let persister_storage = storage.clone();
+            handle.spawn(async move {
+                while let Some(event) = audit_rx.recv().await {
+                    if let Err(err) = persister_storage.insert_audit_event(&event) {
+                        tracing::warn!("Failed to persist audit event #{}: {}", event.id, err);
+                    }
+                }
+            });
+        }
         let health_tracker = Arc::new(crate::api::health::HealthStateTracker::default());
         Self {
             engine,

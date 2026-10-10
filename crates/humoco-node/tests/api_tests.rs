@@ -4129,4 +4129,100 @@ async fn test_admin_peer_reset_and_ping_endpoints() {
     assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
 }
 
+#[tokio::test]
+async fn test_event_log_persister_and_populate() {
+    use humoco_node::api::events::{EventItem, EventKind, EventLog};
+    use humoco_node::api::health::HealthLevel;
+
+    // 1. Populate test
+    let log = EventLog::new(10);
+    let existing = vec![
+        EventItem {
+            id: 10,
+            timestamp_sec: 1000,
+            kind: EventKind::System,
+            severity: HealthLevel::Ok,
+            message: "Initial boot".into(),
+        },
+        EventItem {
+            id: 15,
+            timestamp_sec: 1005,
+            kind: EventKind::PeerConnect,
+            severity: HealthLevel::Ok,
+            message: "Peer connected".into(),
+        },
+    ];
+
+    log.populate(existing);
+    assert_eq!(log.len(), 2);
+    // next_id should be max(existing.id) + 1 = 16
+    let new_id = log.record(EventKind::System, HealthLevel::Ok, "Third event");
+    assert_eq!(new_id, 16);
+
+    // 2. Persister integration test
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<EventItem>(100);
+    log.set_persister(tx);
+
+    // Ok severity, normal kind -> should NOT persist
+    let _id_ok = log.record(EventKind::System, HealthLevel::Ok, "Normal info");
+    assert!(rx.try_recv().is_err(), "Ok system events must not be sent to persister");
+
+    // Warn severity -> should persist
+    let id_warn = log.record(EventKind::HealthWarning, HealthLevel::Warn, "Disk space low");
+    let item_warn = rx.try_recv().expect("Warn event must be sent to persister");
+    assert_eq!(item_warn.id, id_warn);
+    assert_eq!(item_warn.severity, HealthLevel::Warn);
+
+    // PeerBan kind (even if Ok severity) -> should persist
+    let id_ban = log.record(EventKind::PeerBan, HealthLevel::Ok, "Peer banned");
+    let item_ban = rx.try_recv().expect("PeerBan event must be sent to persister");
+    assert_eq!(item_ban.id, id_ban);
+    assert_eq!(item_ban.kind, EventKind::PeerBan);
+
+    // EquivocationFraud kind -> should persist
+    let id_fraud = log.record(EventKind::EquivocationFraud, HealthLevel::Crit, "Double spend fraud");
+    let item_fraud = rx.try_recv().expect("EquivocationFraud event must be sent to persister");
+    assert_eq!(item_fraud.id, id_fraud);
+
+    // ClientRegistered kind -> should persist
+    let id_reg = log.record(EventKind::ClientRegistered, HealthLevel::Ok, "Client token registered");
+    let item_reg = rx.try_recv().expect("ClientRegistered event must be sent to persister");
+    assert_eq!(item_reg.id, id_reg);
+}
+
+#[tokio::test]
+async fn test_dashboard_sre_monitoring_and_conflict_deep_link() {
+    let (app, _, _, _, _) = setup_test_app();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+    // 409 Conflict deep link checks
+    assert!(body_str.contains("jumpToConflictLocks()"), "Dashboard must contain jumpToConflictLocks");
+    assert!(body_str.contains("setLockFilter"), "Dashboard must contain setLockFilter");
+
+    // SRE Monitoring & Ecosystem checks
+    assert!(body_str.contains("📡 Externe Monitoring- &amp; Alerting-Schnittstellen") || body_str.contains("Externe Monitoring-"));
+    assert!(body_str.contains("scrape_configs:"), "Must contain prometheus scrape snippet");
+    assert!(body_str.contains("/metrics"), "Must reference /metrics endpoint");
+    assert!(body_str.contains("/healthz"), "Must reference /healthz endpoint");
+    assert!(body_str.contains("/health/ready"), "Must reference /health/ready endpoint");
+    assert!(body_str.contains("deploy/grafana/dashboard.json"), "Must reference Grafana template path");
+    assert!(body_str.contains("/tmp/humoco.sock"), "Must reference UNIX control socket");
+    assert!(body_str.contains("journalctl -u humoco-node -f"), "Must reference journalctl command");
+    assert!(body_str.contains("copySnippet"), "Must contain copySnippet helper");
+}
+
 

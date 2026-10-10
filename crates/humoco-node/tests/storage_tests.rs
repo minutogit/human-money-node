@@ -577,4 +577,55 @@ async fn test_voucher_query_methods() {
     assert!(engine.get_voucher_lineage("non_existent").await.is_none());
 }
 
+#[test]
+fn test_system_audit_events_storage_and_pruning() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test_audit.redb");
+    let storage = RedbStorage::open(&db_path).expect("failed to open redb");
+
+    // Initially empty
+    let initial = storage.load_recent_audit_events(100).unwrap();
+    assert!(initial.is_empty());
+
+    // Insert 120 events: ids 1 to 120
+    for id in 1..=120 {
+        let event = humoco_node::api::events::EventItem {
+            id,
+            timestamp_sec: 1700000000 + id,
+            kind: if id % 2 == 0 {
+                humoco_node::api::events::EventKind::PeerBan
+            } else {
+                humoco_node::api::events::EventKind::System
+            },
+            severity: if id > 100 {
+                humoco_node::api::health::HealthLevel::Crit
+            } else {
+                humoco_node::api::health::HealthLevel::Ok
+            },
+            message: format!("Audit event #{}", id),
+        };
+        storage.insert_audit_event(&event).expect("insert failed");
+    }
+
+    // Should be capped at 100 entries: oldest 20 (ids 1..=20) pruned, keeping ids 21..=120
+    let loaded_all = storage.load_recent_audit_events(200).unwrap();
+    assert_eq!(loaded_all.len(), 100);
+    assert_eq!(loaded_all.first().unwrap().id, 21);
+    assert_eq!(loaded_all.last().unwrap().id, 120);
+
+    // Limit respects limit argument
+    let loaded_10 = storage.load_recent_audit_events(10).unwrap();
+    assert_eq!(loaded_10.len(), 10);
+    assert_eq!(loaded_10.first().unwrap().id, 111);
+    assert_eq!(loaded_10.last().unwrap().id, 120);
+
+    // Reopen storage and verify persistence
+    drop(storage);
+    let reopened = RedbStorage::open(&db_path).expect("failed to reopen redb");
+    let after_reopen = reopened.load_recent_audit_events(50).unwrap();
+    assert_eq!(after_reopen.len(), 50);
+    assert_eq!(after_reopen.first().unwrap().id, 71);
+    assert_eq!(after_reopen.last().unwrap().id, 120);
+}
+
 

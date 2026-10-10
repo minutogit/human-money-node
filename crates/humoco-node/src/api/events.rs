@@ -48,6 +48,7 @@ pub struct EventLog {
     buffer: Arc<RwLock<VecDeque<EventItem>>>,
     next_id: AtomicU64,
     capacity: usize,
+    persist_tx: parking_lot::RwLock<Option<tokio::sync::mpsc::Sender<EventItem>>>,
 }
 
 impl Default for EventLog {
@@ -63,6 +64,38 @@ impl EventLog {
             buffer: Arc::new(RwLock::new(VecDeque::with_capacity(capacity.min(EVENT_LOG_CAPACITY)))),
             next_id: AtomicU64::new(1),
             capacity,
+            persist_tx: parking_lot::RwLock::new(None),
+        }
+    }
+
+    /// Sets the asynchronous persistence sender for critical audit events.
+    pub fn set_persister(&self, tx: tokio::sync::mpsc::Sender<EventItem>) {
+        *self.persist_tx.write() = Some(tx);
+    }
+
+    /// Populates the in-memory ring buffer with pre-existing events
+    /// (adjusting `next_id` to be max(existing.id) + 1).
+    pub fn populate(&self, events: Vec<EventItem>) {
+        if events.is_empty() {
+            return;
+        }
+        let max_id = events.iter().map(|e| e.id).max().unwrap_or(0);
+        let next = (max_id + 1).max(self.next_id.load(Ordering::SeqCst));
+        self.next_id.store(next, Ordering::SeqCst);
+
+        let mut guard = self.buffer.write();
+        let mut sorted = events;
+        sorted.sort_by_key(|e| e.id);
+
+        let to_keep = if sorted.len() > self.capacity {
+            &sorted[sorted.len() - self.capacity..]
+        } else {
+            &sorted[..]
+        };
+
+        guard.clear();
+        for event in to_keep {
+            guard.push_back(event.clone());
         }
     }
 
@@ -96,11 +129,25 @@ impl EventLog {
             message: msg.into(),
         };
 
-        let mut guard = self.buffer.write();
-        if guard.len() >= self.capacity {
-            guard.pop_front();
+        {
+            let mut guard = self.buffer.write();
+            if guard.len() >= self.capacity {
+                guard.pop_front();
+            }
+            guard.push_back(item.clone());
         }
-        guard.push_back(item);
+
+        let should_persist = severity >= HealthLevel::Warn
+            || kind == EventKind::PeerBan
+            || kind == EventKind::EquivocationFraud
+            || kind == EventKind::ClientRegistered;
+
+        if should_persist {
+            if let Some(tx) = self.persist_tx.read().as_ref() {
+                let _ = tx.try_send(item);
+            }
+        }
+
         id
     }
 

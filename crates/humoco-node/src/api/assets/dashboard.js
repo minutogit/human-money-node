@@ -131,6 +131,13 @@ copyTextToClipboard('journalctl -u humoco-node -f')
   .catch(() => showToast('Kopieren fehlgeschlagen', 'error'));
 }
 
+function copySnippet(text, label) {
+copyTextToClipboard(text)
+  .then(() => showToast((label || 'Snippet') + ' in Zwischenablage kopiert', 'success'))
+  .catch(() => showToast('Kopieren fehlgeschlagen', 'error'));
+}
+window.copySnippet = copySnippet;
+
 function togglePollPause() {
 isPollPaused = !isPollPaused;
 const btn = $('poll-pause-btn');
@@ -899,6 +906,13 @@ currentLockFilter = filter;
 });
 filterLocksTable();
 }
+window.setLockFilter = setLockFilter;
+
+function jumpToConflictLocks() {
+switchTab('tab-ingress');
+setLockFilter('409');
+}
+window.jumpToConflictLocks = jumpToConflictLocks;
 function filterLocksTable() {
 const d = currentDashboardData;
 const locksTbody = $('locks-tbody');

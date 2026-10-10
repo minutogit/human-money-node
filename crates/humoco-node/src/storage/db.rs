@@ -63,6 +63,7 @@ pub const TABLE_HMC_LOCKS: TableDefinition<&str, &[u8]> = TableDefinition::new("
 pub const TABLE_HMC_VOUCHER_INDEX: TableDefinition<(&str, &str), ()> = TableDefinition::new("hmc_voucher_index");
 pub const TABLE_HMC_TTL_INDEX: TableDefinition<(u64, &str), ()> = TableDefinition::new("hmc_ttl_index");
 pub const TABLE_BANNED_NODES: TableDefinition<&[u8; 32], u64> = TableDefinition::new("banned_nodes");
+pub const TABLE_SYSTEM_AUDIT_EVENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("system_audit_events");
 
 #[derive(Clone)]
 pub struct RedbStorage {
@@ -95,6 +96,7 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
             let _ = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
             let _ = write_txn.open_table(TABLE_BANNED_NODES)?;
+            let _ = write_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
         }
         write_txn.commit()?;
 
@@ -601,6 +603,14 @@ impl RedbStorage {
                 let (k, v) = item?;
                 dst_banned.insert(k.value(), v.value())?;
             }
+
+            // 9. TABLE_SYSTEM_AUDIT_EVENTS
+            let src_audit = read_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
+            let mut dst_audit = write_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
+            for item in src_audit.iter()? {
+                let (k, v) = item?;
+                dst_audit.insert(k.value(), v.value())?;
+            }
         }
         write_txn.commit()?;
         Ok(locks_count)
@@ -644,5 +654,63 @@ impl RedbStorage {
         let mut list: Vec<String> = vouchers.into_iter().collect();
         list.sort();
         Ok(list)
+    }
+
+    /// Inserts a system audit event, serializing it with `serde_json`, and prunes oldest entries
+    /// if the total count in `TABLE_SYSTEM_AUDIT_EVENTS` exceeds 100 so the table never grows beyond 100 entries.
+    pub fn insert_audit_event(&self, event: &crate::api::events::EventItem) -> Result<(), StorageError> {
+        let bytes = serde_json::to_vec(event)?;
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
+            table.insert(event.id, bytes.as_slice())?;
+
+            let count = table.len()?;
+            if count > 100 {
+                let to_remove = (count - 100) as usize;
+                let mut keys_to_remove = Vec::with_capacity(to_remove);
+                for item in table.iter()? {
+                    if keys_to_remove.len() >= to_remove {
+                        break;
+                    }
+                    if let Ok((k, _)) = item {
+                        keys_to_remove.push(k.value());
+                    }
+                }
+                for k in keys_to_remove {
+                    table.remove(k)?;
+                }
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Loads recent audit events from storage, up to `limit` entries, sorted by id/timestamp.
+    pub fn load_recent_audit_events(&self, limit: usize) -> Result<Vec<crate::api::events::EventItem>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
+        let mut items = Vec::new();
+        for entry in table.iter()? {
+            let (_, val_guard) = match entry {
+                Ok(g) => g,
+                Err(err) => {
+                    warn!("Corrupt entry in TABLE_SYSTEM_AUDIT_EVENTS: {}", err);
+                    continue;
+                }
+            };
+            match serde_json::from_slice::<crate::api::events::EventItem>(val_guard.value()) {
+                Ok(event) => items.push(event),
+                Err(err) => {
+                    warn!("Failed to deserialize EventItem from storage: {}", err);
+                }
+            }
+        }
+        items.sort_by_key(|e| e.id);
+        if items.len() > limit {
+            Ok(items[items.len() - limit..].to_vec())
+        } else {
+            Ok(items)
+        }
     }
 }

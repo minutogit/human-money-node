@@ -507,9 +507,35 @@ impl NodeDaemon {
             self.cancel_token.clone(),
         );
 
-        // Initialize History Sampler & Security Event Log (Phase 2)
+        // Initialize History Sampler & Security Event Log (Phase 2 & Phase 5)
         let history_sampler = Arc::new(crate::api::HistorySampler::default());
         let event_log = Arc::new(crate::api::EventLog::default());
+
+        // Load existing audit events on startup (Phase 5)
+        match storage.load_recent_audit_events(100) {
+            Ok(loaded_events) => {
+                if !loaded_events.is_empty() {
+                    tracing::info!("Loaded {} persistent audit events from storage", loaded_events.len());
+                    event_log.populate(loaded_events);
+                }
+            }
+            Err(err) => {
+                warn!("Failed to load recent audit events from storage: {}", err);
+            }
+        }
+
+        // Spawn background audit event persister task (Phase 5)
+        let (audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<crate::api::events::EventItem>(100);
+        event_log.set_persister(audit_tx);
+        let persister_storage = storage.clone();
+        tokio::spawn(async move {
+            while let Some(event) = audit_rx.recv().await {
+                if let Err(err) = persister_storage.insert_audit_event(&event) {
+                    warn!("Failed to persist audit event #{}: {}", event.id, err);
+                }
+            }
+        });
+
         event_log.record(
             crate::api::EventKind::System,
             crate::api::HealthLevel::Ok,

@@ -10,7 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::events::EventKind;
-use crate::api::health::{evaluate_health, HealthLevel, HealthSummary};
+use crate::api::health::{evaluate_health_tracked, HealthLevel, HealthSummary};
 pub use crate::ingress::F2fClientDto;
 use crate::api::metrics::LatencyTierStats;
 use crate::api::qr::generate_qr_svg;
@@ -217,16 +217,37 @@ pub struct ShardScoreSampleDto {
     pub rank: usize,
 }
 
+fn default_flush_queue_capacity() -> usize {
+    10_000
+}
+
 /// Status of the asynchronous ACID redb persistence worker.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistenceDto {
     pub last_successful_flush_ms: u64,
     pub last_flush_ago_sec: Option<u64>,
     pub flush_queue_depth: usize,
+    #[serde(default = "default_flush_queue_capacity")]
+    pub flush_queue_capacity: usize,
     pub flush_batches_total: u64,
     pub flush_errors_total: u64,
     pub flush_ops_total: u64,
     pub redb_file_bytes: u64,
+}
+
+impl Default for PersistenceDto {
+    fn default() -> Self {
+        Self {
+            last_successful_flush_ms: 0,
+            last_flush_ago_sec: None,
+            flush_queue_depth: 0,
+            flush_queue_capacity: 10_000,
+            flush_batches_total: 0,
+            flush_errors_total: 0,
+            flush_ops_total: 0,
+            redb_file_bytes: 0,
+        }
+    }
 }
 
 /// Breakdown of rejected requests across specific failure causes.
@@ -848,6 +869,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         last_successful_flush_ms: last_flush_ms,
         last_flush_ago_sec,
         flush_queue_depth,
+        flush_queue_capacity: 10_000,
         flush_batches_total: state.engine.stats.flush_batches_total.load(std::sync::atomic::Ordering::Relaxed),
         flush_errors_total: state.engine.stats.flush_errors_total.load(std::sync::atomic::Ordering::Relaxed),
         flush_ops_total: state.engine.stats.flush_ops_total.load(std::sync::atomic::Ordering::Relaxed),
@@ -914,7 +936,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         persistence,
         rejections,
     };
-    data.health = evaluate_health(&data);
+    data.health = evaluate_health_tracked(&data, &state.health_tracker);
     data
 }
 

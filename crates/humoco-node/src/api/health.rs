@@ -27,6 +27,28 @@ pub struct HealthItem {
     pub severity: HealthLevel,
     pub message_de: String,
     pub hint_de: String,
+    #[serde(default)]
+    pub active_since_sec: u64,
+    #[serde(default)]
+    pub duration_formatted: String,
+}
+
+impl HealthItem {
+    pub fn new(
+        code: impl Into<String>,
+        severity: HealthLevel,
+        message_de: impl Into<String>,
+        hint_de: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            severity,
+            message_de: message_de.into(),
+            hint_de: hint_de.into(),
+            active_since_sec: 0,
+            duration_formatted: "0s".to_string(),
+        }
+    }
 }
 
 /// Summary of all evaluated diagnostic health checks.
@@ -73,108 +95,108 @@ pub fn evaluate_health(data: &DashboardData) -> HealthSummary {
 
     // 1. NO_PEERS: connected_peers == 0 and configured_peers > 0 -> crit
     if data.connected_peers == 0 && data.configured_peers > 0 {
-        items.push(HealthItem {
-            code: "NO_PEERS".to_string(),
-            severity: HealthLevel::Crit,
-            message_de: "Keine P2P-Peers verbunden trotz konfigurierter Gegenstellen.".to_string(),
-            hint_de: "Netzwerkverbindung, Firewall und P2P-Port (Standard 9090) prüfen.".to_string(),
-        });
+        items.push(HealthItem::new(
+            "NO_PEERS",
+            HealthLevel::Crit,
+            "Keine P2P-Peers verbunden trotz konfigurierter Gegenstellen.",
+            "Netzwerkverbindung, Firewall und P2P-Port (Standard 9090) prüfen.",
+        ));
     }
 
     // 2. QUEUE_HIGH: flush_queue_depth > 1000 -> warn, if extreme (> 90%) -> crit
     if data.flush_queue_depth >= QUEUE_CRIT_THRESHOLD {
-        items.push(HealthItem {
-            code: "QUEUE_HIGH".to_string(),
-            severity: HealthLevel::Crit,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "QUEUE_HIGH",
+            HealthLevel::Crit,
+            format!(
                 "Flush-Warteschlange extrem voll ({} Einträge, >90% Kapazität).",
                 data.flush_queue_depth
             ),
-            hint_de: "I/O-Leistung des Speichermediums (redb) und Systemauslastung prüfen.".to_string(),
-        });
+            "I/O-Leistung des Speichermediums (redb) und Systemauslastung prüfen.",
+        ));
     } else if data.flush_queue_depth > QUEUE_WARN_THRESHOLD {
-        items.push(HealthItem {
-            code: "QUEUE_HIGH".to_string(),
-            severity: HealthLevel::Warn,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "QUEUE_HIGH",
+            HealthLevel::Warn,
+            format!(
                 "Erhöhte Flush-Warteschlangentiefe ({} Einträge).",
                 data.flush_queue_depth
             ),
-            hint_de: "Disk-I/O beobachten; asynchroner Flush hinkt eventuell hinterher.".to_string(),
-        });
+            "Disk-I/O beobachten; asynchroner Flush hinkt eventuell hinterher.",
+        ));
     }
 
     // 3. SLA_VIOLATED: !pos_sla_compliant -> warn
     if !data.pos_sla_compliant {
-        items.push(HealthItem {
-            code: "SLA_VIOLATED".to_string(),
-            severity: HealthLevel::Warn,
-            message_de: "PoS-Checkout Hot-Path SLA (<5 ms) verletzt.".to_string(),
-            hint_de: "RAM-Index-Latenzen analysieren und I/O-Überlastung reduzieren.".to_string(),
-        });
+        items.push(HealthItem::new(
+            "SLA_VIOLATED",
+            HealthLevel::Warn,
+            "PoS-Checkout Hot-Path SLA (<5 ms) verletzt.",
+            "RAM-Index-Latenzen analysieren und I/O-Überlastung reduzieren.",
+        ));
     }
 
     // 4. BROOM: broom_patterns_detected > 0 -> warn
     if data.broom_patterns_detected > 0 {
-        items.push(HealthItem {
-            code: "BROOM".to_string(),
-            severity: HealthLevel::Warn,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "BROOM",
+            HealthLevel::Warn,
+            format!(
                 "Besen-Muster (Broom Attack) im Ingress erkannt ({} Vorfälle).",
                 data.broom_patterns_detected
             ),
-            hint_de: "Ingress-Diversität und Gateway-Traffic auf aggregierte Sybil-Angriffe prüfen.".to_string(),
-        });
+            "Ingress-Diversität und Gateway-Traffic auf aggregierte Sybil-Angriffe prüfen.",
+        ));
     }
 
     // 5. GATEWAY_CONC: gateway_concentration_ratio > 0.5 -> warn
     if data.gateway_concentration_ratio > GATEWAY_CONCENTRATION_WARN_RATIO {
-        items.push(HealthItem {
-            code: "GATEWAY_CONC".to_string(),
-            severity: HealthLevel::Warn,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "GATEWAY_CONC",
+            HealthLevel::Warn,
+            format!(
                 "Hohe Gateway-Konzentration ({:.1}% > 50%).",
                 data.gateway_concentration_ratio * 100.0
             ),
-            hint_de: "Ingress über mehrere Gateways streuen, um Single-Points-of-Failure zu vermeiden.".to_string(),
-        });
+            "Ingress über mehrere Gateways streuen, um Single-Points-of-Failure zu vermeiden.",
+        ));
     }
 
     // 6. SUBNET_DOM: shard_subnet_dominance_max > 0.5 -> warn
     if data.shard_subnet_dominance_max > SUBNET_DOMINANCE_WARN_RATIO {
-        items.push(HealthItem {
-            code: "SUBNET_DOM".to_string(),
-            severity: HealthLevel::Warn,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "SUBNET_DOM",
+            HealthLevel::Warn,
+            format!(
                 "Shard-Subnetz-Dominanz überschreitet 50% ({:.1}%).",
                 data.shard_subnet_dominance_max * 100.0
             ),
-            hint_de: "Peers in unterschiedlichen IP-Subnetzen betreiben zur Erhöhung der Resilienz.".to_string(),
-        });
+            "Peers in unterschiedlichen IP-Subnetzen betreiben zur Erhöhung der Resilienz.",
+        ));
     }
 
     // 7. CLOCK_DRIFT: if drift > 5_000 ms -> warn, > 30_000 ms -> crit
     let drift = data.clock_drift_ms.abs();
     if drift > CLOCK_DRIFT_CRIT_MS {
-        items.push(HealthItem {
-            code: "CLOCK_DRIFT".to_string(),
-            severity: HealthLevel::Crit,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "CLOCK_DRIFT",
+            HealthLevel::Crit,
+            format!(
                 "Kritische Uhrenabweichung zur P2P-Netzwerkzeit: {} ms (>30 s).",
                 drift
             ),
-            hint_de: "Systemzeitsynchronisation (NTP / chrony) prüfen. Große Abweichungen gefährden Konsensvalidität.".to_string(),
-        });
+            "Systemzeitsynchronisation (NTP / chrony) prüfen. Große Abweichungen gefährden Konsensvalidität.",
+        ));
     } else if drift > CLOCK_DRIFT_WARN_MS {
-        items.push(HealthItem {
-            code: "CLOCK_DRIFT".to_string(),
-            severity: HealthLevel::Warn,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "CLOCK_DRIFT",
+            HealthLevel::Warn,
+            format!(
                 "Erhöhte Uhrenabweichung zur P2P-Netzwerkzeit: {} ms (>5 s).",
                 drift
             ),
-            hint_de: "Lokale Systemzeit weicht vom Median der F2F-Nachbarn ab. NTP-Status überprüfen.".to_string(),
-        });
+            "Lokale Systemzeit weicht vom Median der F2F-Nachbarn ab. NTP-Status überprüfen.",
+        ));
     }
 
     // 8. TICKET_INCUBATING: if ticket incubation < 86_400 s (when incubating) -> info/ok
@@ -187,15 +209,15 @@ pub fn evaluate_health(data: &DashboardData) -> HealthSummary {
     if let Some(node) = incubating_node {
         let remaining_sec = node.incubation_remaining_sec.unwrap_or(TICKET_INCUBATION_SEC);
         if remaining_sec <= TICKET_INCUBATION_SEC {
-            items.push(HealthItem {
-                code: "TICKET_INCUBATING".to_string(),
-                severity: HealthLevel::Ok,
-                message_de: format!(
+            items.push(HealthItem::new(
+                "TICKET_INCUBATING",
+                HealthLevel::Ok,
+                format!(
                     "Argon2d-Shard-Ticket befindet sich in 24h-Reifung (noch {} s verbleibend).",
                     remaining_sec
                 ),
-                hint_de: "Ticket reift 24 Stunden, bevor es im HRW-Scoring aktiv wird (Schutz vor Shard-Hopping).".to_string(),
-            });
+                "Ticket reift 24 Stunden, bevor es im HRW-Scoring aktiv wird (Schutz vor Shard-Hopping).",
+            ));
         }
     }
 
@@ -206,70 +228,123 @@ pub fn evaluate_health(data: &DashboardData) -> HealthSummary {
         false
     };
     if is_exposed {
-        items.push(HealthItem {
-            code: "DASHBOARD_EXPOSED".to_string(),
-            severity: HealthLevel::Crit,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "DASHBOARD_EXPOSED",
+            HealthLevel::Crit,
+            format!(
                 "Dashboard-REST-API lauscht auf externer/öffentlicher Adresse '{}'.",
                 data.config_view.bind_addr
             ),
-            hint_de: "Dashboard sollte nur auf Loopback (127.0.0.1) lauschen oder per Firewall/VPN geschützt werden.".to_string(),
-        });
+            "Dashboard sollte nur auf Loopback (127.0.0.1) lauschen oder per Firewall/VPN geschützt werden.",
+        ));
     }
 
     // 10. PERSIST_ERROR: flush_errors_total > 0 -> crit
     if data.persistence.flush_errors_total > 0 {
-        items.push(HealthItem {
-            code: "PERSIST_ERROR".to_string(),
-            severity: HealthLevel::Crit,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "PERSIST_ERROR",
+            HealthLevel::Crit,
+            format!(
                 "Datenbank-Flush fehlgeschlagen ({} Fehler seit Daemon-Start erkannt).",
                 data.persistence.flush_errors_total
             ),
-            hint_de: "Dateisystem-Rechte, I/O-Fehler und Speicherplatz prüfen. Nach Behebung Daemon neu starten.".to_string(),
-        });
+            "Dateisystem-Rechte, I/O-Fehler und Speicherplatz prüfen. Nach Behebung Daemon neu starten.",
+        ));
     }
 
     // 11. DISK_SPACE_LOW: disk_free_gb < 2.0 -> crit, < 5.0 -> warn
     if data.disk_free_gb < 2.0 {
-        items.push(HealthItem {
-            code: "DISK_SPACE_LOW".to_string(),
-            severity: HealthLevel::Crit,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "DISK_SPACE_LOW",
+            HealthLevel::Crit,
+            format!(
                 "Knapper Festplattenspeicher (redb): {:.1} GB verbleibend.",
                 data.disk_free_gb
             ),
-            hint_de: "Speicherplatz freigeben oder Partition vergrößern. Volle Festplatten gefährden die Datenintegrität.".to_string(),
-        });
+            "Speicherplatz freigeben oder Partition vergrößern. Volle Festplatten gefährden die Datenintegrität.",
+        ));
     } else if data.disk_free_gb < 5.0 {
-        items.push(HealthItem {
-            code: "DISK_SPACE_LOW".to_string(),
-            severity: HealthLevel::Warn,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "DISK_SPACE_LOW",
+            HealthLevel::Warn,
+            format!(
                 "Knapper Festplattenspeicher (redb): {:.1} GB verbleibend.",
                 data.disk_free_gb
             ),
-            hint_de: "Speicherplatz freigeben oder Partition vergrößern. Volle Festplatten gefährden die Datenintegrität.".to_string(),
-        });
+            "Speicherplatz freigeben oder Partition vergrößern. Volle Festplatten gefährden die Datenintegrität.",
+        ));
     }
 
     // 12. FLUSH_STALE: flush_queue_depth > 0 && last_flush_ago_sec > 60 -> warn
     if data.persistence.flush_queue_depth > 0 && data.persistence.last_flush_ago_sec.unwrap_or(0) > 60 {
-        items.push(HealthItem {
-            code: "FLUSH_STALE".to_string(),
-            severity: HealthLevel::Warn,
-            message_de: format!(
+        items.push(HealthItem::new(
+            "FLUSH_STALE",
+            HealthLevel::Warn,
+            format!(
                 "Verzögerter Festplatten-Flush (Queue: {}, letzter Flush vor {}s).",
                 data.persistence.flush_queue_depth,
                 data.persistence.last_flush_ago_sec.unwrap_or(0)
             ),
-            hint_de: "Disk-I/O beobachten; asynchroner redb Flush hinkt hinterher.".to_string(),
-        });
+            "Disk-I/O beobachten; asynchroner redb Flush hinkt hinterher.",
+        ));
     }
 
     let level = items.iter().map(|item| item.severity).max().unwrap_or(HealthLevel::Ok);
 
     HealthSummary { level, items }
+}
+
+/// Formats active health duration in human-readable compact form.
+pub fn format_health_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Tracks the first-seen timestamp of active diagnostic health issues across polling intervals.
+#[derive(Debug, Default)]
+pub struct HealthStateTracker {
+    first_seen: parking_lot::RwLock<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+impl HealthStateTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Looks up or inserts `Instant::now()` for each item's `code`, sets duration metadata,
+    /// and prunes codes that are no longer present in `items`.
+    pub fn track(&self, items: &mut [HealthItem]) {
+        let now = std::time::Instant::now();
+        let mut map = self.first_seen.write();
+        let active_codes: std::collections::HashSet<&str> =
+            items.iter().map(|it| it.code.as_str()).collect();
+        map.retain(|k, _| active_codes.contains(k.as_str()));
+
+        for item in items.iter_mut() {
+            let first = *map.entry(item.code.clone()).or_insert(now);
+            let secs = now.duration_since(first).as_secs();
+            item.active_since_sec = secs;
+            item.duration_formatted = format_health_duration(secs);
+        }
+    }
+}
+
+/// Evaluates health with stateful duration tracking across polling cycles.
+///
+/// Preserves [`evaluate_health`] unchanged for backward compatibility while enriching
+/// active items with `active_since_sec` and `duration_formatted`.
+pub fn evaluate_health_tracked(
+    data: &DashboardData,
+    tracker: &HealthStateTracker,
+) -> HealthSummary {
+    let mut summary = evaluate_health(data);
+    tracker.track(&mut summary.items);
+    summary
 }
 
 #[cfg(test)]
@@ -618,5 +693,79 @@ mod tests {
         data.persistence.last_flush_ago_sec = Some(30);
         let summary_ok = evaluate_health(&data);
         assert_eq!(summary_ok.level, HealthLevel::Ok);
+    }
+
+    #[test]
+    fn test_format_health_duration() {
+        assert_eq!(format_health_duration(0), "0s");
+        assert_eq!(format_health_duration(42), "42s");
+        assert_eq!(format_health_duration(59), "59s");
+        assert_eq!(format_health_duration(60), "1m 0s");
+        assert_eq!(format_health_duration(125), "2m 5s");
+        assert_eq!(format_health_duration(3599), "59m 59s");
+        assert_eq!(format_health_duration(3600), "1h 0m");
+        assert_eq!(format_health_duration(3665), "1h 1m");
+        assert_eq!(format_health_duration(7200), "2h 0m");
+    }
+
+    #[test]
+    fn test_health_state_tracker_lifecycle() {
+        let tracker = HealthStateTracker::new();
+        let mut items = vec![
+            HealthItem::new("NO_PEERS", HealthLevel::Crit, "No peers", "Check network"),
+            HealthItem::new("QUEUE_HIGH", HealthLevel::Warn, "Queue high", "Check disk"),
+        ];
+
+        // First track call
+        tracker.track(&mut items);
+        assert_eq!(items[0].active_since_sec, 0);
+        assert_eq!(items[0].duration_formatted, "0s");
+        assert_eq!(items[1].active_since_sec, 0);
+        assert_eq!(items[1].duration_formatted, "0s");
+
+        // Manually adjust first_seen for NO_PEERS to simulate 75 seconds ago
+        {
+            let mut map = tracker.first_seen.write();
+            let past = std::time::Instant::now() - std::time::Duration::from_secs(75);
+            map.insert("NO_PEERS".to_string(), past);
+        }
+
+        // QUEUE_HIGH is resolved, only NO_PEERS remains
+        let mut items2 = vec![
+            HealthItem::new("NO_PEERS", HealthLevel::Crit, "No peers", "Check network"),
+        ];
+        tracker.track(&mut items2);
+        assert!(items2[0].active_since_sec >= 75);
+        assert_eq!(items2[0].duration_formatted, "1m 15s");
+
+        // QUEUE_HIGH must have been pruned from tracker
+        {
+            let map = tracker.first_seen.read();
+            assert!(!map.contains_key("QUEUE_HIGH"));
+            assert!(map.contains_key("NO_PEERS"));
+        }
+
+        // NO_PEERS is now also resolved
+        let mut items3 = Vec::new();
+        tracker.track(&mut items3);
+        {
+            let map = tracker.first_seen.read();
+            assert!(map.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_evaluate_health_tracked_backward_compatible() {
+        let tracker = HealthStateTracker::new();
+        let mut data = mock_healthy_dashboard_data();
+        data.connected_peers = 0;
+        data.configured_peers = 3;
+
+        let summary = evaluate_health_tracked(&data, &tracker);
+        assert_eq!(summary.level, HealthLevel::Crit);
+        assert_eq!(summary.items.len(), 1);
+        assert_eq!(summary.items[0].code, "NO_PEERS");
+        assert_eq!(summary.items[0].active_since_sec, 0);
+        assert_eq!(summary.items[0].duration_formatted, "0s");
     }
 }

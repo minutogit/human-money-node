@@ -18,6 +18,82 @@ let lastSuccessfulFetchTime = null;
 let pendingConfirmCallback = null;
 let isPollPaused = false;
 let isFetchInProgress = false;
+let isHealthExpanded = false;
+
+function toggleHealthCard() {
+  isHealthExpanded = !isHealthExpanded;
+  if (currentDashboardData) {
+    renderHealthCard(currentDashboardData);
+  }
+}
+window.toggleHealthCard = toggleHealthCard;
+
+function renderHealthCard(d) {
+  if (!d || !d.health) return;
+  const level = d.health.level || 'Ok';
+  const hBadge = $('health-badge');
+  const hIcon = $('health-icon');
+  const hCard = $('health-card');
+  const toggleIcon = $('health-toggle-icon');
+  const noteEl = $('health-note');
+  const itemsContainer = $('health-items-container');
+
+  if (level === 'Crit') {
+    if (hBadge) { hBadge.innerText = 'KRITISCH'; hBadge.className = 'badge badge-red'; }
+    if (hIcon) hIcon.innerText = '🚨';
+    if (hCard) hCard.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+  } else if (level === 'Warn') {
+    if (hBadge) { hBadge.innerText = 'WARNUNG'; hBadge.className = 'badge badge-amber'; }
+    if (hIcon) hIcon.innerText = '⚠️';
+    if (hCard) hCard.style.borderColor = 'rgba(245, 158, 11, 0.5)';
+  } else {
+    if (hBadge) { hBadge.innerText = 'OK (GESUND)'; hBadge.className = 'badge badge-green'; }
+    if (hIcon) hIcon.innerText = '🟢';
+    if (hCard) hCard.style.borderColor = 'var(--border)';
+  }
+
+  const isDegraded = (level === 'Warn' || level === 'Crit');
+  const showExpanded = isDegraded || isHealthExpanded;
+
+  if (toggleIcon) {
+    if (level === 'Ok') {
+      toggleIcon.innerText = showExpanded ? '▲' : '▼';
+      toggleIcon.style.display = 'inline';
+    } else {
+      toggleIcon.style.display = 'none';
+    }
+  }
+
+  if (noteEl) {
+    noteEl.style.display = showExpanded ? 'block' : 'none';
+  }
+
+  if (itemsContainer) {
+    if (level === 'Ok') {
+      if (!showExpanded) {
+        itemsContainer.innerHTML = '<div style="font-size:0.85rem;color:var(--green);display:flex;align-items:center;justify-content:space-between;padding:0.25rem 0;cursor:pointer;" onclick="toggleHealthCard()"><span style="display:flex;align-items:center;gap:0.5rem;"><span>✅</span><span>Alle Systeme nominal. Keine Auffälligkeiten erkannt.</span></span><span style="font-size:0.75rem;color:var(--text-muted);">Details anzeigen ▼</span></div>';
+      } else {
+        let itemsHtml = '<div style="font-size:0.85rem;color:var(--green);display:flex;align-items:center;justify-content:space-between;padding:0.25rem 0;cursor:pointer;" onclick="toggleHealthCard()"><span style="display:flex;align-items:center;gap:0.5rem;"><span>✅</span><span>Alle Systeme nominal. Keine Auffälligkeiten erkannt.</span></span><span style="font-size:0.75rem;color:var(--text-muted);">Details verbergen ▲</span></div>';
+        if (d.health.items?.length > 0) {
+          for (const item of d.health.items) {
+            const durText = item.duration_formatted ? ` (aktiv seit ${escapeHtml(item.duration_formatted)})` : '';
+            itemsHtml += `<div class="health-item ok"><div class="health-item-header"><span class="badge badge-green">INFO</span><strong style="color:var(--text);">${escapeHtml(item.message_de)}<span style="font-size:0.75rem;font-weight:normal;color:var(--text-muted);margin-left:0.35rem;">${durText}</span></strong><span class="code" style="font-size:0.75rem;margin-left:auto;">${escapeHtml(item.code)}</span></div>${item.hint_de ? `<div class="health-item-hint">💡 ${escapeHtml(item.hint_de)}</div>` : ''}</div>`;
+          }
+        }
+        itemsContainer.innerHTML = itemsHtml;
+      }
+    } else {
+      // Degraded (Warn or Crit): Automatically expanded with warning badges and duration
+      let itemsHtml = '';
+      for (const item of (d.health.items || [])) {
+        const isCrit = item.severity === 'Crit';
+        const durText = item.duration_formatted ? ` (aktiv seit ${escapeHtml(item.duration_formatted)})` : '';
+        itemsHtml += `<div class="health-item ${isCrit ? 'crit' : 'warn'}"><div class="health-item-header"><span class="badge ${isCrit ? 'badge-red' : 'badge-amber'}">${isCrit ? 'KRITISCH' : 'WARNUNG'}</span><strong style="color:var(--text);">${escapeHtml(item.message_de)}<span style="font-size:0.75rem;font-weight:normal;color:var(--text-muted);margin-left:0.35rem;">${durText}</span></strong><span class="code" style="font-size:0.75rem;margin-left:auto;">${escapeHtml(item.code)}</span></div>${item.hint_de ? `<div class="health-item-hint">💡 ${escapeHtml(item.hint_de)}</div>` : ''}</div>`;
+      }
+      itemsContainer.innerHTML = itemsHtml;
+    }
+  }
+}
 
 function fallbackCopyTextToClipboard(text) {
   return new Promise((resolve, reject) => {
@@ -557,7 +633,8 @@ function copyHealthDiagnosis() {
   if (items.length > 0) {
     lines.push('Aktive Diagnose-Meldungen:');
     for (const item of items) {
-      lines.push(`- [${item.severity}] ${item.code}: ${item.message_de}`);
+      const durText = item.duration_formatted ? ` (aktiv seit ${item.duration_formatted})` : '';
+      lines.push(`- [${item.severity}] ${item.code}: ${item.message_de}${durText}`);
       if (item.hint_de) {
         lines.push(`  Hinweis: ${item.hint_de}`);
       }
@@ -947,23 +1024,8 @@ async function refreshDashboard() {
       }
     }
     if (d.health) {
-      const hBadge = $('health-badge');
-      const hIcon = $('health-icon');
-      const hCard = $('health-card');
+      renderHealthCard(d);
       const level = d.health.level || 'Ok';
-      if (level === 'Crit') {
-        if (hBadge) { hBadge.innerText = 'KRITISCH'; hBadge.className = 'badge badge-red'; }
-        if (hIcon) hIcon.innerText = '🚨';
-        if (hCard) hCard.style.borderColor = 'rgba(239, 68, 68, 0.5)';
-      } else if (level === 'Warn') {
-        if (hBadge) { hBadge.innerText = 'WARNUNG'; hBadge.className = 'badge badge-amber'; }
-        if (hIcon) hIcon.innerText = '⚠️';
-        if (hCard) hCard.style.borderColor = 'rgba(245, 158, 11, 0.5)';
-      } else {
-        if (hBadge) { hBadge.innerText = 'OK (GESUND)'; hBadge.className = 'badge badge-green'; }
-        if (hIcon) hIcon.innerText = '🟢';
-        if (hCard) hCard.style.borderColor = 'var(--border)';
-      }
       updateDocumentHealthIndicator(level);
       const topBanner = $('health-banner-top');
       if (topBanner) {
@@ -998,20 +1060,6 @@ async function refreshDashboard() {
       updateTabBadge('tab-badge-cockpit', cockpitWarns);
       updateTabBadge('tab-badge-network', networkWarns);
       updateTabBadge('tab-badge-tiers', tiersWarns);
-
-      const itemsContainer = $('health-items-container');
-      if (itemsContainer) {
-        if (d.health.items?.length > 0) {
-          let itemsHtml = '';
-          for (const item of d.health.items) {
-            const isCrit = item.severity === 'Crit';
-            itemsHtml += `<div class="health-item ${isCrit ? 'crit' : 'warn'}"><div class="health-item-header"><span class="badge ${isCrit ? 'badge-red' : 'badge-amber'}">${isCrit ? 'KRITISCH' : 'WARNUNG'}</span><strong style="color:var(--text);">${escapeHtml(item.message_de)}</strong><span class="code" style="font-size:0.75rem;margin-left:auto;">${escapeHtml(item.code)}</span></div>${item.hint_de ? `<div class="health-item-hint">💡 ${escapeHtml(item.hint_de)}</div>` : ''}</div>`;
-          }
-          itemsContainer.innerHTML = itemsHtml;
-        } else {
-          itemsContainer.innerHTML = '<div style="font-size:0.85rem;color:var(--green);display:flex;align-items:center;gap:0.5rem;padding:0.25rem 0;"><span>✅</span><span>Alle Systeme nominal. Keine Auffälligkeiten erkannt.</span></div>';
-        }
-      }
     }
     const sp = d.sparklines;
     const latestWrite = sp?.writes?.length ? sp.writes[sp.writes.length - 1] : 0;
@@ -1027,12 +1075,14 @@ async function refreshDashboard() {
     const pers = d.persistence;
     if (pers) {
       setText('persist-queue-val', (pers.flush_queue_depth || 0).toLocaleString());
+      const qCap = pers.flush_queue_capacity || 10000;
+      setText('persist-queue-cap', qCap.toLocaleString());
       const qBar = $('persist-queue-bar');
       if (qBar) {
-        const qPct = Math.min(100, ((pers.flush_queue_depth || 0) / 10000) * 100);
+        const qPct = Math.min(100, ((pers.flush_queue_depth || 0) / qCap) * 100);
         qBar.style.width = qPct + '%';
-        if (pers.flush_queue_depth >= 9000) qBar.className = 'progress-fill fill-red';
-        else if (pers.flush_queue_depth >= 1000) qBar.className = 'progress-fill fill-amber';
+        if (pers.flush_queue_depth >= (qCap * 0.9)) qBar.className = 'progress-fill fill-red';
+        else if (pers.flush_queue_depth >= (qCap * 0.1)) qBar.className = 'progress-fill fill-amber';
         else qBar.className = 'progress-fill fill-green';
       }
       const sBadge = $('persist-status-badge');
@@ -1040,7 +1090,7 @@ async function refreshDashboard() {
         if (pers.flush_errors_total > 0) {
           sBadge.innerText = 'Fehler!';
           sBadge.className = 'badge badge-red';
-        } else if (pers.flush_queue_depth >= 1000) {
+        } else if (pers.flush_queue_depth >= (qCap * 0.1)) {
           sBadge.innerText = 'Stau';
           sBadge.className = 'badge badge-amber';
         } else {
@@ -1101,11 +1151,19 @@ async function refreshDashboard() {
         const diskBar = $('sys-disk-bar');
         if (diskBar) {
           const totalGb = sys ? ((sys.redb_bytes || 0) / (1024 * 1024 * 1024)) + d.disk_free_gb : d.disk_free_gb;
-          const fillPct = totalGb > 0 ? Math.min(100, Math.max(5, (d.disk_free_gb / totalGb) * 100)) : Math.min(100, Math.max(5, (d.disk_free_gb / 20.0) * 100));
-          diskBar.style.width = fillPct.toFixed(1) + '%';
-          if (d.disk_free_gb < 2.0) diskBar.className = 'progress-fill fill-red';
-          else if (d.disk_free_gb < 5.0) diskBar.className = 'progress-fill fill-amber';
+          const freePct = totalGb > 0 ? (d.disk_free_gb / totalGb) * 100 : 100;
+          diskBar.style.width = Math.min(100, Math.max(5, freePct)).toFixed(1) + '%';
+          if (freePct <= 10.0) diskBar.className = 'progress-fill fill-red';
+          else if (freePct <= 20.0) diskBar.className = 'progress-fill fill-amber';
           else diskBar.className = 'progress-fill fill-green';
+        }
+        const headroomEl = $('sys-disk-headroom');
+        if (headroomEl && sys) {
+          if (sys.redb_growth_mb_per_day > 0) {
+            headroomEl.innerText = `Wachstum: +${sys.redb_growth_mb_per_day.toFixed(1)} MB/Tag • Reichweite: ${sys.disk_headroom_label || '> 365 Tage (stabil)'}`;
+          } else {
+            headroomEl.innerText = `Reichweite: ${sys.disk_headroom_label || '> 365 Tage (stabil)'}`;
+          }
         }
       }
       setText('sys-rss-val', sys.rss_mb.toFixed(1) + ' MB');

@@ -1,6 +1,7 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -21,6 +22,12 @@ pub struct SystemStatsDto {
     pub max_storage_locks: u64,
     pub byte_years_capacity: u64,
     pub ttl_purged_count: u64,
+    #[serde(default)]
+    pub redb_growth_mb_per_day: f64,
+    #[serde(default)]
+    pub days_until_full: Option<u64>,
+    #[serde(default)]
+    pub disk_headroom_label: String,
 }
 
 /// DTO for 60-second historical sparkline graphs.
@@ -147,10 +154,39 @@ fn read_redb_size(data_dir: &Path) -> u64 {
     std::fs::metadata(redb_path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// Safe disk space calculation / fallback.
-fn read_disk_free(_data_dir: &Path) -> u64 {
-    // 64 GiB default baseline safe estimate in pure safe Rust (#![forbid(unsafe_code)])
-    64 * 1024 * 1024 * 1024
+/// Safe disk space calculation / fallback via POSIX `df -Pk`.
+fn read_disk_free(data_dir: &Path) -> u64 {
+    const DEFAULT_FALLBACK_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+    #[cfg(unix)]
+    {
+        if let Ok(output) = std::process::Command::new("df")
+            .arg("-Pk")
+            .arg(data_dir)
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(stdout) = std::str::from_utf8(&output.stdout) {
+                    let mut lines = stdout.lines();
+                    let _header = lines.next();
+                    if let Some(data_line) = lines.next() {
+                        let cols: Vec<&str> = data_line.split_whitespace().collect();
+                        // Line 2, column 4 (1-indexed col 4 = index 3: Available 1K-blocks)
+                        if let Some(avail_col) = cols.get(3) {
+                            if let Ok(avail_1k) = avail_col.parse::<u64>() {
+                                return avail_1k.saturating_mul(1024);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = data_dir;
+
+    DEFAULT_FALLBACK_BYTES
 }
 
 /// Inner state guarded by RwLock.
@@ -161,6 +197,7 @@ struct CollectorState {
     rss_mb: f64,
     redb_bytes: u64,
     disk_free_bytes: u64,
+    redb_history: VecDeque<(Instant, u64)>,
 
     // Sparklines
     writes_sparkline: SparklineRingBuffer<f32, SPARKLINE_CAPACITY>,
@@ -175,10 +212,14 @@ struct CollectorState {
 
 impl CollectorState {
     fn new(data_dir: &Path) -> Self {
+        let redb_bytes = read_redb_size(data_dir);
+        let mut redb_history = VecDeque::with_capacity(120);
+        redb_history.push_back((Instant::now(), redb_bytes));
         Self {
             disk_free_bytes: read_disk_free(data_dir),
-            redb_bytes: read_redb_size(data_dir),
+            redb_bytes,
             rss_mb: read_rss_mb(),
+            redb_history,
             ..Default::default()
         }
     }
@@ -231,6 +272,13 @@ impl SystemStatsCollector {
         guard.redb_bytes = redb_sz;
         guard.disk_free_bytes = disk_free;
 
+        // Track redb file size history (up to 120 samples)
+        let now = Instant::now();
+        guard.redb_history.push_back((now, redb_sz));
+        if guard.redb_history.len() > 120 {
+            guard.redb_history.pop_front();
+        }
+
         // 2. Calculate TX/s and Reads/s delta
         let writes_per_sec = current_writes_total.saturating_sub(guard.last_writes_total) as f32;
         let reads_per_sec = current_reads_total.saturating_sub(guard.last_reads_total) as f32;
@@ -266,6 +314,27 @@ impl SystemStatsCollector {
         let max_storage_locks = disk_free / 256;
         let byte_years_capacity = max_storage_locks;
 
+        let (redb_growth_mb_per_day, days_until_full, disk_headroom_label) = {
+            if let (Some(oldest), Some(newest)) = (guard.redb_history.front(), guard.redb_history.back()) {
+                let delta_sec = newest.0.duration_since(oldest.0).as_secs();
+                if delta_sec > 0 && newest.1 > oldest.1 {
+                    let delta_bytes = newest.1 - oldest.1;
+                    let growth_mb_per_day = (delta_bytes as f64 / delta_sec as f64) * 86400.0 / (1024.0 * 1024.0);
+                    if growth_mb_per_day > 0.0 {
+                        let bytes_per_day = growth_mb_per_day * 1024.0 * 1024.0;
+                        let days = (disk_free as f64 / bytes_per_day) as u64;
+                        (growth_mb_per_day, Some(days), format!("{days} Tage"))
+                    } else {
+                        (0.0, None, "> 365 Tage (stabil)".to_string())
+                    }
+                } else {
+                    (0.0, None, "> 365 Tage (stabil)".to_string())
+                }
+            } else {
+                (0.0, None, "> 365 Tage (stabil)".to_string())
+            }
+        };
+
         SystemStatsDto {
             cpu_percent: guard.cpu_percent,
             rss_mb: guard.rss_mb,
@@ -277,7 +346,25 @@ impl SystemStatsCollector {
             max_storage_locks,
             byte_years_capacity,
             ttl_purged_count,
+            redb_growth_mb_per_day,
+            days_until_full,
+            disk_headroom_label,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn push_redb_history_for_testing(&self, instant: Instant, bytes: u64) {
+        let mut guard = self.state.write();
+        guard.redb_history.push_back((instant, bytes));
+        if guard.redb_history.len() > 120 {
+            guard.redb_history.pop_front();
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn clear_redb_history_for_testing(&self) {
+        let mut guard = self.state.write();
+        guard.redb_history.clear();
     }
 
     /// Computes and returns the `SparklinesDto`.
@@ -367,5 +454,36 @@ mod tests {
         assert!(stats.peak_tps_multi_core >= 2000);
         assert!(stats.max_storage_locks > 0);
         assert_eq!(stats.byte_years_capacity, stats.max_storage_locks);
+
+        // Initial state has insufficient delta
+        assert_eq!(stats.redb_growth_mb_per_day, 0.0);
+        assert_eq!(stats.days_until_full, None);
+        assert_eq!(stats.disk_headroom_label, "> 365 Tage (stabil)");
+    }
+
+    #[test]
+    fn test_read_disk_free() {
+        let free = read_disk_free(Path::new("."));
+        assert!(free > 0);
+    }
+
+    #[test]
+    fn test_redb_growth_and_headroom_projection() {
+        let collector = SystemStatsCollector::new(".");
+        collector.clear_redb_history_for_testing();
+
+        let t0 = Instant::now() - Duration::from_secs(86400);
+        let t1 = Instant::now();
+
+        // 100 MB to 110 MB in 24 hours -> 10 MB / day
+        collector.push_redb_history_for_testing(t0, 100 * 1024 * 1024);
+        collector.push_redb_history_for_testing(t1, 110 * 1024 * 1024);
+
+        let stats = collector.get_system_stats(100, 1.0, 0);
+        let growth = stats.redb_growth_mb_per_day;
+        assert!((growth - 10.0).abs() < 0.1, "Growth expected ~10.0 MB/day, got {growth}");
+        assert!(stats.days_until_full.is_some());
+        let days = stats.days_until_full.unwrap();
+        assert_eq!(stats.disk_headroom_label, format!("{days} Tage"));
     }
 }

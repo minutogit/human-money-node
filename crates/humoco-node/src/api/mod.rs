@@ -18,7 +18,10 @@ pub use dashboard::{
     ShardScoreSampleDto, ThermometerStatsDto, TierOverviewDto, TierSharesDto, VipAccountDto,
 };
 pub use events::{EventItem, EventKind, EventLog, EVENT_LOG_CAPACITY};
-pub use health::{evaluate_health, HealthItem, HealthLevel, HealthSummary};
+pub use health::{
+    evaluate_health, evaluate_health_tracked, format_health_duration, HealthItem, HealthLevel,
+    HealthStateTracker, HealthSummary,
+};
 pub use history::{HistoryPoint, HistorySampler, HISTORY_CAPACITY};
 
 pub use dto::{

@@ -52,6 +52,7 @@ pub struct AppState {
     pub config: Arc<crate::config::NodeConfig>,
     pub history_sampler: Arc<crate::api::history::HistorySampler>,
     pub event_log: Arc<crate::api::events::EventLog>,
+    pub health_tracker: Arc<crate::api::health::HealthStateTracker>,
 }
 
 impl AppState {
@@ -68,6 +69,7 @@ impl AppState {
         let config = Arc::new(crate::config::NodeConfig::default());
         let history_sampler = Arc::new(crate::api::history::HistorySampler::default());
         let event_log = Arc::new(crate::api::events::EventLog::default());
+        let health_tracker = Arc::new(crate::api::health::HealthStateTracker::default());
         Self {
             engine,
             storage,
@@ -87,7 +89,16 @@ impl AppState {
             config,
             history_sampler,
             event_log,
+            health_tracker,
         }
+    }
+
+    pub fn with_health_tracker(
+        mut self,
+        health_tracker: Arc<crate::api::health::HealthStateTracker>,
+    ) -> Self {
+        self.health_tracker = health_tracker;
+        self
     }
 
     pub fn with_history_sampler(

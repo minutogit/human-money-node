@@ -536,6 +536,7 @@ impl NodeDaemon {
             config: Arc::new(self.config.clone()),
             history_sampler: history_sampler.clone(),
             event_log: event_log.clone(),
+            health_tracker: Arc::new(crate::api::health::HealthStateTracker::default()),
         };
 
         // Spawn history sampling task (60s tick in normal mode, 5s in simulation mode)

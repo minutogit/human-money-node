@@ -100,3 +100,9 @@ span[title]{cursor:help;border-bottom:1px dotted var(--text-muted)}
 .chip{background:var(--surface-alt);border:1px solid var(--border);color:var(--text-muted);border-radius:9999px;padding:0.2rem 0.65rem;font-size:0.75rem;font-weight:600;cursor:pointer;transition:all 0.15s}
 .chip:hover{background:var(--surface-hover);color:var(--text)}
 .chip.active{background:var(--blue-bg);color:var(--blue);border-color:rgba(59,130,246,0.4)}
+.hero-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:0.75rem;margin-bottom:1rem}
+.hero-kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:0.5rem;padding:0.75rem 1rem;display:flex;flex-direction:column;gap:0.25rem;transition:border-color 0.15s ease}
+.hero-kpi-title{font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;font-weight:600;letter-spacing:0.05em}
+.hero-kpi-val{font-size:1.25rem;font-weight:700;color:var(--text);display:flex;align-items:center;gap:0.4rem}
+.hero-kpi-sub{font-size:0.75rem;color:var(--text-muted)}
+th[onclick]{cursor:pointer;user-select:none}.btn-xs{padding:0.2rem 0.5rem;font-size:0.75rem}.card-unit{font-size:1rem;color:var(--text-muted);font-weight:normal}.card-unit-sm{font-size:0.95rem;color:var(--text-muted);font-weight:normal}.bar-sm{height:4px;margin:0.35rem 0 0.5rem 0}.mb-md{margin-bottom:1.25rem}.modal-sm{max-width:480px}.hdr-wrap{flex-wrap:wrap;gap:0.5rem}.admin-box{display:none;background:var(--surface-alt);padding:0.75rem;border-radius:0.5rem;border:1px solid var(--border)}

@@ -1447,11 +1447,21 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("humoco_admin_token"));
     assert!(body_str.contains("isFetchInProgress"));
 
-    // Verify 4-Tab Navigation Identifiers
-    assert!(body_str.contains("Cockpit &amp; System") || body_str.contains("Cockpit & System"));
-    assert!(body_str.contains("Netzwerk &amp; Mesh") || body_str.contains("Netzwerk & Mesh") || body_str.contains("Netzwerk &amp; F2F") || body_str.contains("Netzwerk & F2F"));
-    assert!(body_str.contains("Zugang &amp; Freunde") || body_str.contains("Zugang & Freunde") || body_str.contains("Tiers &amp; Quoten") || body_str.contains("Tiers & Quoten") || body_str.contains("Wallet-Zugänge") || body_str.contains("Gateway, Wallets &amp; Einnahmen") || body_str.contains("Gateway, Wallets & Einnahmen") || body_str.contains("Ingress, Kassen &amp; Wallets") || body_str.contains("Ingress, Kassen & Wallets"));
-    assert!(body_str.contains("Gutscheine &amp; Logs") || body_str.contains("Gutscheine & Logs") || body_str.contains("Gutscheine &amp; Locks") || body_str.contains("Gutscheine & Locks"));
+    // Verify 5-Tab Navigation Identifiers (Phase 4 Role-Based Tabs)
+    assert!(body_str.contains("Cockpit &amp; Vitalwerte") || body_str.contains("Cockpit & Vitalwerte"));
+    assert!(body_str.contains("Netzwerk &amp; Shards") || body_str.contains("Netzwerk & Shards"));
+    assert!(body_str.contains("Ingress &amp; Lastkontrolle") || body_str.contains("Ingress & Lastkontrolle"));
+    assert!(body_str.contains("Kassen &amp; Zugänge") || body_str.contains("Kassen & Zugänge"));
+    assert!(body_str.contains("Diagnose, Forensik &amp; OS") || body_str.contains("Diagnose, Forensik & OS"));
+
+    // Verify Phase 4 6-Tile Hero KPI Bar
+    assert!(body_str.contains("hero-grid"));
+    assert!(body_str.contains("hero-kpi-status"));
+    assert!(body_str.contains("hero-kpi-peers"));
+    assert!(body_str.contains("hero-kpi-queue"));
+    assert!(body_str.contains("hero-kpi-lat"));
+    assert!(body_str.contains("hero-kpi-disk"));
+    assert!(body_str.contains("hero-kpi-rej"));
 
     // Verify Visual Cards & Systems
     assert!(body_str.contains("Schreib-Durchsatz"));

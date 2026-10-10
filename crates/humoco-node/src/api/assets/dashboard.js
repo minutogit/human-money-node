@@ -17,6 +17,7 @@ let pollTimer = null;
 let lastSuccessfulFetchTime = null;
 let pendingConfirmCallback = null;
 let isPollPaused = false;
+let isFetchInProgress = false;
 
 function fallbackCopyTextToClipboard(text) {
   return new Promise((resolve, reject) => {
@@ -80,13 +81,31 @@ function togglePollPause() {
   }
 }
 
-// 15-minute inactivity session timeout (purely in-memory)
+// 15-minute inactivity session timeout with sessionStorage
+const ADMIN_TOKEN_KEY = 'humoco_admin_token';
+const ADMIN_TOKEN_TS_KEY = 'humoco_admin_token_ts';
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 let inactivityTimer = null;
+
+function refreshAdminSessionTimestamp() {
+  if (adminToken) {
+    try {
+      sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
+    } catch (_) {}
+  }
+}
+
+function clearAdminSessionStorage() {
+  try {
+    sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+    sessionStorage.removeItem(ADMIN_TOKEN_TS_KEY);
+  } catch (_) {}
+}
 
 function resetInactivityTimer() {
   if (inactivityTimer) clearTimeout(inactivityTimer);
   if (adminToken) {
+    refreshAdminSessionTimestamp();
     inactivityTimer = setTimeout(() => {
       logoutAdminDueToInactivity();
     }, INACTIVITY_TIMEOUT_MS);
@@ -94,17 +113,32 @@ function resetInactivityTimer() {
 }
 
 function checkInactivityOnLoad() {
-  // adminToken is in-memory only; defaults to empty on reload
+  try {
+    const savedToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
+    const tsStr = sessionStorage.getItem(ADMIN_TOKEN_TS_KEY);
+    if (savedToken && tsStr) {
+      const ts = parseInt(tsStr, 10);
+      if (!isNaN(ts) && Date.now() - ts < INACTIVITY_TIMEOUT_MS) {
+        adminToken = savedToken;
+        sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
+        resetInactivityTimer();
+        applyAdminMode();
+      } else {
+        clearAdminSessionStorage();
+      }
+    }
+  } catch (_) {}
 }
 
 function logoutAdminDueToInactivity() {
   if (adminToken) {
     adminToken = '';
+    clearAdminSessionStorage();
     if (inactivityTimer) {
       clearTimeout(inactivityTimer);
       inactivityTimer = null;
     }
-    updateAdminUI();
+    applyAdminMode();
     showToast('Admin-Sitzung wegen Inaktivität (15 Min.) beendet', 'info');
     refreshDashboard();
   }
@@ -112,7 +146,9 @@ function logoutAdminDueToInactivity() {
 
 ['mousedown', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
   window.addEventListener(evt, () => {
-    if (adminToken) resetInactivityTimer();
+    if (adminToken) {
+      resetInactivityTimer();
+    }
   }, { passive: true });
 });
 function formatHHMMSS(d) {
@@ -188,6 +224,9 @@ function updateAdminUI() {
     adminEls.forEach(el => el.style.display = 'none');
   }
 }
+function applyAdminMode() {
+  updateAdminUI();
+}
 function handleAdminBtnClick() {
   if (adminToken) {
     if (inactivityTimer) {
@@ -195,7 +234,8 @@ function handleAdminBtnClick() {
       inactivityTimer = null;
     }
     adminToken = '';
-    updateAdminUI();
+    clearAdminSessionStorage();
+    applyAdminMode();
     showToast('Admin-Modus abgemeldet', 'info');
     refreshDashboard();
   } else {
@@ -216,9 +256,13 @@ async function submitAdminToken() {
     }, 6000);
     if (res.ok) {
       adminToken = val;
+      try {
+        sessionStorage.setItem(ADMIN_TOKEN_KEY, val);
+        sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
+      } catch (_) {}
       resetInactivityTimer();
       closeModal('admin-modal');
-      updateAdminUI();
+      applyAdminMode();
       showToast('Admin-Modus aktiviert', 'success');
       refreshDashboard();
     } else {
@@ -440,13 +484,39 @@ function prefillVipTopup(tag) {
   if (amountInput) amountInput.focus();
   showToast(`VIP-Account ${truncateHash(tag)} zum Aufladen ausgewählt`, 'info');
 }
-function switchTab(tabId) {
+const HASH_TAB_MAP = {
+  '#cockpit': 'tab-cockpit',
+  '#network': 'tab-network',
+  '#tiers': 'tab-tiers',
+  '#ingress': 'tab-tiers',
+  '#vouchers': 'tab-vouchers',
+  '#history': 'tab-history',
+  '#diagnostics': 'tab-history',
+};
+
+function handleHashRouting() {
+  const hash = (window.location.hash || '').toLowerCase();
+  const tabId = HASH_TAB_MAP[hash];
+  if (tabId) {
+    switchTab(tabId, false);
+  }
+}
+
+window.addEventListener('hashchange', handleHashRouting);
+
+function switchTab(tabId, updateHash = true) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  const btn = document.querySelector(`[onclick="switchTab('${tabId}')"]`);
+  const btn = document.querySelector(`[onclick="switchTab('${tabId}')"]`) || $(`tab-btn-${tabId.replace('tab-', '')}`);
   if (btn) btn.classList.add('active');
   const target = $(tabId);
   if (target) target.classList.add('active');
+  if (updateHash !== false) {
+    const rawHash = '#' + tabId.replace('tab-', '');
+    if (window.location.hash !== rawHash) {
+      window.location.hash = rawHash;
+    }
+  }
 }
 function copyPeering() {
   const text = $('peering-text')?.innerText || '';
@@ -761,18 +831,70 @@ function updateTabBadge(id, count) {
   }
 }
 
+function updateHeader(data) {
+  if (data.network_time_ms) {
+    const dt = new Date(data.network_time_ms);
+    const pad = n => String(n).padStart(2, '0');
+    setText('hdr-net-time', `${pad(dt.getDate())}.${pad(dt.getMonth() + 1)}.${dt.getFullYear()}, ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`);
+  }
+  const simBadge = $('hdr-sim-badge');
+  if (simBadge) simBadge.style.display = data.is_simulation ? 'inline-block' : 'none';
+  if (data.clock_drift_ms != null) {
+    const driftEl = $('net-clock-drift');
+    if (driftEl) {
+      const sign = data.clock_drift_ms > 0 ? '+' : '';
+      driftEl.innerText = `${sign}${data.clock_drift_ms} ms`;
+      driftEl.style.color = Math.abs(data.clock_drift_ms) > 2000 ? 'var(--red)' : (Math.abs(data.clock_drift_ms) > 500 ? 'var(--amber)' : 'var(--text)');
+    }
+  }
+  const heroText = $('net-hero-text');
+  if (heroText) {
+    const isWeltnetz = (data.active_nodes_count || 0) + 1 >= 20 || data.shard_mode === 'WELTNETZ' || data.status === 'WELTNETZ';
+    heroText.innerHTML = isWeltnetz
+      ? '🌐 <strong>Netzwerk-Phase:</strong> Weltnetz (N &ge; 20): HRW Top-20 Sharding aktiv. BFT-Quorum 14/20.'
+      : '🌐 <strong>Netzwerk-Phase:</strong> Community-Mesh (Inselnetz): Alle Knoten validieren alle 65.536 Shards. BFT-Quorum erfüllt.';
+  }
+  const qEl = $('hdr-lat-quorum');
+  if (qEl && data.quorum_latency) {
+    const qP95 = data.quorum_latency.p95_ms != null ? ` (p95: ${data.quorum_latency.p95_ms.toFixed(1)} ms)` : '';
+    qEl.innerText = data.quorum_latency.avg_ms.toFixed(2) + ' ms' + qP95;
+    qEl.style.color = data.quorum_latency.avg_ms >= 500.0 ? 'var(--red)' : 'var(--text)';
+  }
+  const localVal = data.local_latency ? (data.local_latency.avg_ms != null ? data.local_latency.avg_ms.toFixed(2) : '--') : '--';
+  const e2eVal = data.e2e_latency ? (data.e2e_latency.avg_ms != null ? data.e2e_latency.avg_ms.toFixed(2) : '--') : '--';
+  setText('hdr-lat-local', localVal !== '--' ? localVal + ' ms' : '--');
+  setText('hdr-lat-e2e', e2eVal !== '--' ? e2eVal + ' ms' : '--');
+  if (data.uptime_formatted) setText('hdr-uptime', data.uptime_formatted);
+  const netPill = $('hdr-net-pill');
+  if (netPill) {
+    const n = (data.active_nodes_count || 0) + 1;
+    netPill.innerHTML = `🌐 N=${n} &bull; ${escapeHtml(data.quorum_display || 'Quorum OK')}`;
+  }
+  setText('hdr-peers', `${data.connected_peers}/${data.configured_peers}`);
+}
+
 async function refreshDashboard() {
   if (isPollPaused) {
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
     return;
   }
+  if (isFetchInProgress) {
+    console.warn('Dashboard fetch already in progress, skipping interval');
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
+    return;
+  }
+  isFetchInProgress = true;
   try {
     const res = await fetchWithTimeout('/dashboard/data', {}, 6000);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const d = await res.json();
     currentDashboardData = d;
     lastSuccessfulFetchTime = new Date();
+    if (adminToken) {
+      refreshAdminSessionTimestamp();
+    }
     if (consecutiveFailures >= 3) showToast('Verbindung zum Knoten wiederhergestellt', 'success');
     consecutiveFailures = 0;
     pollIntervalMs = 2000;
@@ -805,43 +927,7 @@ async function refreshDashboard() {
         badgeEl.className = 'badge badge-red';
       }
     }
-    if (d.network_time_ms) {
-      const dt = new Date(d.network_time_ms);
-      const pad = n => String(n).padStart(2, '0');
-      setText('hdr-net-time', `${pad(dt.getDate())}.${pad(dt.getMonth() + 1)}.${dt.getFullYear()}, ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`);
-    }
-    const simBadge = $('hdr-sim-badge');
-    if (simBadge) simBadge.style.display = d.is_simulation ? 'inline-block' : 'none';
-    if (d.clock_drift_ms != null) {
-      const driftEl = $('net-clock-drift');
-      if (driftEl) {
-        const sign = d.clock_drift_ms > 0 ? '+' : '';
-        driftEl.innerText = `${sign}${d.clock_drift_ms} ms`;
-        driftEl.style.color = Math.abs(d.clock_drift_ms) > 2000 ? 'var(--red)' : (Math.abs(d.clock_drift_ms) > 500 ? 'var(--amber)' : 'var(--text)');
-      }
-    }
-    const heroText = $('net-hero-text');
-    if (heroText) {
-      const isWeltnetz = (d.active_nodes_count || 0) + 1 >= 20 || d.shard_mode === 'WELTNETZ' || d.status === 'WELTNETZ';
-      heroText.innerHTML = isWeltnetz
-        ? '🌐 <strong>Netzwerk-Phase:</strong> Weltnetz (N &ge; 20): HRW Top-20 Sharding aktiv. BFT-Quorum 14/20.'
-        : '🌐 <strong>Netzwerk-Phase:</strong> Community-Mesh (Inselnetz): Alle Knoten validieren alle 65.536 Shards. BFT-Quorum erfüllt.';
-    }
-    const qEl = $('hdr-lat-quorum');
-    if (qEl && d.quorum_latency) {
-      const qP95 = d.quorum_latency.p95_ms != null ? ` (p95: ${d.quorum_latency.p95_ms.toFixed(1)} ms)` : '';
-      qEl.innerText = d.quorum_latency.avg_ms.toFixed(2) + ' ms' + qP95;
-      qEl.style.color = d.quorum_latency.avg_ms >= 500.0 ? 'var(--red)' : 'var(--text)';
-    }
-    const e2eP95 = d.e2e_latency?.p95_ms != null ? ` (p95: ${d.e2e_latency.p95_ms.toFixed(1)} ms)` : '';
-    setText('hdr-lat-e2e', d.e2e_latency.avg_ms.toFixed(2) + ' ms' + e2eP95);
-    if (d.uptime_formatted) setText('hdr-uptime', d.uptime_formatted);
-    const netPill = $('hdr-net-pill');
-    if (netPill) {
-      const n = (d.active_nodes_count || 0) + 1;
-      netPill.innerHTML = `🌐 N=${n} &bull; ${escapeHtml(d.quorum_display || 'Quorum OK')}`;
-    }
-    setText('hdr-peers', `${d.connected_peers}/${d.configured_peers}`);
+    updateHeader(d);
     setText('shard-status-sub', d.shard_mode);
     const respRatio = d.shard_responsibility_ratio || 0;
     const totalShards = d.total_shards || 65536;
@@ -1158,10 +1244,14 @@ async function refreshDashboard() {
       if (pollIntervalMs < 16000) pollIntervalMs = Math.min(16000, pollIntervalMs * 2);
     }
   } finally {
+    isFetchInProgress = false;
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
   }
 }
+
+const pollData = refreshDashboard;
+const fetchDashboardData = refreshDashboard;
 
 // --- Tab 4: History & Security Event Log (Phase 2) ---
 let currentHistoryWindow = '24h';
@@ -1582,5 +1672,6 @@ function startPhase2Pollers() {
 
 checkInactivityOnLoad();
 updateAdminUI();
+handleHashRouting();
 refreshDashboard();
 startPhase2Pollers();

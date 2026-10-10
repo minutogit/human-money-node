@@ -1436,6 +1436,17 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("8080/9090"));
     assert!(body_str.contains("Admin-Modus"));
 
+    // Verify Phase 1 Dashboard SRE enhancements:
+    assert!(body_str.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+    assert!(body_str.contains("id=\"hdr-lat-local\""));
+    assert!(body_str.contains("id=\"hdr-lat-e2e\""));
+    assert!(body_str.contains("Lokale RAM-Kollisionsprüfung und In-Memory Attestierung"));
+    assert!(body_str.contains("End-to-End Kassen-Checkout inklusive Shard-Quorum"));
+    assert!(body_str.contains("updateHeader"));
+    assert!(body_str.contains("HASH_TAB_MAP"));
+    assert!(body_str.contains("humoco_admin_token"));
+    assert!(body_str.contains("isFetchInProgress"));
+
     // Verify 4-Tab Navigation Identifiers
     assert!(body_str.contains("Cockpit &amp; System") || body_str.contains("Cockpit & System"));
     assert!(body_str.contains("Netzwerk &amp; Mesh") || body_str.contains("Netzwerk & Mesh") || body_str.contains("Netzwerk &amp; F2F") || body_str.contains("Netzwerk & F2F"));

@@ -1338,6 +1338,7 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
 
     let html = format!(
         include_str!("assets/dashboard.html"),
+        pkg_version = env!("CARGO_PKG_VERSION"),
         css = include_str!("assets/dashboard.css"),
         js = include_str!("assets/dashboard.js"),
         status_badge = data.status_badge,

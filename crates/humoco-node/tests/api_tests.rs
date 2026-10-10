@@ -3981,4 +3981,142 @@ fn test_qa_ring_buffer_boundary_conditions() {
     assert_eq!(overflow_events[999].id, 1001);
 }
 
+#[tokio::test]
+async fn test_admin_peer_reset_and_ping_endpoints() {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_admin_peer.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+    let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
+
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("test_admin_token", false));
+    let event_log = Arc::new(humoco_node::api::events::EventLog::default());
+    let mut state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    );
+    state.peer_manager = Some(peer_manager.clone());
+    state = state.with_auth(auth).with_event_log(event_log.clone());
+
+    let app = build_router(state);
+
+    let test_addr: std::net::SocketAddr = "127.0.0.1:9095".parse().unwrap();
+    let unknown_addr = "127.0.0.1:9999";
+    let bad_addr_str = "not-a-valid-socket";
+
+    // 1. Auth check
+    let req_no_auth = Request::builder()
+        .method("POST")
+        .uri(format!("/dashboard/admin/peers/{}/reset", test_addr))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req_no_auth).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let req_bad_auth = Request::builder()
+        .method("POST")
+        .uri(format!("/dashboard/admin/peers/{}/ping", test_addr))
+        .header("Authorization", "Bearer wrong_secret")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req_bad_auth).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. Bad request check (malformed address)
+    let req_bad_addr_reset = Request::builder()
+        .method("POST")
+        .uri(format!("/dashboard/admin/peers/{}/reset", bad_addr_str))
+        .header("Authorization", "Bearer test_admin_token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req_bad_addr_reset).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let req_bad_addr_ping = Request::builder()
+        .method("POST")
+        .uri(format!("/dashboard/admin/peers/{}/ping", bad_addr_str))
+        .header("Authorization", "Bearer test_admin_token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req_bad_addr_ping).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 3. Not Found check for reset
+    let req_not_found = Request::builder()
+        .method("POST")
+        .uri(format!("/dashboard/admin/peers/{}/reset", unknown_addr))
+        .header("Authorization", "Bearer test_admin_token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req_not_found).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // 4. Reset execution on degraded/suspended peer
+    peer_manager.add_peer(test_addr).await;
+    let t0 = std::time::Instant::now();
+    peer_manager.record_failure_at(test_addr, t0).await;
+    peer_manager.record_failure_at(test_addr, t0 + std::time::Duration::from_secs(65)).await;
+    peer_manager.record_failure_at(test_addr, t0 + std::time::Duration::from_secs(130)).await;
+    let p = peer_manager.get_peer(&test_addr).await.unwrap();
+    assert_eq!(p.missing_count, 3);
+    assert_eq!(p.status, humoco_node::network::peer::PeerStatus::Suspended);
+
+    let req_reset = Request::builder()
+        .method("POST")
+        .uri(format!("/dashboard/admin/peers/{}/reset", test_addr))
+        .header("Authorization", "Bearer test_admin_token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req_reset).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let json_resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(json_resp["status"], "ok");
+    assert_eq!(json_resp["addr"], test_addr.to_string());
+
+    let p_after = peer_manager.get_peer(&test_addr).await.unwrap();
+    assert_eq!(p_after.missing_count, 0);
+    assert_eq!(p_after.last_failure, None);
+    assert_eq!(p_after.status, humoco_node::network::peer::PeerStatus::Degrading);
+
+    // Verify event log recorded the action
+    let events = event_log.query(None, None);
+    assert!(events.iter().any(|e| e.message.contains(&format!("Admin reset suspension for peer {}", test_addr))));
+
+    // 5. Banned peer check for reset
+    let banned_addr: std::net::SocketAddr = "127.0.0.1:9096".parse().unwrap();
+    let banned_nid = [88u8; 32];
+    peer_manager.add_peer(banned_addr).await;
+    peer_manager.record_success(banned_addr, Some(banned_nid), None).await;
+    peer_manager.ban_node(&banned_nid).await;
+
+    let req_banned = Request::builder()
+        .method("POST")
+        .uri(format!("/dashboard/admin/peers/{}/reset", banned_addr))
+        .header("Authorization", "Bearer test_admin_token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req_banned).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let json_banned: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(json_banned["error"], "Banned");
+
+    // 6. Ping check when transport is unavailable -> 502 Bad Gateway
+    let req_ping_no_transport = Request::builder()
+        .method("POST")
+        .uri(format!("/dashboard/admin/peers/{}/ping", test_addr))
+        .header("Authorization", "Bearer test_admin_token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req_ping_no_transport).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+}
+
 

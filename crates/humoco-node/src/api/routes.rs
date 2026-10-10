@@ -201,6 +201,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/dashboard/admin/ingress/clients", post(crate::api::dashboard::admin_add_ingress_client))
         .route("/dashboard/admin/ingress/clients/:token_hash", delete(crate::api::dashboard::admin_remove_ingress_client))
         .route("/dashboard/admin/quota", post(crate::api::dashboard::admin_topup_quota))
+        .route("/dashboard/admin/peers/:addr/reset", post(crate::api::dashboard::admin_reset_peer))
+        .route("/dashboard/admin/peers/:addr/ping", post(crate::api::dashboard::admin_ping_peer))
         .route("/dashboard/history", get(get_dashboard_history))
         .route("/dashboard/events", get(get_dashboard_events))
         .route("/metrics", get(crate::api::metrics::prometheus_metrics))

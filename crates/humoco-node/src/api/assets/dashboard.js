@@ -688,27 +688,64 @@ function renderSparklineSvg(arr, color) {
   const polyline = pts.join(' ');
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:40px;display:block;"><polygon points="0,${h} ${polyline} ${w},${h}" fill="${color}" fill-opacity="0.15" /><polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>`;
 }
+function getNodeStatusBadge(n) {
+  if (n.is_local) {
+    return badge('green', 'Lokal (Self)');
+  }
+  const s = n.connection_status || '';
+  if (s.includes('Banned')) {
+    return badge('red', 'Dauerhaft gebannt (Kryptografische Fraud-Proof)');
+  }
+  if (s.includes('Suspended') || n.missing_count >= 3) {
+    return badge('red', 'Vorübergehend pausiert (3/3)');
+  }
+  if (s.includes('Degrading') || (n.missing_count > 0 && n.missing_count < 3)) {
+    return badge('amber', `Beeinträchtigt (${escapeHtml(n.missing_count)}/3)`);
+  }
+  if (s.includes('Connected')) {
+    return badge('green', 'Verbunden (0 Ausfälle)');
+  }
+  if (s.includes('Configured')) {
+    return badge('cyan', 'Konfiguriert (Standby)');
+  }
+  if (s.includes('Learned')) {
+    return badge('cyan', 'Gossip gelernt');
+  }
+  return badge('amber', escapeHtml(s));
+}
+
 function renderNodeRow(n) {
   const roleBadge = n.is_local ? badge('purple', 'LOCAL') : (n.is_f2f ? badge('blue', 'F2F Friend') : badge('cyan', 'Shard'));
-  const statusBadge = n.is_local
-    ? badge('green', 'Lokal (Self)')
-    : (n.connection_status.includes('Connected')
-        ? (n.missing_count === 0 ? badge('green', 'Connected (0)') : badge('amber', n.connection_status))
-        : (n.connection_status.includes('Suspended') ? badge('red', n.connection_status) : badge('amber', n.connection_status)));
+  const statusBadge = getNodeStatusBadge(n);
   const rttText = n.rtt_ms != null ? escapeHtml(n.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
+  const failText = `<span style="${n.missing_count > 0 ? 'color:var(--amber);font-weight:600;' : ''}">${escapeHtml(n.missing_count)} / 3</span>`;
   const routeText = `${escapeHtml(n.min_hops)} Hop${n.min_hops === 1 ? '' : 's'}${n.best_ingress_peer ? ' via ' + escapeHtml(truncateHash(n.best_ingress_peer)) : (n.is_local ? ' (Self)' : (n.is_f2f ? ' (Direkt)' : ''))}`;
   const incubText = n.is_immature ? badge('amber', `24h (${escapeHtml(n.incubation_remaining_sec || 0)}s)`) : badge('green', 'Aktiv');
   const safePubkey = escapeHtml(n.public_key || '');
-  return `<tr><td>${cTrunc(n.public_key)}</td><td>${escapeHtml(n.address)}</td><td>${roleBadge}</td><td>${statusBadge}</td><td>${rttText}</td><td>${routeText}</td><td>${cTrunc(n.hrw_routing_id)}</td><td>${incubText}</td><td><button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-pubkey="${safePubkey}" onclick="openNodeInspector(this.getAttribute('data-pubkey'))">🔍 Info</button></td></tr>`;
+  const safeAddr = escapeHtml(n.address || '');
+
+  let actionBtns = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-pubkey="${safePubkey}" onclick="openNodeInspector(this.getAttribute('data-pubkey'))" title="Knoten-Diagnose">🔍 Info</button>`;
+  if (adminToken && !n.is_local) {
+    actionBtns += ` <button class="btn btn-secondary" style="padding:0.2rem 0.5rem;margin-left:0.25rem;" data-addr="${safeAddr}" onclick="adminPingPeer(this.getAttribute('data-addr'))" title="QUIC Latenz-Ping">🔄 Ping</button>`;
+    if (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading')) {
+      actionBtns += ` <button class="btn btn-secondary" style="padding:0.2rem 0.5rem;margin-left:0.25rem;border-color:var(--green);color:var(--green);" data-addr="${safeAddr}" onclick="adminResetPeer(this.getAttribute('data-addr'))" title="Ausfall-Zähler zurücksetzen und heilen">🩹 Heilen</button>`;
+    }
+    if (n.is_f2f) {
+      actionBtns += ` <button class="btn btn-danger" style="padding:0.2rem 0.5rem;margin-left:0.25rem;" data-pubkey="${safePubkey}" onclick="adminRemoveMeshPeer(this.getAttribute('data-pubkey'))" title="F2F-Freund entfernen">🗑️</button>`;
+    }
+  }
+
+  const isProblem = (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading'));
+  const rowStyle = isProblem ? ' style="background: rgba(239, 68, 68, 0.08);"' : '';
+
+  return `<tr${rowStyle}><td>${cTrunc(n.public_key)}</td><td>${escapeHtml(n.address)}</td><td>${roleBadge}</td><td>${statusBadge}</td><td>${rttText}</td><td>${failText}</td><td>${routeText}</td><td>${cTrunc(n.hrw_routing_id)}</td><td>${incubText}</td><td>${actionBtns}</td></tr>`;
 }
 function openNodeInspector(pubkey) {
   if (!currentDashboardData?.network_nodes) return;
   const node = currentDashboardData.network_nodes.find(n => n.public_key === pubkey || n.node_id === pubkey);
   if (!node) { showToast('Knoten nicht gefunden: ' + escapeHtml(pubkey), 'warning'); return; }
   setText('node-modal-title', '🔍 Knoten-Diagnose: ' + truncateHash(node.public_key));
-  const statusBadge = node.connection_status.includes('Connected')
-    ? (node.missing_count === 0 ? badge('green', 'Connected (0 Ausfälle)') : badge('amber', node.connection_status))
-    : (node.connection_status.includes('Suspended') ? badge('red', node.connection_status) : badge('amber', node.connection_status));
+  const statusBadge = getNodeStatusBadge(node);
   const rttText = node.rtt_ms != null ? escapeHtml(node.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
   const failText = node.last_failure_sec != null ? `vor ${escapeHtml(node.last_failure_sec)}s` : '<span style="color:var(--green);">Kein Ausfall</span>';
   const ingressText = node.best_ingress_peer ? 'via ' + escapeHtml(node.best_ingress_peer) : (node.is_local ? 'Lokal (Self)' : (node.is_f2f ? 'F2F Direkt' : 'Direkt / Standby'));
@@ -737,73 +774,156 @@ function copyNodePubkey() {
   const el = $('node-modal-pubkey');
   if (el) copyTextToClipboard(el.innerText).then(() => showToast('NodePubKey in Zwischenablage kopiert', 'success')).catch(() => showToast('Fehler beim Kopieren', 'error'));
 }
+
+let sortCol = '';
+let sortAsc = true;
+
+function sortNodesTable(col) {
+  if (sortCol === col) {
+    sortAsc = !sortAsc;
+  } else {
+    sortCol = col;
+    sortAsc = true;
+  }
+  ['pubkey', 'address', 'type', 'status', 'rtt', 'failures'].forEach(c => {
+    const el = $('sort-' + c);
+    if (el) {
+      if (c === sortCol) {
+        el.innerText = sortAsc ? '▲' : '▼';
+        el.style.color = 'var(--text)';
+      } else {
+        el.innerText = '↕';
+        el.style.color = 'var(--text-muted)';
+      }
+    }
+  });
+  filterNodesTable();
+}
+window.sortNodesTable = sortNodesTable;
+
 let currentPeerFilter = 'ALL';
 function setPeerFilter(filter) {
   currentPeerFilter = filter;
-  document.querySelectorAll('.filter-chips .chip').forEach(c => c.classList.remove('active'));
-  $('chip-' + filter.toLowerCase())?.classList.add('active');
+  ['all', 'f2f', 'shard', 'incubating', 'problem'].forEach(f => {
+    const chip = $('chip-' + f);
+    if (chip) chip.classList.toggle('active', f.toUpperCase() === filter.toUpperCase());
+  });
   filterNodesTable();
 }
+window.setPeerFilter = setPeerFilter;
+
 function filterNodesTable() {
   const term = $('node-search-input')?.value.trim().toLowerCase();
   const nodesTbody = $('nodes-tbody');
   if (!currentDashboardData?.network_nodes || !nodesTbody) return;
-  let html = '';
-  for (const n of currentDashboardData.network_nodes) {
-    if (currentPeerFilter === 'F2F' && !n.is_f2f) continue;
-    if (currentPeerFilter === 'SHARD' && (n.is_local || n.is_f2f)) continue;
-    if (currentPeerFilter === 'INCUBATING' && !n.is_immature) continue;
-    if (term) {
-      const m = n.public_key.toLowerCase().includes(term) || n.address.toLowerCase().includes(term) || n.connection_status.toLowerCase().includes(term) || n.hrw_routing_id.toLowerCase().includes(term);
-      if (!m) continue;
+
+  let nodes = currentDashboardData.network_nodes.slice();
+
+  // Filter
+  nodes = nodes.filter(n => {
+    if (currentPeerFilter === 'F2F' && !n.is_f2f) return false;
+    if (currentPeerFilter === 'SHARD' && (n.is_local || n.is_f2f)) return false;
+    if (currentPeerFilter === 'INCUBATING' && !n.is_immature) return false;
+    if (currentPeerFilter === 'PROBLEM') {
+      const isProblem = (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading'));
+      if (!isProblem) return false;
     }
+    if (term) {
+      const m = (n.public_key || '').toLowerCase().includes(term) ||
+                (n.address || '').toLowerCase().includes(term) ||
+                (n.connection_status || '').toLowerCase().includes(term) ||
+                (n.hrw_routing_id || '').toLowerCase().includes(term);
+      if (!m) return false;
+    }
+    return true;
+  });
+
+  // Sort
+  if (sortCol) {
+    nodes.sort((a, b) => {
+      let cmp = 0;
+      if (sortCol === 'pubkey') {
+        cmp = (a.public_key || '').localeCompare(b.public_key || '');
+      } else if (sortCol === 'address') {
+        cmp = (a.address || '').localeCompare(b.address || '');
+      } else if (sortCol === 'type') {
+        const orderA = a.is_local ? 0 : (a.is_f2f ? 1 : 2);
+        const orderB = b.is_local ? 0 : (b.is_f2f ? 1 : 2);
+        cmp = orderA - orderB;
+      } else if (sortCol === 'status') {
+        cmp = (a.connection_status || '').localeCompare(b.connection_status || '');
+      } else if (sortCol === 'rtt') {
+        const rttA = a.rtt_ms == null ? 999999 : a.rtt_ms;
+        const rttB = b.rtt_ms == null ? 999999 : b.rtt_ms;
+        cmp = rttA - rttB;
+      } else if (sortCol === 'failures') {
+        cmp = (a.missing_count || 0) - (b.missing_count || 0);
+      }
+      return sortAsc ? cmp : -cmp;
+    });
+  }
+
+  let html = '';
+  for (const n of nodes) {
     html += renderNodeRow(n);
   }
-  nodesTbody.innerHTML = html || '<tr><td colspan="9" class="empty-cell">Keine Knoten gefunden</td></tr>';
+  nodesTbody.innerHTML = html || '<tr><td colspan="10" class="empty-cell">Keine Knoten für diesen Filter gefunden</td></tr>';
+  setText('network-count-sub', `${currentDashboardData.network_nodes.length} Knoten registriert (${nodes.length} angezeigt)`);
 }
-let currentFriendFilter = 'ALL';
-function setFriendFilter(filter) {
-  currentFriendFilter = filter;
-  ['all', 'problem', 'connected'].forEach(f => {
-    const chip = $('chip-friend-' + f);
-    if (chip) chip.classList.toggle('active', f === filter.toLowerCase());
-  });
-  renderFriendsTable();
-}
-function renderFriendsTable() {
-  const d = currentDashboardData;
-  const friendsTbody = $('friends-tbody');
-  if (!friendsTbody || !d?.f2f) return;
-  if (d.f2f.friends?.length > 0) {
-    const filtered = d.f2f.friends.filter(f => {
-      const isProblem = !f.is_connected || (f.missing_count != null && f.missing_count > 0);
-      if (currentFriendFilter === 'PROBLEM') return isProblem;
-      if (currentFriendFilter === 'CONNECTED') return f.is_connected && (!f.missing_count || f.missing_count === 0);
-      return true;
-    });
-    if (filtered.length > 0) {
-      let html = '';
-      for (const f of filtered) {
-        const isProblem = !f.is_connected || (f.missing_count != null && f.missing_count > 0);
-        let sBadge = badge('green', 'Verbunden (0 Ausfälle)');
-        if (!f.is_connected) sBadge = badge('amber', 'Getrennt');
-        else if (f.missing_count >= 3) sBadge = badge('red', 'Suspended (3/3)');
-        else if (f.missing_count > 0) sBadge = badge('amber', `Degrading (${escapeHtml(f.missing_count)}/3)`);
-        const rttText = f.rtt_ms != null ? escapeHtml(f.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
-        const safeKey = escapeHtml(f.public_key || '');
-        let actionBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;" data-pubkey="${safeKey}" onclick="openNodeInspector(this.getAttribute('data-pubkey'))">🔍 Info</button>`;
-        if (adminToken) actionBtn += ` <button class="btn btn-danger" style="padding:0.2rem 0.5rem;margin-left:0.25rem;" data-pubkey="${safeKey}" onclick="adminRemoveFriend(this.getAttribute('data-pubkey'))">🗑️</button>`;
-        const rowStyle = isProblem ? ' style="background: rgba(239, 68, 68, 0.08);"' : '';
-        html += `<tr${rowStyle}><td>${cTrunc(f.public_key)}</td><td>${escapeHtml(f.address)}</td><td>${sBadge}</td><td>${rttText}</td><td>${actionBtn}</td></tr>`;
-      }
-      friendsTbody.innerHTML = html;
+window.filterNodesTable = filterNodesTable;
+
+async function adminPingPeer(addr) {
+  if (!adminToken) {
+    showToast('Admin-Modus nicht aktiv', 'warning');
+    return;
+  }
+  showToast(`Sende Ping an ${escapeHtml(addr)}...`, 'info');
+  try {
+    const res = await fetchWithTimeout('/dashboard/admin/peers/' + encodeURIComponent(addr) + '/ping', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + adminToken }
+    }, 4000);
+    const json = await res.json().catch(() => ({}));
+    if (res.ok) {
+      showToast(`Ping erfolgreich (${escapeHtml(addr)}): ${json.rtt_ms} ms RTT`, 'success');
+      refreshDashboard();
     } else {
-      friendsTbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine P2P-Peers für diesen Filter</td></tr>';
+      showToast(`Ping fehlgeschlagen (${escapeHtml(addr)}): ${json.message || res.statusText}`, 'error');
     }
-  } else {
-    friendsTbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine F2F Freunde konfiguriert</td></tr>';
+  } catch (e) {
+    showToast(`Ping Fehler: ${e.message}`, 'error');
   }
 }
+window.adminPingPeer = adminPingPeer;
+
+async function adminResetPeer(addr) {
+  if (!adminToken) {
+    showToast('Admin-Modus nicht aktiv', 'warning');
+    return;
+  }
+  showConfirm(
+    'Knoten heilen',
+    `Möchten Sie den Status und die Ausfall-Zähler für Peer ${escapeHtml(addr)} wirklich zurücksetzen?`,
+    async () => {
+      try {
+        const res = await fetchWithTimeout('/dashboard/admin/peers/' + encodeURIComponent(addr) + '/reset', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + adminToken }
+        }, 4000);
+        const json = await res.json().catch(() => ({}));
+        if (res.ok) {
+          showToast(`Peer ${escapeHtml(addr)} erfolgreich zurückgesetzt und geheilt`, 'success');
+          refreshDashboard();
+        } else {
+          showToast(`Reset fehlgeschlagen: ${json.message || res.statusText}`, 'error');
+        }
+      } catch (e) {
+        showToast(`Reset Fehler: ${e.message}`, 'error');
+      }
+    }
+  );
+}
+window.adminResetPeer = adminResetPeer;
 
 let currentLockFilter = 'ALL';
 function setLockFilter(filter) {
@@ -1182,19 +1302,7 @@ async function refreshDashboard() {
     }
     setText('conc-val', (d.gateway_concentration_ratio * 100).toFixed(1) + '%');
     setText('subnet-dom-sub', (d.shard_subnet_dominance_max * 100).toFixed(1) + '%');
-    renderFriendsTable();
-    const searchInput = $('node-search-input');
-    if (searchInput?.value.trim()) {
-      filterNodesTable();
-    } else {
-      const nodesTbody = $('nodes-tbody');
-      if (nodesTbody && d.network_nodes?.length > 0) {
-        let html = '';
-        for (const n of d.network_nodes) html += renderNodeRow(n);
-        nodesTbody.innerHTML = html;
-        setText('network-count-sub', `${d.network_nodes.length} Knoten registriert`);
-      }
-    }
+    filterNodesTable();
     const shardsTbody = $('shards-tbody');
     if (shardsTbody) {
       if (d.sample_shard_scores?.length > 0) {

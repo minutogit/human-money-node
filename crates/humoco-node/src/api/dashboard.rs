@@ -1305,6 +1305,161 @@ pub async fn admin_topup_quota(
     }
 }
 
+/// Handler for POST /dashboard/admin/peers/:addr/reset
+pub async fn admin_reset_peer(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(addr_str): Path<String>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let addr: SocketAddr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "BadRequest",
+                    "message": format!("Invalid socket address: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(ref pm) = state.peer_manager {
+        match pm.reset_peer_suspension(addr).await {
+            Ok(true) => {
+                state.event_log.record(
+                    EventKind::System,
+                    HealthLevel::Ok,
+                    format!("Admin reset suspension for peer {}", addr_str),
+                );
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "addr": addr_str,
+                        "message": "Peer suspension reset"
+                    })),
+                )
+                    .into_response()
+            }
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "NotFound",
+                    "message": "Peer not found"
+                })),
+            )
+                .into_response(),
+            Err(err_msg) => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "Banned",
+                    "message": err_msg
+                })),
+            )
+                .into_response(),
+        }
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "PeerManagerUnavailable",
+                "message": "P2P peer manager is not initialized"
+            })),
+        )
+            .into_response()
+    }
+}
+
+/// Handler for POST /dashboard/admin/peers/:addr/ping
+pub async fn admin_ping_peer(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(addr_str): Path<String>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let addr: SocketAddr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "BadRequest",
+                    "message": format!("Invalid socket address: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Attempt ping with 2000 ms timeout:
+    // First, check if connection is active in peer manager
+    if let Some(ref pm) = state.peer_manager {
+        if let Some(rtt) = pm.get_peer_rtt(addr).await {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "addr": addr_str,
+                    "rtt_ms": rtt
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Otherwise, if transport is available, attempt to connect with 2000 ms timeout
+    if let Some(ref transport) = state.transport {
+        match tokio::time::timeout(Duration::from_millis(2000), transport.connect_peer(addr)).await {
+            Ok(Ok(conn)) => {
+                let rtt = conn.rtt().as_millis() as u32;
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "addr": addr_str,
+                        "rtt_ms": rtt
+                    })),
+                )
+                    .into_response()
+            }
+            Ok(Err(e)) => (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "BadGateway",
+                    "message": format!("Connection failed: {}", e)
+                })),
+            )
+                .into_response(),
+            Err(_timeout) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(serde_json::json!({
+                    "error": "Timeout",
+                    "message": "Ping timeout after 2000ms"
+                })),
+            )
+                .into_response(),
+        }
+    } else {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "Unavailable",
+                "message": "No active connection or transport available to ping peer"
+            })),
+        )
+            .into_response()
+    }
+}
+
 /// Handler for GET /dashboard/data
 pub async fn dashboard_data(State(state): State<AppState>) -> (StatusCode, Json<DashboardData>) {
     let data = collect_dashboard_data(&state).await;

@@ -1364,6 +1364,41 @@ impl PeerManager {
         }
     }
 
+    /// Resets failure counters and suspension state for a peer.
+    /// Returns Ok(true) if reset was applied, Ok(false) if peer is unknown,
+    /// or Err if the peer is permanently banned due to proven equivocation fraud.
+    pub async fn reset_peer_suspension(&self, addr: SocketAddr) -> Result<bool, &'static str> {
+        let mut peers = self.peers.write().await;
+        let Some(nid_opt) = peers.get(&addr).map(|p| p.node_id) else {
+            return Ok(false);
+        };
+        if let Some(nid) = nid_opt {
+            if self.is_banned(&nid).await {
+                return Err("Peer is permanently banned due to equivocation fraud");
+            }
+        }
+        if let Some(peer) = peers.get_mut(&addr) {
+            peer.missing_count = 0;
+            peer.last_failure = None;
+            if peer.connection.is_some() {
+                peer.status = PeerStatus::Connected;
+            } else {
+                peer.status = PeerStatus::Degrading;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Retrieves the current round-trip time (RTT) in milliseconds for an active peer connection.
+    pub async fn get_peer_rtt(&self, addr: SocketAddr) -> Option<u32> {
+        let peers = self.peers.read().await;
+        peers
+            .get(&addr)
+            .and_then(|p| p.connection.as_ref().map(|c| c.rtt().as_millis() as u32))
+    }
+
     /// Retrieves an active QUIC connection for a peer, if present, open, and authorized.
     pub async fn get_connection(&self, addr: &SocketAddr) -> Option<quinn::Connection> {
         let peers = self.peers.read().await;
@@ -1680,5 +1715,45 @@ mod tests {
         assert_eq!(calculate_fan_out(16), 5);
         // Large mesh hub: d=64 -> k=9
         assert_eq!(calculate_fan_out(64), 9);
+    }
+
+    #[tokio::test]
+    async fn test_reset_peer_suspension_and_get_peer_rtt() {
+        let addr: SocketAddr = "127.0.0.1:9095".parse().unwrap();
+        let unknown_addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let manager = PeerManager::new(vec![addr]);
+
+        // Unknown peer returns Ok(false)
+        assert_eq!(manager.reset_peer_suspension(unknown_addr).await, Ok(false));
+        assert_eq!(manager.get_peer_rtt(unknown_addr).await, None);
+
+        // Degrade peer
+        let t0 = Instant::now();
+        manager.record_failure_at(addr, t0).await;
+        manager.record_failure_at(addr, t0 + Duration::from_secs(65)).await;
+        manager.record_failure_at(addr, t0 + Duration::from_secs(130)).await;
+        let peer = manager.get_peer(&addr).await.unwrap();
+        assert_eq!(peer.missing_count, 3);
+        assert_eq!(peer.status, PeerStatus::Suspended);
+
+        // Reset suspension
+        let res = manager.reset_peer_suspension(addr).await;
+        assert_eq!(res, Ok(true));
+        let peer_reset = manager.get_peer(&addr).await.unwrap();
+        assert_eq!(peer_reset.missing_count, 0);
+        assert_eq!(peer_reset.last_failure, None);
+        // Connection is None, so status becomes Degrading
+        assert_eq!(peer_reset.status, PeerStatus::Degrading);
+
+        // Test with banned peer
+        let banned_id = [42u8; 32];
+        let banned_addr: SocketAddr = "127.0.0.1:9096".parse().unwrap();
+        manager.add_peer(banned_addr).await;
+        manager.record_success(banned_addr, Some(banned_id), None).await;
+        manager.ban_node(&banned_id).await;
+
+        let banned_res = manager.reset_peer_suspension(banned_addr).await;
+        assert!(banned_res.is_err());
+        assert_eq!(banned_res.unwrap_err(), "Peer is permanently banned due to equivocation fraud");
     }
 }

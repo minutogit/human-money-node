@@ -23,6 +23,56 @@ pub struct HeartbeatWirePayload {
     pub signature: [u8; 64],
     #[serde(default)]
     pub supported_suites_mask: u8,
+    #[serde(default, deserialize_with = "deserialize_piggyback_observations")]
+    pub piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
+}
+
+pub fn deserialize_piggyback_observations<'de, D>(
+    deserializer: D,
+) -> Result<Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut vec: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence> =
+        serde::Deserialize::deserialize(deserializer)?;
+    if vec.len() > 2 {
+        vec.truncate(2);
+    }
+    Ok(vec)
+}
+
+impl HeartbeatWirePayload {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        if let Ok(hb) = bincode::deserialize::<HeartbeatWirePayload>(bytes) {
+            Ok(hb)
+        } else {
+            #[derive(serde::Deserialize)]
+            struct LegacyHeartbeat {
+                node_id: [u8; 32],
+                addr: std::net::SocketAddr,
+                timestamp_ms: u64,
+                #[serde(default)]
+                declared_write_ema_micro_bj: u64,
+                #[serde(default)]
+                declared_read_ema_credits: u64,
+                #[serde(default = "default_signature", with = "serde_sig_64")]
+                signature: [u8; 64],
+                #[serde(default)]
+                supported_suites_mask: u8,
+            }
+            let l: LegacyHeartbeat = bincode::deserialize(bytes)?;
+            Ok(HeartbeatWirePayload {
+                node_id: l.node_id,
+                addr: l.addr,
+                timestamp_ms: l.timestamp_ms,
+                declared_write_ema_micro_bj: l.declared_write_ema_micro_bj,
+                declared_read_ema_credits: l.declared_read_ema_credits,
+                signature: l.signature,
+                supported_suites_mask: l.supported_suites_mask,
+                piggyback_observations: Vec::new(),
+            })
+        }
+    }
 }
 
 pub fn default_signature() -> [u8; 64] {
@@ -443,5 +493,63 @@ mod tests {
             let oversized = (u32::MAX as usize) + 1;
             assert!(checked_payload_len(oversized).is_err());
         }
+    }
+
+    #[test]
+    fn test_heartbeat_payload_serde_and_capping() {
+        use humoco_sim_core::fraud::IngressEnvelopeEvidence;
+
+        let ev1 = IngressEnvelopeEvidence {
+            gateway_pubkey: [1; 32],
+            timestamp_ms: 1000,
+            declared_write_ema_micro_bj: 500,
+            ..Default::default()
+        };
+        let ev2 = IngressEnvelopeEvidence {
+            gateway_pubkey: [2; 32],
+            timestamp_ms: 2000,
+            declared_write_ema_micro_bj: 600,
+            ..Default::default()
+        };
+        let ev3 = IngressEnvelopeEvidence {
+            gateway_pubkey: [3; 32],
+            timestamp_ms: 3000,
+            declared_write_ema_micro_bj: 700,
+            ..Default::default()
+        };
+
+        // 1. Serde bincode roundtrip with 3 items capped to 2
+        let hb = HeartbeatWirePayload {
+            node_id: [9; 32],
+            addr: "127.0.0.1:9090".parse().unwrap(),
+            timestamp_ms: 12345,
+            declared_write_ema_micro_bj: 100,
+            declared_read_ema_credits: 200,
+            signature: [0; 64],
+            supported_suites_mask: 1,
+            piggyback_observations: vec![ev1.clone(), ev2.clone(), ev3.clone()],
+        };
+        let bytes = bincode::serialize(&hb).expect("serialize bincode");
+        let decoded = HeartbeatWirePayload::from_bytes(&bytes).expect("deserialize bincode");
+        assert_eq!(decoded.piggyback_observations.len(), 2, "Must cap at 2 entries");
+        assert_eq!(decoded.piggyback_observations[0].gateway_pubkey, ev1.gateway_pubkey);
+        assert_eq!(decoded.piggyback_observations[1].gateway_pubkey, ev2.gateway_pubkey);
+
+        // 2. JSON serde: omitted piggyback_observations defaults to empty Vec
+        let json_str = r#"{
+            "node_id": [9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9],
+            "addr": "127.0.0.1:9090",
+            "timestamp_ms": 12345,
+            "declared_write_ema_micro_bj": 100,
+            "declared_read_ema_credits": 200,
+            "supported_suites_mask": 0
+        }"#;
+        let decoded_json: HeartbeatWirePayload = serde_json::from_str(json_str).expect("deserialize json");
+        assert!(decoded_json.piggyback_observations.is_empty(), "Omitted field defaults to empty Vec");
+
+        // 3. JSON serde with 3 entries caps at 2
+        let json_with_3 = serde_json::to_string(&hb).expect("serialize json");
+        let decoded_json_3: HeartbeatWirePayload = serde_json::from_str(&json_with_3).expect("deserialize json");
+        assert_eq!(decoded_json_3.piggyback_observations.len(), 2, "JSON must cap at 2 entries");
     }
 }

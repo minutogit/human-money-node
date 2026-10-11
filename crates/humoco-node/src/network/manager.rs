@@ -226,6 +226,7 @@ pub struct PeerManager {
     sync_notify: Arc<tokio::sync::Notify>,
     ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
     fraud_proof_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>>>>,
+    recent_observed_evidences: Arc<tokio::sync::RwLock<std::collections::VecDeque<humoco_sim_core::fraud::IngressEnvelopeEvidence>>>,
 }
 
 impl PeerManager {
@@ -314,6 +315,7 @@ impl PeerManager {
             sync_notify: Arc::new(tokio::sync::Notify::new()),
             ticket_outdated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
+            recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(16))),
         }
     }
 
@@ -1533,10 +1535,28 @@ impl PeerManager {
         result
     }
 
+    pub async fn record_observed_evidence(&self, ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
+        let mut guard = self.recent_observed_evidences.write().await;
+        if guard.len() >= 16 {
+            guard.pop_front();
+        }
+        guard.push_back(ev);
+    }
+
+    pub async fn sample_piggyback_evidences(&self, max_count: usize) -> Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
+        let guard = self.recent_observed_evidences.read().await;
+        guard.iter().rev().take(max_count).cloned().collect()
+    }
+
     pub async fn update_node_write_evidence(&self, node_id: &[u8; 32], ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
         let mut known = self.known_network_nodes.write().await;
         if let Some(info) = known.get_mut(node_id) {
             info.update_write_evidence(ev);
+        } else {
+            let dummy_addr = SocketAddr::from(([127, 0, 0, 1], 0));
+            let mut info = KnownNodeInfo::new(dummy_addr, *node_id, *node_id);
+            info.update_write_evidence(ev);
+            known.insert(*node_id, info);
         }
     }
 
@@ -1544,6 +1564,11 @@ impl PeerManager {
         let mut known = self.known_network_nodes.write().await;
         if let Some(info) = known.get_mut(node_id) {
             info.update_read_evidence(ev);
+        } else {
+            let dummy_addr = SocketAddr::from(([127, 0, 0, 1], 0));
+            let mut info = KnownNodeInfo::new(dummy_addr, *node_id, *node_id);
+            info.update_read_evidence(ev);
+            known.insert(*node_id, info);
         }
     }
 

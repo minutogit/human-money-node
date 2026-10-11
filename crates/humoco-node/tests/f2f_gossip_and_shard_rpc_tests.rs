@@ -92,6 +92,7 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
         declared_read_ema_credits: 0,
         signature: [0u8; 64],
         supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
     };
     let heartbeat_payload = bincode::serialize(&hb_payload).expect("serialize heartbeat");
     let mut heartbeat_hdr = WireHeader::new(

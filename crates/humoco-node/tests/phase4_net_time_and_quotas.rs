@@ -341,6 +341,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         declared_read_ema_credits: 1000,
         signature: sig1,
         supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
     };
     let hb_payload = bincode::serialize(&hb_wire).unwrap();
     let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, hb_payload.len() as u32);
@@ -410,5 +411,199 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     // 3. Perpetrator must now be banned locally in both engine and peer manager!
     assert!(engine.is_node_banned(identity_client.node_pubkey()).await, "Engine must ban fraudster");
     assert!(pm_shard.is_banned(identity_client.node_pubkey()).await, "PeerManager must ban fraudster");
+}
+
+#[tokio::test]
+async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::{NodeRequestHandler, RequestHandler, PeerManager};
+    use humoco_node::storage::{DualTierEngine, RedbStorage};
+    use humoco_sim_core::wire::{MsgType, WireHeader, FLAG_QUOTA_EXCEEDED, FLAG_PEER_SUSPENDED, FLAG_QUOTA_FRAUD};
+    use ed25519_dalek::Signer;
+
+    let temp_a = tempdir().unwrap();
+    let db_path_a = temp_a.path().join("shard_a.redb");
+    let storage_a = Arc::new(RedbStorage::open(&db_path_a).unwrap());
+    let (engine_a, _drain_a) = DualTierEngine::new(storage_a.clone());
+
+    let temp_b = tempdir().unwrap();
+    let db_path_b = temp_b.path().join("shard_b.redb");
+    let storage_b = Arc::new(RedbStorage::open(&db_path_b).unwrap());
+    let (engine_b, _drain_b) = DualTierEngine::new(storage_b.clone());
+
+    let identity_a = NodeIdentity::generate();
+    let identity_b = NodeIdentity::generate();
+    let identity_g = NodeIdentity::generate();
+
+    // Node A setup
+    let pm_a = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*identity_g.node_id()],
+    ));
+    pm_a.learn_node_from_gossip(*identity_g.node_id(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
+    let handler_a = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine_a.clone(),
+            storage_a.clone(),
+            identity_a.clone(),
+            pm_a.clone(),
+        ),
+    );
+
+    // Node B setup with fraud proof listener
+    let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel(16);
+    let pm_b = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*identity_a.node_id()],
+    ));
+    pm_b.set_fraud_proof_tx(fraud_tx).await;
+    pm_b.learn_node_from_gossip(*identity_a.node_id(), "127.0.0.1:9002".parse().unwrap(), 0, None).await;
+    let handler_b = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine_b.clone(),
+            storage_b.clone(),
+            identity_b.clone(),
+            pm_b.clone(),
+        ),
+    );
+
+    // 1. Gateway G interacts with Shard Node A with high load (10_000_000 micro BJ) at T = 1_000_000 ms
+    let t1 = 1_000_000u64;
+    let high_write_ema = 10_000_000u64;
+    let hmc_req_a = humoco_node::api::hmc::L2LockRequest {
+        auth: humoco_node::api::hmc::L2AuthPayload {
+            ephemeral_pubkey: *identity_g.node_id(),
+            auth_signature: None,
+        },
+        layer2_voucher_id: "voucher_high_load".into(),
+        ds_tag: None,
+        transaction_hash: [10; 32],
+        is_genesis: true,
+        sender_ephemeral_pub: *identity_g.node_id(),
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let entry_a = humoco_node::api::hmc::L2LockEntry::from(&hmc_req_a);
+    let root_valid_until_a = t1 + 86_400_000;
+    let ttl_s = 86_400;
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+    let digest_a = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        identity_g.node_pubkey(),
+        t1,
+        high_write_ema,
+        0,
+        footprint,
+        false,
+        &entry_a.t_id,
+    );
+    let sig_a = identity_g.signing_key().sign(&digest_a).to_bytes();
+    let lock_wire_a = humoco_node::network::framing::LockWirePayload::Hmc {
+        req: hmc_req_a,
+        root_valid_until: root_valid_until_a,
+        declared_write_ema_micro_bj: high_write_ema,
+        sender_pubkey: *identity_g.node_pubkey(),
+        sender_signature: sig_a,
+        timestamp_ms: t1,
+    };
+    let lock_payload_a = bincode::serialize(&lock_wire_a).unwrap();
+    let lock_hdr_a = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, lock_payload_a.len() as u32);
+    let (resp_hdr_a, _) = handler_a.handle(lock_hdr_a, lock_payload_a).await.expect("handle lock A");
+    assert_eq!(resp_hdr_a.msg_type, MsgType::LockVerifyResponse as u16);
+
+    // Node A records evidence and samples it
+    let sampled = pm_a.sample_piggyback_evidences(2).await;
+    assert_eq!(sampled.len(), 1, "Node A must have recorded 1 observed evidence");
+    assert_eq!(sampled[0].gateway_pubkey, *identity_g.node_pubkey());
+    assert_eq!(sampled[0].declared_write_ema_micro_bj, high_write_ema);
+
+    // 2. Shard Node A sends Heartbeat with piggyback_observations to Node B
+    let hb_wire = humoco_node::network::framing::HeartbeatWirePayload {
+        node_id: *identity_a.node_pubkey(),
+        addr: "127.0.0.1:9002".parse().unwrap(),
+        timestamp_ms: t1 + 5,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: sampled,
+    };
+    let hb_payload = bincode::serialize(&hb_wire).unwrap();
+    let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, hb_payload.len() as u32);
+    handler_b.handle_unidirectional(hb_hdr, hb_payload).await.expect("handle hb at B");
+
+    // Node B receives the Heartbeat, verifies piggyback, and stores in KnownNodeInfo
+    let ev_at_b = pm_b.get_node_write_evidence(identity_g.node_pubkey()).await;
+    assert!(ev_at_b.is_some(), "Node B must store piggybacked evidence in KnownNodeInfo");
+    assert_eq!(ev_at_b.unwrap().declared_write_ema_micro_bj, high_write_ema);
+
+    // 3. Gateway G subsequently tries to submit a Lock to Node B claiming low load (100_000 micro BJ)
+    let t2 = t1 + 10;
+    let fraudulent_low_ema = 100_000u64;
+    let hmc_req_b = humoco_node::api::hmc::L2LockRequest {
+        auth: humoco_node::api::hmc::L2AuthPayload {
+            ephemeral_pubkey: *identity_g.node_id(),
+            auth_signature: None,
+        },
+        layer2_voucher_id: "voucher_low_load".into(),
+        ds_tag: None,
+        transaction_hash: [20; 32],
+        is_genesis: true,
+        sender_ephemeral_pub: *identity_g.node_id(),
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let entry_b = humoco_node::api::hmc::L2LockEntry::from(&hmc_req_b);
+    let root_valid_until_b = t2 + 86_400_000;
+    let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        identity_g.node_pubkey(),
+        t2,
+        fraudulent_low_ema,
+        0,
+        footprint,
+        false,
+        &entry_b.t_id,
+    );
+    let sig_b = identity_g.signing_key().sign(&digest_b).to_bytes();
+    let lock_wire_b = humoco_node::network::framing::LockWirePayload::Hmc {
+        req: hmc_req_b,
+        root_valid_until: root_valid_until_b,
+        declared_write_ema_micro_bj: fraudulent_low_ema,
+        sender_pubkey: *identity_g.node_pubkey(),
+        sender_signature: sig_b,
+        timestamp_ms: t2,
+    };
+    let lock_payload_b = bincode::serialize(&lock_wire_b).unwrap();
+    let lock_hdr_b = WireHeader::new(MsgType::LockVerifyRequest as u16, 3, 0, 0, lock_payload_b.len() as u32);
+    let (resp_hdr_b, _) = handler_b.handle(lock_hdr_b, lock_payload_b).await.expect("handle lock B");
+
+    // Node B detects under-reporting against piggybacked evidence and rejects with FLAG_QUOTA_FRAUD
+    assert_eq!(resp_hdr_b.msg_type, MsgType::LockVerifyResponse as u16);
+    let expected_flags = FLAG_QUOTA_EXCEEDED | FLAG_PEER_SUSPENDED | FLAG_QUOTA_FRAUD;
+    assert_eq!(
+        resp_hdr_b.flags & expected_flags,
+        expected_flags,
+        "Node B must reject with FLAG_QUOTA_EXCEEDED | FLAG_PEER_SUSPENDED | FLAG_QUOTA_FRAUD"
+    );
+
+    // 4. Node B bans Gateway G in engine and peer manager
+    assert!(engine_b.is_node_banned(identity_g.node_pubkey()).await, "Engine B must ban Gateway G");
+    assert!(pm_b.is_banned(identity_g.node_pubkey()).await, "PeerManager B must ban Gateway G");
+
+    // 5. Fraud proof was broadcast
+    let broadcasted_proof = fraud_rx.try_recv().expect("Fraud proof must be broadcast");
+    assert_eq!(broadcasted_proof.perpetrator_node_id, *identity_g.node_pubkey());
+    assert!(broadcasted_proof.verify(), "Broadcasted proof must be cryptographically valid");
 }
 

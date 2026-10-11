@@ -258,6 +258,7 @@ impl NodeDaemon {
                             &[0u8; 32],
                         );
                         let signature = hb_identity.signing_key().sign(&digest).to_bytes();
+                        let piggyback = hb_pm.sample_piggyback_evidences(2).await;
 
                         for peer_addr in peers {
                             if hb_cancel.is_cancelled() { break; }
@@ -271,6 +272,7 @@ impl NodeDaemon {
                                 declared_read_ema,
                                 signature,
                                 now_ms,
+                                piggyback.clone(),
                             ).await {
                                 Ok(()) => {
                                     debug!(peer=%peer_addr, seq, "F2F heartbeat sent");

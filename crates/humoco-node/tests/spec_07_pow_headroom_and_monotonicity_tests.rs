@@ -219,6 +219,7 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
         declared_read_ema_credits: 0,
         signature: [0u8; 64],
         supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
     };
     let payload = bincode::serialize(&hb).unwrap();
     let mut header = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);

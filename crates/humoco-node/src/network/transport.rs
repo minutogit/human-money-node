@@ -356,7 +356,8 @@ impl RequestHandler for NodeRequestHandler {
                                     return Ok((resp_header, Vec::new()));
                                 }
                             }
-                            pm.update_node_write_evidence(&sender_pubkey, curr).await;
+                            pm.update_node_write_evidence(&sender_pubkey, curr.clone()).await;
+                            pm.record_observed_evidence(curr.clone()).await;
                         }
                     }
 
@@ -623,7 +624,8 @@ impl RequestHandler for NodeRequestHandler {
                                 return Ok((resp_header, Vec::new()));
                             }
                         }
-                        pm.update_node_read_evidence(&sender_pubkey, curr).await;
+                        pm.update_node_read_evidence(&sender_pubkey, curr.clone()).await;
+                        pm.record_observed_evidence(curr.clone()).await;
                     }
                 }
 
@@ -838,7 +840,7 @@ impl RequestHandler for NodeRequestHandler {
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0)
                     });
-                if let Ok(hb) = bincode::deserialize::<crate::network::framing::HeartbeatWirePayload>(&payload) {
+                if let Ok(hb) = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload) {
                     if hb.signature != [0u8; 64] {
                         let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                             hb.node_id,
@@ -895,6 +897,60 @@ impl RequestHandler for NodeRequestHandler {
                                 }
                             }
                             pm.update_node_read_evidence(&hb.node_id, ev_read).await;
+                        }
+                    }
+
+                    if let Some(pm) = peer_manager.as_ref() {
+                        for ev in hb.piggyback_observations.into_iter().take(2) {
+                            if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev) {
+                                warn!(gateway = %hex::encode(ev.gateway_pubkey), "Piggybacked evidence ignored: invalid signature");
+                                continue;
+                            }
+                            let gw_pub = ev.gateway_pubkey;
+
+                            if ev.is_read {
+                                if let Some(prev) = pm.get_node_read_evidence(&gw_pub).await {
+                                    if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &ev) {
+                                        warn!(gateway = %hex::encode(gw_pub), "CRITICAL FRAUD: read under-reporting detected from piggyback observation! Slashing perpetrator.");
+                                        let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev.clone());
+                                        let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                        let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+                                        let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+                                        engine.ban_node(gw_pub, now_ms).await;
+                                        pm.ban_node(&gw_pub).await;
+                                        pm.broadcast_fraud_proof(proof);
+                                        continue;
+                                    }
+                                    let is_newer = ev.timestamp_ms > prev.timestamp_ms;
+                                    let is_higher = ev.declared_read_ema_credits > prev.declared_read_ema_credits;
+                                    if is_newer || is_higher {
+                                        pm.update_node_read_evidence(&gw_pub, ev).await;
+                                    }
+                                } else {
+                                    pm.update_node_read_evidence(&gw_pub, ev).await;
+                                }
+                            } else {
+                                if let Some(prev) = pm.get_node_write_evidence(&gw_pub).await {
+                                    if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &ev) {
+                                        warn!(gateway = %hex::encode(gw_pub), "CRITICAL FRAUD: write under-reporting detected from piggyback observation! Slashing perpetrator.");
+                                        let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev.clone());
+                                        let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                        let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+                                        let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+                                        engine.ban_node(gw_pub, now_ms).await;
+                                        pm.ban_node(&gw_pub).await;
+                                        pm.broadcast_fraud_proof(proof);
+                                        continue;
+                                    }
+                                    let is_newer = ev.timestamp_ms > prev.timestamp_ms;
+                                    let is_higher = ev.declared_write_ema_micro_bj > prev.declared_write_ema_micro_bj;
+                                    if is_newer || is_higher {
+                                        pm.update_node_write_evidence(&gw_pub, ev).await;
+                                    }
+                                } else {
+                                    pm.update_node_write_evidence(&gw_pub, ev).await;
+                                }
+                            }
                         }
                     }
                 }
@@ -1151,6 +1207,7 @@ impl QuicTransport {
         declared_read_ema_credits: u64,
         signature: [u8; 64],
         timestamp_ms: u64,
+        piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     ) -> Result<(), NodeError> {
         let hb = crate::network::framing::HeartbeatWirePayload {
             node_id,
@@ -1160,6 +1217,7 @@ impl QuicTransport {
             declared_read_ema_credits,
             signature,
             supported_suites_mask: 0,
+            piggyback_observations,
         };
         let payload = bincode::serialize(&hb)
             .map_err(|e| NodeError::Network(format!("heartbeat serialize: {}", e)))?;
@@ -1475,7 +1533,7 @@ impl QuicTransport {
                                             } else {
                                                 pm.is_f2f_addr(&remote_addr).await
                                             };
-                                            let res1 = bincode::deserialize::<crate::network::framing::HeartbeatWirePayload>(&payload);
+                                            let res1 = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload);
                                             let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
 
                                             let info_opt = if let Ok(hb) = res1 {

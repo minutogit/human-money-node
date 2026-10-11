@@ -3,7 +3,7 @@
 > **Credo:** *"In decentralization there is no trust, only mathematical proofs."*  
 > **Principle:** *"Subtraction before Construction"*
 
-This prompt suite contains **19 highly specialized, reusable AI audits** covering the full spectrum of modern software engineering: from **mutation testing** and **memory safety** to **Byzantine hardening**, **clean code**, **adversarial wire verification**, and **performance tuning**.
+This prompt suite contains **20 highly specialized, reusable AI audits** covering the full spectrum of modern software engineering: from **macro architecture (Adlerperspektive)**, **mutation testing**, and **memory safety** to **Byzantine hardening**, **clean code**, **adversarial wire verification**, and **performance tuning**.
 
 ---
 
@@ -11,7 +11,7 @@ This prompt suite contains **19 highly specialized, reusable AI audits** coverin
 
 > **Central Orchestrator & Tracking:**
 > * **[00_master_audit_orchestrator.md](00_master_audit_orchestrator.md)**: **Master Prompt** to autonomously select, parallel-dispatch (via Model-Router & Muse Spark), and dynamically chain audits until sufficient findings are discovered and fixed.
-> * **[AUDIT_REGISTRY.md](AUDIT_REGISTRY.md)**: **Central Status Matrix & Audit Log** tracking the execution timestamps, findings count, priority scores, and health status for all 19 audit prompts.
+> * **[AUDIT_REGISTRY.md](AUDIT_REGISTRY.md)**: **Central Status Matrix & Audit Log** tracking the execution timestamps, findings count, priority scores, and health status for all 20 audit prompts.
 
 ---
 
@@ -33,6 +33,7 @@ This prompt suite contains **19 highly specialized, reusable AI audits** coverin
 | **[01_subtraktion_und_vereinfachung.md](01_subtraktion_und_vereinfachung.md)** | **Subtraction & Simplification** | Eliminate accidental complexity, over-engineering, and dead code (KISS / YAGNI). |
 | **[04_invarianten_und_spezifikations_waechter.md](04_invarianten_und_spezifikations_waechter.md)** | **Invariant & Spec Guardian** | Bit-exact reconciliation between code (`crates/`) and specifications (`docs/`). |
 | **[05_performance_und_latency_audit.md](05_performance_und_latency_audit.md)** | **Performance & Latency Guardian** | PoS Hot-Path $< 5\,\text{ms}$, RAM filter $< 1\,\mu\text{s}$, eliminate clones & heap allocations. |
+| **[20_adler_perspektive_und_systemische_vollstaendigkeit.md](20_adler_perspektive_und_systemische_vollstaendigkeit.md)** | **Macro Architecture & Completeness** | Eagle's Eye view: uncovers systemic gaps, broken pipelines, dangling components, and macro flaws across the whole system. |
 
 ---
 

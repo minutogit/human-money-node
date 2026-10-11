@@ -1,4 +1,7 @@
-use crate::crypto::{verify_attestation, DOMAIN_INGRESS_DECL};
+use crate::crypto::{
+    compute_sig_digest, verify_attestation, DOMAIN_APPROVE_FINAL, DOMAIN_APPROVE_PROV,
+    DOMAIN_INGRESS_DECL,
+};
 use crate::types::{Attestation, NodeId, SimTime};
 
 // ---------------------------------------------------------------------------
@@ -295,8 +298,8 @@ pub fn compute_ingress_envelope_digest_v2(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn sign_ingress_envelope(
-    gateway_pubkey: [u8; 32],
+pub fn sign_ingress_envelope_with_key(
+    signing_key: &ed25519_dalek::SigningKey,
     epoch_day: u32,
     epoch_seq: u32,
     cumulative_micro_byte_years: u64,
@@ -305,6 +308,8 @@ pub fn sign_ingress_envelope(
     timestamp_ms: u64,
     lock_hash: [u8; 32],
 ) -> IngressEnvelopeEvidence {
+    use ed25519_dalek::Signer;
+    let gateway_pubkey = signing_key.verifying_key().to_bytes();
     let digest = compute_ingress_envelope_digest(
         &gateway_pubkey,
         epoch_day,
@@ -315,9 +320,7 @@ pub fn sign_ingress_envelope(
         timestamp_ms,
         &lock_hash,
     );
-    let mut signature = [0u8; 64];
-    signature[..32].copy_from_slice(&digest);
-    signature[32..64].copy_from_slice(&gateway_pubkey);
+    let signature = signing_key.sign(&digest).to_bytes();
     IngressEnvelopeEvidence {
         gateway_pubkey,
         epoch_day,
@@ -336,8 +339,32 @@ pub fn sign_ingress_envelope(
     }
 }
 
-pub fn sign_ingress_evidence(
-    gateway_pubkey: [u8; 32],
+#[allow(clippy::too_many_arguments)]
+pub fn sign_ingress_envelope(
+    gateway_key_or_seed: [u8; 32],
+    epoch_day: u32,
+    epoch_seq: u32,
+    cumulative_micro_byte_years: u64,
+    prev_day_final_bytes: u64,
+    current_anl_24h: u64,
+    timestamp_ms: u64,
+    lock_hash: [u8; 32],
+) -> IngressEnvelopeEvidence {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&gateway_key_or_seed);
+    sign_ingress_envelope_with_key(
+        &signing_key,
+        epoch_day,
+        epoch_seq,
+        cumulative_micro_byte_years,
+        prev_day_final_bytes,
+        current_anl_24h,
+        timestamp_ms,
+        lock_hash,
+    )
+}
+
+pub fn sign_ingress_evidence_with_key(
+    signing_key: &ed25519_dalek::SigningKey,
     timestamp_ms: u64,
     declared_write_ema_micro_bj: u64,
     declared_read_ema_credits: u64,
@@ -345,6 +372,8 @@ pub fn sign_ingress_evidence(
     is_read: bool,
     op_hash: [u8; 32],
 ) -> IngressEnvelopeEvidence {
+    use ed25519_dalek::Signer;
+    let gateway_pubkey = signing_key.verifying_key().to_bytes();
     let digest = compute_ingress_envelope_digest_v2(
         &gateway_pubkey,
         timestamp_ms,
@@ -354,9 +383,7 @@ pub fn sign_ingress_evidence(
         is_read,
         &op_hash,
     );
-    let mut signature = [0u8; 64];
-    signature[..32].copy_from_slice(&digest);
-    signature[32..64].copy_from_slice(&gateway_pubkey);
+    let signature = signing_key.sign(&digest).to_bytes();
     IngressEnvelopeEvidence {
         gateway_pubkey,
         epoch_day: 0,
@@ -373,6 +400,27 @@ pub fn sign_ingress_evidence(
         lock_hash: op_hash,
         signature,
     }
+}
+
+pub fn sign_ingress_evidence(
+    gateway_key_or_seed: [u8; 32],
+    timestamp_ms: u64,
+    declared_write_ema_micro_bj: u64,
+    declared_read_ema_credits: u64,
+    footprint_micro_bj: u64,
+    is_read: bool,
+    op_hash: [u8; 32],
+) -> IngressEnvelopeEvidence {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&gateway_key_or_seed);
+    sign_ingress_evidence_with_key(
+        &signing_key,
+        timestamp_ms,
+        declared_write_ema_micro_bj,
+        declared_read_ema_credits,
+        footprint_micro_bj,
+        is_read,
+        op_hash,
+    )
 }
 
 pub fn encode_ingress_envelope(env: &IngressEnvelopeEvidence) -> Vec<u8> {
@@ -411,9 +459,6 @@ pub fn verify_ingress_envelope_signature(env: &IngressEnvelopeEvidence) -> bool 
         )
     };
 
-    if env.signature[..32] == digest && env.signature[32..64] == env.gateway_pubkey {
-        return true;
-    }
     if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&env.gateway_pubkey) {
         if let Ok(sig) = ed25519_dalek::Signature::from_slice(&env.signature) {
             return vk.verify_strict(&digest, &sig).is_ok();
@@ -447,7 +492,7 @@ pub struct FraudProofPayload {
 }
 
 impl FraudProofPayload {
-    fn pubkey_from_node_id(node_id: NodeId) -> [u8; 32] {
+    pub fn pubkey_from_node_id(node_id: NodeId) -> [u8; 32] {
         let mut pk = [0u8; 32];
         pk[0..2].copy_from_slice(&node_id.to_le_bytes());
         // remaining bytes deterministically derived via blake3 for uniqueness
@@ -459,7 +504,7 @@ impl FraudProofPayload {
         pk
     }
 
-    fn node_id_from_pubkey(pk: &[u8; 32]) -> NodeId {
+    pub fn node_id_from_pubkey(pk: &[u8; 32]) -> NodeId {
         u16::from_le_bytes([pk[0], pk[1]])
     }
 
@@ -480,6 +525,17 @@ impl FraudProofPayload {
             perpetrator,
             pillar,
         }
+    }
+
+    /// Alternative constructor with explicit perpetrator pubkey
+    pub fn new_shard_equivocation_with_pubkey(
+        a: Attestation,
+        b: Attestation,
+        perpetrator_pubkey: [u8; 32],
+    ) -> Self {
+        let mut p = Self::new_shard_equivocation(a, b);
+        p.perpetrator_node_id = perpetrator_pubkey;
+        p
     }
 
     /// Alternative constructor with explicit reporter
@@ -581,13 +637,6 @@ impl FraudProofPayload {
         if a.node_id != b.node_id {
             return false;
         }
-        let perp = Self::node_id_from_pubkey(&self.perpetrator_node_id);
-        // perpetrator field alias check (allow either)
-        if perp != a.node_id && self.perpetrator != a.node_id {
-            // if mismatch, still check that stored perpetrator equals signer
-            // we allow both representations to match
-            return false;
-        }
         // Must be same parent_lock (INV: double-spend on same voucher/parent)
         if a.parent_lock != b.parent_lock {
             return false;
@@ -596,7 +645,50 @@ impl FraudProofPayload {
         if a.lock_id == b.lock_id {
             return false;
         }
-        // Both signatures must be valid
+
+        // Verify signatures of both attestations using genuine Ed25519 if valid key
+        let is_ed25519_valid = if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.perpetrator_node_id) {
+            let verify_one = |att: &Attestation| -> bool {
+                let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
+                    Ok(s) => s,
+                    Err(_) => return false,
+                };
+                let shard_id = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
+                let d_prov = compute_sig_digest(
+                    DOMAIN_APPROVE_PROV,
+                    0,
+                    0,
+                    0,
+                    shard_id,
+                    0,
+                    &att.lock_id,
+                );
+                let d_final = compute_sig_digest(
+                    DOMAIN_APPROVE_FINAL,
+                    0,
+                    0,
+                    0,
+                    shard_id,
+                    1,
+                    &att.lock_id,
+                );
+                vk.verify_strict(&d_prov, &sig).is_ok()
+                    || vk.verify_strict(&d_final, &sig).is_ok()
+            };
+            verify_one(&a) && verify_one(&b)
+        } else {
+            false
+        };
+
+        if is_ed25519_valid {
+            return true;
+        }
+
+        // Fallback for simulation mode tests that use BLAKE3 deterministic simulator signatures
+        let perp = Self::node_id_from_pubkey(&self.perpetrator_node_id);
+        if perp != a.node_id && self.perpetrator != a.node_id {
+            return false;
+        }
         if !verify_attestation(&a) || !verify_attestation(&b) {
             return false;
         }

@@ -30,7 +30,19 @@ pub trait RequestHandler: Send + Sync + 'static {
         &self,
         header: WireHeader,
         payload: Vec<u8>,
-    ) -> BoxFuture<Result<(WireHeader, Vec<u8>), NodeError>>;
+    ) -> BoxFuture<Result<(WireHeader, Vec<u8>), NodeError>> {
+        self.handle_authenticated(header, payload, None)
+    }
+
+    fn handle_authenticated(
+        &self,
+        header: WireHeader,
+        payload: Vec<u8>,
+        peer_identity: Option<[u8; 32]>,
+    ) -> BoxFuture<Result<(WireHeader, Vec<u8>), NodeError>> {
+        let _ = peer_identity;
+        self.handle(header, payload)
+    }
 
     fn handle_unidirectional(
         &self,
@@ -39,6 +51,16 @@ pub trait RequestHandler: Send + Sync + 'static {
     ) -> BoxFuture<Result<(), NodeError>> {
         let _ = (header, payload);
         Box::pin(async { Ok(()) })
+    }
+
+    fn handle_unidirectional_authenticated(
+        &self,
+        header: WireHeader,
+        payload: Vec<u8>,
+        peer_identity: Option<[u8; 32]>,
+    ) -> BoxFuture<Result<(), NodeError>> {
+        let _ = peer_identity;
+        self.handle_unidirectional(header, payload)
     }
 }
 
@@ -93,6 +115,10 @@ pub fn verify_equivocation_first_party(
                 None => return false,
             };
 
+            if a.parent_lock != b.parent_lock || a.lock_id == b.lock_id || a.node_id != b.node_id {
+                return false;
+            }
+
             let verify_att = |att: &humoco_sim_core::types::Attestation| -> bool {
                 let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
                     Ok(s) => s,
@@ -118,14 +144,8 @@ pub fn verify_equivocation_first_party(
                     &att.lock_id,
                 );
 
-                #[cfg(any(test, debug_assertions))]
-                let sim_test_fallback = humoco_sim_core::crypto::verify_attestation(att);
-                #[cfg(not(any(test, debug_assertions)))]
-                let sim_test_fallback = false;
-
                 vk.verify_strict(&d_prov, &sig).is_ok()
                     || vk.verify_strict(&d_final, &sig).is_ok()
-                    || sim_test_fallback
             };
 
             verify_att(&a) && verify_att(&b)
@@ -186,6 +206,15 @@ impl RequestHandler for NodeRequestHandler {
         header: WireHeader,
         payload: Vec<u8>,
     ) -> BoxFuture<Result<(WireHeader, Vec<u8>), NodeError>> {
+        self.handle_authenticated(header, payload, None)
+    }
+
+    fn handle_authenticated(
+        &self,
+        header: WireHeader,
+        payload: Vec<u8>,
+        peer_identity: Option<[u8; 32]>,
+    ) -> BoxFuture<Result<(WireHeader, Vec<u8>), NodeError>> {
         let engine = self.engine.clone();
         let storage = self.storage.clone();
         let identity = self.identity.clone();
@@ -193,6 +222,21 @@ impl RequestHandler for NodeRequestHandler {
         let tier_controller = self.tier_controller.clone();
         Box::pin(async move {
             let msg_type = header.msg_type;
+
+            if let Some(auth_peer) = peer_identity {
+                if engine.is_node_banned(&auth_peer).await {
+                    warn!(auth_peer = %hex::encode(auth_peer), "Rejected request from banned authenticated QUIC peer");
+                    let resp_header = WireHeader::new(
+                        MsgType::StatusResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+            }
+
             // --- Phase 4: Real slashing on EquivocationProof (Spec 10 Pillar 1) ---
             if msg_type == MsgType::EquivocationProof as u16 {
                 let now_ms = peer_manager
@@ -543,7 +587,7 @@ impl RequestHandler for NodeRequestHandler {
                 };
                 let read_limit = (5.0 * ncb_read_eff as f64).round() as u64;
 
-                let (lock_id, parent_lock, shard_id, declared_read_ema, sender_pubkey, timestamp_ms, sender_signature) =
+                let (lock_id, parent_lock, shard_id, declared_read_ema, raw_sender_pubkey, timestamp_ms, sender_signature) =
                     if let Ok(sq) = bincode::deserialize::<crate::network::framing::StatusQueryPayload>(&payload) {
                         (sq.lock_id, sq.parent_lock, sq.shard_id, sq.current_read_ema_credits, sq.sender_pubkey, sq.timestamp_ms, sq.sender_signature)
                     } else if let Ok((l_id, p_lock, s_id)) = bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload) {
@@ -552,6 +596,22 @@ impl RequestHandler for NodeRequestHandler {
                         let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
                         return Ok((resp_header, Vec::new()));
                     };
+
+                // Bind sender identity to authenticated QUIC TLS peer if available
+                let sender_pubkey = if let Some(auth_peer) = peer_identity {
+                    if raw_sender_pubkey != [0u8; 32] && raw_sender_pubkey != auth_peer {
+                        warn!(
+                            claimed = %hex::encode(raw_sender_pubkey),
+                            authenticated = %hex::encode(auth_peer),
+                            "StatusQuery rejected: claimed sender pubkey does not match authenticated QUIC identity"
+                        );
+                        let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                        return Ok((resp_header, Vec::new()));
+                    }
+                    auth_peer
+                } else {
+                    raw_sender_pubkey
+                };
 
                 let is_banned = if sender_pubkey != [0u8; 32] {
                     if engine.is_node_banned(&sender_pubkey).await {
@@ -642,14 +702,59 @@ impl RequestHandler for NodeRequestHandler {
                     return Ok((resp_header, Vec::new()));
                 }
 
-                let known = {
-                    let hmc = engine.hmc_ram.read().await;
-                    hmc.locks.values().any(|e| e.t_id == lock_id)
-                        || engine.get_ram_lock(&parent_lock).await.is_some()
-                        || storage.get_lock(&parent_lock).map(|o| o.is_some()).unwrap_or(false)
+                // Strict Lock & Shard & Validity Verification (INV: Close StatusQuery Signature Hole)
+                let matching_and_valid = {
+                    let mut is_match = false;
+                    // Check Pure L2 Lock in RAM or Disk
+                    let ram_lock = engine.get_ram_lock(&parent_lock).await;
+                    let stored = ram_lock.or_else(|| {
+                        storage
+                            .get_lock(&parent_lock)
+                            .ok()
+                            .flatten()
+                            .map(|(rec, _)| rec)
+                    });
+                    if let Some(rec) = stored {
+                        let expected_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+                        if rec.id == lock_id
+                            && rec.parent_lock == parent_lock
+                            && shard_id == expected_shard
+                            && rec.valid_until.0 >= now_ms
+                        {
+                            is_match = true;
+                        }
+                    }
+
+                    // Check HMC lock in HMC RAM
+                    if !is_match {
+                        let hmc = engine.hmc_ram.read().await;
+                        for (lookup_tag, entry) in &hmc.locks {
+                            if entry.t_id == lock_id {
+                                let tag_hash = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+                                let parent_matches = tag_hash == parent_lock || lookup_tag.as_bytes() == &parent_lock[..];
+                                if parent_matches {
+                                    let v_hash = *blake3::hash(entry.layer2_voucher_id.as_bytes()).as_bytes();
+                                    let v_shard = u16::from_be_bytes([v_hash[0], v_hash[1]]);
+                                    let p_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+                                    let shard_matches = shard_id == v_shard || shard_id == p_shard;
+                                    let valid = entry
+                                        .deletable_at
+                                        .as_deref()
+                                        .and_then(|s| s.parse::<u64>().ok())
+                                        .map(|del| del >= now_ms)
+                                        .unwrap_or(true);
+                                    if shard_matches && valid {
+                                        is_match = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    is_match
                 };
 
-                if known {
+                if matching_and_valid {
                     let target_status = (header.flags & 0xFF) as u8;
                     let attestation = crate::api::routes::create_attestation(
                         &identity,
@@ -1455,7 +1560,7 @@ impl QuicTransport {
                                             return;
                                         }
 
-                                        match h.handle(header, payload).await {
+                                        match h.handle_authenticated(header, payload, remote_node_id).await {
                                             Ok((resp_header, resp_payload)) => {
                                                 if let Err(e) = write_frame(&mut send, &resp_header, &resp_payload).await {
                                                     debug!(error = %e, "Failed to write frame response");
@@ -1615,7 +1720,7 @@ impl QuicTransport {
                                             }
                                         }
 
-                                        if let Err(e) = h.handle_unidirectional(header, payload).await {
+                                        if let Err(e) = h.handle_unidirectional_authenticated(header, payload, remote_node_id).await {
                                             debug!(error = %e, "Failed to handle unidirectional frame");
                                         }
                                     }

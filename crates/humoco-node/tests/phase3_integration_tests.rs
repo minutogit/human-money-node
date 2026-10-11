@@ -8,7 +8,7 @@ use humoco_node::network::{
     DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport,
 };
 use humoco_node::storage::{compute_hmc_canonical_hash, DualTierEngine, IngressOrigin, RedbStorage};
-use humoco_sim_core::crypto::{compute_canonical_hash, sign_lock_attestation};
+use humoco_sim_core::crypto::compute_canonical_hash;
 use humoco_sim_core::fraud::FraudProofPayload;
 use humoco_sim_core::storage::IngressVerdictLow;
 use humoco_sim_core::types::{LockRecord, SimTime};
@@ -467,11 +467,37 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
     let lock_id_1 = [0x11; 32];
     let lock_id_2 = [0x22; 32];
     let node_u16 = u16::from_le_bytes([offender_node_id[0], offender_node_id[1]]);
+    let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
 
-    let att_1 = sign_lock_attestation(node_u16, &lock_id_1, &parent_lock, SimTime(100));
-    let att_2 = sign_lock_attestation(node_u16, &lock_id_2, &parent_lock, SimTime(200));
+    let d1 = humoco_sim_core::crypto::compute_sig_digest(
+        humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
+        0, 0, 0, shard_id, 0, &lock_id_1,
+    );
+    let d2 = humoco_sim_core::crypto::compute_sig_digest(
+        humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
+        0, 0, 0, shard_id, 0, &lock_id_2,
+    );
 
-    let proof = FraudProofPayload::new_shard_equivocation(att_1, att_2);
+    use ed25519_dalek::Signer;
+    let sig_1 = identity_b.signing_key().sign(&d1).to_bytes();
+    let sig_2 = identity_b.signing_key().sign(&d2).to_bytes();
+
+    let att_1 = humoco_sim_core::types::Attestation {
+        node_id: node_u16,
+        lock_id: lock_id_1,
+        parent_lock,
+        timestamp: SimTime(100),
+        signature: sig_1,
+    };
+    let att_2 = humoco_sim_core::types::Attestation {
+        node_id: node_u16,
+        lock_id: lock_id_2,
+        parent_lock,
+        timestamp: SimTime(200),
+        signature: sig_2,
+    };
+
+    let proof = FraudProofPayload::new_shard_equivocation_with_pubkey(att_1, att_2, offender_node_id);
     assert!(proof.verify(), "Proof must be cryptographically valid");
 
     let raw_proof = bincode::serialize(&proof).expect("serialize proof");

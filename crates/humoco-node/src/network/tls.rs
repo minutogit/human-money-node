@@ -65,6 +65,35 @@ impl P2pCertVerifier {
     }
 }
 
+pub type P2pServerCertVerifier = P2pCertVerifier;
+
+/// Validates Ed25519 handshake signatures (Proof of Possession) for TLS 1.2 and TLS 1.3.
+fn verify_handshake_signature(
+    message: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &rustls::DigitallySignedStruct,
+) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    if dss.scheme != rustls::SignatureScheme::ED25519 {
+        return Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::BadSignature,
+        ));
+    }
+
+    let (_node_id, vk) = extract_peer_node_id(cert.as_ref()).map_err(|_| {
+        rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
+    })?;
+
+    let sig = ed25519_dalek::Signature::from_slice(dss.signature()).map_err(|_| {
+        rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
+    })?;
+
+    vk.verify_strict(message, &sig).map_err(|_| {
+        rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
+    })?;
+
+    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+}
+
 impl rustls::client::danger::ServerCertVerifier for P2pCertVerifier {
     fn verify_server_cert(
         &self,
@@ -79,28 +108,24 @@ impl rustls::client::danger::ServerCertVerifier for P2pCertVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        verify_handshake_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        verify_handshake_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-        ]
+        vec![rustls::SignatureScheme::ED25519]
     }
 }
 
@@ -130,28 +155,24 @@ impl rustls::server::danger::ClientCertVerifier for P2pClientCertVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        verify_handshake_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        verify_handshake_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-        ]
+        vec![rustls::SignatureScheme::ED25519]
     }
 }
 
@@ -359,4 +380,58 @@ mod tests {
         let client_config_with_id = build_quinn_client_config_with_identity(&identity);
         assert!(client_config_with_id.is_ok());
     }
+
+    #[test]
+    fn test_handshake_signature_verification() {
+        use ed25519_dalek::Signer;
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::internal::msgs::codec::{Codec, Reader};
+
+        let identity = NodeIdentity::generate();
+        let (cert, _key) = generate_node_certificate(&identity).expect("cert generation");
+        let verifier = P2pServerCertVerifier::new();
+
+        let message = b"handshake_context_test_payload";
+        let valid_sig = identity.signing_key().sign(message);
+
+        let make_dss = |scheme: rustls::SignatureScheme, sig: &[u8]| -> rustls::DigitallySignedStruct {
+            let mut bytes = Vec::new();
+            scheme.encode(&mut bytes);
+            (sig.len() as u16).encode(&mut bytes);
+            bytes.extend_from_slice(sig);
+            let mut reader = Reader::init(&bytes);
+            rustls::DigitallySignedStruct::read(&mut reader).expect("decode dss")
+        };
+
+        let valid_dss = make_dss(rustls::SignatureScheme::ED25519, valid_sig.to_bytes().as_ref());
+
+        // 1. Valid signature -> Ok
+        assert!(verifier
+            .verify_tls13_signature(message, &cert, &valid_dss)
+            .is_ok());
+        assert!(verifier
+            .verify_tls12_signature(message, &cert, &valid_dss)
+            .is_ok());
+
+        // 2. Tampered message -> BadSignature error
+        assert!(verifier
+            .verify_tls13_signature(b"tampered_payload", &cert, &valid_dss)
+            .is_err());
+
+        // 3. Foreign signature -> BadSignature error
+        let foreign_identity = NodeIdentity::generate();
+        let foreign_sig = foreign_identity.signing_key().sign(message);
+        let foreign_dss = make_dss(rustls::SignatureScheme::ED25519, foreign_sig.to_bytes().as_ref());
+        assert!(verifier
+            .verify_tls13_signature(message, &cert, &foreign_dss)
+            .is_err());
+
+        // 4. Unsupported scheme -> BadSignature error
+        let bad_scheme_dss = make_dss(rustls::SignatureScheme::RSA_PSS_SHA256, valid_sig.to_bytes().as_ref());
+        assert!(verifier
+            .verify_tls13_signature(message, &cert, &bad_scheme_dss)
+            .is_err());
+    }
 }
+
+

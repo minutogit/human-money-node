@@ -1170,19 +1170,39 @@ async fn query_status(
     let quorum_certificate = if payload.read_quorum > 1 {
         let voucher_bytes = *blake3::hash(payload.layer2_voucher_id.as_bytes()).as_bytes();
         let shard_id = u16::from_be_bytes([voucher_bytes[0], voucher_bytes[1]]);
-        let (lock_id, parent_lock) = match &verdict {
+        match &verdict {
             L2Verdict::Verified { lock_entry } => {
-                (lock_entry.t_id, *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes())
+                let parent_lock = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
+                let lock_id = lock_entry.t_id;
+                let is_valid = lock_entry
+                    .deletable_at
+                    .as_deref()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|del| del >= now_ms)
+                    .unwrap_or(true);
+                if is_valid {
+                    Some(assemble_status_quorum_certificate(&state, lock_id, parent_lock, shard_id, now_ms, payload.read_quorum).await)
+                } else {
+                    None
+                }
             }
             L2Verdict::Conflict { existing_lock } => {
-                (existing_lock.t_id, *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes())
+                let parent_lock = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
+                let lock_id = existing_lock.t_id;
+                let is_valid = existing_lock
+                    .deletable_at
+                    .as_deref()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|del| del >= now_ms)
+                    .unwrap_or(true);
+                if is_valid {
+                    Some(assemble_status_quorum_certificate(&state, lock_id, parent_lock, shard_id, now_ms, payload.read_quorum).await)
+                } else {
+                    None
+                }
             }
-            _ => {
-                let ch_hash = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
-                (ch_hash, voucher_bytes)
-            }
-        };
-        Some(assemble_status_quorum_certificate(&state, lock_id, parent_lock, shard_id, now_ms, payload.read_quorum).await)
+            _ => None,
+        }
     } else {
         None
     };

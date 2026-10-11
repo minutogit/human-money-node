@@ -1,6 +1,6 @@
 use humoco_sim_core::crypto::sign_lock_attestation;
 use humoco_sim_core::fraud::{
-    sign_heartbeat, sign_ingress_envelope, FraudProofPayload, FraudProofPillar, SlotDetector128,
+    sign_heartbeat, FraudProofPayload, FraudProofPillar, SlotDetector128,
 };
 use humoco_sim_core::sim::{SimNetwork, SimNode};
 use humoco_sim_core::types::{LockRecord, SimTime};
@@ -213,14 +213,17 @@ fn test_pillar_3_heartbeat_spam_128_slot_detector_bans() {
 /// Säule 2: Ingress-Zähler-Kollision (Lastzähler-Rückschritt / Fork / Vortages-Unterschlagung)
 #[test]
 fn test_pillar_2_ingress_counter_conflict_bans_immediately() {
-    let malicious_gateway_id: u16 = 88;
-    let mut gateway_pubkey = [0u8; 32];
-    gateway_pubkey[0..2].copy_from_slice(&malicious_gateway_id.to_le_bytes());
-    gateway_pubkey[2..].fill(0x77);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x77; 32]);
+    let gateway_pubkey = signing_key.verifying_key().to_bytes();
+    let malicious_gateway_id = FraudProofPayload::node_id_from_pubkey(&gateway_pubkey);
 
     // Erzeuge zwei betrügerische Pakete (Pfad 4: Zähler-Rückschritt am gleichen Tag)
-    let p1 = sign_ingress_envelope(gateway_pubkey, 1, 10, 500_000, 0, 100_000, 1000, [0x11; 32]);
-    let p2 = sign_ingress_envelope(gateway_pubkey, 1, 11, 400_000, 0, 100_000, 2000, [0x22; 32]);
+    let p1 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+        &signing_key, 1, 10, 500_000, 0, 100_000, 1000, [0x11; 32],
+    );
+    let p2 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+        &signing_key, 1, 11, 400_000, 0, 100_000, 2000, [0x22; 32],
+    );
 
     let proof = FraudProofPayload::new_ingress_counter_conflict(p1, p2);
     assert_eq!(proof.proof_pillar, FraudProofPillar::IngressCounterConflict);

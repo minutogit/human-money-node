@@ -1344,7 +1344,10 @@ impl PeerManager {
                 if let Some(nid) = peer.node_id {
                     if &nid == node_id {
                         if let Some(conn) = peer.connection.take() {
-                            conn.close(0u32.into(), b"banned: equivocation proof");
+                            tokio::spawn(async move {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                                conn.close(0u32.into(), b"banned: equivocation proof");
+                            });
                         }
                         peer.status = PeerStatus::Suspended;
                         peer.missing_count = crate::network::peer::FAILURE_THRESHOLD_SUSPENDED;

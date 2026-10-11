@@ -215,6 +215,9 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
         node_id: pk_a,
         addr: addr_a,
         timestamp_ms: 1000,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
         supported_suites_mask: 0,
     };
     let payload = bincode::serialize(&hb).unwrap();

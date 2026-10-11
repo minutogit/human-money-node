@@ -1027,13 +1027,27 @@ async fn assemble_status_quorum_certificate(
 
             if collected_signatures.len() < required_q {
                 if let Some(transport) = &state.transport {
+                    let declared_read_ema = state.tier_controller.current_read_ema_credits();
+                    let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+                    let sender_pubkey = *state.identity.node_pubkey();
+                    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                        &sender_pubkey,
+                        now_ms,
+                        declared_write_ema,
+                        declared_read_ema,
+                        0,
+                        true,
+                        &lock_id,
+                    );
+                    let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
                     let status_query = crate::network::framing::StatusQueryPayload {
                         lock_id,
                         parent_lock,
                         shard_id,
-                        sender_pubkey: *state.identity.node_pubkey(),
-                        current_read_ema_credits: state.tier_controller.current_read_ema_credits(),
+                        sender_pubkey,
+                        current_read_ema_credits: declared_read_ema,
                         timestamp_ms: now_ms,
+                        sender_signature,
                     };
                     let payload = bincode::serialize(&status_query).unwrap_or_default();
                     let my_load = state.tier_controller.rolling_24h_read_average();
@@ -1333,11 +1347,29 @@ async fn submit_hmc_lock(
             let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
             let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
             let now_ms = state.net_time_ms();
+            let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+            let declared_read_ema = state.tier_controller.current_read_ema_credits();
+            let sender_pubkey = *state.identity.node_pubkey();
+            let ttl_sec = (root_valid_until.saturating_sub(now_ms)) / 1000;
+            let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
+            let op_hash = entry.t_id;
+            let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                &sender_pubkey,
+                now_ms,
+                declared_write_ema,
+                declared_read_ema,
+                footprint,
+                false,
+                &op_hash,
+            );
+            let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
             let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                 req: req.clone(),
                 root_valid_until,
-                declared_write_ema_micro_bj: state.tier_controller.current_write_ema_micro_bj(),
-                sender_pubkey: *state.identity.node_pubkey(),
+                declared_write_ema_micro_bj: declared_write_ema,
+                sender_pubkey,
+                sender_signature,
+                timestamp_ms: now_ms,
             }).ok();
             let start_quorum = std::time::Instant::now();
             let quorum_certificate = Some(assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await);
@@ -1493,11 +1525,28 @@ async fn submit_hmc_lock(
             let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
             let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
             let now_ms = state.net_time_ms();
+            let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+            let declared_read_ema = state.tier_controller.current_read_ema_credits();
+            let sender_pubkey = *state.identity.node_pubkey();
+            let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
+            let op_hash = entry.t_id;
+            let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                &sender_pubkey,
+                now_ms,
+                declared_write_ema,
+                declared_read_ema,
+                footprint,
+                false,
+                &op_hash,
+            );
+            let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
             let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                 req: req.clone(),
                 root_valid_until,
-                declared_write_ema_micro_bj: state.tier_controller.current_write_ema_micro_bj(),
-                sender_pubkey: *state.identity.node_pubkey(),
+                declared_write_ema_micro_bj: declared_write_ema,
+                sender_pubkey,
+                sender_signature,
+                timestamp_ms: now_ms,
             }).ok();
             let start_quorum = std::time::Instant::now();
             let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
@@ -1692,11 +1741,28 @@ async fn submit_hmc_chain_lock_inner(
             };
             let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
             let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+            let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+            let declared_read_ema = state.tier_controller.current_read_ema_credits();
+            let sender_pubkey = *state.identity.node_pubkey();
+            let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds).saturating_mul(chain_req.chain.len() as u64);
+            let op_hash = lock_entry.t_id;
+            let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                &sender_pubkey,
+                now_ms,
+                declared_write_ema,
+                declared_read_ema,
+                footprint,
+                false,
+                &op_hash,
+            );
+            let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
             let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                 req: last_hop.clone(),
                 root_valid_until,
-                declared_write_ema_micro_bj: state.tier_controller.current_write_ema_micro_bj(),
-                sender_pubkey: *state.identity.node_pubkey(),
+                declared_write_ema_micro_bj: declared_write_ema,
+                sender_pubkey,
+                sender_signature,
+                timestamp_ms: now_ms,
             })
             .ok();
             let start_quorum = std::time::Instant::now();

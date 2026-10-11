@@ -234,6 +234,8 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         root_valid_until: 86_400_000,
         declared_write_ema_micro_bj: declared_write_ema,
         sender_pubkey: *identity_client.node_id(),
+        sender_signature: [0; 64],
+        timestamp_ms: 1000,
     }).unwrap();
 
     let req_header = WireHeader::new(
@@ -257,6 +259,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         sender_pubkey: *identity_client.node_id(),
         current_read_ema_credits: 500_000, // declared daily rate = 500_000 * 0.693 = 346_573 > 250_000
         timestamp_ms: 1000,
+        sender_signature: [0; 64],
     };
     let status_payload = bincode::serialize(&status_query).unwrap();
     let status_req_header = WireHeader::new(
@@ -284,5 +287,128 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
     // Zone 3: My load is 7_000_000 (> 125%). Legitimate overload -> No penalty
     let v_zone3 = humoco_sim_core::quota::evaluate_quota_exceeded_claim(7_000_000, quota_limit);
     assert!(matches!(v_zone3, humoco_sim_core::quota::QuotaPlausibilityVerdict::LegitimateOverload { .. }));
+}
+
+#[tokio::test]
+async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::{NodeRequestHandler, RequestHandler, PeerManager};
+    use humoco_node::storage::{DualTierEngine, RedbStorage};
+    use humoco_sim_core::wire::{MsgType, WireHeader, FLAG_QUOTA_EXCEEDED, FLAG_PEER_SUSPENDED, FLAG_QUOTA_FRAUD};
+    use ed25519_dalek::Signer;
+
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("fraud_test.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _drain) = DualTierEngine::new(storage.clone());
+
+    let identity_shard = NodeIdentity::generate();
+    let identity_client = NodeIdentity::generate();
+
+    let pm_shard = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*identity_client.node_id()],
+    ));
+    pm_shard.learn_node_from_gossip(*identity_client.node_id(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
+
+    let handler_shard = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            identity_shard.clone(),
+            pm_shard.clone(),
+        ),
+    );
+
+    // 1. Initial Heartbeat anchors write EMA at 10_000_000 at T = 1_000_000 ms
+    let t1 = 1_000_000u64;
+    let initial_write_ema = 10_000_000u64;
+    let digest1 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        identity_client.node_pubkey(),
+        t1,
+        initial_write_ema,
+        1000,
+        0,
+        false,
+        &[0u8; 32],
+    );
+    let sig1 = identity_client.signing_key().sign(&digest1).to_bytes();
+    let hb_wire = humoco_node::network::framing::HeartbeatWirePayload {
+        node_id: *identity_client.node_pubkey(),
+        addr: "127.0.0.1:9001".parse().unwrap(),
+        timestamp_ms: t1,
+        declared_write_ema_micro_bj: initial_write_ema,
+        declared_read_ema_credits: 1000,
+        signature: sig1,
+        supported_suites_mask: 0,
+    };
+    let hb_payload = bincode::serialize(&hb_wire).unwrap();
+    let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, hb_payload.len() as u32);
+    handler_shard.handle_unidirectional(hb_hdr, hb_payload).await.expect("handle hb");
+
+    // Verify evidence anchored in KnownNodeInfo
+    let ev = pm_shard.get_node_write_evidence(identity_client.node_pubkey()).await;
+    assert!(ev.is_some(), "Evidence must be recorded from heartbeat");
+    assert_eq!(ev.unwrap().declared_write_ema_micro_bj, initial_write_ema);
+
+    // 2. Under-reporting attack:
+    // Client sends LockVerifyRequest at T = 1_000_010 ms (delta = 10ms ~ 0s).
+    // Decayed threshold is ~ 10_000_000 + footprint.
+    // Client falsely reports declared_write_ema = 1_000_000 (< threshold)!
+    let t2 = 1_000_010u64;
+    let fraudulent_write_ema = 1_000_000u64;
+    let hmc_req = humoco_node::api::hmc::L2LockRequest {
+        auth: humoco_node::api::hmc::L2AuthPayload {
+            ephemeral_pubkey: *identity_client.node_id(),
+            auth_signature: None,
+        },
+        layer2_voucher_id: "fraud_voucher".into(),
+        ds_tag: None,
+        transaction_hash: [2; 32],
+        is_genesis: true,
+        sender_ephemeral_pub: *identity_client.node_id(),
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
+    let root_valid_until = t2 + 86_400_000;
+    let ttl_s = 86_400;
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+    let digest2 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        identity_client.node_pubkey(),
+        t2,
+        fraudulent_write_ema,
+        0,
+        footprint,
+        false,
+        &entry.t_id,
+    );
+    let sig2 = identity_client.signing_key().sign(&digest2).to_bytes();
+
+    let lock_wire = humoco_node::network::framing::LockWirePayload::Hmc {
+        req: hmc_req,
+        root_valid_until,
+        declared_write_ema_micro_bj: fraudulent_write_ema,
+        sender_pubkey: *identity_client.node_pubkey(),
+        sender_signature: sig2,
+        timestamp_ms: t2,
+    };
+    let lock_payload = bincode::serialize(&lock_wire).unwrap();
+    let lock_hdr = WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 0, lock_payload.len() as u32);
+
+    let (resp_hdr, _) = handler_shard.handle(lock_hdr, lock_payload).await.expect("handle lock");
+    assert_eq!(resp_hdr.msg_type, MsgType::LockVerifyResponse as u16);
+    let expected_flags = FLAG_QUOTA_EXCEEDED | FLAG_PEER_SUSPENDED | FLAG_QUOTA_FRAUD;
+    assert_eq!(resp_hdr.flags & expected_flags, expected_flags, "Must return FLAG_QUOTA_EXCEEDED | FLAG_PEER_SUSPENDED | FLAG_QUOTA_FRAUD");
+
+    // 3. Perpetrator must now be banned locally in both engine and peer manager!
+    assert!(engine.is_node_banned(identity_client.node_pubkey()).await, "Engine must ban fraudster");
+    assert!(pm_shard.is_banned(identity_client.node_pubkey()).await, "PeerManager must ban fraudster");
 }
 

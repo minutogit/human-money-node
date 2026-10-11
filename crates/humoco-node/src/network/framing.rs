@@ -16,7 +16,73 @@ pub struct HeartbeatWirePayload {
     pub addr: std::net::SocketAddr,
     pub timestamp_ms: u64,
     #[serde(default)]
+    pub declared_write_ema_micro_bj: u64,
+    #[serde(default)]
+    pub declared_read_ema_credits: u64,
+    #[serde(default = "default_signature", with = "serde_sig_64")]
+    pub signature: [u8; 64],
+    #[serde(default)]
     pub supported_suites_mask: u8,
+}
+
+pub fn default_signature() -> [u8; 64] {
+    [0u8; 64]
+}
+
+pub mod serde_sig_64 {
+    use serde::{de::Error, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(bytes)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = [u8; 64];
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a byte array of length 64")
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                if v.len() == 64 {
+                    let mut arr = [0u8; 64];
+                    arr.copy_from_slice(v);
+                    Ok(arr)
+                } else if v.is_empty() {
+                    Ok([0u8; 64])
+                } else {
+                    Err(E::custom(format!("expected 64 bytes, got {}", v.len())))
+                }
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut arr = [0u8; 64];
+                let mut idx = 0;
+                while let Some(val) = seq.next_element()? {
+                    if idx < 64 {
+                        arr[idx] = val;
+                        idx += 1;
+                    }
+                }
+                Ok(arr)
+            }
+        }
+        deserializer.deserialize_bytes(Visitor)
+    }
 }
 
 mod hmc_req_json {
@@ -57,6 +123,10 @@ pub enum LockWirePayload {
         declared_write_ema_micro_bj: u64,
         #[serde(default)]
         sender_pubkey: [u8; 32],
+        #[serde(default = "default_signature", with = "serde_sig_64")]
+        sender_signature: [u8; 64],
+        #[serde(default)]
+        timestamp_ms: u64,
     },
 }
 
@@ -80,6 +150,20 @@ impl LockWirePayload {
             }
         }
     }
+
+    pub fn sender_signature(&self) -> [u8; 64] {
+        match self {
+            Self::Sim(..) => [0u8; 64],
+            Self::Hmc { sender_signature, .. } => *sender_signature,
+        }
+    }
+
+    pub fn timestamp_ms(&self) -> u64 {
+        match self {
+            Self::Sim(..) => 0,
+            Self::Hmc { timestamp_ms, .. } => *timestamp_ms,
+        }
+    }
 }
 
 /// Wire payload for StatusQuery carrying lock identifiers and declared read EMA metrics (Spec 09/10).
@@ -94,6 +178,8 @@ pub struct StatusQueryPayload {
     pub current_read_ema_credits: u64,
     #[serde(default)]
     pub timestamp_ms: u64,
+    #[serde(default = "default_signature", with = "serde_sig_64")]
+    pub sender_signature: [u8; 64],
 }
 
 mod hmc_locks_json {

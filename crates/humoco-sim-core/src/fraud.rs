@@ -158,15 +158,91 @@ impl HeartbeatSlashingSlot {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IngressEnvelopeEvidence {
     pub gateway_pubkey: [u8; 32],
+    #[serde(default)]
     pub epoch_day: u32,
+    #[serde(default)]
     pub epoch_seq: u32,
+    #[serde(default)]
     pub cumulative_micro_byte_years: u64,
+    #[serde(default)]
     pub prev_day_final_bytes: u64,
+    #[serde(default)]
     pub current_anl_24h: u64,
     pub timestamp_ms: u64,
+    #[serde(default)]
+    pub declared_write_ema_micro_bj: u64,
+    #[serde(default)]
+    pub declared_read_ema_credits: u64,
+    #[serde(default)]
+    pub footprint_micro_bj: u64,
+    #[serde(default)]
+    pub is_read: bool,
+    #[serde(default)]
+    pub op_hash: [u8; 32],
+    #[serde(default)]
     pub lock_hash: [u8; 32],
     #[serde(with = "crate::types::serde_bytes_64")]
     pub signature: [u8; 64],
+}
+
+impl Default for IngressEnvelopeEvidence {
+    fn default() -> Self {
+        Self {
+            gateway_pubkey: [0u8; 32],
+            epoch_day: 0,
+            epoch_seq: 0,
+            cumulative_micro_byte_years: 0,
+            prev_day_final_bytes: 0,
+            current_anl_24h: 0,
+            timestamp_ms: 0,
+            declared_write_ema_micro_bj: 0,
+            declared_read_ema_credits: 0,
+            footprint_micro_bj: 0,
+            is_read: false,
+            op_hash: [0u8; 32],
+            lock_hash: [0u8; 32],
+            signature: [0u8; 64],
+        }
+    }
+}
+
+impl IngressEnvelopeEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_v2(
+        gateway_pubkey: [u8; 32],
+        timestamp_ms: u64,
+        declared_write_ema_micro_bj: u64,
+        declared_read_ema_credits: u64,
+        footprint_micro_bj: u64,
+        is_read: bool,
+        op_hash: [u8; 32],
+        signature: [u8; 64],
+    ) -> Self {
+        Self {
+            gateway_pubkey,
+            epoch_day: 0,
+            epoch_seq: 0,
+            cumulative_micro_byte_years: 0,
+            prev_day_final_bytes: 0,
+            current_anl_24h: 0,
+            timestamp_ms,
+            declared_write_ema_micro_bj,
+            declared_read_ema_credits,
+            footprint_micro_bj,
+            is_read,
+            op_hash,
+            lock_hash: [0u8; 32],
+            signature,
+        }
+    }
+
+    pub fn effective_op_hash(&self) -> [u8; 32] {
+        if self.op_hash != [0u8; 32] {
+            self.op_hash
+        } else {
+            self.lock_hash
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -192,6 +268,29 @@ pub fn compute_ingress_envelope_digest(
     hasher.update(&current_anl_24h.to_le_bytes());
     hasher.update(&timestamp_ms.to_le_bytes());
     hasher.update(lock_hash);
+    *hasher.finalize().as_bytes()
+}
+
+pub fn compute_ingress_envelope_digest_v2(
+    gateway_pubkey: &[u8; 32],
+    timestamp_ms: u64,
+    declared_write_ema_micro_bj: u64,
+    declared_read_ema_credits: u64,
+    footprint_micro_bj: u64,
+    is_read: bool,
+    op_hash: &[u8; 32],
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    let tag_len = (DOMAIN_INGRESS_DECL.len() as u8).to_le_bytes();
+    hasher.update(&tag_len);
+    hasher.update(DOMAIN_INGRESS_DECL);
+    hasher.update(gateway_pubkey);
+    hasher.update(&timestamp_ms.to_le_bytes());
+    hasher.update(&declared_write_ema_micro_bj.to_le_bytes());
+    hasher.update(&declared_read_ema_credits.to_le_bytes());
+    hasher.update(&footprint_micro_bj.to_le_bytes());
+    hasher.update(&[if is_read { 1u8 } else { 0u8 }]);
+    hasher.update(op_hash);
     *hasher.finalize().as_bytes()
 }
 
@@ -227,7 +326,51 @@ pub fn sign_ingress_envelope(
         prev_day_final_bytes,
         current_anl_24h,
         timestamp_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        footprint_micro_bj: 0,
+        is_read: false,
+        op_hash: lock_hash,
         lock_hash,
+        signature,
+    }
+}
+
+pub fn sign_ingress_evidence(
+    gateway_pubkey: [u8; 32],
+    timestamp_ms: u64,
+    declared_write_ema_micro_bj: u64,
+    declared_read_ema_credits: u64,
+    footprint_micro_bj: u64,
+    is_read: bool,
+    op_hash: [u8; 32],
+) -> IngressEnvelopeEvidence {
+    let digest = compute_ingress_envelope_digest_v2(
+        &gateway_pubkey,
+        timestamp_ms,
+        declared_write_ema_micro_bj,
+        declared_read_ema_credits,
+        footprint_micro_bj,
+        is_read,
+        &op_hash,
+    );
+    let mut signature = [0u8; 64];
+    signature[..32].copy_from_slice(&digest);
+    signature[32..64].copy_from_slice(&gateway_pubkey);
+    IngressEnvelopeEvidence {
+        gateway_pubkey,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        timestamp_ms,
+        declared_write_ema_micro_bj,
+        declared_read_ema_credits,
+        footprint_micro_bj,
+        is_read,
+        op_hash,
+        lock_hash: op_hash,
         signature,
     }
 }
@@ -237,24 +380,46 @@ pub fn encode_ingress_envelope(env: &IngressEnvelopeEvidence) -> Vec<u8> {
 }
 
 pub fn decode_ingress_envelope(bytes: &[u8]) -> Option<IngressEnvelopeEvidence> {
-    if bytes.is_empty() || bytes.len() >= 512 {
+    if bytes.is_empty() || bytes.len() >= 1024 {
         return None;
     }
     bincode::deserialize(bytes).ok()
 }
 
 pub fn verify_ingress_envelope_signature(env: &IngressEnvelopeEvidence) -> bool {
-    let digest = compute_ingress_envelope_digest(
-        &env.gateway_pubkey,
-        env.epoch_day,
-        env.epoch_seq,
-        env.cumulative_micro_byte_years,
-        env.prev_day_final_bytes,
-        env.current_anl_24h,
-        env.timestamp_ms,
-        &env.lock_hash,
-    );
-    env.signature[..32] == digest && env.signature[32..64] == env.gateway_pubkey
+    let is_legacy = env.epoch_day > 0 || env.epoch_seq > 0 || env.cumulative_micro_byte_years > 0;
+    let digest = if is_legacy {
+        compute_ingress_envelope_digest(
+            &env.gateway_pubkey,
+            env.epoch_day,
+            env.epoch_seq,
+            env.cumulative_micro_byte_years,
+            env.prev_day_final_bytes,
+            env.current_anl_24h,
+            env.timestamp_ms,
+            &env.effective_op_hash(),
+        )
+    } else {
+        compute_ingress_envelope_digest_v2(
+            &env.gateway_pubkey,
+            env.timestamp_ms,
+            env.declared_write_ema_micro_bj,
+            env.declared_read_ema_credits,
+            env.footprint_micro_bj,
+            env.is_read,
+            &env.effective_op_hash(),
+        )
+    };
+
+    if env.signature[..32] == digest && env.signature[32..64] == env.gateway_pubkey {
+        return true;
+    }
+    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&env.gateway_pubkey) {
+        if let Ok(sig) = ed25519_dalek::Signature::from_slice(&env.signature) {
+            return vk.verify_strict(&digest, &sig).is_ok();
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +553,12 @@ impl FraudProofPayload {
         p
     }
 
+    /// Checks if two ingress evidences constitute an under-reporting or rollback fraud conflict.
+    pub fn check_ingress_conflict(a: &IngressEnvelopeEvidence, b: &IngressEnvelopeEvidence) -> bool {
+        let proof = Self::new_ingress_counter_conflict(a.clone(), b.clone());
+        proof.verify_ingress_counter_conflict()
+    }
+
     /// Generic verify dispatcher
     pub fn verify(&self) -> bool {
         match self.proof_pillar {
@@ -480,44 +651,89 @@ impl FraudProofPayload {
             return false;
         }
 
-        // Normalize without loss of generality so that p1 is the temporally/epoch-wise earlier packet:
-        // If (a.epoch_day, a.epoch_seq, a.timestamp_ms) > (b.epoch_day, b.epoch_seq, b.timestamp_ms): swap p1 and p2
-        let (p1, p2) = if (a.epoch_day, a.epoch_seq, a.timestamp_ms)
-            > (b.epoch_day, b.epoch_seq, b.timestamp_ms)
+        // If legacy mode (day / sequence based):
+        if a.epoch_day > 0
+            || b.epoch_day > 0
+            || a.epoch_seq > 0
+            || b.epoch_seq > 0
+            || a.cumulative_micro_byte_years > 0
+            || b.cumulative_micro_byte_years > 0
         {
-            (b, a)
-        } else {
+            let (p1, p2) = if (a.epoch_day, a.epoch_seq, a.timestamp_ms)
+                > (b.epoch_day, b.epoch_seq, b.timestamp_ms)
+            {
+                (b, a)
+            } else {
+                (a, b)
+            };
+
+            // Mathematically proven 8-path trichotomy matrix:
+            return if p1.epoch_day == p2.epoch_day {
+                // Case 1 (same day: p1.epoch_day == p2.epoch_day)
+                if p1.epoch_seq == p2.epoch_seq {
+                    if p1.lock_hash != p2.lock_hash {
+                        true // Path 2: sequence fork!
+                    } else {
+                        false // Path 1: idempotent duplicate
+                    }
+                } else {
+                    // Since normalized: p2.epoch_seq > p1.epoch_seq
+                    if p2.cumulative_micro_byte_years < p1.cumulative_micro_byte_years {
+                        true // Path 4: counter rollback!
+                    } else {
+                        false // Path 3: regular monotonic growth
+                    }
+                }
+            } else if p2.epoch_day == p1.epoch_day + 1 {
+                // Case 2 (next day: p2.epoch_day == p1.epoch_day + 1)
+                if p1.cumulative_micro_byte_years > p2.prev_day_final_bytes {
+                    true // Path 7: prior-day embezzlement!
+                } else {
+                    false // Path 6: honest midnight transition (incl. path 5)
+                }
+            } else {
+                // Case 3 (gap >= 2 days: p2.epoch_day > p1.epoch_day + 1)
+                false // Path 8: rest day / gap >= 2 days, zero state bloat
+            };
+        }
+
+        // Exact mathematical under-reporting fraud check:
+        // Given two signed evidences P1 and P2 with T1 <= T2, delta_secs = (T2 - T1) / 1000:
+        // If T2 < T1 with different contents -> fraud (timestamp rollback).
+        if b.timestamp_ms < a.timestamp_ms
+            && (b.effective_op_hash() != a.effective_op_hash()
+                || b.declared_write_ema_micro_bj != a.declared_write_ema_micro_bj
+                || b.declared_read_ema_credits != a.declared_read_ema_credits)
+        {
+            return true;
+        }
+
+        let (p1, p2) = if a.timestamp_ms <= b.timestamp_ms {
             (a, b)
+        } else {
+            (b, a)
         };
 
-        // Mathematically proven 8-path trichotomy matrix:
-        if p1.epoch_day == p2.epoch_day {
-            // Case 1 (same day: p1.epoch_day == p2.epoch_day)
-            if p1.epoch_seq == p2.epoch_seq {
-                if p1.lock_hash != p2.lock_hash {
-                    true // Path 2: sequence fork!
-                } else {
-                    false // Path 1: idempotent duplicate
-                }
-            } else {
-                // Since normalized: p2.epoch_seq > p1.epoch_seq
-                if p2.cumulative_micro_byte_years < p1.cumulative_micro_byte_years {
-                    true // Path 4: counter rollback!
-                } else {
-                    false // Path 3: regular monotonic growth
-                }
+        if p1.timestamp_ms == p2.timestamp_ms {
+            if p1.effective_op_hash() != p2.effective_op_hash() {
+                return true;
             }
-        } else if p2.epoch_day == p1.epoch_day + 1 {
-            // Case 2 (next day: p2.epoch_day == p1.epoch_day + 1)
-            if p1.cumulative_micro_byte_years > p2.prev_day_final_bytes {
-                true // Path 7: prior-day embezzlement!
-            } else {
-                false // Path 6: honest midnight transition (incl. path 5)
+            return false;
+        }
+
+        let delta_secs = (p2.timestamp_ms - p1.timestamp_ms) / 1000;
+        if p2.is_read {
+            let min_allowed = crate::quota::decay_integer_ema(p1.declared_read_ema_credits, delta_secs).saturating_add(1);
+            if p2.declared_read_ema_credits < min_allowed {
+                return true;
             }
         } else {
-            // Case 3 (gap >= 2 days: p2.epoch_day > p1.epoch_day + 1)
-            false // Path 8: rest day / gap >= 2 days, zero state bloat
+            let min_allowed = crate::quota::decay_integer_ema(p1.declared_write_ema_micro_bj, delta_secs).saturating_add(p2.footprint_micro_bj);
+            if p2.declared_write_ema_micro_bj < min_allowed {
+                return true;
+            }
         }
+        false
     }
 
     /// Alias for compatibility: proof_pillar vs pillar

@@ -88,6 +88,9 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
         node_id: *identity_c.node_id(),
         addr: actual_addr_c,
         timestamp_ms: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
         supported_suites_mask: 0,
     };
     let heartbeat_payload = bincode::serialize(&hb_payload).expect("serialize heartbeat");

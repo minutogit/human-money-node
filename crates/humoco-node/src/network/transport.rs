@@ -76,51 +76,61 @@ pub fn verify_equivocation_first_party(
     vk: &ed25519_dalek::VerifyingKey,
     proof: &humoco_sim_core::fraud::FraudProofPayload,
 ) -> bool {
-    let a = match humoco_sim_core::fraud::decode_attestation(&proof.evidence_packet_a) {
-        Some(att) => att,
-        None => return false,
-    };
-    let b = match humoco_sim_core::fraud::decode_attestation(&proof.evidence_packet_b) {
-        Some(att) => att,
-        None => return false,
-    };
+    match proof.proof_pillar {
+        humoco_sim_core::fraud::FraudProofPillar::IngressCounterConflict => {
+            proof.verify()
+        }
+        humoco_sim_core::fraud::FraudProofPillar::HeartbeatSpam => {
+            proof.verify()
+        }
+        humoco_sim_core::fraud::FraudProofPillar::ShardEquivocation => {
+            let a = match humoco_sim_core::fraud::decode_attestation(&proof.evidence_packet_a) {
+                Some(att) => att,
+                None => return false,
+            };
+            let b = match humoco_sim_core::fraud::decode_attestation(&proof.evidence_packet_b) {
+                Some(att) => att,
+                None => return false,
+            };
 
-    let verify_att = |att: &humoco_sim_core::types::Attestation| -> bool {
-        let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        let shard_id = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
-        let d_prov = humoco_sim_core::crypto::compute_sig_digest(
-            humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
-            0,
-            0,
-            0,
-            shard_id,
-            0,
-            &att.lock_id,
-        );
-        let d_final = humoco_sim_core::crypto::compute_sig_digest(
-            humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL,
-            0,
-            0,
-            0,
-            shard_id,
-            1,
-            &att.lock_id,
-        );
+            let verify_att = |att: &humoco_sim_core::types::Attestation| -> bool {
+                let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
+                    Ok(s) => s,
+                    Err(_) => return false,
+                };
+                let shard_id = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
+                let d_prov = humoco_sim_core::crypto::compute_sig_digest(
+                    humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
+                    0,
+                    0,
+                    0,
+                    shard_id,
+                    0,
+                    &att.lock_id,
+                );
+                let d_final = humoco_sim_core::crypto::compute_sig_digest(
+                    humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL,
+                    0,
+                    0,
+                    0,
+                    shard_id,
+                    1,
+                    &att.lock_id,
+                );
 
-        #[cfg(any(test, debug_assertions))]
-        let sim_test_fallback = humoco_sim_core::crypto::verify_attestation(att);
-        #[cfg(not(any(test, debug_assertions)))]
-        let sim_test_fallback = false;
+                #[cfg(any(test, debug_assertions))]
+                let sim_test_fallback = humoco_sim_core::crypto::verify_attestation(att);
+                #[cfg(not(any(test, debug_assertions)))]
+                let sim_test_fallback = false;
 
-        vk.verify_strict(&d_prov, &sig).is_ok()
-            || vk.verify_strict(&d_final, &sig).is_ok()
-            || sim_test_fallback
-    };
+                vk.verify_strict(&d_prov, &sig).is_ok()
+                    || vk.verify_strict(&d_final, &sig).is_ok()
+                    || sim_test_fallback
+            };
 
-    verify_att(&a) && verify_att(&b)
+            verify_att(&a) && verify_att(&b)
+        }
+    }
 }
 
 
@@ -224,6 +234,7 @@ impl RequestHandler for NodeRequestHandler {
                             engine.ban_node(offender, now_ms).await;
                             if let Some(pm) = peer_manager.as_ref() {
                                 let affected = pm.ban_node(&offender).await;
+                                pm.broadcast_fraud_proof(proof);
                                 info!(offender = %hex::encode(offender), affected, "Slashing: offender banned and peers disconnected");
                             } else {
                                 info!(offender = %hex::encode(offender), "Slashing: offender banned (no peer_manager)");
@@ -256,7 +267,99 @@ impl RequestHandler for NodeRequestHandler {
                 let write_limit = (5.0 * ncb_eff as f64).round() as u64;
 
                 if let Ok(wire_payload) = bincode::deserialize::<crate::network::framing::LockWirePayload>(&payload) {
+                    let sender_pubkey = wire_payload.sender_pubkey();
+                    let sender_signature = wire_payload.sender_signature();
+                    let timestamp_ms = wire_payload.timestamp_ms();
                     let declared_write_ema = wire_payload.declared_write_ema_micro_bj();
+
+                    let is_banned = if sender_pubkey != [0u8; 32] {
+                        if engine.is_node_banned(&sender_pubkey).await {
+                            true
+                        } else if let Some(pm) = peer_manager.as_ref() {
+                            pm.is_banned(&sender_pubkey).await
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if is_banned {
+                        warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: sender is banned");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+
+                    let effective_ts = if timestamp_ms > 0 { timestamp_ms } else { now_ms };
+                    let (op_hash, footprint) = match &wire_payload {
+                        crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
+                            let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
+                            (record.id, humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s))
+                        }
+                        crate::network::framing::LockWirePayload::Hmc { req, root_valid_until, .. } => {
+                            let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
+                            let entry = crate::api::hmc::L2LockEntry::from(req);
+                            (entry.t_id, humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s))
+                        }
+                    };
+
+                    if sender_pubkey != [0u8; 32] && sender_signature != [0u8; 64] {
+                        let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                            sender_pubkey,
+                            timestamp_ms,
+                            declared_write_ema,
+                            0,
+                            footprint,
+                            false,
+                            op_hash,
+                            sender_signature,
+                        );
+
+                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
+                            warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: invalid ingress envelope signature");
+                            let resp_header = WireHeader::new(
+                                MsgType::LockVerifyResponse as u16,
+                                header.session_seq + 1,
+                                header.epoch_id,
+                                humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                                0,
+                            );
+                            return Ok((resp_header, Vec::new()));
+                        }
+
+                        if let Some(pm) = peer_manager.as_ref() {
+                            if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
+                                if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
+                                    warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: under-reporting detected in LockVerifyRequest! Slashing perpetrator.");
+                                    let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
+                                    let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                    let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+                                    let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+                                    engine.ban_node(sender_pubkey, now_ms).await;
+                                    pm.ban_node(&sender_pubkey).await;
+                                    pm.broadcast_fraud_proof(proof);
+
+                                    let resp_header = WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq + 1,
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
+                                            | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                                            | humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
+                                        0,
+                                    );
+                                    return Ok((resp_header, Vec::new()));
+                                }
+                            }
+                            pm.update_node_write_evidence(&sender_pubkey, curr).await;
+                        }
+                    }
+
                     let declared_daily_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_write_ema) / 1_000_000;
                     if declared_daily_rate > write_limit {
                         warn!(declared_daily_rate, write_limit, sender = %hex::encode(wire_payload.sender_pubkey()), "LockVerifyRequest rejected: declared write load exceeds 5.0 * ncb_eff");
@@ -439,14 +542,90 @@ impl RequestHandler for NodeRequestHandler {
                 };
                 let read_limit = (5.0 * ncb_read_eff as f64).round() as u64;
 
-                let (lock_id, parent_lock, shard_id, declared_read_ema) = if let Ok(sq) = bincode::deserialize::<crate::network::framing::StatusQueryPayload>(&payload) {
-                    (sq.lock_id, sq.parent_lock, sq.shard_id, sq.current_read_ema_credits)
-                } else if let Ok((l_id, p_lock, s_id)) = bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload) {
-                    (l_id, p_lock, s_id, 0)
+                let (lock_id, parent_lock, shard_id, declared_read_ema, sender_pubkey, timestamp_ms, sender_signature) =
+                    if let Ok(sq) = bincode::deserialize::<crate::network::framing::StatusQueryPayload>(&payload) {
+                        (sq.lock_id, sq.parent_lock, sq.shard_id, sq.current_read_ema_credits, sq.sender_pubkey, sq.timestamp_ms, sq.sender_signature)
+                    } else if let Ok((l_id, p_lock, s_id)) = bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload) {
+                        (l_id, p_lock, s_id, 0, [0u8; 32], 0, [0u8; 64])
+                    } else {
+                        let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                        return Ok((resp_header, Vec::new()));
+                    };
+
+                let is_banned = if sender_pubkey != [0u8; 32] {
+                    if engine.is_node_banned(&sender_pubkey).await {
+                        true
+                    } else if let Some(pm) = peer_manager.as_ref() {
+                        pm.is_banned(&sender_pubkey).await
+                    } else {
+                        false
+                    }
                 } else {
-                    let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
-                    return Ok((resp_header, Vec::new()));
+                    false
                 };
+                if is_banned {
+                    warn!(sender = %hex::encode(sender_pubkey), "StatusQuery rejected: sender is banned");
+                    let resp_header = WireHeader::new(
+                        MsgType::StatusResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
+                if sender_pubkey != [0u8; 32] && sender_signature != [0u8; 64] {
+                    let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                        sender_pubkey,
+                        timestamp_ms,
+                        0,
+                        declared_read_ema,
+                        0,
+                        true,
+                        lock_id,
+                        sender_signature,
+                    );
+
+                    if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
+                        warn!(sender = %hex::encode(sender_pubkey), "StatusQuery rejected: invalid ingress envelope signature");
+                        let resp_header = WireHeader::new(
+                            MsgType::StatusResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+
+                    if let Some(pm) = peer_manager.as_ref() {
+                        if let Some(prev) = pm.get_node_read_evidence(&sender_pubkey).await {
+                            if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
+                                warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: read under-reporting detected in StatusQuery! Slashing perpetrator.");
+                                let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
+                                let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+                                let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+                                engine.ban_node(sender_pubkey, now_ms).await;
+                                pm.ban_node(&sender_pubkey).await;
+                                pm.broadcast_fraud_proof(proof);
+
+                                let resp_header = WireHeader::new(
+                                    MsgType::StatusResponse as u16,
+                                    header.session_seq + 1,
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
+                                        | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                                        | humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
+                                    0,
+                                );
+                                return Ok((resp_header, Vec::new()));
+                            }
+                        }
+                        pm.update_node_read_evidence(&sender_pubkey, curr).await;
+                    }
+                }
 
                 let declared_read_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_read_ema);
                 if declared_read_rate > read_limit {
@@ -638,12 +817,85 @@ impl RequestHandler for NodeRequestHandler {
                             engine.ban_node(offender, now_ms).await;
                             if let Some(pm) = peer_manager.as_ref() {
                                 let _ = pm.ban_node(&offender).await;
+                                pm.broadcast_fraud_proof(proof);
                             }
-                            info!(offender = %hex::encode(offender), "Slashing (uni): offender banned");
+                            info!(offender = %hex::encode(offender), "Slashing (uni): offender banned and proof broadcast");
                         }
                     }
                     Err(e) => {
                         warn!("EquivocationProof (uni) rejected: deserialize failed: {}", e);
+                    }
+                }
+                return Ok(());
+            }
+            if header.msg_type == MsgType::Heartbeat as u16 {
+                let now_ms = peer_manager
+                    .as_ref()
+                    .map(|pm| pm.net_time_ms())
+                    .unwrap_or_else(|| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0)
+                    });
+                if let Ok(hb) = bincode::deserialize::<crate::network::framing::HeartbeatWirePayload>(&payload) {
+                    if hb.signature != [0u8; 64] {
+                        let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                            hb.node_id,
+                            hb.timestamp_ms,
+                            hb.declared_write_ema_micro_bj,
+                            hb.declared_read_ema_credits,
+                            0,
+                            false,
+                            [0u8; 32],
+                            hb.signature,
+                        );
+                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write) {
+                            warn!(node = %hex::encode(hb.node_id), "Heartbeat rejected: invalid signature");
+                            return Ok(());
+                        }
+
+                        if let Some(pm) = peer_manager.as_ref() {
+                            if let Some(prev) = pm.get_node_write_evidence(&hb.node_id).await {
+                                if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &ev_write) {
+                                    warn!(node = %hex::encode(hb.node_id), "CRITICAL FRAUD: under-reporting detected in Heartbeat! Slashing perpetrator.");
+                                    let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev_write.clone());
+                                    let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                    let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+                                    let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+                                    engine.ban_node(hb.node_id, now_ms).await;
+                                    pm.ban_node(&hb.node_id).await;
+                                    pm.broadcast_fraud_proof(proof);
+                                    return Ok(());
+                                }
+                            }
+                            pm.update_node_write_evidence(&hb.node_id, ev_write).await;
+
+                            let ev_read = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                                hb.node_id,
+                                hb.timestamp_ms,
+                                hb.declared_write_ema_micro_bj,
+                                hb.declared_read_ema_credits,
+                                0,
+                                true,
+                                [0u8; 32],
+                                hb.signature,
+                            );
+                            if let Some(prev) = pm.get_node_read_evidence(&hb.node_id).await {
+                                if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &ev_read) {
+                                    warn!(node = %hex::encode(hb.node_id), "CRITICAL FRAUD: read under-reporting detected in Heartbeat! Slashing perpetrator.");
+                                    let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev_read.clone());
+                                    let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                    let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+                                    let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+                                    engine.ban_node(hb.node_id, now_ms).await;
+                                    pm.ban_node(&hb.node_id).await;
+                                    pm.broadcast_fraud_proof(proof);
+                                    return Ok(());
+                                }
+                            }
+                            pm.update_node_read_evidence(&hb.node_id, ev_read).await;
+                        }
                     }
                 }
                 return Ok(());
@@ -697,15 +949,36 @@ impl QuicTransport {
         endpoint.set_default_client_config(client_config);
         peer_manager.set_endpoint(endpoint.clone());
 
-        Ok(Self {
+        let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel::<humoco_sim_core::fraud::FraudProofPayload>(100);
+        let pm_for_channel = peer_manager.clone();
+        tokio::spawn(async move {
+            pm_for_channel.set_fraud_proof_tx(fraud_tx).await;
+        });
+
+        let transport = Self {
             endpoint,
             identity: identity.clone(),
             peer_manager,
             handler,
-            cancel_token,
+            cancel_token: cancel_token.clone(),
             stream_semaphore: Arc::new(Semaphore::new(STREAM_CONCURRENCY_LIMIT)),
             connection_semaphore: Arc::new(Semaphore::new(CONNECTION_CONCURRENCY_LIMIT)),
-        })
+        };
+
+        let transport_for_broadcast = transport.clone();
+        let cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    Some(proof) = fraud_rx.recv() => {
+                        transport_for_broadcast.broadcast_equivocation_proof_to_f2f(&proof).await;
+                    }
+                }
+            }
+        });
+
+        Ok(transport)
     }
 
     /// Returns the local bound socket address.
@@ -867,18 +1140,25 @@ pub async fn send_unidirectional_frame(
 impl QuicTransport {
 
     /// Sends a signed F2F heartbeat to a single peer (used by daemon heartbeat emitter).
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_heartbeat_to(
         &self,
         addr: SocketAddr,
         node_id: [u8; 32],
         local_addr: SocketAddr,
         seq: u64,
+        declared_write_ema_micro_bj: u64,
+        declared_read_ema_credits: u64,
+        signature: [u8; 64],
+        timestamp_ms: u64,
     ) -> Result<(), NodeError> {
-        let timestamp_ms = self.peer_manager.net_time_ms();
         let hb = crate::network::framing::HeartbeatWirePayload {
             node_id,
             addr: local_addr,
             timestamp_ms,
+            declared_write_ema_micro_bj,
+            declared_read_ema_credits,
+            signature,
             supported_suites_mask: 0,
         };
         let payload = bincode::serialize(&hb)
@@ -887,6 +1167,44 @@ impl QuicTransport {
         let header = WireHeader::new(MsgType::Heartbeat as u16, seq, 0, 0, payload_len);
         let conn = self.connect_peer_unchecked(addr).await?;
         self.send_unidirectional(&conn, &header, &payload).await
+    }
+
+    /// Sends a unidirectional frame to a target peer without prior authorization check (used for F2F gossip & fraud proofs).
+    pub async fn send_unidirectional_to_peer(
+        &self,
+        addr: SocketAddr,
+        header: &WireHeader,
+        payload: &[u8],
+    ) -> Result<(), NodeError> {
+        let conn = self.connect_peer_unchecked(addr).await?;
+        self.send_unidirectional(&conn, header, payload).await
+    }
+
+    /// Broadcasts an equivocation or under-reporting fraud proof to all F2F friends via unidirectional QUIC streams.
+    pub async fn broadcast_equivocation_proof_to_f2f(
+        &self,
+        proof: &humoco_sim_core::fraud::FraudProofPayload,
+    ) {
+        let payload = match bincode::serialize(proof) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Failed to serialize FraudProofPayload for broadcast: {}", e);
+                return;
+            }
+        };
+        let payload_len = match checked_payload_len(payload.len()) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let header = WireHeader::new(MsgType::EquivocationProof as u16, 1, 0, 0, payload_len);
+        let targets = self.peer_manager.all_f2f_target_addrs().await;
+        for addr in targets {
+            let transport = self.clone();
+            let payload = payload.clone();
+            tokio::spawn(async move {
+                let _ = transport.send_unidirectional_to_peer(addr, &header, &payload).await;
+            });
+        }
     }
 
     /// Requests a shard digest from a peer (ShardDigestRequest -> ShardDigestResponse).
@@ -1161,6 +1479,22 @@ impl QuicTransport {
                                             let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
 
                                             let info_opt = if let Ok(hb) = res1 {
+                                                if hb.signature != [0u8; 64] {
+                                                    let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                                                        hb.node_id,
+                                                        hb.timestamp_ms,
+                                                        hb.declared_write_ema_micro_bj,
+                                                        hb.declared_read_ema_credits,
+                                                        0,
+                                                        false,
+                                                        [0u8; 32],
+                                                        hb.signature,
+                                                    );
+                                                    if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write) {
+                                                        warn!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with invalid signature");
+                                                        return;
+                                                    }
+                                                }
                                                 Some((hb.node_id, hb.addr, Some(hb.timestamp_ms)))
                                             } else if let Ok((adv_id, adv_addr)) = res2 {
                                                 Some((adv_id, adv_addr, None))
@@ -1169,6 +1503,10 @@ impl QuicTransport {
                                             };
 
                                             if let Some((node_id, addr_val, timestamp_ms)) = info_opt {
+                                                if pm.is_banned(&node_id).await {
+                                                    warn!(node = %hex::encode(node_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
+                                                    return;
+                                                }
                                                 let is_direct = remote_node_id == Some(node_id);
                                                 if is_direct && hops > 0 {
                                                     warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");

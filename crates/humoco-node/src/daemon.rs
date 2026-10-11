@@ -10,6 +10,7 @@ use crate::config::NodeConfig;
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
 use crate::storage::IngressOrigin;
+use ed25519_dalek::Signer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundAddrs {
@@ -222,6 +223,7 @@ impl NodeDaemon {
         let hb_cancel = self.cancel_token.clone();
         let hb_local_addr = p2p_bound_addr;
         let hb_sim_mode = is_simulation;
+        let hb_tc = tier_controller.clone();
         let heartbeat_handle = tokio::spawn(async move {
             let mut seq: u64 = 0;
             loop {
@@ -243,10 +245,33 @@ impl NodeDaemon {
                             continue;
                         }
                         let node_id = *hb_identity.node_pubkey();
+                        let declared_write_ema = hb_tc.current_write_ema_micro_bj();
+                        let declared_read_ema = hb_tc.current_read_ema_credits();
+                        let now_ms = hb_pm.net_time_ms();
+                        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                            &node_id,
+                            now_ms,
+                            declared_write_ema,
+                            declared_read_ema,
+                            0,
+                            false,
+                            &[0u8; 32],
+                        );
+                        let signature = hb_identity.signing_key().sign(&digest).to_bytes();
+
                         for peer_addr in peers {
                             if hb_cancel.is_cancelled() { break; }
                             seq = seq.wrapping_add(1);
-                            match hb_transport.send_heartbeat_to(peer_addr, node_id, hb_local_addr, seq).await {
+                            match hb_transport.send_heartbeat_to(
+                                peer_addr,
+                                node_id,
+                                hb_local_addr,
+                                seq,
+                                declared_write_ema,
+                                declared_read_ema,
+                                signature,
+                                now_ms,
+                            ).await {
                                 Ok(()) => {
                                     debug!(peer=%peer_addr, seq, "F2F heartbeat sent");
                                 }

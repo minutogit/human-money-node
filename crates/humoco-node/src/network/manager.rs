@@ -85,6 +85,8 @@ pub struct KnownNodeInfo {
     pub(crate) min_hops: u8,
     pub(crate) best_ingress_peer: Option<SocketAddr>,
     pub(crate) ingress_diversity_mask: u32,
+    pub last_write_evidence: Option<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
+    pub last_read_evidence: Option<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
 }
 
 impl KnownNodeInfo {
@@ -116,6 +118,8 @@ impl KnownNodeInfo {
             min_hops: 255,
             best_ingress_peer: None,
             ingress_diversity_mask: 0,
+            last_write_evidence: None,
+            last_read_evidence: None,
         }
     }
 
@@ -142,7 +146,17 @@ impl KnownNodeInfo {
             min_hops: 255,
             best_ingress_peer: None,
             ingress_diversity_mask: 0,
+            last_write_evidence: None,
+            last_read_evidence: None,
         }
+    }
+
+    pub fn update_write_evidence(&mut self, ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
+        self.last_write_evidence = Some(ev);
+    }
+
+    pub fn update_read_evidence(&mut self, ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
+        self.last_read_evidence = Some(ev);
     }
 
     /// Returns the work score of this node.
@@ -211,6 +225,7 @@ pub struct PeerManager {
     ge20_first_reached_ms: Arc<AtomicU64>,
     sync_notify: Arc<tokio::sync::Notify>,
     ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
+    fraud_proof_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>>>>,
 }
 
 impl PeerManager {
@@ -298,6 +313,20 @@ impl PeerManager {
             ge20_first_reached_ms: Arc::new(AtomicU64::new(0)),
             sync_notify: Arc::new(tokio::sync::Notify::new()),
             ticket_outdated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+
+    pub async fn set_fraud_proof_tx(&self, tx: tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>) {
+        let mut slot = self.fraud_proof_tx.write().await;
+        *slot = Some(tx);
+    }
+
+    pub fn broadcast_fraud_proof(&self, proof: humoco_sim_core::fraud::FraudProofPayload) {
+        if let Ok(slot) = self.fraud_proof_tx.try_read() {
+            if let Some(tx) = slot.as_ref() {
+                let _ = tx.try_send(proof);
+            }
         }
     }
 
@@ -835,6 +864,8 @@ impl PeerManager {
                     min_hops: hops,
                     best_ingress_peer: ingress_peer,
                     ingress_diversity_mask: mask,
+                    last_write_evidence: None,
+                    last_read_evidence: None,
                 },
             );
             drop(nodes);
@@ -1502,6 +1533,71 @@ impl PeerManager {
         result
     }
 
+    pub async fn update_node_write_evidence(&self, node_id: &[u8; 32], ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
+        let mut known = self.known_network_nodes.write().await;
+        if let Some(info) = known.get_mut(node_id) {
+            info.update_write_evidence(ev);
+        }
+    }
+
+    pub async fn update_node_read_evidence(&self, node_id: &[u8; 32], ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
+        let mut known = self.known_network_nodes.write().await;
+        if let Some(info) = known.get_mut(node_id) {
+            info.update_read_evidence(ev);
+        }
+    }
+
+    pub async fn get_node_write_evidence(&self, node_id: &[u8; 32]) -> Option<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
+        let known = self.known_network_nodes.read().await;
+        known.get(node_id).and_then(|info| info.last_write_evidence.clone())
+    }
+
+    pub async fn get_node_read_evidence(&self, node_id: &[u8; 32]) -> Option<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
+        let known = self.known_network_nodes.read().await;
+        known.get(node_id).and_then(|info| info.last_read_evidence.clone())
+    }
+
+    /// Computes decentralized network median write daily rate and read daily rate across mature known nodes.
+    pub async fn effective_network_medians(&self, now_sec: u64) -> (u64, u64) {
+        let known = self.known_network_nodes.read().await;
+        let mut write_rates = Vec::new();
+        let mut read_rates = Vec::new();
+
+        for kinfo in known.values() {
+            if kinfo.is_immature() {
+                continue;
+            }
+            if let Some(ref w_ev) = kinfo.last_write_evidence {
+                let ev_sec = w_ev.timestamp_ms / 1000;
+                let delta_secs = now_sec.saturating_sub(ev_sec);
+                let decayed_ema = humoco_sim_core::quota::decay_integer_ema(w_ev.declared_write_ema_micro_bj, delta_secs);
+                let daily_rate = humoco_sim_core::quota::ema_to_daily_rate(decayed_ema) / 1_000_000;
+                write_rates.push(daily_rate);
+            }
+            if let Some(ref r_ev) = kinfo.last_read_evidence {
+                let ev_sec = r_ev.timestamp_ms / 1000;
+                let delta_secs = now_sec.saturating_sub(ev_sec);
+                let decayed_ema = humoco_sim_core::quota::decay_integer_ema(r_ev.declared_read_ema_credits, delta_secs);
+                let daily_rate = humoco_sim_core::quota::ema_to_daily_rate(decayed_ema);
+                read_rates.push(daily_rate);
+            }
+        }
+
+        let write_median = if write_rates.is_empty() {
+            humoco_sim_core::quota::HARD_FLOOR_BASELINE_DAILY
+        } else {
+            humoco_sim_core::quota::QuartileStats::calculate(&write_rates).median
+        };
+
+        let read_median = if read_rates.is_empty() {
+            humoco_sim_core::quota::HARD_FLOOR_READ_BASELINE_DAILY
+        } else {
+            humoco_sim_core::quota::QuartileStats::calculate(&read_rates).median
+        };
+
+        (write_median, read_median)
+    }
+
     /// Returns the estimated total count of active nodes in the network (peers + known nodes + self).
     /// Skips immature entries (only mature shard tickets count).
     pub fn active_nodes_count(&self) -> usize {
@@ -1562,6 +1658,18 @@ impl PeerManager {
             .filter(|p| p.conn_type == PeerConnectionType::FriendToFriend)
             .map(|p| p.addr)
             .collect()
+    }
+
+    /// Returns all configured and connected F2F friend addresses for gossip broadcast.
+    pub async fn all_f2f_target_addrs(&self) -> Vec<SocketAddr> {
+        let mut addrs = self.f2f_peer_addrs().await;
+        let friends = self.f2f_friends.read().await;
+        for a in friends.values().flatten() {
+            if !addrs.contains(a) {
+                addrs.push(*a);
+            }
+        }
+        addrs
     }
 
     /// Returns shard sync candidates for digest pull (non-suspended peers).

@@ -23,7 +23,7 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 
 ---
 
-## 📊 Status-Matrix der 17 Audit-Prompts
+## 📊 Status-Matrix der 19 Audit-Prompts
 
 | ID | Prompt-Datei | Pillar | Letzter Durchlauf | Modell | Funde gesamt | Offen | Status | Prio-Score |
 |---|---|---|---|---|---|---|---|---|
@@ -45,6 +45,7 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | **16** | `16_supply_chain_und_dependency_audit.md` | 1. Supply Chain | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **17** | `17_update_and_supply_chain_verification.md` | 1. Sovereign | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
 | **18** | `18_legacy_code_and_architectural_drift_audit.md` | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 12 | 0 | `🟢 Clean` | **Niedrig** |
+| **19** | `19_wire_level_quota_and_adversarial_verification_audit.md` | 5. Wire / Chaos | - | - | 0 | 0 | `⚪ Untested` | **🔥 Höchste** |
 
 ---
 

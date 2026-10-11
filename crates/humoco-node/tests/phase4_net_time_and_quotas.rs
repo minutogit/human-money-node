@@ -173,3 +173,116 @@ async fn test_phase4_spec_09_slotted_median_and_dynamic_quotas() {
     let exceed_res = controller.evaluate_f2f_quota(peer_token, huge_by * 1000, controller.current_epoch_day()); // 19_200_000 > 12_000_000
     assert!(matches!(exceed_res, Err(IngressError::QuotaExceeded { .. })));
 }
+
+#[tokio::test]
+async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::{NodeRequestHandler, RequestHandler};
+    use humoco_node::storage::DualTierEngine;
+    use humoco_sim_core::wire::{MsgType, WireHeader, FLAG_QUOTA_EXCEEDED};
+
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("wire_quota.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _drain) = DualTierEngine::new(storage.clone());
+    let pow = Arc::new(PowEngine::new([0x44; 32], 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow));
+
+    // NCB_eff hard floor is 960_000, 5.0 * 960_000 = 4_800_000
+    let identity_shard = NodeIdentity::generate();
+    let identity_client = NodeIdentity::generate();
+
+    let pm_shard = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*identity_client.node_id()],
+    ));
+    pm_shard.learn_node_from_gossip(*identity_client.node_id(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
+
+    let handler_shard = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            identity_shard.clone(),
+            pm_shard.clone(),
+        )
+        .with_tier_controller(tier_controller.clone()),
+    );
+
+    // 1. Send LockVerifyRequest with declared write load exceeding 5.0 * ncb_eff
+    let declared_write_ema = 15_000_000_000_000u64; // >> 4_800_000 daily rate
+    let hmc_req = humoco_node::api::hmc::L2LockRequest {
+        auth: humoco_node::api::hmc::L2AuthPayload {
+            ephemeral_pubkey: *identity_client.node_id(),
+            auth_signature: None,
+        },
+        layer2_voucher_id: "test_voucher".into(),
+        ds_tag: None,
+        transaction_hash: [1; 32],
+        is_genesis: true,
+        sender_ephemeral_pub: *identity_client.node_id(),
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let hmc_payload = bincode::serialize(&humoco_node::network::framing::LockWirePayload::Hmc {
+        req: hmc_req,
+        root_valid_until: 86_400_000,
+        declared_write_ema_micro_bj: declared_write_ema,
+        sender_pubkey: *identity_client.node_id(),
+    }).unwrap();
+
+    let req_header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        1,
+        0,
+        0,
+        hmc_payload.len() as u32,
+    );
+
+    let (resp_header, resp_payload) = handler_shard.handle(req_header, hmc_payload).await.expect("handle");
+    assert_eq!(resp_header.msg_type, MsgType::LockVerifyResponse as u16);
+    assert_eq!(resp_header.flags & FLAG_QUOTA_EXCEEDED, FLAG_QUOTA_EXCEEDED, "Shard must return FLAG_QUOTA_EXCEEDED when write load > 5x limit");
+    assert!(resp_payload.is_empty(), "Payload must be empty on quota rejection");
+
+    // 2. StatusQuery exceeding read limit (5.0 * 50_000 = 250_000)
+    let status_query = humoco_node::network::framing::StatusQueryPayload {
+        lock_id: [0x77; 32],
+        parent_lock: [0x88; 32],
+        shard_id: 42,
+        sender_pubkey: *identity_client.node_id(),
+        current_read_ema_credits: 500_000, // declared daily rate = 500_000 * 0.693 = 346_573 > 250_000
+        timestamp_ms: 1000,
+    };
+    let status_payload = bincode::serialize(&status_query).unwrap();
+    let status_req_header = WireHeader::new(
+        MsgType::StatusQuery as u16,
+        2,
+        0,
+        0,
+        status_payload.len() as u32,
+    );
+    let (status_resp_header, status_resp_payload) = handler_shard.handle(status_req_header, status_payload).await.expect("handle status query");
+    assert_eq!(status_resp_header.msg_type, MsgType::StatusResponse as u16);
+    assert_eq!(status_resp_header.flags & FLAG_QUOTA_EXCEEDED, FLAG_QUOTA_EXCEEDED, "Shard must return FLAG_QUOTA_EXCEEDED when read load > 5x limit");
+    assert!(status_resp_payload.is_empty(), "Payload must be empty on read quota rejection");
+
+    // 3. 3-Zone Plausibility Check verification
+    let quota_limit = 4_800_000u64;
+    // Zone 1: My load is 2_000_000 (< 75% = 3_600_000). Shard claimed QuotaExceeded -> Fraud / Malice!
+    let v_zone1 = humoco_sim_core::quota::evaluate_quota_exceeded_claim(2_000_000, quota_limit);
+    assert!(matches!(v_zone1, humoco_sim_core::quota::QuotaPlausibilityVerdict::FraudulentRejection { .. }));
+
+    // Zone 2: My load is 4_000_000 (between 75% and 125%). Honest frontrunner -> No penalty
+    let v_zone2 = humoco_sim_core::quota::evaluate_quota_exceeded_claim(4_000_000, quota_limit);
+    assert!(matches!(v_zone2, humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff { .. }));
+
+    // Zone 3: My load is 7_000_000 (> 125%). Legitimate overload -> No penalty
+    let v_zone3 = humoco_sim_core::quota::evaluate_quota_exceeded_claim(7_000_000, quota_limit);
+    assert!(matches!(v_zone3, humoco_sim_core::quota::QuotaPlausibilityVerdict::LegitimateOverload { .. }));
+}
+

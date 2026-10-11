@@ -984,7 +984,7 @@ proptest! {
         prop_assert!(ema_b >= ema_a, "EMA monotonic in footprint: {} >= {}", ema_b, ema_a);
         // larger delta => more decay => smaller or equal EMA (for same footprint)
         let ema_small_delta = calculate_integer_ema(old_ema, delta, footprint_a);
-        let ema_large_delta = calculate_integer_ema(old_ema, delta.saturating_add(10_000).min(86_400), footprint_a);
+        let ema_large_delta = calculate_integer_ema(old_ema, delta.saturating_add(10_000), footprint_a);
         prop_assert!(ema_large_delta <= ema_small_delta,
             "EMA should decay with time: {} <= {} for larger delta", ema_large_delta, ema_small_delta);
         // never panics, always within u64

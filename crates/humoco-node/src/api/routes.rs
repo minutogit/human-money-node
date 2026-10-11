@@ -660,6 +660,19 @@ struct PeerAttestationQuery<'a> {
     shard_id: u16,
     required_q: usize,
     shard_query_depth: usize,
+    my_load: u64,
+    quota_limit: u64,
+}
+
+enum PeerQueryError {
+    QuotaExceeded,
+    Generic,
+}
+
+enum PeerQueryResult {
+    Success(AttestationDto),
+    QuotaExceeded,
+    Failure,
 }
 
 /// # Architectural Invariant: 1000ms Verification Timeout & Quorum Fast-Exit (Spec 03/15)
@@ -712,18 +725,22 @@ async fn collect_peer_attestations(
                 let exp_resp = query.resp_msg_type as u16;
                 join_set.spawn(async move {
                     let query_peer = async {
-                        let conn = t.connect_peer(addr).await.map_err(|_| ())?;
-                        let (resp_header, resp_payload) = t.send_request(&conn, &h, &p).await.map_err(|_| ())?;
+                        let conn = t.connect_peer(addr).await.map_err(|_| PeerQueryError::Generic)?;
+                        let (resp_header, resp_payload) = t.send_request(&conn, &h, &p).await.map_err(|_| PeerQueryError::Generic)?;
+                        if (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0 {
+                            return Err(PeerQueryError::QuotaExceeded);
+                        }
                         if resp_header.msg_type == exp_resp && !resp_payload.is_empty() {
                             if let Ok(att) = bincode::deserialize::<AttestationDto>(&resp_payload) {
                                 return Ok(att);
                             }
                         }
-                        Err(())
+                        Err(PeerQueryError::Generic)
                     };
                     match query_peer.await {
-                        Ok(att) => (nid, addr, rank_idx, Some(att)),
-                        Err(_) => (nid, addr, rank_idx, None),
+                        Ok(att) => (nid, addr, rank_idx, PeerQueryResult::Success(att)),
+                        Err(PeerQueryError::QuotaExceeded) => (nid, addr, rank_idx, PeerQueryResult::QuotaExceeded),
+                        Err(PeerQueryError::Generic) => (nid, addr, rank_idx, PeerQueryResult::Failure),
                     }
                 });
             }
@@ -737,7 +754,7 @@ async fn collect_peer_attestations(
 
         while let Some(res) = join_set.join_next().await {
             match res {
-                Ok((_nid, addr, rank_idx, Some(att))) => {
+                Ok((_nid, addr, rank_idx, PeerQueryResult::Success(att))) => {
                     in_flight.remove(&rank_idx);
 
                     if collected_signatures.iter().any(|s| s.node_id == att.node_id) {
@@ -763,7 +780,36 @@ async fn collect_peer_attestations(
                         break;
                     }
                 }
-                Ok((_nid, addr, rank_idx, None)) => {
+                Ok((_nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)) => {
+                    in_flight.remove(&rank_idx);
+                    let verdict = humoco_sim_core::quota::evaluate_quota_exceeded_claim(query.my_load, query.quota_limit);
+                    match verdict {
+                        humoco_sim_core::quota::QuotaPlausibilityVerdict::FraudulentRejection { .. } => {
+                            tracing::warn!(
+                                %addr,
+                                rank_idx,
+                                my_load = query.my_load,
+                                quota_limit = query.quota_limit,
+                                "Shard peer fraudulently claimed FLAG_QUOTA_EXCEEDED (Zone 1) - recording peer failure"
+                            );
+                            if rank_idx < 20 {
+                                query.peer_mgr.record_failure(addr).await;
+                            }
+                        }
+                        humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff { .. }
+                        | humoco_sim_core::quota::QuotaPlausibilityVerdict::LegitimateOverload { .. } => {
+                            tracing::info!(
+                                %addr,
+                                rank_idx,
+                                my_load = query.my_load,
+                                quota_limit = query.quota_limit,
+                                "Shard peer legitimately returned FLAG_QUOTA_EXCEEDED (Zone 2/3) - no peer penalty"
+                            );
+                        }
+                    }
+                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+                }
+                Ok((_nid, addr, rank_idx, PeerQueryResult::Failure)) => {
                     in_flight.remove(&rank_idx);
                     timeout_addrs.push((addr, rank_idx));
                     spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
@@ -856,6 +902,8 @@ async fn assemble_quorum_certificate(
             candidate_nodes.truncate(40);
 
             if let (Some(transport), Some(payload)) = (&state.transport, record_payload) {
+                let my_load = state.tier_controller.rolling_24h_average();
+                let quota_limit = (5.0 * state.tier_controller.effective_ncb() as f64).round() as u64;
                 collect_peer_attestations(
                     PeerAttestationQuery {
                         transport,
@@ -869,6 +917,8 @@ async fn assemble_quorum_certificate(
                         shard_id,
                         required_q,
                         shard_query_depth: state.shard_query_depth,
+                        my_load,
+                        quota_limit,
                     },
                     &mut collected_signatures,
                 ).await;
@@ -977,7 +1027,17 @@ async fn assemble_status_quorum_certificate(
 
             if collected_signatures.len() < required_q {
                 if let Some(transport) = &state.transport {
-                    let payload = bincode::serialize(&(lock_id, parent_lock, shard_id)).unwrap_or_default();
+                    let status_query = crate::network::framing::StatusQueryPayload {
+                        lock_id,
+                        parent_lock,
+                        shard_id,
+                        sender_pubkey: *state.identity.node_pubkey(),
+                        current_read_ema_credits: state.tier_controller.current_read_ema_credits(),
+                        timestamp_ms: now_ms,
+                    };
+                    let payload = bincode::serialize(&status_query).unwrap_or_default();
+                    let my_load = state.tier_controller.rolling_24h_read_average();
+                    let quota_limit = (5.0 * state.tier_controller.effective_read_ncb() as f64).round() as u64;
                     collect_peer_attestations(
                         PeerAttestationQuery {
                             transport,
@@ -991,6 +1051,8 @@ async fn assemble_status_quorum_certificate(
                             shard_id,
                             required_q,
                             shard_query_depth: state.shard_query_depth,
+                            my_load,
+                            quota_limit,
                         },
                         &mut collected_signatures,
                     ).await;
@@ -1272,8 +1334,10 @@ async fn submit_hmc_lock(
             let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
             let now_ms = state.net_time_ms();
             let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                req: Box::new(req.clone()),
+                req: req.clone(),
                 root_valid_until,
+                declared_write_ema_micro_bj: state.tier_controller.current_write_ema_micro_bj(),
+                sender_pubkey: *state.identity.node_pubkey(),
             }).ok();
             let start_quorum = std::time::Instant::now();
             let quorum_certificate = Some(assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await);
@@ -1430,8 +1494,10 @@ async fn submit_hmc_lock(
             let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
             let now_ms = state.net_time_ms();
             let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                req: Box::new(req.clone()),
+                req: req.clone(),
                 root_valid_until,
+                declared_write_ema_micro_bj: state.tier_controller.current_write_ema_micro_bj(),
+                sender_pubkey: *state.identity.node_pubkey(),
             }).ok();
             let start_quorum = std::time::Instant::now();
             let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
@@ -1627,8 +1693,10 @@ async fn submit_hmc_chain_lock_inner(
             let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
             let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
             let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                req: Box::new(last_hop.clone()),
+                req: last_hop.clone(),
                 root_valid_until,
+                declared_write_ema_micro_bj: state.tier_controller.current_write_ema_micro_bj(),
+                sender_pubkey: *state.identity.node_pubkey(),
             })
             .ok();
             let start_quorum = std::time::Instant::now();

@@ -3,7 +3,7 @@
 > **Credo:** *"In decentralization there is no trust, only mathematical proofs."*  
 > **Principle:** *"Subtraction before Construction"*
 
-This prompt suite contains **17 highly specialized, reusable AI audits** covering the full spectrum of modern software engineering: from **mutation testing** and **memory safety** to **Byzantine hardening**, **clean code**, and **performance tuning**.
+This prompt suite contains **19 highly specialized, reusable AI audits** covering the full spectrum of modern software engineering: from **mutation testing** and **memory safety** to **Byzantine hardening**, **clean code**, **adversarial wire verification**, and **performance tuning**.
 
 ---
 
@@ -11,7 +11,7 @@ This prompt suite contains **17 highly specialized, reusable AI audits** coverin
 
 > **Central Orchestrator & Tracking:**
 > * **[00_master_audit_orchestrator.md](00_master_audit_orchestrator.md)**: **Master Prompt** to autonomously select, parallel-dispatch (via Model-Router & Muse Spark), and dynamically chain audits until sufficient findings are discovered and fixed.
-> * **[AUDIT_REGISTRY.md](AUDIT_REGISTRY.md)**: **Central Status Matrix & Audit Log** tracking the execution timestamps, findings count, priority scores, and health status for all 17 audit prompts.
+> * **[AUDIT_REGISTRY.md](AUDIT_REGISTRY.md)**: **Central Status Matrix & Audit Log** tracking the execution timestamps, findings count, priority scores, and health status for all 19 audit prompts.
 
 ---
 
@@ -59,6 +59,7 @@ This prompt suite contains **17 highly specialized, reusable AI audits** coverin
 | File | Focus | Primary Goal |
 |---|---|---|
 | **[06_chaos_und_fuzz_test_generator.md](06_chaos_und_fuzz_test_generator.md)** | **Chaos & Test Generator** | Directly writes new executable Rust test code for extreme Jepsen/DST scenarios. |
+| **[19_wire_level_quota_and_adversarial_verification_audit.md](19_wire_level_quota_and_adversarial_verification_audit.md)** | **Wire Quotas & Adversarial P2P** | Eliminates unit-test illusions; verifies that quotas, backpressure, and rate limits are enforced in `transport.rs` and proven via negative wire tests. |
 
 ---
 

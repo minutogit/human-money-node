@@ -187,12 +187,15 @@ impl NodeDaemon {
 
         info!("Initializing QUIC P2P transport...");
 
-        let handler = std::sync::Arc::new(crate::network::NodeRequestHandler::with_peer_manager(
-            engine.clone(),
-            storage.clone(),
-            self.identity.clone(),
-            peer_manager.clone(),
-        ));
+        let handler = std::sync::Arc::new(
+            crate::network::NodeRequestHandler::with_peer_manager(
+                engine.clone(),
+                storage.clone(),
+                self.identity.clone(),
+                peer_manager.clone(),
+            )
+            .with_tier_controller(tier_controller.clone()),
+        );
         let transport = crate::network::QuicTransport::bind_with_options(
             self.config.network.p2p_listen_addr,
             &self.identity,
@@ -211,7 +214,6 @@ impl NodeDaemon {
         // --- Phase 3 Autonomous Background Motors ---
         let is_simulation = self.config.network.simulation_mode
             || self.config.network.fast_ticker_interval_secs.is_some();
-        let fast_interval = self.config.network.fast_ticker_interval_secs;
 
         // 1. F2F Heartbeat-Emitter (hourly with jitter, signed payload)
         let hb_pm = peer_manager.clone();
@@ -284,65 +286,6 @@ impl NodeDaemon {
                             Err(e) => {
                                 warn!(error=%e, "TTL pruning failed");
                             }
-                        }
-                    }
-                }
-            }
-        });
-
-        // 3. Network-Thermometer Hourly Aggregation & Daily Quota Ticker (Spec 09)
-        let thermo_tier = tier_controller.clone();
-        let thermo_storage = storage.clone();
-        let thermo_pm = peer_manager.clone();
-        let thermo_cancel = self.cancel_token.clone();
-        let thermo_interval_secs = if is_simulation {
-            fast_interval.unwrap_or(5)
-        } else {
-            3600
-        };
-        let quota_ticker_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(thermo_interval_secs));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            interval.tick().await; // Initial tick
-            let mut hourly_ticks: u32 = 0;
-            loop {
-                tokio::select! {
-                    _ = thermo_cancel.cancelled() => {
-                        info!("Network thermometer daily quota ticker shutting down");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let now_ms = thermo_pm.net_time_ms();
-                        let epoch_hour = now_ms / (3_600 * 1000);
-                        let valid_locks = thermo_storage.all_valid_locks(now_ms).unwrap_or_default();
-                        let total_byte_years: u64 = valid_locks.iter()
-                            .map(|(rec, _)| {
-                                let ttl_sec = rec.valid_until.0.saturating_sub(rec.created_at.0) / 1000;
-                                humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_sec)
-                            })
-                            .sum();
-                        let hourly_byte_years = total_byte_years;
-                        thermo_tier.record_hourly_median(
-                            epoch_hour,
-                            hourly_byte_years.max(humoco_sim_core::quota::HARD_FLOOR_BASELINE_DAILY / 24),
-                        );
-                        hourly_ticks += 1;
-                        if hourly_ticks >= 24 {
-                            hourly_ticks = 0;
-                            let daily_median = total_byte_years.max(humoco_sim_core::quota::HARD_FLOOR_BASELINE_DAILY);
-                            thermo_tier.record_daily_median(daily_median);
-                            let daily_read_median = humoco_sim_core::quota::HARD_FLOOR_READ_BASELINE_DAILY;
-                            thermo_tier.record_daily_read_median(daily_read_median);
-                            let ncb = thermo_tier.effective_ncb();
-                            let ncb_read = thermo_tier.effective_read_ncb();
-                            debug!(
-                                epoch_hour,
-                                daily_median,
-                                ncb,
-                                daily_read_median,
-                                ncb_read,
-                                "Network thermometer recorded daily medians to 28-day ring buffers"
-                            );
                         }
                     }
                 }
@@ -681,7 +624,6 @@ impl NodeDaemon {
         let _ = control_handle.await;
         let _ = heartbeat_handle.await;
         let _ = ttl_prune_handle.await;
-        let _ = quota_ticker_handle.await;
         let _ = shard_sync_handle.await;
         let _ = malus_decay_handle.await;
         let _ = dns_re_resolve_handle.await;

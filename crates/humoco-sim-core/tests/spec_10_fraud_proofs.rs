@@ -219,8 +219,8 @@ fn test_pillar_2_ingress_counter_conflict_bans_immediately() {
     gateway_pubkey[2..].fill(0x77);
 
     // Erzeuge zwei betrügerische Pakete (Pfad 4: Zähler-Rückschritt am gleichen Tag)
-    let p1 = sign_ingress_envelope(gateway_pubkey, 1, 10, 500_000, 0, 1000, [0x11; 32]);
-    let p2 = sign_ingress_envelope(gateway_pubkey, 1, 11, 400_000, 0, 2000, [0x22; 32]);
+    let p1 = sign_ingress_envelope(gateway_pubkey, 1, 10, 500_000, 0, 100_000, 1000, [0x11; 32]);
+    let p2 = sign_ingress_envelope(gateway_pubkey, 1, 11, 400_000, 0, 100_000, 2000, [0x22; 32]);
 
     let proof = FraudProofPayload::new_ingress_counter_conflict(p1, p2);
     assert_eq!(proof.proof_pillar, FraudProofPillar::IngressCounterConflict);

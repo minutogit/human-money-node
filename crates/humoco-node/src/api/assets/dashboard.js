@@ -175,7 +175,6 @@ refreshDashboard();
 }
 }
 }
-// 15-minute inactivity session timeout with sessionStorage
 const ADMIN_TOKEN_KEY = 'humoco_admin_token';
 const ADMIN_TOKEN_TS_KEY = 'humoco_admin_token_ts';
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
@@ -499,7 +498,6 @@ const tokenLabelEl = $('client-qr-token-label');
 const hintEl = $('client-qr-hint');
 setText('client-qr-label', label || 'Client');
 if (hasPlaintextToken) {
-// Freshly created client with plaintext token
 const apiPort = currentDashboardData?.config_view?.api_port || 8080;
 const host = window.location.hostname || '127.0.0.1';
 let walletUri = (tokenHashOrUri && tokenHashOrUri.startsWith('humoco://'))
@@ -514,7 +512,6 @@ if (hintEl) hintEl.innerText = '💡 Scannen Sie diesen QR-Code mit der HuMoCo W
 const svg = generateQrSvg(walletUri);
 setHtml('client-qr-box', svg);
 } else {
-// Existing client - only token_hash is known
 const hash = tokenHashOrUri || '';
 if (tokenLabelEl) tokenLabelEl.innerText = 'Token-Hash:';
 setText('client-qr-token', hash ? `${hash} (Klartext nicht gespeichert)` : 'Nicht verfügbar');
@@ -1323,9 +1320,17 @@ setText('thermo-write-load', th.gossip_write_load.toFixed(2));
 setText('thermo-read-load', th.gossip_read_load.toFixed(2));
 setText('thermo-ncb-eff', Math.round(th.ncb_eff));
 setText('thermo-ncb-read-eff', Math.round(th.ncb_read_eff));
-setText('thermo-rolling-avg', th.gossip_write_load.toFixed(2));
+setText('thermo-rolling-avg', (th.today_write_used || 0).toLocaleString());
 setText('quota-used-val', (th.today_write_used || 0).toLocaleString());
-setText('quota-limit-val', (th.daily_write_quota || 0).toLocaleString());
+setText('quota-limit-val', (th.write_quota_limit || th.daily_write_quota || 0).toLocaleString());
+setText('quota-pct-text', (th.write_quota_percent || 0).toFixed(1) + '%');
+const qBar = $('quota-bar');
+if (qBar) qBar.style.width = Math.min(100, Math.max(0, th.write_quota_percent || 0)) + '%';
+setText('quota-read-used-val', (th.today_read_used || 0).toLocaleString());
+setText('quota-read-limit-val', (th.read_quota_limit || 0).toLocaleString());
+setText('quota-read-pct-text', (th.read_quota_percent || 0).toFixed(1) + '%');
+const qrBar = $('quota-read-bar');
+if (qrBar) qrBar.style.width = Math.min(100, Math.max(0, th.read_quota_percent || 0)) + '%';
 }
 setText('conc-val', (d.gateway_concentration_ratio * 100).toFixed(1) + '%');
 setText('subnet-dom-sub', (d.shard_subnet_dominance_max * 100).toFixed(1) + '%');
@@ -1447,7 +1452,6 @@ pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
 }
 const pollData = refreshDashboard;
 const fetchDashboardData = refreshDashboard;
-// --- Tab 4: History & Security Event Log (Phase 2) ---
 let currentHistoryWindow = '24h';
 let cachedHistoryPoints = [];
 let cachedAuditEvents = [];
@@ -1549,7 +1553,6 @@ if (filtered.length === 0) {
 tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine passenden Audit-Ereignisse gefunden.</td></tr>';
 return;
 }
-// Show most recent events first
 const displayItems = [...filtered].reverse();
 let html = '';
 for (const item of displayItems) {
@@ -1601,7 +1604,6 @@ a.click();
 a.remove();
 showToast('CSV-Audit-Log heruntergeladen', 'success');
 }
-// Background tab throttling (Page Visibility API)
 document.addEventListener('visibilitychange', () => {
 if (document.hidden) {
 pollIntervalMs = 15000;

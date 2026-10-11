@@ -84,6 +84,14 @@ pub struct ThermometerStatsDto {
     pub f2f_writes_today: u64,
     #[serde(default)]
     pub free_writes_today: u64,
+    #[serde(default)]
+    pub write_quota_limit: u64,
+    #[serde(default)]
+    pub read_quota_limit: u64,
+    #[serde(default)]
+    pub write_quota_percent: f64,
+    #[serde(default)]
+    pub read_quota_percent: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -587,7 +595,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         "14/20 (Final)".to_string()
     };
 
-    let (active_byte_years, active_locks) = state.engine.get_active_footprint_byte_years(now_ms).await;
+    let (_active_byte_years, active_locks) = state.engine.get_active_footprint_byte_years(now_ms).await;
     let flush_queue_depth = state.engine.flush_sender_len();
 
     // 3-Tier Latencies (Rolling 100)
@@ -689,8 +697,20 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
             thermo.total_daily_read_usage(),
         )
     };
-    let today_write_used = active_byte_years;
-    let today_read_used = state.metrics.total_reads();
+    let today_write_used = state.tier_controller.rolling_24h_average();
+    let today_read_used = state.tier_controller.rolling_24h_read_average();
+    let write_quota_limit = (5.0 * ncb_eff).round() as u64;
+    let read_quota_limit = (5.0 * ncb_read_eff).round() as u64;
+    let write_quota_percent = if write_quota_limit > 0 {
+        ((today_write_used as f64 / write_quota_limit as f64) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    let read_quota_percent = if read_quota_limit > 0 {
+        ((today_read_used as f64 / read_quota_limit as f64) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
     let (vip_writes_today, f2f_writes_today, free_writes_today) = state.tier_controller.tier_counters();
 
     let thermometer = ThermometerStatsDto {
@@ -707,6 +727,10 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         vip_writes_today,
         f2f_writes_today,
         free_writes_today,
+        write_quota_limit,
+        read_quota_limit,
+        write_quota_percent,
+        read_quota_percent,
     };
 
     // 4. F2F Overview
@@ -1620,9 +1644,12 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
         vip_accounts_count = data.tiers.vip_accounts_count,
         vip_total_balance = data.tiers.vip_total_balance,
         total_writes_today = data.tiers.total_writes_today,
-        total_quota_used_pct = data.tiers.total_quota_used_pct,
         today_write_used = data.thermometer.today_write_used,
-        daily_write_quota = data.thermometer.daily_write_quota,
+        write_quota_limit = data.thermometer.write_quota_limit,
+        write_quota_pct = data.thermometer.write_quota_percent,
+        today_read_used = data.thermometer.today_read_used,
+        read_quota_limit = data.thermometer.read_quota_limit,
+        read_quota_pct = data.thermometer.read_quota_percent,
         net_time_formatted = net_time_formatted,
         sim_badge_style = sim_badge_style,
         disk_free_gb = data.disk_free_gb,

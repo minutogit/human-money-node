@@ -235,14 +235,34 @@ impl TierController {
         self.thermometer.write().unwrap_or_else(|e| e.into_inner()).record_daily_median(median);
     }
 
-    /// [INV-0921] Records an hourly median in the 24-hour slotted ring buffer
-    pub fn record_hourly_median(&self, epoch_hour: u64, median: u64) {
-        self.thermometer.write().unwrap_or_else(|e| e.into_inner()).record_hourly_median(epoch_hour, median);
-    }
-
-    /// Returns the current rolling 24-hour average of the hourly ring buffer
+    /// Returns the rolling 24-hour write daily rate in Byte-Years
     pub fn rolling_24h_average(&self) -> u64 {
         self.thermometer.read().unwrap_or_else(|e| e.into_inner()).rolling_24h_average()
+    }
+
+    /// Returns the rolling 24-hour write daily rate in Byte-Years at a specific second
+    pub fn rolling_24h_average_at(&self, now_sec: u64) -> u64 {
+        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).rolling_24h_average_at(now_sec)
+    }
+
+    /// Returns the current raw write EMA in micro-Byte-Years (µBJ)
+    pub fn current_write_ema_micro_bj(&self) -> u64 {
+        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).current_write_ema_micro_bj()
+    }
+
+    /// Returns the current raw read EMA in credits
+    pub fn current_read_ema_credits(&self) -> u64 {
+        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).current_read_ema_credits()
+    }
+
+    /// Returns the current rolling 24-hour read daily rate in credits
+    pub fn rolling_24h_read_average(&self) -> u64 {
+        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).rolling_24h_read_average()
+    }
+
+    /// Returns the rolling 24-hour read daily rate in credits at a specific second
+    pub fn rolling_24h_read_average_at(&self, now_sec: u64) -> u64 {
+        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).rolling_24h_read_average_at(now_sec)
     }
 
     /// [INV-0923] Records a daily read median
@@ -277,6 +297,11 @@ impl TierController {
         let daily_quota = self.calculate_daily_read_quota(k_multiplier, 1.0);
         let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
         if thermo.try_accept_read(epoch_day, client_id, credits, daily_quota) {
+            let now_sec = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(epoch_day * 86_400);
+            thermo.record_read_ingress(now_sec, credits);
             Ok(())
         } else {
             let used = thermo.get_node_read_usage(client_id);
@@ -477,6 +502,15 @@ impl TierController {
         parent_lock: Option<&[u8; 32]>,
         now_ms: Option<u64>,
     ) -> Result<IngressTier, IngressError> {
+        let now_sec = match now_ms {
+            Some(ms) => ms / 1000,
+            None => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+        let footprint_micro_bj = ByteYears::micro_from_ttl_seconds(ttl_seconds);
+
         // 1. Check Tier 1 (VIP) - in-memory atomic cache, no synchronous fsync stall (INV-0929 hot-path)
         if let Some(token) = auth_token {
             let account_tag = self.resolve_account_tag(token)?;
@@ -489,10 +523,9 @@ impl TierController {
                 None => self.current_epoch_day(),
             };
             let daily_quota = self.calculate_daily_quota(5.0, 1.0);
-            self.thermometer
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .try_accept_lock(epoch_day, vip_node_id, required_byte_years, daily_quota);
+            let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+            thermo.try_accept_lock(epoch_day, vip_node_id, required_byte_years, daily_quota);
+            thermo.record_write_ingress(now_sec, footprint_micro_bj);
             return Ok(IngressTier::Tier1Vip);
         }
 
@@ -508,6 +541,10 @@ impl TierController {
                 };
                 self.evaluate_f2f_quota(token_trimmed, required_byte_years, epoch_day)?;
                 self.f2f_writes_today.fetch_add(1, Ordering::Relaxed);
+                self.thermometer
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_write_ingress(now_sec, footprint_micro_bj);
 
                 // Update last active timestamp
                 let token_hash = hex::encode(blake3::hash(token_trimmed.as_bytes()).as_bytes());
@@ -545,24 +582,22 @@ impl TierController {
 
         if self.pow_engine.default_difficulty() == 0 {
             self.free_writes_today.fetch_add(1, Ordering::Relaxed);
-            self.thermometer
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
+            let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+            thermo.try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
+            thermo.record_write_ingress(now_sec, footprint_micro_bj);
             return Ok(IngressTier::Tier3Public);
         }
 
-        let load_factor = (self.rolling_24h_average() as f64 / self.effective_ncb().max(1) as f64).clamp(0.0, 1.0);
+        let load_factor = (self.rolling_24h_average_at(now_sec) as f64 / self.effective_ncb().max(1) as f64).clamp(0.0, 1.0);
         let dynamic_difficulty = self.pow_engine.required_difficulty_for_load(load_factor);
 
         match (pow_challenge, pow_nonce) {
             (Some(challenge), Some(nonce)) => {
                 self.pow_engine.verify_pow_for_parent(challenge, nonce, dynamic_difficulty, parent_lock).await?;
                 self.free_writes_today.fetch_add(1, Ordering::Relaxed);
-                self.thermometer
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
+                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+                thermo.try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
+                thermo.record_write_ingress(now_sec, footprint_micro_bj);
                 Ok(IngressTier::Tier3Public)
             }
             _ => {

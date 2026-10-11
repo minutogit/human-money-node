@@ -52,6 +52,17 @@ impl ByteYears {
         (byte_years as u64).max(1)
     }
 
+    /// Computes micro-Byte-Years (µBJ) from TTL in seconds: (STORED_LOCK_BYTES * ttl_seconds * 1_000_000) / SECONDS_PER_YEAR
+    /// With commercial rounding (at least 1 micro-Byte-Year).
+    pub fn micro_from_ttl_seconds(ttl_seconds: u64) -> u64 {
+        if ttl_seconds == 0 {
+            return 1;
+        }
+        let total_micro_byte_seconds = (STORED_LOCK_BYTES as u128) * (ttl_seconds as u128) * 1_000_000u128;
+        let micro_byte_years = (total_micro_byte_seconds + (SECONDS_PER_YEAR as u128 / 2)) / (SECONDS_PER_YEAR as u128);
+        (micro_byte_years as u64).max(1)
+    }
+
     /// Computes Byte-Years from days
     pub fn from_ttl_days(days: u64) -> u64 {
         Self::from_ttl_seconds(days * 86_400)
@@ -247,15 +258,57 @@ impl SlottedMedianRingBuffer {
     }
 }
 
-/// [Pillar B]
-/// Computes the integer EMA (exponential moving average) with time-based linear decay:
-/// - Overflow-safe via u128 and `saturating_sub` / `saturating_add`.
-/// - When `delta_secs == 0`: no decay, only addition of the footprint.
-/// - When `delta_secs >= 86_400`: old EMA decays completely to 0.
-pub fn calculate_integer_ema(old_ema: u64, delta_secs: u64, footprint_micro_bj: u64) -> u64 {
-    let elapsed = delta_secs.min(86_400) as u128;
-    let decay_amount = ((old_ema as u128 * elapsed) / 86_400) as u64;
-    old_ema.saturating_sub(decay_amount).saturating_add(footprint_micro_bj)
+/// 65-entry dyadic lookup table for 2^(-i/64) * 2^32, i in 0..=64.
+/// Represents 64 uniform intervals of length 1,350s within a 24h half-life (86,400s).
+/// Interpolation error across the entire 24h domain is strictly bounded < 0.002%.
+const DYADIC_HALF_LIFE_TABLE: [u64; 65] = [
+    0x100000000, 0xfd3e0c0d, 0xfa83b2db, 0xf7d0df73, 0xf5257d15, 0xf281773c, 0xefe4b99c, 0xed4f301f,
+    0xeac0c6e8, 0xe8396a50, 0xe5b906e7, 0xe33f8973, 0xe0ccdeec, 0xde60f482, 0xdbfbb798, 0xd99d15c2,
+    0xd744fccb, 0xd4f35aac, 0xd2a81d92, 0xd06333db, 0xce248c15, 0xcbec14ff, 0xc9b9bd86, 0xc78d74c9,
+    0xc5672a11, 0xc346ccda, 0xc12c4cca, 0xbf1799b6, 0xbd08a39f, 0xbaff5ab2, 0xb8fbaf47, 0xb6fd91e3,
+    0xb504f334, 0xb311c413, 0xb123f582, 0xaf3b78ad, 0xad583eea, 0xab7a39b6, 0xa9a15ab5, 0xa7cd93b5,
+    0xa5fed6aa, 0xa43515ae, 0xa2704303, 0xa0b05110, 0x9ef53261, 0x9d3ed9a7, 0x9b8d39ba, 0x99e04593,
+    0x9837f052, 0x96942d37, 0x94f4efa9, 0x935a2b2f, 0x91c3d374, 0x9031dc43, 0x8ea4398b, 0x8d1adf5b,
+    0x8b95c1e4, 0x8a14d575, 0x88980e81, 0x871f6197, 0x85aac368, 0x843a28c4, 0x82cd8699, 0x8164d1f4,
+    0x80000000,
+];
+
+/// Computes the exponential decay of a metric with a 24-hour half-life (86,400s):
+/// - Decays exactly 50% every 86,400s (24 hours).
+/// - 100% pure integer arithmetic, overflow-safe via u128.
+/// - 64-step dyadic lookup table with linear interpolation (error < 0.002%).
+/// - If `delta_secs == 0`: returns `value` without modification.
+/// - If `delta_secs >= 64 * 86_400`: decays completely to 0.
+pub fn decay_integer_ema(value: u64, delta_secs: u64) -> u64 {
+    if value == 0 || delta_secs == 0 {
+        return value;
+    }
+    let half_lives = delta_secs / 86_400;
+    if half_lives >= 64 {
+        return 0;
+    }
+    let r = delta_secs % 86_400;
+    let i = (r / 1_350) as usize;
+    let step_rem = r % 1_350;
+
+    let y0 = DYADIC_HALF_LIFE_TABLE[i];
+    let y1 = DYADIC_HALF_LIFE_TABLE[i + 1];
+    let factor = y0 - ((y0 - y1) * step_rem) / 1_350;
+
+    ((value as u128 * factor as u128) >> (32 + half_lives)) as u64
+}
+
+/// Computes the integer EMA with 24h half-life decay followed by addition of footprint:
+/// - First applies 24h half-life decay via `decay_integer_ema(old_ema, delta_secs)`.
+/// - Then adds `footprint` using `saturating_add` (overflow-safe).
+pub fn calculate_integer_ema(old_ema: u64, delta_secs: u64, footprint: u64) -> u64 {
+    decay_integer_ema(old_ema, delta_secs).saturating_add(footprint)
+}
+
+/// Converts a 24h half-life EMA accumulator value to its equivalent 24h daily rate:
+/// Rate = (EMA * ln(2)) ≈ (EMA * 693_147) / 1_000_000.
+pub fn ema_to_daily_rate(ema: u64) -> u64 {
+    ((ema as u128 * 693_147) / 1_000_000) as u64
 }
 
 /// [Pillar C]
@@ -383,10 +436,13 @@ pub fn evaluate_quota_exceeded_claim(sender_volume: u64, quota_limit: u64) -> Qu
 pub struct NetworkThermometer {
     ring_buffer: SlottedMedianRingBuffer,
     read_ring_buffer: SlottedMedianRingBuffer,
-    hourly_ring_buffer: HourlySlottedRingBuffer,
     current_epoch_day: u64,
     node_daily_usage: HashMap<NodeId, u64>,
     node_daily_read_usage: HashMap<NodeId, u64>,
+    write_ema_micro_bj: u64,
+    last_write_ema_sec: u64,
+    read_ema_credits: u64,
+    last_read_ema_sec: u64,
 }
 
 impl NetworkThermometer {
@@ -394,10 +450,13 @@ impl NetworkThermometer {
         Self {
             ring_buffer: SlottedMedianRingBuffer::new(),
             read_ring_buffer: SlottedMedianRingBuffer::new(),
-            hourly_ring_buffer: HourlySlottedRingBuffer::new(),
             current_epoch_day: 0,
             node_daily_usage: HashMap::new(),
             node_daily_read_usage: HashMap::new(),
+            write_ema_micro_bj: 0,
+            last_write_ema_sec: 0,
+            read_ema_credits: 0,
+            last_read_ema_sec: 0,
         }
     }
 
@@ -556,28 +615,74 @@ impl NetworkThermometer {
         }
     }
 
-    /// [Pillar C]
-    /// Registers an hourly median in the rolling 24-hour ring buffer
-    pub fn record_hourly_median(&mut self, epoch_hour: u64, median: u64) {
-        self.hourly_ring_buffer.record_hourly_median(epoch_hour, median);
+    /// Records write ingress into the continuous 24h half-life Write-EMA
+    pub fn record_write_ingress(&mut self, now_sec: u64, footprint_micro_bj: u64) {
+        let delta = if self.last_write_ema_sec == 0 {
+            0
+        } else {
+            now_sec.saturating_sub(self.last_write_ema_sec)
+        };
+        self.write_ema_micro_bj = calculate_integer_ema(self.write_ema_micro_bj, delta, footprint_micro_bj);
+        self.last_write_ema_sec = now_sec.max(self.last_write_ema_sec);
     }
 
-    /// [Pillar C]
-    /// Returns a reference to the hourly 24h ring buffer
-    pub fn hourly_buffer(&self) -> &HourlySlottedRingBuffer {
-        &self.hourly_ring_buffer
+    /// Returns the current raw write EMA accumulator in micro-Byte-Years (µBJ)
+    pub fn current_write_ema_micro_bj(&self) -> u64 {
+        self.write_ema_micro_bj
     }
 
-    /// [Pillar C]
-    /// Returns a mutable reference to the hourly 24h ring buffer
-    pub fn hourly_buffer_mut(&mut self) -> &mut HourlySlottedRingBuffer {
-        &mut self.hourly_ring_buffer
+    /// Returns the current write EMA in Byte-Years (BJ)
+    pub fn current_write_ema_byte_years(&self) -> u64 {
+        self.write_ema_micro_bj / 1_000_000
     }
 
-    /// [Pillar C]
-    /// Computes the current rolling 24h average from the hourly ring buffer
+    /// Computes the rolling 24-hour write daily rate in Byte-Years at a specific time `now_sec`
+    pub fn rolling_24h_average_at(&self, now_sec: u64) -> u64 {
+        let delta = if self.last_write_ema_sec == 0 {
+            0
+        } else {
+            now_sec.saturating_sub(self.last_write_ema_sec)
+        };
+        let decayed_ema_micro = decay_integer_ema(self.write_ema_micro_bj, delta);
+        let daily_rate_micro = ema_to_daily_rate(decayed_ema_micro);
+        daily_rate_micro / 1_000_000
+    }
+
+    /// Computes the current rolling 24-hour write daily rate in Byte-Years
     pub fn rolling_24h_average(&self) -> u64 {
-        self.hourly_ring_buffer.rolling_24h_average()
+        self.rolling_24h_average_at(self.last_write_ema_sec)
+    }
+
+    /// Records read ingress into the continuous 24h half-life Read-EMA
+    pub fn record_read_ingress(&mut self, now_sec: u64, credits: u64) {
+        let delta = if self.last_read_ema_sec == 0 {
+            0
+        } else {
+            now_sec.saturating_sub(self.last_read_ema_sec)
+        };
+        self.read_ema_credits = calculate_integer_ema(self.read_ema_credits, delta, credits);
+        self.last_read_ema_sec = now_sec.max(self.last_read_ema_sec);
+    }
+
+    /// Returns the current raw read EMA accumulator in credits
+    pub fn current_read_ema_credits(&self) -> u64 {
+        self.read_ema_credits
+    }
+
+    /// Computes the rolling 24-hour read daily rate in credits at a specific time `now_sec`
+    pub fn rolling_24h_read_average_at(&self, now_sec: u64) -> u64 {
+        let delta = if self.last_read_ema_sec == 0 {
+            0
+        } else {
+            now_sec.saturating_sub(self.last_read_ema_sec)
+        };
+        let decayed_read_ema = decay_integer_ema(self.read_ema_credits, delta);
+        ema_to_daily_rate(decayed_read_ema)
+    }
+
+    /// Computes the current rolling 24-hour read daily rate in credits
+    pub fn rolling_24h_read_average(&self) -> u64 {
+        self.rolling_24h_read_average_at(self.last_read_ema_sec)
     }
 }
 
@@ -620,6 +725,16 @@ mod tests {
     }
 
     #[test]
+    fn test_micro_from_ttl_seconds() {
+        // 1 Jahr = 192 Byte-Jahre = 192_000_000 µBJ
+        assert_eq!(ByteYears::micro_from_ttl_seconds(SECONDS_PER_YEAR), 192_000_000);
+        // 5 Jahre = 960 Byte-Jahre = 960_000_000 µBJ
+        assert_eq!(ByteYears::micro_from_ttl_seconds(5 * SECONDS_PER_YEAR), 960_000_000);
+        // 0 Sekunden = mindestens 1 µBJ
+        assert_eq!(ByteYears::micro_from_ttl_seconds(0), 1);
+    }
+
+    #[test]
     fn test_integer_ema_time_decay() {
         let old_ema = 100_000u64;
 
@@ -627,21 +742,26 @@ mod tests {
         let ema_delta_0 = calculate_integer_ema(old_ema, 0, 5_000);
         assert_eq!(ema_delta_0, 105_000);
 
-        // delta = 43_200 (Halbierung von 86_400s)
-        // decay = (100_000 * 43_200) / 86_400 = 50_000
-        // rest = 50_000 + 10_000 = 60_000
-        let ema_delta_half = calculate_integer_ema(old_ema, 43_200, 10_000);
-        assert_eq!(ema_delta_half, 60_000);
+        // delta = 86_400 (24h Halbwertszeit): exakt 50% Decay
+        let decayed_1d = decay_integer_ema(old_ema, 86_400);
+        assert_eq!(decayed_1d, 50_000);
+        let ema_delta_1d = calculate_integer_ema(old_ema, 86_400, 7_000);
+        assert_eq!(ema_delta_1d, 57_000);
 
-        // delta = 86,400: old EMA decays completely to 0
-        // decay = (100,000 * 86,400) / 86,400 = 100,000
-        // rest = 0 + 7,000 = 7,000
-        let ema_delta_day = calculate_integer_ema(old_ema, 86_400, 7_000);
-        assert_eq!(ema_delta_day, 7_000);
+        // delta = 172_800 (48h = 2 Halbwertszeiten): exakt 25% übrig (75% Decay)
+        let decayed_2d = decay_integer_ema(old_ema, 172_800);
+        assert_eq!(decayed_2d, 25_000);
 
-        // delta > 86,400: old EMA decays completely to 0
-        let ema_delta_more = calculate_integer_ema(old_ema, 100_000, 8_000);
-        assert_eq!(ema_delta_more, 8_000);
+        // delta = 259_200 (72h = 3 Halbwertszeiten): exakt 12.5% übrig
+        let decayed_3d = decay_integer_ema(old_ema, 259_200);
+        assert_eq!(decayed_3d, 12_500);
+
+        // delta >= 64 Halbwertszeiten: Decay auf 0
+        let decayed_ext = decay_integer_ema(old_ema, 64 * 86_400);
+        assert_eq!(decayed_ext, 0);
+
+        // ema_to_daily_rate: 1_000_000 EMA -> 693_147 Daily Rate
+        assert_eq!(ema_to_daily_rate(1_000_000), 693_147);
     }
 
     #[test]
@@ -1006,13 +1126,15 @@ mod tests {
         therm.record_daily_median(3_000_000);
         therm.record_daily_read_median(600_000);
 
-        // hourly_buffer, hourly_buffer_mut, record_hourly_median, rolling_24h_average
-        therm.record_hourly_median(10, 1000);
-        assert_eq!(therm.hourly_buffer().count(), 1);
-        assert_eq!(therm.rolling_24h_average(), 1000);
+        // Write-EMA & Read-EMA continuous 24h metrics
+        therm.record_write_ingress(1000, 100_000_000); // 100 BY in µBJ
+        assert_eq!(therm.current_write_ema_micro_bj(), 100_000_000);
+        assert_eq!(therm.current_write_ema_byte_years(), 100);
+        assert_eq!(therm.rolling_24h_average(), 69); // 100 * 0.693147
 
-        therm.hourly_buffer_mut().record_hourly_median(11, 2000);
-        assert_eq!(therm.rolling_24h_average(), 1500);
+        therm.record_read_ingress(1000, 500);
+        assert_eq!(therm.current_read_ema_credits(), 500);
+        assert_eq!(therm.rolling_24h_read_average(), 346); // 500 * 0.693147
 
         let default_therm = NetworkThermometer::default();
         assert_eq!(default_therm.effective_ncb(), HARD_FLOOR_BASELINE_DAILY);

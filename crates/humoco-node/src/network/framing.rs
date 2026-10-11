@@ -19,14 +19,81 @@ pub struct HeartbeatWirePayload {
     pub supported_suites_mask: u8,
 }
 
+mod hmc_req_json {
+    use serde::{de, Deserializer, Serializer};
+
+    pub fn serialize<S>(
+        data: &crate::api::hmc::L2LockRequest,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let raw = serde_json::to_vec(data).map_err(serde::ser::Error::custom)?;
+        serializer.serialize_bytes(&raw)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<crate::api::hmc::L2LockRequest, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
+        serde_json::from_slice(&bytes).map_err(de::Error::custom)
+    }
+}
+
 /// Unified wire payload for lock verification across simulation and HMC domains.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum LockWirePayload {
     Sim(humoco_sim_core::types::LockRecord, u64),
     Hmc {
-        req: Box<crate::api::hmc::L2LockRequest>,
+        #[serde(with = "hmc_req_json")]
+        req: crate::api::hmc::L2LockRequest,
         root_valid_until: u64,
+        #[serde(default)]
+        declared_write_ema_micro_bj: u64,
+        #[serde(default)]
+        sender_pubkey: [u8; 32],
     },
+}
+
+impl LockWirePayload {
+    pub fn declared_write_ema_micro_bj(&self) -> u64 {
+        match self {
+            Self::Sim(..) => 0,
+            Self::Hmc { declared_write_ema_micro_bj, .. } => *declared_write_ema_micro_bj,
+        }
+    }
+
+    pub fn sender_pubkey(&self) -> [u8; 32] {
+        match self {
+            Self::Sim(rec, _) => rec.receiver_pub,
+            Self::Hmc { sender_pubkey, req, .. } => {
+                if *sender_pubkey != [0u8; 32] {
+                    *sender_pubkey
+                } else {
+                    req.sender_ephemeral_pub
+                }
+            }
+        }
+    }
+}
+
+/// Wire payload for StatusQuery carrying lock identifiers and declared read EMA metrics (Spec 09/10).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StatusQueryPayload {
+    pub lock_id: [u8; 32],
+    pub parent_lock: [u8; 32],
+    pub shard_id: u16,
+    #[serde(default)]
+    pub sender_pubkey: [u8; 32],
+    #[serde(default)]
+    pub current_read_ema_credits: u64,
+    #[serde(default)]
+    pub timestamp_ms: u64,
 }
 
 mod hmc_locks_json {

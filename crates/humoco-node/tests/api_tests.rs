@@ -3420,6 +3420,10 @@ fn create_qa_mock_dashboard_data() -> humoco_node::api::DashboardData {
             vip_writes_today: 5,
             f2f_writes_today: 10,
             free_writes_today: 35,
+            write_quota_limit: 4_800_000,
+            read_quota_limit: 4_800_000,
+            write_quota_percent: 0.1,
+            read_quota_percent: 0.1,
         },
         sparklines: humoco_node::api::system_stats::SparklinesDto::default(),
         tiers: TierOverviewDto {

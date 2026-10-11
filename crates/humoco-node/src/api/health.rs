@@ -447,6 +447,10 @@ mod tests {
                 vip_writes_today: 10,
                 f2f_writes_today: 20,
                 free_writes_today: 70,
+                write_quota_limit: 4_800_000,
+                read_quota_limit: 4_800_000,
+                write_quota_percent: 0.1,
+                read_quota_percent: 0.1,
             },
             sparklines: SparklinesDto::default(),
             tiers: TierOverviewDto {

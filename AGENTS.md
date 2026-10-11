@@ -193,7 +193,7 @@ Before writing new code for a new feature or requirement, apply this test:
 
 ---
 
-## 🚨 4. The 10 Iron-Clad Programming Rules
+## 🚨 4. The 11 Iron-Clad Programming Rules
 
 ### 1. ⚡ No I/O & No Mutex on the Hot Path:
 * On the PoS lock path (`POST /v1/lock`), never write to disk synchronously.
@@ -247,6 +247,13 @@ Before writing new code for a new feature or requirement, apply this test:
 * **Origin lock determines validity:** Gateways/clients must not dictate arbitrary TTLs for successor locks. Successor locks derive their `root_valid_until` and Byte-Years accounting strictly from the signed genesis lock of the root. If the origin lock is unknown, the lock is rejected with `400 Bad Request`.
 * **Reservation-First Backpressure:** Never mutate the `RamIndex` before securing asynchronous disk capacity. Reserve with `tx.try_reserve()` before RAM mutation. If the queue is full, the request is rejected immediately (`RejectedCapacity` / `429 Too Many Requests`) without polluting RAM.
 * **Zero State Bloat (No Tombstones):** An expired voucher can never be double-spent, as clients and nodes can mathematically prove and reject its expired `root.valid_until`. Expired locks are purged entirely from RAM and disk; permanent tombstones are forbidden.
+
+### 11. 🧪 Mandatory Adversarial Wire-Level P2P Verification (Ban on Unit-Test-Only Illusion):
+* **No Unit-Test-Only Illusion:** No protocol rule, quota, rate-limit, or security defense is considered complete if it is only verified via in-memory unit tests in `humoco-sim-core` or locally at the HTTP gateway!
+* **Mandatory Adversarial Wire Tests:** Every network invariant (`INV-xxxx`) and server defense MUST have an integration test executing over real QUIC connections in `crates/humoco-node/tests/`:
+  - An over-quota or flood peer MUST be proven to be rejected or dropped by the receiving shard server (`transport.rs`).
+  - Fraudulent or malformed messages MUST trigger the exact specified wire rejection or slashing.
+  - "Green unit tests in core do not prove server protection." Every PR and feature must prove wire-level defense.
 
 
 ---

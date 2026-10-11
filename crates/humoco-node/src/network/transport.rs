@@ -131,6 +131,7 @@ pub struct NodeRequestHandler {
     pub storage: Arc<crate::storage::RedbStorage>,
     pub identity: NodeIdentity,
     pub peer_manager: Option<Arc<crate::network::PeerManager>>,
+    pub tier_controller: Option<Arc<crate::ingress::TierController>>,
 }
 
 impl NodeRequestHandler {
@@ -144,6 +145,7 @@ impl NodeRequestHandler {
             storage,
             identity,
             peer_manager: None,
+            tier_controller: None,
         }
     }
 
@@ -158,7 +160,13 @@ impl NodeRequestHandler {
             storage,
             identity,
             peer_manager: Some(peer_manager),
+            tier_controller: None,
         }
+    }
+
+    pub fn with_tier_controller(mut self, tier_controller: Arc<crate::ingress::TierController>) -> Self {
+        self.tier_controller = Some(tier_controller);
+        self
     }
 }
 
@@ -172,6 +180,7 @@ impl RequestHandler for NodeRequestHandler {
         let storage = self.storage.clone();
         let identity = self.identity.clone();
         let peer_manager = self.peer_manager.clone();
+        let tier_controller = self.tier_controller.clone();
         Box::pin(async move {
             let msg_type = header.msg_type;
             // --- Phase 4: Real slashing on EquivocationProof (Spec 10 Pillar 1) ---
@@ -239,7 +248,28 @@ impl RequestHandler for NodeRequestHandler {
                             .unwrap_or(0)
                     });
 
+                let ncb_eff = if let Some(tc) = &tier_controller {
+                    tc.effective_ncb()
+                } else {
+                    humoco_sim_core::quota::HARD_FLOOR_BASELINE_DAILY
+                };
+                let write_limit = (5.0 * ncb_eff as f64).round() as u64;
+
                 if let Ok(wire_payload) = bincode::deserialize::<crate::network::framing::LockWirePayload>(&payload) {
+                    let declared_write_ema = wire_payload.declared_write_ema_micro_bj();
+                    let declared_daily_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_write_ema) / 1_000_000;
+                    if declared_daily_rate > write_limit {
+                        warn!(declared_daily_rate, write_limit, sender = %hex::encode(wire_payload.sender_pubkey()), "LockVerifyRequest rejected: declared write load exceeds 5.0 * ncb_eff");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+
                     match wire_payload {
                         crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
                             if engine.is_node_banned(&record.receiver_pub).await {
@@ -287,7 +317,7 @@ impl RequestHandler for NodeRequestHandler {
                                 }
                             }
                         }
-                        crate::network::framing::LockWirePayload::Hmc { req, root_valid_until: _ } => {
+                        crate::network::framing::LockWirePayload::Hmc { req, root_valid_until: _, .. } => {
                             if engine.is_node_banned(&req.sender_ephemeral_pub).await
                                 || engine.is_node_banned(&req.auth.ephemeral_pubkey).await
                             {
@@ -312,7 +342,7 @@ impl RequestHandler for NodeRequestHandler {
                                 }
                             };
 
-                            let entry = crate::api::hmc::L2LockEntry::from(&*req);
+                            let entry = crate::api::hmc::L2LockEntry::from(&req);
                             let (verdict, _is_new) = engine.ingress_hmc_lock(lookup_tag.clone(), entry.clone()).await;
 
                             match verdict {
@@ -402,35 +432,62 @@ impl RequestHandler for NodeRequestHandler {
                             .unwrap_or(0)
                     });
 
-                if let Ok((lock_id, parent_lock, shard_id)) = bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload) {
-                    let known = {
-                        let hmc = engine.hmc_ram.read().await;
-                        hmc.locks.values().any(|e| e.t_id == lock_id)
-                            || engine.get_ram_lock(&parent_lock).await.is_some()
-                            || storage.get_lock(&parent_lock).map(|o| o.is_some()).unwrap_or(false)
-                    };
+                let ncb_read_eff = if let Some(tc) = &tier_controller {
+                    tc.effective_read_ncb()
+                } else {
+                    humoco_sim_core::quota::HARD_FLOOR_READ_BASELINE_DAILY
+                };
+                let read_limit = (5.0 * ncb_read_eff as f64).round() as u64;
 
-                    if known {
-                        let target_status = (header.flags & 0xFF) as u8;
-                        let attestation = crate::api::routes::create_attestation(
-                            &identity,
-                            lock_id,
-                            parent_lock,
-                            shard_id,
-                            target_status,
-                            now_ms,
-                        );
-                        let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
-                        let payload_len = checked_payload_len(resp_bytes.len())?;
-                        let resp_header = WireHeader::new(
-                            MsgType::StatusResponse as u16,
-                            header.session_seq + 1,
-                            header.epoch_id,
-                            0,
-                            payload_len,
-                        );
-                        return Ok((resp_header, resp_bytes));
-                    }
+                let (lock_id, parent_lock, shard_id, declared_read_ema) = if let Ok(sq) = bincode::deserialize::<crate::network::framing::StatusQueryPayload>(&payload) {
+                    (sq.lock_id, sq.parent_lock, sq.shard_id, sq.current_read_ema_credits)
+                } else if let Ok((l_id, p_lock, s_id)) = bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload) {
+                    (l_id, p_lock, s_id, 0)
+                } else {
+                    let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                    return Ok((resp_header, Vec::new()));
+                };
+
+                let declared_read_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_read_ema);
+                if declared_read_rate > read_limit {
+                    warn!(declared_read_rate, read_limit, "StatusQuery rejected: declared read load exceeds 5.0 * ncb_read_eff");
+                    let resp_header = WireHeader::new(
+                        MsgType::StatusResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
+                let known = {
+                    let hmc = engine.hmc_ram.read().await;
+                    hmc.locks.values().any(|e| e.t_id == lock_id)
+                        || engine.get_ram_lock(&parent_lock).await.is_some()
+                        || storage.get_lock(&parent_lock).map(|o| o.is_some()).unwrap_or(false)
+                };
+
+                if known {
+                    let target_status = (header.flags & 0xFF) as u8;
+                    let attestation = crate::api::routes::create_attestation(
+                        &identity,
+                        lock_id,
+                        parent_lock,
+                        shard_id,
+                        target_status,
+                        now_ms,
+                    );
+                    let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                    let payload_len = checked_payload_len(resp_bytes.len())?;
+                    let resp_header = WireHeader::new(
+                        MsgType::StatusResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        0,
+                        payload_len,
+                    );
+                    return Ok((resp_header, resp_bytes));
                 }
                 let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
                 return Ok((resp_header, Vec::new()));

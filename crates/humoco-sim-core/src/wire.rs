@@ -107,6 +107,7 @@ pub const FLAG_PEER_SUSPENDED: u32 = 0x0000_0040;
 pub const FLAG_POW_OUTDATED: u32 = 0x0000_0080;
 pub const FLAG_QUOTA_EXCEEDED: u32 = 0x0000_0100;
 pub const FLAG_QUOTA_FRAUD: u32 = 0x0000_0200;
+pub const FLAG_NOT_IN_SHARD: u32 = 0x0000_0400;
 
 
 /// 144-Byte LockEntry (INV-1001)

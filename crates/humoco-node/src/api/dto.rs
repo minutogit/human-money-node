@@ -25,6 +25,17 @@ pub struct QuorumCertificateDto {
     pub signer_bitmap: u32,
 }
 
+impl QuorumCertificateDto {
+    pub fn is_quorum_reached(&self) -> bool {
+        let (required_q, _) = humoco_sim_core::types::required_quorum(self.active_nodes_count);
+        self.signatures.len() >= required_q
+    }
+
+    pub fn required_quorum(&self) -> usize {
+        humoco_sim_core::types::required_quorum(self.active_nodes_count).0
+    }
+}
+
 /// Request for synchronizing missing locks via sparse locators.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SyncRequest {

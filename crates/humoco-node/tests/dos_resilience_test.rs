@@ -119,8 +119,8 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
             .unwrap();
 
         let res = router.clone().oneshot(req).await.unwrap();
-        // The lock is created locally even if remote shard quorum times out under DoS
-        assert_eq!(res.status(), StatusCode::CREATED);
+        // Under DoS where remote shard quorum times out, strict Quorum-Gating returns 503 Service Unavailable
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // 4. Verify Correlated Failure Protection:

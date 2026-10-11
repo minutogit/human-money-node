@@ -1538,6 +1538,44 @@ impl PeerManager {
         result
     }
 
+    /// Checks whether the local node is among the responsible Top-N (default 20) shard nodes
+    /// for the given shard_id according to HRW score.
+    pub async fn is_local_responsible_for_shard(&self, self_hrw: &[u8; 32], shard_id: u16, top_n: usize) -> bool {
+        let active_nodes = self.active_hrw_nodes().await;
+        if active_nodes.is_empty() {
+            return true;
+        }
+        let total_active = active_nodes.len() + 1;
+        if total_active <= top_n {
+            return true;
+        }
+        let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(self_hrw, shard_id);
+        let higher_nodes_count = active_nodes
+            .iter()
+            .filter(|(hrw_id, _)| {
+                if hrw_id == self_hrw {
+                    return false;
+                }
+                let score = humoco_sim_core::client_flow::compute_hrw_score_f64(hrw_id, shard_id);
+                score > self_score || (score == self_score && hrw_id > self_hrw)
+            })
+            .count();
+        let self_rank = higher_nodes_count + 1;
+        self_rank <= top_n
+    }
+
+    /// Returns the top-N candidate nodes for a given shard_id according to HRW ranking.
+    pub async fn get_top_n_shards_for_lock(&self, shard_id: u16, n: usize) -> Vec<([u8; 32], SocketAddr)> {
+        let mut active = self.active_hrw_nodes().await;
+        active.sort_by(|a, b| {
+            let score_a = humoco_sim_core::client_flow::compute_hrw_score_f64(&a.0, shard_id);
+            let score_b = humoco_sim_core::client_flow::compute_hrw_score_f64(&b.0, shard_id);
+            score_b.total_cmp(&score_a)
+        });
+        active.truncate(n);
+        active
+    }
+
     pub async fn record_observed_evidence(&self, ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
         let mut guard = self.recent_observed_evidences.write().await;
         if guard.len() >= 16 {

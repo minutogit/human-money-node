@@ -311,6 +311,39 @@ impl RequestHandler for NodeRequestHandler {
                 let write_limit = (5.0 * ncb_eff as f64).round() as u64;
 
                 if let Ok(wire_payload) = bincode::deserialize::<crate::network::framing::LockWirePayload>(&payload) {
+                    let shard_id = match &wire_payload {
+                        crate::network::framing::LockWirePayload::Sim(record, _) => {
+                            u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]])
+                        }
+                        crate::network::framing::LockWirePayload::Hmc { req, .. } => {
+                            let tag = if req.is_genesis {
+                                bs58::encode(&req.transaction_hash).into_string()
+                            } else {
+                                req.ds_tag.clone().unwrap_or_default()
+                            };
+                            let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+                            u16::from_be_bytes([p_bytes[0], p_bytes[1]])
+                        }
+                    };
+
+                    let is_responsible = if let Some(pm) = peer_manager.as_ref() {
+                        pm.is_local_responsible_for_shard(identity.hrw_routing_id(), shard_id, 20).await
+                    } else {
+                        true
+                    };
+
+                    if !is_responsible {
+                        warn!(shard_id, "LockVerifyRequest rejected: local node is not in top-20 for shard");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+
                     let sender_pubkey = wire_payload.sender_pubkey();
                     let sender_signature = wire_payload.sender_signature();
                     let timestamp_ms = wire_payload.timestamp_ms();
@@ -434,7 +467,6 @@ impl RequestHandler for NodeRequestHandler {
                             match ingress_res {
                                 Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew)
                                 | Ok(humoco_sim_core::storage::IngressVerdictLow::IdempotentReplay) => {
-                                    let shard_id = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
                                     let requested_status = (header.flags & 0xFF) as u8;
                                     let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
                                     let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
@@ -467,7 +499,7 @@ impl RequestHandler for NodeRequestHandler {
                         }
                         crate::network::framing::LockWirePayload::Hmc { req, root_valid_until: _, .. } => {
                             if engine.is_node_banned(&req.sender_ephemeral_pub).await
-                                || engine.is_node_banned(&req.auth.ephemeral_pubkey).await
+                                    || engine.is_node_banned(&req.auth.ephemeral_pubkey).await
                             {
                                 let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
                                 return Ok((resp_header, Vec::new()));
@@ -500,13 +532,17 @@ impl RequestHandler for NodeRequestHandler {
                                 }
                                 _ => {
                                     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-                                    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+                                    let requested_status = (header.flags & 0xFF) as u8;
+                                    let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
+                                    let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
+                                        && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
+                                    let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
                                     let attestation = crate::api::routes::create_attestation(
                                         &identity,
                                         entry.t_id,
                                         parent_bytes,
                                         shard_id,
-                                        0,
+                                        final_status,
                                         now_ms,
                                     );
                                     let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
@@ -526,6 +562,25 @@ impl RequestHandler for NodeRequestHandler {
                 }
 
                 if let Ok((record, root_valid_until)) = bincode::deserialize::<(humoco_sim_core::types::LockRecord, u64)>(&payload) {
+                    let shard_id = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
+                    let is_responsible = if let Some(pm) = peer_manager.as_ref() {
+                        pm.is_local_responsible_for_shard(identity.hrw_routing_id(), shard_id, 20).await
+                    } else {
+                        true
+                    };
+
+                    if !is_responsible {
+                        warn!(shard_id, "LockVerifyRequest rejected: local node is not in top-20 for shard (legacy)");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+
                     let ingress_res = engine.ingress_lock(
                         record.clone(),
                         humoco_sim_core::types::SimTime(now_ms),
@@ -535,13 +590,17 @@ impl RequestHandler for NodeRequestHandler {
                     match ingress_res {
                         Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew)
                         | Ok(humoco_sim_core::storage::IngressVerdictLow::IdempotentReplay) => {
-                            let shard_id = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
+                            let requested_status = (header.flags & 0xFF) as u8;
+                            let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
+                            let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
+                                && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
+                            let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
                             let attestation = crate::api::routes::create_attestation(
                                 &identity,
                                 record.id,
                                 record.parent_lock,
                                 shard_id,
-                                0,
+                                final_status,
                                 now_ms,
                             );
                             let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();

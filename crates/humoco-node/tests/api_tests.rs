@@ -1285,7 +1285,9 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
         .await
         .unwrap();
 
-    assert_eq!(res.status(), StatusCode::CREATED);
+    // Since the 25 peers are uncontactable and the gateway itself is rank > 20,
+    // quorum (14/20) cannot be reached. Strict Quorum-Gating returns 503 Service Unavailable.
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     let resp: L2ResponseEnvelope = response_json(res).await;
     assert!(resp.quorum_certificate.is_some());
     let qc = resp.quorum_certificate.unwrap();
@@ -1294,6 +1296,9 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     // Gateway's own attestation must NOT be present in QuorumCertificate because its rank is > 20!
     let self_attestation_present = qc.signatures.iter().any(|s| s.node_id == self_node_u16);
     assert!(!self_attestation_present, "Gateway with HRW rank > 20 must NOT attest itself into the QuorumCertificate");
+
+    // Task 1: Stateless gateway must NOT write foreign shard lock to local engine or redb!
+    assert!(storage.get_hmc_lock(&lookup_tag).unwrap().is_none(), "Stateless gateway must not write foreign shard lock to redb storage");
 }
 
 #[tokio::test]
@@ -1892,12 +1897,6 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
 
     // 4. Multi-node adaptive quorum test with PeerManager
     let peer_mgr = Arc::new(humoco_node::network::PeerManager::new(vec![]));
-    for i in 0..4u64 {
-        let dummy_id = *blake3::hash(&i.to_le_bytes()).as_bytes();
-        let addr = format!("127.0.0.1:{}", 17000 + i).parse().unwrap();
-        peer_mgr.learn_node_from_gossip(dummy_id, addr, 1, None).await;
-        peer_mgr.set_first_seen_for_test(&dummy_id, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
-    }
 
     let temp2 = tempdir().expect("tempdir");
     let db_path2 = temp2.path().join("test_read_quorum_peers.redb");
@@ -1914,10 +1913,10 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         tc2.clone(),
         pow2.clone(),
     );
-    state_multi.peer_manager = Some(peer_mgr);
+    state_multi.peer_manager = Some(peer_mgr.clone());
     let app_multi = build_router(state_multi);
 
-    // Anchor genesis on multi-node app
+    // Anchor genesis on app before peer expansion (reaches provisional quorum 1/1)
     let res_gen2 = app_multi
         .clone()
         .oneshot(
@@ -1932,6 +1931,14 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .await
         .unwrap();
     assert_eq!(res_gen2.status(), StatusCode::CREATED);
+
+    // Populate peer_mgr with 4 mature peers so active_nodes_count = 5
+    for i in 0..4u64 {
+        let dummy_id = *blake3::hash(&i.to_le_bytes()).as_bytes();
+        let addr = format!("127.0.0.1:{}", 17000 + i).parse().unwrap();
+        peer_mgr.learn_node_from_gossip(dummy_id, addr, 1, None).await;
+        peer_mgr.set_first_seen_for_test(&dummy_id, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    }
 
     // Query status with read_quorum: 2
     let query_multi = L2StatusQuery {

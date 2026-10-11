@@ -666,12 +666,14 @@ struct PeerAttestationQuery<'a> {
 
 enum PeerQueryError {
     QuotaExceeded,
+    NotInShard,
     Generic,
 }
 
 enum PeerQueryResult {
     Success(AttestationDto),
     QuotaExceeded,
+    NotInShard,
     Failure,
 }
 
@@ -730,6 +732,9 @@ async fn collect_peer_attestations(
                         if (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0 {
                             return Err(PeerQueryError::QuotaExceeded);
                         }
+                        if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_IN_SHARD) != 0 {
+                            return Err(PeerQueryError::NotInShard);
+                        }
                         if resp_header.msg_type == exp_resp && !resp_payload.is_empty() {
                             if let Ok(att) = bincode::deserialize::<AttestationDto>(&resp_payload) {
                                 return Ok(att);
@@ -740,6 +745,7 @@ async fn collect_peer_attestations(
                     match query_peer.await {
                         Ok(att) => (nid, addr, rank_idx, PeerQueryResult::Success(att)),
                         Err(PeerQueryError::QuotaExceeded) => (nid, addr, rank_idx, PeerQueryResult::QuotaExceeded),
+                        Err(PeerQueryError::NotInShard) => (nid, addr, rank_idx, PeerQueryResult::NotInShard),
                         Err(PeerQueryError::Generic) => (nid, addr, rank_idx, PeerQueryResult::Failure),
                     }
                 });
@@ -779,6 +785,10 @@ async fn collect_peer_attestations(
                         in_flight.clear(); // Aborted stragglers must NEVER be counted as peer failures (AGENTS.md / INV-1501)
                         break;
                     }
+                }
+                Ok((_nid, _addr, rank_idx, PeerQueryResult::NotInShard)) => {
+                    in_flight.remove(&rank_idx);
+                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
                 }
                 Ok((_nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)) => {
                     in_flight.remove(&rank_idx);
@@ -1359,45 +1369,82 @@ async fn submit_hmc_lock(
     };
 
     let entry = L2LockEntry::from(&req);
+    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+    let is_responsible = if let Some(pm) = &state.peer_manager {
+        pm.is_local_responsible_for_shard(state.identity.hrw_routing_id(), shard_id, 20).await
+    } else {
+        true
+    };
 
     // 4. Fast-path idempotency check: if identical lock already verified in RAM, return 200 OK immediately
-    if let Some(existing) = state.engine.hmc_ram.read().await.locks.get(&lookup_tag) {
-        if existing.t_id == entry.t_id {
-            let verdict = L2Verdict::Verified { lock_entry: existing.clone() };
-            let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-            let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
-            let now_ms = state.net_time_ms();
-            let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-            let declared_read_ema = state.tier_controller.current_read_ema_credits();
-            let sender_pubkey = *state.identity.node_pubkey();
-            let ttl_sec = (root_valid_until.saturating_sub(now_ms)) / 1000;
-            let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
-            let op_hash = entry.t_id;
-            let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-                &sender_pubkey,
-                now_ms,
-                declared_write_ema,
-                declared_read_ema,
-                footprint,
-                false,
-                &op_hash,
-            );
-            let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-            let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                req: req.clone(),
-                root_valid_until,
-                declared_write_ema_micro_bj: declared_write_ema,
-                sender_pubkey,
-                sender_signature,
-                timestamp_ms: now_ms,
-            }).ok();
-            let start_quorum = std::time::Instant::now();
-            let quorum_certificate = Some(assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await);
-            state.metrics.record_quorum_latency(start_quorum.elapsed());
-            state.metrics.record_local_latency(std::time::Duration::from_micros(1));
-            let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
-            state.metrics.record_e2e_latency(start.elapsed());
-            return (StatusCode::OK, Json(envelope)).into_response();
+    if is_responsible {
+        if let Some(existing) = state.engine.hmc_ram.read().await.locks.get(&lookup_tag) {
+            if existing.t_id == entry.t_id {
+                let verdict = L2Verdict::Verified { lock_entry: existing.clone() };
+                let now_ms = state.net_time_ms();
+                let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+                let declared_read_ema = state.tier_controller.current_read_ema_credits();
+                let sender_pubkey = *state.identity.node_pubkey();
+                let ttl_sec = (root_valid_until.saturating_sub(now_ms)) / 1000;
+                let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
+                let op_hash = entry.t_id;
+                let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                    &sender_pubkey,
+                    now_ms,
+                    declared_write_ema,
+                    declared_read_ema,
+                    footprint,
+                    false,
+                    &op_hash,
+                );
+                let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+                let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+                    req: req.clone(),
+                    root_valid_until,
+                    declared_write_ema_micro_bj: declared_write_ema,
+                    sender_pubkey,
+                    sender_signature,
+                    timestamp_ms: now_ms,
+                }).ok();
+                let start_quorum = std::time::Instant::now();
+                let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+                state.metrics.record_quorum_latency(start_quorum.elapsed());
+                state.metrics.record_local_latency(std::time::Duration::from_micros(1));
+
+                if !cert.is_quorum_reached() {
+                    let reason = format!(
+                        "Quorum not reached: required {} signatures, collected {}",
+                        cert.required_quorum(), cert.signatures.len()
+                    );
+                    let rej_verdict = L2Verdict::Rejected { reason };
+                    let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert));
+                    state.metrics.record_e2e_latency(start.elapsed());
+                    let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+                    if should_warn {
+                        resp.headers_mut().insert(
+                            axum::http::HeaderName::from_static("x-deprecation-warning"),
+                            axum::http::HeaderValue::from_static(
+                                "Suite 1 (Ed25519) deprecated - migrate to suite 2",
+                            ),
+                        );
+                    }
+                    return resp;
+                }
+
+                let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
+                state.metrics.record_e2e_latency(start.elapsed());
+                let mut resp = (StatusCode::OK, Json(envelope)).into_response();
+                if should_warn {
+                    resp.headers_mut().insert(
+                        axum::http::HeaderName::from_static("x-deprecation-warning"),
+                        axum::http::HeaderValue::from_static(
+                            "Suite 1 (Ed25519) deprecated - migrate to suite 2",
+                        ),
+                    );
+                }
+                return resp;
+            }
         }
     }
 
@@ -1522,58 +1569,111 @@ async fn submit_hmc_lock(
     };
     let byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
 
-    // 4. Ingress into DualTierEngine (ClientApi origin) with ingress window enforcement
-    let start_local = std::time::Instant::now();
-    let (verdict, is_new) = state
-        .engine
-        .ingress_hmc_lock_with_metadata(
-            lookup_tag.clone(),
-            entry.clone(),
-            IngressOrigin::ClientApi,
-            Some(now_ms),
-            Some(tier_str),
-            Some(byte_years),
-            Some(req.layer2_voucher_id.clone()),
-        )
-        .await;
-    state.metrics.record_local_latency(start_local.elapsed());
+    // 4. Ingress: Local shard storage vs. Stateless Gateway routing
+    let (verdict, is_new, quorum_certificate) = if is_responsible {
+        let start_local = std::time::Instant::now();
+        let (verdict, is_new) = state
+            .engine
+            .ingress_hmc_lock_with_metadata(
+                lookup_tag.clone(),
+                entry.clone(),
+                IngressOrigin::ClientApi,
+                Some(now_ms),
+                Some(tier_str),
+                Some(byte_years),
+                Some(req.layer2_voucher_id.clone()),
+            )
+            .await;
+        state.metrics.record_local_latency(start_local.elapsed());
 
-    // 5. Assemble QuorumCertificate for successful verdicts
-    let quorum_certificate = match &verdict {
-        L2Verdict::Conflict { .. } | L2Verdict::Rejected { .. } => None,
-        _ => {
-            let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-            let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
-            let now_ms = state.net_time_ms();
-            let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-            let declared_read_ema = state.tier_controller.current_read_ema_credits();
-            let sender_pubkey = *state.identity.node_pubkey();
-            let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
-            let op_hash = entry.t_id;
-            let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-                &sender_pubkey,
-                now_ms,
-                declared_write_ema,
-                declared_read_ema,
-                footprint,
-                false,
-                &op_hash,
-            );
-            let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-            let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                req: req.clone(),
-                root_valid_until,
-                declared_write_ema_micro_bj: declared_write_ema,
-                sender_pubkey,
-                sender_signature,
-                timestamp_ms: now_ms,
-            }).ok();
-            let start_quorum = std::time::Instant::now();
-            let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
-            state.metrics.record_quorum_latency(start_quorum.elapsed());
-            Some(cert)
-        }
+        let q_cert = match &verdict {
+            L2Verdict::Conflict { .. } | L2Verdict::Rejected { .. } => None,
+            _ => {
+                let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+                let declared_read_ema = state.tier_controller.current_read_ema_credits();
+                let sender_pubkey = *state.identity.node_pubkey();
+                let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
+                let op_hash = entry.t_id;
+                let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                    &sender_pubkey,
+                    now_ms,
+                    declared_write_ema,
+                    declared_read_ema,
+                    footprint,
+                    false,
+                    &op_hash,
+                );
+                let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+                let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+                    req: req.clone(),
+                    root_valid_until,
+                    declared_write_ema_micro_bj: declared_write_ema,
+                    sender_pubkey,
+                    sender_signature,
+                    timestamp_ms: now_ms,
+                }).ok();
+                let start_quorum = std::time::Instant::now();
+                let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+                state.metrics.record_quorum_latency(start_quorum.elapsed());
+                Some(cert)
+            }
+        };
+        (verdict, is_new, q_cert)
+    } else {
+        // Stateless routing Gateway: DO NOT write to local engine or redb!
+        // Instead, route and collect P2P shard attestations from the responsible shard nodes.
+        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+        let declared_read_ema = state.tier_controller.current_read_ema_credits();
+        let sender_pubkey = *state.identity.node_pubkey();
+        let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
+        let op_hash = entry.t_id;
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+            &sender_pubkey,
+            now_ms,
+            declared_write_ema,
+            declared_read_ema,
+            footprint,
+            false,
+            &op_hash,
+        );
+        let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+        let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+            req: req.clone(),
+            root_valid_until,
+            declared_write_ema_micro_bj: declared_write_ema,
+            sender_pubkey,
+            sender_signature,
+            timestamp_ms: now_ms,
+        }).ok();
+        let start_quorum = std::time::Instant::now();
+        let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+        state.metrics.record_quorum_latency(start_quorum.elapsed());
+        let verdict = L2Verdict::Verified { lock_entry: entry.clone() };
+        (verdict, true, Some(cert))
     };
+
+    // 5. Quorum-Gating: No HTTP 200/201 without reaching quorum
+    if let Some(ref cert) = quorum_certificate {
+        if !cert.is_quorum_reached() {
+            let reason = format!(
+                "Quorum not reached: required {} signatures, collected {}",
+                cert.required_quorum(), cert.signatures.len()
+            );
+            let rej_verdict = L2Verdict::Rejected { reason };
+            let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert.clone()));
+            state.metrics.record_e2e_latency(start.elapsed());
+            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+            if should_warn {
+                resp.headers_mut().insert(
+                    axum::http::HeaderName::from_static("x-deprecation-warning"),
+                    axum::http::HeaderValue::from_static(
+                        "Suite 1 (Ed25519) deprecated - migrate to suite 2",
+                    ),
+                );
+            }
+            return resp;
+        }
+    }
 
     // 6. Wrap and sign response envelope with appropriate HTTP status
     let status = match &verdict {
@@ -1725,81 +1825,143 @@ async fn submit_hmc_chain_lock_inner(
     };
     let byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
 
-    // Atomares Ketten-Locking via engine
-    let start_local = std::time::Instant::now();
-    let (verdict, is_new) = state
-        .engine
-        .ingress_hmc_chain_lock_with_tier(
-            chain_req.clone(),
-            IngressOrigin::ClientApi,
-            Some(now_ms),
-            Some(tier_str),
-            Some(byte_years),
-        )
-        .await;
-    state.metrics.record_local_latency(start_local.elapsed());
-
-    let quorum_certificate = match &verdict {
-        L2Verdict::Verified { lock_entry } => {
-            // Last hop lookup for shard derivation
-            let last_hop = match chain_req.chain.last() {
-                Some(hop) => hop,
-                None => {
-                    let envelope = wrap_and_sign_verdict(
-                        &state.identity,
-                        L2Verdict::Rejected {
-                            reason: "Chain cannot be empty".into(),
-                        },
-                    );
-                    return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
-                }
-            };
-            let lookup_tag = if last_hop.is_genesis {
-                bs58::encode(&last_hop.transaction_hash).into_string()
-            } else {
-                last_hop.ds_tag.clone().unwrap_or_default()
-            };
-            let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-            let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
-            let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-            let declared_read_ema = state.tier_controller.current_read_ema_credits();
-            let sender_pubkey = *state.identity.node_pubkey();
-            let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds).saturating_mul(chain_req.chain.len() as u64);
-            let op_hash = lock_entry.t_id;
-            let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-                &sender_pubkey,
-                now_ms,
-                declared_write_ema,
-                declared_read_ema,
-                footprint,
-                false,
-                &op_hash,
+    let last_hop = match chain_req.chain.last() {
+        Some(hop) => hop,
+        None => {
+            let envelope = wrap_and_sign_verdict(
+                &state.identity,
+                L2Verdict::Rejected {
+                    reason: "Chain cannot be empty".into(),
+                },
             );
-            let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-            let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                req: last_hop.clone(),
-                root_valid_until,
-                declared_write_ema_micro_bj: declared_write_ema,
-                sender_pubkey,
-                sender_signature,
-                timestamp_ms: now_ms,
-            })
-            .ok();
-            let start_quorum = std::time::Instant::now();
-            let cert = assemble_quorum_certificate(
-                &state,
-                lock_entry.t_id,
-                parent_bytes,
-                shard_id,
-                now_ms,
-                wire_payload,
+            return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+        }
+    };
+    let lookup_tag = if last_hop.is_genesis {
+        bs58::encode(&last_hop.transaction_hash).into_string()
+    } else {
+        last_hop.ds_tag.clone().unwrap_or_default()
+    };
+    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+    let is_responsible = if let Some(pm) = &state.peer_manager {
+        pm.is_local_responsible_for_shard(state.identity.hrw_routing_id(), shard_id, 20).await
+    } else {
+        true
+    };
+
+    let (verdict, is_new, quorum_certificate) = if is_responsible {
+        // Atomares Ketten-Locking via engine
+        let start_local = std::time::Instant::now();
+        let (verdict, is_new) = state
+            .engine
+            .ingress_hmc_chain_lock_with_tier(
+                chain_req.clone(),
+                IngressOrigin::ClientApi,
+                Some(now_ms),
+                Some(tier_str),
+                Some(byte_years),
             )
             .await;
-            state.metrics.record_quorum_latency(start_quorum.elapsed());
-            Some(cert)
-        }
-        _ => None,
+        state.metrics.record_local_latency(start_local.elapsed());
+
+        let q_cert = match &verdict {
+            L2Verdict::Verified { lock_entry } => {
+                let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+                let declared_read_ema = state.tier_controller.current_read_ema_credits();
+                let sender_pubkey = *state.identity.node_pubkey();
+                let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds).saturating_mul(chain_req.chain.len() as u64);
+                let op_hash = lock_entry.t_id;
+                let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                    &sender_pubkey,
+                    now_ms,
+                    declared_write_ema,
+                    declared_read_ema,
+                    footprint,
+                    false,
+                    &op_hash,
+                );
+                let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+                let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+                    req: last_hop.clone(),
+                    root_valid_until,
+                    declared_write_ema_micro_bj: declared_write_ema,
+                    sender_pubkey,
+                    sender_signature,
+                    timestamp_ms: now_ms,
+                })
+                .ok();
+                let start_quorum = std::time::Instant::now();
+                let cert = assemble_quorum_certificate(
+                    &state,
+                    lock_entry.t_id,
+                    parent_bytes,
+                    shard_id,
+                    now_ms,
+                    wire_payload,
+                )
+                .await;
+                state.metrics.record_quorum_latency(start_quorum.elapsed());
+                Some(cert)
+            }
+            _ => None,
+        };
+        (verdict, is_new, q_cert)
+    } else {
+        // Stateless Gateway: do not write to local engine/redb
+        let entry = L2LockEntry::from(last_hop);
+        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+        let declared_read_ema = state.tier_controller.current_read_ema_credits();
+        let sender_pubkey = *state.identity.node_pubkey();
+        let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds).saturating_mul(chain_req.chain.len() as u64);
+        let op_hash = entry.t_id;
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+            &sender_pubkey,
+            now_ms,
+            declared_write_ema,
+            declared_read_ema,
+            footprint,
+            false,
+            &op_hash,
+        );
+        let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+        let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+            req: last_hop.clone(),
+            root_valid_until,
+            declared_write_ema_micro_bj: declared_write_ema,
+            sender_pubkey,
+            sender_signature,
+            timestamp_ms: now_ms,
+        })
+        .ok();
+        let start_quorum = std::time::Instant::now();
+        let cert = assemble_quorum_certificate(
+            &state,
+            entry.t_id,
+            parent_bytes,
+            shard_id,
+            now_ms,
+            wire_payload,
+        )
+        .await;
+        state.metrics.record_quorum_latency(start_quorum.elapsed());
+        let verdict = L2Verdict::Verified { lock_entry: entry };
+        (verdict, true, Some(cert))
     };
+
+    // Quorum-Gating: No HTTP 200/201 without reaching quorum
+    if let Some(ref cert) = quorum_certificate {
+        if !cert.is_quorum_reached() {
+            let reason = format!(
+                "Quorum not reached: required {} signatures, collected {}",
+                cert.required_quorum(), cert.signatures.len()
+            );
+            let rej_verdict = L2Verdict::Rejected { reason };
+            let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert.clone()));
+            state.metrics.record_e2e_latency(start.elapsed());
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+        }
+    }
 
     let status = match &verdict {
         L2Verdict::Conflict { .. } => {

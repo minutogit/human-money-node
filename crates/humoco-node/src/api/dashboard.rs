@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -1460,10 +1460,70 @@ pub async fn admin_ping_peer(
     }
 }
 
-/// Handler for GET /dashboard/data
-pub async fn dashboard_data(State(state): State<AppState>) -> (StatusCode, Json<DashboardData>) {
+/// Computes a fast cryptographic ETag fingerprint for dashboard data.
+///
+/// Combines atomic counters (`flush_ops_total`, `total_writes`, `total_reads`,
+/// `locks_rejected`, `flush_sender_len`, `connected_peers`) and a 10s coarse time
+/// bucket (`now_ms / 10_000`) so that system stats still refresh every 10s if idle.
+pub async fn compute_dashboard_etag(state: &AppState) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let time_bucket = now_ms / 10_000;
+
+    let flush_ops_total = state
+        .engine
+        .stats
+        .flush_ops_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let total_writes = state.metrics.total_writes();
+    let total_reads = state.metrics.total_reads();
+    let locks_rejected = state.metrics.locks_rejected();
+    let flush_sender_len = state.engine.flush_sender_len() as u64;
+    let connected_peers = if let Some(ref pm) = state.peer_manager {
+        pm.connected_peer_count().await as u64
+    } else {
+        0u64
+    };
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"HUMOCO_V1_DASHBOARD_ETAG");
+    hasher.update(&flush_ops_total.to_le_bytes());
+    hasher.update(&total_writes.to_le_bytes());
+    hasher.update(&total_reads.to_le_bytes());
+    hasher.update(&locks_rejected.to_le_bytes());
+    hasher.update(&flush_sender_len.to_le_bytes());
+    hasher.update(&connected_peers.to_le_bytes());
+    hasher.update(&time_bucket.to_le_bytes());
+
+    let hash = hasher.finalize();
+    format!("\"{}\"", &hash.to_hex()[..16])
+}
+
+/// Handler for GET /dashboard/data supporting ETag caching (HTTP 304 Not Modified).
+pub async fn dashboard_data(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    let etag = compute_dashboard_etag(&state).await;
+
+    if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+        if if_none_match == etag || if_none_match.trim_matches('"') == etag.trim_matches('"') {
+            return (
+                StatusCode::NOT_MODIFIED,
+                [(header::ETAG, etag)],
+            )
+                .into_response();
+        }
+    }
+
     let data = collect_dashboard_data(&state).await;
-    (StatusCode::OK, Json(data))
+    let mut response = (StatusCode::OK, Json(data)).into_response();
+    if let Ok(etag_val) = axum::http::HeaderValue::from_str(&etag) {
+        response.headers_mut().insert(header::ETAG, etag_val);
+    }
+    response
 }
 
 /// Handler for GET /dashboard/vouchers

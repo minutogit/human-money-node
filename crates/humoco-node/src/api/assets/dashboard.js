@@ -9,25 +9,72 @@ const badge = (c, t) => `<span class="badge badge-${escapeHtml(c)}">${escapeHtml
 const codeTag = (t, title) => `<span class="code"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(t)}</span>`;
 const cTrunc = (h, title) => codeTag(truncateHash(h), title || h);
 let currentDashboardData = null;
+let currentDashboardEtag = null;
+let currentActiveTab = 'tab-cockpit';
+let lastUserActivityTime = Date.now();
+let localUptimeSeconds = null;
+let localNetworkTimeMs = null;
+let lastTickTime = Date.now();
 let currentVoucherDetail = null;
 let adminToken = '';
 let consecutiveFailures = 0;
 let pollIntervalMs = 2000;
 let pollTimer = null;
+let eventsPollTimer = null;
+let historyPollTimer = null;
 let lastSuccessfulFetchTime = null;
 let pendingConfirmCallback = null;
 let isPollPaused = false;
 let isFetchInProgress = false;
 let isHealthExpanded = false;
-
+function formatUptime(totalSecs) {
+if (totalSecs == null || isNaN(totalSecs)) return '--';
+const days = Math.floor(totalSecs / 86400);
+const hours = Math.floor((totalSecs % 86400) / 3600);
+const mins = Math.floor((totalSecs % 3600) / 60);
+const secs = Math.floor(totalSecs % 60);
+if (days > 0) return `${days}d ${hours}h ${mins}m ${secs}s`;
+if (hours > 0) return `${hours}h ${mins}m ${secs}s`;
+return `${mins}m ${secs}s`;
+}
+function formatNetTime(timeMs) {
+if (!timeMs) return '--';
+const dt = new Date(timeMs);
+const pad = n => String(n).padStart(2, '0');
+return `${pad(dt.getDate())}.${pad(dt.getMonth() + 1)}.${dt.getFullYear()}, ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+}
+function computeCurrentPollInterval() {
+if (document.hidden) return 15000;
+if (consecutiveFailures >= 3) return pollIntervalMs;
+const inactiveMs = Date.now() - lastUserActivityTime;
+if (inactiveMs < 5 * 60 * 1000) return 2000;
+if (inactiveMs < 15 * 60 * 1000) return 5000;
+return 15000;
+}
+function startLocalTicker() {
+setInterval(() => {
+const now = Date.now();
+const elapsedSec = Math.floor((now - lastTickTime) / 1000);
+if (elapsedSec >= 1) {
+lastTickTime = now;
+if (localUptimeSeconds != null) {
+localUptimeSeconds += elapsedSec;
+setText('hdr-uptime', formatUptime(localUptimeSeconds));
+}
+if (localNetworkTimeMs != null) {
+localNetworkTimeMs += elapsedSec * 1000;
+setText('hdr-net-time', formatNetTime(localNetworkTimeMs));
+}
+}
+}, 1000);
+}
 function toggleHealthCard() {
 isHealthExpanded = !isHealthExpanded;
 if (currentDashboardData) {
-  renderHealthCard(currentDashboardData);
+renderHealthCard(currentDashboardData);
 }
 }
 window.toggleHealthCard = toggleHealthCard;
-
 function renderHealthCard(d) {
 if (!d || !d.health) return;
 const level = d.health.level || 'Ok';
@@ -37,192 +84,163 @@ const hCard = $('health-card');
 const toggleIcon = $('health-toggle-icon');
 const noteEl = $('health-note');
 const itemsContainer = $('health-items-container');
-
 if (level === 'Crit') {
-  if (hBadge) { hBadge.innerText = 'KRITISCH'; hBadge.className = 'badge badge-red'; }
-  if (hIcon) hIcon.innerText = '🚨';
-  if (hCard) hCard.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+if (hBadge) { hBadge.innerText = 'KRITISCH'; hBadge.className = 'badge badge-red'; }
+if (hIcon) hIcon.innerText = '🚨';
+if (hCard) hCard.style.borderColor = 'rgba(239, 68, 68, 0.5)';
 } else if (level === 'Warn') {
-  if (hBadge) { hBadge.innerText = 'WARNUNG'; hBadge.className = 'badge badge-amber'; }
-  if (hIcon) hIcon.innerText = '⚠️';
-  if (hCard) hCard.style.borderColor = 'rgba(245, 158, 11, 0.5)';
+if (hBadge) { hBadge.innerText = 'WARNUNG'; hBadge.className = 'badge badge-amber'; }
+if (hIcon) hIcon.innerText = '⚠️';
+if (hCard) hCard.style.borderColor = 'rgba(245, 158, 11, 0.5)';
 } else {
-  if (hBadge) { hBadge.innerText = 'OK (GESUND)'; hBadge.className = 'badge badge-green'; }
-  if (hIcon) hIcon.innerText = '🟢';
-  if (hCard) hCard.style.borderColor = 'var(--border)';
+if (hBadge) { hBadge.innerText = 'OK (GESUND)'; hBadge.className = 'badge badge-green'; }
+if (hIcon) hIcon.innerText = '🟢';
+if (hCard) hCard.style.borderColor = 'var(--border)';
 }
-
 const isDegraded = (level === 'Warn' || level === 'Crit');
 const showExpanded = isDegraded || isHealthExpanded;
-
 if (toggleIcon) {
-  if (level === 'Ok') {
-    toggleIcon.innerText = showExpanded ? '▲' : '▼';
-    toggleIcon.style.display = 'inline';
-  } else {
-    toggleIcon.style.display = 'none';
-  }
+if (level === 'Ok') {
+toggleIcon.innerText = showExpanded ? '▲' : '▼';
+toggleIcon.style.display = 'inline';
+} else {
+toggleIcon.style.display = 'none';
 }
-
+}
 if (noteEl) {
-  noteEl.style.display = showExpanded ? 'block' : 'none';
+noteEl.style.display = showExpanded ? 'block' : 'none';
 }
-
 if (itemsContainer) {
-  const renderItem = item => {
-    const isCrit = item.severity === 'Crit', isWarn = item.severity === 'Warn';
-    const bCls = isCrit ? 'badge-red' : (isWarn ? 'badge-amber' : 'badge-green');
-    const bTxt = isCrit ? 'KRITISCH' : (isWarn ? 'WARNUNG' : 'INFO');
-    const itmCls = isCrit ? 'crit' : (isWarn ? 'warn' : 'ok');
-    const dur = item.duration_formatted ? ` (aktiv seit ${escapeHtml(item.duration_formatted)})` : '';
-    return `<div class="health-item ${itmCls}"><div class="health-item-header"><span class="badge ${bCls}">${bTxt}</span><strong style="color:var(--text);">${escapeHtml(item.message_de)}<span style="font-size:0.75rem;font-weight:normal;color:var(--text-muted);margin-left:0.35rem;">${dur}</span></strong><span class="code" style="font-size:0.75rem;margin-left:auto;">${escapeHtml(item.code)}</span></div>${item.hint_de ? `<div class="health-item-hint">💡 ${escapeHtml(item.hint_de)}</div>` : ''}</div>`;
-  };
-  if (level === 'Ok') {
-    const nomRow = `<div style="font-size:0.85rem;color:var(--green);display:flex;align-items:center;justify-content:space-between;padding:0.25rem 0;cursor:pointer;" onclick="toggleHealthCard()"><span style="display:flex;align-items:center;gap:0.5rem;"><span>✅</span><span>Alle Systeme nominal. Keine Auffälligkeiten erkannt.</span></span><span style="font-size:0.75rem;color:var(--text-muted);">${showExpanded ? 'Details verbergen ▲' : 'Details anzeigen ▼'}</span></div>`;
-    itemsContainer.innerHTML = nomRow + (showExpanded && d.health.items ? d.health.items.map(renderItem).join('') : '');
-  } else {
-    itemsContainer.innerHTML = (d.health.items || []).map(renderItem).join('');
-  }
+const renderItem = item => {
+const isCrit = item.severity === 'Crit', isWarn = item.severity === 'Warn';
+const bCls = isCrit ? 'badge-red' : (isWarn ? 'badge-amber' : 'badge-green');
+const bTxt = isCrit ? 'KRITISCH' : (isWarn ? 'WARNUNG' : 'INFO');
+const itmCls = isCrit ? 'crit' : (isWarn ? 'warn' : 'ok');
+const dur = item.duration_formatted ? ` (aktiv seit ${escapeHtml(item.duration_formatted)})` : '';
+return `<div class="health-item ${itmCls}"><div class="health-item-header"><span class="badge ${bCls}">${bTxt}</span><strong style="color:var(--text);">${escapeHtml(item.message_de)}<span style="font-size:0.75rem;font-weight:normal;color:var(--text-muted);margin-left:0.35rem;">${dur}</span></strong><span class="code" style="font-size:0.75rem;margin-left:auto;">${escapeHtml(item.code)}</span></div>${item.hint_de ? `<div class="health-item-hint">💡 ${escapeHtml(item.hint_de)}</div>` : ''}</div>`;
+};
+if (level === 'Ok') {
+const nomRow = `<div style="font-size:0.85rem;color:var(--green);display:flex;align-items:center;justify-content:space-between;padding:0.25rem 0;cursor:pointer;" onclick="toggleHealthCard()"><span style="display:flex;align-items:center;gap:0.5rem;"><span>✅</span><span>Alle Systeme nominal. Keine Auffälligkeiten erkannt.</span></span><span style="font-size:0.75rem;color:var(--text-muted);">${showExpanded ? 'Details verbergen ▲' : 'Details anzeigen ▼'}</span></div>`;
+itemsContainer.innerHTML = nomRow + (showExpanded && d.health.items ? d.health.items.map(renderItem).join('') : '');
+} else {
+itemsContainer.innerHTML = (d.health.items || []).map(renderItem).join('');
 }
 }
-
+}
 function fallbackCopyTextToClipboard(text) {
 return new Promise((resolve, reject) => {
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.top = '0';
-    ta.style.left = '0';
-    ta.style.width = '1px';
-    ta.style.height = '1px';
-    ta.style.padding = '0';
-    ta.style.border = 'none';
-    ta.style.outline = 'none';
-    ta.style.boxShadow = 'none';
-    ta.style.background = 'transparent';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    const success = document.execCommand('copy');
-    document.body.removeChild(ta);
-    if (success) {
-      resolve();
-    } else {
-      reject(new Error('execCommand copy failed'));
-    }
-  } catch (e) {
-    reject(e);
-  }
+try {
+const ta = document.createElement('textarea');
+ta.value = text;
+ta.style.cssText = 'position:fixed;opacity:0';
+document.body.appendChild(ta);
+ta.focus();
+ta.select();
+const ok = document.execCommand('copy');
+document.body.removeChild(ta);
+ok ? resolve() : reject(new Error('copy failed'));
+} catch (e) { reject(e); }
 });
 }
-
 function copyTextToClipboard(text) {
 if (navigator.clipboard && navigator.clipboard.writeText) {
-  return navigator.clipboard.writeText(text).catch(() => fallbackCopyTextToClipboard(text));
+return navigator.clipboard.writeText(text).catch(() => fallbackCopyTextToClipboard(text));
 }
 return fallbackCopyTextToClipboard(text);
 }
-
 function copyJournalctlCmd() {
 copyTextToClipboard('journalctl -u humoco-node -f')
-  .then(() => showToast('Befehl "journalctl -u humoco-node -f" kopiert', 'success'))
-  .catch(() => showToast('Kopieren fehlgeschlagen', 'error'));
+.then(() => showToast('Befehl "journalctl -u humoco-node -f" kopiert', 'success'))
+.catch(() => showToast('Kopieren fehlgeschlagen', 'error'));
 }
-
 function copySnippet(text, label) {
 copyTextToClipboard(text)
-  .then(() => showToast((label || 'Snippet') + ' in Zwischenablage kopiert', 'success'))
-  .catch(() => showToast('Kopieren fehlgeschlagen', 'error'));
+.then(() => showToast((label || 'Snippet') + ' in Zwischenablage kopiert', 'success'))
+.catch(() => showToast('Kopieren fehlgeschlagen', 'error'));
 }
 window.copySnippet = copySnippet;
-
 function togglePollPause() {
 isPollPaused = !isPollPaused;
 const btn = $('poll-pause-btn');
 if (btn) {
-  if (isPollPaused) {
-    btn.innerHTML = '▶️ Live (2s)';
-    btn.className = 'btn btn-secondary paused';
-    showToast('Dashboard-Aktualisierung pausiert', 'info');
-  } else {
-    btn.innerHTML = '⏸️ Pause';
-    btn.className = 'btn btn-secondary';
-    showToast('Live-Aktualisierung wieder aktiv', 'info');
-    refreshDashboard();
-  }
+if (isPollPaused) {
+btn.innerHTML = '▶️ Live (2s)';
+btn.className = 'btn btn-secondary paused';
+showToast('Dashboard-Aktualisierung pausiert', 'info');
+} else {
+btn.innerHTML = '⏸️ Pause';
+btn.className = 'btn btn-secondary';
+showToast('Live-Aktualisierung wieder aktiv', 'info');
+refreshDashboard();
 }
 }
-
+}
 // 15-minute inactivity session timeout with sessionStorage
 const ADMIN_TOKEN_KEY = 'humoco_admin_token';
 const ADMIN_TOKEN_TS_KEY = 'humoco_admin_token_ts';
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 let inactivityTimer = null;
-
 function refreshAdminSessionTimestamp() {
 if (adminToken) {
-  try {
-    sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
-  } catch (_) {}
-}
-}
-
-function clearAdminSessionStorage() {
 try {
-  sessionStorage.removeItem(ADMIN_TOKEN_KEY);
-  sessionStorage.removeItem(ADMIN_TOKEN_TS_KEY);
+sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
 } catch (_) {}
 }
-
+}
+function clearAdminSessionStorage() {
+try {
+sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+sessionStorage.removeItem(ADMIN_TOKEN_TS_KEY);
+} catch (_) {}
+}
 function resetInactivityTimer() {
 if (inactivityTimer) clearTimeout(inactivityTimer);
 if (adminToken) {
-  refreshAdminSessionTimestamp();
-  inactivityTimer = setTimeout(() => {
-    logoutAdminDueToInactivity();
-  }, INACTIVITY_TIMEOUT_MS);
+refreshAdminSessionTimestamp();
+inactivityTimer = setTimeout(() => {
+logoutAdminDueToInactivity();
+}, INACTIVITY_TIMEOUT_MS);
 }
 }
-
 function checkInactivityOnLoad() {
 try {
-  const savedToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
-  const tsStr = sessionStorage.getItem(ADMIN_TOKEN_TS_KEY);
-  if (savedToken && tsStr) {
-    const ts = parseInt(tsStr, 10);
-    if (!isNaN(ts) && Date.now() - ts < INACTIVITY_TIMEOUT_MS) {
-      adminToken = savedToken;
-      sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
-      resetInactivityTimer();
-      applyAdminMode();
-    } else {
-      clearAdminSessionStorage();
-    }
-  }
+const savedToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
+const tsStr = sessionStorage.getItem(ADMIN_TOKEN_TS_KEY);
+if (savedToken && tsStr) {
+const ts = parseInt(tsStr, 10);
+if (!isNaN(ts) && Date.now() - ts < INACTIVITY_TIMEOUT_MS) {
+adminToken = savedToken;
+sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
+resetInactivityTimer();
+applyAdminMode();
+} else {
+clearAdminSessionStorage();
+}
+}
 } catch (_) {}
 }
-
 function logoutAdminDueToInactivity() {
 if (adminToken) {
-  adminToken = '';
-  clearAdminSessionStorage();
-  if (inactivityTimer) {
-    clearTimeout(inactivityTimer);
-    inactivityTimer = null;
-  }
-  applyAdminMode();
-  showToast('Admin-Sitzung wegen Inaktivität (15 Min.) beendet', 'info');
-  refreshDashboard();
+adminToken = '';
+clearAdminSessionStorage();
+if (inactivityTimer) {
+clearTimeout(inactivityTimer);
+inactivityTimer = null;
+}
+applyAdminMode();
+showToast('Admin-Sitzung wegen Inaktivität (15 Min.) beendet', 'info');
+refreshDashboard();
 }
 }
-
 ['mousedown', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
 window.addEventListener(evt, () => {
-  if (adminToken) {
-    resetInactivityTimer();
-  }
+lastUserActivityTime = Date.now();
+if (!document.hidden && consecutiveFailures < 3) {
+pollIntervalMs = 2000;
+}
+if (adminToken) {
+resetInactivityTimer();
+}
 }, { passive: true });
 });
 function formatHHMMSS(d) {
@@ -234,12 +252,12 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 6000) {
 const c = new AbortController();
 const id = setTimeout(() => c.abort(), timeoutMs);
 try {
-  const res = await fetch(url, { ...opts, signal: c.signal });
-  clearTimeout(id);
-  return res;
+const res = await fetch(url, { ...opts, signal: c.signal });
+clearTimeout(id);
+return res;
 } catch (e) {
-  clearTimeout(id);
-  throw e;
+clearTimeout(id);
+throw e;
 }
 }
 function showToast(msg, type = 'info') {
@@ -251,9 +269,9 @@ const icon = type === 'success' ? '✅' : (type === 'error' ? '❌' : (type === 
 t.innerHTML = `<span>${icon}</span><span style="flex:1;">${escapeHtml(msg)}</span>`;
 box.appendChild(t);
 setTimeout(() => {
-  t.style.opacity = '0';
-  t.style.transform = 'translateY(10px)';
-  setTimeout(() => { if (t.parentNode) t.parentNode.removeChild(t); }, 300);
+t.style.opacity = '0';
+t.style.transform = 'translateY(10px)';
+setTimeout(() => { if (t.parentNode) t.parentNode.removeChild(t); }, 300);
 }, 4000);
 }
 function showConfirm(title, message, onConfirm) {
@@ -262,12 +280,12 @@ setText('confirm-modal-message', message);
 pendingConfirmCallback = onConfirm;
 const btn = $('confirm-modal-btn');
 btn.onclick = () => {
-  closeModal('confirm-modal');
-  if (pendingConfirmCallback) {
-    const cb = pendingConfirmCallback;
-    pendingConfirmCallback = null;
-    cb();
-  }
+closeModal('confirm-modal');
+if (pendingConfirmCallback) {
+const cb = pendingConfirmCallback;
+pendingConfirmCallback = null;
+cb();
+}
 };
 $('confirm-modal').classList.add('active');
 }
@@ -279,9 +297,9 @@ else if (level === 'Warn') { emoji = '⚠️'; document.title = '⚠️ ' + base
 else { document.title = '🟢 ' + baseTitle; }
 let link = document.querySelector("link[rel*='icon']");
 if (!link) {
-  link = document.createElement('link');
-  link.rel = 'icon';
-  document.head.appendChild(link);
+link = document.createElement('link');
+link.rel = 'icon';
+document.head.appendChild(link);
 }
 link.href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">${emoji}</text></svg>`);
 }
@@ -289,13 +307,13 @@ function updateAdminUI() {
 const btn = $('admin-btn');
 const adminEls = document.querySelectorAll('.admin-only');
 if (adminToken) {
-  btn.innerHTML = '🔓 Admin aktiv (Logout)';
-  btn.className = 'btn btn-danger';
-  adminEls.forEach(el => el.style.display = (el.tagName === 'BUTTON' ? 'inline-flex' : 'block'));
+btn.innerHTML = '🔓 Admin aktiv (Logout)';
+btn.className = 'btn btn-danger';
+adminEls.forEach(el => el.style.display = (el.tagName === 'BUTTON' ? 'inline-flex' : 'block'));
 } else {
-  btn.innerHTML = '🔒 Admin-Modus';
-  btn.className = 'btn btn-secondary';
-  adminEls.forEach(el => el.style.display = 'none');
+btn.innerHTML = '🔒 Admin-Modus';
+btn.className = 'btn btn-secondary';
+adminEls.forEach(el => el.style.display = 'none');
 }
 }
 function applyAdminMode() {
@@ -303,51 +321,51 @@ updateAdminUI();
 }
 function handleAdminBtnClick() {
 if (adminToken) {
-  if (inactivityTimer) {
-    clearTimeout(inactivityTimer);
-    inactivityTimer = null;
-  }
-  adminToken = '';
-  clearAdminSessionStorage();
-  applyAdminMode();
-  showToast('Admin-Modus abgemeldet', 'info');
-  refreshDashboard();
+if (inactivityTimer) {
+clearTimeout(inactivityTimer);
+inactivityTimer = null;
+}
+adminToken = '';
+clearAdminSessionStorage();
+applyAdminMode();
+showToast('Admin-Modus abgemeldet', 'info');
+refreshDashboard();
 } else {
-  const err = $('admin-auth-error');
-  if (err) err.style.display = 'none';
-  const input = $('admin-token-input');
-  if (input) input.value = '';
-  $('admin-modal').classList.add('active');
+const err = $('admin-auth-error');
+if (err) err.style.display = 'none';
+const input = $('admin-token-input');
+if (input) input.value = '';
+$('admin-modal').classList.add('active');
 }
 }
 async function submitAdminToken() {
 const val = $('admin-token-input')?.value.trim();
 if (!val) return;
 try {
-  const res = await fetchWithTimeout('/dashboard/admin/verify-token', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + val }
-  }, 6000);
-  if (res.ok) {
-    adminToken = val;
-    try {
-      sessionStorage.setItem(ADMIN_TOKEN_KEY, val);
-      sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
-    } catch (_) {}
-    resetInactivityTimer();
-    closeModal('admin-modal');
-    applyAdminMode();
-    showToast('Admin-Modus aktiviert', 'success');
-    refreshDashboard();
-  } else {
-    const err = $('admin-auth-error');
-    if (err) { err.innerText = 'Ungültiges Admin-Token.'; err.style.display = 'block'; }
-    showToast('Ungültiges Admin-Token.', 'error');
-  }
+const res = await fetchWithTimeout('/dashboard/admin/verify-token', {
+method: 'POST',
+headers: { 'Authorization': 'Bearer ' + val }
+}, 6000);
+if (res.ok) {
+adminToken = val;
+try {
+sessionStorage.setItem(ADMIN_TOKEN_KEY, val);
+sessionStorage.setItem(ADMIN_TOKEN_TS_KEY, String(Date.now()));
+} catch (_) {}
+resetInactivityTimer();
+closeModal('admin-modal');
+applyAdminMode();
+showToast('Admin-Modus aktiviert', 'success');
+refreshDashboard();
+} else {
+const err = $('admin-auth-error');
+if (err) { err.innerText = 'Ungültiges Admin-Token.'; err.style.display = 'block'; }
+showToast('Ungültiges Admin-Token.', 'error');
+}
 } catch (e) {
-  const err = $('admin-auth-error');
-  if (err) { err.innerText = 'Verbindungsfehler: ' + e.message; err.style.display = 'block'; }
-  showToast('Verbindungsfehler: ' + e.message, 'error');
+const err = $('admin-auth-error');
+if (err) { err.innerText = 'Verbindungsfehler: ' + e.message; err.style.display = 'block'; }
+showToast('Verbindungsfehler: ' + e.message, 'error');
 }
 }
 async function adminAddMeshPeer() {
@@ -356,43 +374,43 @@ const lInput = $('friend-label-input');
 const raw = pInput?.value.trim() || '';
 const label = lInput?.value.trim() || '';
 if (!raw) {
-  showToast('Bitte Peering-String (pubkey@ip:port) oder NodePubKey eingeben', 'error');
-  return;
+showToast('Bitte Peering-String (pubkey@ip:port) oder NodePubKey eingeben', 'error');
+return;
 }
 if (raw.includes('@')) {
-  const parts = raw.split('@');
-  if (!parts[0].trim()) {
-    showToast('Ungültiger Peering-String: NodePubKey vor "@" fehlt', 'error');
-    return;
-  }
-  if (!parts[1].trim()) {
-    showToast('Ungültiger Peering-String: Adresse nach "@" fehlt (z. B. ip:port)', 'error');
-    return;
-  }
-  if (!parts[1].includes(':') || !parts[1].split(':')[1].trim()) {
-    showToast('Ungültiger Peering-String: Port fehlt (z. B. pubkey@ip:9090)', 'error');
-    return;
-  }
+const parts = raw.split('@');
+if (!parts[0].trim()) {
+showToast('Ungültiger Peering-String: NodePubKey vor "@" fehlt', 'error');
+return;
+}
+if (!parts[1].trim()) {
+showToast('Ungültiger Peering-String: Adresse nach "@" fehlt (z. B. ip:port)', 'error');
+return;
+}
+if (!parts[1].includes(':') || !parts[1].split(':')[1].trim()) {
+showToast('Ungültiger Peering-String: Port fehlt (z. B. pubkey@ip:9090)', 'error');
+return;
+}
 } else if (raw.length < 32) {
-  showToast('Ungültiger NodePubKey: Schlüssel ist zu kurz', 'error');
-  return;
+showToast('Ungültiger NodePubKey: Schlüssel ist zu kurz', 'error');
+return;
 }
 const pubkey = raw.includes('@') ? raw.split('@')[0].trim() : raw;
 try {
-  const res = await fetchWithTimeout('/dashboard/admin/mesh/peers', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
-    body: JSON.stringify({ pubkey, label: label || null })
-  }, 6000);
-  if (res.ok) {
-    if (pInput) pInput.value = '';
-    if (lInput) lInput.value = '';
-    showToast('P2P-Server erfolgreich verbunden', 'success');
-    refreshDashboard();
-  } else {
-    const err = await res.json().catch(() => ({}));
-    showToast('Fehler: ' + (err.message || res.statusText), 'error');
-  }
+const res = await fetchWithTimeout('/dashboard/admin/mesh/peers', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
+body: JSON.stringify({ pubkey, label: label || null })
+}, 6000);
+if (res.ok) {
+if (pInput) pInput.value = '';
+if (lInput) lInput.value = '';
+showToast('P2P-Server erfolgreich verbunden', 'success');
+refreshDashboard();
+} else {
+const err = await res.json().catch(() => ({}));
+showToast('Fehler: ' + (err.message || res.statusText), 'error');
+}
 } catch (e) { showToast('Fehler: ' + e.message, 'error'); }
 }
 function adminAddFriend() {
@@ -400,23 +418,23 @@ return adminAddMeshPeer();
 }
 function adminRemoveMeshPeer(pubkey) {
 showConfirm(
-  'Nachbarknoten trennen',
-  `Möchten Sie den Nachbarknoten ${truncateHash(pubkey)} wirklich aus den F2F-Freunden entfernen?`,
-  async () => {
-    try {
-      const res = await fetchWithTimeout('/dashboard/admin/mesh/peers/' + encodeURIComponent(pubkey), {
-        method: 'DELETE',
-        headers: { 'Authorization': 'Bearer ' + adminToken }
-      }, 6000);
-      if (res.ok) {
-        showToast(`Nachbarknoten ${truncateHash(pubkey)} entfernt`, 'success');
-        refreshDashboard();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('Fehler: ' + (err.message || res.statusText), 'error');
-      }
-    } catch (e) { showToast('Fehler: ' + e.message, 'error'); }
-  }
+'Nachbarknoten trennen',
+`Möchten Sie den Nachbarknoten ${truncateHash(pubkey)} wirklich aus den F2F-Freunden entfernen?`,
+async () => {
+try {
+const res = await fetchWithTimeout('/dashboard/admin/mesh/peers/' + encodeURIComponent(pubkey), {
+method: 'DELETE',
+headers: { 'Authorization': 'Bearer ' + adminToken }
+}, 6000);
+if (res.ok) {
+showToast(`Nachbarknoten ${truncateHash(pubkey)} entfernt`, 'success');
+refreshDashboard();
+} else {
+const err = await res.json().catch(() => ({}));
+showToast('Fehler: ' + (err.message || res.statusText), 'error');
+}
+} catch (e) { showToast('Fehler: ' + e.message, 'error'); }
+}
 );
 }
 function adminRemoveFriend(pubkey) {
@@ -435,42 +453,42 @@ const tInput = $('client-friend-token-input');
 const label = lInput?.value.trim() || '';
 const token = tInput?.value.trim() || '';
 try {
-  const res = await fetchWithTimeout('/dashboard/admin/ingress/clients', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
-    body: JSON.stringify({ label, token: token || null })
-  }, 6000);
-  if (res.ok) {
-    const data = await res.json();
-    closeModal('add-client-modal');
-    showToast('Client-Freund freigeschaltet', 'success');
-    refreshDashboard();
-    showClientQrModal(data.label, data.token, data.wallet_uri);
-  } else {
-    const err = await res.json().catch(() => ({}));
-    showToast('Fehler: ' + (err.message || res.statusText), 'error');
-  }
+const res = await fetchWithTimeout('/dashboard/admin/ingress/clients', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
+body: JSON.stringify({ label, token: token || null })
+}, 6000);
+if (res.ok) {
+const data = await res.json();
+closeModal('add-client-modal');
+showToast('Client-Freund freigeschaltet', 'success');
+refreshDashboard();
+showClientQrModal(data.label, data.token, data.wallet_uri);
+} else {
+const err = await res.json().catch(() => ({}));
+showToast('Fehler: ' + (err.message || res.statusText), 'error');
+}
 } catch (e) { showToast('Fehler: ' + e.message, 'error'); }
 }
 function adminRemoveClientFriend(tokenHash, label) {
 showConfirm(
-  'Client-Freund widerrufen',
-  `Möchten Sie den Client-Freund "${label || truncateHash(tokenHash)}" wirklich widerrufen?`,
-  async () => {
-    try {
-      const res = await fetchWithTimeout('/dashboard/admin/ingress/clients/' + encodeURIComponent(tokenHash), {
-        method: 'DELETE',
-        headers: { 'Authorization': 'Bearer ' + adminToken }
-      }, 6000);
-      if (res.ok) {
-        showToast(`Client ${label || truncateHash(tokenHash)} widerrufen`, 'success');
-        refreshDashboard();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('Fehler: ' + (err.message || res.statusText), 'error');
-      }
-    } catch (e) { showToast('Fehler: ' + e.message, 'error'); }
-  }
+'Client-Freund widerrufen',
+`Möchten Sie den Client-Freund "${label || truncateHash(tokenHash)}" wirklich widerrufen?`,
+async () => {
+try {
+const res = await fetchWithTimeout('/dashboard/admin/ingress/clients/' + encodeURIComponent(tokenHash), {
+method: 'DELETE',
+headers: { 'Authorization': 'Bearer ' + adminToken }
+}, 6000);
+if (res.ok) {
+showToast(`Client ${label || truncateHash(tokenHash)} widerrufen`, 'success');
+refreshDashboard();
+} else {
+const err = await res.json().catch(() => ({}));
+showToast('Fehler: ' + (err.message || res.statusText), 'error');
+}
+} catch (e) { showToast('Fehler: ' + e.message, 'error'); }
+}
 );
 }
 function showClientQrModal(label, token, tokenHashOrUri) {
@@ -479,48 +497,44 @@ const warnEl = $('client-qr-warning');
 const uriSection = $('client-qr-uri-section');
 const tokenLabelEl = $('client-qr-token-label');
 const hintEl = $('client-qr-hint');
-
 setText('client-qr-label', label || 'Client');
-
 if (hasPlaintextToken) {
-  // Freshly created client with plaintext token
-  const apiPort = currentDashboardData?.config_view?.api_port || 8080;
-  const host = window.location.hostname || '127.0.0.1';
-  let walletUri = (tokenHashOrUri && tokenHashOrUri.startsWith('humoco://'))
-    ? tokenHashOrUri
-    : `humoco://${host}:${apiPort}?token=${token}`;
-
-  if (tokenLabelEl) tokenLabelEl.innerText = 'Token:';
-  setText('client-qr-token', token);
-  setText('client-qr-uri', walletUri);
-  if (uriSection) uriSection.style.display = 'block';
-  if (warnEl) warnEl.style.display = 'none';
-  if (hintEl) hintEl.innerText = '💡 Scannen Sie diesen QR-Code mit der HuMoCo Wallet App oder hinterlegen Sie das Token im PoS-Terminal.';
-  const svg = generateQrSvg(walletUri);
-  setHtml('client-qr-box', svg);
+// Freshly created client with plaintext token
+const apiPort = currentDashboardData?.config_view?.api_port || 8080;
+const host = window.location.hostname || '127.0.0.1';
+let walletUri = (tokenHashOrUri && tokenHashOrUri.startsWith('humoco://'))
+? tokenHashOrUri
+: `humoco://${host}:${apiPort}?token=${token}`;
+if (tokenLabelEl) tokenLabelEl.innerText = 'Token:';
+setText('client-qr-token', token);
+setText('client-qr-uri', walletUri);
+if (uriSection) uriSection.style.display = 'block';
+if (warnEl) warnEl.style.display = 'none';
+if (hintEl) hintEl.innerText = '💡 Scannen Sie diesen QR-Code mit der HuMoCo Wallet App oder hinterlegen Sie das Token im PoS-Terminal.';
+const svg = generateQrSvg(walletUri);
+setHtml('client-qr-box', svg);
 } else {
-  // Existing client - only token_hash is known
-  const hash = tokenHashOrUri || '';
-  if (tokenLabelEl) tokenLabelEl.innerText = 'Token-Hash:';
-  setText('client-qr-token', hash ? `${hash} (Klartext nicht gespeichert)` : 'Nicht verfügbar');
-  setText('client-qr-uri', '');
-  if (uriSection) uriSection.style.display = 'none';
-  if (warnEl) {
-    warnEl.innerHTML = '⚠️ <strong>Sicherheitshinweis:</strong> Das Klartext-Token wurde nur einmalig bei Erstellung angezeigt und wird aus Sicherheitsgründen nicht auf dem Server vorgehalten. Bei Verlust des Tokens bitte einen neuen Client anlegen.';
-    warnEl.style.display = 'block';
-  }
-  if (hintEl) hintEl.innerText = 'ℹ️ Dieser Client ist mit dem obenstehenden Token-Hash auf dem Knoten registriert.';
-  setHtml('client-qr-box', '<div style="font-size:2.5rem;padding:1.5rem 0;">🔒</div>');
+// Existing client - only token_hash is known
+const hash = tokenHashOrUri || '';
+if (tokenLabelEl) tokenLabelEl.innerText = 'Token-Hash:';
+setText('client-qr-token', hash ? `${hash} (Klartext nicht gespeichert)` : 'Nicht verfügbar');
+setText('client-qr-uri', '');
+if (uriSection) uriSection.style.display = 'none';
+if (warnEl) {
+warnEl.innerHTML = '⚠️ <strong>Sicherheitshinweis:</strong> Das Klartext-Token wurde nur einmalig bei Erstellung angezeigt und wird aus Sicherheitsgründen nicht auf dem Server vorgehalten. Bei Verlust des Tokens bitte einen neuen Client anlegen.';
+warnEl.style.display = 'block';
 }
-
+if (hintEl) hintEl.innerText = 'ℹ️ Dieser Client ist mit dem obenstehenden Token-Hash auf dem Knoten registriert.';
+setHtml('client-qr-box', '<div style="font-size:2.5rem;padding:1.5rem 0;">🔒</div>');
+}
 $('client-qr-modal')?.classList.add('active');
 }
 function copyClientUri() {
 const uri = $('client-qr-uri')?.innerText?.trim();
 if (!uri) return;
 copyTextToClipboard(uri).then(
-  () => showToast('Wallet-URI in die Zwischenablage kopiert', 'success'),
-  () => showToast('Fehler beim Kopieren', 'error')
+() => showToast('Wallet-URI in die Zwischenablage kopiert', 'success'),
+() => showToast('Fehler beim Kopieren', 'error')
 );
 }
 async function adminTopupQuota() {
@@ -530,27 +544,27 @@ const tag = tInput?.value.trim() || '';
 const amount = aInput ? parseInt(aInput.value, 10) : 0;
 if (!tag || isNaN(amount) || amount <= 0) return;
 try {
-  const res = await fetchWithTimeout('/dashboard/admin/quota', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
-    body: JSON.stringify({ account_tag: tag, byte_years: amount })
-  }, 6000);
-  if (res.ok) {
-    if (tInput) tInput.value = '';
-    if (aInput) aInput.value = '';
-    showToast('VIP-Guthaben erfolgreich aufgeladen', 'success');
-    refreshDashboard();
-  } else {
-    const err = await res.json().catch(() => ({}));
-    showToast('Fehler: ' + (err.message || res.statusText), 'error');
-  }
+const res = await fetchWithTimeout('/dashboard/admin/quota', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
+body: JSON.stringify({ account_tag: tag, byte_years: amount })
+}, 6000);
+if (res.ok) {
+if (tInput) tInput.value = '';
+if (aInput) aInput.value = '';
+showToast('VIP-Guthaben erfolgreich aufgeladen', 'success');
+refreshDashboard();
+} else {
+const err = await res.json().catch(() => ({}));
+showToast('Fehler: ' + (err.message || res.statusText), 'error');
+}
 } catch (e) { showToast('Fehler: ' + e.message, 'error'); }
 }
 function prefillVipTopup(tag) {
 if (!adminToken) {
-  showToast('Bitte zuerst Admin-Modus aktivieren', 'warning');
-  handleAdminBtnClick();
-  return;
+showToast('Bitte zuerst Admin-Modus aktivieren', 'warning');
+handleAdminBtnClick();
+return;
 }
 const tagInput = $('vip-tag-input');
 const amountInput = $('vip-amount-input');
@@ -569,18 +583,16 @@ const HASH_TAB_MAP = {
 '#vouchers': 'tab-ingress',
 '#history': 'tab-diagnostics',
 };
-
 function handleHashRouting() {
 const hash = (window.location.hash || '').toLowerCase();
 const tabId = HASH_TAB_MAP[hash];
 if (tabId) {
-  switchTab(tabId, false);
+switchTab(tabId, false);
 }
 }
-
 window.addEventListener('hashchange', handleHashRouting);
-
 function switchTab(tabId, updateHash = true) {
+currentActiveTab = tabId;
 document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
 document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
 const btn = document.querySelector(`[onclick="switchTab('${tabId}')"]`) || $(`tab-btn-${tabId.replace('tab-', '')}`);
@@ -588,18 +600,23 @@ if (btn) btn.classList.add('active');
 const target = $(tabId);
 if (target) target.classList.add('active');
 if (updateHash !== false) {
-  const rawHash = '#' + tabId.replace('tab-', '');
-  if (window.location.hash !== rawHash) {
-    window.location.hash = rawHash;
-  }
+const rawHash = '#' + tabId.replace('tab-', '');
+if (window.location.hash !== rawHash) {
+window.location.hash = rawHash;
+}
+}
+if (tabId === 'tab-diagnostics') {
+startPhase2Pollers();
+} else {
+stopPhase2Pollers();
 }
 }
 function copyPeering() {
 const text = $('peering-text')?.innerText || '';
 copyTextToClipboard(text).then(() => {
-  const btn = $('copy-btn');
-  if (btn) { const o = btn.innerText; btn.innerText = 'Kopiert!'; setTimeout(() => { btn.innerText = o; }, 1500); }
-  showToast('Peering-String kopiert', 'success');
+const btn = $('copy-btn');
+if (btn) { const o = btn.innerText; btn.innerText = 'Kopiert!'; setTimeout(() => { btn.innerText = o; }, 1500); }
+showToast('Peering-String kopiert', 'success');
 }).catch(() => showToast('Fehler beim Kopieren', 'error'));
 }
 function copyMyPubkey() {
@@ -609,45 +626,42 @@ copyTextToClipboard(text).then(() => showToast('NodePubKey kopiert', 'success'))
 function copyHealthDiagnosis() {
 const d = currentDashboardData;
 if (!d) {
-  showToast('Keine Diagnosedaten verfügbar', 'warning');
-  return;
+showToast('Keine Diagnosedaten verfügbar', 'warning');
+return;
 }
 const driftStr = d.clock_drift_ms != null ? `${d.clock_drift_ms > 0 ? '+' : ''}${d.clock_drift_ms} ms` : 'N/A';
 const inRamLat = d.local_latency?.avg_ms != null ? d.local_latency.avg_ms.toFixed(2) + ' ms' : 'N/A';
 const quorumLat = d.quorum_latency?.avg_ms != null ? d.quorum_latency.avg_ms.toFixed(2) + ' ms' : 'N/A';
 const e2eLat = d.e2e_latency?.avg_ms != null ? d.e2e_latency.avg_ms.toFixed(2) + ' ms' : 'N/A';
 const peersStr = `${d.connected_peers ?? 0}/${d.configured_peers ?? 0} verbunden (Netz N=${(d.active_nodes_count || 0) + 1})`;
-
 const lines = [
-  '=== HuMoCo Node Systemdiagnose ===',
-  `Node ID: ${d.node_id || 'unbekannt'}`,
-  `Status: ${d.status_badge || d.status || 'unbekannt'}`,
-  `Health Level: ${d.health?.level || 'Ok'}`,
-  `Clock Drift: ${driftStr}`,
-  `Peers: ${peersStr}`,
-  `Latenzen: In-RAM ${inRamLat} | Quorum ${quorumLat} | Kasse/E2E ${e2eLat}`,
-  ''
+'=== HuMoCo Node Systemdiagnose ===',
+`Node ID: ${d.node_id || 'unbekannt'}`,
+`Status: ${d.status_badge || d.status || 'unbekannt'}`,
+`Health Level: ${d.health?.level || 'Ok'}`,
+`Clock Drift: ${driftStr}`,
+`Peers: ${peersStr}`,
+`Latenzen: In-RAM ${inRamLat} | Quorum ${quorumLat} | Kasse/E2E ${e2eLat}`,
+''
 ];
-
 const items = d.health?.items || [];
 if (items.length > 0) {
-  lines.push('Aktive Diagnose-Meldungen:');
-  for (const item of items) {
-    const durText = item.duration_formatted ? ` (aktiv seit ${item.duration_formatted})` : '';
-    lines.push(`- [${item.severity}] ${item.code}: ${item.message_de}${durText}`);
-    if (item.hint_de) {
-      lines.push(`  Hinweis: ${item.hint_de}`);
-    }
-  }
-} else {
-  lines.push('Aktive Diagnose-Meldungen: Keine (Alle Systeme nominal)');
+lines.push('Aktive Diagnose-Meldungen:');
+for (const item of items) {
+const durText = item.duration_formatted ? ` (aktiv seit ${item.duration_formatted})` : '';
+lines.push(`- [${item.severity}] ${item.code}: ${item.message_de}${durText}`);
+if (item.hint_de) {
+lines.push(`  Hinweis: ${item.hint_de}`);
 }
-
+}
+} else {
+lines.push('Aktive Diagnose-Meldungen: Keine (Alle Systeme nominal)');
+}
 const text = lines.join('\n');
 copyTextToClipboard(text).then(() => {
-  showToast('Systemdiagnose in die Zwischenablage kopiert', 'success');
+showToast('Systemdiagnose in die Zwischenablage kopiert', 'success');
 }).catch(() => {
-  showToast('Fehler beim Kopieren der Diagnose', 'error');
+showToast('Fehler beim Kopieren der Diagnose', 'error');
 });
 }
 function closeModal(modalId) {
@@ -681,39 +695,38 @@ if (!arr || arr.length === 0) return '';
 const max = Math.max(...arr, 1.0);
 const w = 280, h = 40;
 const pts = arr.map((v, i) => {
-  const x = (i / (arr.length - 1 || 1)) * w;
-  const y = h - ((v / max) * (h - 6)) - 3;
-  return `${x.toFixed(1)},${y.toFixed(1)}`;
+const x = (i / (arr.length - 1 || 1)) * w;
+const y = h - ((v / max) * (h - 6)) - 3;
+return `${x.toFixed(1)},${y.toFixed(1)}`;
 });
 const polyline = pts.join(' ');
 return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:40px;display:block;"><polygon points="0,${h} ${polyline} ${w},${h}" fill="${color}" fill-opacity="0.15" /><polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>`;
 }
 function getNodeStatusBadge(n) {
 if (n.is_local) {
-  return badge('green', 'Lokal (Self)');
+return badge('green', 'Lokal (Self)');
 }
 const s = n.connection_status || '';
 if (s.includes('Banned')) {
-  return badge('red', 'Dauerhaft gebannt (Kryptografische Fraud-Proof)');
+return badge('red', 'Dauerhaft gebannt (Kryptografische Fraud-Proof)');
 }
 if (s.includes('Suspended') || n.missing_count >= 3) {
-  return badge('red', 'Vorübergehend pausiert (3/3)');
+return badge('red', 'Vorübergehend pausiert (3/3)');
 }
 if (s.includes('Degrading') || (n.missing_count > 0 && n.missing_count < 3)) {
-  return badge('amber', `Beeinträchtigt (${escapeHtml(n.missing_count)}/3)`);
+return badge('amber', `Beeinträchtigt (${escapeHtml(n.missing_count)}/3)`);
 }
 if (s.includes('Connected')) {
-  return badge('green', 'Verbunden (0 Ausfälle)');
+return badge('green', 'Verbunden (0 Ausfälle)');
 }
 if (s.includes('Configured')) {
-  return badge('cyan', 'Konfiguriert (Standby)');
+return badge('cyan', 'Konfiguriert (Standby)');
 }
 if (s.includes('Learned')) {
-  return badge('cyan', 'Gossip gelernt');
+return badge('cyan', 'Gossip gelernt');
 }
 return badge('amber', escapeHtml(s));
 }
-
 function renderNodeRow(n) {
 const roleBadge = n.is_local ? badge('purple', 'LOCAL') : (n.is_f2f ? badge('blue', 'F2F Friend') : badge('cyan', 'Shard'));
 const statusBadge = getNodeStatusBadge(n);
@@ -723,21 +736,18 @@ const routeText = `${escapeHtml(n.min_hops)} Hop${n.min_hops === 1 ? '' : 's'}${
 const incubText = n.is_immature ? badge('amber', `24h (${escapeHtml(n.incubation_remaining_sec || 0)}s)`) : badge('green', 'Aktiv');
 const safePubkey = escapeHtml(n.public_key || '');
 const safeAddr = escapeHtml(n.address || '');
-
 let actionBtns = `<button class="btn btn-secondary btn-xs" data-pubkey="${safePubkey}" onclick="openNodeInspector(this.getAttribute('data-pubkey'))" title="Knoten-Diagnose">🔍 Info</button>`;
 if (adminToken && !n.is_local) {
-  actionBtns += ` <button class="btn btn-secondary btn-xs" style="margin-left:0.25rem;" data-addr="${safeAddr}" onclick="adminPingPeer(this.getAttribute('data-addr'))" title="QUIC Latenz-Ping">🔄 Ping</button>`;
-  if (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading')) {
-    actionBtns += ` <button class="btn btn-secondary btn-xs" style="margin-left:0.25rem;border-color:var(--green);color:var(--green);" data-addr="${safeAddr}" onclick="adminResetPeer(this.getAttribute('data-addr'))" title="Ausfall-Zähler zurücksetzen und heilen">🩹 Heilen</button>`;
-  }
-  if (n.is_f2f) {
-    actionBtns += ` <button class="btn btn-danger btn-xs" style="margin-left:0.25rem;" data-pubkey="${safePubkey}" onclick="adminRemoveMeshPeer(this.getAttribute('data-pubkey'))" title="F2F-Freund entfernen">🗑️</button>`;
-  }
+actionBtns += ` <button class="btn btn-secondary btn-xs" style="margin-left:0.25rem;" data-addr="${safeAddr}" onclick="adminPingPeer(this.getAttribute('data-addr'))" title="QUIC Latenz-Ping">🔄 Ping</button>`;
+if (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading')) {
+actionBtns += ` <button class="btn btn-secondary btn-xs" style="margin-left:0.25rem;border-color:var(--green);color:var(--green);" data-addr="${safeAddr}" onclick="adminResetPeer(this.getAttribute('data-addr'))" title="Ausfall-Zähler zurücksetzen und heilen">🩹 Heilen</button>`;
 }
-
+if (n.is_f2f) {
+actionBtns += ` <button class="btn btn-danger btn-xs" style="margin-left:0.25rem;" data-pubkey="${safePubkey}" onclick="adminRemoveMeshPeer(this.getAttribute('data-pubkey'))" title="F2F-Freund entfernen">🗑️</button>`;
+}
+}
 const isProblem = (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading'));
 const rowStyle = isProblem ? ' style="background: rgba(239, 68, 68, 0.08);"' : '';
-
 return `<tr${rowStyle}><td>${cTrunc(n.public_key)}</td><td>${escapeHtml(n.address)}</td><td>${roleBadge}</td><td>${statusBadge}</td><td>${rttText}</td><td>${failText}</td><td>${routeText}</td><td>${cTrunc(n.hrw_routing_id)}</td><td>${incubText}</td><td>${actionBtns}</td></tr>`;
 }
 function openNodeInspector(pubkey) {
@@ -758,156 +768,144 @@ function copyNodePubkey() {
 const el = $('node-modal-pubkey');
 if (el) copyTextToClipboard(el.innerText).then(() => showToast('NodePubKey in Zwischenablage kopiert', 'success')).catch(() => showToast('Fehler beim Kopieren', 'error'));
 }
-
 let sortCol = '';
 let sortAsc = true;
-
 function sortNodesTable(col) {
 if (sortCol === col) {
-  sortAsc = !sortAsc;
+sortAsc = !sortAsc;
 } else {
-  sortCol = col;
-  sortAsc = true;
+sortCol = col;
+sortAsc = true;
 }
 ['pubkey', 'address', 'type', 'status', 'rtt', 'failures'].forEach(c => {
-  const el = $('sort-' + c);
-  if (el) {
-    if (c === sortCol) {
-      el.innerText = sortAsc ? '▲' : '▼';
-      el.style.color = 'var(--text)';
-    } else {
-      el.innerText = '↕';
-      el.style.color = 'var(--text-muted)';
-    }
-  }
+const el = $('sort-' + c);
+if (el) {
+if (c === sortCol) {
+el.innerText = sortAsc ? '▲' : '▼';
+el.style.color = 'var(--text)';
+} else {
+el.innerText = '↕';
+el.style.color = 'var(--text-muted)';
+}
+}
 });
 filterNodesTable();
 }
 window.sortNodesTable = sortNodesTable;
-
 let currentPeerFilter = 'ALL';
 function setPeerFilter(filter) {
 currentPeerFilter = filter;
 ['all', 'f2f', 'shard', 'incubating', 'problem'].forEach(f => {
-  const chip = $('chip-' + f);
-  if (chip) chip.classList.toggle('active', f.toUpperCase() === filter.toUpperCase());
+const chip = $('chip-' + f);
+if (chip) chip.classList.toggle('active', f.toUpperCase() === filter.toUpperCase());
 });
 filterNodesTable();
 }
 window.setPeerFilter = setPeerFilter;
-
 function filterNodesTable() {
 const term = $('node-search-input')?.value.trim().toLowerCase();
 const nodesTbody = $('nodes-tbody');
 if (!currentDashboardData?.network_nodes || !nodesTbody) return;
-
 let nodes = currentDashboardData.network_nodes.slice();
-
 // Filter
 nodes = nodes.filter(n => {
-  if (currentPeerFilter === 'F2F' && !n.is_f2f) return false;
-  if (currentPeerFilter === 'SHARD' && (n.is_local || n.is_f2f)) return false;
-  if (currentPeerFilter === 'INCUBATING' && !n.is_immature) return false;
-  if (currentPeerFilter === 'PROBLEM') {
-    const isProblem = (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading'));
-    if (!isProblem) return false;
-  }
-  if (term) {
-    const m = (n.public_key || '').toLowerCase().includes(term) ||
-              (n.address || '').toLowerCase().includes(term) ||
-              (n.connection_status || '').toLowerCase().includes(term) ||
-              (n.hrw_routing_id || '').toLowerCase().includes(term);
-    if (!m) return false;
-  }
-  return true;
-});
-
-if (sortCol) {
-  nodes.sort((a, b) => {
-    let cmp = 0;
-    if (sortCol === 'pubkey') cmp = (a.public_key || '').localeCompare(b.public_key || '');
-    else if (sortCol === 'address') cmp = (a.address || '').localeCompare(b.address || '');
-    else if (sortCol === 'type') cmp = (a.is_local ? 0 : (a.is_f2f ? 1 : 2)) - (b.is_local ? 0 : (b.is_f2f ? 1 : 2));
-    else if (sortCol === 'status') cmp = (a.connection_status || '').localeCompare(b.connection_status || '');
-    else if (sortCol === 'rtt') cmp = (a.rtt_ms ?? 999999) - (b.rtt_ms ?? 999999);
-    else if (sortCol === 'failures') cmp = (a.missing_count || 0) - (b.missing_count || 0);
-    return sortAsc ? cmp : -cmp;
-  });
+if (currentPeerFilter === 'F2F' && !n.is_f2f) return false;
+if (currentPeerFilter === 'SHARD' && (n.is_local || n.is_f2f)) return false;
+if (currentPeerFilter === 'INCUBATING' && !n.is_immature) return false;
+if (currentPeerFilter === 'PROBLEM') {
+const isProblem = (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading'));
+if (!isProblem) return false;
 }
-
+if (term) {
+const m = (n.public_key || '').toLowerCase().includes(term) ||
+(n.address || '').toLowerCase().includes(term) ||
+(n.connection_status || '').toLowerCase().includes(term) ||
+(n.hrw_routing_id || '').toLowerCase().includes(term);
+if (!m) return false;
+}
+return true;
+});
+if (sortCol) {
+nodes.sort((a, b) => {
+let cmp = 0;
+if (sortCol === 'pubkey') cmp = (a.public_key || '').localeCompare(b.public_key || '');
+else if (sortCol === 'address') cmp = (a.address || '').localeCompare(b.address || '');
+else if (sortCol === 'type') cmp = (a.is_local ? 0 : (a.is_f2f ? 1 : 2)) - (b.is_local ? 0 : (b.is_f2f ? 1 : 2));
+else if (sortCol === 'status') cmp = (a.connection_status || '').localeCompare(b.connection_status || '');
+else if (sortCol === 'rtt') cmp = (a.rtt_ms ?? 999999) - (b.rtt_ms ?? 999999);
+else if (sortCol === 'failures') cmp = (a.missing_count || 0) - (b.missing_count || 0);
+return sortAsc ? cmp : -cmp;
+});
+}
 let html = '';
 for (const n of nodes) {
-  html += renderNodeRow(n);
+html += renderNodeRow(n);
 }
 nodesTbody.innerHTML = html || '<tr><td colspan="10" class="empty-cell">Keine Knoten für diesen Filter gefunden</td></tr>';
 setText('network-count-sub', `${currentDashboardData.network_nodes.length} Knoten registriert (${nodes.length} angezeigt)`);
 }
 window.filterNodesTable = filterNodesTable;
-
 async function adminPingPeer(addr) {
 if (!adminToken) {
-  showToast('Admin-Modus nicht aktiv', 'warning');
-  return;
+showToast('Admin-Modus nicht aktiv', 'warning');
+return;
 }
 showToast(`Sende Ping an ${escapeHtml(addr)}...`, 'info');
 try {
-  const res = await fetchWithTimeout('/dashboard/admin/peers/' + encodeURIComponent(addr) + '/ping', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + adminToken }
-  }, 4000);
-  const json = await res.json().catch(() => ({}));
-  if (res.ok) {
-    showToast(`Ping erfolgreich (${escapeHtml(addr)}): ${json.rtt_ms} ms RTT`, 'success');
-    refreshDashboard();
-  } else {
-    showToast(`Ping fehlgeschlagen (${escapeHtml(addr)}): ${json.message || res.statusText}`, 'error');
-  }
+const res = await fetchWithTimeout('/dashboard/admin/peers/' + encodeURIComponent(addr) + '/ping', {
+method: 'POST',
+headers: { 'Authorization': 'Bearer ' + adminToken }
+}, 4000);
+const json = await res.json().catch(() => ({}));
+if (res.ok) {
+showToast(`Ping erfolgreich (${escapeHtml(addr)}): ${json.rtt_ms} ms RTT`, 'success');
+refreshDashboard();
+} else {
+showToast(`Ping fehlgeschlagen (${escapeHtml(addr)}): ${json.message || res.statusText}`, 'error');
+}
 } catch (e) {
-  showToast(`Ping Fehler: ${e.message}`, 'error');
+showToast(`Ping Fehler: ${e.message}`, 'error');
 }
 }
 window.adminPingPeer = adminPingPeer;
-
 async function adminResetPeer(addr) {
 if (!adminToken) {
-  showToast('Admin-Modus nicht aktiv', 'warning');
-  return;
+showToast('Admin-Modus nicht aktiv', 'warning');
+return;
 }
 showConfirm(
-  'Knoten heilen',
-  `Möchten Sie den Status und die Ausfall-Zähler für Peer ${escapeHtml(addr)} wirklich zurücksetzen?`,
-  async () => {
-    try {
-      const res = await fetchWithTimeout('/dashboard/admin/peers/' + encodeURIComponent(addr) + '/reset', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + adminToken }
-      }, 4000);
-      const json = await res.json().catch(() => ({}));
-      if (res.ok) {
-        showToast(`Peer ${escapeHtml(addr)} erfolgreich zurückgesetzt und geheilt`, 'success');
-        refreshDashboard();
-      } else {
-        showToast(`Reset fehlgeschlagen: ${json.message || res.statusText}`, 'error');
-      }
-    } catch (e) {
-      showToast(`Reset Fehler: ${e.message}`, 'error');
-    }
-  }
+'Knoten heilen',
+`Möchten Sie den Status und die Ausfall-Zähler für Peer ${escapeHtml(addr)} wirklich zurücksetzen?`,
+async () => {
+try {
+const res = await fetchWithTimeout('/dashboard/admin/peers/' + encodeURIComponent(addr) + '/reset', {
+method: 'POST',
+headers: { 'Authorization': 'Bearer ' + adminToken }
+}, 4000);
+const json = await res.json().catch(() => ({}));
+if (res.ok) {
+showToast(`Peer ${escapeHtml(addr)} erfolgreich zurückgesetzt und geheilt`, 'success');
+refreshDashboard();
+} else {
+showToast(`Reset fehlgeschlagen: ${json.message || res.statusText}`, 'error');
+}
+} catch (e) {
+showToast(`Reset Fehler: ${e.message}`, 'error');
+}
+}
 );
 }
 window.adminResetPeer = adminResetPeer;
-
 let currentLockFilter = 'ALL';
 function setLockFilter(filter) {
 currentLockFilter = filter;
 ['all', '409', 'vip', 'free'].forEach(f => {
-  const chip = $('chip-lock-' + f);
-  if (chip) chip.classList.toggle('active', f === filter.toLowerCase());
+const chip = $('chip-lock-' + f);
+if (chip) chip.classList.toggle('active', f === filter.toLowerCase());
 });
 filterLocksTable();
 }
 window.setLockFilter = setLockFilter;
-
 function jumpToConflictLocks() {
 switchTab('tab-ingress');
 setLockFilter('409');
@@ -918,48 +916,47 @@ const d = currentDashboardData;
 const locksTbody = $('locks-tbody');
 if (!locksTbody || !d?.recent_locks) return;
 if (d.recent_locks.length > 0) {
-  const filtered = d.recent_locks.filter(l => {
-    if (currentLockFilter === '409') return l.status === 'Conflict' || l.status === '409';
-    if (currentLockFilter === 'VIP') return l.tier === 'VIP';
-    if (currentLockFilter === 'FREE') return l.tier === 'Free';
-    return true;
-  });
-  if (filtered.length > 0) {
-    let html = '';
-    for (const l of filtered) {
-      const b = l.status === 'Verified' ? badge('green', 'Verified') : (l.status === 'Provisional' ? badge('amber', 'Provisional') : badge('red', 'Conflict'));
-      const pShort = truncateHash(l.parent_lock_hex);
-      const cShort = truncateHash(l.child_lock_hex);
-      let tierBadge = badge('cyan', 'P2P Sync');
-      if (l.tier === 'VIP') tierBadge = badge('purple', `VIP (${escapeHtml(l.byte_years || 0)} BY)`);
-      else if (l.tier === 'F2F') tierBadge = badge('blue', `F2F (${escapeHtml(l.byte_years || 0)} BY)`);
-      else if (l.tier === 'Free') tierBadge = badge('green', 'Free (PoW)');
-      else if (l.tier) tierBadge = badge('cyan', l.tier);
-      const safeVoucherId = l.voucher_id ? escapeHtml(l.voucher_id) : '';
-      const safeParentHex = escapeHtml(l.parent_lock_hex || '');
-      const vLink = l.voucher_id ? `<button class="btn btn-secondary btn-xs" data-voucher="${safeVoucherId}" onclick="openVoucherInspector(this.getAttribute('data-voucher'))">🎟️ ${escapeHtml(truncateHash(l.voucher_id))}</button>` : '<span style="color:var(--text-muted);">-</span>';
-      html += `<tr><td>${escapeHtml(l.timestamp_ms)}</td><td>${codeTag(pShort, l.parent_lock_hex)}</td><td>${codeTag(cShort, l.child_lock_hex)}</td><td>${tierBadge}</td><td>${vLink}</td><td>${b}</td><td><button class="btn btn-secondary btn-xs" data-parent="${safeParentHex}" onclick="openLockInspector(this.getAttribute('data-parent'))">📄 JSON</button></td></tr>`;
-    }
-    locksTbody.innerHTML = html;
-  } else {
-    locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren für diesen Filter</td></tr>';
-  }
+const filtered = d.recent_locks.filter(l => {
+if (currentLockFilter === '409') return l.status === 'Conflict' || l.status === '409';
+if (currentLockFilter === 'VIP') return l.tier === 'VIP';
+if (currentLockFilter === 'FREE') return l.tier === 'Free';
+return true;
+});
+if (filtered.length > 0) {
+let html = '';
+for (const l of filtered) {
+const b = l.status === 'Verified' ? badge('green', 'Verified') : (l.status === 'Provisional' ? badge('amber', 'Provisional') : badge('red', 'Conflict'));
+const pShort = truncateHash(l.parent_lock_hex);
+const cShort = truncateHash(l.child_lock_hex);
+let tierBadge = badge('cyan', 'P2P Sync');
+if (l.tier === 'VIP') tierBadge = badge('purple', `VIP (${escapeHtml(l.byte_years || 0)} BY)`);
+else if (l.tier === 'F2F') tierBadge = badge('blue', `F2F (${escapeHtml(l.byte_years || 0)} BY)`);
+else if (l.tier === 'Free') tierBadge = badge('green', 'Free (PoW)');
+else if (l.tier) tierBadge = badge('cyan', l.tier);
+const safeVoucherId = l.voucher_id ? escapeHtml(l.voucher_id) : '';
+const safeParentHex = escapeHtml(l.parent_lock_hex || '');
+const vLink = l.voucher_id ? `<button class="btn btn-secondary btn-xs" data-voucher="${safeVoucherId}" onclick="openVoucherInspector(this.getAttribute('data-voucher'))">🎟️ ${escapeHtml(truncateHash(l.voucher_id))}</button>` : '<span style="color:var(--text-muted);">-</span>';
+html += `<tr><td>${escapeHtml(l.timestamp_ms)}</td><td>${codeTag(pShort, l.parent_lock_hex)}</td><td>${codeTag(cShort, l.child_lock_hex)}</td><td>${tierBadge}</td><td>${vLink}</td><td>${b}</td><td><button class="btn btn-secondary btn-xs" data-parent="${safeParentHex}" onclick="openLockInspector(this.getAttribute('data-parent'))">📄 JSON</button></td></tr>`;
+}
+locksTbody.innerHTML = html;
 } else {
-  locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren im Ringbuffer</td></tr>';
+locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren für diesen Filter</td></tr>';
+}
+} else {
+locksTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Keine Sperren im Ringbuffer</td></tr>';
 }
 }
-
 async function openLockInspector(lookupTag) {
 try {
-  const res = await fetchWithTimeout('/dashboard/lock/' + encodeURIComponent(lookupTag), {}, 6000);
-  if (!res.ok) return;
-  const json = await res.json();
-  setText('modal-title', '🔒 Sperr-Rohdaten: ' + truncateHash(lookupTag));
-  setHtml('modal-details', `<strong>Lookup Tag:</strong> <span class="code">${escapeHtml(lookupTag)}</span>`);
-  setText('modal-json', JSON.stringify(json, null, 2));
-  $('json-modal').classList.add('active');
+const res = await fetchWithTimeout('/dashboard/lock/' + encodeURIComponent(lookupTag), {}, 6000);
+if (!res.ok) return;
+const json = await res.json();
+setText('modal-title', '🔒 Sperr-Rohdaten: ' + truncateHash(lookupTag));
+setHtml('modal-details', `<strong>Lookup Tag:</strong> <span class="code">${escapeHtml(lookupTag)}</span>`);
+setText('modal-json', JSON.stringify(json, null, 2));
+$('json-modal').classList.add('active');
 } catch (e) {
-  showToast('Laden der Sperr-Rohdaten fehlgeschlagen: ' + e.message, 'error');
+showToast('Laden der Sperr-Rohdaten fehlgeschlagen: ' + e.message, 'error');
 }
 }
 async function openVoucherInspector(voucherId) {
@@ -971,67 +968,66 @@ async function searchVoucher() {
 const term = $('voucher-search-input')?.value.trim();
 if (!term) return;
 try {
-  const res = await fetchWithTimeout('/dashboard/voucher/' + encodeURIComponent(term), {}, 6000);
-  if (res.ok) {
-    const detail = await res.json();
-    currentVoucherDetail = detail;
-    setText('voucher-modal-title', '🎟️ Gutschein-Lineage: ' + truncateHash(detail.voucher_id));
-    const html = `<div style="margin-bottom:0.6rem;line-height:1.5;"><div><strong>Gutschein-ID:</strong> <span class="code">${escapeHtml(detail.voucher_id)}</span> &bull; <strong>Wurzel-Gültigkeit:</strong> ${escapeHtml(detail.root_valid_until_formatted)}</div><div><strong>Genesis Tag:</strong> <span class="code">${escapeHtml(detail.genesis_tag || 'N/A')}</span> &bull; <strong>Sperren in Kette:</strong> ${escapeHtml(detail.locks.length)} (${escapeHtml(detail.total_byte_years)} BY)</div></div>`;
-    let tableHtml = '<h4 style="margin:0.5rem 0 0.2rem 0;font-size:0.85rem;">Ketten-Historie:</h4><div style="overflow-x:auto;"><table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
-    for (const h of detail.locks) {
-      tableHtml += `<tr><td>${h.is_genesis ? badge('amber', 'GENESIS') : badge('blue', 'SPEND')}</td><td>${cTrunc(h.lookup_tag)}</td><td class="code">${escapeHtml(truncateHash(h.t_id_hex))}</td><td class="code">${escapeHtml(truncateHash(h.sender_pub_hex))}</td></tr>`;
-    }
-    tableHtml += '</tbody></table></div>';
-    setHtml('voucher-modal-details', html);
-    setHtml('voucher-modal-table-container', tableHtml);
-    setText('voucher-modal-json', JSON.stringify(detail, null, 2));
-    $('voucher-modal').classList.add('active');
-  } else {
-    showToast(`Gutschein oder Lookup-Tag "${escapeHtml(term)}" nicht gefunden.`, 'warning');
-  }
+const res = await fetchWithTimeout('/dashboard/voucher/' + encodeURIComponent(term), {}, 6000);
+if (res.ok) {
+const detail = await res.json();
+currentVoucherDetail = detail;
+setText('voucher-modal-title', '🎟️ Gutschein-Lineage: ' + truncateHash(detail.voucher_id));
+const html = `<div style="margin-bottom:0.6rem;line-height:1.5;"><div><strong>Gutschein-ID:</strong> <span class="code">${escapeHtml(detail.voucher_id)}</span> &bull; <strong>Wurzel-Gültigkeit:</strong> ${escapeHtml(detail.root_valid_until_formatted)}</div><div><strong>Genesis Tag:</strong> <span class="code">${escapeHtml(detail.genesis_tag || 'N/A')}</span> &bull; <strong>Sperren in Kette:</strong> ${escapeHtml(detail.locks.length)} (${escapeHtml(detail.total_byte_years)} BY)</div></div>`;
+let tableHtml = '<h4 style="margin:0.5rem 0 0.2rem 0;font-size:0.85rem;">Ketten-Historie:</h4><div style="overflow-x:auto;"><table><thead><tr><th>Typ</th><th>Lookup Tag</th><th>Child Lock (t_id)</th><th>Sender PubKey</th></tr></thead><tbody>';
+for (const h of detail.locks) {
+tableHtml += `<tr><td>${h.is_genesis ? badge('amber', 'GENESIS') : badge('blue', 'SPEND')}</td><td>${cTrunc(h.lookup_tag)}</td><td class="code">${escapeHtml(truncateHash(h.t_id_hex))}</td><td class="code">${escapeHtml(truncateHash(h.sender_pub_hex))}</td></tr>`;
+}
+tableHtml += '</tbody></table></div>';
+setHtml('voucher-modal-details', html);
+setHtml('voucher-modal-table-container', tableHtml);
+setText('voucher-modal-json', JSON.stringify(detail, null, 2));
+$('voucher-modal').classList.add('active');
+} else {
+showToast(`Gutschein oder Lookup-Tag "${escapeHtml(term)}" nicht gefunden.`, 'warning');
+}
 } catch (e) {
-  showToast('Fehler bei der Suche: ' + e.message, 'error');
+showToast('Fehler bei der Suche: ' + e.message, 'error');
 }
 }
 function updateTabBadge(id, count) {
 const el = $(id);
 if (!el) return;
 if (count > 0) {
-  el.innerText = count;
-  el.style.display = 'inline-flex';
+el.innerText = count;
+el.style.display = 'inline-flex';
 } else {
-  el.style.display = 'none';
+el.style.display = 'none';
 }
 }
-
 function updateHeader(data) {
 if (data.network_time_ms) {
-  const dt = new Date(data.network_time_ms);
-  const pad = n => String(n).padStart(2, '0');
-  setText('hdr-net-time', `${pad(dt.getDate())}.${pad(dt.getMonth() + 1)}.${dt.getFullYear()}, ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`);
+const dt = new Date(data.network_time_ms);
+const pad = n => String(n).padStart(2, '0');
+setText('hdr-net-time', `${pad(dt.getDate())}.${pad(dt.getMonth() + 1)}.${dt.getFullYear()}, ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`);
 }
 const simBadge = $('hdr-sim-badge');
 if (simBadge) simBadge.style.display = data.is_simulation ? 'inline-block' : 'none';
 if (data.clock_drift_ms != null) {
-  const driftEl = $('net-clock-drift');
-  if (driftEl) {
-    const sign = data.clock_drift_ms > 0 ? '+' : '';
-    driftEl.innerText = `${sign}${data.clock_drift_ms} ms`;
-    driftEl.style.color = Math.abs(data.clock_drift_ms) > 2000 ? 'var(--red)' : (Math.abs(data.clock_drift_ms) > 500 ? 'var(--amber)' : 'var(--text)');
-  }
+const driftEl = $('net-clock-drift');
+if (driftEl) {
+const sign = data.clock_drift_ms > 0 ? '+' : '';
+driftEl.innerText = `${sign}${data.clock_drift_ms} ms`;
+driftEl.style.color = Math.abs(data.clock_drift_ms) > 2000 ? 'var(--red)' : (Math.abs(data.clock_drift_ms) > 500 ? 'var(--amber)' : 'var(--text)');
+}
 }
 const heroText = $('net-hero-text');
 if (heroText) {
-  const isWeltnetz = (data.active_nodes_count || 0) + 1 >= 20 || data.shard_mode === 'WELTNETZ' || data.status === 'WELTNETZ';
-  heroText.innerHTML = isWeltnetz
-    ? '🌐 <strong>Netzwerk-Phase:</strong> Weltnetz (N &ge; 20): HRW Top-20 Sharding aktiv. BFT-Quorum 14/20.'
-    : '🌐 <strong>Netzwerk-Phase:</strong> Community-Mesh (Inselnetz): Alle Knoten validieren alle 65.536 Shards. BFT-Quorum erfüllt.';
+const isWeltnetz = (data.active_nodes_count || 0) + 1 >= 20 || data.shard_mode === 'WELTNETZ' || data.status === 'WELTNETZ';
+heroText.innerHTML = isWeltnetz
+? '🌐 <strong>Netzwerk-Phase:</strong> Weltnetz (N &ge; 20): HRW Top-20 Sharding aktiv. BFT-Quorum 14/20.'
+: '🌐 <strong>Netzwerk-Phase:</strong> Community-Mesh (Inselnetz): Alle Knoten validieren alle 65.536 Shards. BFT-Quorum erfüllt.';
 }
 const qEl = $('hdr-lat-quorum');
 if (qEl && data.quorum_latency) {
-  const qP95 = data.quorum_latency.p95_ms != null ? ` (p95: ${data.quorum_latency.p95_ms.toFixed(1)} ms)` : '';
-  qEl.innerText = data.quorum_latency.avg_ms.toFixed(2) + ' ms' + qP95;
-  qEl.style.color = data.quorum_latency.avg_ms >= 500.0 ? 'var(--red)' : 'var(--text)';
+const qP95 = data.quorum_latency.p95_ms != null ? ` (p95: ${data.quorum_latency.p95_ms.toFixed(1)} ms)` : '';
+qEl.innerText = data.quorum_latency.avg_ms.toFixed(2) + ' ms' + qP95;
+qEl.style.color = data.quorum_latency.avg_ms >= 500.0 ? 'var(--red)' : 'var(--text)';
 }
 const localVal = data.local_latency ? (data.local_latency.avg_ms != null ? data.local_latency.avg_ms.toFixed(2) : '--') : '--';
 const e2eVal = data.e2e_latency ? (data.e2e_latency.avg_ms != null ? data.e2e_latency.avg_ms.toFixed(2) : '--') : '--';
@@ -1040,537 +1036,536 @@ setText('hdr-lat-e2e', e2eVal !== '--' ? e2eVal + ' ms' : '--');
 if (data.uptime_formatted) setText('hdr-uptime', data.uptime_formatted);
 const netPill = $('hdr-net-pill');
 if (netPill) {
-  const n = (data.active_nodes_count || 0) + 1;
-  netPill.innerHTML = `🌐 N=${n} &bull; ${escapeHtml(data.quorum_display || 'Quorum OK')}`;
+const n = (data.active_nodes_count || 0) + 1;
+netPill.innerHTML = `🌐 N=${n} &bull; ${escapeHtml(data.quorum_display || 'Quorum OK')}`;
 }
 setText('hdr-peers', `${data.connected_peers}/${data.configured_peers}`);
 }
-
 function updateHeroKpis(d) {
 if (!d) return;
 const lvl = d.health?.level || 'Ok', st = d.status || '', bTxt = d.status_badge || st;
 let sCls = 'badge badge-green', sSub = 'Nominal (Gesund)';
 if (lvl === 'Crit' || st === 'DEGRADED') { sCls = 'badge badge-red'; sSub = 'Kritischer Zustand'; }
 else if (lvl === 'Warn' || ['STABILIZING', 'COMMUNITY MESH', 'STANDALONE', 'VILLAGE MODE'].includes(st)) {
-  sCls = 'badge badge-amber'; sSub = lvl === 'Warn' ? 'Warnung aktiv' : 'Eingeschränkt / Mesh';
+sCls = 'badge badge-amber'; sSub = lvl === 'Warn' ? 'Warnung aktiv' : 'Eingeschränkt / Mesh';
 }
 setHtml('hero-kpi-status-val', `<span class="${sCls}">${escapeHtml(bTxt)}</span>`);
 setText('hero-kpi-status-sub', sSub);
-
 setText('hero-kpi-peers-val', `${d.connected_peers ?? 0} / ${d.configured_peers ?? 0}`);
 const pB = $('hero-peers-badge');
 if (pB) {
-  pB.innerText = d.quorum_display || 'Quorum OK';
-  pB.className = 'badge ' + (d.connected_peers === 0 && d.configured_peers > 0 ? 'badge-red' : (st === 'COMMUNITY MESH' || st === 'STANDALONE' ? 'badge-amber' : 'badge-green'));
+pB.innerText = d.quorum_display || 'Quorum OK';
+pB.className = 'badge ' + (d.connected_peers === 0 && d.configured_peers > 0 ? 'badge-red' : (st === 'COMMUNITY MESH' || st === 'STANDALONE' ? 'badge-amber' : 'badge-green'));
 }
 setText('hero-kpi-peers-sub', `N=${(d.active_nodes_count || 0) + 1} Knoten`);
-
 const pers = d.persistence, qD = pers?.flush_queue_depth ?? d.flush_queue_depth ?? 0, qC = pers?.flush_queue_capacity ?? 10000;
 const qP = Math.min(100, Math.round((qD / qC) * 100));
 setText('hero-kpi-queue-val', qD.toLocaleString());
 setText('hero-kpi-queue-sub', `${qP}% Kapazität (${qC.toLocaleString()} Max)`);
 const qCrd = $('hero-kpi-queue');
 if (qCrd) qCrd.style.borderColor = qP >= 90 ? 'rgba(239, 68, 68, 0.5)' : (qP >= 50 ? 'rgba(245, 158, 11, 0.5)' : 'var(--border)');
-
 const e2e = d.e2e_latency?.avg_ms, sla = e2e != null ? e2e < 1500.0 : true;
 setText('hero-kpi-lat-val', e2e != null ? e2e.toFixed(1) + ' ms' : '-- ms');
 const eSub = $('hero-kpi-lat-sub');
 if (eSub) { eSub.innerText = sla ? '< 1.500ms SLA eingehalten' : '⚠️ SLA verletzt (> 1.500ms)'; eSub.style.color = sla ? 'var(--text-muted)' : 'var(--red)'; }
-
 setText('hero-kpi-disk-val', d.disk_free_gb != null ? d.disk_free_gb.toFixed(1) + ' GB' : '-- GB');
 const hr = d.system?.disk_headroom_label || '> 365 Tage (stabil)';
 setText('hero-kpi-disk-sub', hr.startsWith('Reichweite:') ? hr : `Reichweite: ${hr}`);
-
 const rej = d.rejections, tR = rej?.total_rejected ?? 0, c409 = rej?.conflict_409 ?? 0;
 setText('hero-kpi-rej-val', `${tR.toLocaleString()} Abgewiesen`);
 setText('hero-kpi-rej-sub', `${c409.toLocaleString()} Konflikte`);
 const rCrd = $('hero-kpi-rej');
 if (rCrd) rCrd.style.borderColor = c409 > 0 ? 'rgba(239, 68, 68, 0.4)' : (tR > 0 ? 'rgba(245, 158, 11, 0.4)' : 'var(--border)');
 }
-
-async function refreshDashboard() {
+async function refreshDashboard(force = false) {
+if (force) {
+currentDashboardEtag = null;
+}
 if (isPollPaused) {
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
-  return;
+if (pollTimer) clearTimeout(pollTimer);
+pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
+return;
 }
 if (isFetchInProgress) {
-  console.warn('Dashboard fetch already in progress, skipping interval');
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
-  return;
+console.warn('Dashboard fetch already in progress, skipping interval');
+if (pollTimer) clearTimeout(pollTimer);
+pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
+return;
 }
 isFetchInProgress = true;
 try {
-  const res = await fetchWithTimeout('/dashboard/data', {}, 6000);
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const d = await res.json();
-  currentDashboardData = d;
-  lastSuccessfulFetchTime = new Date();
-  if (adminToken) {
-    refreshAdminSessionTimestamp();
-  }
-  if (consecutiveFailures >= 3) showToast('Verbindung zum Knoten wiederhergestellt', 'success');
-  consecutiveFailures = 0;
-  pollIntervalMs = 2000;
-  const banner = $('conn-banner');
-  if (banner) banner.style.display = 'none';
-  const badgeEl = $('status-badge');
-  if (badgeEl) {
-    const st = d.status || '', bTxt = d.status_badge || st, lvl = d.health?.level || 'Ok';
-    let c = 'badge-green', t = bTxt;
-    if (st === 'ONLINE' || st === 'WELTNETZ') {
-      if (lvl === 'Crit') { c = 'badge-red'; t += ' (KRITISCH)'; }
-      else if (lvl === 'Warn') { c = 'badge-amber'; t += ' (WARNUNG)'; }
-    } else if (['COMMUNITY MESH', 'STANDALONE', 'STABILIZING', 'VILLAGE MODE'].includes(st)) {
-      c = 'badge-amber';
-    } else {
-      c = 'badge-red';
-    }
-    badgeEl.innerText = t; badgeEl.className = 'badge ' + c;
-  }
-  updateHeader(d);
-  updateHeroKpis(d);
-  setText('shard-status-sub', d.shard_mode);
-  setText('diag-runtime-mode', d.shard_mode);
-  const respRatio = d.shard_responsibility_ratio || 0;
-  const totalShards = d.total_shards || 65536;
-  const respCount = Math.round(respRatio * totalShards);
-  const respPct = (respRatio * 100).toFixed(1);
-  setText('shard-resp-summary', `Aktive Zuständigkeit: ca. ${respCount.toLocaleString()} von ${totalShards.toLocaleString()} Shards (${respPct}%)`);
-  const cv = d.config_view;
-  if (cv) {
-    setText('hdr-ports', `${cv.api_port}/${cv.p2p_port}`);
-    setText('tier-free-port', cv.api_port);
-    setText('f2f-client-port', cv.api_port);
-    setText('cfg-footprint-bytes', cv.footprint_bytes);
-    if (cv.tier_shares) {
-      setText('tier-free-badge', `${cv.tier_shares.free}% Kontingent`);
-      setText('tier-friends-badge', `${cv.tier_shares.f2f}% Reserviert`);
-      setText('tier-vip-badge', `${cv.tier_shares.vip}% Reserviert`);
-    }
-  }
-  if (d.health) {
-    renderHealthCard(d);
-    const level = d.health.level || 'Ok';
-    updateDocumentHealthIndicator(level);
-    const topBanner = $('health-banner-top');
-    if (topBanner) {
-      if (level !== 'Ok') {
-        const isCrit = level === 'Crit';
-        topBanner.className = 'health-banner-top ' + (isCrit ? 'crit' : 'warn');
-        setText('health-banner-icon', isCrit ? '🚨' : '⚠️');
-        const warnMsgs = (d.health.items || []).filter(i => i.severity !== 'Ok').map(i => i.message_de);
-        const msg = warnMsgs.length > 0 ? warnMsgs.join(' • ') : (isCrit ? 'Kritischer Systemzustand erkannt!' : 'Systemwarnung vorhanden.');
-        setText('health-banner-msg', msg);
-        topBanner.style.display = 'flex';
-      } else {
-        topBanner.style.display = 'none';
-      }
-    }
-    let cockpitWarns = 0, networkWarns = 0, ingressWarns = 0, accessWarns = 0, diagWarns = 0;
-    if (d.health.items) {
-      for (const item of d.health.items) {
-        if (item.severity === 'Warn' || item.severity === 'Crit') {
-          if (['QUEUE_HIGH', 'SLA_VIOLATED', 'CLOCK_DRIFT'].includes(item.code)) {
-            cockpitWarns++;
-          } else if (['NO_PEERS', 'LOW_PEERS', 'SUBNET_DOM'].includes(item.code)) {
-            networkWarns++;
-          } else if (['BROOM', 'GATEWAY_CONC'].includes(item.code)) {
-            ingressWarns++;
-          } else if (['DASHBOARD_EXPOSED'].includes(item.code)) {
-            diagWarns++;
-          } else {
-            cockpitWarns++;
-          }
-        }
-      }
-    }
-    updateTabBadge('tab-badge-cockpit', cockpitWarns);
-    updateTabBadge('tab-badge-network', networkWarns);
-    updateTabBadge('tab-badge-ingress', ingressWarns);
-    updateTabBadge('tab-badge-access', accessWarns);
-    updateTabBadge('tab-badge-diagnostics', diagWarns);
-    updateTabBadge('tab-badge-tiers', ingressWarns);
-  }
-  const sp = d.sparklines;
-  const latestWrite = sp?.writes?.length ? sp.writes[sp.writes.length - 1] : 0;
-  const latestRead = sp?.reads?.length ? sp.reads[sp.reads.length - 1] : 0;
-  setText('writes-rate', latestWrite.toFixed(1));
-  setText('writes-today', d.total_writes);
-  setText('reads-rate', latestRead.toFixed(1));
-  setText('reads-today', d.total_reads);
-  if (sp) {
-    setHtml('writes-sparkline', renderSparklineSvg(sp.writes, '#10b981'));
-    setHtml('reads-sparkline', renderSparklineSvg(sp.reads, '#3b82f6'));
-  }
-  const pers = d.persistence;
-  if (pers) {
-    setText('persist-queue-val', (pers.flush_queue_depth || 0).toLocaleString());
-    const qCap = pers.flush_queue_capacity || 10000;
-    setText('persist-queue-cap', qCap.toLocaleString());
-    const qBar = $('persist-queue-bar');
-    if (qBar) {
-      const qPct = Math.min(100, ((pers.flush_queue_depth || 0) / qCap) * 100);
-      qBar.style.width = qPct + '%';
-      if (pers.flush_queue_depth >= (qCap * 0.9)) qBar.className = 'progress-fill fill-red';
-      else if (pers.flush_queue_depth >= (qCap * 0.1)) qBar.className = 'progress-fill fill-amber';
-      else qBar.className = 'progress-fill fill-green';
-    }
-    const sBadge = $('persist-status-badge');
-    if (sBadge) {
-      if (pers.flush_errors_total > 0) {
-        sBadge.innerText = 'Fehler!';
-        sBadge.className = 'badge badge-red';
-      } else if (pers.flush_queue_depth >= (qCap * 0.1)) {
-        sBadge.innerText = 'Stau';
-        sBadge.className = 'badge badge-amber';
-      } else {
-        sBadge.innerText = 'Nominal';
-        sBadge.className = 'badge badge-green';
-      }
-    }
-    let lastFlushStr = 'Nie';
-    if (pers.last_successful_flush_ms > 0) {
-      if (pers.last_flush_ago_sec != null) {
-        lastFlushStr = `vor ${pers.last_flush_ago_sec}s`;
-      } else {
-        const dt = new Date(pers.last_successful_flush_ms);
-        lastFlushStr = formatHHMMSS(dt);
-      }
-    }
-    setText('persist-last-flush', lastFlushStr);
-    setText('persist-batches-val', (pers.flush_batches_total || 0).toLocaleString());
-    setText('persist-ops-val', (pers.flush_ops_total || 0).toLocaleString());
-    const errEl = $('persist-errors-val');
-    if (errEl) {
-      errEl.innerText = (pers.flush_errors_total || 0).toLocaleString();
-      errEl.style.color = pers.flush_errors_total > 0 ? 'var(--red)' : 'var(--green)';
-    }
-    setText('persist-redb-val', Math.round((pers.redb_file_bytes || 0) / 1024).toLocaleString() + ' KB');
-  }
-  const rej = d.rejections;
-  if (rej) {
-    setText('rej-total-val', (rej.total_rejected || 0).toLocaleString());
-    setText('rej-409-val', (rej.conflict_409 || 0).toLocaleString());
-    setText('rej-cap-val', (rej.capacity_429 || 0).toLocaleString());
-    setText('rej-quota-val', (rej.quota_429 || 0).toLocaleString());
-    setText('rej-pow-val', (rej.bad_pow_400 || 0).toLocaleString());
-    if (rej.last_rejection_ago_sec != null) {
-      setText('rej-last-ago', `vor ${rej.last_rejection_ago_sec}s`);
-    } else {
-      setText('rej-last-ago', 'Nie');
-    }
-    const rBadge = $('rej-badge');
-    if (rBadge) {
-      rBadge.innerText = `${(rej.total_rejected || 0).toLocaleString()} Gesamt`;
-      rBadge.className = 'badge ' + ((rej.total_rejected || 0) > 0 ? 'badge-amber' : 'badge-cyan');
-    }
-  }
-  const sys = d.system;
-  if (sys) {
-    setText('sys-cpu-val', sys.cpu_percent.toFixed(1) + '%');
-    const cpuBar = $('sys-cpu-bar');
-    if (cpuBar) {
-      const pct = Math.min(100, Math.max(0, sys.cpu_percent));
-      cpuBar.style.width = pct + '%';
-      if (pct >= 85) cpuBar.className = 'progress-fill fill-red';
-      else if (pct >= 70) cpuBar.className = 'progress-fill fill-amber';
-      else cpuBar.className = 'progress-fill fill-green';
-    }
-    if (d.disk_free_gb != null) {
-      setText('sys-disk-val', `${d.disk_free_gb.toFixed(1)} GB frei`);
-      const diskBar = $('sys-disk-bar');
-      if (diskBar) {
-        const totalGb = sys ? ((sys.redb_bytes || 0) / (1024 * 1024 * 1024)) + d.disk_free_gb : d.disk_free_gb;
-        const freePct = totalGb > 0 ? (d.disk_free_gb / totalGb) * 100 : 100;
-        diskBar.style.width = Math.min(100, Math.max(5, freePct)).toFixed(1) + '%';
-        if (freePct <= 10.0) diskBar.className = 'progress-fill fill-red';
-        else if (freePct <= 20.0) diskBar.className = 'progress-fill fill-amber';
-        else diskBar.className = 'progress-fill fill-green';
-      }
-      const headroomEl = $('sys-disk-headroom');
-      if (headroomEl && sys) {
-        if (sys.redb_growth_mb_per_day > 0) {
-          headroomEl.innerText = `Wachstum: +${sys.redb_growth_mb_per_day.toFixed(1)} MB/Tag • Reichweite: ${sys.disk_headroom_label || '> 365 Tage (stabil)'}`;
-        } else {
-          headroomEl.innerText = `Reichweite: ${sys.disk_headroom_label || '> 365 Tage (stabil)'}`;
-        }
-      }
-    }
-    setText('sys-rss-val', sys.rss_mb.toFixed(1) + ' MB');
-    setText('sys-netto-val', sys.netto_locks_bytes + ' B');
-    setText('sys-purged-val', sys.ttl_purged_count);
-  }
-  const th = d.thermometer;
-  if (th) {
-    setText('thermo-write-load', th.gossip_write_load.toFixed(2));
-    setText('thermo-read-load', th.gossip_read_load.toFixed(2));
-    setText('thermo-ncb-eff', Math.round(th.ncb_eff));
-    setText('thermo-ncb-read-eff', Math.round(th.ncb_read_eff));
-    setText('thermo-rolling-avg', th.gossip_write_load.toFixed(2));
-    setText('quota-used-val', (th.today_write_used || 0).toLocaleString());
-    setText('quota-limit-val', (th.daily_write_quota || 0).toLocaleString());
-  }
-  setText('conc-val', (d.gateway_concentration_ratio * 100).toFixed(1) + '%');
-  setText('subnet-dom-sub', (d.shard_subnet_dominance_max * 100).toFixed(1) + '%');
-  filterNodesTable();
-  const shardsTbody = $('shards-tbody');
-  if (shardsTbody) {
-    if (d.sample_shard_scores?.length > 0) {
-      const totalActive = (d.active_nodes_count || 0) + 1;
-      let html = '';
-      for (const s of d.sample_shard_scores) {
-        const rankText = `Rang ${s.rank || 1} von ${totalActive}`;
-        const sBadge = s.is_responsible
-          ? badge('green', 'Validator (Signer)')
-          : badge('cyan', 'Gateway (Relay)');
-        html += `<tr><td><strong class="code">${escapeHtml(s.shard_id)}</strong></td><td class="code">${s.score.toFixed(4)}</td><td>${escapeHtml(rankText)}</td><td>${sBadge}</td></tr>`;
-      }
-      shardsTbody.innerHTML = html;
-    } else {
-      shardsTbody.innerHTML = '<tr><td colspan="4" class="empty-cell">Keine Shard-Daten vorhanden</td></tr>';
-    }
-  }
-  const ti = d.tiers;
-  if (ti) {
-    setText('tier-free-used-val', (ti.free_used_pct || 0).toFixed(1) + '%');
-    setText('tier-free-writes-val', ti.free_writes_today || 0);
-    const freeBar = $('tier-free-bar');
-    if (freeBar) freeBar.style.width = Math.min(100, Math.max(0, ti.free_used_pct || 0)) + '%';
-    setText('tier-free-pow-val', ti.free_pow_diff);
-    setText('tier-free-hashes-val', (ti.free_pow_hashes || 1).toLocaleString());
-    setText('tier-free-time-val', ti.free_pow_time_est || '< 0.1 ms');
-    setText('tier-free-req-val', (ti.free_req_sec || 0).toFixed(1));
-    setText('tier-friends-used-val', (ti.friends_used_pct || 0).toFixed(1) + '%');
-    setText('tier-friends-writes-val', ti.friends_writes_today || 0);
-    const friendsBar = $('tier-friends-bar');
-    if (friendsBar) friendsBar.style.width = Math.min(100, Math.max(0, ti.friends_used_pct || 0)) + '%';
-    setText('tier-friends-count-val', ti.active_friends_count || 0);
-    setText('tier-vip-used-val', (ti.vip_used_pct || 0).toFixed(1) + '%');
-    setText('tier-vip-writes-val', ti.vip_writes_today || 0);
-    const vipBar = $('tier-vip-bar');
-    if (vipBar) vipBar.style.width = Math.min(100, Math.max(0, ti.vip_used_pct || 0)) + '%';
-    setText('tier-vip-accounts-val', ti.vip_accounts_count || 0);
-    setText('tier-vip-balance-val', (ti.vip_total_balance || 0).toLocaleString());
-    setText('quota-locks-val', ti.total_writes_today || 0);
-    setText('quota-pct-text', (ti.total_quota_used_pct || 0).toFixed(1) + '%');
-    const quotaBar = $('quota-bar');
-    if (quotaBar) quotaBar.style.width = Math.min(100, Math.max(0, ti.total_quota_used_pct || 0)) + '%';
-    const vipTbody = $('vip-accounts-tbody');
-    if (vipTbody) {
-      if (ti.vip_accounts?.length > 0) {
-        let html = '';
-        for (const a of ti.vip_accounts) {
-          const safeTag = escapeHtml(a.account_tag);
-          const topupBtn = `<button class="btn btn-secondary admin-only" style="${adminToken ? 'display:inline-flex;' : 'display:none;'}padding:0.2rem 0.5rem;font-size:0.75rem;" data-tag="${safeTag}" onclick="prefillVipTopup(this.getAttribute('data-tag'))">+ Aufladen</button>`;
-          html += `<tr><td>${codeTag(a.account_tag, a.account_tag)}</td><td><strong style="color:var(--purple);">${a.balance_byte_years.toLocaleString()}</strong> Byte-Jahre</td><td>${topupBtn}</td></tr>`;
-        }
-        vipTbody.innerHTML = html;
-      } else {
-        vipTbody.innerHTML = '<tr><td colspan="3" class="empty-cell">Keine VIP Accounts hinterlegt</td></tr>';
-      }
-    }
-  }
-  const f2fClientsTbody = $('f2f-clients-tbody');
-  if (f2fClientsTbody) {
-    if (d.f2f_clients?.length > 0) {
-      let html = '';
-      for (const c of d.f2f_clients) {
-        const whaleBadge = c.whale_brake_active ? badge('amber', 'Aktiv (5x)') : badge('green', 'Inaktiv');
-        const lastActive = c.last_active_sec != null ? `vor ${escapeHtml(c.last_active_sec)}s` : '<span style="color:var(--text-muted);">-</span>';
-        const tok = c.token || '';
-        const safeLabel = escapeHtml(c.label || 'Client');
-        const safeTok = escapeHtml(tok);
-        const safeHash = escapeHtml(c.token_hash || '');
-        const qrBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;font-size:0.75rem;margin-right:0.35rem;" data-label="${safeLabel}" data-tok="${safeTok}" data-hash="${safeHash}" onclick="showClientQrModal(this.getAttribute('data-label'), this.getAttribute('data-tok'), this.getAttribute('data-hash'))">QR-Code</button>`;
-        const revokeBtn = `<button class="btn btn-danger admin-only" style="${adminToken ? 'display:inline-flex;' : 'display:none;'}padding:0.2rem 0.5rem;font-size:0.75rem;" data-hash="${safeHash}" data-label="${safeLabel}" onclick="adminRemoveClientFriend(this.getAttribute('data-hash'), this.getAttribute('data-label'))">Widerrufen</button>`;
-        html += `<tr><td><strong>${safeLabel}</strong></td><td>${cTrunc(c.token_hash)}</td><td>${(c.writes_today || 0).toLocaleString()} / ${(c.daily_limit || 0).toLocaleString()}</td><td>${whaleBadge}</td><td>${lastActive}</td><td>${qrBtn}${revokeBtn}</td></tr>`;
-      }
-      f2fClientsTbody.innerHTML = html;
-      const sub = $('f2f-clients-count-sub');
-      if (sub && cv) sub.innerHTML = `${d.f2f_clients.length} Wallets registriert &bull; REST Port <strong>${cv.api_port}</strong>`;
-    } else {
-      f2fClientsTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine Ingress-Client-Freunde registriert (Locks im Free Tier nutzen BLAKE3 PoW).</td></tr>';
-    }
-  }
-  setText('vouchers-count-sub', `${d.total_active_vouchers_count || 0} Gutscheine aktiv (Top 15 angezeigt)`);
-  const vouchersTbody = $('vouchers-tbody');
-  if (vouchersTbody) {
-    if (d.active_vouchers?.length > 0) {
-      let html = '';
-      for (const v of d.active_vouchers) {
-        const genShort = v.genesis_tag ? truncateHash(v.genesis_tag) : 'N/A';
-        const sBadge = v.status === 'Active' ? badge('green', 'Aktiv') : badge('amber', v.status);
-        const safeVoucherId = escapeHtml(v.voucher_id || '');
-        html += `<tr><td><strong>${safeVoucherId}</strong></td><td>${escapeHtml(v.root_valid_until_formatted)}</td><td class="code">${escapeHtml(genShort)}</td><td>${escapeHtml(v.locks_count)} Sperren</td><td>${sBadge}</td><td><button class="btn btn-secondary" data-voucher="${safeVoucherId}" onclick="openVoucherInspector(this.getAttribute('data-voucher'))">🔍 Wurzel-Inspektor</button></td></tr>`;
-      }
-      vouchersTbody.innerHTML = html;
-    } else {
-      vouchersTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine aktiven Gutscheine im Speicher</td></tr>';
-    }
-  }
-  filterLocksTable();
+const reqHeaders = {};
+if (currentDashboardEtag) {
+reqHeaders['If-None-Match'] = currentDashboardEtag;
+}
+const res = await fetchWithTimeout('/dashboard/data', { headers: reqHeaders }, 6000);
+if (res.status === 304) {
+lastSuccessfulFetchTime = new Date();
+if (adminToken) {
+refreshAdminSessionTimestamp();
+}
+if (consecutiveFailures >= 3) showToast('Verbindung zum Knoten wiederhergestellt', 'success');
+consecutiveFailures = 0;
+pollIntervalMs = computeCurrentPollInterval();
+const banner = $('conn-banner');
+if (banner) banner.style.display = 'none';
+return;
+}
+if (!res.ok) throw new Error('HTTP ' + res.status);
+const etagHeader = res.headers ? (res.headers.get('ETag') || res.headers.get('etag')) : null;
+if (etagHeader) {
+currentDashboardEtag = etagHeader;
+}
+const d = await res.json();
+currentDashboardData = d;
+lastSuccessfulFetchTime = new Date();
+if (d.uptime_seconds != null) localUptimeSeconds = d.uptime_seconds;
+if (d.network_time_ms != null) localNetworkTimeMs = d.network_time_ms;
+lastTickTime = Date.now();
+if (adminToken) {
+refreshAdminSessionTimestamp();
+}
+if (consecutiveFailures >= 3) showToast('Verbindung zum Knoten wiederhergestellt', 'success');
+consecutiveFailures = 0;
+pollIntervalMs = computeCurrentPollInterval();
+const banner = $('conn-banner');
+if (banner) banner.style.display = 'none';
+const badgeEl = $('status-badge');
+if (badgeEl) {
+const st = d.status || '', bTxt = d.status_badge || st, lvl = d.health?.level || 'Ok';
+let c = 'badge-green', t = bTxt;
+if (st === 'ONLINE' || st === 'WELTNETZ') {
+if (lvl === 'Crit') { c = 'badge-red'; t += ' (KRITISCH)'; }
+else if (lvl === 'Warn') { c = 'badge-amber'; t += ' (WARNUNG)'; }
+} else if (['COMMUNITY MESH', 'STANDALONE', 'STABILIZING', 'VILLAGE MODE'].includes(st)) {
+c = 'badge-amber';
+} else {
+c = 'badge-red';
+}
+badgeEl.innerText = t; badgeEl.className = 'badge ' + c;
+}
+updateHeader(d);
+updateHeroKpis(d);
+setText('shard-status-sub', d.shard_mode);
+setText('diag-runtime-mode', d.shard_mode);
+const respRatio = d.shard_responsibility_ratio || 0;
+const totalShards = d.total_shards || 65536;
+const respCount = Math.round(respRatio * totalShards);
+const respPct = (respRatio * 100).toFixed(1);
+setText('shard-resp-summary', `Aktive Zuständigkeit: ca. ${respCount.toLocaleString()} von ${totalShards.toLocaleString()} Shards (${respPct}%)`);
+const cv = d.config_view;
+if (cv) {
+setText('hdr-ports', `${cv.api_port}/${cv.p2p_port}`);
+setText('tier-free-port', cv.api_port);
+setText('f2f-client-port', cv.api_port);
+setText('cfg-footprint-bytes', cv.footprint_bytes);
+if (cv.tier_shares) {
+setText('tier-free-badge', `${cv.tier_shares.free}% Kontingent`);
+setText('tier-friends-badge', `${cv.tier_shares.f2f}% Reserviert`);
+setText('tier-vip-badge', `${cv.tier_shares.vip}% Reserviert`);
+}
+}
+if (d.health) {
+renderHealthCard(d);
+const level = d.health.level || 'Ok';
+updateDocumentHealthIndicator(level);
+const topBanner = $('health-banner-top');
+if (topBanner) {
+if (level !== 'Ok') {
+const isCrit = level === 'Crit';
+topBanner.className = 'health-banner-top ' + (isCrit ? 'crit' : 'warn');
+setText('health-banner-icon', isCrit ? '🚨' : '⚠️');
+const warnMsgs = (d.health.items || []).filter(i => i.severity !== 'Ok').map(i => i.message_de);
+const msg = warnMsgs.length > 0 ? warnMsgs.join(' • ') : (isCrit ? 'Kritischer Systemzustand erkannt!' : 'Systemwarnung vorhanden.');
+setText('health-banner-msg', msg);
+topBanner.style.display = 'flex';
+} else {
+topBanner.style.display = 'none';
+}
+}
+let cockpitWarns = 0, networkWarns = 0, ingressWarns = 0, accessWarns = 0, diagWarns = 0;
+if (d.health.items) {
+for (const item of d.health.items) {
+if (item.severity === 'Warn' || item.severity === 'Crit') {
+if (['QUEUE_HIGH', 'SLA_VIOLATED', 'CLOCK_DRIFT'].includes(item.code)) {
+cockpitWarns++;
+} else if (['NO_PEERS', 'LOW_PEERS', 'SUBNET_DOM'].includes(item.code)) {
+networkWarns++;
+} else if (['BROOM', 'GATEWAY_CONC'].includes(item.code)) {
+ingressWarns++;
+} else if (['DASHBOARD_EXPOSED'].includes(item.code)) {
+diagWarns++;
+} else {
+cockpitWarns++;
+}
+}
+}
+}
+updateTabBadge('tab-badge-cockpit', cockpitWarns);
+updateTabBadge('tab-badge-network', networkWarns);
+updateTabBadge('tab-badge-ingress', ingressWarns);
+updateTabBadge('tab-badge-access', accessWarns);
+updateTabBadge('tab-badge-diagnostics', diagWarns);
+updateTabBadge('tab-badge-tiers', ingressWarns);
+}
+const sp = d.sparklines;
+const latestWrite = sp?.writes?.length ? sp.writes[sp.writes.length - 1] : 0;
+const latestRead = sp?.reads?.length ? sp.reads[sp.reads.length - 1] : 0;
+setText('writes-rate', latestWrite.toFixed(1));
+setText('writes-today', d.total_writes);
+setText('reads-rate', latestRead.toFixed(1));
+setText('reads-today', d.total_reads);
+if (sp) {
+setHtml('writes-sparkline', renderSparklineSvg(sp.writes, '#10b981'));
+setHtml('reads-sparkline', renderSparklineSvg(sp.reads, '#3b82f6'));
+}
+const pers = d.persistence;
+if (pers) {
+setText('persist-queue-val', (pers.flush_queue_depth || 0).toLocaleString());
+const qCap = pers.flush_queue_capacity || 10000;
+setText('persist-queue-cap', qCap.toLocaleString());
+const qBar = $('persist-queue-bar');
+if (qBar) {
+const qPct = Math.min(100, ((pers.flush_queue_depth || 0) / qCap) * 100);
+qBar.style.width = qPct + '%';
+if (pers.flush_queue_depth >= (qCap * 0.9)) qBar.className = 'progress-fill fill-red';
+else if (pers.flush_queue_depth >= (qCap * 0.1)) qBar.className = 'progress-fill fill-amber';
+else qBar.className = 'progress-fill fill-green';
+}
+const sBadge = $('persist-status-badge');
+if (sBadge) {
+if (pers.flush_errors_total > 0) {
+sBadge.innerText = 'Fehler!';
+sBadge.className = 'badge badge-red';
+} else if (pers.flush_queue_depth >= (qCap * 0.1)) {
+sBadge.innerText = 'Stau';
+sBadge.className = 'badge badge-amber';
+} else {
+sBadge.innerText = 'Nominal';
+sBadge.className = 'badge badge-green';
+}
+}
+let lastFlushStr = 'Nie';
+if (pers.last_successful_flush_ms > 0) {
+if (pers.last_flush_ago_sec != null) {
+lastFlushStr = `vor ${pers.last_flush_ago_sec}s`;
+} else {
+const dt = new Date(pers.last_successful_flush_ms);
+lastFlushStr = formatHHMMSS(dt);
+}
+}
+setText('persist-last-flush', lastFlushStr);
+setText('persist-batches-val', (pers.flush_batches_total || 0).toLocaleString());
+setText('persist-ops-val', (pers.flush_ops_total || 0).toLocaleString());
+const errEl = $('persist-errors-val');
+if (errEl) {
+errEl.innerText = (pers.flush_errors_total || 0).toLocaleString();
+errEl.style.color = pers.flush_errors_total > 0 ? 'var(--red)' : 'var(--green)';
+}
+setText('persist-redb-val', Math.round((pers.redb_file_bytes || 0) / 1024).toLocaleString() + ' KB');
+}
+const rej = d.rejections;
+if (rej) {
+setText('rej-total-val', (rej.total_rejected || 0).toLocaleString());
+setText('rej-409-val', (rej.conflict_409 || 0).toLocaleString());
+setText('rej-cap-val', (rej.capacity_429 || 0).toLocaleString());
+setText('rej-quota-val', (rej.quota_429 || 0).toLocaleString());
+setText('rej-pow-val', (rej.bad_pow_400 || 0).toLocaleString());
+if (rej.last_rejection_ago_sec != null) {
+setText('rej-last-ago', `vor ${rej.last_rejection_ago_sec}s`);
+} else {
+setText('rej-last-ago', 'Nie');
+}
+const rBadge = $('rej-badge');
+if (rBadge) {
+rBadge.innerText = `${(rej.total_rejected || 0).toLocaleString()} Gesamt`;
+rBadge.className = 'badge ' + ((rej.total_rejected || 0) > 0 ? 'badge-amber' : 'badge-cyan');
+}
+}
+const sys = d.system;
+if (sys) {
+setText('sys-cpu-val', sys.cpu_percent.toFixed(1) + '%');
+const cpuBar = $('sys-cpu-bar');
+if (cpuBar) {
+const pct = Math.min(100, Math.max(0, sys.cpu_percent));
+cpuBar.style.width = pct + '%';
+if (pct >= 85) cpuBar.className = 'progress-fill fill-red';
+else if (pct >= 70) cpuBar.className = 'progress-fill fill-amber';
+else cpuBar.className = 'progress-fill fill-green';
+}
+if (d.disk_free_gb != null) {
+setText('sys-disk-val', `${d.disk_free_gb.toFixed(1)} GB frei`);
+const diskBar = $('sys-disk-bar');
+if (diskBar) {
+const totalGb = sys ? ((sys.redb_bytes || 0) / (1024 * 1024 * 1024)) + d.disk_free_gb : d.disk_free_gb;
+const freePct = totalGb > 0 ? (d.disk_free_gb / totalGb) * 100 : 100;
+diskBar.style.width = Math.min(100, Math.max(5, freePct)).toFixed(1) + '%';
+if (freePct <= 10.0) diskBar.className = 'progress-fill fill-red';
+else if (freePct <= 20.0) diskBar.className = 'progress-fill fill-amber';
+else diskBar.className = 'progress-fill fill-green';
+}
+const headroomEl = $('sys-disk-headroom');
+if (headroomEl && sys) {
+if (sys.redb_growth_mb_per_day > 0) {
+headroomEl.innerText = `Wachstum: +${sys.redb_growth_mb_per_day.toFixed(1)} MB/Tag • Reichweite: ${sys.disk_headroom_label || '> 365 Tage (stabil)'}`;
+} else {
+headroomEl.innerText = `Reichweite: ${sys.disk_headroom_label || '> 365 Tage (stabil)'}`;
+}
+}
+}
+setText('sys-rss-val', sys.rss_mb.toFixed(1) + ' MB');
+setText('sys-netto-val', sys.netto_locks_bytes + ' B');
+setText('sys-purged-val', sys.ttl_purged_count);
+}
+const th = d.thermometer;
+if (th) {
+setText('thermo-write-load', th.gossip_write_load.toFixed(2));
+setText('thermo-read-load', th.gossip_read_load.toFixed(2));
+setText('thermo-ncb-eff', Math.round(th.ncb_eff));
+setText('thermo-ncb-read-eff', Math.round(th.ncb_read_eff));
+setText('thermo-rolling-avg', th.gossip_write_load.toFixed(2));
+setText('quota-used-val', (th.today_write_used || 0).toLocaleString());
+setText('quota-limit-val', (th.daily_write_quota || 0).toLocaleString());
+}
+setText('conc-val', (d.gateway_concentration_ratio * 100).toFixed(1) + '%');
+setText('subnet-dom-sub', (d.shard_subnet_dominance_max * 100).toFixed(1) + '%');
+filterNodesTable();
+const shardsTbody = $('shards-tbody');
+if (shardsTbody) {
+if (d.sample_shard_scores?.length > 0) {
+const totalActive = (d.active_nodes_count || 0) + 1;
+let html = '';
+for (const s of d.sample_shard_scores) {
+const rankText = `Rang ${s.rank || 1} von ${totalActive}`;
+const sBadge = s.is_responsible
+? badge('green', 'Validator (Signer)')
+: badge('cyan', 'Gateway (Relay)');
+html += `<tr><td><strong class="code">${escapeHtml(s.shard_id)}</strong></td><td class="code">${s.score.toFixed(4)}</td><td>${escapeHtml(rankText)}</td><td>${sBadge}</td></tr>`;
+}
+shardsTbody.innerHTML = html;
+} else {
+shardsTbody.innerHTML = '<tr><td colspan="4" class="empty-cell">Keine Shard-Daten vorhanden</td></tr>';
+}
+}
+const ti = d.tiers;
+if (ti) {
+setText('tier-free-used-val', (ti.free_used_pct || 0).toFixed(1) + '%');
+setText('tier-free-writes-val', ti.free_writes_today || 0);
+const freeBar = $('tier-free-bar');
+if (freeBar) freeBar.style.width = Math.min(100, Math.max(0, ti.free_used_pct || 0)) + '%';
+setText('tier-free-pow-val', ti.free_pow_diff);
+setText('tier-free-hashes-val', (ti.free_pow_hashes || 1).toLocaleString());
+setText('tier-free-time-val', ti.free_pow_time_est || '< 0.1 ms');
+setText('tier-free-req-val', (ti.free_req_sec || 0).toFixed(1));
+setText('tier-friends-used-val', (ti.friends_used_pct || 0).toFixed(1) + '%');
+setText('tier-friends-writes-val', ti.friends_writes_today || 0);
+const friendsBar = $('tier-friends-bar');
+if (friendsBar) friendsBar.style.width = Math.min(100, Math.max(0, ti.friends_used_pct || 0)) + '%';
+setText('tier-friends-count-val', ti.active_friends_count || 0);
+setText('tier-vip-used-val', (ti.vip_used_pct || 0).toFixed(1) + '%');
+setText('tier-vip-writes-val', ti.vip_writes_today || 0);
+const vipBar = $('tier-vip-bar');
+if (vipBar) vipBar.style.width = Math.min(100, Math.max(0, ti.vip_used_pct || 0)) + '%';
+setText('tier-vip-accounts-val', ti.vip_accounts_count || 0);
+setText('tier-vip-balance-val', (ti.vip_total_balance || 0).toLocaleString());
+setText('quota-locks-val', ti.total_writes_today || 0);
+setText('quota-pct-text', (ti.total_quota_used_pct || 0).toFixed(1) + '%');
+const quotaBar = $('quota-bar');
+if (quotaBar) quotaBar.style.width = Math.min(100, Math.max(0, ti.total_quota_used_pct || 0)) + '%';
+const vipTbody = $('vip-accounts-tbody');
+if (vipTbody) {
+if (ti.vip_accounts?.length > 0) {
+let html = '';
+for (const a of ti.vip_accounts) {
+const safeTag = escapeHtml(a.account_tag);
+const topupBtn = `<button class="btn btn-secondary admin-only" style="${adminToken ? 'display:inline-flex;' : 'display:none;'}padding:0.2rem 0.5rem;font-size:0.75rem;" data-tag="${safeTag}" onclick="prefillVipTopup(this.getAttribute('data-tag'))">+ Aufladen</button>`;
+html += `<tr><td>${codeTag(a.account_tag, a.account_tag)}</td><td><strong style="color:var(--purple);">${a.balance_byte_years.toLocaleString()}</strong> Byte-Jahre</td><td>${topupBtn}</td></tr>`;
+}
+vipTbody.innerHTML = html;
+} else {
+vipTbody.innerHTML = '<tr><td colspan="3" class="empty-cell">Keine VIP Accounts hinterlegt</td></tr>';
+}
+}
+}
+const f2fClientsTbody = $('f2f-clients-tbody');
+if (f2fClientsTbody) {
+if (d.f2f_clients?.length > 0) {
+let html = '';
+for (const c of d.f2f_clients) {
+const whaleBadge = c.whale_brake_active ? badge('amber', 'Aktiv (5x)') : badge('green', 'Inaktiv');
+const lastActive = c.last_active_sec != null ? `vor ${escapeHtml(c.last_active_sec)}s` : '<span style="color:var(--text-muted);">-</span>';
+const tok = c.token || '';
+const safeLabel = escapeHtml(c.label || 'Client');
+const safeTok = escapeHtml(tok);
+const safeHash = escapeHtml(c.token_hash || '');
+const qrBtn = `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem;font-size:0.75rem;margin-right:0.35rem;" data-label="${safeLabel}" data-tok="${safeTok}" data-hash="${safeHash}" onclick="showClientQrModal(this.getAttribute('data-label'), this.getAttribute('data-tok'), this.getAttribute('data-hash'))">QR-Code</button>`;
+const revokeBtn = `<button class="btn btn-danger admin-only" style="${adminToken ? 'display:inline-flex;' : 'display:none;'}padding:0.2rem 0.5rem;font-size:0.75rem;" data-hash="${safeHash}" data-label="${safeLabel}" onclick="adminRemoveClientFriend(this.getAttribute('data-hash'), this.getAttribute('data-label'))">Widerrufen</button>`;
+html += `<tr><td><strong>${safeLabel}</strong></td><td>${cTrunc(c.token_hash)}</td><td>${(c.writes_today || 0).toLocaleString()} / ${(c.daily_limit || 0).toLocaleString()}</td><td>${whaleBadge}</td><td>${lastActive}</td><td>${qrBtn}${revokeBtn}</td></tr>`;
+}
+f2fClientsTbody.innerHTML = html;
+const sub = $('f2f-clients-count-sub');
+if (sub && cv) sub.innerHTML = `${d.f2f_clients.length} Wallets registriert &bull; REST Port <strong>${cv.api_port}</strong>`;
+} else {
+f2fClientsTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine Ingress-Client-Freunde registriert (Locks im Free Tier nutzen BLAKE3 PoW).</td></tr>';
+}
+}
+setText('vouchers-count-sub', `${d.total_active_vouchers_count || 0} Gutscheine aktiv (Top 15 angezeigt)`);
+const vouchersTbody = $('vouchers-tbody');
+if (vouchersTbody) {
+if (d.active_vouchers?.length > 0) {
+let html = '';
+for (const v of d.active_vouchers) {
+const genShort = v.genesis_tag ? truncateHash(v.genesis_tag) : 'N/A';
+const sBadge = v.status === 'Active' ? badge('green', 'Aktiv') : badge('amber', v.status);
+const safeVoucherId = escapeHtml(v.voucher_id || '');
+html += `<tr><td><strong>${safeVoucherId}</strong></td><td>${escapeHtml(v.root_valid_until_formatted)}</td><td class="code">${escapeHtml(genShort)}</td><td>${escapeHtml(v.locks_count)} Sperren</td><td>${sBadge}</td><td><button class="btn btn-secondary" data-voucher="${safeVoucherId}" onclick="openVoucherInspector(this.getAttribute('data-voucher'))">🔍 Wurzel-Inspektor</button></td></tr>`;
+}
+vouchersTbody.innerHTML = html;
+} else {
+vouchersTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine aktiven Gutscheine im Speicher</td></tr>';
+}
+}
+filterLocksTable();
 } catch (e) {
-  consecutiveFailures++;
-  if (consecutiveFailures >= 3) {
-    const banner = $('conn-banner');
-    if (banner) {
-      setText('conn-banner-time', lastSuccessfulFetchTime ? formatHHMMSS(lastSuccessfulFetchTime) : '--:--:--');
-      banner.style.display = 'flex';
-    }
-    if (pollIntervalMs < 16000) pollIntervalMs = Math.min(16000, pollIntervalMs * 2);
-  }
+consecutiveFailures++;
+if (consecutiveFailures >= 3) {
+const banner = $('conn-banner');
+if (banner) {
+setText('conn-banner-time', lastSuccessfulFetchTime ? formatHHMMSS(lastSuccessfulFetchTime) : '--:--:--');
+banner.style.display = 'flex';
+}
+if (pollIntervalMs < 16000) pollIntervalMs = Math.min(16000, pollIntervalMs * 2);
+}
 } finally {
-  isFetchInProgress = false;
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
+isFetchInProgress = false;
+if (pollTimer) clearTimeout(pollTimer);
+if (!isPollPaused && consecutiveFailures < 3) {
+pollIntervalMs = computeCurrentPollInterval();
+}
+pollTimer = setTimeout(refreshDashboard, pollIntervalMs);
 }
 }
-
 const pollData = refreshDashboard;
 const fetchDashboardData = refreshDashboard;
-
 // --- Tab 4: History & Security Event Log (Phase 2) ---
 let currentHistoryWindow = '24h';
 let cachedHistoryPoints = [];
 let cachedAuditEvents = [];
 let cachedFilteredAuditEvents = null;
-let eventsPollTimer = null;
-let historyPollTimer = null;
-
 async function loadHistoryWindow(windowStr) {
 currentHistoryWindow = windowStr;
 await fetchHistoryData();
 }
-
 async function fetchHistoryData() {
 try {
-  const res = await fetchWithTimeout(`/dashboard/history?window=${currentHistoryWindow}`, {}, 6000);
-  if (!res.ok) return;
-  const data = await res.json();
-  cachedHistoryPoints = data.points || [];
-  renderHistoryChart(cachedHistoryPoints);
+const res = await fetchWithTimeout(`/dashboard/history?window=${currentHistoryWindow}`, {}, 6000);
+if (!res.ok) return;
+const data = await res.json();
+cachedHistoryPoints = data.points || [];
+renderHistoryChart(cachedHistoryPoints);
 } catch (e) {
-  console.debug('Failed to fetch history:', e);
+console.debug('Failed to fetch history:', e);
 }
 }
-
 function renderHistoryChart(points) {
 const container = $('history-chart');
 const summary = $('history-summary-sub');
 if (!container) return;
-
 if (!points || points.length === 0) {
-  container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:0.875rem;">Noch keine Verlaufsdaten gesammelt (Sampler läuft im 60s Takt).</div>';
-  if (summary) summary.innerText = '0 Datenpunkte vorhanden';
-  return;
+container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:0.875rem;">Noch keine Verlaufsdaten gesammelt (Sampler läuft im 60s Takt).</div>';
+if (summary) summary.innerText = '0 Datenpunkte vorhanden';
+return;
 }
-
 const w = 900, h = 150;
 const len = points.length;
 if (summary) {
-  const last = points[len - 1];
-  summary.innerText = `${len} Datenpunkte (${currentHistoryWindow}) &bull; Zuletzt: Free=${last.free_writes}, F2F=${last.f2f_writes}, VIP=${last.vip_writes}, Reads=${last.read_count}, Peers=${last.connected_peers}`;
+const last = points[len - 1];
+summary.innerText = `${len} Datenpunkte (${currentHistoryWindow}) &bull; Zuletzt: Free=${last.free_writes}, F2F=${last.f2f_writes}, VIP=${last.vip_writes}, Reads=${last.read_count}, Peers=${last.connected_peers}`;
 }
-
 const maxVal = Math.max(
-  ...points.map(p => Math.max(p.free_writes || 0, p.f2f_writes || 0, p.vip_writes || 0, (p.read_count || 0) / 5)),
-  1.0
+...points.map(p => Math.max(p.free_writes || 0, p.f2f_writes || 0, p.vip_writes || 0, (p.read_count || 0) / 5)),
+1.0
 );
-
 const getPointsStr = (valFn) => {
-  return points.map((p, i) => {
-    const x = len > 1 ? (i / (len - 1)) * (w - 20) + 10 : w / 2;
-    const v = valFn(p);
-    const y = h - 20 - ((v / maxVal) * (h - 40));
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
+return points.map((p, i) => {
+const x = len > 1 ? (i / (len - 1)) * (w - 20) + 10 : w / 2;
+const v = valFn(p);
+const y = h - 20 - ((v / maxVal) * (h - 40));
+return `${x.toFixed(1)},${y.toFixed(1)}`;
+}).join(' ');
 };
-
 const freePts = getPointsStr(p => p.free_writes || 0);
 const f2fPts = getPointsStr(p => p.f2f_writes || 0);
 const vipPts = getPointsStr(p => p.vip_writes || 0);
 const readPts = getPointsStr(p => (p.read_count || 0) / 5);
 const tStart = points[0].timestamp_sec ? formatHHMMSS(new Date(points[0].timestamp_sec * 1000)) : '';
 const tEnd = points[len - 1].timestamp_sec ? formatHHMMSS(new Date(points[len - 1].timestamp_sec * 1000)) : '';
-
 let hoverDots = '';
 for (let i = 0; i < len; i++) {
-  const p = points[i];
-  const x = len > 1 ? (i / (len - 1)) * (w - 20) + 10 : w / 2;
-  const yFree = h - 20 - (((p.free_writes || 0) / maxVal) * (h - 40));
-  const timeStr = p.timestamp_sec ? new Date(p.timestamp_sec * 1000).toLocaleTimeString() : '';
-  hoverDots += `<circle cx="${x.toFixed(1)}" cy="${yFree.toFixed(1)}" r="3" fill="var(--green)" opacity="0.6"><title>${timeStr} - Free: ${p.free_writes || 0}, F2F: ${p.f2f_writes || 0}, VIP: ${p.vip_writes || 0}, Reads: ${p.read_count || 0}</title></circle>`;
+const p = points[i];
+const x = len > 1 ? (i / (len - 1)) * (w - 20) + 10 : w / 2;
+const yFree = h - 20 - (((p.free_writes || 0) / maxVal) * (h - 40));
+const timeStr = p.timestamp_sec ? new Date(p.timestamp_sec * 1000).toLocaleTimeString() : '';
+hoverDots += `<circle cx="${x.toFixed(1)}" cy="${yFree.toFixed(1)}" r="3" fill="var(--green)" opacity="0.6"><title>${timeStr} - Free: ${p.free_writes || 0}, F2F: ${p.f2f_writes || 0}, VIP: ${p.vip_writes || 0}, Reads: ${p.read_count || 0}</title></circle>`;
 }
-
 container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:100%;display:block;"><line x1="10" y1="${h-20}" x2="${w-10}" y2="${h-20}" stroke="var(--border)" stroke-width="1"/><line x1="10" y1="${(h-20)/2}" x2="${w-10}" y2="${(h-20)/2}" stroke="var(--border)" stroke-width="1" stroke-dasharray="3,3"/><text x="14" y="16" fill="var(--text-muted)" font-size="10" font-family="sans-serif">Max: ${Math.round(maxVal)} Writes/min</text><text x="14" y="${h-6}" fill="var(--text-muted)" font-size="10" font-family="sans-serif">0</text><text x="50" y="${h-6}" fill="var(--text-muted)" font-size="10" font-family="sans-serif">${tStart}</text><text x="${w-70}" y="${h-6}" fill="var(--text-muted)" font-size="10" font-family="sans-serif">${tEnd}</text><polyline points="${readPts}" fill="none" stroke="var(--cyan)" stroke-width="2" stroke-dasharray="2,2"/><polyline points="${vipPts}" fill="none" stroke="var(--purple)" stroke-width="2"/><polyline points="${f2fPts}" fill="none" stroke="var(--blue)" stroke-width="2"/><polyline points="${freePts}" fill="none" stroke="var(--green)" stroke-width="2"/>${hoverDots}</svg>`;
 }
-
 async function fetchAuditEvents() {
 try {
-  const res = await fetchWithTimeout('/dashboard/events?limit=200', {}, 6000);
-  if (!res.ok) return;
-  const data = await res.json();
-  cachedAuditEvents = data.events || [];
-  filterEventsTable();
+const res = await fetchWithTimeout('/dashboard/events?limit=200', {}, 6000);
+if (!res.ok) return;
+const data = await res.json();
+cachedAuditEvents = data.events || [];
+filterEventsTable();
 } catch (e) {
-  console.debug('Failed to fetch events:', e);
+console.debug('Failed to fetch events:', e);
 }
 }
-
 function filterEventsTable() {
 const tbody = $('events-tbody');
 const countSub = $('events-count-sub');
 if (!tbody) return;
-
 const search = $('event-search-input')?.value.trim().toLowerCase() || '';
 const severityFilter = $('event-severity-filter')?.value || 'ALL';
 const isFiltered = Boolean(search || severityFilter !== 'ALL');
-
 const filtered = cachedAuditEvents.filter(ev => {
-  if (severityFilter !== 'ALL' && ev.severity !== severityFilter) return false;
-  if (search) {
-    const matchMsg = ev.message && ev.message.toLowerCase().includes(search);
-    const matchKind = ev.kind && String(ev.kind).toLowerCase().includes(search);
-    if (!matchMsg && !matchKind) return false;
-  }
-  return true;
+if (severityFilter !== 'ALL' && ev.severity !== severityFilter) return false;
+if (search) {
+const matchMsg = ev.message && ev.message.toLowerCase().includes(search);
+const matchKind = ev.kind && String(ev.kind).toLowerCase().includes(search);
+if (!matchMsg && !matchKind) return false;
+}
+return true;
 });
-
 cachedFilteredAuditEvents = isFiltered ? filtered : null;
-
 if (countSub) {
-  if (isFiltered) {
-    countSub.innerText = `${filtered.length} von ${cachedAuditEvents.length} Ereignissen gefiltert (Ringbuffer max 1000)`;
-  } else {
-    countSub.innerText = `${cachedAuditEvents.length} Ereignisse geloggt (Ringbuffer max 1000)`;
-  }
+if (isFiltered) {
+countSub.innerText = `${filtered.length} von ${cachedAuditEvents.length} Ereignissen gefiltert (Ringbuffer max 1000)`;
+} else {
+countSub.innerText = `${cachedAuditEvents.length} Ereignisse geloggt (Ringbuffer max 1000)`;
 }
-
+}
 if (filtered.length === 0) {
-  tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine passenden Audit-Ereignisse gefunden.</td></tr>';
-  return;
+tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine passenden Audit-Ereignisse gefunden.</td></tr>';
+return;
 }
-
 // Show most recent events first
 const displayItems = [...filtered].reverse();
 let html = '';
 for (const item of displayItems) {
-  const d = new Date(item.timestamp_sec * 1000);
-  const timeStr = `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
-  const sevBadge = badge(item.severity === 'Crit' ? 'red' : (item.severity === 'Warn' ? 'amber' : 'green'), item.severity === 'Crit' ? 'CRIT' : (item.severity === 'Warn' ? 'WARN' : 'OK'));
-  const kCol = (item.kind === 'EquivocationFraud' || item.kind === 'PeerBan') ? 'red' : (item.kind === 'PeerConnect' ? 'green' : (item.kind === 'QuotaTopup' ? 'purple' : 'cyan'));
-  html += `<tr class="event-row"><td>#${item.id}</td><td>${timeStr}</td><td>${badge(kCol, item.kind)}</td><td>${sevBadge}</td><td>${escapeHtml(item.message)}</td></tr>`;
+const d = new Date(item.timestamp_sec * 1000);
+const timeStr = `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+const sevBadge = badge(item.severity === 'Crit' ? 'red' : (item.severity === 'Warn' ? 'amber' : 'green'), item.severity === 'Crit' ? 'CRIT' : (item.severity === 'Warn' ? 'WARN' : 'OK'));
+const kCol = (item.kind === 'EquivocationFraud' || item.kind === 'PeerBan') ? 'red' : (item.kind === 'PeerConnect' ? 'green' : (item.kind === 'QuotaTopup' ? 'purple' : 'cyan'));
+html += `<tr class="event-row"><td>#${item.id}</td><td>${timeStr}</td><td>${badge(kCol, item.kind)}</td><td>${sevBadge}</td><td>${escapeHtml(item.message)}</td></tr>`;
 }
 tbody.innerHTML = html;
 }
-
 function exportAuditLogJson() {
 const list = cachedFilteredAuditEvents || cachedAuditEvents;
 if (!list || list.length === 0) {
-  showToast('Keine Ereignisse zum Exportieren vorhanden', 'warning');
-  return;
+showToast('Keine Ereignisse zum Exportieren vorhanden', 'warning');
+return;
 }
 const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(list, null, 2));
 const a = document.createElement('a');
@@ -1581,21 +1576,20 @@ a.click();
 a.remove();
 showToast('JSON-Audit-Log heruntergeladen', 'success');
 }
-
 function exportAuditLogCsv() {
 const list = cachedFilteredAuditEvents || cachedAuditEvents;
 if (!list || list.length === 0) {
-  showToast('Keine Ereignisse zum Exportieren vorhanden', 'warning');
-  return;
+showToast('Keine Ereignisse zum Exportieren vorhanden', 'warning');
+return;
 }
 const header = ['ID', 'Timestamp_Sec', 'Date_Time', 'Kind', 'Severity', 'Message'];
 const rows = list.map(e => [
-  e.id,
-  e.timestamp_sec,
-  new Date(e.timestamp_sec * 1000).toISOString(),
-  `"${(e.kind || '').replace(/"/g, '""')}"`,
-  `"${(e.severity || '').replace(/"/g, '""')}"`,
-  `"${(e.message || '').replace(/"/g, '""')}"`
+e.id,
+e.timestamp_sec,
+new Date(e.timestamp_sec * 1000).toISOString(),
+`"${(e.kind || '').replace(/"/g, '""')}"`,
+`"${(e.severity || '').replace(/"/g, '""')}"`,
+`"${(e.message || '').replace(/"/g, '""')}"`
 ]);
 const csvContent = [header.join(','), ...rows.map(r => r.join(','))].join('\r\n');
 const dataStr = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvContent);
@@ -1607,18 +1601,21 @@ a.click();
 a.remove();
 showToast('CSV-Audit-Log heruntergeladen', 'success');
 }
-
 // Background tab throttling (Page Visibility API)
 document.addEventListener('visibilitychange', () => {
 if (document.hidden) {
-  pollIntervalMs = 10000;
+pollIntervalMs = 15000;
+stopPhase2Pollers();
 } else {
-  pollIntervalMs = 2000;
-  if (pollTimer) clearTimeout(pollTimer);
-  refreshDashboard();
+lastUserActivityTime = Date.now();
+pollIntervalMs = 2000;
+if (pollTimer) clearTimeout(pollTimer);
+refreshDashboard();
+if (currentActiveTab === 'tab-diagnostics') {
+startPhase2Pollers();
+}
 }
 });
-
 function generateQrSvg(text) {
 const bytes = new TextEncoder().encode(text), len = bytes.length;
 let ver, size, alignCenter, totalCW, dataCW, ecCW, numBlocks, remBits;
@@ -1626,133 +1623,128 @@ if (len <= 53) { ver = 3; size = 29; alignCenter = 22; totalCW = 70; dataCW = 55
 else if (len <= 78) { ver = 4; size = 33; alignCenter = 26; totalCW = 100; dataCW = 80; ecCW = 20; numBlocks = 1; remBits = 0; }
 else if (len <= 106) { ver = 5; size = 37; alignCenter = 30; totalCW = 134; dataCW = 108; ecCW = 26; numBlocks = 1; remBits = 0; }
 else { ver = 6; size = 41; alignCenter = 34; totalCW = 172; dataCW = 136; ecCW = 18; numBlocks = 2; remBits = 7; }
-
 const bitBuf = [];
 const pushBits = (val, count) => { for (let i = count - 1; i >= 0; i--) bitBuf.push(((val >> i) & 1) === 1); };
 pushBits(4, 4); pushBits(len, 8);
 for (let i = 0; i < len; i++) pushBits(bytes[i], 8);
 pushBits(0, Math.min(4, Math.max(0, dataCW * 8 - bitBuf.length)));
 while (bitBuf.length % 8 !== 0) bitBuf.push(false);
-
 const dataCodewords = [];
 for (let i = 0; i < bitBuf.length; i += 8) {
-  let b = 0;
-  for (let j = 0; j < 8; j++) b = (b << 1) | (bitBuf[i + j] ? 1 : 0);
-  dataCodewords.push(b);
+let b = 0;
+for (let j = 0; j < 8; j++) b = (b << 1) | (bitBuf[i + j] ? 1 : 0);
+dataCodewords.push(b);
 }
 const pad = [0xEC, 0x11]; let padIdx = 0;
 while (dataCodewords.length < dataCW) { dataCodewords.push(pad[padIdx]); padIdx = 1 - padIdx; }
-
 const exp = new Uint8Array(512), log = new Uint8Array(256);
 let x = 1;
 for (let i = 0; i < 255; i++) { exp[i] = x; exp[i + 255] = x; log[x] = i; x <<= 1; if (x >= 256) x ^= 0x11D; }
 const gfMul = (a, b) => (!a || !b ? 0 : exp[(log[a] + log[b]) % 255]);
-
 let gen = [1];
 for (let i = 0; i < ecCW; i++) {
-  const alpha = exp[i], next = new Array(gen.length + 1).fill(0);
-  for (let j = 0; j < gen.length; j++) { next[j] ^= gen[j]; next[j + 1] ^= gfMul(gen[j], alpha); }
-  gen = next;
+const alpha = exp[i], next = new Array(gen.length + 1).fill(0);
+for (let j = 0; j < gen.length; j++) { next[j] ^= gen[j]; next[j + 1] ^= gfMul(gen[j], alpha); }
+gen = next;
 }
 const rsEncode = (data, ecCount) => {
-  const rem = new Array(ecCount).fill(0);
-  for (let i = 0; i < data.length; i++) {
-    const factor = data[i] ^ rem[0];
-    rem.copyWithin(0, 1, ecCount); rem[ecCount - 1] = 0;
-    if (factor !== 0) { for (let j = 0; j < ecCount; j++) rem[j] ^= gfMul(gen[j + 1], factor); }
-  }
-  return rem;
+const rem = new Array(ecCount).fill(0);
+for (let i = 0; i < data.length; i++) {
+const factor = data[i] ^ rem[0];
+rem.copyWithin(0, 1, ecCount); rem[ecCount - 1] = 0;
+if (factor !== 0) { for (let j = 0; j < ecCount; j++) rem[j] ^= gfMul(gen[j + 1], factor); }
+}
+return rem;
 };
-
 const dataPerBlock = Math.floor(dataCW / numBlocks), dataBlocks = [], ecBlocks = [];
 for (let b = 0; b < numBlocks; b++) {
-  const slice = dataCodewords.slice(b * dataPerBlock, (b + 1) * dataPerBlock);
-  dataBlocks.push(slice); ecBlocks.push(rsEncode(slice, ecCW));
+const slice = dataCodewords.slice(b * dataPerBlock, (b + 1) * dataPerBlock);
+dataBlocks.push(slice); ecBlocks.push(rsEncode(slice, ecCW));
 }
 const interleaved = [];
 for (let i = 0; i < dataPerBlock; i++) for (let b = 0; b < numBlocks; b++) interleaved.push(dataBlocks[b][i]);
 for (let i = 0; i < ecCW; i++) for (let b = 0; b < numBlocks; b++) interleaved.push(ecBlocks[b][i]);
-
 const allBits = [];
 for (let i = 0; i < interleaved.length; i++) for (let j = 7; j >= 0; j--) allBits.push(((interleaved[i] >> j) & 1) === 1);
 while (allBits.length < totalCW * 8 + remBits) allBits.push(false);
-
 const modules = Array.from({ length: size }, () => Array(size).fill(false));
 const isFunc = Array.from({ length: size }, () => Array(size).fill(false));
 const markFunc = (r, c) => { if (r >= 0 && r < size && c >= 0 && c < size) isFunc[r][c] = true; };
 const placeFinder = (top, left) => {
-  for (let r = 0; r < 7; r++) for (let c = 0; c < 7; c++) {
-    modules[top + r][left + c] = r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4);
-    isFunc[top + r][left + c] = true;
-  }
+for (let r = 0; r < 7; r++) for (let c = 0; c < 7; c++) {
+modules[top + r][left + c] = r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4);
+isFunc[top + r][left + c] = true;
+}
 };
 placeFinder(0, 0); placeFinder(0, size - 7); placeFinder(size - 7, 0);
 for (let i = 0; i < 8; i++) {
-  markFunc(7, i); markFunc(i, 7); markFunc(7, size - 1 - i); markFunc(i, size - 8);
-  markFunc(size - 8, i); markFunc(size - 1 - i, 7);
+markFunc(7, i); markFunc(i, 7); markFunc(7, size - 1 - i); markFunc(i, size - 8);
+markFunc(size - 8, i); markFunc(size - 1 - i, 7);
 }
 if (alignCenter > 0) {
-  for (let r = -2; r <= 2; r++) for (let c = -2; c <= 2; c++) {
-    modules[alignCenter + r][alignCenter + c] = Math.abs(r) === 2 || Math.abs(c) === 2 || (r === 0 && c === 0);
-    isFunc[alignCenter + r][alignCenter + c] = true;
-  }
+for (let r = -2; r <= 2; r++) for (let c = -2; c <= 2; c++) {
+modules[alignCenter + r][alignCenter + c] = Math.abs(r) === 2 || Math.abs(c) === 2 || (r === 0 && c === 0);
+isFunc[alignCenter + r][alignCenter + c] = true;
+}
 }
 for (let i = 8; i < size - 8; i++) {
-  modules[6][i] = i % 2 === 0; isFunc[6][i] = true;
-  modules[i][6] = i % 2 === 0; isFunc[i][6] = true;
+modules[6][i] = i % 2 === 0; isFunc[6][i] = true;
+modules[i][6] = i % 2 === 0; isFunc[i][6] = true;
 }
 modules[size - 8][8] = true; isFunc[size - 8][8] = true;
 for (let i = 0; i < 9; i++) { isFunc[8][i] = true; isFunc[i][8] = true; }
 for (let i = 0; i < 8; i++) { isFunc[8][size - 1 - i] = true; isFunc[size - 1 - i][8] = true; }
-
 let bitIdx = 0, col = size - 1, upward = true;
 while (col > 0) {
-  if (col === 6) col -= 1;
-  const rows = upward ? Array.from({ length: size }, (_, i) => size - 1 - i) : Array.from({ length: size }, (_, i) => i);
-  for (const r of rows) for (const c of [col, col - 1]) {
-    if (!isFunc[r][c]) {
-      const bit = bitIdx < allBits.length ? allBits[bitIdx] : false;
-      bitIdx++;
-      modules[r][c] = bit !== ((r + c) % 2 === 0);
-    }
-  }
-  upward = !upward; col -= 2;
+if (col === 6) col -= 1;
+const rows = upward ? Array.from({ length: size }, (_, i) => size - 1 - i) : Array.from({ length: size }, (_, i) => i);
+for (const r of rows) for (const c of [col, col - 1]) {
+if (!isFunc[r][c]) {
+const bit = bitIdx < allBits.length ? allBits[bitIdx] : false;
+bitIdx++;
+modules[r][c] = bit !== ((r + c) % 2 === 0);
 }
-
+}
+upward = !upward; col -= 2;
+}
 const formatVal = 0x77C4;
 for (let i = 0; i < 15; i++) {
-  const bit = ((formatVal >> i) & 1) === 1;
-  modules[i <= 5 ? 8 : (i === 6 ? 8 : (i === 7 ? 8 : (i === 8 ? 7 : 14 - i)))][i <= 5 ? i : (i === 6 ? 7 : (i === 7 ? 8 : (i === 8 ? 8 : 8)))] = bit;
-  modules[i < 7 ? size - 1 - i : 8][i < 7 ? 8 : size - 8 + (i - 7)] = bit;
+const bit = ((formatVal >> i) & 1) === 1;
+modules[i <= 5 ? 8 : (i === 6 ? 8 : (i === 7 ? 8 : (i === 8 ? 7 : 14 - i)))][i <= 5 ? i : (i === 6 ? 7 : (i === 7 ? 8 : (i === 8 ? 8 : 8)))] = bit;
+modules[i < 7 ? size - 1 - i : 8][i < 7 ? 8 : size - 8 + (i - 7)] = bit;
 }
-
 const quiet = 4, total = size + quiet * 2;
 let d = '';
 for (let r = 0; r < size; r++) {
-  let c = 0;
-  while (c < size) {
-    if (modules[r][c]) {
-      const startC = c;
-      while (c < size && modules[r][c]) c++;
-      const w = c - startC, x = startC + quiet, y = r + quiet;
-      d += w === 1 ? `M${x} ${y}h1v1h-1z ` : `M${x} ${y}h${w}v1h-${w}z `;
-    } else c++;
-  }
+let c = 0;
+while (c < size) {
+if (modules[r][c]) {
+const startC = c;
+while (c < size && modules[r][c]) c++;
+const w = c - startC, x = startC + quiet, y = r + quiet;
+d += w === 1 ? `M${x} ${y}h1v1h-1z ` : `M${x} ${y}h${w}v1h-${w}z `;
+} else c++;
+}
 }
 return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${total} ${total}" shape-rendering="crispEdges" class="qr-svg"><rect width="${total}" height="${total}" fill="#ffffff"/><path fill="#111827" d="${d.trim()}"/></svg>`;
 }
-
+function stopPhase2Pollers() {
+if (historyPollTimer) { clearInterval(historyPollTimer); historyPollTimer = null; }
+if (eventsPollTimer) { clearInterval(eventsPollTimer); eventsPollTimer = null; }
+}
 function startPhase2Pollers() {
+stopPhase2Pollers();
+if (document.hidden) return;
 fetchHistoryData();
 fetchAuditEvents();
-if (historyPollTimer) clearInterval(historyPollTimer);
 historyPollTimer = setInterval(fetchHistoryData, 30000);
-if (eventsPollTimer) clearInterval(eventsPollTimer);
 eventsPollTimer = setInterval(fetchAuditEvents, 10000);
 }
-
 checkInactivityOnLoad();
 updateAdminUI();
 handleHashRouting();
+startLocalTicker();
 refreshDashboard();
+if (currentActiveTab === 'tab-diagnostics') {
 startPhase2Pollers();
+}

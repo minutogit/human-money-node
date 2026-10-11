@@ -4225,4 +4225,80 @@ async fn test_dashboard_sre_monitoring_and_conflict_deep_link() {
     assert!(body_str.contains("copySnippet"), "Must contain copySnippet helper");
 }
 
+#[tokio::test]
+async fn test_dashboard_etag_and_304_not_modified() {
+    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_app();
+
+    // 1. Initial GET /dashboard/data -> 200 OK with ETag header
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/data")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let etag = res
+        .headers()
+        .get(axum::http::header::ETAG)
+        .expect("ETag header must be present")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(!etag.is_empty(), "ETag must not be empty");
+
+    // 2. GET /dashboard/data with matching If-None-Match -> 304 Not Modified
+    let res_304 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/data")
+                .header(axum::http::header::IF_NONE_MATCH, &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res_304.status(), StatusCode::NOT_MODIFIED);
+    let etag_304 = res_304
+        .headers()
+        .get(axum::http::header::ETAG)
+        .expect("ETag header must be present in 304 response")
+        .to_str()
+        .unwrap();
+    assert_eq!(etag_304, etag);
+    let body_304 = res_304.into_body().collect().await.unwrap().to_bytes();
+    assert!(body_304.is_empty(), "304 response body must be empty");
+
+    // 3. GET /dashboard/data with mismatched If-None-Match -> 200 OK
+    let res_mismatch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/data")
+                .header(axum::http::header::IF_NONE_MATCH, "\"mismatched-etag-12345\"")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res_mismatch.status(), StatusCode::OK);
+    let mismatch_etag = res_mismatch
+        .headers()
+        .get(axum::http::header::ETAG)
+        .expect("ETag header must be present in 200 response")
+        .to_str()
+        .unwrap();
+    assert_eq!(mismatch_etag, etag);
+}
+
 

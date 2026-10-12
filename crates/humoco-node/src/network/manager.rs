@@ -30,6 +30,17 @@ pub const QUORUM_GLOBAL_TIMEOUT: Duration = Duration::from_millis(1000);
 pub const HRW_INCUBATION_SECS: u64 = 24 * 60 * 60;
 pub const HRW_INCUBATION_DURATION: Duration = Duration::from_secs(HRW_INCUBATION_SECS);
 
+/// Presence freshness window for phase-transition counting (Spec 08/11 Phase 9 P1).
+/// A gossip-learned node counts toward `N_active` only while its last heartbeat
+/// is fresh. Hourly heartbeats with jitter mean a 2h window tolerates one
+/// missed heartbeat without flapping, while stale ghosts stop inflating N.
+pub const PRESENCE_FRESHNESS_SECS: u64 = 2 * 60 * 60;
+pub const PRESENCE_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(PRESENCE_FRESHNESS_SECS);
+
+/// 24h merge/quota moratorium after a partition merge (Spec 09 INV-0908 / Spec 08 INV-0802).
+pub const MERGE_HYSTERESIS_SECS: u64 = 24 * 60 * 60;
+pub const MERGE_HYSTERESIS_MS: u64 = MERGE_HYSTERESIS_SECS * 1000;
+
 /// Bio-mimetic fan-out k(d) = min(d, ceil(sqrt(d)) + 1) according to Spec 11.
 pub fn calculate_fan_out(d: usize) -> usize {
     if d == 0 {
@@ -214,6 +225,12 @@ impl KnownNodeInfo {
         self.first_seen.elapsed() < HRW_INCUBATION_DURATION
     }
 
+    /// Is gossip presence still fresh (heartbeat seen within `PRESENCE_FRESHNESS_TIMEOUT`)?
+    /// Stale ghosts must not inflate `N_active` for the Provisional -> Final transition.
+    pub fn is_presence_fresh(&self) -> bool {
+        self.last_seen.elapsed() < PRESENCE_FRESHNESS_TIMEOUT
+    }
+
     /// May node be used for HRW scoring? (ACTIVE, not IMMATURE)
     pub fn is_hrw_eligible(&self) -> bool {
         !self.is_immature()
@@ -274,6 +291,8 @@ pub struct PeerManager {
     ge20_first_reached_ms: Arc<AtomicU64>,
     sync_notify: Arc<tokio::sync::Notify>,
     ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
+    local_sync_ready: Arc<std::sync::atomic::AtomicBool>,
+    merge_hysteresis_until_ms: Arc<AtomicU64>,
     fraud_proof_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>>>>,
     recent_observed_evidences: Arc<tokio::sync::RwLock<std::collections::VecDeque<humoco_sim_core::fraud::IngressEnvelopeEvidence>>>,
     seen_heartbeats: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
@@ -365,6 +384,8 @@ impl PeerManager {
             ge20_first_reached_ms: Arc::new(AtomicU64::new(0)),
             sync_notify: Arc::new(tokio::sync::Notify::new()),
             ticket_outdated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            local_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            merge_hysteresis_until_ms: Arc::new(AtomicU64::new(0)),
             fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
             recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(16))),
             seen_heartbeats: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(10_000))),
@@ -1651,7 +1672,7 @@ impl PeerManager {
     }
 
     /// Returns a list of (NodeId, SocketAddr) for all peers and known network nodes that are not suspended.
-    /// Skips immature entries (only mature shard tickets count).
+    /// Skips immature entries (only mature shard tickets count) and stale presence ghosts.
     pub async fn active_known_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
         let mut result = Vec::new();
         let peers = self.peers.read().await;
@@ -1665,6 +1686,9 @@ impl PeerManager {
         let known = self.known_network_nodes.read().await;
         for (&nid, kinfo) in known.iter() {
             if kinfo.is_immature() {
+                continue;
+            }
+            if !kinfo.is_presence_fresh() {
                 continue;
             }
             if !result.iter().any(|(id, _)| id == &nid) {
@@ -1686,7 +1710,7 @@ impl PeerManager {
             if !p.is_suspended() {
                 if let Some(nid) = p.node_id {
                     if let Some(k) = known.get(&nid) {
-                        if k.is_immature() {
+                        if k.is_immature() || !k.is_presence_fresh() {
                             continue;
                         }
                     }
@@ -1696,7 +1720,7 @@ impl PeerManager {
             }
         }
         for (&nid, kinfo) in known.iter() {
-            if kinfo.is_immature() {
+            if kinfo.is_immature() || !kinfo.is_presence_fresh() {
                 continue;
             }
             if !result.iter().any(|(_, addr)| addr == &kinfo.addr) {
@@ -1837,7 +1861,9 @@ impl PeerManager {
     }
 
     /// Returns the estimated total count of active nodes in the network (peers + known nodes + self).
-    /// Skips immature entries (only mature shard tickets count).
+    /// Skips immature entries (only mature shard tickets count) and stale presence ghosts.
+    /// Strictly coupled to 24h shard-ticket incubation + fresh presence (Spec 08 Phase 9 P1):
+    /// unreife oder karteileichen-Knoten duerfen N >= 20 niemals vorzeitig triggern.
     pub fn active_nodes_count(&self) -> usize {
         let mut count = 1; // Always include self (INV: local node is active)
         if let Ok(peers) = self.peers.try_read() {
@@ -1854,6 +1880,9 @@ impl PeerManager {
                     if kinfo.is_immature() {
                         continue;
                     }
+                    if !kinfo.is_presence_fresh() {
+                        continue;
+                    }
                     let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
                     if !is_suspended {
                         unique_nodes.insert(nid);
@@ -1865,8 +1894,116 @@ impl PeerManager {
         count
     }
 
+    /// Async accurate mature network size (mature + presence-fresh + non-suspended + self).
+    /// Used by the daemon phase-transition monitor (Spec 08 INV-0802).
+    pub async fn mature_network_size(&self) -> usize {
+        let mut unique_nodes = HashSet::new();
+        let peers = self.peers.read().await;
+        for p in peers.values() {
+            if !p.is_suspended() {
+                if let Some(nid) = p.node_id {
+                    unique_nodes.insert(nid);
+                }
+            }
+        }
+        let known = self.known_network_nodes.read().await;
+        for (&nid, kinfo) in known.iter() {
+            if kinfo.is_immature() || !kinfo.is_presence_fresh() {
+                continue;
+            }
+            let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
+            if !is_suspended {
+                unique_nodes.insert(nid);
+            }
+        }
+        unique_nodes.len() + 1
+    }
+
+    /// Total network size including IMMATURE nodes with fresh presence (for merge detection).
+    /// A village docking to the world mesh learns dozens of immature nodes at once;
+    /// the quota thermometer must reseed immediately, not 24h later (Spec 09 INV-0908).
+    pub async fn total_network_size(&self) -> usize {
+        let mut unique_nodes = HashSet::new();
+        let peers = self.peers.read().await;
+        for p in peers.values() {
+            if !p.is_suspended() {
+                if let Some(nid) = p.node_id {
+                    unique_nodes.insert(nid);
+                } else {
+                    // Anonymous but connected endpoint still proves network presence.
+                    // Use address bytes as stable pseudo-identity without trusting them for HRW.
+                    let mut pseudo = [0u8; 32];
+                    let s = p.addr.to_string();
+                    let h = blake3::hash(s.as_bytes());
+                    pseudo.copy_from_slice(h.as_bytes());
+                    unique_nodes.insert(pseudo);
+                }
+            }
+        }
+        let known = self.known_network_nodes.read().await;
+        for (&nid, kinfo) in known.iter() {
+            if !kinfo.is_presence_fresh() {
+                continue;
+            }
+            let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
+            if !is_suspended {
+                unique_nodes.insert(nid);
+            }
+        }
+        unique_nodes.len() + 1
+    }
+
+    /// Pure merge-jump predicate (Spec 09 INV-0908): abrupt growth detection.
+    /// Triggers on doubling (`N_new >= 2 * N_old`) or absolute jump (`ΔN >= 20`).
+    pub fn is_merge_jump(old_count: usize, new_count: usize) -> bool {
+        if new_count <= old_count {
+            return false;
+        }
+        if old_count == 0 {
+            return new_count >= 20;
+        }
+        new_count >= old_count.saturating_mul(2) || new_count.saturating_sub(old_count) >= 20
+    }
+
+    /// Marks a detected partition merge: arms the 24h quota moratorium window.
+    pub fn note_merge_detected(&self, now_ms: u64) {
+        self.merge_hysteresis_until_ms
+            .store(now_ms.saturating_add(MERGE_HYSTERESIS_MS), Ordering::Relaxed);
+    }
+
+    /// Checks whether the node is inside the 24h post-merge quota moratorium.
+    /// During this window no quota-driven peer penalties may be applied (INV-0908).
+    pub fn is_in_merge_hysteresis(&self, now_ms: u64) -> bool {
+        now_ms < self.merge_hysteresis_until_ms.load(Ordering::Relaxed)
+    }
+
+    /// Remaining merge-moratorium time in seconds (0 when outside the window).
+    pub fn merge_hysteresis_remaining_sec(&self, now_ms: u64) -> u64 {
+        self.merge_hysteresis_until_ms
+            .load(Ordering::Relaxed)
+            .saturating_sub(now_ms)
+            / 1000
+    }
+
+    /// Sets local shard-sync readiness (mirrored from the daemon digest-pull motor).
+    /// The Provisional -> Final transition requires Sync-Readiness (Spec 08 Phase 9 P1).
+    pub fn set_local_sync_ready(&self, ready: bool) {
+        self.local_sync_ready.store(ready, Ordering::Relaxed);
+    }
+
+    /// Returns local shard-sync readiness.
+    pub fn is_local_sync_ready(&self) -> bool {
+        self.local_sync_ready.load(Ordering::Relaxed)
+    }
+
     /// 24h finality hysteresis: FINAL status only if network has been stable with >=20 mature nodes for 24h.
+    /// Strictly coupled to mature nodes only (24h incubation + fresh presence + local sync-readiness).
+    /// Immature nodes, stale ghosts, and un-synced local state reset the timer and never trigger FINAL early.
     pub fn is_network_stable_ge20_for_24h(&self, now_ms: u64) -> bool {
+        if !self.is_local_sync_ready() {
+            self.ge20_first_reached_ms.store(0, Ordering::Relaxed);
+            return false;
+        }
         if self.active_nodes_count() >= 20 {
             let start = self.ge20_first_reached_ms.load(Ordering::Relaxed);
             if start == 0 {
@@ -1877,6 +2014,19 @@ impl PeerManager {
         } else {
             self.ge20_first_reached_ms.store(0, Ordering::Relaxed);
             false
+        }
+    }
+
+    /// Test helper: overrides the 24h-stability anchor (simulates long-stable N >= 20).
+    pub fn set_ge20_anchor_for_test(&self, anchor_ms: u64) {
+        self.ge20_first_reached_ms.store(anchor_ms, Ordering::Relaxed);
+    }
+
+    /// Test helper: overrides last_seen to simulate stale presence ghosts.
+    pub async fn set_last_seen_for_test(&self, node_pubkey: &[u8; 32], last_seen: Instant) {
+        let mut nodes = self.known_network_nodes.write().await;
+        if let Some(entry) = nodes.get_mut(node_pubkey) {
+            entry.last_seen = last_seen;
         }
     }
 

@@ -101,6 +101,7 @@ pub struct TierController {
     cumulative_micro_byte_years: Arc<AtomicU64>,
     prev_day_final_bytes: Arc<AtomicU64>,
     current_epoch_day_cached: Arc<AtomicU64>,
+    last_thermometer_day: Arc<AtomicU64>,
 }
 
 impl TierController {
@@ -122,6 +123,7 @@ impl TierController {
             cumulative_micro_byte_years: Arc::new(AtomicU64::new(0)),
             prev_day_final_bytes: Arc::new(AtomicU64::new(0)),
             current_epoch_day_cached: Arc::new(AtomicU64::new(0)),
+            last_thermometer_day: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -299,6 +301,57 @@ impl TierController {
     /// [INV-0923] Records a daily read median
     pub fn record_daily_read_median(&self, median: u64) {
         self.thermometer.write().unwrap_or_else(|e| e.into_inner()).record_daily_read_median(median);
+    }
+
+    /// [INV-0903/0904] Autonomous thermometer day roll-over (Spec 09 Phase 9 P1).
+    ///
+    /// Called periodically by the daemon ticker (hourly in production, fast in
+    /// simulation mode). On epoch-day change (`now_ms / 86_400_000`) the locally
+    /// measured 24h rolling rates are rotated into the 28-day slotted ring
+    /// buffer so the moving median stays autonomous without manual intervention.
+    ///
+    /// Returns `Some(new_day)` when at least one daily slot was rotated,
+    /// otherwise `None` (same day or cold-start init). Never fails; purely
+    /// local time-based progression, no I/O, no peer telemetry coupling.
+    pub fn advance_epoch_day(&self, now_ms: u64) -> Option<u64> {
+        let day = self.current_epoch_day_at(now_ms);
+        let last = self.last_thermometer_day.load(Ordering::Relaxed);
+        if last == 0 {
+            // Cold-start init: anchor to current day without recording a spurious median.
+            let _ = self.last_thermometer_day.compare_exchange(
+                0,
+                day,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            );
+            return None;
+        }
+        if day <= last {
+            return None;
+        }
+        // Claim exactly one day-step at a time to avoid duplicate rotation under concurrency.
+        if self
+            .last_thermometer_day
+            .compare_exchange(last, day, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+        let now_sec = now_ms / 1000;
+        let write_median = self.rolling_24h_average_at(now_sec);
+        let read_median = self.rolling_24h_read_average_at(now_sec);
+        // Catch up missed days (offline / downtime) in a bounded way (max 28 slots).
+        let missed = (day.saturating_sub(last)).clamp(1, 28);
+        for _ in 0..missed {
+            self.record_daily_median(write_median);
+            self.record_daily_read_median(read_median);
+        }
+        Some(day)
+    }
+
+    /// Returns the last thermometer day that was rotated into the ring buffer (0 = not yet anchored).
+    pub fn last_thermometer_day(&self) -> u64 {
+        self.last_thermometer_day.load(Ordering::Relaxed)
     }
 
     /// [INV-0924] Calculates effective reference value NCB_eff = max(Moving_Median, HARD_FLOOR_BASELINE_DAILY)

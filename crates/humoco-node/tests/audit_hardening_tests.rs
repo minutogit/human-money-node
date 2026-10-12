@@ -73,6 +73,11 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
     let peer_mgr = Arc::new(PeerManager::new(vec![]));
     let now_ms = 1_000_000_000u64;
 
+    // Phase 9 P1: Provisional -> Final additionally requires local sync-readiness.
+    // A freshly booted (unsynced) node must never report FINAL, even with N >= 20.
+    assert!(!peer_mgr.is_local_sync_ready());
+    peer_mgr.set_local_sync_ready(true);
+
     // Initially, only self is active (1 node < 20)
     assert_eq!(peer_mgr.active_nodes_count(), 1);
     assert!(!peer_mgr.is_network_stable_ge20_for_24h(now_ms));
@@ -131,6 +136,10 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
     // Active count is now 16 < 20
     assert!(peer_mgr.active_nodes_count() < 20);
     assert!(!peer_mgr.is_network_stable_ge20_for_24h(now_ms + 86_400_002));
+
+    // Phase 9 P1: without local sync-readiness FINAL must stay blocked even with N >= 20.
+    peer_mgr.set_local_sync_ready(false);
+    assert!(!peer_mgr.is_network_stable_ge20_for_24h(now_ms + 86_400_003));
 }
 
 #[tokio::test]

@@ -168,6 +168,9 @@ impl NodeDaemon {
         // Wire PeerManager to DualTierEngine and PowEngine for consensus time and ban propagation (Spec 07 / Phase 6)
         engine.set_peer_manager(peer_manager.clone()).await;
         pow_engine.set_clock(peer_manager.clock().clone());
+        // Phase 9 P1 (Spec 08): mirror initial sync-readiness into PeerManager so the
+        // Provisional -> Final transition stays strictly coupled to Sync-Readiness.
+        peer_manager.set_local_sync_ready(initial_sync_ready);
 
         // Background DNS / DynDNS peer re-resolution task (every 10 minutes)
         let dns_pm = peer_manager.clone();
@@ -240,6 +243,61 @@ impl NodeDaemon {
         // --- Phase 3 Autonomous Background Motors ---
         let is_simulation = self.config.network.simulation_mode
             || self.config.network.fast_ticker_interval_secs.is_some();
+
+        // Phase 9 P1 (Spec 08/09): autonomous thermometer day roll-over + merge-reseed monitor.
+        // - Thermometer: `advance_epoch_day()` rotates the 28-day slotted ring buffer on day change.
+        // - Merge: abrupt growth (N_new >= 2*N_old or ΔN >= 20, INV-0908) triggers
+        //   `fast_reseed_on_merge()` with the fresh global median to prevent quota collapse,
+        //   plus a 24h quota moratorium via `PeerManager::note_merge_detected()`.
+        // - Phase transition coupling: mirrors shard-sync readiness into PeerManager so
+        //   `is_network_stable_ge20_for_24h()` stays gated on mature + presence-fresh + synced state.
+        let thermo_tc = tier_controller.clone();
+        let thermo_pm = peer_manager.clone();
+        let thermo_cancel = self.cancel_token.clone();
+        let thermo_sync_flag = is_sync_ready.clone();
+        let thermo_interval_secs = if is_simulation { 5 } else { 60 };
+        let thermometer_handle = tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(thermo_interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            let mut prev_total = thermo_pm.total_network_size().await;
+            loop {
+                tokio::select! {
+                    _ = thermo_cancel.cancelled() => {
+                        info!("Thermometer / merge-monitor ticker shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let now_ms = thermo_pm.net_time_ms();
+                        // Mirror sync-readiness for the Provisional -> Final gate.
+                        thermo_pm.set_local_sync_ready(
+                            thermo_sync_flag.load(std::sync::atomic::Ordering::SeqCst),
+                        );
+                        // 1. Daily roll-over of the 28-day ring buffer.
+                        if let Some(new_day) = thermo_tc.advance_epoch_day(now_ms) {
+                            debug!(new_day, "Network thermometer day rotated into 28-day ring buffer");
+                        }
+                        // 2. Partition-merge detection on total (incl. immature) size.
+                        let cur_total = thermo_pm.total_network_size().await;
+                        if crate::network::PeerManager::is_merge_jump(prev_total, cur_total) {
+                            let now_sec = now_ms / 1000;
+                            let (write_median, _read_median) =
+                                thermo_pm.effective_network_medians(now_sec).await;
+                            thermo_tc.fast_reseed_on_merge(write_median);
+                            thermo_pm.note_merge_detected(now_ms);
+                            info!(
+                                prev_total,
+                                cur_total,
+                                write_median,
+                                "Partition merge detected: thermometer fast-reseeded, 24h quota moratorium armed"
+                            );
+                        }
+                        prev_total = cur_total;
+                    }
+                }
+            }
+        });
 
         // 1. F2F Heartbeat-Emitter (hourly with jitter, signed payload)
         let hb_pm = peer_manager.clone();
@@ -709,6 +767,7 @@ impl NodeDaemon {
         let _ = heartbeat_handle.await;
         let _ = ttl_prune_handle.await;
         let _ = shard_sync_handle.await;
+        let _ = thermometer_handle.await;
         let _ = malus_decay_handle.await;
         let _ = dns_re_resolve_handle.await;
         let _ = alert_handle.await;
@@ -751,6 +810,7 @@ async fn run_shard_digest_pull_sync(
         debug!("Shard digest sync: no known shard peers, skipping and marking ready");
         is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
         transport.set_sync_ready(true);
+        peer_manager.set_local_sync_ready(true);
         return Ok(());
     }
     let total_known = candidate_addrs.len() + 1; // include self
@@ -853,6 +913,7 @@ async fn run_shard_digest_pull_sync(
         info!("Bootstrap active sync pull completed");
         is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
         transport.set_sync_ready(true);
+        peer_manager.set_local_sync_ready(true);
         return Ok(());
     }
 
@@ -1107,6 +1168,7 @@ async fn run_shard_digest_pull_sync(
 
     is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
     transport.set_sync_ready(true);
+    peer_manager.set_local_sync_ready(true);
     info!("Shard digest pull-sync completed");
     Ok(())
 }

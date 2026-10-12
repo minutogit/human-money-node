@@ -890,18 +890,32 @@ async fn collect_peer_attestations(
                 }
                 Ok((_nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)) => {
                     in_flight.remove(&rank_idx);
+                    // Phase 9 P1 (Spec 09 INV-0908): 24h quota moratorium after a partition merge.
+                    // During merge hysteresis no quota-driven peer penalty may be applied,
+                    // preventing cascade bans from divergent thermometers.
+                    let in_moratorium = query.peer_mgr.is_in_merge_hysteresis(query.peer_mgr.net_time_ms());
                     let verdict = humoco_sim_core::quota::evaluate_quota_exceeded_claim(query.my_load, query.quota_limit);
                     match verdict {
                         humoco_sim_core::quota::QuotaPlausibilityVerdict::FraudulentRejection { .. } => {
-                            tracing::warn!(
-                                %addr,
-                                rank_idx,
-                                my_load = query.my_load,
-                                quota_limit = query.quota_limit,
-                                "Shard peer fraudulently claimed FLAG_QUOTA_EXCEEDED (Zone 1) - recording peer failure"
-                            );
-                            if rank_idx < 20 {
-                                query.peer_mgr.record_failure(addr).await;
+                            if in_moratorium {
+                                tracing::info!(
+                                    %addr,
+                                    rank_idx,
+                                    my_load = query.my_load,
+                                    quota_limit = query.quota_limit,
+                                    "Shard peer quota rejection during 24h merge moratorium - penalty suppressed (INV-0908)"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    %addr,
+                                    rank_idx,
+                                    my_load = query.my_load,
+                                    quota_limit = query.quota_limit,
+                                    "Shard peer fraudulently claimed FLAG_QUOTA_EXCEEDED (Zone 1) - recording peer failure"
+                                );
+                                if rank_idx < 20 {
+                                    query.peer_mgr.record_failure(addr).await;
+                                }
                             }
                         }
                         humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff { .. }

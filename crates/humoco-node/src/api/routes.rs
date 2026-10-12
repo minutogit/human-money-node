@@ -282,6 +282,19 @@ async fn submit_lock(
     body_bytes: bytes::Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
+    if state.transport.as_ref().map(|t| !t.is_sync_ready()).unwrap_or(false) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "NodeNotReady".into(),
+                message: "503 Service Unavailable: Node is in boot-sync recovery phase".into(),
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            }),
+        )
+            .into_response();
+    }
     match serde_json::from_slice::<IngressLockPayload>(&body_bytes) {
         Ok(IngressLockPayload::Chain(chain_req)) => {
             return submit_hmc_chain_lock_inner(state, headers, chain_req, start).await;
@@ -1759,6 +1772,19 @@ async fn submit_hmc_chain_lock_inner(
     chain_req: L2ChainLockRequest,
     start: std::time::Instant,
 ) -> Response {
+    if state.transport.as_ref().map(|t| !t.is_sync_ready()).unwrap_or(false) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "NodeNotReady".into(),
+                message: "503 Service Unavailable: Node is in boot-sync recovery phase".into(),
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            }),
+        )
+            .into_response();
+    }
     state.metrics.record_write();
     if chain_req.chain.is_empty() {
         let envelope = wrap_and_sign_verdict(
@@ -2081,8 +2107,13 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<serde_
     } else {
         true // Village mode N=1
     };
+    let sync_ok = if let Some(ref tr) = state.transport {
+        tr.is_sync_ready()
+    } else {
+        true
+    };
 
-    if storage_ok && peers_ok {
+    if storage_ok && peers_ok && sync_ok {
         (StatusCode::OK, Json(serde_json::json!({"status": "ready"})))
     } else {
         (
@@ -2090,7 +2121,8 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<serde_
             Json(serde_json::json!({
                 "status": "not_ready",
                 "storage_ok": storage_ok,
-                "peers_ok": peers_ok
+                "peers_ok": peers_ok,
+                "sync_ok": sync_ok
             })),
         )
     }

@@ -188,6 +188,8 @@ impl NodeDaemon {
 
         info!("Initializing QUIC P2P transport...");
 
+        let is_sync_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         let handler = std::sync::Arc::new(
             crate::network::NodeRequestHandler::with_peer_manager(
                 engine.clone(),
@@ -195,15 +197,17 @@ impl NodeDaemon {
                 self.identity.clone(),
                 peer_manager.clone(),
             )
-            .with_tier_controller(tier_controller.clone()),
+            .with_tier_controller(tier_controller.clone())
+            .with_sync_ready(is_sync_ready.clone()),
         );
-        let transport = crate::network::QuicTransport::bind_with_options(
+        let mut transport = crate::network::QuicTransport::bind_with_options(
             self.config.network.p2p_listen_addr,
             &self.identity,
             peer_manager.clone(),
             handler,
             self.cancel_token.clone(),
         )?;
+        transport.set_sync_ready_handle(is_sync_ready.clone());
 
         let p2p_bound_addr = transport.local_addr()?;
         let accept_handle = transport.spawn_accept_loop();
@@ -380,6 +384,8 @@ impl NodeDaemon {
         let sync_engine = engine.clone();
         let sync_storage = storage.clone();
         let sync_cancel = self.cancel_token.clone();
+        let sync_identity = self.identity.clone();
+        let sync_ready_flag = is_sync_ready.clone();
         let shard_sync_handle = tokio::spawn(async move {
             let sync_notify = sync_pm.sync_notifier();
             let is_syncing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -390,7 +396,17 @@ impl NodeDaemon {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
             if !sync_cancel.is_cancelled() {
-                if let Err(e) = run_shard_digest_pull_sync(&sync_transport, &sync_pm, &sync_engine, &sync_storage, &sync_cancel).await {
+                if let Err(e) = run_shard_digest_pull_sync(
+                    &sync_transport,
+                    &sync_pm,
+                    &sync_engine,
+                    &sync_storage,
+                    &sync_identity,
+                    &sync_ready_flag,
+                    &sync_cancel,
+                )
+                .await
+                {
                     debug!(error=%e, "Initial shard sync finished with note");
                 }
             }
@@ -418,9 +434,11 @@ impl NodeDaemon {
                             let eng = sync_engine.clone();
                             let stor = sync_storage.clone();
                             let cancel = sync_cancel.clone();
+                            let ident = sync_identity.clone();
+                            let ready_flag = sync_ready_flag.clone();
                             let syncing_flag = is_syncing.clone();
                             sync_tasks.spawn(async move {
-                                let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &cancel).await;
+                                let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &ident, &ready_flag, &cancel).await;
                                 syncing_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                             });
                         }
@@ -444,9 +462,11 @@ impl NodeDaemon {
                             let eng = sync_engine.clone();
                             let stor = sync_storage.clone();
                             let cancel = sync_cancel.clone();
+                            let ident = sync_identity.clone();
+                            let ready_flag = sync_ready_flag.clone();
                             let syncing_flag = is_syncing.clone();
                             sync_tasks.spawn(async move {
-                                let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &cancel).await;
+                                let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &ident, &ready_flag, &cancel).await;
                                 syncing_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                             });
                         }
@@ -684,12 +704,16 @@ async fn run_shard_digest_pull_sync(
     peer_manager: &crate::network::PeerManager,
     engine: &crate::storage::DualTierEngine,
     storage: &std::sync::Arc<crate::storage::RedbStorage>,
+    identity: &crate::identity::NodeIdentity,
+    is_sync_ready: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     cancel_token: &CancellationToken,
 ) -> Result<(), NodeError> {
     // Gather candidates
     let candidate_addrs = peer_manager.shard_sync_addrs().await;
     if candidate_addrs.is_empty() {
-        debug!("Shard digest sync: no known shard peers, skipping");
+        debug!("Shard digest sync: no known shard peers, skipping and marking ready");
+        is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        transport.set_sync_ready(true);
         return Ok(());
     }
     let total_known = candidate_addrs.len() + 1; // include self
@@ -731,73 +755,106 @@ async fn run_shard_digest_pull_sync(
                 }
             };
 
-            let sync_payload = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                transport.request_active_sync(&conn, seq),
-            )
-            .await
-            {
-                Ok(Ok(p)) => p,
-                Ok(Err(e)) => {
-                    debug!(peer=%addr, error=%e, "Bootstrap ActiveSync: request failed");
-                    continue;
+            let mut cursor: u64 = 0;
+            let limit: usize = 500;
+            loop {
+                if cancel_token.is_cancelled() {
+                    return Ok(());
                 }
-                Err(_) => {
-                    debug!(peer=%addr, "Bootstrap ActiveSync: request timeout");
-                    continue;
-                }
-            };
-            seq = seq.wrapping_add(1);
-            let now_ms2 = peer_manager.net_time_ms();
+                let page_res = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    transport.request_active_sync_page(&conn, seq, cursor, limit),
+                )
+                .await
+                {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => {
+                        debug!(peer=%addr, error=%e, "Bootstrap ActiveSync page failed");
+                        break;
+                    }
+                    Err(_) => {
+                        debug!(peer=%addr, "Bootstrap ActiveSync page timeout");
+                        break;
+                    }
+                };
+                seq = seq.wrapping_add(1);
+                let now_ms2 = peer_manager.net_time_ms();
 
-            for (rec, root_valid) in sync_payload.locks {
-                if cancel_token.is_cancelled() { break; }
-                let _ = engine
-                    .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
-                    .await;
-            }
-            for (tag, entry) in sync_payload.hmc_locks {
-                if cancel_token.is_cancelled() { break; }
-                let _ = engine
-                    .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
-                    .await;
+                for (rec, root_valid) in page_res.payload.locks {
+                    if cancel_token.is_cancelled() { break; }
+                    let _ = engine
+                        .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
+                        .await;
+                }
+                for (tag, entry) in page_res.payload.hmc_locks {
+                    if cancel_token.is_cancelled() { break; }
+                    let _ = engine
+                        .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
+                        .await;
+                }
+
+                if !page_res.has_more {
+                    break;
+                }
+                if let Some(next) = page_res.next_cursor {
+                    if next <= cursor {
+                        break;
+                    }
+                    cursor = next;
+                } else {
+                    cursor += limit as u64;
+                }
             }
         }
         info!("Bootstrap active sync pull completed");
+        is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        transport.set_sync_ready(true);
         return Ok(());
     }
 
     // Dominant Quorum Shard Digest Sync (N >= 20):
-    // Collect all shard IDs for which the node has local entries (at least 0, plus all shard IDs from local locks and HMC voucher tags)
-    let mut shard_ids: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
-    shard_ids.insert(0);
+    // Collect all candidate shard IDs (local entries, registered active shards, and shard 0)
+    let mut candidate_shards: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
+    candidate_shards.insert(0);
 
     for (rec, _) in &local_valid_locks {
         let sid = u16::from_be_bytes([rec.parent_lock[0], rec.parent_lock[1]]);
-        shard_ids.insert(sid);
+        candidate_shards.insert(sid);
     }
     for (rec, _) in engine.ram.read().await.all_locks() {
         let sid = u16::from_be_bytes([rec.parent_lock[0], rec.parent_lock[1]]);
-        shard_ids.insert(sid);
+        candidate_shards.insert(sid);
     }
 
     for (tag, _) in &local_valid_hmc {
         let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
         let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
-        shard_ids.insert(sid);
+        candidate_shards.insert(sid);
     }
     for tag in engine.hmc_ram.read().await.locks.keys() {
         let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
         let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
-        shard_ids.insert(sid);
+        candidate_shards.insert(sid);
     }
 
-    for shard_id in shard_ids {
+    for sid in peer_manager.get_active_shards().await {
+        candidate_shards.insert(sid);
+    }
+
+    // Filter to shards where local node is in the Top-20 responsible nodes:
+    let mut responsible_shards: Vec<u16> = Vec::new();
+    for sid in candidate_shards {
+        if peer_manager.is_local_responsible_for_shard(identity.hrw_routing_id(), sid, 20).await {
+            responsible_shards.push(sid);
+        }
+    }
+
+    for shard_id in responsible_shards {
         if cancel_token.is_cancelled() {
             return Ok(());
         }
 
-        // Compute local digest for comparison for this shard
+        // Compute local digest strictly for this shard_id
         let mut locks: Vec<humoco_sim_core::types::LockRecord> = storage
             .all_valid_locks(now_ms)
             .unwrap_or_default()
@@ -839,9 +896,28 @@ async fn run_shard_digest_pull_sync(
             SimTime(now_ms),
         );
 
+        // Targeted Co-Shard Sync: query only Top-20 HRW responsible peers for this shard
+        let top_peers = peer_manager.get_top_n_shards_for_lock(shard_id, 20).await;
+        let query_addrs: Vec<SocketAddr> = if !top_peers.is_empty() {
+            let mut addrs: Vec<SocketAddr> = top_peers
+                .into_iter()
+                .map(|(_, addr)| addr)
+                .collect();
+            if let Ok(local_addr) = transport.local_addr() {
+                addrs.retain(|a| a != &local_addr);
+            }
+            if addrs.is_empty() {
+                candidate_addrs.clone()
+            } else {
+                addrs
+            }
+        } else {
+            candidate_addrs.clone()
+        };
+
         let mut peer_digests: Vec<([u8; 32], SocketAddr, u64)> = Vec::new();
 
-        for addr in &candidate_addrs {
+        for addr in &query_addrs {
             if cancel_token.is_cancelled() {
                 return Ok(());
             }
@@ -919,9 +995,9 @@ async fn run_shard_digest_pull_sync(
             continue;
         }
 
-        info!(shard_id, divergent = dominant_addrs.len(), "Shard digest divergence detected via evaluate_digest_clusters, pulling active sync");
+        info!(shard_id, divergent = dominant_addrs.len(), "Shard digest divergence detected via evaluate_digest_clusters, pulling paginated active sync");
 
-        // Pull missing locks from dominant quorum peers via ActiveSyncRequest
+        // Pull missing locks from dominant quorum peers via paginated ActiveSyncRequest
         for addr in dominant_addrs {
             if cancel_token.is_cancelled() {
                 break;
@@ -933,40 +1009,60 @@ async fn run_shard_digest_pull_sync(
                     continue;
                 }
             };
-            let sync_payload = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                transport.request_active_sync(&conn, seq),
-            )
-            .await
-            {
-                Ok(Ok(p)) => p,
-                Ok(Err(e)) => {
-                    debug!(peer=%addr, error=%e, "ActiveSync request failed");
-                    continue;
-                }
-                Err(_) => {
-                    debug!(peer=%addr, "ActiveSync request timeout");
-                    continue;
-                }
-            };
-            seq = seq.wrapping_add(1);
-            let now_ms2 = peer_manager.net_time_ms();
 
-            for (rec, root_valid) in sync_payload.locks {
+            let mut cursor: u64 = 0;
+            let limit: usize = 500;
+            loop {
                 if cancel_token.is_cancelled() { break; }
-                let _ = engine
-                    .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
-                    .await;
-            }
-            for (tag, entry) in sync_payload.hmc_locks {
-                if cancel_token.is_cancelled() { break; }
-                let _ = engine
-                    .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
-                    .await;
+                let page_res = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    transport.request_active_sync_page(&conn, seq, cursor, limit),
+                )
+                .await
+                {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => {
+                        debug!(peer=%addr, error=%e, "ActiveSync page request failed");
+                        break;
+                    }
+                    Err(_) => {
+                        debug!(peer=%addr, "ActiveSync page request timeout");
+                        break;
+                    }
+                };
+                seq = seq.wrapping_add(1);
+                let now_ms2 = peer_manager.net_time_ms();
+
+                for (rec, root_valid) in page_res.payload.locks {
+                    if cancel_token.is_cancelled() { break; }
+                    let _ = engine
+                        .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
+                        .await;
+                }
+                for (tag, entry) in page_res.payload.hmc_locks {
+                    if cancel_token.is_cancelled() { break; }
+                    let _ = engine
+                        .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
+                        .await;
+                }
+
+                if !page_res.has_more {
+                    break;
+                }
+                if let Some(next) = page_res.next_cursor {
+                    if next <= cursor {
+                        break;
+                    }
+                    cursor = next;
+                } else {
+                    cursor += limit as u64;
+                }
             }
         }
     }
 
+    is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+    transport.set_sync_ready(true);
     info!("Shard digest pull-sync completed");
     Ok(())
 }

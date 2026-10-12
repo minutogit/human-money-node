@@ -265,6 +265,7 @@ pub struct PeerManager {
     fraud_proof_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>>>>,
     recent_observed_evidences: Arc<tokio::sync::RwLock<std::collections::VecDeque<humoco_sim_core::fraud::IngressEnvelopeEvidence>>>,
     seen_heartbeats: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
+    known_active_shards: Arc<RwLock<std::collections::BTreeSet<u16>>>,
 }
 
 impl PeerManager {
@@ -355,7 +356,20 @@ impl PeerManager {
             fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
             recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(16))),
             seen_heartbeats: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(10_000))),
+            known_active_shards: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
         }
+    }
+
+    /// Registers an active shard ID into the known shard inventory.
+    pub async fn register_active_shard(&self, shard_id: u16) {
+        let mut shards = self.known_active_shards.write().await;
+        shards.insert(shard_id);
+    }
+
+    /// Returns a list of all known active shard IDs.
+    pub async fn get_active_shards(&self) -> Vec<u16> {
+        let shards = self.known_active_shards.read().await;
+        shards.iter().copied().collect()
     }
 
     /// Checks if a heartbeat has already been seen; if not, records it. Returns true if new, false if duplicate.

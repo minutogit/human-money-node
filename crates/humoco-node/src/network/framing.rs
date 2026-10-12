@@ -451,6 +451,77 @@ impl SyncPayload {
     }
 }
 
+/// Paginated ActiveSync request payload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActiveSyncRequest {
+    #[serde(default)]
+    pub cursor: u64,
+    #[serde(default = "default_sync_limit")]
+    pub limit: usize,
+}
+
+pub fn default_sync_limit() -> usize {
+    500
+}
+
+impl ActiveSyncRequest {
+    pub fn new(cursor: u64, limit: usize) -> Self {
+        Self { cursor, limit }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        if bytes.is_empty() {
+            Ok(Self {
+                cursor: 0,
+                limit: default_sync_limit(),
+            })
+        } else {
+            bincode::deserialize(bytes)
+        }
+    }
+}
+
+/// Paginated ActiveSync response payload.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ActiveSyncResponse {
+    pub payload: SyncPayload,
+    pub has_more: bool,
+    #[serde(default)]
+    pub next_cursor: Option<u64>,
+}
+
+impl ActiveSyncResponse {
+    pub fn new(payload: SyncPayload, has_more: bool, next_cursor: Option<u64>) -> Self {
+        Self {
+            payload,
+            has_more,
+            next_cursor,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        if let Ok(resp) = bincode::deserialize::<ActiveSyncResponse>(bytes) {
+            Ok(resp)
+        } else {
+            // Backward compatibility with raw SyncPayload
+            let payload = SyncPayload::from_bytes(bytes)?;
+            Ok(ActiveSyncResponse {
+                payload,
+                has_more: false,
+                next_cursor: None,
+            })
+        }
+    }
+}
+
 /// Safely converts a payload `usize` length to `u32` for wire framing, preventing truncation.
 pub fn checked_payload_len(len: usize) -> Result<u32, NodeError> {
     u32::try_from(len).map_err(|_| {

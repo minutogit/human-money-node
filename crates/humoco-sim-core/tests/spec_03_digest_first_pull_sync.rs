@@ -10,8 +10,11 @@ fn make_locks(n: usize) -> Vec<LockRecord> {
     (0..n)
         .map(|i| {
             let mut parent = [0u8; 32];
-            parent[0] = i as u8;
-            parent[1] = (i >> 8) as u8;
+            let sid_bytes = SHARD_ID.to_be_bytes();
+            parent[0] = sid_bytes[0];
+            parent[1] = sid_bytes[1];
+            parent[2] = i as u8;
+            parent[3] = (i >> 8) as u8;
             let mut receiver = [0u8; 32];
             receiver[0] = (i + 100) as u8;
             LockRecord::new(

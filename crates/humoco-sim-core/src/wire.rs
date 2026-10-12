@@ -110,6 +110,7 @@ pub const FLAG_QUOTA_FRAUD: u32 = 0x0000_0200;
 pub const FLAG_NOT_IN_SHARD: u32 = 0x0000_0400;
 pub const FLAG_UNAUTHORIZED: u32 = 0x0000_0800;
 pub const FLAG_SIGNATURE_INVALID: u32 = 0x0000_1000;
+pub const FLAG_NOT_READY: u32 = 0x0000_2000;
 
 
 /// 144-Byte LockEntry (INV-1001)

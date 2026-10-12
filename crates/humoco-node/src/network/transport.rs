@@ -162,6 +162,7 @@ pub struct NodeRequestHandler {
     pub identity: NodeIdentity,
     pub peer_manager: Option<Arc<crate::network::PeerManager>>,
     pub tier_controller: Option<Arc<crate::ingress::TierController>>,
+    pub is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NodeRequestHandler {
@@ -176,6 +177,7 @@ impl NodeRequestHandler {
             identity,
             peer_manager: None,
             tier_controller: None,
+            is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
@@ -191,11 +193,17 @@ impl NodeRequestHandler {
             identity,
             peer_manager: Some(peer_manager),
             tier_controller: None,
+            is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
     pub fn with_tier_controller(mut self, tier_controller: Arc<crate::ingress::TierController>) -> Self {
         self.tier_controller = Some(tier_controller);
+        self
+    }
+
+    pub fn with_sync_ready(mut self, ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.is_sync_ready = ready;
         self
     }
 }
@@ -220,6 +228,7 @@ impl RequestHandler for NodeRequestHandler {
         let identity = self.identity.clone();
         let peer_manager = self.peer_manager.clone();
         let tier_controller = self.tier_controller.clone();
+        let is_sync_ready = self.is_sync_ready.clone();
         Box::pin(async move {
             let msg_type = header.msg_type;
 
@@ -293,6 +302,18 @@ impl RequestHandler for NodeRequestHandler {
                 return Ok((resp_header, Vec::new()));
             }
             if msg_type == MsgType::LockVerifyRequest as u16 {
+                if !is_sync_ready.load(std::sync::atomic::Ordering::SeqCst) {
+                    warn!("LockVerifyRequest rejected: node is booting and initial sync is not ready");
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_NOT_READY,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
@@ -1024,12 +1045,22 @@ impl RequestHandler for NodeRequestHandler {
                         ));
                     }
                 }
+                if let Some(pm) = peer_manager.as_ref() {
+                    pm.register_active_shard(shard_id).await;
+                }
+                let shard_locks: Vec<humoco_sim_core::types::LockRecord> = locks
+                    .into_iter()
+                    .filter(|l| {
+                        let sid = u16::from_be_bytes([l.parent_lock[0], l.parent_lock[1]]);
+                        sid == shard_id && !l.status.is_void() && l.valid_until > humoco_sim_core::types::SimTime(now_ms)
+                    })
+                    .collect();
                 let digest = humoco_sim_core::crypto::compute_shard_digest_at(
                     shard_id,
-                    &locks,
+                    &shard_locks,
                     humoco_sim_core::types::SimTime(now_ms),
                 );
-                let lock_count = locks.len() as u64;
+                let lock_count = shard_locks.len() as u64;
                 let resp_bytes = bincode::serialize(&(digest, lock_count)).unwrap_or_default();
                 let payload_len = checked_payload_len(resp_bytes.len())?;
                 let resp_header = WireHeader::new(
@@ -1041,12 +1072,19 @@ impl RequestHandler for NodeRequestHandler {
                 );
                 return Ok((resp_header, resp_bytes));
             } else if msg_type == MsgType::ActiveSyncRequest as u16 {
+                let req = crate::network::framing::ActiveSyncRequest::from_bytes(&payload)
+                    .unwrap_or(crate::network::framing::ActiveSyncRequest {
+                        cursor: 0,
+                        limit: 500,
+                    });
                 let mut locks = storage.all_valid_locks(0).unwrap_or_default();
                 for (rec, rv) in engine.ram.read().await.all_locks() {
                     if !locks.iter().any(|(l, _)| l.parent_lock == rec.parent_lock) {
                         locks.push((rec, rv.0));
                     }
                 }
+                locks.sort_by(|a, b| a.0.parent_lock.cmp(&b.0.parent_lock));
+
                 let mut hmc_locks = storage.all_valid_hmc_locks(0).unwrap_or_default();
                 let hmc_ram = engine.hmc_ram.read().await;
                 for (tag, entry) in &hmc_ram.locks {
@@ -1054,8 +1092,43 @@ impl RequestHandler for NodeRequestHandler {
                         hmc_locks.push((tag.clone(), entry.clone()));
                     }
                 }
-                let sync_payload = crate::network::framing::SyncPayload::new(locks, hmc_locks);
-                let serialized = bincode::serialize(&sync_payload).unwrap_or_default();
+                hmc_locks.sort_by(|a, b| a.0.cmp(&b.0));
+
+                let total_locks = locks.len();
+                let total_hmc = hmc_locks.len();
+                let total_items = total_locks + total_hmc;
+                let offset = req.cursor as usize;
+                let limit = req.limit.clamp(1, 1000);
+
+                let mut chunk_locks = Vec::new();
+                let mut chunk_hmc = Vec::new();
+
+                if offset < total_locks {
+                    let end_locks = (offset + limit).min(total_locks);
+                    chunk_locks.extend_from_slice(&locks[offset..end_locks]);
+                    let taken = chunk_locks.len();
+                    if taken < limit && total_hmc > 0 {
+                        let hmc_needed = limit - taken;
+                        let end_hmc = hmc_needed.min(total_hmc);
+                        chunk_hmc.extend_from_slice(&hmc_locks[0..end_hmc]);
+                    }
+                } else if offset < total_items {
+                    let hmc_offset = offset - total_locks;
+                    let end_hmc = (hmc_offset + limit).min(total_hmc);
+                    chunk_hmc.extend_from_slice(&hmc_locks[hmc_offset..end_hmc]);
+                }
+
+                let items_in_chunk = chunk_locks.len() + chunk_hmc.len();
+                let next_offset = offset + items_in_chunk;
+                let has_more = next_offset < total_items;
+                let next_cursor = if has_more { Some(next_offset as u64) } else { None };
+
+                let sync_resp = crate::network::framing::ActiveSyncResponse::new(
+                    crate::network::framing::SyncPayload::new(chunk_locks, chunk_hmc),
+                    has_more,
+                    next_cursor,
+                );
+                let serialized = sync_resp.to_bytes().unwrap_or_default();
                 let payload_len = checked_payload_len(serialized.len())?;
                 let resp_header = WireHeader::new(MsgType::ActiveSyncDone as u16, header.session_seq + 1, header.epoch_id, 0, payload_len);
                 return Ok((resp_header, serialized));
@@ -1273,12 +1346,33 @@ pub struct QuicTransport {
     cancel_token: CancellationToken,
     stream_semaphore: Arc<Semaphore>,
     connection_semaphore: Arc<Semaphore>,
+    is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Backwards-compatible alias for `QuicTransport` (task spec naming: `QuicP2pTransport`).
 pub type QuicP2pTransport = QuicTransport;
 
 impl QuicTransport {
+    /// Returns true if the node is sync-ready after initial recovery.
+    pub fn is_sync_ready(&self) -> bool {
+        self.is_sync_ready.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Sets the sync-ready state.
+    pub fn set_sync_ready(&self, ready: bool) {
+        self.is_sync_ready.store(ready, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Replaces the underlying sync-ready atomic handle.
+    pub fn set_sync_ready_handle(&mut self, handle: Arc<std::sync::atomic::AtomicBool>) {
+        self.is_sync_ready = handle;
+    }
+
+    /// Returns a clone of the sync-ready atomic handle.
+    pub fn sync_ready_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.is_sync_ready.clone()
+    }
+
     /// Binds a QUIC endpoint on the specified socket address using the NodeIdentity.
     pub fn bind(addr: SocketAddr, identity: &NodeIdentity) -> Result<Self, NodeError> {
         Self::bind_with_options(
@@ -1322,6 +1416,7 @@ impl QuicTransport {
             cancel_token: cancel_token.clone(),
             stream_semaphore: Arc::new(Semaphore::new(STREAM_CONCURRENCY_LIMIT)),
             connection_semaphore: Arc::new(Semaphore::new(CONNECTION_CONCURRENCY_LIMIT)),
+            is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
 
         let transport_for_broadcast = transport.clone();
@@ -1662,22 +1757,53 @@ impl QuicTransport {
         Ok((digest, count))
     }
 
-    /// Requests full active sync data (ActiveSyncRequest -> ActiveSyncDone) from a peer.
-    pub async fn request_active_sync(
+    /// Requests a single paginated active sync page from a peer.
+    pub async fn request_active_sync_page(
         &self,
         conn: &quinn::Connection,
         seq: u64,
-    ) -> Result<crate::network::framing::SyncPayload, NodeError> {
-        let header = WireHeader::new(MsgType::ActiveSyncRequest as u16, seq, 0, 0, 0);
-        let (resp_hdr, resp_payload) = self.send_request(conn, &header, &[]).await?;
+        cursor: u64,
+        limit: usize,
+    ) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
+        let req = crate::network::framing::ActiveSyncRequest::new(cursor, limit);
+        let req_bytes = req.to_bytes().unwrap_or_default();
+        let payload_len = checked_payload_len(req_bytes.len())?;
+        let header = WireHeader::new(MsgType::ActiveSyncRequest as u16, seq, 0, 0, payload_len);
+        let (resp_hdr, resp_payload) = self.send_request(conn, &header, &req_bytes).await?;
         if resp_hdr.msg_type != MsgType::ActiveSyncDone as u16 {
             return Err(NodeError::Network(format!(
                 "Unexpected ActiveSync response {}",
                 resp_hdr.msg_type
             )));
         }
-        crate::network::framing::SyncPayload::from_bytes(&resp_payload)
+        crate::network::framing::ActiveSyncResponse::from_bytes(&resp_payload)
             .map_err(|e| NodeError::Network(format!("active sync deserialize: {}", e)))
+    }
+
+    /// Requests full active sync data across all pages from a peer.
+    pub async fn request_active_sync(
+        &self,
+        conn: &quinn::Connection,
+        seq: u64,
+    ) -> Result<crate::network::framing::SyncPayload, NodeError> {
+        let mut all_locks = Vec::new();
+        let mut all_hmc = Vec::new();
+        let mut cursor = 0u64;
+        let mut current_seq = seq;
+        loop {
+            let resp = self.request_active_sync_page(conn, current_seq, cursor, 500).await?;
+            current_seq = current_seq.wrapping_add(1);
+            all_locks.extend(resp.payload.locks);
+            all_hmc.extend(resp.payload.hmc_locks);
+            if !resp.has_more {
+                break;
+            }
+            match resp.next_cursor {
+                Some(next) if next > cursor => cursor = next,
+                _ => break,
+            }
+        }
+        Ok(crate::network::framing::SyncPayload::new(all_locks, all_hmc))
     }
 
     /// Spawns the incoming connection accept loop in the background.

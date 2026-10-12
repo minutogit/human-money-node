@@ -100,6 +100,17 @@ impl HmcRamIndex {
             }
         }
 
+        if origin == IngressOrigin::PartitionSync
+            && !crate::api::hmc::verify_l2_lock_entry_signature(&entry, &lookup_tag)
+        {
+            return (
+                L2Verdict::Rejected {
+                    reason: "Invalid cryptographic signature on synced lock".into(),
+                },
+                false,
+            );
+        }
+
         if let Some(existing) = self.locks.get(&lookup_tag) {
             // Collision check: if t_id identical -> Idempotent replay
             if existing.t_id == entry.t_id {
@@ -484,6 +495,27 @@ impl DualTierEngine {
         let parent_lock_hex = hex::encode(record.parent_lock);
         let child_lock_hex = hex::encode(record.id);
         let is_final = record.status.is_final();
+
+        if origin == IngressOrigin::PartitionSync {
+            let mut hasher = blake3::Hasher::new();
+            let tag = b"HUMOCO_V1_LOCK_ID";
+            hasher.update(&[tag.len() as u8]);
+            hasher.update(tag);
+            hasher.update(&record.parent_lock);
+            hasher.update(&record.receiver_pub);
+            hasher.update(&record.nonce);
+            hasher.update(&record.created_at.0.to_le_bytes());
+            hasher.update(&record.valid_until.0.to_le_bytes());
+            let expected_id: humoco_sim_core::types::Hash256 = *hasher.finalize().as_bytes();
+            if record.id != expected_id {
+                warn!("PartitionSync lock rejected: invalid LockId hash preimage");
+                return Err(IngressVerdictLow::RejectedWindow);
+            }
+            if record.valid_until.0 <= now.0 || record.valid_until.0 > root_valid_until.0 {
+                warn!("PartitionSync lock rejected: invalid valid_until TTL");
+                return Err(IngressVerdictLow::RejectedWindow);
+            }
+        }
 
         let (verdict, to_flush) = {
             let mut ram = self.ram.write().await;

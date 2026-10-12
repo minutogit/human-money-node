@@ -302,7 +302,10 @@ pub fn compute_shard_digest(shard_id: ShardId, locks: &[LockRecord]) -> Hash256 
 pub fn compute_shard_digest_at(shard_id: ShardId, locks: &[LockRecord], now: SimTime) -> Hash256 {
     let mut active: Vec<&LockRecord> = locks
         .iter()
-        .filter(|l| !l.status.is_void() && l.valid_until > now)
+        .filter(|l| {
+            let sid = u16::from_be_bytes([l.parent_lock[0], l.parent_lock[1]]);
+            sid == shard_id && !l.status.is_void() && l.valid_until > now
+        })
         .collect();
     active.sort_by(|a, b| a.parent_lock.cmp(&b.parent_lock));
     let mut hasher = blake3::Hasher::new();
@@ -440,10 +443,18 @@ mod tests {
     fn test_compute_shard_digest_at_exact_boundaries() {
         let shard_id = 7u16;
         let now = SimTime(100);
+        let sid_bytes = shard_id.to_be_bytes();
+
+        let make_parent = |b: u8| {
+            let mut p = [b; 32];
+            p[0] = sid_bytes[0];
+            p[1] = sid_bytes[1];
+            p
+        };
 
         // Lock 1: valid_until == now (100) -> EXCLUDED (must be strictly > now)
         let lock_at_now = LockRecord::new(
-            [1u8; 32],
+            make_parent(1),
             [10u8; 32],
             b"nonce1".to_vec(),
             SimTime(50),
@@ -452,7 +463,7 @@ mod tests {
 
         // Lock 2: valid_until == now + 1 (101) -> INCLUDED
         let lock_after_now = LockRecord::new(
-            [2u8; 32],
+            make_parent(2),
             [20u8; 32],
             b"nonce2".to_vec(),
             SimTime(50),
@@ -461,7 +472,7 @@ mod tests {
 
         // Lock 3: valid_until == now - 1 (99) -> EXCLUDED
         let lock_before_now = LockRecord::new(
-            [3u8; 32],
+            make_parent(3),
             [30u8; 32],
             b"nonce3".to_vec(),
             SimTime(50),
@@ -470,7 +481,7 @@ mod tests {
 
         // Lock 4: valid_until == 200 (> now), but status is VOID -> EXCLUDED
         let mut lock_void = LockRecord::new(
-            [4u8; 32],
+            make_parent(4),
             [40u8; 32],
             b"nonce4".to_vec(),
             SimTime(50),
@@ -492,6 +503,25 @@ mod tests {
         let digest_single = compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_after_now), now);
         assert_eq!(digest_multi, digest_single);
 
+        // Lock from a different shard (shard 999) -> strictly EXCLUDED from shard 7 digest
+        let other_sid_bytes = 999u16.to_be_bytes();
+        let mut p_other = [2u8; 32];
+        p_other[0] = other_sid_bytes[0];
+        p_other[1] = other_sid_bytes[1];
+        let lock_other_shard = LockRecord::new(
+            p_other,
+            [20u8; 32],
+            b"nonce_other".to_vec(),
+            SimTime(50),
+            SimTime(101),
+        );
+        let digest_with_other = compute_shard_digest_at(
+            shard_id,
+            &[lock_after_now.clone(), lock_other_shard],
+            now,
+        );
+        assert_eq!(digest_multi, digest_with_other);
+
         // Active locks with identical parent_lock order & lexicographical sorting
         let mut lock_p1_a = LockRecord::new(
             [5u8; 32],
@@ -500,7 +530,7 @@ mod tests {
             SimTime(50),
             SimTime(200),
         );
-        lock_p1_a.parent_lock = [0xAA; 32];
+        lock_p1_a.parent_lock = make_parent(0xAA);
 
         let mut lock_p1_b = LockRecord::new(
             [6u8; 32],
@@ -509,7 +539,7 @@ mod tests {
             SimTime(50),
             SimTime(200),
         );
-        lock_p1_b.parent_lock = [0xBB; 32];
+        lock_p1_b.parent_lock = make_parent(0xBB);
 
         // Passed in reverse order: [B, A]
         let digest_sorted1 = compute_shard_digest_at(

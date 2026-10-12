@@ -139,6 +139,7 @@ impl NodeDaemon {
         // Initialize QUIC P2P PeerManager with F2F friends, resolved endpoints, and known peers
         let (configured_entries, trusted_pubkeys) = self.config.f2f.parse_peers();
         let configured_peers = crate::config::F2fConfig::resolve_peer_endpoints(&configured_entries).await;
+        let initial_sync_ready = configured_peers.is_empty();
         let dns_peers: Vec<crate::config::PeerConfigEntry> = configured_entries
             .into_iter()
             .filter(|e| e.is_hostname())
@@ -148,6 +149,10 @@ impl NodeDaemon {
             trusted_pubkeys,
             dns_peers,
         ));
+
+        // Wire PeerManager to DualTierEngine and PowEngine for consensus time and ban propagation (Spec 07 / Phase 6)
+        engine.set_peer_manager(peer_manager.clone()).await;
+        pow_engine.set_clock(peer_manager.clock().clone());
 
         // Background DNS / DynDNS peer re-resolution task (every 10 minutes)
         let dns_pm = peer_manager.clone();
@@ -188,7 +193,7 @@ impl NodeDaemon {
 
         info!("Initializing QUIC P2P transport...");
 
-        let is_sync_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let is_sync_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(initial_sync_ready));
 
         let handler = std::sync::Arc::new(
             crate::network::NodeRequestHandler::with_peer_manager(
@@ -208,6 +213,7 @@ impl NodeDaemon {
             self.cancel_token.clone(),
         )?;
         transport.set_sync_ready_handle(is_sync_ready.clone());
+        transport.set_sync_ready(initial_sync_ready);
 
         let p2p_bound_addr = transport.local_addr()?;
         let accept_handle = transport.spawn_accept_loop();
@@ -300,6 +306,7 @@ impl NodeDaemon {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(prune_interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await;
+            let mut last_prune_anchor = 0u64;
             loop {
                 tokio::select! {
                     _ = prune_cancel.cancelled() => {
@@ -308,8 +315,22 @@ impl NodeDaemon {
                     }
                     _ = interval.tick() => {
                         let now_ms = prune_pm.net_time_ms();
+                        // Inspect time drift BEFORE mutating the pruning anchor (Spec 07 / INV-1203)
+                        if last_prune_anchor > 0 {
+                            let jump = now_ms.saturating_sub(last_prune_anchor);
+                            if jump > 86_400_000 && !prune_pm.clock().is_time_corroborated(jump) {
+                                warn!(
+                                    now_ms,
+                                    last_prune_anchor,
+                                    jump_ms = jump,
+                                    "TTL pruning ticker: forward clock jump >24h rejected without F2F consensus (local clock jump protection)"
+                                );
+                                continue;
+                            }
+                        }
                         match prune_engine.prune_expired(SimTime(now_ms)).await {
                             Ok(pruned) => {
+                                last_prune_anchor = now_ms;
                                 if pruned > 0 {
                                     info!(pruned, now_ms, "TTL pruning evicted expired locks");
                                 }
@@ -391,9 +412,10 @@ impl NodeDaemon {
             let is_syncing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
             // Small initial delay to let accept loop and initial peer connections settle
+            let initial_delay_ms = if is_simulation || initial_sync_ready { 10 } else { 50 };
             tokio::select! {
                 _ = sync_cancel.cancelled() => return,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(initial_delay_ms)) => {}
             }
             if !sync_cancel.is_cancelled() {
                 if let Err(e) = run_shard_digest_pull_sync(
@@ -777,6 +799,13 @@ async fn run_shard_digest_pull_sync(
                         break;
                     }
                 };
+                debug!(
+                    peer = %addr,
+                    locks_count = page_res.payload.locks.len(),
+                    hmc_count = page_res.payload.hmc_locks.len(),
+                    has_more = page_res.has_more,
+                    "Bootstrap ActiveSync page received"
+                );
                 seq = seq.wrapping_add(1);
                 let now_ms2 = peer_manager.net_time_ms();
 

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use ed25519_dalek::Signer;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
@@ -133,8 +134,10 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
     let lookup_tag = "voucher_tag_split_brain_test".to_string();
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
 
-    let sender_a = [0x33; 32];
-    let sender_b = [0x44; 32];
+    let key_a = ed25519_dalek::SigningKey::from_bytes(&[0x33; 32]);
+    let sender_a = key_a.verifying_key().to_bytes();
+    let key_b = ed25519_dalek::SigningKey::from_bytes(&[0x44; 32]);
+    let sender_b = key_b.verifying_key().to_bytes();
     let t_id_loser = [0x55; 32];
     let mut t_id_winner = [0x66; 32];
 
@@ -149,7 +152,25 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
     }
     assert!(h_hmc_winner < h_hmc_loser);
 
-    let entry_loser = L2LockEntry {
+    let sign_entry = |key: &ed25519_dalek::SigningKey, entry: &mut L2LockEntry| {
+        use humoco_node::api::hmc::{calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER};
+        let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string();
+        let eff_v = if is_genesis { TRAP_NONE_PLACEHOLDER } else { &entry.layer2_voucher_id };
+        let hash = calculate_l2_payload_hash_raw(
+            eff_v,
+            &lookup_tag,
+            &entry.t_id,
+            &entry.sender_ephemeral_pub,
+            entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+            entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+            entry.encrypted_timestamp,
+            entry.deletable_at.as_deref(),
+            privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
+        );
+        entry.layer2_signature = key.sign(&hash).to_bytes();
+    };
+
+    let mut entry_loser = L2LockEntry {
         layer2_voucher_id: "voucher_hmc_1".into(),
         t_id: t_id_loser,
         sender_ephemeral_pub: sender_a,
@@ -162,8 +183,9 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         deletable_at: Some("600000".into()),
         privacy_guard: None,
     };
+    sign_entry(&key_a, &mut entry_loser);
 
-    let entry_winner = L2LockEntry {
+    let mut entry_winner = L2LockEntry {
         layer2_voucher_id: "voucher_hmc_1".into(),
         t_id: t_id_winner,
         sender_ephemeral_pub: sender_b,
@@ -176,6 +198,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         deletable_at: Some("600000".into()),
         privacy_guard: None,
     };
+    sign_entry(&key_b, &mut entry_winner);
 
     // Ingress HMC loser lock first
     let (v_hmc1, is_new1) = engine.ingress_hmc_lock(lookup_tag.clone(), entry_loser.clone()).await;
@@ -213,7 +236,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         t_id_loser2[0..4].copy_from_slice(&hmc_counter.to_le_bytes());
         h_hmc_loser2 = compute_hmc_canonical_hash(&parent_bytes, &sender_a, &t_id_loser2);
     }
-    let entry_loser2 = L2LockEntry {
+    let mut entry_loser2 = L2LockEntry {
         layer2_voucher_id: "voucher_hmc_1".into(),
         t_id: t_id_loser2,
         sender_ephemeral_pub: sender_a,
@@ -226,6 +249,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         deletable_at: Some("600000".into()),
         privacy_guard: None,
     };
+    sign_entry(&key_a, &mut entry_loser2);
     let (v_hmc3, is_new3) = engine
         .ingress_hmc_lock_with_origin(lookup_tag.clone(), entry_loser2, IngressOrigin::PartitionSync, None)
         .await;
@@ -329,10 +353,12 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
     let hmc_tag = "voucher_multi_shard_sync_tag".to_string();
     let hmc_parent = *blake3::hash(hmc_tag.as_bytes()).as_bytes();
     let hmc_shard_id = u16::from_be_bytes([hmc_parent[0], hmc_parent[1]]);
-    let hmc_entry = L2LockEntry {
+    let hmc_key = ed25519_dalek::SigningKey::from_bytes(&[0x88; 32]);
+    let hmc_pub = hmc_key.verifying_key().to_bytes();
+    let mut hmc_entry = L2LockEntry {
         layer2_voucher_id: "voucher_sync_123".into(),
         t_id: [0x77; 32],
-        sender_ephemeral_pub: [0x88; 32],
+        sender_ephemeral_pub: hmc_pub,
         receiver_ephemeral_pub_hash: None,
         change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
@@ -342,6 +368,23 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
         deletable_at: Some("600000".into()),
         privacy_guard: None,
     };
+    {
+        use humoco_node::api::hmc::{calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER};
+        let is_genesis = hmc_tag == bs58::encode(&hmc_entry.t_id).into_string();
+        let eff_v = if is_genesis { TRAP_NONE_PLACEHOLDER } else { &hmc_entry.layer2_voucher_id };
+        let hash = calculate_l2_payload_hash_raw(
+            eff_v,
+            &hmc_tag,
+            &hmc_entry.t_id,
+            &hmc_entry.sender_ephemeral_pub,
+            hmc_entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+            hmc_entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+            hmc_entry.encrypted_timestamp,
+            hmc_entry.deletable_at.as_deref(),
+            privacy_guard_commitment(hmc_entry.privacy_guard.as_deref()).as_str(),
+        );
+        hmc_entry.layer2_signature = hmc_key.sign(&hash).to_bytes();
+    }
     let _ = engine_a.ingress_hmc_lock(hmc_tag.clone(), hmc_entry.clone()).await;
 
     // Wait 100ms for flush on Node A

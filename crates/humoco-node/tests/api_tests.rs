@@ -937,9 +937,12 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    let mut parent_lock = [0x44; 32];
+    parent_lock[0] = 0;
+    parent_lock[1] = 1;
     let record = humoco_sim_core::types::LockRecord::new(
+        parent_lock,
         [0x33; 32],
-        [0x44; 32],
         vec![0x01, 0x02],
         humoco_sim_core::types::SimTime(now_ms),
         humoco_sim_core::types::SimTime(now_ms + 60_000),

@@ -1096,6 +1096,16 @@ impl RequestHandler for NodeRequestHandler {
 
                 let total_locks = locks.len();
                 let total_hmc = hmc_locks.len();
+                debug!(
+                    total_locks,
+                    total_hmc,
+                    cursor = req.cursor,
+                    limit = req.limit,
+                    "NodeRequestHandler handling ActiveSyncRequest"
+                );
+
+                let total_locks = locks.len();
+                let total_hmc = hmc_locks.len();
                 let total_items = total_locks + total_hmc;
                 let offset = req.cursor as usize;
                 let limit = req.limit.clamp(1, 1000);
@@ -2148,9 +2158,10 @@ impl QuicTransport {
                                                     work_score,
                                                 ).await;
 
-                                                // Allow heartbeats up to 4 hops across trusted F2F edges for fast median convergence
-                                                if hops <= 4 {
-                                                    pm.clock().record_heartbeat(is_f2f, hb.timestamp_ms);
+                                                // Spec 07 / Spec 11: Clock samples fed to P2pClock must originate strictly from direct authenticated F2F peers,
+                                                // never relayed third-party hops (Task 4: F2F-Only Clock Samples).
+                                                if hops == 0 && is_f2f && is_direct {
+                                                    pm.clock().record_heartbeat(true, hb.timestamp_ms);
                                                 }
 
                                                 // Multi-hop forwarding to Dunbar fan-out subset of F2F peers (Spec 11)

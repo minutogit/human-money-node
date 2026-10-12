@@ -182,6 +182,32 @@ impl HmcRamIndex {
         }
     }
 
+    /// Re-populates an unexpired HMC lock entry from disk during cold-start recovery.
+    pub fn insert_recovered(&mut self, lookup_tag: String, entry: L2LockEntry) {
+        let valid_until_ms = entry
+            .deletable_at
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let prune_threshold_ms = valid_until_ms.saturating_add(30_000);
+        let bucket_sec = prune_threshold_ms / 1_000;
+
+        self.ttl_buckets.entry(bucket_sec).or_default().push(lookup_tag.clone());
+        self.valid_until.insert(lookup_tag.clone(), valid_until_ms);
+        self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+        if entry.deletable_at.is_some() {
+            let p_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+            self.voucher_genesis_parents.entry(entry.layer2_voucher_id.clone()).or_insert(p_bytes);
+        }
+
+        self.vouchers
+            .entry(entry.layer2_voucher_id.clone())
+            .or_default()
+            .insert(lookup_tag.clone());
+        self.locks.insert(lookup_tag.clone(), entry);
+        self.filter.add(&lookup_tag);
+    }
+
     pub fn get_voucher_root_valid(&self, voucher_id: &str) -> Option<u64> {
         self.voucher_roots.get(voucher_id).copied()
     }
@@ -318,6 +344,8 @@ pub struct DualTierEngine {
     pub peer_manager: Arc<RwLock<Option<Arc<crate::network::PeerManager>>>>,
     pub recent_locks: Arc<parking_lot::RwLock<RecentLockBuffer>>,
     pub stats: Arc<PersistenceStats>,
+    /// Previous pruning anchor timestamp in ms for detecting forward clock jumps (local NTP warp protection)
+    pub last_prune_anchor: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl DualTierEngine {
@@ -356,6 +384,7 @@ impl DualTierEngine {
                 peer_manager: Arc::new(RwLock::new(None)),
                 recent_locks,
                 stats,
+                last_prune_anchor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             },
             handle,
         )
@@ -386,6 +415,7 @@ impl DualTierEngine {
             peer_manager: Arc::new(RwLock::new(None)),
             recent_locks,
             stats,
+            last_prune_anchor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1688,7 +1718,7 @@ impl DualTierEngine {
         let hmc_locks = self.db.all_valid_hmc_locks(now.0)?;
         let mut hmc_ram = self.hmc_ram.write().await;
         for (tag, entry) in hmc_locks {
-            hmc_ram.insert_or_check(tag, entry, IngressOrigin::PartitionSync, None);
+            hmc_ram.insert_recovered(tag, entry);
         }
 
         Ok(count)
@@ -1699,30 +1729,23 @@ impl DualTierEngine {
     /// Resilience hardening: rejects forward jumps >24h (86_400_000 ms) on local NTP warp
     /// unless corroborated by F2F network median, to prevent accidental mass purge.
     pub async fn prune_expired(&self, now: SimTime) -> Result<usize, StorageError> {
-        if let Some(pm) = self.peer_manager.read().await.as_ref() {
-            let last = pm.clock().last_net_time_ms();
-            if last > 0 {
-                let jump = now.0.saturating_sub(last);
-                if jump > 86_400_000 {
-                    let corroborated = pm
-                        .clock()
-                        .current_median_offset()
-                        .map(|median| {
-                            let median_abs = median.unsigned_abs();
-                            // Network median is clamped to 15 min (900_000 ms); a 24h jump can never be corroborated
-                            // by median alone. This strict check ensures only an explicit large median would allow it.
-                            median_abs >= 86_400_000 || median_abs >= jump.saturating_sub(900_000)
-                        })
-                        .unwrap_or(false);
-                    if !corroborated {
-                        warn!(
-                            now_ms = now.0,
-                            last_net_time = last,
-                            jump_ms = jump,
-                            "Prune rejected: forward clock jump >24h (86_400_000 ms) not corroborated by F2F network median (NTP warp protection)"
-                        );
-                        return Ok(0);
-                    }
+        let last_anchor = self.last_prune_anchor.load(std::sync::atomic::Ordering::Relaxed);
+        if last_anchor > 0 {
+            let jump = now.0.saturating_sub(last_anchor);
+            if jump > 86_400_000 {
+                let corroborated = if let Some(pm) = self.peer_manager.read().await.as_ref() {
+                    pm.clock().is_time_corroborated(jump)
+                } else {
+                    false
+                };
+                if !corroborated {
+                    warn!(
+                        now_ms = now.0,
+                        last_prune_anchor = last_anchor,
+                        jump_ms = jump,
+                        "Prune rejected: forward clock jump >24h (86_400_000 ms) not corroborated by F2F network median (NTP warp protection)"
+                    );
+                    return Ok(0);
                 }
             }
         }
@@ -1738,6 +1761,7 @@ impl DualTierEngine {
         };
 
         let (disk_pruned, disk_hmc_pruned) = self.db.prune_expired_buckets(now.0 / 1_000)?;
+        self.last_prune_anchor.store(now.0, std::sync::atomic::Ordering::Relaxed);
         Ok(ram_pruned + hmc_pruned + disk_pruned.len() + disk_hmc_pruned)
     }
 }

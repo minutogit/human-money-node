@@ -77,22 +77,34 @@ fn test_phase4_network_clock_clamping_and_monotonicity() {
     assert_eq!(clock.logical_offset_ms(), MAX_TIME_OFFSET_CLAMP_MS);
     assert_eq!(clock.logical_offset_ms(), 900_000);
 
-    // Strict Monotonicity: successive calls must strictly increase
+    // Monotonicity: successive calls must never decrease
     let mut prev = clock.net_time_ms();
     for _ in 0..10_000 {
         let cur = clock.net_time_ms();
         assert!(
-            cur > prev,
-            "Strict monotonicity violated: cur ({cur}) <= prev ({prev})"
+            cur >= prev,
+            "Monotonicity violated: cur ({cur}) < prev ({prev})"
         );
         prev = cur;
     }
+
+    // Rapid queries in tight loop must NOT inflate consensus time
+    let start = clock.net_time_ms();
+    for _ in 0..20_000 {
+        clock.net_time_ms();
+    }
+    let end = clock.net_time_ms();
+    assert!(
+        end.saturating_sub(start) < 500,
+        "20,000 queries must not inflate time by seconds (was {} ms)",
+        end - start
+    );
 
     // Even if local clock jumps backwards drastically (-15 minutes clamp)
     clock.set_offset_for_testing(-900_000);
     let after_backwards = clock.net_time_ms();
     assert!(
-        after_backwards > prev,
+        after_backwards >= prev,
         "Monotonicity must survive backwards time jumps"
     );
 }

@@ -88,6 +88,7 @@ pub struct PowEngine {
     default_difficulty: u32,
     challenge_ttl_seconds: u64,
     seen_solutions: Arc<Mutex<HashMap<([u8; 32], u64), u64>>>,
+    clock: Arc<parking_lot::RwLock<Option<Arc<crate::network::NetworkClock>>>>,
 }
 
 impl PowEngine {
@@ -98,6 +99,32 @@ impl PowEngine {
             default_difficulty,
             challenge_ttl_seconds: DEFAULT_EPOCH_DURATION_SEC,
             seen_solutions: Arc::new(Mutex::new(HashMap::new())),
+            clock: Arc::new(parking_lot::RwLock::new(None)),
+        }
+    }
+
+    /// Attaches a P2P network clock so epoch calculations use decentralized consensus time.
+    pub fn with_clock(self, clock: Arc<crate::network::NetworkClock>) -> Self {
+        *self.clock.write() = Some(clock);
+        self
+    }
+
+    /// Sets the P2P network clock reference.
+    pub fn set_clock(&self, clock: Arc<crate::network::NetworkClock>) {
+        *self.clock.write() = Some(clock);
+    }
+
+    /// Returns the current consensus time in seconds, querying P2pClock if configured,
+    /// falling back to local SystemTime only during offline unit tests or cold boot.
+    #[inline]
+    pub fn now_sec(&self) -> u64 {
+        if let Some(clock) = self.clock.read().as_ref() {
+            clock.net_time_ms() / 1000
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
         }
     }
 
@@ -131,17 +158,18 @@ impl PowEngine {
         }
     }
 
-    /// Generates a stateless BLAKE3 challenge bound to a specific parent lock.
-    /// Returns `(challenge_hex, difficulty, expires_at_sec)`.
-    pub fn generate_challenge_for_parent(&self, parent_lock: &[u8; 32]) -> (String, u32, u64) {
-        let now_sec = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+    /// Generates a stateless BLAKE3 challenge bound to a specific parent lock at explicit timestamp.
+    pub fn generate_challenge_for_parent_at(&self, parent_lock: &[u8; 32], now_sec: u64) -> (String, u32, u64) {
         let slot = self.current_epoch_slot(now_sec);
         let expires_at = (slot + 1) * self.challenge_ttl_seconds;
         let challenge_bytes = compute_stateless_challenge(parent_lock, slot);
         (hex::encode(challenge_bytes), self.default_difficulty, expires_at)
+    }
+
+    /// Generates a stateless BLAKE3 challenge bound to a specific parent lock.
+    /// Returns `(challenge_hex, difficulty, expires_at_sec)` aligned to decentralized consensus time.
+    pub fn generate_challenge_for_parent(&self, parent_lock: &[u8; 32]) -> (String, u32, u64) {
+        self.generate_challenge_for_parent_at(parent_lock, self.now_sec())
     }
 
     /// Generates a generic challenge without a specific parent lock binding.
@@ -149,8 +177,8 @@ impl PowEngine {
         self.generate_challenge_for_parent(&[0u8; 32])
     }
 
-    /// Validates the challenge structure and computes its expiration time.
-    pub fn validate_challenge(&self, challenge_hex: &str) -> Result<([u8; 32], u64), PowError> {
+    /// Validates the challenge structure and computes its expiration time at explicit timestamp.
+    pub fn validate_challenge_at(&self, challenge_hex: &str, now_sec: u64) -> Result<([u8; 32], u64), PowError> {
         let payload = hex::decode(challenge_hex).map_err(|_| PowError::InvalidFormat)?;
         if payload.len() != 32 {
             return Err(PowError::InvalidFormat);
@@ -158,13 +186,14 @@ impl PowEngine {
         let mut challenge_bytes = [0u8; 32];
         challenge_bytes.copy_from_slice(&payload);
 
-        let now_sec = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         let slot = self.current_epoch_slot(now_sec);
         let expires_at = (slot + 1) * self.challenge_ttl_seconds;
         Ok((challenge_bytes, expires_at))
+    }
+
+    /// Validates the challenge structure and computes its expiration time.
+    pub fn validate_challenge(&self, challenge_hex: &str) -> Result<([u8; 32], u64), PowError> {
+        self.validate_challenge_at(challenge_hex, self.now_sec())
     }
 
     /// ARCHITECTURAL INVARIANT / AUDIT NOTE (Spec 13, Rule 9):
@@ -178,12 +207,13 @@ impl PowEngine {
     ///    parent binding. Both paths are fully protected by `seen_solutions` replay deduplication.
     ///
     /// Performs exactly 1 BLAKE3 hash computation (< 0.1 µs).
-    pub async fn verify_pow_for_parent(
+    pub async fn verify_pow_for_parent_at(
         &self,
         challenge_hex: &str,
         nonce: u64,
         difficulty: u32,
         expected_parent_lock: Option<&[u8; 32]>,
+        now_sec: u64,
     ) -> Result<bool, PowError> {
         let payload = hex::decode(challenge_hex).map_err(|_| PowError::InvalidFormat)?;
         if payload.len() != 32 {
@@ -192,10 +222,6 @@ impl PowEngine {
         let mut challenge_bytes = [0u8; 32];
         challenge_bytes.copy_from_slice(&payload);
 
-        let now_sec = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         let current_slot = self.current_epoch_slot(now_sec);
 
         let gen_curr = compute_stateless_challenge(&[0u8; 32], current_slot);
@@ -248,6 +274,17 @@ impl PowEngine {
         }
 
         Ok(true)
+    }
+
+    /// Verifies PoW challenge with parent lock check, using consensus time.
+    pub async fn verify_pow_for_parent(
+        &self,
+        challenge_hex: &str,
+        nonce: u64,
+        difficulty: u32,
+        expected_parent_lock: Option<&[u8; 32]>,
+    ) -> Result<bool, PowError> {
+        self.verify_pow_for_parent_at(challenge_hex, nonce, difficulty, expected_parent_lock, self.now_sec()).await
     }
 
     /// Verifies PoW challenge without parent lock check.
@@ -374,5 +411,19 @@ mod tests {
         let (challenge, _, _) = engine.generate_challenge();
         let result = engine.verify_pow(&challenge, 0, 16).await;
         assert!(matches!(result, Err(PowError::InsufficientDifficulty { required: 16, .. })));
+    }
+
+    #[tokio::test]
+    async fn test_pow_clock_wiring_and_consensus_time() {
+        let secret = [0x42u8; 32];
+        let clock = Arc::new(crate::network::NetworkClock::new());
+        clock.set_offset_for_testing(60_000);
+        let engine = PowEngine::new(secret, 8).with_clock(clock.clone());
+
+        assert_eq!(engine.now_sec(), clock.net_time_ms() / 1000);
+
+        let (_ch, diff, exp) = engine.generate_challenge();
+        assert_eq!(diff, 8);
+        assert!(exp >= engine.now_sec());
     }
 }

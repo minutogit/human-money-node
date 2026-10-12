@@ -383,3 +383,90 @@ async fn test_5_2_doctor_check_7_healthy_and_outdated() {
 
     cancel.cancel();
 }
+
+#[tokio::test]
+async fn test_6_1_consensus_time_monotonicity_and_no_inflation_on_rapid_queries() {
+    let clock = humoco_node::network::NetworkClock::new();
+
+    // 1. Verify monotonicity across 10,000 queries
+    let mut prev = clock.net_time_ms();
+    for _ in 0..10_000 {
+        let cur = clock.net_time_ms();
+        assert!(
+            cur >= prev,
+            "Consensus time monotonicity violated: cur ({cur}) < prev ({prev})"
+        );
+        prev = cur;
+    }
+
+    // 2. Critical Spec 07 Invariant: 20,000 rapid queries MUST NOT inflate consensus time by seconds!
+    let start = clock.net_time_ms();
+    for _ in 0..20_000 {
+        clock.net_time_ms();
+    }
+    let end = clock.net_time_ms();
+    let drift = end.saturating_sub(start);
+    assert!(
+        drift < 500,
+        "Decoupling failed: 20,000 queries inflated consensus time by {} ms (must be < 500 ms)",
+        drift
+    );
+
+    // 3. Sequence tie-breaking works without altering consensus time
+    let (t1, s1) = clock.next_sequence_time_ms();
+    let (t2, s2) = clock.next_sequence_time_ms();
+    assert!(t2 >= t1);
+    assert_eq!(s2, s1 + 1);
+}
+
+#[tokio::test]
+async fn test_6_2_mesh_merge_dynamic_clamp_adaptation() {
+    let clock = humoco_node::network::NetworkClock::new();
+
+    // Partition separated for 45 minutes (2_700_000 ms > 15-min clamp)
+    let partition_offset_ms = 45 * 60 * 1000;
+    clock.fast_reseed_on_merge(partition_offset_ms);
+
+    // Logical offset must adapt to the partition merge offset rather than being capped at 15 min
+    assert_eq!(clock.logical_offset_ms(), partition_offset_ms);
+}
+
+#[tokio::test]
+async fn test_6_3_pow_engine_clock_alignment() {
+    let secret = [0x55u8; 32];
+    let clock = Arc::new(humoco_node::network::NetworkClock::new());
+    // Move clock into future by 10 minutes (600_000 ms)
+    clock.fast_reseed_on_merge(600_000);
+
+    let pow_engine = humoco_node::ingress::pow::PowEngine::new(secret, 8).with_clock(clock.clone());
+
+    // Epoch slot must be derived from clock.net_time_ms() rather than naive host SystemTime
+    let expected_slot = (clock.net_time_ms() / 1000) / 600;
+    let (challenge_hex, diff, exp) = pow_engine.generate_challenge();
+    assert_eq!(diff, 8);
+    assert!(exp > clock.net_time_ms() / 1000);
+
+    // Verify stateless challenge structure matches expected slot
+    let payload = hex::decode(&challenge_hex).unwrap();
+    let expected = humoco_node::ingress::pow::compute_stateless_challenge(&[0u8; 32], expected_slot);
+    assert_eq!(payload.as_slice(), expected.as_slice());
+}
+
+#[tokio::test]
+async fn test_6_4_pruning_ntp_warp_protection() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("prune_warp_test.redb");
+    let storage = Arc::new(humoco_node::storage::RedbStorage::open(&db_path).unwrap());
+    let (engine, _flush) = humoco_node::storage::DualTierEngine::new(storage.clone());
+    let pm = Arc::new(PeerManager::new(vec![]));
+    engine.set_peer_manager(pm.clone()).await;
+
+    // Normal initial prune at t = 1_000_000 ms
+    let res1 = engine.prune_expired(humoco_sim_core::types::SimTime(1_000_000)).await;
+    assert!(res1.is_ok());
+
+    // Sudden forward NTP jump by +48 hours (172_800_000 ms) without F2F consensus
+    let res2 = engine.prune_expired(humoco_sim_core::types::SimTime(1_000_000 + 172_800_000)).await;
+    assert_eq!(res2.unwrap(), 0, "Prune must be rejected on forward jump >24h without F2F corroboration");
+}
+

@@ -350,8 +350,14 @@ pub fn verify_l2_lock_entry_signature(entry: &L2LockEntry, lookup_tag: &str) -> 
         Err(_) => return false,
     };
     let sig = Signature::from_bytes(&entry.layer2_signature);
+    let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string();
+    let effective_voucher_id = if is_genesis {
+        TRAP_NONE_PLACEHOLDER
+    } else {
+        entry.layer2_voucher_id.as_str()
+    };
     let payload_hash = calculate_l2_payload_hash_raw(
-        &entry.layer2_voucher_id,
+        effective_voucher_id,
         lookup_tag,
         &entry.t_id,
         &entry.sender_ephemeral_pub,
@@ -361,7 +367,25 @@ pub fn verify_l2_lock_entry_signature(entry: &L2LockEntry, lookup_tag: &str) -> 
         entry.deletable_at.as_deref(),
         privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
     );
-    verifying_key.verify(&payload_hash, &sig).is_ok()
+    if verifying_key.verify(&payload_hash, &sig).is_ok() {
+        return true;
+    }
+    if is_genesis {
+        let fallback_hash = calculate_l2_payload_hash_raw(
+            &entry.layer2_voucher_id,
+            lookup_tag,
+            &entry.t_id,
+            &entry.sender_ephemeral_pub,
+            entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+            entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+            entry.encrypted_timestamp,
+            entry.deletable_at.as_deref(),
+            privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
+        );
+        verifying_key.verify(&fallback_hash, &sig).is_ok()
+    } else {
+        false
+    }
 }
 
 /// Wraps a verdict into an L2ResponseEnvelope signed with the node identity.

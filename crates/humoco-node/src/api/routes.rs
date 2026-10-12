@@ -1179,8 +1179,12 @@ async fn query_status(
     drop(hmc);
 
     let quorum_certificate = if payload.read_quorum > 1 {
-        let voucher_bytes = *blake3::hash(payload.layer2_voucher_id.as_bytes()).as_bytes();
-        let shard_id = u16::from_be_bytes([voucher_bytes[0], voucher_bytes[1]]);
+        let shard_id = if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id).await {
+            sid
+        } else {
+            let voucher_bytes = *blake3::hash(payload.layer2_voucher_id.as_bytes()).as_bytes();
+            humoco_sim_core::types::extract_shard_id(&voucher_bytes)
+        };
         match &verdict {
             L2Verdict::Verified { lock_entry } => {
                 let parent_lock = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
@@ -1371,7 +1375,17 @@ async fn submit_hmc_lock(
 
     let entry = L2LockEntry::from(&req);
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+    let shard_id = if req.is_genesis {
+        let sid = humoco_sim_core::types::extract_shard_id(&parent_bytes);
+        state.engine.record_hmc_voucher_genesis_parent(&req.layer2_voucher_id, parent_bytes).await;
+        sid
+    } else {
+        state
+            .engine
+            .get_hmc_voucher_genesis_shard(&req.layer2_voucher_id)
+            .await
+            .unwrap_or_else(|| humoco_sim_core::types::extract_shard_id(&parent_bytes))
+    };
     let is_responsible = if let Some(pm) = &state.peer_manager {
         pm.is_local_responsible_for_shard(state.identity.hrw_routing_id(), shard_id, 20).await
     } else {
@@ -1856,7 +1870,7 @@ async fn submit_hmc_chain_lock_inner(
     };
     let byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
 
-    let last_hop = match chain_req.chain.last() {
+    let first_hop = match chain_req.chain.first() {
         Some(hop) => hop,
         None => {
             let envelope = wrap_and_sign_verdict(
@@ -1868,13 +1882,21 @@ async fn submit_hmc_chain_lock_inner(
             return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
         }
     };
+    let genesis_tag = if first_hop.is_genesis {
+        bs58::encode(&first_hop.transaction_hash).into_string()
+    } else {
+        first_hop.ds_tag.clone().unwrap_or_default()
+    };
+    let genesis_parent_bytes = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    let shard_id = humoco_sim_core::types::extract_shard_id(&genesis_parent_bytes);
+
+    let last_hop = chain_req.chain.last().unwrap();
     let lookup_tag = if last_hop.is_genesis {
         bs58::encode(&last_hop.transaction_hash).into_string()
     } else {
         last_hop.ds_tag.clone().unwrap_or_default()
     };
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
     let is_responsible = if let Some(pm) = &state.peer_manager {
         pm.is_local_responsible_for_shard(state.identity.hrw_routing_id(), shard_id, 20).await
     } else {

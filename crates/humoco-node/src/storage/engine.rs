@@ -28,6 +28,8 @@ pub struct HmcRamIndex {
     pub vouchers: HashMap<String, HashSet<String>>,
     /// layer2_voucher_id -> root valid_until timestamp in ms
     pub voucher_roots: HashMap<String, u64>,
+    /// layer2_voucher_id -> genesis parent lock [u8; 32]
+    pub voucher_genesis_parents: HashMap<String, [u8; 32]>,
     /// lookup_tag -> valid_until timestamp in ms
     pub valid_until: HashMap<String, u64>,
     /// Bucket-Index: bucket_sec (valid_until_ms + 30s) / 1000 -> Vec<lookup_tag>
@@ -130,6 +132,10 @@ impl HmcRamIndex {
                     self.ttl_buckets.entry(bucket_sec).or_default().push(lookup_tag.clone());
                     self.valid_until.insert(lookup_tag.clone(), valid_until_ms);
                     self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+                    if entry.deletable_at.is_some() {
+                        let p_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+                        self.voucher_genesis_parents.entry(entry.layer2_voucher_id.clone()).or_insert(p_bytes);
+                    }
 
                     self.vouchers
                         .entry(entry.layer2_voucher_id.clone())
@@ -150,6 +156,10 @@ impl HmcRamIndex {
             self.ttl_buckets.entry(bucket_sec).or_default().push(lookup_tag.clone());
             self.valid_until.insert(lookup_tag.clone(), valid_until_ms);
             self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+            if entry.deletable_at.is_some() {
+                let p_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+                self.voucher_genesis_parents.entry(entry.layer2_voucher_id.clone()).or_insert(p_bytes);
+            }
 
             self.vouchers
                 .entry(entry.layer2_voucher_id.clone())
@@ -163,6 +173,10 @@ impl HmcRamIndex {
 
     pub fn get_voucher_root_valid(&self, voucher_id: &str) -> Option<u64> {
         self.voucher_roots.get(voucher_id).copied()
+    }
+
+    pub fn get_voucher_genesis_parent(&self, voucher_id: &str) -> Option<[u8; 32]> {
+        self.voucher_genesis_parents.get(voucher_id).copied()
     }
 
     /// Prune expired HMC locks where now > valid_until + 30s grace (INV-1203).
@@ -950,6 +964,12 @@ impl DualTierEngine {
                             hmc.voucher_roots
                                 .entry(entry.layer2_voucher_id.clone())
                                 .or_insert(valid_until_ms);
+                            if entry.deletable_at.is_some() {
+                                let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+                                hmc.voucher_genesis_parents
+                                    .entry(entry.layer2_voucher_id.clone())
+                                    .or_insert(p_bytes);
+                            }
                             hmc.vouchers
                                 .entry(entry.layer2_voucher_id.clone())
                                 .or_default()
@@ -1066,6 +1086,34 @@ impl DualTierEngine {
     /// Returns the root validity timestamp (in ms) for an HMC voucher, if known.
     pub async fn get_hmc_voucher_root_valid(&self, voucher_id: &str) -> Option<u64> {
         self.hmc_ram.read().await.get_voucher_root_valid(voucher_id)
+    }
+
+    /// Returns the genesis parent lock for an HMC voucher, if known.
+    pub async fn get_hmc_voucher_genesis_parent(&self, voucher_id: &str) -> Option<[u8; 32]> {
+        if let Some(p) = self.hmc_ram.read().await.get_voucher_genesis_parent(voucher_id) {
+            return Some(p);
+        }
+        // Fallback to redb
+        if let Ok(locks) = self.db.get_hmc_locks_for_voucher(voucher_id) {
+            for (tag, entry) in locks {
+                if entry.deletable_at.is_some() {
+                    let parent = *blake3::hash(tag.as_bytes()).as_bytes();
+                    self.hmc_ram.write().await.voucher_genesis_parents.insert(voucher_id.to_string(), parent);
+                    return Some(parent);
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the genesis shard ID for an HMC voucher, if known.
+    pub async fn get_hmc_voucher_genesis_shard(&self, voucher_id: &str) -> Option<u16> {
+        self.get_hmc_voucher_genesis_parent(voucher_id).await.map(|p| humoco_sim_core::types::extract_shard_id(&p))
+    }
+
+    /// Manually records the genesis parent lock for an HMC voucher.
+    pub async fn record_hmc_voucher_genesis_parent(&self, voucher_id: &str, parent: [u8; 32]) {
+        self.hmc_ram.write().await.voucher_genesis_parents.insert(voucher_id.to_string(), parent);
     }
 
     /// Returns at most `limit` recent active vouchers without scanning the entire database if not needed.

@@ -93,6 +93,10 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
         signature: [0u8; 64],
         supported_suites_mask: 0,
         piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *identity_c.node_id(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
     };
     let heartbeat_payload = bincode::serialize(&hb_payload).expect("serialize heartbeat");
     let mut heartbeat_hdr = WireHeader::new(
@@ -274,5 +278,94 @@ async fn test_unauthorized_active_sync_and_shard_digest_rejected() {
     cancel_a.cancel();
     cancel_c.cancel();
     transport_a.close();
+    transport_c.close();
+}
+
+#[tokio::test]
+async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
+    // 3 Nodes in a line: A <-> B <-> C (A friends B, B friends C; A and C are NOT direct friends)
+    let cancel_a = CancellationToken::new();
+    let cancel_b = CancellationToken::new();
+    let cancel_c = CancellationToken::new();
+
+    let identity_a = NodeIdentity::generate();
+    let identity_b = NodeIdentity::generate();
+    let identity_c = NodeIdentity::generate();
+
+    let addr_a: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let addr_b: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let addr_c: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let pm_a = Arc::new(PeerManager::with_f2f(vec![], vec![*identity_b.node_id()]));
+    let pm_b = Arc::new(PeerManager::with_f2f(vec![], vec![*identity_a.node_id(), *identity_c.node_id()]));
+    let pm_c = Arc::new(PeerManager::with_f2f(vec![], vec![*identity_b.node_id()]));
+
+    let transport_a = QuicTransport::bind_with_options(addr_a, &identity_a, pm_a.clone(), Arc::new(DefaultRequestHandler), cancel_a.clone()).unwrap();
+    let actual_addr_a = transport_a.local_addr().unwrap();
+    let _accept_a = transport_a.spawn_accept_loop();
+
+    let transport_b = QuicTransport::bind_with_options(addr_b, &identity_b, pm_b.clone(), Arc::new(DefaultRequestHandler), cancel_b.clone()).unwrap();
+    let actual_addr_b = transport_b.local_addr().unwrap();
+    let _accept_b = transport_b.spawn_accept_loop();
+
+    let transport_c = QuicTransport::bind_with_options(addr_c, &identity_c, pm_c.clone(), Arc::new(DefaultRequestHandler), cancel_c.clone()).unwrap();
+    let actual_addr_c = transport_c.local_addr().unwrap();
+    let _accept_c = transport_c.spawn_accept_loop();
+
+    // Register friend addresses
+    pm_a.register_f2f_friend(*identity_b.node_id(), Some(actual_addr_b)).await;
+    pm_b.register_f2f_friend(*identity_a.node_id(), Some(actual_addr_a)).await;
+    pm_b.register_f2f_friend(*identity_c.node_id(), Some(actual_addr_c)).await;
+    pm_c.register_f2f_friend(*identity_b.node_id(), Some(actual_addr_b)).await;
+
+    // Connect friends
+    let _conn_a_b = transport_a.connect_peer_unchecked(actual_addr_b).await.unwrap();
+    let _conn_b_c = transport_b.connect_peer_unchecked(actual_addr_c).await.unwrap();
+
+    // Node A sends Heartbeat with TTL=16 and Argon2d routing ID
+    let hb_a = humoco_node::network::framing::HeartbeatWirePayload {
+        node_id: *identity_a.node_id(),
+        addr: actual_addr_a,
+        timestamp_ms: 50_000,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *identity_a.node_id(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    let payload = bincode::serialize(&hb_a).unwrap();
+    let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
+    hdr.reserved = 0; // hops = 0
+
+    let conn_a_to_b = transport_a.connect_peer_unchecked(actual_addr_b).await.unwrap();
+    transport_a.send_unidirectional(&conn_a_to_b, &hdr, &payload).await.unwrap();
+
+    // Wait for multi-hop gossip propagation: A -> B -> C
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // Node B must have learned A (direct, hops=0)
+    assert!(pm_b.is_known_node(identity_a.node_id()).await);
+    let info_at_b = pm_b.get_known_node_info(identity_a.node_id()).await.unwrap();
+    assert_eq!(info_at_b.min_hops(), 0);
+
+    // Node C must have learned A through multi-hop forwarding from B (hops=1)
+    assert!(pm_c.is_known_node(identity_a.node_id()).await, "Node C must have learned Node A via F2F multi-hop gossip");
+    let info_at_c = pm_c.get_known_node_info(identity_a.node_id()).await.unwrap();
+    assert_eq!(info_at_c.min_hops(), 1);
+
+    // Verify 24h incubation wall: Node A is newly learned, so is_immature() must be true, cannot be HRW eligible yet!
+    assert!(info_at_c.is_immature(), "Newly learned node must be IMMATURE under 24h incubation wall");
+    assert!(!info_at_c.is_hrw_eligible(), "Newly learned node must NOT be HRW eligible yet");
+
+    // Clean up
+    cancel_a.cancel();
+    cancel_b.cancel();
+    cancel_c.cancel();
+    transport_a.close();
+    transport_b.close();
     transport_c.close();
 }

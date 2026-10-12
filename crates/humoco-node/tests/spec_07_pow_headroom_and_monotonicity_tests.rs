@@ -220,6 +220,10 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
         signature: [0u8; 64],
         supported_suites_mask: 0,
         piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: pk_a,
+        ticket_epoch_t0: 0,
+        ttl: 16,
     };
     let payload = bincode::serialize(&hb).unwrap();
     let mut header = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);

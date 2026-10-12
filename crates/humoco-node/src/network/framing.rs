@@ -25,6 +25,18 @@ pub struct HeartbeatWirePayload {
     pub supported_suites_mask: u8,
     #[serde(default, deserialize_with = "deserialize_piggyback_observations")]
     pub piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
+    #[serde(default)]
+    pub pow_nonce: u64,
+    #[serde(default)]
+    pub hrw_routing_id: [u8; 32],
+    #[serde(default)]
+    pub ticket_epoch_t0: u64,
+    #[serde(default = "default_heartbeat_ttl")]
+    pub ttl: u8,
+}
+
+pub fn default_heartbeat_ttl() -> u8 {
+    16
 }
 
 pub fn deserialize_piggyback_observations<'de, D>(
@@ -47,7 +59,7 @@ impl HeartbeatWirePayload {
             Ok(hb)
         } else {
             #[derive(serde::Deserialize)]
-            struct LegacyHeartbeat {
+            struct MidHeartbeat {
                 node_id: [u8; 32],
                 addr: std::net::SocketAddr,
                 timestamp_ms: u64,
@@ -59,18 +71,55 @@ impl HeartbeatWirePayload {
                 signature: [u8; 64],
                 #[serde(default)]
                 supported_suites_mask: u8,
+                #[serde(default, deserialize_with = "deserialize_piggyback_observations")]
+                piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
             }
-            let l: LegacyHeartbeat = bincode::deserialize(bytes)?;
-            Ok(HeartbeatWirePayload {
-                node_id: l.node_id,
-                addr: l.addr,
-                timestamp_ms: l.timestamp_ms,
-                declared_write_ema_micro_bj: l.declared_write_ema_micro_bj,
-                declared_read_ema_credits: l.declared_read_ema_credits,
-                signature: l.signature,
-                supported_suites_mask: l.supported_suites_mask,
-                piggyback_observations: Vec::new(),
-            })
+            if let Ok(m) = bincode::deserialize::<MidHeartbeat>(bytes) {
+                Ok(HeartbeatWirePayload {
+                    node_id: m.node_id,
+                    addr: m.addr,
+                    timestamp_ms: m.timestamp_ms,
+                    declared_write_ema_micro_bj: m.declared_write_ema_micro_bj,
+                    declared_read_ema_credits: m.declared_read_ema_credits,
+                    signature: m.signature,
+                    supported_suites_mask: m.supported_suites_mask,
+                    piggyback_observations: m.piggyback_observations,
+                    pow_nonce: 0,
+                    hrw_routing_id: m.node_id,
+                    ticket_epoch_t0: 0,
+                    ttl: 16,
+                })
+            } else {
+                #[derive(serde::Deserialize)]
+                struct LegacyHeartbeat {
+                    node_id: [u8; 32],
+                    addr: std::net::SocketAddr,
+                    timestamp_ms: u64,
+                    #[serde(default)]
+                    declared_write_ema_micro_bj: u64,
+                    #[serde(default)]
+                    declared_read_ema_credits: u64,
+                    #[serde(default = "default_signature", with = "serde_sig_64")]
+                    signature: [u8; 64],
+                    #[serde(default)]
+                    supported_suites_mask: u8,
+                }
+                let l: LegacyHeartbeat = bincode::deserialize(bytes)?;
+                Ok(HeartbeatWirePayload {
+                    node_id: l.node_id,
+                    addr: l.addr,
+                    timestamp_ms: l.timestamp_ms,
+                    declared_write_ema_micro_bj: l.declared_write_ema_micro_bj,
+                    declared_read_ema_credits: l.declared_read_ema_credits,
+                    signature: l.signature,
+                    supported_suites_mask: l.supported_suites_mask,
+                    piggyback_observations: Vec::new(),
+                    pow_nonce: 0,
+                    hrw_routing_id: l.node_id,
+                    ticket_epoch_t0: 0,
+                    ttl: 16,
+                })
+            }
         }
     }
 }
@@ -644,6 +693,10 @@ mod tests {
             signature: [0; 64],
             supported_suites_mask: 1,
             piggyback_observations: vec![ev1.clone(), ev2.clone(), ev3.clone()],
+            pow_nonce: 0,
+            hrw_routing_id: [9; 32],
+            ticket_epoch_t0: 0,
+            ttl: 16,
         };
         let bytes = bincode::serialize(&hb).expect("serialize bincode");
         let decoded = HeartbeatWirePayload::from_bytes(&bytes).expect("deserialize bincode");

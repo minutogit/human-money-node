@@ -164,6 +164,11 @@ impl KnownNodeInfo {
         self.work_score
     }
 
+    /// Returns the minimum hop distance observed for this node.
+    pub fn min_hops(&self) -> u8 {
+        self.min_hops
+    }
+
     /// Effective HRW for scoring: active ticket, as long as pending is not mature.
     pub fn effective_hrw(&self) -> [u8; 32] {
         // If pending is mature (>=24h), it would have been promoted already — return active here.
@@ -209,6 +214,38 @@ pub struct DnsPeerState {
     pub current_addr: Option<SocketAddr>,
 }
 
+/// Bounded LRU-style deduplication cache for seen heartbeats (Spec 11).
+#[derive(Debug)]
+pub struct HeartbeatDedupCache {
+    set: HashSet<[u8; 32]>,
+    queue: std::collections::VecDeque<[u8; 32]>,
+    capacity: usize,
+}
+
+impl HeartbeatDedupCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            set: HashSet::with_capacity(capacity.min(4096)),
+            queue: std::collections::VecDeque::with_capacity(capacity.min(4096)),
+            capacity,
+        }
+    }
+
+    pub fn check_and_insert(&mut self, id: [u8; 32]) -> bool {
+        if self.set.contains(&id) {
+            return false;
+        }
+        if self.queue.len() >= self.capacity {
+            if let Some(oldest) = self.queue.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+        self.set.insert(id);
+        self.queue.push_back(id);
+        true
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PeerManager {
     peers: Arc<RwLock<HashMap<SocketAddr, PeerInfo>>>,
@@ -227,6 +264,7 @@ pub struct PeerManager {
     ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
     fraud_proof_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>>>>,
     recent_observed_evidences: Arc<tokio::sync::RwLock<std::collections::VecDeque<humoco_sim_core::fraud::IngressEnvelopeEvidence>>>,
+    seen_heartbeats: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
 }
 
 impl PeerManager {
@@ -316,7 +354,19 @@ impl PeerManager {
             ticket_outdated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
             recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(16))),
+            seen_heartbeats: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(10_000))),
         }
+    }
+
+    /// Checks if a heartbeat has already been seen; if not, records it. Returns true if new, false if duplicate.
+    pub async fn check_and_record_heartbeat(&self, node_id: &[u8; 32], nonce: u64, timestamp_ms: u64) -> bool {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(node_id);
+        hasher.update(&nonce.to_le_bytes());
+        hasher.update(&timestamp_ms.to_le_bytes());
+        let id = *hasher.finalize().as_bytes();
+        let mut guard = self.seen_heartbeats.write().await;
+        guard.check_and_insert(id)
     }
 
     pub async fn set_fraud_proof_tx(&self, tx: tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>) {
@@ -1518,6 +1568,11 @@ impl PeerManager {
         for p in peers.values() {
             if !p.is_suspended() {
                 if let Some(nid) = p.node_id {
+                    if let Some(k) = known.get(&nid) {
+                        if k.is_immature() {
+                            continue;
+                        }
+                    }
                     let hrw = known.get(&nid).map(|k| k.hrw_routing_id).unwrap_or(nid);
                     result.push((hrw, p.addr));
                 }

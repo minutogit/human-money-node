@@ -350,6 +350,10 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         signature: sig1,
         supported_suites_mask: 0,
         piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *identity_client.node_pubkey(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
     };
     let hb_payload = bincode::serialize(&hb_wire).unwrap();
     let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, hb_payload.len() as u32);
@@ -554,6 +558,10 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         signature: [0; 64],
         supported_suites_mask: 0,
         piggyback_observations: sampled,
+        pow_nonce: 0,
+        hrw_routing_id: *identity_a.node_pubkey(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
     };
     let hb_payload = bincode::serialize(&hb_wire).unwrap();
     let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, hb_payload.len() as u32);

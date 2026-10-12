@@ -1095,7 +1095,6 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
     let tx_hash = [0x42u8; 32];
     let lookup_tag = bs58::encode(&tx_hash).into_string();
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-    let expected_shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
 
     // Intentional mismatch: t_id prefix does NOT match parent_bytes prefix
     let mut different_t_id = [0x99u8; 32];
@@ -1208,9 +1207,11 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
     let envelope: humoco_node::api::hmc::L2ResponseEnvelope = response_json(res).await;
     assert!(envelope.quorum_certificate.is_some());
     let qc = envelope.quorum_certificate.unwrap();
+    let genesis_parent_bytes = *blake3::hash(genesis_lookup_tag.as_bytes()).as_bytes();
+    let expected_genesis_shard_id = u16::from_be_bytes([genesis_parent_bytes[0], genesis_parent_bytes[1]]);
 
-    // Verify: Shard-ID MUST equal expected_shard_id (derived from parent_bytes anchor), NOT from t_id!
-    assert_eq!(qc.shard_id, expected_shard_id, "Shard ID must be derived from parent voucher anchor, never from t_id");
+    // Verify: Shard-ID MUST equal expected_genesis_shard_id (derived from genesis voucher anchor), NOT from t_id!
+    assert_eq!(qc.shard_id, expected_genesis_shard_id, "Shard ID must be derived from genesis voucher anchor, never from t_id");
 }
 
 #[tokio::test]

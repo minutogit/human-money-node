@@ -653,7 +653,7 @@ impl FraudProofPayload {
                     Ok(s) => s,
                     Err(_) => return false,
                 };
-                let shard_id = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
+                let shard_id = crate::types::extract_shard_id(&att.parent_lock);
                 let d_prov = compute_sig_digest(
                     DOMAIN_APPROVE_PROV,
                     0,

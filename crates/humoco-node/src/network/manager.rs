@@ -1991,13 +1991,22 @@ impl PeerManager {
     /// Checks whether the local node is among the responsible Top-N (default 20) shard nodes
     /// for the given shard_id according to HRW score.
     pub async fn is_local_responsible_for_shard(&self, self_hrw: &[u8; 32], shard_id: u16, top_n: usize) -> bool {
+        self.local_shard_rank(self_hrw, shard_id).await.map(|r| r <= top_n).unwrap_or(true)
+    }
+
+    /// # Architectural Invariant: INV-0306 Dynamic Succession & INV-1501 (Phase 2 P1)
+    ///
+    /// Returns the 1-based HRW rank of the local node for `shard_id` (`None`
+    /// when alone / no peers). Ranks 1-20 are primary custodians; ranks 21-40
+    /// are active straggler-failover replacements that MUST serve authorized
+    /// quorum requests after the gateway's 300ms partial timeout instead of
+    /// answering `FLAG_NOT_IN_SHARD`. Only ranks beyond 40 (K_max=40 successor
+    /// horizon) may refuse. Idle Tier-2 closes and aborted stragglers are never
+    /// peer failures.
+    pub async fn local_shard_rank(&self, self_hrw: &[u8; 32], shard_id: u16) -> Option<usize> {
         let active_nodes = self.active_hrw_nodes().await;
         if active_nodes.is_empty() {
-            return true;
-        }
-        let total_active = active_nodes.len() + 1;
-        if total_active <= top_n {
-            return true;
+            return None;
         }
         let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(self_hrw, shard_id);
         let higher_nodes_count = active_nodes
@@ -2010,8 +2019,7 @@ impl PeerManager {
                 score > self_score || (score == self_score && hrw_id > self_hrw)
             })
             .count();
-        let self_rank = higher_nodes_count + 1;
-        self_rank <= top_n
+        Some(higher_nodes_count + 1)
     }
 
     /// Returns the top-N candidate nodes for a given shard_id according to HRW ranking.

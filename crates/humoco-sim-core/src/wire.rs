@@ -111,6 +111,11 @@ pub const FLAG_NOT_IN_SHARD: u32 = 0x0000_0400;
 pub const FLAG_UNAUTHORIZED: u32 = 0x0000_0800;
 pub const FLAG_SIGNATURE_INVALID: u32 = 0x0000_1000;
 pub const FLAG_NOT_READY: u32 = 0x0000_2000;
+/// True HMC double-spend conflict on the wire (Phase 2 P1, INV-0306/INV-0604):
+/// the shard already holds a diverging lock on the same parent tag. The
+/// response carries the colliding `L2LockEntry` payload so the stateless
+/// gateway can return `409 Conflict` with first-party evidence.
+pub const FLAG_COLLISION_DETECTED: u32 = 0x0000_4000;
 
 
 /// 144-Byte LockEntry (INV-1001)

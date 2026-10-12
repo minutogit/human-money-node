@@ -553,6 +553,23 @@ pub fn create_attestation(
 // JoinSet fanout / attestation verification logic.
 // ---------------------------------------------------------------------------
 
+/// Resolves a voucher root for a stateless gateway (Phase 2 P1):
+/// RAM already missed; check persistent disk for the signed genesis TTL
+/// before falling back to provisional forwarding. Returns the immutable
+/// `root.valid_until` in ms when the genesis lock is known on disk.
+async fn fetch_remote_voucher_root(state: &AppState, voucher_id: &str) -> Option<u64> {
+    if let Ok(locks) = state.storage.get_hmc_locks_for_voucher(voucher_id) {
+        for (_, entry) in locks {
+            if let Some(del) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                return Some(del);
+            }
+        }
+    }
+    // The authoritative shard check happens during the subsequent quorum
+    // fanout (LockVerifyRequest); the shard enforces INV-1202 on `now_ms`.
+    None
+}
+
 /// Computes the 32-bit signer bitmap for a quorum certificate.
 /// Ranks all active HRW ids plus self by HRW score, truncates to 32, and
 /// maps each collected signature's node_id to its HRW rank bit position.
@@ -745,6 +762,7 @@ struct PeerAttestationQuery<'a> {
 enum PeerQueryError {
     QuotaExceeded,
     NotInShard,
+    Collision(Vec<u8>),
     Generic,
 }
 
@@ -752,6 +770,7 @@ enum PeerQueryResult {
     Success(AttestationDto),
     QuotaExceeded,
     NotInShard,
+    Collision(Vec<u8>),
     Failure,
 }
 
@@ -773,7 +792,7 @@ enum PeerQueryResult {
 async fn collect_peer_attestations(
     query: PeerAttestationQuery<'_>,
     collected_signatures: &mut Vec<AttestationDto>,
-) {
+) -> Option<crate::api::hmc::L2LockEntry> {
     let header = humoco_sim_core::wire::WireHeader::new(
         query.msg_type as u16,
         1,
@@ -786,6 +805,8 @@ async fn collect_peer_attestations(
     let mut candidate_idx = 0;
     let mut total_queried = 0;
     let mut in_flight = std::collections::HashMap::new();
+    // First genuine HMC conflict evidence (FLAG_COLLISION_DETECTED) for 409.
+    let mut collision_entry: Option<crate::api::hmc::L2LockEntry> = None;
 
     let _ = tokio::time::timeout(crate::network::manager::QUORUM_GLOBAL_TIMEOUT, async {
         let mut join_set = tokio::task::JoinSet::new();
@@ -807,6 +828,11 @@ async fn collect_peer_attestations(
                     let query_peer = async {
                         let conn = t.connect_peer(addr).await.map_err(|_| PeerQueryError::Generic)?;
                         let (resp_header, resp_payload) = t.send_request(&conn, &h, &p).await.map_err(|_| PeerQueryError::Generic)?;
+                        // Phase 2 P1 (INV-0604): genuine HMC double-spend carries
+                        // FLAG_COLLISION_DETECTED + colliding lock payload for 409.
+                        if (resp_header.flags & humoco_sim_core::wire::FLAG_COLLISION_DETECTED) != 0 {
+                            return Err(PeerQueryError::Collision(resp_payload));
+                        }
                         if (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0 {
                             return Err(PeerQueryError::QuotaExceeded);
                         }
@@ -830,6 +856,7 @@ async fn collect_peer_attestations(
                         Ok(att) => (nid, addr, rank_idx, PeerQueryResult::Success(att)),
                         Err(PeerQueryError::QuotaExceeded) => (nid, addr, rank_idx, PeerQueryResult::QuotaExceeded),
                         Err(PeerQueryError::NotInShard) => (nid, addr, rank_idx, PeerQueryResult::NotInShard),
+                        Err(PeerQueryError::Collision(payload)) => (nid, addr, rank_idx, PeerQueryResult::Collision(payload)),
                         Err(PeerQueryError::Generic) => (nid, addr, rank_idx, PeerQueryResult::Failure),
                     }
                 });
@@ -915,6 +942,18 @@ async fn collect_peer_attestations(
                     in_flight.remove(&rank_idx);
                     spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
                 }
+                Ok((_nid, addr, rank_idx, PeerQueryResult::Collision(payload))) => {
+                    in_flight.remove(&rank_idx);
+                    // Genuine shard work (conflict lookup) decays malus; the
+                    // colliding lock is first-party double-spend evidence.
+                    query.peer_mgr.record_shard_work(addr).await;
+                    if collision_entry.is_none() {
+                        if let Ok(entry) = bincode::deserialize::<crate::api::hmc::L2LockEntry>(&payload) {
+                            collision_entry = Some(entry);
+                        }
+                    }
+                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+                }
                 Ok((_nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)) => {
                     in_flight.remove(&rank_idx);
                     // Phase 9 P1 (Spec 09 INV-0908): 24h quota moratorium after a partition merge.
@@ -996,10 +1035,14 @@ async fn collect_peer_attestations(
             }
         }
     }
+    collision_entry
 }
 
 /// Assembles a quorum certificate for a lock by collecting signatures from top-20 HRW nodes
 /// or creating a local standalone certificate when N=1 or no peers are available.
+/// Returns the certificate plus the first genuine HMC conflict evidence
+/// (`FLAG_COLLISION_DETECTED`) when any shard reports a diverging lock on the
+/// same parent tag, so the stateless gateway can return `409 Conflict`.
 async fn assemble_quorum_certificate(
     state: &AppState,
     lock_id: [u8; 32],
@@ -1007,7 +1050,7 @@ async fn assemble_quorum_certificate(
     shard_id: u16,
     now_ms: u64,
     record_payload: Option<Vec<u8>>,
-) -> QuorumCertificateDto {
+) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
     let local_attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, 0, now_ms, state.network_id);
     let mut collected_signatures = Vec::new();
 
@@ -1056,7 +1099,7 @@ async fn assemble_quorum_certificate(
             if let (Some(transport), Some(payload)) = (&state.transport, record_payload) {
                 let my_load = state.tier_controller.rolling_24h_average();
                 let quota_limit = (5.0 * state.tier_controller.effective_ncb() as f64).round() as u64;
-                collect_peer_attestations(
+                let collision = collect_peer_attestations(
                     PeerAttestationQuery {
                         transport,
                         peer_mgr,
@@ -1074,6 +1117,27 @@ async fn assemble_quorum_certificate(
                     },
                     &mut collected_signatures,
                 ).await;
+
+                let status = if collected_signatures.len() >= required_q && target_status == 1 {
+                    1
+                } else {
+                    0
+                };
+
+                let self_pubkey = *state.identity.node_pubkey();
+                let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
+                verify_signer_bitmap_consistency(&collected_signatures, signer_bitmap);
+
+                let cert = QuorumCertificateDto {
+                    lock_id: hex::encode(lock_id),
+                    shard_id,
+                    status,
+                    active_nodes_count: total_active,
+                    signer_count: collected_signatures.len(),
+                    signatures: collected_signatures,
+                    signer_bitmap,
+                };
+                return (cert, collision);
             }
 
             let status = if collected_signatures.len() >= required_q && target_status == 1 {
@@ -1086,7 +1150,7 @@ async fn assemble_quorum_certificate(
             let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
             verify_signer_bitmap_consistency(&collected_signatures, signer_bitmap);
 
-            QuorumCertificateDto {
+            (QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),
                 shard_id,
                 status,
@@ -1094,9 +1158,9 @@ async fn assemble_quorum_certificate(
                 signer_count: collected_signatures.len(),
                 signatures: collected_signatures,
                 signer_bitmap,
-            }
+            }, None)
         } else {
-            QuorumCertificateDto {
+            (QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),
                 shard_id,
                 status: 0,
@@ -1104,10 +1168,10 @@ async fn assemble_quorum_certificate(
                 signer_count: 1,
                 signatures: vec![local_attestation],
                 signer_bitmap: 1,
-            }
+            }, None)
         }
     } else {
-        QuorumCertificateDto {
+        (QuorumCertificateDto {
             lock_id: hex::encode(lock_id),
             shard_id,
             status: 0,
@@ -1115,7 +1179,7 @@ async fn assemble_quorum_certificate(
             signer_count: 1,
             signatures: vec![local_attestation],
             signer_bitmap: 1,
-        }
+        }, None)
     }
 }
 
@@ -1210,7 +1274,7 @@ async fn assemble_status_quorum_certificate(
                     let payload = bincode::serialize(&status_query).unwrap_or_default();
                     let my_load = state.tier_controller.rolling_24h_read_average();
                     let quota_limit = (5.0 * state.tier_controller.effective_read_ncb() as f64).round() as u64;
-                    collect_peer_attestations(
+                    let _ = collect_peer_attestations(
                         PeerAttestationQuery {
                             transport,
                             peer_mgr,
@@ -1319,12 +1383,109 @@ async fn query_status(
     }
 
     let hmc = state.engine.hmc_ram.read().await;
-    let verdict = hmc.query_status(
+    let mut verdict = hmc.query_status(
         &payload.layer2_voucher_id,
         &payload.challenge_ds_tag,
         &payload.locator_prefixes,
     );
     drop(hmc);
+
+    // # Architectural Invariant: Smart Client, Dumb Server & Hydra Resilience
+    // (Phase 2 P1, Spec 06 / INV-0310)
+    //
+    // The gateway is a stateless messenger without own shard state: if the lock
+    // is unknown locally it MUST NOT blindly answer UnknownVoucher. It queries
+    // exactly 1 deterministic node from the Top-20 shard custodians via QUIC
+    // (deterministic per-lock index, no hotspot on rank 1) and returns the
+    // remote result. If the public gateway IP fails, wallets rotate to the next
+    // gateway (Hydra resilience); shard state lives only on shard custodians.
+    if matches!(verdict, L2Verdict::UnknownVoucher) {
+        if let (Some(peer_mgr), Some(transport)) = (state.peer_manager.as_ref(), state.transport.as_ref()) {
+            let shard_id = if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id).await {
+                sid
+            } else {
+                let voucher_bytes = *blake3::hash(payload.layer2_voucher_id.as_bytes()).as_bytes();
+                humoco_sim_core::types::extract_shard_id(&voucher_bytes)
+            };
+            let candidates = peer_mgr.get_top_n_shards_for_lock(shard_id, 20).await;
+            if !candidates.is_empty() {
+                // Deterministic 1-of-20: per-lock index from BLAKE3(tag).
+                let tag_hash = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
+                let idx = (tag_hash[0] as usize) % candidates.len();
+                let (_, addr) = candidates[idx];
+                let parent_lock = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
+                let declared_read_ema = state.tier_controller.current_read_ema_credits();
+                let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+                let sender_pubkey = *state.identity.node_pubkey();
+                let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                    &sender_pubkey, 0, 0, now_ms,
+                    declared_write_ema, declared_read_ema, 0, true, &[0u8; 32],
+                );
+                let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+                let status_query = crate::network::framing::StatusQueryPayload {
+                    lock_id: [0u8; 32],
+                    parent_lock,
+                    shard_id,
+                    sender_pubkey,
+                    declared_write_ema_micro_bj: declared_write_ema,
+                    current_read_ema_credits: declared_read_ema,
+                    timestamp_ms: now_ms,
+                    sender_signature,
+                };
+                let payload_bytes = bincode::serialize(&status_query).unwrap_or_default();
+                let header = humoco_sim_core::wire::WireHeader::new(
+                    humoco_sim_core::wire::MsgType::StatusQuery as u16, 1, 0, 0,
+                    payload_bytes.len() as u32,
+                );
+                let remote_verdict: Option<L2Verdict> = async {
+                    let conn = transport.connect_peer(addr).await.ok()?;
+                    let fut = transport.send_request(&conn, &header, &payload_bytes);
+                    let (resp_header, resp_payload) = tokio::time::timeout(std::time::Duration::from_millis(1000), fut).await.ok()?.ok()?;
+                    if resp_header.msg_type != humoco_sim_core::wire::MsgType::StatusResponse as u16
+                        || resp_payload.is_empty()
+                        || (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0
+                        || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED) != 0
+                    {
+                        return None;
+                    }
+                    // Tag-only fallback returns the full L2LockEntry with
+                    // first-party signature evidence.
+                    if let Ok(entry) = bincode::deserialize::<crate::api::hmc::L2LockEntry>(&resp_payload) {
+                        if entry.layer2_voucher_id == payload.layer2_voucher_id {
+                            return Some(L2Verdict::Verified { lock_entry: entry });
+                        }
+                    }
+                    // Standard path returns an attestation; existence proves the
+                    // lock lives on the shard (full entry sync via digest-pull).
+                    if let Ok(att) = bincode::deserialize::<crate::api::dto::AttestationDto>(&resp_payload) {
+                        // Attestation alone proves shard custody; report as
+                        // MissingLocks would hide it, so surface as Verified
+                        // with a minimal entry carrying the proven t_id. The
+                        // client cross-checks t_id for double-spend (Spec 06).
+                        let lock_id_bytes = hex::decode(&att.lock_id).ok().and_then(|b| <[u8; 32]>::try_from(b).ok())?;
+                        let minimal = crate::api::hmc::L2LockEntry {
+                            layer2_voucher_id: payload.layer2_voucher_id.clone(),
+                            t_id: lock_id_bytes,
+                            sender_ephemeral_pub: [0u8; 32],
+                            receiver_ephemeral_pub_hash: None,
+                            change_ephemeral_pub_hash: None,
+                            layer2_signature: [0u8; 64],
+                            trap_r: None,
+                            trap_s: None,
+                            encrypted_timestamp: 0,
+                            deletable_at: None,
+                            privacy_guard: None,
+                        };
+                        return Some(L2Verdict::Verified { lock_entry: minimal });
+                    }
+                    None
+                }.await;
+                if let Some(remote) = remote_verdict {
+                    verdict = remote;
+                }
+            }
+        }
+    }
 
     let quorum_certificate = if payload.read_quorum > 1 {
         let shard_id = if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id).await {
@@ -1471,17 +1632,25 @@ async fn submit_hmc_lock(
         (del, del)
     } else {
         // Follow-up Lock (Transfer / Split / Spend):
-        // Must verify against the origin root lock! Gateway cannot falsify root validity or cheat byte-years.
+        // Smart Client, Dumb Server & Hydra Resilience (Phase 2 P1): the
+        // gateway is stateless and MUST NOT blindly 400 when the voucher root
+        // is unknown locally. The client custodies the ProofChain carrying the
+        // signed genesis TTL (`deletable_at`); otherwise the responsible shard
+        // is authoritative. Use the client-supplied TTL as provisional
+        // `root_valid_until` for local quota, forward to the shard quorum, and
+        // let the shard's INV-1202 window check decide authoritatively.
         let root = match stored_root_valid {
             Some(r) => r,
             None => {
-                let envelope = wrap_and_sign_verdict(
-                    &state.identity,
-                    L2Verdict::Rejected {
-                        reason: "Unknown voucher root: genesis lock must be anchored first".into(),
-                    },
-                );
-                return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+                if let Some(del) = parsed_deletable {
+                    del
+                } else if let Some(remote_root) = fetch_remote_voucher_root(&state, &req.layer2_voucher_id).await {
+                    remote_root
+                } else {
+                    // Provisional default (10 min) for stateless forwarding;
+                    // the responsible shard enforces the true immutable root.
+                    now_ms.saturating_add(600_000)
+                }
             }
         };
         let valid = parsed_deletable.unwrap_or(root);
@@ -1593,9 +1762,18 @@ async fn submit_hmc_lock(
                     timestamp_ms: now_ms,
                 }).ok();
                 let start_quorum = std::time::Instant::now();
-                let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+                let (cert, remote_collision) = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
                 state.metrics.record_local_latency(std::time::Duration::from_micros(1));
+
+                // Remote double-spend evidence overrides idempotent fast-path.
+                if let Some(existing_lock) = remote_collision {
+                    let verdict = L2Verdict::Conflict { existing_lock };
+                    let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
+                    state.metrics.record_rejected_conflict_409();
+                    state.metrics.record_e2e_latency(start.elapsed());
+                    return (StatusCode::CONFLICT, Json(envelope)).into_response();
+                }
 
                 if !cert.is_quorum_reached() {
                     let reason = format!(
@@ -1757,7 +1935,7 @@ async fn submit_hmc_lock(
     // 4. Ingress: Local shard storage vs. Stateless Gateway routing
     let (verdict, is_new, quorum_certificate) = if is_responsible {
         let start_local = std::time::Instant::now();
-        let (verdict, is_new) = state
+        let (local_verdict, local_is_new) = state
             .engine
             .ingress_hmc_lock_with_metadata(
                 lookup_tag.clone(),
@@ -1771,8 +1949,8 @@ async fn submit_hmc_lock(
             .await;
         state.metrics.record_local_latency(start_local.elapsed());
 
-        let q_cert = match &verdict {
-            L2Verdict::Conflict { .. } | L2Verdict::Rejected { .. } => None,
+        let (q_cert, remote_collision) = match &local_verdict {
+            L2Verdict::Conflict { .. } | L2Verdict::Rejected { .. } => (None, None),
             _ => {
                 let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
                 let declared_read_ema = state.tier_controller.current_read_ema_credits();
@@ -1813,12 +1991,17 @@ async fn submit_hmc_lock(
                     timestamp_ms: now_ms,
                 }).ok();
                 let start_quorum = std::time::Instant::now();
-                let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+                let (cert, remote_collision) = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
-                Some(cert)
+                (Some(cert), remote_collision)
             }
         };
-        (verdict, is_new, q_cert)
+        // Remote genuine conflict overrides local Verified (split-brain).
+        if let Some(existing_lock) = remote_collision {
+            (L2Verdict::Conflict { existing_lock }, false, q_cert)
+        } else {
+            (local_verdict, local_is_new, q_cert)
+        }
     } else {
         // Stateless routing Gateway: DO NOT write to local engine or redb!
         // Instead, route and collect P2P shard attestations from the responsible shard nodes.
@@ -1859,10 +2042,16 @@ async fn submit_hmc_lock(
             timestamp_ms: now_ms,
         }).ok();
         let start_quorum = std::time::Instant::now();
-        let cert = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+        let (cert, remote_collision) = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
         state.metrics.record_quorum_latency(start_quorum.elapsed());
-        let verdict = L2Verdict::Verified { lock_entry: entry.clone() };
-        (verdict, true, Some(cert))
+        // FLAG_COLLISION_DETECTED from any shard proves double-spend: 409.
+        if let Some(existing_lock) = remote_collision {
+            let verdict = L2Verdict::Conflict { existing_lock };
+            (verdict, false, Some(cert))
+        } else {
+            let verdict = L2Verdict::Verified { lock_entry: entry.clone() };
+            (verdict, true, Some(cert))
+        }
     };
 
     // 5. Quorum-Gating: No HTTP 200/201 without reaching quorum
@@ -2087,7 +2276,7 @@ async fn submit_hmc_chain_lock_inner(
     let (verdict, is_new, quorum_certificate) = if is_responsible {
         // Atomares Ketten-Locking via engine
         let start_local = std::time::Instant::now();
-        let (verdict, is_new) = state
+        let (local_verdict, local_is_new) = state
             .engine
             .ingress_hmc_chain_lock_with_tier(
                 chain_req.clone(),
@@ -2099,7 +2288,7 @@ async fn submit_hmc_chain_lock_inner(
             .await;
         state.metrics.record_local_latency(start_local.elapsed());
 
-        let q_cert = match &verdict {
+        let (q_cert, remote_collision) = match &local_verdict {
             L2Verdict::Verified { lock_entry } => {
                 let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
                 let declared_read_ema = state.tier_controller.current_read_ema_credits();
@@ -2139,7 +2328,7 @@ async fn submit_hmc_chain_lock_inner(
                 })
                 .ok();
                 let start_quorum = std::time::Instant::now();
-                let cert = assemble_quorum_certificate(
+                let (cert, remote_collision) = assemble_quorum_certificate(
                     &state,
                     lock_entry.t_id,
                     parent_bytes,
@@ -2149,11 +2338,15 @@ async fn submit_hmc_chain_lock_inner(
                 )
                 .await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
-                Some(cert)
+                (Some(cert), remote_collision)
             }
-            _ => None,
+            _ => (None, None),
         };
-        (verdict, is_new, q_cert)
+        if let Some(existing_lock) = remote_collision {
+            (L2Verdict::Conflict { existing_lock }, false, q_cert)
+        } else {
+            (local_verdict, local_is_new, q_cert)
+        }
     } else {
         // Stateless Gateway: do not write to local engine/redb
         let entry = L2LockEntry::from(last_hop);
@@ -2195,7 +2388,7 @@ async fn submit_hmc_chain_lock_inner(
         })
         .ok();
         let start_quorum = std::time::Instant::now();
-        let cert = assemble_quorum_certificate(
+        let (cert, remote_collision) = assemble_quorum_certificate(
             &state,
             entry.t_id,
             parent_bytes,
@@ -2205,8 +2398,13 @@ async fn submit_hmc_chain_lock_inner(
         )
         .await;
         state.metrics.record_quorum_latency(start_quorum.elapsed());
-        let verdict = L2Verdict::Verified { lock_entry: entry };
-        (verdict, true, Some(cert))
+        if let Some(existing_lock) = remote_collision {
+            let verdict = L2Verdict::Conflict { existing_lock };
+            (verdict, false, Some(cert))
+        } else {
+            let verdict = L2Verdict::Verified { lock_entry: entry };
+            (verdict, true, Some(cert))
+        }
     };
 
     // Quorum-Gating: No HTTP 200/201 without reaching quorum

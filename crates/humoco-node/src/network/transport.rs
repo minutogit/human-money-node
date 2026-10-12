@@ -406,6 +406,17 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 };
 
+                // # Architectural Invariant: INV-0302 Trust-Tree Locality (Phase 2 P1, Spec 03)
+                //
+                // The canonical shard of EVERY transaction of a voucher (genesis AND
+                // follow-up spends) derives EXCLUSIVELY from the immutable genesis
+                // parent anchor (`BLAKE3(genesis_lookup_tag)`), NEVER from the varying
+                // per-spend `ds_tag`. Routing on `ds_tag` would scatter one voucher's
+                // trust tree across shards (a new shard per hop) and break quorum
+                // convergence. Resolution order: (1) known `voucher_genesis_parent`
+                // from RAM/disk, (2) genesis hop inside the attached ProofChain,
+                // (3) own genesis tag for self-anchoring genesis, (4) voucher-stable
+                // `BLAKE3(voucher_id)` fallback while genesis is still unknown.
                 let shard_id = match &wire_payload {
                     crate::network::framing::LockWirePayload::Sim(..) => {
                         warn!("LockVerifyRequest rejected: Sim payload unreachable (defense in depth)");
@@ -418,25 +429,68 @@ impl RequestHandler for NodeRequestHandler {
                         );
                         return Ok((resp_header, Vec::new()));
                     }
-                    crate::network::framing::LockWirePayload::Hmc { req, .. } => {
-                        let tag = if req.is_genesis {
-                            bs58::encode(&req.transaction_hash).into_string()
+                    crate::network::framing::LockWirePayload::Hmc { req, chain, .. } => {
+                        let voucher_id = chain
+                            .as_ref()
+                            .map(|c| c.layer2_voucher_id.as_str())
+                            .unwrap_or(req.layer2_voucher_id.as_str());
+                        // (1) Known genesis anchor from local index (RAM, else redb fallback).
+                        if let Some(genesis_parent) =
+                            engine.get_hmc_voucher_genesis_parent(voucher_id).await
+                        {
+                            humoco_sim_core::types::canonical_voucher_shard(&genesis_parent)
+                        } else if let Some(chain_req) = chain {
+                            // (2) Genesis hop inside the client-supplied ProofChain.
+                            if let Some(genesis_hop) =
+                                chain_req.chain.iter().find(|h| h.is_genesis)
+                            {
+                                let genesis_tag =
+                                    bs58::encode(&genesis_hop.transaction_hash).into_string();
+                                let p_bytes =
+                                    humoco_sim_core::types::genesis_parent_bytes_from_tag(
+                                        &genesis_tag,
+                                    );
+                                humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
+                            } else if req.is_genesis {
+                                let tag = bs58::encode(&req.transaction_hash).into_string();
+                                let p_bytes =
+                                    humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+                                humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
+                            } else {
+                                // (4) Voucher-stable fallback while genesis unknown (never ds_tag).
+                                let v_bytes =
+                                    *blake3::hash(voucher_id.as_bytes()).as_bytes();
+                                humoco_sim_core::types::canonical_voucher_shard(&v_bytes)
+                            }
+                        } else if req.is_genesis {
+                            // (3) Self-anchoring genesis lock.
+                            let tag = bs58::encode(&req.transaction_hash).into_string();
+                            let p_bytes =
+                                humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+                            humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
                         } else {
-                            req.ds_tag.clone().unwrap_or_default()
-                        };
-                        let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-                        u16::from_be_bytes([p_bytes[0], p_bytes[1]])
+                            // (4) Voucher-stable fallback while genesis unknown (never ds_tag).
+                            let v_bytes = *blake3::hash(voucher_id.as_bytes()).as_bytes();
+                            humoco_sim_core::types::canonical_voucher_shard(&v_bytes)
+                        }
                     }
                 };
 
+                // # Architectural Invariant: INV-0306 Dynamic Succession & INV-1501 (Phase 2 P1)
+                //
+                // Nodes on HRW ranks 21-40 are active straggler-failover replacements:
+                // after the gateway's 300ms partial timeout they are fanned in and MUST
+                // NOT reject authorized quorum requests with FLAG_NOT_IN_SHARD. Only
+                // ranks beyond 40 (max successor horizon K_max=40) may refuse. Aborted
+                // stragglers and Tier-2 15s idle closes are never counted as failures.
                 let is_responsible = if let Some(pm) = peer_manager.as_ref() {
-                    pm.is_local_responsible_for_shard(identity.hrw_routing_id(), shard_id, 20).await
+                    pm.is_local_responsible_for_shard(identity.hrw_routing_id(), shard_id, 40).await
                 } else {
                     true
                 };
 
                 if !is_responsible {
-                    warn!(shard_id, "LockVerifyRequest rejected: local node is not in top-20 for shard");
+                    warn!(shard_id, "LockVerifyRequest rejected: local node is beyond rank 40 for shard");
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
                         header.session_seq.wrapping_add(1),
@@ -692,7 +746,15 @@ impl RequestHandler for NodeRequestHandler {
                             }
                             let (verdict, _is_new) = engine.ingress_hmc_chain_lock(chain_req.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
                             match verdict {
-                                crate::api::hmc::L2Verdict::Conflict { .. } | crate::api::hmc::L2Verdict::Rejected { .. } => {
+                                crate::api::hmc::L2Verdict::Conflict { existing_lock } => {
+                                    // True double-spend: report colliding lock payload so the
+                                    // stateless gateway can return 409 Conflict (INV-0604).
+                                    let colliding = bincode::serialize(&existing_lock).unwrap_or_default();
+                                    let payload_len = checked_payload_len(colliding.len())?;
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_COLLISION_DETECTED, payload_len);
+                                    return Ok((resp_header, colliding));
+                                }
+                                crate::api::hmc::L2Verdict::Rejected { .. } => {
                                     let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                                     return Ok((resp_header, Vec::new()));
                                 }
@@ -755,10 +817,18 @@ impl RequestHandler for NodeRequestHandler {
                             };
 
                             let entry = crate::api::hmc::L2LockEntry::from(&req);
-                            let (verdict, _is_new) = engine.ingress_hmc_lock(lookup_tag.clone(), entry.clone()).await;
+                            // INV-1202: validate the ingress time window at the shard with
+                            // the current network time (never blindly trust gateway time).
+                            let (verdict, _is_new) = engine.ingress_hmc_lock_with_origin(lookup_tag.clone(), entry.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
 
                             match verdict {
-                                crate::api::hmc::L2Verdict::Conflict { .. } | crate::api::hmc::L2Verdict::Rejected { .. } => {
+                                crate::api::hmc::L2Verdict::Conflict { existing_lock } => {
+                                    let colliding = bincode::serialize(&existing_lock).unwrap_or_default();
+                                    let payload_len = checked_payload_len(colliding.len())?;
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_COLLISION_DETECTED, payload_len);
+                                    return Ok((resp_header, colliding));
+                                }
+                                crate::api::hmc::L2Verdict::Rejected { .. } => {
                                     let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                                     return Ok((resp_header, Vec::new()));
                                 }
@@ -980,8 +1050,13 @@ impl RequestHandler for NodeRequestHandler {
                 }
 
                 // Strict Lock & Shard & Validity Verification (INV: Close StatusQuery Signature Hole)
-                let matching_and_valid = {
+                // INV-0302: HMC shard matching uses the canonical genesis anchor when
+                // known; tag-only queries (lock_id == [0;32], INV-0310 gateway
+                // fallback) return the full L2LockEntry so a stateless gateway can
+                // answer UnknownVoucher from 1 deterministic Top-20 node.
+                let (matching_and_valid, tag_only_entry) = {
                     let mut is_match = false;
+                    let mut tag_entry: Option<crate::api::hmc::L2LockEntry> = None;
                     // Check Pure L2 Lock in RAM or Disk
                     let ram_lock = engine.get_ram_lock(&parent_lock).await;
                     let stored = ram_lock.or_else(|| {
@@ -1005,31 +1080,59 @@ impl RequestHandler for NodeRequestHandler {
                     // Check HMC lock in HMC RAM
                     if !is_match {
                         let hmc = engine.hmc_ram.read().await;
+                        // Tag-only gateway fallback: lock_id zero means "any lock on
+                        // this parent tag". Resolve to full entry below.
+                        let is_tag_only = lock_id == [0u8; 32];
                         for (lookup_tag, entry) in &hmc.locks {
-                            if entry.t_id == lock_id {
-                                let tag_hash = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-                                let parent_matches = tag_hash == parent_lock || lookup_tag.as_bytes() == &parent_lock[..];
-                                if parent_matches {
-                                    let v_hash = *blake3::hash(entry.layer2_voucher_id.as_bytes()).as_bytes();
-                                    let v_shard = u16::from_be_bytes([v_hash[0], v_hash[1]]);
-                                    let p_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
-                                    let shard_matches = shard_id == v_shard || shard_id == p_shard;
-                                    let valid = entry
-                                        .deletable_at
-                                        .as_deref()
-                                        .and_then(|s| s.parse::<u64>().ok())
-                                        .map(|del| del >= now_ms)
-                                        .unwrap_or(true);
-                                    if shard_matches && valid {
-                                        is_match = true;
-                                        break;
-                                    }
+                            let tag_hash = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+                            let parent_matches = tag_hash == parent_lock || lookup_tag.as_bytes() == &parent_lock[..];
+                            if !parent_matches {
+                                continue;
+                            }
+                            if !is_tag_only && entry.t_id != lock_id {
+                                continue;
+                            }
+                            // Canonical shard check (INV-0302): prefer genesis anchor.
+                            let shard_ok = if let Some(genesis_parent) = hmc.get_voucher_genesis_parent(&entry.layer2_voucher_id) {
+                                shard_id == humoco_sim_core::types::canonical_voucher_shard(&genesis_parent)
+                            } else {
+                                let v_hash = *blake3::hash(entry.layer2_voucher_id.as_bytes()).as_bytes();
+                                let v_shard = u16::from_be_bytes([v_hash[0], v_hash[1]]);
+                                let p_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+                                shard_id == v_shard || shard_id == p_shard
+                            };
+                            let valid = entry
+                                .deletable_at
+                                .as_deref()
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .map(|del| del >= now_ms)
+                                .unwrap_or(true);
+                            if shard_ok && valid {
+                                if is_tag_only {
+                                    tag_entry = Some(entry.clone());
                                 }
+                                is_match = true;
+                                break;
                             }
                         }
                     }
-                    is_match
+                    (is_match, tag_entry)
                 };
+
+                // Tag-only fallback returns the full entry so the gateway can
+                // build a Verified verdict with first-party signature evidence.
+                if let Some(entry) = tag_only_entry {
+                    let resp_bytes = bincode::serialize(&entry).unwrap_or_default();
+                    let payload_len = checked_payload_len(resp_bytes.len())?;
+                    let resp_header = WireHeader::new(
+                        MsgType::StatusResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        0,
+                        payload_len,
+                    );
+                    return Ok((resp_header, resp_bytes));
+                }
 
                 if matching_and_valid {
                     let target_status = (header.flags & 0xFF) as u8;

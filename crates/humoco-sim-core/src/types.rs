@@ -552,6 +552,27 @@ pub fn extract_shard_id(genesis_root: &[u8; 32]) -> ShardId {
     u16::from_be_bytes([genesis_root[0], genesis_root[1]])
 }
 
+/// # Architectural Invariant: INV-0302 Trust-Tree Locality (Phase 2 P1)
+///
+/// All transfers and splits of a voucher remain permanently on the same
+/// shard. The canonical shard is derived EXCLUSIVELY from the immutable
+/// genesis parent anchor (`BLAKE3(genesis_lookup_tag)`), NEVER from the
+/// varying per-spend `ds_tag`. A spend's `ds_tag` changes on every hop
+/// (payment, split, change); routing on it would scatter one voucher's
+/// trust tree across shards and break quorum convergence. Gateways and
+/// shard nodes must resolve `voucher_genesis_parent` first and fall back
+/// to a voucher-stable hash only while the genesis is still unknown.
+pub fn canonical_voucher_shard(genesis_parent: &[u8; 32]) -> ShardId {
+    extract_shard_id(genesis_parent)
+}
+
+/// Computes the genesis parent anchor bytes for a lookup tag:
+/// `parent_bytes = BLAKE3(lookup_tag)`. For genesis locks the lookup tag
+/// is `bs58(transaction_hash)`; the hash of that tag is the trust-tree root.
+pub fn genesis_parent_bytes_from_tag(lookup_tag: &str) -> [u8; 32] {
+    *blake3::hash(lookup_tag.as_bytes()).as_bytes()
+}
+
 /// Minimum stability duration (in seconds) for predecessor ranks to retire an active shard node / replacement (24 hours, docs/03:150)
 pub const STABLE_PREDECESSOR_MIN_UPTIME_SECONDS: u64 = 24 * 3600;
 

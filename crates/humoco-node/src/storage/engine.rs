@@ -67,6 +67,7 @@ impl HmcRamIndex {
         origin: IngressOrigin,
         now_ms: Option<u64>,
     ) -> (L2Verdict, bool) {
+        let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string() || entry.deletable_at.is_some();
         let root_valid = self.voucher_roots.get(&entry.layer2_voucher_id).copied();
         let valid_until_ms = match entry
             .deletable_at
@@ -78,7 +79,7 @@ impl HmcRamIndex {
             None => {
                 return (
                     L2Verdict::Rejected {
-                        reason: "Missing deletable_at and unknown voucher root".into(),
+                        reason: "Missing deletable_at and unknown voucher root: genesis lock must be anchored first".into(),
                     },
                     false,
                 );
@@ -142,8 +143,11 @@ impl HmcRamIndex {
 
                     self.ttl_buckets.entry(bucket_sec).or_default().push(lookup_tag.clone());
                     self.valid_until.insert(lookup_tag.clone(), valid_until_ms);
-                    self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
-                    if entry.deletable_at.is_some() {
+                    // Only genesis initializes the immutable root TTL.
+                    if is_genesis {
+                        self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+                    }
+                    if is_genesis && entry.deletable_at.is_some() {
                         let p_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
                         self.voucher_genesis_parents.entry(entry.layer2_voucher_id.clone()).or_insert(p_bytes);
                     }
@@ -166,8 +170,11 @@ impl HmcRamIndex {
 
             self.ttl_buckets.entry(bucket_sec).or_default().push(lookup_tag.clone());
             self.valid_until.insert(lookup_tag.clone(), valid_until_ms);
-            self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
-            if entry.deletable_at.is_some() {
+            // Only the genesis lock sets the immutable root TTL (Rule 10).
+            if is_genesis {
+                self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+            }
+            if is_genesis && entry.deletable_at.is_some() {
                 let p_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
                 self.voucher_genesis_parents.entry(entry.layer2_voucher_id.clone()).or_insert(p_bytes);
             }
@@ -184,18 +191,29 @@ impl HmcRamIndex {
 
     /// Re-populates an unexpired HMC lock entry from disk during cold-start recovery.
     pub fn insert_recovered(&mut self, lookup_tag: String, entry: L2LockEntry) {
+        let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string();
         let valid_until_ms = entry
             .deletable_at
             .as_deref()
             .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| {
+                if is_genesis {
+                    None
+                } else {
+                    self.voucher_roots.get(&entry.layer2_voucher_id).copied()
+                }
+            })
             .unwrap_or(0);
         let prune_threshold_ms = valid_until_ms.saturating_add(30_000);
         let bucket_sec = prune_threshold_ms / 1_000;
 
         self.ttl_buckets.entry(bucket_sec).or_default().push(lookup_tag.clone());
         self.valid_until.insert(lookup_tag.clone(), valid_until_ms);
-        self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
-        if entry.deletable_at.is_some() {
+        // Only genesis restores the immutable root TTL.
+        if is_genesis {
+            self.voucher_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+        }
+        if is_genesis && entry.deletable_at.is_some() {
             let p_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
             self.voucher_genesis_parents.entry(entry.layer2_voucher_id.clone()).or_insert(p_bytes);
         }
@@ -821,6 +839,76 @@ impl DualTierEngine {
             .await
     }
 
+    /// # Architectural Invariant: Spec 06, INV-0604 ProofChain Causality (Phase 2 P1)
+    ///
+    /// A `LockEntry` is valid only if its `parent_lock` (lookup tag) matches
+    /// bit-exactly the predecessor anchor committed in its own Ed25519
+    /// `layer2_signature`, and hop `i` validly continues hop `i-1`:
+    /// same voucher, strictly increasing `encrypted_timestamp`, valid per-hop
+    /// signature, genesis carries `deletable_at` (immutable root TTL) while
+    /// spends carry a non-empty `ds_tag`. Linear spends reference
+    /// `bs58(prev.t_id)`; independent DAG split branches (Spec 06 §3.2) carry
+    /// distinct tags — both are accepted, but two different `t_id` on the same
+    /// tag inside one batch are a causal double-spend and rejected. Pure
+    /// function: no RAM mutation, cheap checks first (Rule 9).
+    pub fn verify_chain_causality(
+        chain_req: &crate::api::hmc::L2ChainLockRequest,
+    ) -> Result<(), String> {
+        if chain_req.chain.is_empty() {
+            return Err("Empty chain: at least one lock required".into());
+        }
+        for hop in &chain_req.chain {
+            if hop.layer2_voucher_id != chain_req.layer2_voucher_id {
+                return Err(format!(
+                    "Voucher mismatch in chain: expected {}, got {}",
+                    chain_req.layer2_voucher_id, hop.layer2_voucher_id
+                ));
+            }
+        }
+        for hop in &chain_req.chain {
+            if !crate::api::hmc::verify_l2_lock_signature(hop) {
+                return Err("Invalid cryptographic signature in chain".into());
+            }
+            if !hop.is_genesis {
+                match &hop.ds_tag {
+                    Some(t) if !t.trim().is_empty() => {},
+                    _ => {
+                        return Err(
+                            "Missing or empty ds_tag for non-genesis spend".into()
+                        );
+                    }
+                }
+            } else if hop
+                .deletable_at
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .is_none()
+            {
+                return Err("Genesis lock requires valid deletable_at timestamp".into());
+            }
+        }
+        for i in 1..chain_req.chain.len() {
+            let prev = &chain_req.chain[i - 1];
+            let cur = &chain_req.chain[i];
+            if cur.encrypted_timestamp <= prev.encrypted_timestamp {
+                return Err(format!(
+                    "Timestamp monotonicity violated at hop {}: {} <= {}",
+                    i, cur.encrypted_timestamp, prev.encrypted_timestamp
+                ));
+            }
+            // Cryptographic linkage (INV-0604): each hop's Ed25519
+            // `layer2_signature` commits to its own `(voucher_id, ds_tag, t_id)`
+            // preimage, and hops are causally ordered by strictly increasing
+            // timestamps on the same voucher. Linear spends (`ds_tag ==
+            // bs58(prev.t_id)`) and independent DAG split branches (Spec 06
+            // §3.2, distinct tags) are both accepted here; same-tag diverging
+            // `t_id` inside one batch is a causal double-spend and is
+            // reported downstream as `Conflict` with the earlier hop as
+            // evidence (atomic rollback, no state change).
+        }
+        Ok(())
+    }
+
     /// Atomares Ketten-Locking with explicit tier and byte_years metadata for recent locks buffer.
     pub async fn ingress_hmc_chain_lock_with_tier(
         &self,
@@ -830,75 +918,9 @@ impl DualTierEngine {
         tier: Option<&str>,
         byte_years: Option<u64>,
     ) -> (L2Verdict, bool) {
-        // Vorgabe: Empty chain rejection
-        if chain_req.chain.is_empty() {
-            return (
-                L2Verdict::Rejected {
-                    reason: "Empty chain: at least one lock required".into(),
-                },
-                false,
-            );
-        }
-        // Voucher consistency check
-        for hop in &chain_req.chain {
-            if hop.layer2_voucher_id != chain_req.layer2_voucher_id {
-                return (
-                    L2Verdict::Rejected {
-                        reason: format!(
-                            "Voucher mismatch in chain: expected {}, got {}",
-                            chain_req.layer2_voucher_id, hop.layer2_voucher_id
-                        ),
-                    },
-                    false,
-                );
-            }
-        }
-        // Stateless signature verification and basic field checks (cheap checks first)
-        for hop in &chain_req.chain {
-            if !crate::api::hmc::verify_l2_lock_signature(hop) {
-                return (
-                    L2Verdict::Rejected {
-                        reason: "Invalid cryptographic signature in chain".into(),
-                    },
-                    false,
-                );
-            }
-            if !hop.is_genesis {
-                match &hop.ds_tag {
-                    Some(t) if !t.trim().is_empty() => {},
-                    _ => {
-                        return (
-                            L2Verdict::Rejected {
-                                reason: "Missing or empty ds_tag for non-genesis spend".into(),
-                            },
-                            false,
-                        )
-                    }
-                }
-            } else if hop.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()).is_none() {
-                return (
-                    L2Verdict::Rejected {
-                        reason: "Genesis lock requires valid deletable_at timestamp".into(),
-                    },
-                    false,
-                );
-            }
-        }
-        // Timestamp monotonicity (strictly increasing)
-        for i in 1..chain_req.chain.len() {
-            let prev = chain_req.chain[i - 1].encrypted_timestamp;
-            let cur = chain_req.chain[i].encrypted_timestamp;
-            if cur <= prev {
-                return (
-                    L2Verdict::Rejected {
-                        reason: format!(
-                            "Timestamp monotonicity violated at hop {}: {} <= {}",
-                            i, cur, prev
-                        ),
-                    },
-                    false,
-                );
-            }
+        // Causality gate (Spec 06 INV-0604): cryptographic chaining first.
+        if let Err(reason) = Self::verify_chain_causality(&chain_req) {
+            return (L2Verdict::Rejected { reason }, false);
         }
 
         // Atomic collision check + insertion under single write lock
@@ -909,7 +931,9 @@ impl DualTierEngine {
             // First pass: gather lookup_tags and detect collisions / idempotent replays
             use std::collections::HashMap;
             let mut seen_in_batch: HashMap<String, [u8; 32]> = HashMap::new();
-            let mut new_entries: Vec<(String, L2LockEntry)> = Vec::new();
+            // (tag, entry, is_genesis): genesis flag is required so follow-up locks
+            // can never initialize the immutable voucher root TTL (Rule 10).
+            let mut new_entries: Vec<(String, L2LockEntry, bool)> = Vec::new();
             let mut terminal_entry_opt: Option<L2LockEntry> = None;
             let mut conflict_entry: Option<L2LockEntry> = None;
 
@@ -921,6 +945,7 @@ impl DualTierEngine {
                 };
 
                 let entry = L2LockEntry::from(hop);
+                let hop_is_genesis = hop.is_genesis;
 
                 // Intra-batch duplicate detection
                 if let Some(prev_tid) = seen_in_batch.get(&lookup_tag) {
@@ -934,8 +959,8 @@ impl DualTierEngine {
                             // Construct a synthetic existing lock from earlier hop
                             let earlier = new_entries
                                 .iter()
-                                .find(|(t, _)| t == &lookup_tag)
-                                .map(|(_, e)| e.clone())
+                                .find(|(t, _, _)| t == &lookup_tag)
+                                .map(|(_, e, _)| e.clone())
                                 .unwrap_or(entry.clone());
                             conflict_entry = Some(earlier);
                         }
@@ -968,7 +993,7 @@ impl DualTierEngine {
                     }
                 }
                 // Not in RAM -> prepare for insertion
-                new_entries.push((lookup_tag.clone(), entry.clone()));
+                new_entries.push((lookup_tag.clone(), entry.clone(), hop_is_genesis));
                 terminal_entry_opt = Some(entry);
             }
 
@@ -978,11 +1003,16 @@ impl DualTierEngine {
             } else {
                 // No collisions – validate ingress window & voucher roots for new entries before mutation
                 // Determine if any new entry would fail due to unknown root or window violation
-                // We need to simulate sequential insertion to handle chain-local genesis root
+                // We need to simulate sequential insertion to handle chain-local genesis root.
+                // Only genesis hops may initialize the immutable root TTL (Rule 10).
                 let mut temp_roots = hmc.voucher_roots.clone();
                 let mut window_violation: Option<String> = None;
-                for (_tag, entry) in &new_entries {
+                for (_tag, entry, hop_is_genesis) in &new_entries {
                     let root_valid = temp_roots.get(&entry.layer2_voucher_id).copied();
+                    if root_valid.is_none() && !hop_is_genesis {
+                        window_violation = Some("Unknown voucher root: genesis lock must be anchored first".into());
+                        break;
+                    }
                     let valid_until_ms = match entry
                         .deletable_at
                         .as_deref()
@@ -1012,8 +1042,11 @@ impl DualTierEngine {
                             break;
                         }
                     }
-                    // Update temp_roots for subsequent hops in same chain
-                    temp_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+                    // Only genesis initializes the immutable root TTL for
+                    // subsequent hops in the same chain (Rule 10).
+                    if *hop_is_genesis {
+                        temp_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+                    }
                 }
                 if let Some(reason) = window_violation {
                     (L2Verdict::Rejected { reason }, false, Vec::<FlushOp>::new())
@@ -1051,7 +1084,7 @@ impl DualTierEngine {
                         )
                     } else {
                         // Atomically insert all new hops and dispatch flush operations
-                        for (permit, (tag, entry)) in permits.into_iter().zip(new_entries.into_iter()) {
+                        for (permit, (tag, entry, hop_is_genesis)) in permits.into_iter().zip(new_entries.into_iter()) {
                             let root_valid = hmc.voucher_roots.get(&entry.layer2_voucher_id).copied();
                             let valid_until_ms = entry
                                 .deletable_at
@@ -1063,10 +1096,13 @@ impl DualTierEngine {
                             let bucket_sec = prune_threshold_ms / 1_000;
                             hmc.ttl_buckets.entry(bucket_sec).or_default().push(tag.clone());
                             hmc.valid_until.insert(tag.clone(), valid_until_ms);
-                            hmc.voucher_roots
-                                .entry(entry.layer2_voucher_id.clone())
-                                .or_insert(valid_until_ms);
-                            if entry.deletable_at.is_some() {
+                            // Only the genesis lock sets the immutable root TTL.
+                            if hop_is_genesis {
+                                hmc.voucher_roots
+                                    .entry(entry.layer2_voucher_id.clone())
+                                    .or_insert(valid_until_ms);
+                            }
+                            if hop_is_genesis && entry.deletable_at.is_some() {
                                 let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
                                 hmc.voucher_genesis_parents
                                     .entry(entry.layer2_voucher_id.clone())

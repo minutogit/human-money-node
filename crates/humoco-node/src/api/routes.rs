@@ -1510,8 +1510,15 @@ async fn submit_hmc_lock(
     };
 
     // 4. Fast-path idempotency check: if identical lock already verified in RAM, return 200 OK immediately
+    // Phase 10 (Hot-Path-Locks): the RAM read guard is cloned and dropped
+    // BEFORE any network await (`assemble_quorum_certificate`), so writers
+    // are never blocked while this gateway waits for quorum.
     if is_responsible {
-        if let Some(existing) = state.engine.hmc_ram.read().await.locks.get(&lookup_tag) {
+        let existing_opt = {
+            let hmc = state.engine.hmc_ram.read().await;
+            hmc.locks.get(&lookup_tag).cloned()
+        };
+        if let Some(existing) = existing_opt {
             if existing.t_id == entry.t_id {
                 let verdict = L2Verdict::Verified { lock_entry: existing.clone() };
                 let now_ms = state.net_time_ms();

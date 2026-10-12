@@ -243,6 +243,14 @@ pub struct DnsPeerState {
     pub current_addr: Option<SocketAddr>,
 }
 
+/// Phase 10: queued fraud-proof forward message — the payload plus the
+/// immediate sender to exclude on forward (echo protection). `None` means
+/// locally detected (broadcast to all F2F friends).
+pub type FraudProofForwardMsg = (
+    humoco_sim_core::fraud::FraudProofPayload,
+    Option<[u8; 32]>,
+);
+
 /// Bounded LRU-style deduplication cache for seen heartbeats (Spec 11).
 #[derive(Debug)]
 pub struct HeartbeatDedupCache {
@@ -293,9 +301,12 @@ pub struct PeerManager {
     ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
     local_sync_ready: Arc<std::sync::atomic::AtomicBool>,
     merge_hysteresis_until_ms: Arc<AtomicU64>,
-    fraud_proof_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>>>>,
+    fraud_proof_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<FraudProofForwardMsg>>>>,
     recent_observed_evidences: Arc<tokio::sync::RwLock<std::collections::VecDeque<humoco_sim_core::fraud::IngressEnvelopeEvidence>>>,
     seen_heartbeats: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
+    /// Phase 10: bounded LRU seen-set for fraud-proof forwarding dedup
+    /// (prevents gossip amplification loops) + echo protection basis.
+    seen_fraud_proofs: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
     known_active_shards: Arc<RwLock<std::collections::BTreeSet<u16>>>,
 }
 
@@ -389,6 +400,7 @@ impl PeerManager {
             fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
             recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(16))),
             seen_heartbeats: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(10_000))),
+            seen_fraud_proofs: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(1024))),
             known_active_shards: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
         }
     }
@@ -416,15 +428,99 @@ impl PeerManager {
         guard.check_and_insert(id)
     }
 
-    pub async fn set_fraud_proof_tx(&self, tx: tokio::sync::mpsc::Sender<humoco_sim_core::fraud::FraudProofPayload>) {
+    /// Resolves all known socket addresses for a node identity (F2F slot,
+    /// gossip-learned entry, and live peer entries). Used for fraud-proof
+    /// echo protection: the immediate sender is never sent its own proof
+    /// back. Sequential snapshots only — never holds two locks at once.
+    pub async fn addrs_for_node_id(&self, node_id: &[u8; 32]) -> Vec<SocketAddr> {
+        let mut out = Vec::new();
+        let friend_addr = {
+            let friends = self.f2f_friends.read().await;
+            friends.get(node_id).copied().flatten()
+        };
+        if let Some(a) = friend_addr {
+            out.push(a);
+        }
+        let known_addr = {
+            let known = self.known_network_nodes.read().await;
+            known.get(node_id).map(|info| info.addr)
+        };
+        if let Some(a) = known_addr {
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+        let peer_addrs: Vec<SocketAddr> = {
+            let peers = self.peers.read().await;
+            peers
+                .values()
+                .filter(|p| p.node_id.as_ref() == Some(node_id))
+                .map(|p| p.addr)
+                .collect()
+        };
+        for a in peer_addrs {
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+        out
+    }
+
+    pub async fn set_fraud_proof_tx(
+        &self,
+        tx: tokio::sync::mpsc::Sender<FraudProofForwardMsg>,
+    ) {
         let mut slot = self.fraud_proof_tx.write().await;
         *slot = Some(tx);
     }
 
+    /// Computes the stable dedup hash for a fraud proof (BLAKE3 over the
+    /// canonical bincode encoding, length-prefixed domain separation is
+    /// provided by the payload structure itself).
+    pub fn fraud_proof_dedup_hash(proof: &humoco_sim_core::fraud::FraudProofPayload) -> [u8; 32] {
+        let bytes = bincode::serialize(proof).unwrap_or_default();
+        *blake3::hash(&bytes).as_bytes()
+    }
+
+    /// Checks if a fraud proof was already forwarded; if not, records it.
+    /// Returns true if new (should be forwarded), false if duplicate.
+    pub async fn check_and_record_fraud_proof(&self, hash: &[u8; 32]) -> bool {
+        let mut guard = self.seen_fraud_proofs.write().await;
+        guard.check_and_insert(*hash)
+    }
+
+    /// Sync (non-blocking) variant for hot-path broadcast call sites that
+    /// cannot await. Uses `try_write`; on contention the proof is treated
+    /// as new (forwarded) to never suppress slashing under load.
+    pub fn check_and_record_fraud_proof_sync(&self, hash: &[u8; 32]) -> bool {
+        if let Ok(mut guard) = self.seen_fraud_proofs.try_write() {
+            guard.check_and_insert(*hash)
+        } else {
+            true
+        }
+    }
+
     pub fn broadcast_fraud_proof(&self, proof: humoco_sim_core::fraud::FraudProofPayload) {
+        self.broadcast_fraud_proof_with_sender(proof, None);
+    }
+
+    /// Queues a fraud proof for F2F broadcast, deduplicated via the LRU
+    /// seen-set. `sender` is the immediate peer we received the proof from
+    /// (if any) and is excluded on forward (echo protection happens in
+    /// `QuicTransport::broadcast_equivocation_proof_to_f2f_except`).
+    ///
+    /// Phase 10: queueing itself never drops proofs (slashing must not be
+    /// suppressed under lock contention). Dedup happens exactly once at the
+    /// forward point (`broadcast_equivocation_proof_to_f2f_except`), so a
+    /// pre-insert here would wrongly suppress every forward.
+    pub fn broadcast_fraud_proof_with_sender(
+        &self,
+        proof: humoco_sim_core::fraud::FraudProofPayload,
+        sender: Option<[u8; 32]>,
+    ) {
         if let Ok(slot) = self.fraud_proof_tx.try_read() {
             if let Some(tx) = slot.as_ref() {
-                let _ = tx.try_send(proof);
+                let _ = tx.try_send((proof, sender));
             }
         }
     }
@@ -441,79 +537,119 @@ impl PeerManager {
 
     /// Periodically re-resolves configured DNS hostname peers (every 10 minutes)
     /// and updates peer endpoints if the IP changed without disconnecting healthy peers unless suspended.
+    ///
+    /// Phase 10: lock decoupling — the `dns_peers` guard is never held
+    /// across DNS I/O awaits nor while acquiring `peers`/`f2f_friends`.
+    /// Snapshots are resolved first, mutations applied afterwards one lock
+    /// at a time.
     pub async fn check_and_resolve_dns_peers(&self) {
-        let mut dns_guard = self.dns_peers.write().await;
-        for state in dns_guard.iter_mut() {
-            let endpoint = if state.entry.raw_endpoint.contains(':') {
-                state.entry.raw_endpoint.clone()
+        // Snapshot DNS entries without holding the guard across I/O.
+        let snapshot: Vec<crate::config::PeerConfigEntry> = {
+            let dns_guard = self.dns_peers.read().await;
+            dns_guard.iter().map(|s| s.entry.clone()).collect()
+        };
+        // Resolve all hostnames without holding any manager lock.
+        let mut resolved: Vec<(crate::config::PeerConfigEntry, Option<SocketAddr>)> = Vec::with_capacity(snapshot.len());
+        for entry in snapshot {
+            let endpoint = if entry.raw_endpoint.contains(':') {
+                entry.raw_endpoint.clone()
             } else {
-                format!("{}:9090", state.entry.raw_endpoint)
+                format!("{}:9090", entry.raw_endpoint)
             };
-
             let new_addr_opt = match tokio::net::lookup_host(&endpoint).await {
                 Ok(mut addrs) => addrs.next(),
                 Err(err) => {
                     tracing::warn!(
-                        endpoint = %state.entry.raw_endpoint,
+                        endpoint = %entry.raw_endpoint,
                         error = %err,
                         "DNS re-resolution failed for peer; keeping existing address"
                     );
                     None
                 }
             };
+            resolved.push((entry, new_addr_opt));
+        }
+        // Apply mutations sequentially, one lock at a time.
+        let mut changed = false;
+        for (entry, new_addr_opt) in resolved {
+            let Some(new_addr) = new_addr_opt else { continue };
+            let old_addr_opt = {
+                let dns_guard = self.dns_peers.read().await;
+                dns_guard
+                    .iter()
+                    .find(|s| s.entry.raw_endpoint == entry.raw_endpoint && s.entry.pubkey == entry.pubkey)
+                    .and_then(|s| s.current_addr)
+            };
+            if Some(new_addr) == old_addr_opt {
+                continue;
+            }
+            tracing::info!(
+                endpoint = %entry.raw_endpoint,
+                old_addr = ?old_addr_opt,
+                new_addr = %new_addr,
+                "DNS peer address updated"
+            );
 
-            if let Some(new_addr) = new_addr_opt {
-                let old_addr_opt = state.current_addr;
-                if Some(new_addr) != old_addr_opt {
-                    tracing::info!(
-                        endpoint = %state.entry.raw_endpoint,
-                        old_addr = ?old_addr_opt,
-                        new_addr = %new_addr,
-                        "DNS peer address updated"
-                    );
-
-                    // If old address exists and is suspended, remove it; healthy peers remain connected
-                    if let Some(old_addr) = old_addr_opt {
-                        let mut peers_guard = self.peers.write().await;
-                        let is_suspended = peers_guard
-                            .get(&old_addr)
-                            .map(|p| p.is_suspended())
-                            .unwrap_or(false);
-
-                        if is_suspended {
-                            peers_guard.remove(&old_addr);
-                        }
-                    }
-
-                    // Register/update new address as FriendToFriend peer
-                    {
-                        let mut peers_guard = self.peers.write().await;
-                        let info = peers_guard.entry(new_addr).or_insert_with(|| {
-                            let mut p = PeerInfo::with_type(new_addr, PeerConnectionType::FriendToFriend);
-                            p.node_id = state.entry.pubkey;
-                            p
-                        });
-                        if info.node_id.is_none() && state.entry.pubkey.is_some() {
-                            info.node_id = state.entry.pubkey;
-                        }
-                    }
-
-                    // Update f2f_friends mapping if pubkey is present
-                    if let Some(key) = state.entry.pubkey {
-                        let mut friends_guard = self.f2f_friends.write().await;
-                        friends_guard.insert(key, Some(new_addr));
-
-                        if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key) {
-                            let u16_id = u16::from_be_bytes([key[0], key[1]]);
-                            self.verifying_keys.write().await.insert(key, vk);
-                            self.u16_to_vk.write().await.insert(u16_id, vk);
-                        }
-                    }
-
-                    state.current_addr = Some(new_addr);
-                    self.notify_sync_trigger();
+            // If old address exists and is suspended, remove it; healthy peers remain connected
+            if let Some(old_addr) = old_addr_opt {
+                let is_suspended = {
+                    let peers_guard = self.peers.read().await;
+                    peers_guard
+                        .get(&old_addr)
+                        .map(|p| p.is_suspended())
+                        .unwrap_or(false)
+                };
+                if is_suspended {
+                    let mut peers_guard = self.peers.write().await;
+                    peers_guard.remove(&old_addr);
                 }
             }
+
+            // Register/update new address as FriendToFriend peer
+            {
+                let mut peers_guard = self.peers.write().await;
+                let info = peers_guard.entry(new_addr).or_insert_with(|| {
+                    let mut p = PeerInfo::with_type(new_addr, PeerConnectionType::FriendToFriend);
+                    p.node_id = entry.pubkey;
+                    p
+                });
+                if info.node_id.is_none() && entry.pubkey.is_some() {
+                    info.node_id = entry.pubkey;
+                }
+            }
+
+            // Update f2f_friends mapping if pubkey is present
+            if let Some(key) = entry.pubkey {
+                {
+                    let mut friends_guard = self.f2f_friends.write().await;
+                    friends_guard.insert(key, Some(new_addr));
+                }
+                if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key) {
+                    let u16_id = u16::from_be_bytes([key[0], key[1]]);
+                    {
+                        let mut keys = self.verifying_keys.write().await;
+                        keys.insert(key, vk);
+                    }
+                    {
+                        let mut u16_map = self.u16_to_vk.write().await;
+                        u16_map.insert(u16_id, vk);
+                    }
+                }
+            }
+
+            {
+                let mut dns_guard = self.dns_peers.write().await;
+                if let Some(state) = dns_guard
+                    .iter_mut()
+                    .find(|s| s.entry.raw_endpoint == entry.raw_endpoint && s.entry.pubkey == entry.pubkey)
+                {
+                    state.current_addr = Some(new_addr);
+                }
+            }
+            changed = true;
+        }
+        if changed {
+            self.notify_sync_trigger();
         }
     }
 
@@ -566,12 +702,17 @@ impl PeerManager {
         let mut removed_pubkey = None;
 
         // 1. If key is known, remove from f2f_friends and known_network_nodes
+        // Phase 10: decoupled — never hold both write guards at once.
         if let Some(ref key) = key_opt {
             removed_pubkey = Some(hex::encode(key));
-            let mut friends = self.f2f_friends.write().await;
-            friends.remove(key);
-            let mut known = self.known_network_nodes.write().await;
-            known.remove(key);
+            {
+                let mut friends = self.f2f_friends.write().await;
+                friends.remove(key);
+            }
+            {
+                let mut known = self.known_network_nodes.write().await;
+                known.remove(key);
+            }
         }
 
         // 2. Remove matching peer from peers map
@@ -763,13 +904,25 @@ impl PeerManager {
 
     /// Registers an explicit direct F2F friend.
     /// F2F friendship is strictly bound to permanent Ed25519 NodePubKey.
+    ///
+    /// Phase 10 (Deadlock-Fix): strict lock hierarchy — each map lock is
+    /// acquired, mutated, and dropped before the next one is taken. Never
+    /// holds `f2f_friends` while acquiring `peers`/`verifying_keys`.
     pub async fn register_f2f_friend(&self, node_id: [u8; 32], addr: Option<SocketAddr>) {
-        let mut friends = self.f2f_friends.write().await;
-        friends.insert(node_id, addr);
+        {
+            let mut friends = self.f2f_friends.write().await;
+            friends.insert(node_id, addr);
+        }
         if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&node_id) {
             let u16_id = u16::from_be_bytes([node_id[0], node_id[1]]);
-            self.verifying_keys.write().await.insert(node_id, vk);
-            self.u16_to_vk.write().await.insert(u16_id, vk);
+            {
+                let mut keys = self.verifying_keys.write().await;
+                keys.insert(node_id, vk);
+            }
+            {
+                let mut u16_map = self.u16_to_vk.write().await;
+                u16_map.insert(u16_id, vk);
+            }
         }
         if let Some(a) = addr {
             let mut peers = self.peers.write().await;
@@ -777,21 +930,34 @@ impl PeerManager {
             entry.node_id = Some(node_id);
             entry.conn_type = PeerConnectionType::FriendToFriend;
         }
-        drop(friends);
         self.notify_sync_trigger();
     }
 
     /// Adds a trusted F2F peer by its Ed25519 public key.
     /// Inserts into trusted F2F friends and updates peer connection status if already known.
+    ///
+    /// Phase 10 (Deadlock-Fix): lock decoupling — snapshot what is needed,
+    /// drop each guard before taking the next lock. No nested holding.
     pub async fn add_trusted_f2f_peer(&self, pubkey: [u8; 32]) {
-        let mut friends = self.f2f_friends.write().await;
-        let existing_addr = friends.get(&pubkey).copied().flatten();
-        friends.insert(pubkey, existing_addr);
+        let existing_addr = {
+            let friends = self.f2f_friends.read().await;
+            friends.get(&pubkey).copied().flatten()
+        };
+        {
+            let mut friends = self.f2f_friends.write().await;
+            friends.entry(pubkey).or_insert(existing_addr);
+        }
 
         if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pubkey) {
             let u16_id = u16::from_be_bytes([pubkey[0], pubkey[1]]);
-            self.verifying_keys.write().await.insert(pubkey, vk);
-            self.u16_to_vk.write().await.insert(u16_id, vk);
+            {
+                let mut keys = self.verifying_keys.write().await;
+                keys.insert(pubkey, vk);
+            }
+            {
+                let mut u16_map = self.u16_to_vk.write().await;
+                u16_map.insert(u16_id, vk);
+            }
         }
 
         // If this node is known in known_network_nodes, resolve its address
@@ -801,36 +967,61 @@ impl PeerManager {
         };
 
         if let Some(addr) = known_addr.or(existing_addr) {
-            friends.insert(pubkey, Some(addr));
-            let mut peers = self.peers.write().await;
-            let entry = peers.entry(addr).or_insert_with(|| PeerInfo::with_type(addr, PeerConnectionType::FriendToFriend));
-            entry.node_id = Some(pubkey);
-            entry.conn_type = PeerConnectionType::FriendToFriend;
+            {
+                let mut friends = self.f2f_friends.write().await;
+                friends.insert(pubkey, Some(addr));
+            }
+            {
+                let mut peers = self.peers.write().await;
+                let entry = peers.entry(addr).or_insert_with(|| PeerInfo::with_type(addr, PeerConnectionType::FriendToFriend));
+                entry.node_id = Some(pubkey);
+                entry.conn_type = PeerConnectionType::FriendToFriend;
+            }
         } else {
-            // Check if any peer has matching node_id
-            let mut peers = self.peers.write().await;
-            for (addr, peer) in peers.iter_mut() {
-                if peer.node_id == Some(pubkey) {
-                    peer.conn_type = PeerConnectionType::FriendToFriend;
-                    friends.insert(pubkey, Some(*addr));
+            // Check if any peer has matching node_id — collect first, mutate after.
+            let matched_addr = {
+                let peers = self.peers.read().await;
+                peers
+                    .iter()
+                    .find(|(_, peer)| peer.node_id == Some(pubkey))
+                    .map(|(addr, _)| *addr)
+            };
+            if let Some(addr) = matched_addr {
+                {
+                    let mut peers = self.peers.write().await;
+                    if let Some(peer) = peers.get_mut(&addr) {
+                        peer.conn_type = PeerConnectionType::FriendToFriend;
+                    }
+                }
+                {
+                    let mut friends = self.f2f_friends.write().await;
+                    friends.insert(pubkey, Some(addr));
                 }
             }
         }
-        drop(friends);
         self.notify_sync_trigger();
     }
 
     /// Removes a trusted F2F peer by its Ed25519 public key.
+    ///
+    /// Phase 10 (Deadlock-Fix): sequential lock acquisition, never nested.
     pub async fn remove_trusted_f2f_peer(&self, pubkey: &[u8; 32]) {
-        let mut friends = self.f2f_friends.write().await;
-        friends.remove(pubkey);
+        {
+            let mut friends = self.f2f_friends.write().await;
+            friends.remove(pubkey);
+        }
 
         if let Ok(_vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey) {
             let u16_id = u16::from_be_bytes([pubkey[0], pubkey[1]]);
-            self.verifying_keys.write().await.remove(pubkey);
-            self.u16_to_vk.write().await.remove(&u16_id);
+            {
+                let mut keys = self.verifying_keys.write().await;
+                keys.remove(pubkey);
+            }
+            {
+                let mut u16_map = self.u16_to_vk.write().await;
+                u16_map.remove(&u16_id);
+            }
         }
-        drop(friends);
 
         let mut peers = self.peers.write().await;
         for peer in peers.values_mut() {
@@ -850,12 +1041,21 @@ impl PeerManager {
     }
 
     /// Checks if a socket address belongs to a configured direct F2F friend.
+    ///
+    /// Phase 10 (Deadlock-Fix): strict lock decoupling — the `peers` read
+    /// guard is always dropped before `f2f_friends` is acquired. No nested
+    /// lock holding, so the AB-BA inversion vs `register_f2f_friend`
+    /// (`f2f_friends` -> `peers`) is impossible.
     pub async fn is_f2f_addr(&self, addr: &SocketAddr) -> bool {
-        let peers = self.peers.read().await;
-        if let Some(peer) = peers.get(addr) {
-            if peer.conn_type == PeerConnectionType::FriendToFriend {
-                return true;
-            }
+        let is_friend_peer = {
+            let peers = self.peers.read().await;
+            peers
+                .get(addr)
+                .map(|peer| peer.conn_type == PeerConnectionType::FriendToFriend)
+                .unwrap_or(false)
+        };
+        if is_friend_peer {
+            return true;
         }
         let friends = self.f2f_friends.read().await;
         for opt_addr in friends.values() {
@@ -1285,10 +1485,14 @@ impl PeerManager {
         local_hrw: [u8; 32],
     ) -> Vec<NetworkNodeDto> {
         let mut map: HashMap<[u8; 32], NetworkNodeDto> = HashMap::new();
-        let banned = self.banned_nodes.read().await;
-        let friends = self.f2f_friends.read().await;
-        let peers = self.peers.read().await;
-        let known = self.known_network_nodes.read().await;
+        // Phase 10: snapshot each map sequentially and drop the guard before
+        // taking the next lock — never holds 4 read guards at once.
+        let banned: HashSet<[u8; 32]> = self.banned_nodes.read().await.clone();
+        let friends: HashMap<[u8; 32], Option<SocketAddr>> =
+            self.f2f_friends.read().await.clone();
+        let peers: HashMap<SocketAddr, PeerInfo> = self.peers.read().await.clone();
+        let known: HashMap<[u8; 32], KnownNodeInfo> =
+            self.known_network_nodes.read().await.clone();
 
         // 1. Add Local Node
         let local_addr_str = local_addr
@@ -1450,12 +1654,18 @@ impl PeerManager {
 
     /// Registers a peer's Ed25519 verifying key associated with its 32-byte Node ID.
     /// TLS & F2F strictly on NodePubKey / NodeId (permanent), never on HRW ticket.
+    ///
+    /// Phase 10: decoupled — never holds both key maps at once.
     pub async fn register_verifying_key(&self, node_id: [u8; 32], vk: ed25519_dalek::VerifyingKey) {
         let u16_id = u16::from_be_bytes([node_id[0], node_id[1]]);
-        let mut keys = self.verifying_keys.write().await;
-        keys.insert(node_id, vk);
-        let mut u16_map = self.u16_to_vk.write().await;
-        u16_map.insert(u16_id, vk);
+        {
+            let mut keys = self.verifying_keys.write().await;
+            keys.insert(node_id, vk);
+        }
+        {
+            let mut u16_map = self.u16_to_vk.write().await;
+            u16_map.insert(u16_id, vk);
+        }
     }
 
     /// Retrieves an Ed25519 verifying key by the 16-bit node ID prefix.
@@ -1591,9 +1801,15 @@ impl PeerManager {
     /// Resets failure counters and suspension state for a peer.
     /// Returns Ok(true) if reset was applied, Ok(false) if peer is unknown,
     /// or Err if the peer is permanently banned due to proven equivocation fraud.
+    ///
+    /// Phase 10: `banned` is checked BEFORE taking the `peers` write guard
+    /// (peers -> banned inversion vs `ban_node` banned -> peers eliminated).
     pub async fn reset_peer_suspension(&self, addr: SocketAddr) -> Result<bool, &'static str> {
-        let mut peers = self.peers.write().await;
-        let Some(nid_opt) = peers.get(&addr).map(|p| p.node_id) else {
+        let nid_opt = {
+            let peers = self.peers.read().await;
+            peers.get(&addr).map(|p| p.node_id)
+        };
+        let Some(nid_opt) = nid_opt else {
             return Ok(false);
         };
         if let Some(nid) = nid_opt {
@@ -1601,17 +1817,20 @@ impl PeerManager {
                 return Err("Peer is permanently banned due to equivocation fraud");
             }
         }
-        if let Some(peer) = peers.get_mut(&addr) {
-            peer.missing_count = 0;
-            peer.last_failure = None;
-            if peer.connection.is_some() {
-                peer.status = PeerStatus::Connected;
+        {
+            let mut peers = self.peers.write().await;
+            if let Some(peer) = peers.get_mut(&addr) {
+                peer.missing_count = 0;
+                peer.last_failure = None;
+                if peer.connection.is_some() {
+                    peer.status = PeerStatus::Connected;
+                } else {
+                    peer.status = PeerStatus::Degrading;
+                }
+                Ok(true)
             } else {
-                peer.status = PeerStatus::Degrading;
+                Ok(false)
             }
-            Ok(true)
-        } else {
-            Ok(false)
         }
     }
 
@@ -1673,61 +1892,96 @@ impl PeerManager {
 
     /// Returns a list of (NodeId, SocketAddr) for all peers and known network nodes that are not suspended.
     /// Skips immature entries (only mature shard tickets count) and stale presence ghosts.
+    ///
+    /// Phase 10: snapshot `peers` and `known` sequentially, never nested.
     pub async fn active_known_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
+        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool)> = {
+            let peers = self.peers.read().await;
+            peers
+                .values()
+                .map(|p| (p.node_id, p.addr, p.is_suspended()))
+                .collect()
+        };
+        let known_snapshot: Vec<([u8; 32], KnownNodeInfo)> = {
+            let known = self.known_network_nodes.read().await;
+            known.iter().map(|(k, v)| (*k, v.clone())).collect()
+        };
+        // Suspension lookup by addr from the peer snapshot (no lock held).
+        let is_suspended_by_addr = |addr: &SocketAddr| -> bool {
+            peer_snapshot
+                .iter()
+                .find(|(_, a, _)| a == addr)
+                .map(|(_, _, s)| *s)
+                .unwrap_or(false)
+        };
         let mut result = Vec::new();
-        let peers = self.peers.read().await;
-        for p in peers.values() {
-            if !p.is_suspended() {
-                if let Some(nid) = p.node_id {
-                    result.push((nid, p.addr));
+        for (nid_opt, addr, suspended) in &peer_snapshot {
+            if !suspended {
+                if let Some(nid) = nid_opt {
+                    result.push((*nid, *addr));
                 }
             }
         }
-        let known = self.known_network_nodes.read().await;
-        for (&nid, kinfo) in known.iter() {
+        for (nid, kinfo) in &known_snapshot {
             if kinfo.is_immature() {
                 continue;
             }
             if !kinfo.is_presence_fresh() {
                 continue;
             }
-            if !result.iter().any(|(id, _)| id == &nid) {
-                let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
-                if !is_suspended {
-                    result.push((nid, kinfo.addr));
-                }
+            if !result.iter().any(|(id, _)| id == nid)
+                && !is_suspended_by_addr(&kinfo.addr) {
+                    result.push((*nid, kinfo.addr));
             }
         }
         result
     }
 
     /// HRW-aware variant: returns list of (hrw_routing_id, SocketAddr) for eligible nodes.
+    ///
+    /// Phase 10: snapshot `peers` and `known` sequentially, never nested.
     pub async fn active_hrw_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
-        let peers = self.peers.read().await;
-        let known = self.known_network_nodes.read().await;
+        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool)> = {
+            let peers = self.peers.read().await;
+            peers
+                .values()
+                .map(|p| (p.node_id, p.addr, p.is_suspended()))
+                .collect()
+        };
+        let known_snapshot: Vec<([u8; 32], KnownNodeInfo)> = {
+            let known = self.known_network_nodes.read().await;
+            known.iter().map(|(k, v)| (*k, v.clone())).collect()
+        };
+        let known_map: HashMap<[u8; 32], KnownNodeInfo> =
+            known_snapshot.into_iter().collect();
+        let is_suspended_by_addr = |addr: &SocketAddr| -> bool {
+            peer_snapshot
+                .iter()
+                .find(|(_, a, _)| a == addr)
+                .map(|(_, _, s)| *s)
+                .unwrap_or(false)
+        };
         let mut result = Vec::new();
-        for p in peers.values() {
-            if !p.is_suspended() {
-                if let Some(nid) = p.node_id {
-                    if let Some(k) = known.get(&nid) {
+        for (nid_opt, addr, suspended) in &peer_snapshot {
+            if !suspended {
+                if let Some(nid) = nid_opt {
+                    if let Some(k) = known_map.get(nid) {
                         if k.is_immature() || !k.is_presence_fresh() {
                             continue;
                         }
                     }
-                    let hrw = known.get(&nid).map(|k| k.hrw_routing_id).unwrap_or(nid);
-                    result.push((hrw, p.addr));
+                    let hrw = known_map.get(nid).map(|k| k.hrw_routing_id).unwrap_or(*nid);
+                    result.push((hrw, *addr));
                 }
             }
         }
-        for (&nid, kinfo) in known.iter() {
+        for (nid, kinfo) in known_map.iter() {
             if kinfo.is_immature() || !kinfo.is_presence_fresh() {
                 continue;
             }
-            if !result.iter().any(|(_, addr)| addr == &kinfo.addr) {
-                let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
-                if !is_suspended {
+            if !result.iter().any(|(_, addr)| addr == &kinfo.addr)
+                && !is_suspended_by_addr(&kinfo.addr) {
                     result.push((kinfo.hrw_routing_id, kinfo.addr));
-                }
             }
             let _ = nid;
         }
@@ -1896,23 +2150,37 @@ impl PeerManager {
 
     /// Async accurate mature network size (mature + presence-fresh + non-suspended + self).
     /// Used by the daemon phase-transition monitor (Spec 08 INV-0802).
+    ///
+    /// Phase 10: sequential snapshots, never nested.
     pub async fn mature_network_size(&self) -> usize {
         let mut unique_nodes = HashSet::new();
-        let peers = self.peers.read().await;
-        for p in peers.values() {
-            if !p.is_suspended() {
-                if let Some(nid) = p.node_id {
-                    unique_nodes.insert(nid);
+        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool)> = {
+            let peers = self.peers.read().await;
+            peers
+                .values()
+                .map(|p| (p.node_id, p.addr, p.is_suspended()))
+                .collect()
+        };
+        for (nid_opt, _, suspended) in &peer_snapshot {
+            if !suspended {
+                if let Some(nid) = nid_opt {
+                    unique_nodes.insert(*nid);
                 }
             }
         }
+        let suspended_by_addr = |addr: &SocketAddr| -> bool {
+            peer_snapshot
+                .iter()
+                .find(|(_, a, _)| a == addr)
+                .map(|(_, _, s)| *s)
+                .unwrap_or(false)
+        };
         let known = self.known_network_nodes.read().await;
         for (&nid, kinfo) in known.iter() {
             if kinfo.is_immature() || !kinfo.is_presence_fresh() {
                 continue;
             }
-            let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
-            if !is_suspended {
+            if !suspended_by_addr(&kinfo.addr) {
                 unique_nodes.insert(nid);
             }
         }
@@ -1922,31 +2190,45 @@ impl PeerManager {
     /// Total network size including IMMATURE nodes with fresh presence (for merge detection).
     /// A village docking to the world mesh learns dozens of immature nodes at once;
     /// the quota thermometer must reseed immediately, not 24h later (Spec 09 INV-0908).
+    ///
+    /// Phase 10: sequential snapshots, never nested.
     pub async fn total_network_size(&self) -> usize {
         let mut unique_nodes = HashSet::new();
-        let peers = self.peers.read().await;
-        for p in peers.values() {
-            if !p.is_suspended() {
-                if let Some(nid) = p.node_id {
-                    unique_nodes.insert(nid);
+        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool)> = {
+            let peers = self.peers.read().await;
+            peers
+                .values()
+                .map(|p| (p.node_id, p.addr, p.is_suspended()))
+                .collect()
+        };
+        for (nid_opt, addr, suspended) in &peer_snapshot {
+            if !suspended {
+                if let Some(nid) = nid_opt {
+                    unique_nodes.insert(*nid);
                 } else {
                     // Anonymous but connected endpoint still proves network presence.
                     // Use address bytes as stable pseudo-identity without trusting them for HRW.
                     let mut pseudo = [0u8; 32];
-                    let s = p.addr.to_string();
+                    let s = addr.to_string();
                     let h = blake3::hash(s.as_bytes());
                     pseudo.copy_from_slice(h.as_bytes());
                     unique_nodes.insert(pseudo);
                 }
             }
         }
+        let suspended_by_addr = |addr: &SocketAddr| -> bool {
+            peer_snapshot
+                .iter()
+                .find(|(_, a, _)| a == addr)
+                .map(|(_, _, s)| *s)
+                .unwrap_or(false)
+        };
         let known = self.known_network_nodes.read().await;
         for (&nid, kinfo) in known.iter() {
             if !kinfo.is_presence_fresh() {
                 continue;
             }
-            let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
-            if !is_suspended {
+            if !suspended_by_addr(&kinfo.addr) {
                 unique_nodes.insert(nid);
             }
         }
@@ -2066,18 +2348,29 @@ impl PeerManager {
     }
 
     /// Returns active peers for PEX discovery endpoint, filtered against banned and suspended status.
+    ///
+    /// Phase 10: sequential snapshots, never nested.
     pub async fn get_pex_peers(&self) -> Vec<KnownNodeInfo> {
-        let banned = self.banned_nodes.read().await;
-        let peers = self.peers.read().await;
-        let known = self.known_network_nodes.read().await;
+        let banned: HashSet<[u8; 32]> = self.banned_nodes.read().await.clone();
+        let suspended_addrs: HashSet<SocketAddr> = {
+            let peers = self.peers.read().await;
+            peers
+                .values()
+                .filter(|p| p.is_suspended())
+                .map(|p| p.addr)
+                .collect()
+        };
+        let known: Vec<([u8; 32], KnownNodeInfo)> = {
+            let known = self.known_network_nodes.read().await;
+            known.iter().map(|(k, v)| (*k, v.clone())).collect()
+        };
 
         let mut result = Vec::new();
-        for (&nid, kinfo) in known.iter() {
-            if banned.contains(&nid) {
+        for (nid, kinfo) in &known {
+            if banned.contains(nid) {
                 continue;
             }
-            let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
-            if !is_suspended {
+            if !suspended_addrs.contains(&kinfo.addr) {
                 result.push(kinfo.clone());
             }
         }

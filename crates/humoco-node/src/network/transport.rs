@@ -237,7 +237,7 @@ impl RequestHandler for NodeRequestHandler {
                     warn!(auth_peer = %hex::encode(auth_peer), "Rejected request from banned authenticated QUIC peer");
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
-                        header.session_seq + 1,
+                        header.session_seq.wrapping_add(1),
                         header.epoch_id,
                         humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
                         0,
@@ -287,7 +287,9 @@ impl RequestHandler for NodeRequestHandler {
                             engine.ban_node(offender, now_ms).await;
                             if let Some(pm) = peer_manager.as_ref() {
                                 let affected = pm.ban_node(&offender).await;
-                                pm.broadcast_fraud_proof(proof);
+                                // Phase 10: dedup via LRU seen-set + echo protection —
+                                // never send the proof back to the immediate sender.
+                                pm.broadcast_fraud_proof_with_sender(proof, peer_identity);
                                 info!(offender = %hex::encode(offender), affected, "Slashing: offender banned and peers disconnected");
                             } else {
                                 info!(offender = %hex::encode(offender), "Slashing: offender banned (no peer_manager)");
@@ -298,7 +300,7 @@ impl RequestHandler for NodeRequestHandler {
                         warn!("EquivocationProof rejected: deserialize failed: {}", e);
                     }
                 }
-                let resp_header = WireHeader::new(MsgType::EquivocationAck as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                let resp_header = WireHeader::new(MsgType::EquivocationAck as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                 return Ok((resp_header, Vec::new()));
             }
             if msg_type == MsgType::LockVerifyRequest as u16 {
@@ -306,7 +308,7 @@ impl RequestHandler for NodeRequestHandler {
                     warn!("LockVerifyRequest rejected: node is booting and initial sync is not ready");
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
-                        header.session_seq + 1,
+                        header.session_seq.wrapping_add(1),
                         header.epoch_id,
                         humoco_sim_core::wire::FLAG_NOT_READY,
                         0,
@@ -340,7 +342,7 @@ impl RequestHandler for NodeRequestHandler {
                             warn!("LockVerifyRequest rejected: invalid payload framing");
                             let resp_header = WireHeader::new(
                                 MsgType::LockVerifyResponse as u16,
-                                header.session_seq + 1,
+                                header.session_seq.wrapping_add(1),
                                 header.epoch_id,
                                 humoco_sim_core::wire::FLAG_UNAUTHORIZED,
                                 0,
@@ -375,7 +377,7 @@ impl RequestHandler for NodeRequestHandler {
                     warn!(shard_id, "LockVerifyRequest rejected: local node is not in top-20 for shard");
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
-                        header.session_seq + 1,
+                        header.session_seq.wrapping_add(1),
                         header.epoch_id,
                         humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
                         0,
@@ -395,7 +397,7 @@ impl RequestHandler for NodeRequestHandler {
                     warn!(declared_daily_rate, write_limit, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: declared write load exceeds 5.0 * ncb_eff");
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
-                        header.session_seq + 1,
+                        header.session_seq.wrapping_add(1),
                         header.epoch_id,
                         humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
                         0,
@@ -413,7 +415,7 @@ impl RequestHandler for NodeRequestHandler {
                         );
                         let resp_header = WireHeader::new(
                             MsgType::LockVerifyResponse as u16,
-                            header.session_seq + 1,
+                            header.session_seq.wrapping_add(1),
                             header.epoch_id,
                             humoco_sim_core::wire::FLAG_UNAUTHORIZED,
                             0,
@@ -428,7 +430,7 @@ impl RequestHandler for NodeRequestHandler {
                         warn!("LockVerifyRequest rejected: null sender pubkey");
                         let resp_header = WireHeader::new(
                             MsgType::LockVerifyResponse as u16,
-                            header.session_seq + 1,
+                            header.session_seq.wrapping_add(1),
                             header.epoch_id,
                             humoco_sim_core::wire::FLAG_UNAUTHORIZED,
                             0,
@@ -439,7 +441,7 @@ impl RequestHandler for NodeRequestHandler {
                         warn!("LockVerifyRequest rejected: null sender signature");
                         let resp_header = WireHeader::new(
                             MsgType::LockVerifyResponse as u16,
-                            header.session_seq + 1,
+                            header.session_seq.wrapping_add(1),
                             header.epoch_id,
                             humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
                             0,
@@ -464,7 +466,7 @@ impl RequestHandler for NodeRequestHandler {
                     warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: sender is banned");
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
-                        header.session_seq + 1,
+                        header.session_seq.wrapping_add(1),
                         header.epoch_id,
                         humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
                         0,
@@ -508,7 +510,7 @@ impl RequestHandler for NodeRequestHandler {
                         warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: invalid ingress envelope signature");
                         let resp_header = WireHeader::new(
                             MsgType::LockVerifyResponse as u16,
-                            header.session_seq + 1,
+                            header.session_seq.wrapping_add(1),
                             header.epoch_id,
                             humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
                             0,
@@ -530,7 +532,7 @@ impl RequestHandler for NodeRequestHandler {
 
                                 let resp_header = WireHeader::new(
                                     MsgType::LockVerifyResponse as u16,
-                                    header.session_seq + 1,
+                                    header.session_seq.wrapping_add(1),
                                     header.epoch_id,
                                     humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
                                         | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
@@ -553,7 +555,7 @@ impl RequestHandler for NodeRequestHandler {
                             warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
                             let resp_header = WireHeader::new(
                                 MsgType::LockVerifyResponse as u16,
-                                header.session_seq + 1,
+                                header.session_seq.wrapping_add(1),
                                 header.epoch_id,
                                 humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
                                 0,
@@ -567,7 +569,7 @@ impl RequestHandler for NodeRequestHandler {
                 match wire_payload {
                     crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
                         if engine.is_node_banned(&record.receiver_pub).await {
-                            let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                            let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
                             return Ok((resp_header, Vec::new()));
                         }
 
@@ -597,7 +599,7 @@ impl RequestHandler for NodeRequestHandler {
                                 let payload_len = checked_payload_len(resp_bytes.len())?;
                                 let resp_header = WireHeader::new(
                                     MsgType::LockVerifyResponse as u16,
-                                    header.session_seq + 1,
+                                    header.session_seq.wrapping_add(1),
                                     header.epoch_id,
                                     0,
                                     payload_len,
@@ -605,7 +607,7 @@ impl RequestHandler for NodeRequestHandler {
                                 return Ok((resp_header, resp_bytes));
                             }
                             _ => {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                                 return Ok((resp_header, Vec::new()));
                             }
                         }
@@ -614,30 +616,30 @@ impl RequestHandler for NodeRequestHandler {
                         if let Some(chain_req) = chain {
                             if chain_req.chain.is_empty() {
                                 warn!("LockVerifyRequest rejected: empty chain");
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                                 return Ok((resp_header, Vec::new()));
                             }
                             if engine.is_node_banned(&chain_req.auth.ephemeral_pubkey).await {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
                                 return Ok((resp_header, Vec::new()));
                             }
                             for hop in &chain_req.chain {
                                 if engine.is_node_banned(&hop.sender_ephemeral_pub).await
                                     || engine.is_node_banned(&hop.auth.ephemeral_pubkey).await
                                 {
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
                                     return Ok((resp_header, Vec::new()));
                                 }
                                 if !crate::api::hmc::verify_l2_lock_signature(hop) {
                                     warn!("LockVerifyRequest rejected: invalid hop signature in chain");
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_SIGNATURE_INVALID, 0);
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_SIGNATURE_INVALID, 0);
                                     return Ok((resp_header, Vec::new()));
                                 }
                             }
                             let (verdict, _is_new) = engine.ingress_hmc_chain_lock(chain_req.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
                             match verdict {
                                 crate::api::hmc::L2Verdict::Conflict { .. } | crate::api::hmc::L2Verdict::Rejected { .. } => {
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                                     return Ok((resp_header, Vec::new()));
                                 }
                                 _ => {
@@ -665,7 +667,7 @@ impl RequestHandler for NodeRequestHandler {
                                     let payload_len = checked_payload_len(resp_bytes.len())?;
                                     let resp_header = WireHeader::new(
                                         MsgType::LockVerifyResponse as u16,
-                                        header.session_seq + 1,
+                                        header.session_seq.wrapping_add(1),
                                         header.epoch_id,
                                         0,
                                         payload_len,
@@ -677,12 +679,12 @@ impl RequestHandler for NodeRequestHandler {
                             if engine.is_node_banned(&req.sender_ephemeral_pub).await
                                 || engine.is_node_banned(&req.auth.ephemeral_pubkey).await
                             {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
                                 return Ok((resp_header, Vec::new()));
                             }
 
                             if !crate::api::hmc::verify_l2_lock_signature(&req) {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_SIGNATURE_INVALID, 0);
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_SIGNATURE_INVALID, 0);
                                 return Ok((resp_header, Vec::new()));
                             }
 
@@ -692,7 +694,7 @@ impl RequestHandler for NodeRequestHandler {
                                 match &req.ds_tag {
                                     Some(tag) if !tag.trim().is_empty() => tag.clone(),
                                     _ => {
-                                        let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                        let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                                         return Ok((resp_header, Vec::new()));
                                     }
                                 }
@@ -703,7 +705,7 @@ impl RequestHandler for NodeRequestHandler {
 
                             match verdict {
                                 crate::api::hmc::L2Verdict::Conflict { .. } | crate::api::hmc::L2Verdict::Rejected { .. } => {
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                                     return Ok((resp_header, Vec::new()));
                                 }
                                 _ => {
@@ -725,7 +727,7 @@ impl RequestHandler for NodeRequestHandler {
                                     let payload_len = checked_payload_len(resp_bytes.len())?;
                                     let resp_header = WireHeader::new(
                                         MsgType::LockVerifyResponse as u16,
-                                        header.session_seq + 1,
+                                        header.session_seq.wrapping_add(1),
                                         header.epoch_id,
                                         0,
                                         payload_len,
@@ -760,7 +762,7 @@ impl RequestHandler for NodeRequestHandler {
                     } else if let Ok((l_id, p_lock, s_id)) = bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload) {
                         (l_id, p_lock, s_id, 0, 0, [0u8; 32], 0, [0u8; 64])
                     } else {
-                        let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                        let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                         return Ok((resp_header, Vec::new()));
                     };
 
@@ -770,7 +772,7 @@ impl RequestHandler for NodeRequestHandler {
                     warn!(declared_read_rate, read_limit, "StatusQuery rejected: declared read load exceeds 5.0 * ncb_read_eff");
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
-                        header.session_seq + 1,
+                        header.session_seq.wrapping_add(1),
                         header.epoch_id,
                         humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
                         0,
@@ -788,7 +790,7 @@ impl RequestHandler for NodeRequestHandler {
                         );
                         let resp_header = WireHeader::new(
                             MsgType::StatusResponse as u16,
-                            header.session_seq + 1,
+                            header.session_seq.wrapping_add(1),
                             header.epoch_id,
                             humoco_sim_core::wire::FLAG_UNAUTHORIZED,
                             0,
@@ -808,7 +810,7 @@ impl RequestHandler for NodeRequestHandler {
                         warn!("StatusQuery rejected: null sender pubkey");
                         let resp_header = WireHeader::new(
                             MsgType::StatusResponse as u16,
-                            header.session_seq + 1,
+                            header.session_seq.wrapping_add(1),
                             header.epoch_id,
                             humoco_sim_core::wire::FLAG_UNAUTHORIZED,
                             0,
@@ -819,7 +821,7 @@ impl RequestHandler for NodeRequestHandler {
                         warn!("StatusQuery rejected: null sender signature");
                         let resp_header = WireHeader::new(
                             MsgType::StatusResponse as u16,
-                            header.session_seq + 1,
+                            header.session_seq.wrapping_add(1),
                             header.epoch_id,
                             humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
                             0,
@@ -842,7 +844,7 @@ impl RequestHandler for NodeRequestHandler {
                         warn!(sender = %hex::encode(sender_pubkey), "StatusQuery rejected: invalid ingress envelope signature");
                         let resp_header = WireHeader::new(
                             MsgType::StatusResponse as u16,
-                            header.session_seq + 1,
+                            header.session_seq.wrapping_add(1),
                             header.epoch_id,
                             humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
                             0,
@@ -864,7 +866,7 @@ impl RequestHandler for NodeRequestHandler {
 
                                 let resp_header = WireHeader::new(
                                     MsgType::StatusResponse as u16,
-                                    header.session_seq + 1,
+                                    header.session_seq.wrapping_add(1),
                                     header.epoch_id,
                                     humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
                                         | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
@@ -895,7 +897,7 @@ impl RequestHandler for NodeRequestHandler {
                     warn!(sender = %hex::encode(sender_pubkey), "StatusQuery rejected: sender is banned");
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
-                        header.session_seq + 1,
+                        header.session_seq.wrapping_add(1),
                         header.epoch_id,
                         humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
                         0,
@@ -911,7 +913,7 @@ impl RequestHandler for NodeRequestHandler {
                             warn!(error = ?e, sender = %hex::encode(sender_pubkey), "StatusQuery rejected: node read quota exceeded");
                             let resp_header = WireHeader::new(
                                 MsgType::StatusResponse as u16,
-                                header.session_seq + 1,
+                                header.session_seq.wrapping_add(1),
                                 header.epoch_id,
                                 humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
                                 0,
@@ -987,14 +989,14 @@ impl RequestHandler for NodeRequestHandler {
                     let payload_len = checked_payload_len(resp_bytes.len())?;
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
-                        header.session_seq + 1,
+                        header.session_seq.wrapping_add(1),
                         header.epoch_id,
                         0,
                         payload_len,
                     );
                     return Ok((resp_header, resp_bytes));
                 }
-                let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                 return Ok((resp_header, Vec::new()));
             } else if msg_type == MsgType::ShardDigestRequest as u16 {
                 let shard_id = if payload.len() >= 2 {
@@ -1065,7 +1067,7 @@ impl RequestHandler for NodeRequestHandler {
                 let payload_len = checked_payload_len(resp_bytes.len())?;
                 let resp_header = WireHeader::new(
                     MsgType::ShardDigestResponse as u16,
-                    header.session_seq + 1,
+                    header.session_seq.wrapping_add(1),
                     header.epoch_id,
                     0,
                     payload_len,
@@ -1140,7 +1142,7 @@ impl RequestHandler for NodeRequestHandler {
                 );
                 let serialized = sync_resp.to_bytes().unwrap_or_default();
                 let payload_len = checked_payload_len(serialized.len())?;
-                let resp_header = WireHeader::new(MsgType::ActiveSyncDone as u16, header.session_seq + 1, header.epoch_id, 0, payload_len);
+                let resp_header = WireHeader::new(MsgType::ActiveSyncDone as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, payload_len);
                 return Ok((resp_header, serialized));
             }
             let default_h = DefaultRequestHandler;
@@ -1152,6 +1154,15 @@ impl RequestHandler for NodeRequestHandler {
         &self,
         header: WireHeader,
         payload: Vec<u8>,
+    ) -> BoxFuture<Result<(), NodeError>> {
+        self.handle_unidirectional_authenticated(header, payload, None)
+    }
+
+    fn handle_unidirectional_authenticated(
+        &self,
+        header: WireHeader,
+        payload: Vec<u8>,
+        sender: Option<[u8; 32]>,
     ) -> BoxFuture<Result<(), NodeError>> {
         let engine = self.engine.clone();
         let storage = self.storage.clone();
@@ -1205,7 +1216,8 @@ impl RequestHandler for NodeRequestHandler {
                             engine.ban_node(offender, now_ms).await;
                             if let Some(pm) = peer_manager.as_ref() {
                                 let _ = pm.ban_node(&offender).await;
-                                pm.broadcast_fraud_proof(proof);
+                                // Phase 10: dedup + echo protection (never back to sender).
+                                pm.broadcast_fraud_proof_with_sender(proof, sender);
                             }
                             info!(offender = %hex::encode(offender), "Slashing (uni): offender banned and proof broadcast");
                         }
@@ -1253,7 +1265,7 @@ impl RequestHandler for NodeRequestHandler {
                                     let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
                                     engine.ban_node(hb.node_id, now_ms).await;
                                     pm.ban_node(&hb.node_id).await;
-                                    pm.broadcast_fraud_proof(proof);
+                                    pm.broadcast_fraud_proof_with_sender(proof, sender);
                                     return Ok(());
                                 }
                             }
@@ -1278,7 +1290,7 @@ impl RequestHandler for NodeRequestHandler {
                                     let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
                                     engine.ban_node(hb.node_id, now_ms).await;
                                     pm.ban_node(&hb.node_id).await;
-                                    pm.broadcast_fraud_proof(proof);
+                                    pm.broadcast_fraud_proof_with_sender(proof, sender);
                                     return Ok(());
                                 }
                             }
@@ -1304,7 +1316,7 @@ impl RequestHandler for NodeRequestHandler {
                                         let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
                                         engine.ban_node(gw_pub, now_ms).await;
                                         pm.ban_node(&gw_pub).await;
-                                        pm.broadcast_fraud_proof(proof);
+                                        pm.broadcast_fraud_proof_with_sender(proof, sender);
                                         continue;
                                     }
                                     let is_newer = ev.timestamp_ms > prev.timestamp_ms;
@@ -1325,7 +1337,7 @@ impl RequestHandler for NodeRequestHandler {
                                         let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
                                         engine.ban_node(gw_pub, now_ms).await;
                                         pm.ban_node(&gw_pub).await;
-                                        pm.broadcast_fraud_proof(proof);
+                                        pm.broadcast_fraud_proof_with_sender(proof, sender);
                                         continue;
                                     }
                                     let is_newer = ev.timestamp_ms > prev.timestamp_ms;
@@ -1412,7 +1424,7 @@ impl QuicTransport {
         endpoint.set_default_client_config(client_config);
         peer_manager.set_endpoint(endpoint.clone());
 
-        let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel::<humoco_sim_core::fraud::FraudProofPayload>(100);
+        let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel::<crate::network::manager::FraudProofForwardMsg>(100);
         let pm_for_channel = peer_manager.clone();
         tokio::spawn(async move {
             pm_for_channel.set_fraud_proof_tx(fraud_tx).await;
@@ -1435,8 +1447,8 @@ impl QuicTransport {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
-                    Some(proof) = fraud_rx.recv() => {
-                        transport_for_broadcast.broadcast_equivocation_proof_to_f2f(&proof).await;
+                    Some((proof, sender)) = fraud_rx.recv() => {
+                        transport_for_broadcast.broadcast_equivocation_proof_to_f2f_except(&proof, sender).await;
                     }
                 }
             }
@@ -1723,6 +1735,23 @@ impl QuicTransport {
         &self,
         proof: &humoco_sim_core::fraud::FraudProofPayload,
     ) {
+        self.broadcast_equivocation_proof_to_f2f_except(proof, None).await;
+    }
+
+    /// Phase 10: deduplicated fraud-proof forwarding with echo protection.
+    /// - LRU seen-set suppresses re-broadcast storms (gossip loops).
+    /// - `exclude` (the immediate sender we received the proof from) is
+    ///   never sent the proof back.
+    pub async fn broadcast_equivocation_proof_to_f2f_except(
+        &self,
+        proof: &humoco_sim_core::fraud::FraudProofPayload,
+        exclude: Option<[u8; 32]>,
+    ) {
+        // Dedup: if already forwarded, stop the amplification loop here.
+        let hash = PeerManager::fraud_proof_dedup_hash(proof);
+        if !self.peer_manager.check_and_record_fraud_proof(&hash).await {
+            return;
+        }
         let payload = match bincode::serialize(proof) {
             Ok(p) => p,
             Err(e) => {
@@ -1735,8 +1764,26 @@ impl QuicTransport {
             Err(_) => return,
         };
         let header = WireHeader::new(MsgType::EquivocationProof as u16, 1, 0, 0, payload_len);
-        let targets = self.peer_manager.all_f2f_target_addrs().await;
+        let mut targets = self.peer_manager.all_f2f_target_addrs().await;
+        // Echo protection: resolve all known addrs of the sender and exclude them,
+        // plus belt-and-braces filtering by live peer node_id mapping.
+        if let Some(sender_id) = exclude {
+            let sender_addrs = self.peer_manager.addrs_for_node_id(&sender_id).await;
+            targets.retain(|a| !sender_addrs.contains(a));
+            if targets.is_empty() {
+                return;
+            }
+        }
         for addr in targets {
+            // Second line of echo defense: skip any target currently mapped
+            // to the excluded sender identity (covers addr changes/races).
+            if let Some(sender_id) = exclude {
+                if let Some(peer) = self.peer_manager.get_peer(&addr).await {
+                    if peer.node_id == Some(sender_id) {
+                        continue;
+                    }
+                }
+            }
             let transport = self.clone();
             let payload = payload.clone();
             tokio::spawn(async move {
@@ -1866,14 +1913,24 @@ impl QuicTransport {
                                         let is_authorized = peer_manager.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await
                                             || peer_manager.can_authorize_direct_rpc(&remote_addr, remote_node_id.as_ref()).await;
 
-                                        if is_authorized {
-                                            if let Some((nid, vk)) = extract_peer_identity_from_connection(&conn) {
-                                                peer_manager.register_verifying_key(nid, vk).await;
-                                            }
-                                            peer_manager
-                                                .record_success(remote_addr, remote_node_id, Some(conn.clone()))
-                                                .await;
+                                        if !is_authorized {
+                                            // Phase 10: unauthorized QUIC connections are
+                                            // actively terminated instead of being kept
+                                            // half-open (resource exhaustion protection).
+                                            warn!(
+                                                remote = %remote_addr,
+                                                node_id = ?remote_node_id.map(hex::encode),
+                                                "Rejected unauthorized QUIC connection (neither F2F nor known via gossip): closing"
+                                            );
+                                            conn.close(0u32.into(), b"unauthorized: unknown peer");
+                                            return;
                                         }
+                                        if let Some((nid, vk)) = extract_peer_identity_from_connection(&conn) {
+                                            peer_manager.register_verifying_key(nid, vk).await;
+                                        }
+                                        peer_manager
+                                            .record_success(remote_addr, remote_node_id, Some(conn.clone()))
+                                            .await;
                                         Self::handle_connection(conn, handler, peer_manager.clone(), cancel_token, remote_node_id, stream_semaphore, transport).await;
                                     }
                                     Err(err) => {
@@ -1974,7 +2031,7 @@ impl QuicTransport {
                                             };
                                             let resp_header = WireHeader::new(
                                                 MsgType::StatusResponse as u16,
-                                                header.session_seq + 1,
+                                                header.session_seq.wrapping_add(1),
                                                 header.epoch_id,
                                                 resp_flags,
                                                 payload_len,
@@ -2158,7 +2215,7 @@ impl QuicTransport {
                                                         );
                                                         let ack_hdr = WireHeader::new(
                                                             MsgType::HeartbeatAck as u16,
-                                                            header.session_seq + 1,
+                                                            header.session_seq.wrapping_add(1),
                                                             header.epoch_id,
                                                             humoco_sim_core::wire::FLAG_POW_OUTDATED,
                                                             0,

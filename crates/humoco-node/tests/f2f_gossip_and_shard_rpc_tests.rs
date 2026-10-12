@@ -241,35 +241,70 @@ async fn test_unauthorized_active_sync_and_shard_digest_rejected() {
     transport_c.spawn_accept_loop();
 
     // Stranger C connects unchecked to A
+    // Phase 10: unauthorized QUIC connections are actively terminated with
+    // connection.close() instead of being kept half-open for per-stream
+    // "unauthorized" responses (resource exhaustion protection).
     let conn_c_to_a = transport_c
         .connect_peer_unchecked(actual_addr_a)
         .await
         .expect("C connects unchecked to A");
 
-    // 1. ActiveSyncRequest from stranger -> MUST be rejected with "unauthorized"
-    let sync_req_hdr = WireHeader::new(MsgType::ActiveSyncRequest as u16, 1, 0, 0, 0);
-    let (resp_hdr, resp_payload) = transport_c
-        .send_request(&conn_c_to_a, &sync_req_hdr, b"")
-        .await
-        .expect("send ActiveSyncRequest");
-    assert_eq!(resp_hdr.msg_type, MsgType::StatusResponse as u16);
-    assert_eq!(&resp_payload, b"unauthorized");
+    // Give the accept loop a moment to evaluate authorization and close.
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // 2. ShardDigestRequest from stranger -> MUST be rejected with "unauthorized"
-    let digest_req_hdr = WireHeader::new(MsgType::ShardDigestRequest as u16, 2, 0, 0, 0);
-    let (resp_hdr, resp_payload) = transport_c
-        .send_request(&conn_c_to_a, &digest_req_hdr, b"")
+    // 1. ActiveSyncRequest from stranger -> connection MUST be closed.
+    // (Legacy per-stream "unauthorized" payload is replaced by active close.)
+    let sync_req_hdr = WireHeader::new(MsgType::ActiveSyncRequest as u16, 1, 0, 0, 0);
+    let send_res = transport_c
+        .send_request(&conn_c_to_a, &sync_req_hdr, b"")
+        .await;
+    match send_res {
+        Ok((resp_hdr, resp_payload)) => {
+            // Race window: if the request raced the close, a per-stream
+            // rejection is still acceptable — but never a successful sync.
+            assert_eq!(resp_hdr.msg_type, MsgType::StatusResponse as u16);
+            assert_eq!(&resp_payload, b"unauthorized");
+        }
+        Err(_) => {
+            // Expected path: server actively closed the unauthorized connection.
+        }
+    }
+    // The server side must have terminated the connection.
+    assert!(
+        conn_c_to_a.close_reason().is_some(),
+        "Unauthorized QUIC connection must be actively closed by the server"
+    );
+
+    // 2. ShardDigestRequest from stranger -> needs a fresh connection attempt,
+    // which is likewise terminated while still unauthorized.
+    let conn_c_to_a_2 = transport_c
+        .connect_peer_unchecked(actual_addr_a)
         .await
-        .expect("send ShardDigestRequest");
-    assert_eq!(resp_hdr.msg_type, MsgType::StatusResponse as u16);
-    assert_eq!(&resp_payload, b"unauthorized");
+        .expect("C reconnects unchecked to A");
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let digest_req_hdr = WireHeader::new(MsgType::ShardDigestRequest as u16, 2, 0, 0, 0);
+    let send_res = transport_c
+        .send_request(&conn_c_to_a_2, &digest_req_hdr, b"")
+        .await;
+    if let Ok((resp_hdr, resp_payload)) = send_res {
+        assert_eq!(resp_hdr.msg_type, MsgType::StatusResponse as u16);
+        assert_eq!(&resp_payload, b"unauthorized");
+    }
+    assert!(
+        conn_c_to_a_2.close_reason().is_some(),
+        "Unauthorized QUIC connection must be actively closed by the server"
+    );
 
     // 3. Authorize C by registering it as a learned gossip node
     pm_a.learn_node_from_gossip(*identity_c.node_id(), conn_c_to_a.remote_address(), 1, None).await;
 
-    // Now request should NOT be rejected with unauthorized
+    // Now a fresh request on a new connection must succeed (no unauthorized).
+    let conn_c_to_a_3 = transport_c
+        .connect_peer_unchecked(actual_addr_a)
+        .await
+        .expect("C reconnects after authorization");
     let (resp_hdr, resp_payload) = transport_c
-        .send_request(&conn_c_to_a, &digest_req_hdr, b"")
+        .send_request(&conn_c_to_a_3, &digest_req_hdr, b"")
         .await
         .expect("send authorized ShardDigestRequest");
     assert_ne!(&resp_payload, b"unauthorized");

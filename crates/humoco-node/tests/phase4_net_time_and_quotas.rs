@@ -650,8 +650,8 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     assert!(engine_b.is_node_banned(identity_g.node_pubkey()).await, "Engine B must ban Gateway G");
     assert!(pm_b.is_banned(identity_g.node_pubkey()).await, "PeerManager B must ban Gateway G");
 
-    // 5. Fraud proof was broadcast
-    let broadcasted_proof = fraud_rx.try_recv().expect("Fraud proof must be broadcast");
+    // 5. Fraud proof was broadcast (Phase 10: channel carries (proof, sender))
+    let (broadcasted_proof, _sender) = fraud_rx.try_recv().expect("Fraud proof must be broadcast");
     assert_eq!(broadcasted_proof.perpetrator_node_id, *identity_g.node_pubkey());
     assert!(broadcasted_proof.verify(), "Broadcasted proof must be cryptographically valid");
 }

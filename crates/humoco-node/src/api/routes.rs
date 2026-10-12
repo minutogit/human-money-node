@@ -500,6 +500,9 @@ pub fn create_attestation_for_network(
     network_id: humoco_sim_core::types::NetworkId,
 ) -> AttestationDto {
     let node_id_u16 = identity.node_id_u16();
+    // Pillar 3: Cryptographic Identity Trumps Network Topology — bind the full
+    // 32-byte NodePubKey; `node_id` stays only for backward compatibility.
+    let node_pubkey_hex = hex::encode(identity.node_pubkey());
     let domain_tag = if status == 1 {
         humoco_sim_core::crypto::domain_approve_final(network_id)
     } else {
@@ -521,6 +524,7 @@ pub fn create_attestation_for_network(
         lock_id: hex::encode(lock_id),
         parent_lock: hex::encode(parent_lock),
         node_id: node_id_u16,
+        node_pubkey: node_pubkey_hex,
         timestamp: timestamp_ms,
         signature: hex::encode(signature.to_bytes()),
     }
@@ -591,20 +595,29 @@ async fn compute_signer_bitmap(
     all_hrw.truncate(32);
     let mut bitmap: u32 = 0;
     for sig in collected_signatures {
+        // Pillar 3: resolve strictly via 32-byte NodePubKey; the 16-bit
+        // `node_id` is only a legacy fallback for old attestations.
+        let sig_pubkey_32 = sig.node_pubkey_bytes();
         for (idx, hrw_id) in all_hrw.iter().enumerate() {
-            let pubkey_u16 = if hrw_id == &self_hrw {
-                u16::from_be_bytes([self_pubkey[0], self_pubkey[1]])
+            let candidate_pubkey: Option<[u8; 32]> = if hrw_id == &self_hrw {
+                Some(self_pubkey)
             } else if let Some(mgr) = peer_mgr {
-                if let Some(pubkey) = mgr.get_pubkey_by_hrw_routing_id(hrw_id).await {
-                    u16::from_be_bytes([pubkey[0], pubkey[1]])
-                } else {
-                    u16::from_be_bytes([hrw_id[0], hrw_id[1]])
-                }
+                mgr.get_pubkey_by_hrw_routing_id(hrw_id).await
             } else {
-                u16::from_be_bytes([hrw_id[0], hrw_id[1]])
+                None
+            };
+            let matched = if let (Some(att_pk), Some(cand_pk)) = (sig_pubkey_32, candidate_pubkey) {
+                att_pk == cand_pk
+            } else {
+                // Legacy fallback: compare 16-bit prefix only when the new
+                // 32-byte field is absent on either side.
+                let pubkey_u16 = candidate_pubkey
+                    .map(|pk| u16::from_be_bytes([pk[0], pk[1]]))
+                    .unwrap_or_else(|| u16::from_be_bytes([hrw_id[0], hrw_id[1]]));
+                pubkey_u16 == sig.node_id
             };
 
-            if pubkey_u16 == sig.node_id {
+            if matched {
                 bitmap |= 1u32 << idx;
                 break;
             }
@@ -652,25 +665,67 @@ fn verify_signer_bitmap_consistency(signatures: &[AttestationDto], bitmap: u32) 
 }
 
 /// Verifies a peer attestation's cryptographic fields and HRW binding.
-/// Checks verifying-key existence, signature/lock_id/parent_lock hex decoding,
-/// lock_id equality, and Ed25519 `verify_strict` against the parent_lock-bound
-/// canonical sig digest (Phase 1 P0). Returns `true` only when fully valid;
-/// logs warnings otherwise.
+///
+/// # Architectural Invariant: Pillar 3 — Cryptographic Identity Trumps Network Topology
+///
+/// Key resolution is STRICTLY via the full 32-byte `NodePubKey`
+/// (`att.node_pubkey`); the legacy 16-bit `node_id` is only a fallback and
+/// fails closed on prefix collisions. The claimed signer is additionally
+/// checked against the actual QUIC TLS certificate key of the queried peer
+/// (`expected_tls_pubkey`): a transplanted signature from a different node is
+/// rejected even if cryptographically valid under its own key. Domain tags are
+/// derived from the passed `NetworkId` — Mainnet is never hardcoded.
 async fn verify_peer_attestation(
     peer_mgr: &crate::network::PeerManager,
     att: &AttestationDto,
     expected_lock_id: [u8; 32],
     shard_id: u16,
     target_status: u8,
+    network_id: humoco_sim_core::types::NetworkId,
+    expected_tls_pubkey: Option<[u8; 32]>,
 ) -> bool {
-    let vk = match peer_mgr.get_peer_verifying_key(att.node_id).await {
-        Some(k) => k,
-        None => {
-            tracing::warn!(
-                node_id = att.node_id,
-                "Dropped attestation: peer verifying key not found in peer manager"
-            );
-            return false;
+    // Strict 32-byte signer resolution first.
+    let signer_pubkey: Option<[u8; 32]> = att.node_pubkey_bytes();
+    let vk = if let Some(pk) = signer_pubkey {
+        // TLS binding: the attestation signer MUST be the peer we actually
+        // queried over QUIC (prevents signature-transplant across peers).
+        if let Some(tls_pk) = expected_tls_pubkey {
+            if pk != tls_pk {
+                tracing::warn!(
+                    node_id = att.node_id,
+                    "Dropped attestation: signer NodePubKey does not match TLS certificate key of queried peer"
+                );
+                return false;
+            }
+        }
+        match peer_mgr.get_peer_verifying_key_by_node_id(&pk).await {
+            Some(k) => k,
+            None => {
+                // Unknown but well-formed pubkey: derive vk directly so new
+                // F2F peers without prior gossip registration still verify.
+                match ed25519_dalek::VerifyingKey::from_bytes(&pk) {
+                    Ok(k) => k,
+                    Err(_) => {
+                        tracing::warn!(
+                            node_id = att.node_id,
+                            "Dropped attestation: invalid 32-byte NodePubKey"
+                        );
+                        return false;
+                    }
+                }
+            }
+        }
+    } else {
+        // Legacy fallback: 16-bit prefix, fails closed on collisions.
+        match peer_mgr.get_peer_verifying_key(att.node_id).await {
+            Some(k) => k,
+            None => {
+                tracing::warn!(
+                    node_id = att.node_id,
+                    "Dropped attestation: peer verifying key not found (or 16-bit prefix ambiguous)"
+                );
+                return false;
+            }
         }
     };
 
@@ -717,9 +772,9 @@ async fn verify_peer_attestation(
     };
 
     let domain_tag = if target_status == 1 {
-        humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL
+        humoco_sim_core::crypto::domain_approve_final(network_id)
     } else {
-        humoco_sim_core::crypto::DOMAIN_APPROVE_PROV
+        humoco_sim_core::crypto::domain_approve_prov(network_id)
     };
     // Parent-lock binding (Phase 1 P0): the signature commits to
     // (parent_lock, lock_id); transplanted signatures fail here.
@@ -757,6 +812,7 @@ struct PeerAttestationQuery<'a> {
     shard_query_depth: usize,
     my_load: u64,
     quota_limit: u64,
+    network_id: humoco_sim_core::types::NetworkId,
 }
 
 enum PeerQueryError {
@@ -767,7 +823,7 @@ enum PeerQueryError {
 }
 
 enum PeerQueryResult {
-    Success(AttestationDto),
+    Success(AttestationDto, Option<[u8; 32]>),
     QuotaExceeded,
     NotInShard,
     Collision(Vec<u8>),
@@ -827,6 +883,9 @@ async fn collect_peer_attestations(
                 join_set.spawn(async move {
                     let query_peer = async {
                         let conn = t.connect_peer(addr).await.map_err(|_| PeerQueryError::Generic)?;
+                        // Pillar 3: capture the actual TLS certificate key of the
+                        // queried peer so the attestation signer can be bound to it.
+                        let tls_pubkey = crate::network::tls::extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
                         let (resp_header, resp_payload) = t.send_request(&conn, &h, &p).await.map_err(|_| PeerQueryError::Generic)?;
                         // Phase 2 P1 (INV-0604): genuine HMC double-spend carries
                         // FLAG_COLLISION_DETECTED + colliding lock payload for 409.
@@ -846,14 +905,14 @@ async fn collect_peer_attestations(
                             return Err(PeerQueryError::NotInShard);
                         }
                         if resp_header.msg_type == exp_resp && !resp_payload.is_empty() {
-                            if let Ok(att) = bincode::deserialize::<AttestationDto>(&resp_payload) {
-                                return Ok(att);
+                            if let Some(att) = AttestationDto::from_wire_bytes(&resp_payload) {
+                                return Ok((att, tls_pubkey));
                             }
                         }
                         Err(PeerQueryError::Generic)
                     };
                     match query_peer.await {
-                        Ok(att) => (nid, addr, rank_idx, PeerQueryResult::Success(att)),
+                        Ok((att, tls_pubkey)) => (nid, addr, rank_idx, PeerQueryResult::Success(att, tls_pubkey)),
                         Err(PeerQueryError::QuotaExceeded) => (nid, addr, rank_idx, PeerQueryResult::QuotaExceeded),
                         Err(PeerQueryError::NotInShard) => (nid, addr, rank_idx, PeerQueryResult::NotInShard),
                         Err(PeerQueryError::Collision(payload)) => (nid, addr, rank_idx, PeerQueryResult::Collision(payload)),
@@ -909,15 +968,23 @@ async fn collect_peer_attestations(
             }
             match tokio::time::timeout(std::time::Duration::from_millis(50), join_set.join_next()).await {
                 Ok(Some(res)) => match res {
-                Ok((_nid, addr, rank_idx, PeerQueryResult::Success(att))) => {
+                Ok((_nid, addr, rank_idx, PeerQueryResult::Success(att, tls_pubkey))) => {
                     in_flight.remove(&rank_idx);
 
-                    if collected_signatures.iter().any(|s| s.node_id == att.node_id) {
+                    // Pillar 3: dedup strictly via 32-byte NodePubKey when
+                    // present; legacy 16-bit prefix only as fallback.
+                    let is_duplicate = match att.node_pubkey_bytes() {
+                        Some(pk) => collected_signatures.iter().any(|s| {
+                            s.node_pubkey_bytes().map(|p| p == pk).unwrap_or(false)
+                        }),
+                        None => collected_signatures.iter().any(|s| s.node_id == att.node_id),
+                    };
+                    if is_duplicate {
                         spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
                         continue;
                     }
 
-                    if !verify_peer_attestation(query.peer_mgr, &att, query.lock_id, query.shard_id, query.target_status).await {
+                    if !verify_peer_attestation(query.peer_mgr, &att, query.lock_id, query.shard_id, query.target_status, query.network_id, tls_pubkey).await {
                         if rank_idx < 20 {
                             query.peer_mgr.record_failure(addr).await;
                         }
@@ -1114,6 +1181,7 @@ async fn assemble_quorum_certificate(
                         shard_query_depth: state.shard_query_depth,
                         my_load,
                         quota_limit,
+                        network_id: state.network_id,
                     },
                     &mut collected_signatures,
                 ).await;
@@ -1221,13 +1289,14 @@ async fn assemble_status_quorum_certificate(
                 should_include_self = false;
             }
 
-            let local_attestation = create_attestation(
+            let local_attestation = create_attestation_for_network(
                 &state.identity,
                 lock_id,
                 parent_lock,
                 shard_id,
                 target_status,
                 now_ms,
+                state.network_id,
             );
             if should_include_self {
                 collected_signatures.push(local_attestation);
@@ -1289,6 +1358,7 @@ async fn assemble_status_quorum_certificate(
                             shard_query_depth: state.shard_query_depth,
                             my_load,
                             quota_limit,
+                            network_id: state.network_id,
                         },
                         &mut collected_signatures,
                     ).await;
@@ -1315,7 +1385,7 @@ async fn assemble_status_quorum_certificate(
                 signer_bitmap,
             }
         } else {
-            let local_attestation = create_attestation(&state.identity, lock_id, parent_lock, shard_id, 0, now_ms);
+            let local_attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, 0, now_ms, state.network_id);
             QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),
                 shard_id,
@@ -1327,7 +1397,7 @@ async fn assemble_status_quorum_certificate(
             }
         }
     } else {
-        let local_attestation = create_attestation(&state.identity, lock_id, parent_lock, shard_id, 0, now_ms);
+        let local_attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, 0, now_ms, state.network_id);
         QuorumCertificateDto {
             lock_id: hex::encode(lock_id),
             shard_id,

@@ -614,10 +614,20 @@ impl RedbStorage {
 
     /// Retrieves all unexpired HMC locks stored on disk at now_ms.
     /// Defensive against corrupted entries: catches deserialization errors, logs a warning, and skips defective records.
+    ///
+    /// # Architectural Invariant: INV-1404 Dual-Tier Cold-Start Recovery
+    ///
+    /// Follow-up locks carry no own `deletable_at`; their TTL is strictly
+    /// inherited from the known voucher genesis root (Rule 10, Origin-Lock
+    /// Mandate). They MUST NEVER be dropped as expired with TTL 0, nor may a
+    /// 0 TTL poison `voucher_roots`. Two-stage evaluation: (1) collect genesis
+    /// roots first, (2) evaluate follow-ups with inherited TTL. Orphans with a
+    /// still-unknown root are retained (not pruned) — expiry cannot be proven
+    /// without the root, and dropping them would lose recoverable state.
     pub fn all_valid_hmc_locks(&self, now_ms: u64) -> Result<Vec<(String, crate::api::hmc::L2LockEntry)>, StorageError> {
         let read_txn = self.db.begin_read()?;
         let table_hmc = read_txn.open_table(TABLE_HMC_LOCKS)?;
-        let mut results = Vec::new();
+        let mut raw: Vec<(String, crate::api::hmc::L2LockEntry)> = Vec::new();
         for item in table_hmc.iter()? {
             let (k_guard, v_guard) = match item {
                 Ok(g) => g,
@@ -633,16 +643,47 @@ impl RedbStorage {
                     continue;
                 }
             };
-            let valid_until_ms = entry
-                .deletable_at
-                .as_deref()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if !should_prune(SimTime(now_ms), SimTime(valid_until_ms)) {
-                results.push((k_guard.value().to_string(), entry));
+            raw.push((k_guard.value().to_string(), entry));
+        }
+        drop(table_hmc);
+        drop(read_txn);
+        // Stage 1: collect genesis roots.
+        let mut roots: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for (_, entry) in &raw {
+            if let Some(v) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                roots.entry(entry.layer2_voucher_id.clone()).or_insert(v);
+            }
+        }
+        // Stage 2: evaluate expiry with inherited TTL; never use TTL 0.
+        let mut results = Vec::new();
+        for (tag, entry) in raw {
+            let owned_ttl = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok());
+            let inherited = roots.get(&entry.layer2_voucher_id).copied();
+            match (owned_ttl, inherited) {
+                (Some(v), _) => {
+                    if !should_prune(SimTime(now_ms), SimTime(v)) {
+                        results.push((tag, entry));
+                    }
+                }
+                (None, Some(root_v)) => {
+                    if !should_prune(SimTime(now_ms), SimTime(root_v)) {
+                        results.push((tag, entry));
+                    }
+                }
+                (None, None) => {
+                    // Orphan follow-up with unknown root: expiry unprovable —
+                    // retain instead of dropping with TTL 0.
+                    results.push((tag, entry));
+                }
             }
         }
         Ok(results)
+    }
+
+    /// Raw unfiltered read of all HMC locks (no TTL evaluation).
+    /// Used by cold-start recovery Stage 1/2 so follow-ups never see TTL 0.
+    pub fn read_all_hmc_locks(&self) -> Result<Vec<(String, crate::api::hmc::L2LockEntry)>, StorageError> {
+        self.all_hmc_locks()
     }
 
     /// Performs a consistent snapshot backup of all tables to destination_path using a read transaction.

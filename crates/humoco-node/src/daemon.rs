@@ -221,7 +221,8 @@ impl NodeDaemon {
                 peer_manager.clone(),
             )
             .with_tier_controller(tier_controller.clone())
-            .with_sync_ready(is_sync_ready.clone()),
+            .with_sync_ready(is_sync_ready.clone())
+            .with_network_id(self.config.network.network_id),
         );
         let mut transport = crate::network::QuicTransport::bind_with_options(
             self.config.network.p2p_listen_addr,
@@ -958,11 +959,19 @@ async fn run_shard_digest_pull_sync(
         }
     }
 
+    // # Architectural Invariant: Spec 03, Deterministic Digest Pull-Sync
+    //
+    // `is_sync_ready` is set ONLY after proven shard-sync convergence (all
+    // responsible shards matched the dominant quorum digest, or the divergent
+    // pull completed). A premature `true` would open the PoS hot path on stale
+    // state. `all_converged` starts true and flips to false on any empty peer
+    // set, insufficient quorum, or failed pull page — readiness stays `false`
+    // until the next ticker run converges.
+    let mut all_converged = true;
     for shard_id in responsible_shards {
         if cancel_token.is_cancelled() {
             return Ok(());
         }
-
         // Compute local digest strictly for this shard_id
         let mut locks: Vec<humoco_sim_core::types::LockRecord> = storage
             .all_valid_locks(now_ms)
@@ -981,14 +990,35 @@ async fn run_shard_digest_pull_sync(
                 hmc_locks_all.push((tag.clone(), entry.clone()));
             }
         }
-        for (tag, entry) in hmc_locks_all {
+        // # Architectural Invariant: Spec 03, Deterministic Digest Pull-Sync
+        //
+        // HMC follow-up locks carry no own `deletable_at`; their TTL is strictly
+        // inherited from the known voucher genesis root (Rule 10, Origin-Lock
+        // Mandate). The old fallback `now_ms + 1 year` was wall-clock dependent:
+        // two nodes computing the same shard digest at different times produced
+        // different `valid_until` values, so digests never converged. Digests
+        // MUST be time-independent: inherit deterministically, skip orphans with
+        // unknown root (never invent TTL).
+        let hmc_root_map: std::collections::HashMap<&str, u64> = {
+            let mut m = std::collections::HashMap::new();
+            for (_, e) in &hmc_locks_all {
+                if let Some(v) = e.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                    m.entry(e.layer2_voucher_id.as_str()).or_insert(v);
+                }
+            }
+            m
+        };
+        for (tag, entry) in &hmc_locks_all {
             let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
             if !locks.iter().any(|l| l.parent_lock == parent_bytes) {
                 let valid_until_ms = entry
                     .deletable_at
                     .as_deref()
                     .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or_else(|| now_ms + 365 * 24 * 3600 * 1000);
+                    .or_else(|| hmc_root_map.get(entry.layer2_voucher_id.as_str()).copied());
+                let Some(valid_until_ms) = valid_until_ms else {
+                    continue;
+                };
                 locks.push(humoco_sim_core::types::LockRecord::new(
                     parent_bytes,
                     entry.sender_ephemeral_pub,
@@ -1068,6 +1098,7 @@ async fn run_shard_digest_pull_sync(
         }
 
         if peer_digests.is_empty() {
+            all_converged = false;
             continue;
         }
 
@@ -1094,6 +1125,7 @@ async fn run_shard_digest_pull_sync(
             }
             ClusterResult::InsufficientQuorum { max_votes, backoff_ms } => {
                 debug!(shard_id, max_votes, backoff_ms, "Shard digest sync: insufficient quorum, backing off");
+                all_converged = false;
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                 continue;
             }
@@ -1107,6 +1139,7 @@ async fn run_shard_digest_pull_sync(
         info!(shard_id, divergent = dominant_addrs.len(), "Shard digest divergence detected via evaluate_digest_clusters, pulling paginated active sync");
 
         // Pull missing locks from dominant quorum peers via paginated ActiveSyncRequest
+        let mut shard_pull_ok = false;
         for addr in dominant_addrs {
             if cancel_token.is_cancelled() {
                 break;
@@ -1121,6 +1154,7 @@ async fn run_shard_digest_pull_sync(
 
             let mut cursor: u64 = 0;
             let limit: usize = 500;
+            let mut peer_pull_ok = true;
             loop {
                 if cancel_token.is_cancelled() { break; }
                 let page_res = match tokio::time::timeout(
@@ -1132,10 +1166,12 @@ async fn run_shard_digest_pull_sync(
                     Ok(Ok(p)) => p,
                     Ok(Err(e)) => {
                         debug!(peer=%addr, error=%e, "ActiveSync page request failed");
+                        peer_pull_ok = false;
                         break;
                     }
                     Err(_) => {
                         debug!(peer=%addr, "ActiveSync page request timeout");
+                        peer_pull_ok = false;
                         break;
                     }
                 };
@@ -1167,13 +1203,24 @@ async fn run_shard_digest_pull_sync(
                     cursor += limit as u64;
                 }
             }
+            if peer_pull_ok {
+                shard_pull_ok = true;
+                break;
+            }
+        }
+        if !shard_pull_ok {
+            all_converged = false;
         }
     }
 
-    is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-    transport.set_sync_ready(true);
-    peer_manager.set_local_sync_ready(true);
-    info!("Shard digest pull-sync completed");
+    if all_converged {
+        is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        transport.set_sync_ready(true);
+        peer_manager.set_local_sync_ready(true);
+        info!("Shard digest pull-sync completed (converged)");
+    } else {
+        info!("Shard digest pull-sync incomplete: convergence pending, is_sync_ready stays false");
+    }
     Ok(())
 }
 

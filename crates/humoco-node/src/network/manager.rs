@@ -289,8 +289,11 @@ pub struct PeerManager {
     f2f_friends: Arc<RwLock<HashMap<[u8; 32], Option<SocketAddr>>>>,
     dns_peers: Arc<RwLock<Vec<DnsPeerState>>>,
     known_network_nodes: Arc<RwLock<HashMap<[u8; 32], KnownNodeInfo>>>,
+    /// Strict 32-byte NodePubKey -> VerifyingKey resolution (Pillar 3:
+    /// Cryptographic Identity Trumps Network Topology). There is deliberately
+    /// NO `u16 -> VerifyingKey` map: the 16-bit prefix collides across nodes
+    /// and previously allowed silent `u16_to_vk` overwrite attacks.
     verifying_keys: Arc<RwLock<HashMap<[u8; 32], ed25519_dalek::VerifyingKey>>>,
-    u16_to_vk: Arc<RwLock<HashMap<u16, ed25519_dalek::VerifyingKey>>>,
     banned_nodes: Arc<RwLock<HashSet<[u8; 32]>>>,
     endpoint: Arc<StdRwLock<Option<quinn::Endpoint>>>,
     clock: Arc<crate::network::NetworkClock>,
@@ -334,14 +337,11 @@ impl PeerManager {
         let mut peer_map = HashMap::new();
         let mut friend_map = HashMap::new();
         let mut vk_map = HashMap::new();
-        let mut u16_map = HashMap::new();
 
         for key in &trusted_pubkeys {
             friend_map.insert(*key, None);
             if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(key) {
-                let u16_id = u16::from_be_bytes([key[0], key[1]]);
                 vk_map.insert(*key, vk);
-                u16_map.insert(u16_id, vk);
             }
         }
 
@@ -351,9 +351,7 @@ impl PeerManager {
                 info.node_id = Some(*key);
                 friend_map.insert(*key, Some(*addr));
                 if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(key) {
-                    let u16_id = u16::from_be_bytes([key[0], key[1]]);
                     vk_map.insert(*key, vk);
-                    u16_map.insert(u16_id, vk);
                 }
             }
             peer_map.insert(*addr, info);
@@ -386,7 +384,6 @@ impl PeerManager {
             dns_peers: Arc::new(RwLock::new(dns_state_list)),
             known_network_nodes: Arc::new(RwLock::new(HashMap::new())),
             verifying_keys: Arc::new(RwLock::new(vk_map)),
-            u16_to_vk: Arc::new(RwLock::new(u16_map)),
             banned_nodes: Arc::new(RwLock::new(HashSet::new())),
             endpoint: Arc::new(StdRwLock::new(None)),
             clock: Arc::new(crate::network::NetworkClock::new()),
@@ -625,14 +622,9 @@ impl PeerManager {
                     friends_guard.insert(key, Some(new_addr));
                 }
                 if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key) {
-                    let u16_id = u16::from_be_bytes([key[0], key[1]]);
                     {
                         let mut keys = self.verifying_keys.write().await;
                         keys.insert(key, vk);
-                    }
-                    {
-                        let mut u16_map = self.u16_to_vk.write().await;
-                        u16_map.insert(u16_id, vk);
                     }
                 }
             }
@@ -914,14 +906,9 @@ impl PeerManager {
             friends.insert(node_id, addr);
         }
         if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&node_id) {
-            let u16_id = u16::from_be_bytes([node_id[0], node_id[1]]);
             {
                 let mut keys = self.verifying_keys.write().await;
                 keys.insert(node_id, vk);
-            }
-            {
-                let mut u16_map = self.u16_to_vk.write().await;
-                u16_map.insert(u16_id, vk);
             }
         }
         if let Some(a) = addr {
@@ -949,14 +936,9 @@ impl PeerManager {
         }
 
         if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pubkey) {
-            let u16_id = u16::from_be_bytes([pubkey[0], pubkey[1]]);
             {
                 let mut keys = self.verifying_keys.write().await;
                 keys.insert(pubkey, vk);
-            }
-            {
-                let mut u16_map = self.u16_to_vk.write().await;
-                u16_map.insert(u16_id, vk);
             }
         }
 
@@ -1011,15 +993,10 @@ impl PeerManager {
             friends.remove(pubkey);
         }
 
-        if let Ok(_vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey) {
-            let u16_id = u16::from_be_bytes([pubkey[0], pubkey[1]]);
+        if ed25519_dalek::VerifyingKey::from_bytes(pubkey).is_ok() {
             {
                 let mut keys = self.verifying_keys.write().await;
                 keys.remove(pubkey);
-            }
-            {
-                let mut u16_map = self.u16_to_vk.write().await;
-                u16_map.remove(&u16_id);
             }
         }
 
@@ -1654,24 +1631,33 @@ impl PeerManager {
 
     /// Registers a peer's Ed25519 verifying key associated with its 32-byte Node ID.
     /// TLS & F2F strictly on NodePubKey / NodeId (permanent), never on HRW ticket.
-    ///
-    /// Phase 10: decoupled — never holds both key maps at once.
+    /// Pillar 3: Cryptographic Identity Trumps Network Topology — strict 32-byte
+    /// resolution only; no 16-bit alias map (collision overwrites eliminated).
     pub async fn register_verifying_key(&self, node_id: [u8; 32], vk: ed25519_dalek::VerifyingKey) {
-        let u16_id = u16::from_be_bytes([node_id[0], node_id[1]]);
         {
             let mut keys = self.verifying_keys.write().await;
             keys.insert(node_id, vk);
         }
-        {
-            let mut u16_map = self.u16_to_vk.write().await;
-            u16_map.insert(u16_id, vk);
-        }
     }
 
-    /// Retrieves an Ed25519 verifying key by the 16-bit node ID prefix.
+    /// Legacy 16-bit lookup (backward compatibility only).
+    /// Scans the strict 32-byte map for prefix matches and returns a key ONLY
+    /// when the prefix is unambiguous. On collision (multiple pubkeys share the
+    /// prefix) returns `None` instead of silently overwriting — this eliminates
+    /// the old `u16_to_vk` collision-overwrite attack. New code MUST use
+    /// [`Self::get_peer_verifying_key_by_node_id`].
     pub async fn get_peer_verifying_key(&self, node_id_u16: u16) -> Option<ed25519_dalek::VerifyingKey> {
-        let u16_map = self.u16_to_vk.read().await;
-        u16_map.get(&node_id_u16).copied()
+        let keys = self.verifying_keys.read().await;
+        let mut found: Option<ed25519_dalek::VerifyingKey> = None;
+        for (pubkey, vk) in keys.iter() {
+            if u16::from_be_bytes([pubkey[0], pubkey[1]]) == node_id_u16 {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(*vk);
+            }
+        }
+        found
     }
 
     /// Retrieves an Ed25519 verifying key by the full 32-byte Node ID.

@@ -190,20 +190,37 @@ impl HmcRamIndex {
     }
 
     /// Re-populates an unexpired HMC lock entry from disk during cold-start recovery.
+    ///
+    /// # Architectural Invariant: INV-1404 Dual-Tier Cold-Start Recovery
+    ///
+    /// Follow-up locks without own `deletable_at` inherit their TTL from the
+    /// already-loaded voucher genesis root (Stage 2 runs after Stage 1, so the
+    /// root is known). They are NEVER inserted with TTL 0 (which would make
+    /// them instantly prunable) and NEVER poison `voucher_roots` with 0 — only
+    /// genesis locks initialize the immutable root TTL. Orphans with a still-
+    /// unknown root are skipped (deferred, not dropped with 0).
     pub fn insert_recovered(&mut self, lookup_tag: String, entry: L2LockEntry) {
-        let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string();
-        let valid_until_ms = entry
+        let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string()
+            || entry.deletable_at.is_some();
+        let owned_ttl = entry
             .deletable_at
             .as_deref()
-            .and_then(|s| s.parse::<u64>().ok())
-            .or_else(|| {
-                if is_genesis {
-                    None
-                } else {
-                    self.voucher_roots.get(&entry.layer2_voucher_id).copied()
+            .and_then(|s| s.parse::<u64>().ok());
+        let valid_until_ms = match (owned_ttl, is_genesis) {
+            (Some(v), _) => v,
+            (None, true) => {
+                // Genesis without parseable TTL: cannot anchor a root — skip.
+                return;
+            }
+            (None, false) => match self.voucher_roots.get(&entry.layer2_voucher_id).copied() {
+                Some(root_v) => root_v,
+                None => {
+                    // Orphan follow-up: root not yet known — skip instead of
+                    // inserting TTL 0 (never drop as expired, never poison).
+                    return;
                 }
-            })
-            .unwrap_or(0);
+            },
+        };
         let prune_threshold_ms = valid_until_ms.saturating_add(30_000);
         let bucket_sec = prune_threshold_ms / 1_000;
 
@@ -1881,6 +1898,14 @@ impl DualTierEngine {
     }
 
     /// Cold-start recovery: Scans unexpired locks from disk and re-populates both RAM indices.
+    ///
+    /// # Architectural Invariant: INV-1404 Dual-Tier Cold-Start Recovery
+    ///
+    /// Two-stage HMC recovery: (1) genesis roots first so `voucher_roots` is
+    /// anchored, (2) follow-up locks inherit TTL from the known root. Follow-ups
+    /// are never inserted with TTL 0 and never poison roots with 0. Raw disk
+    /// read (`read_all_hmc_locks`) is used so follow-ups without own TTL are
+    /// not pre-filtered as expired before their root is known.
     pub async fn recover_from_disk(&self, now: SimTime) -> Result<usize, StorageError> {
         let locks = self.db.all_valid_locks(now.0)?;
         let count = locks.len();
@@ -1889,9 +1914,40 @@ impl DualTierEngine {
             ram.insert_recovered(lock, SimTime(root_valid_until));
         }
 
-        let hmc_locks = self.db.all_valid_hmc_locks(now.0)?;
-        let mut hmc_ram = self.hmc_ram.write().await;
+        let hmc_locks = self.db.read_all_hmc_locks()?;
+        // Stage 1: genesis roots (own deletable_at) first.
+        // Stage 2: follow-ups inherit from the anchored roots.
+        let mut genesis: Vec<(String, L2LockEntry)> = Vec::new();
+        let mut followups: Vec<(String, L2LockEntry)> = Vec::new();
         for (tag, entry) in hmc_locks {
+            if entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()).is_some() {
+                genesis.push((tag, entry));
+            } else {
+                followups.push((tag, entry));
+            }
+        }
+        // Precompute roots (including expired ones) so follow-ups inherit the
+        // same TTL their genesis carries; expiry is then evaluated uniformly.
+        let mut root_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for (_, e) in genesis.iter().chain(followups.iter()) {
+            if let Some(v) = e.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                root_map.entry(e.layer2_voucher_id.clone()).or_insert(v);
+            }
+        }
+        let mut hmc_ram = self.hmc_ram.write().await;
+        for (tag, entry) in genesis.into_iter().chain(followups) {
+            // Expiry filter at recovery time `now`: entries with known
+            // (owned or inherited) TTL that already exceed grace are skipped.
+            // Orphans with unknown root are retained (expiry unprovable,
+            // never TTL-0-dropped); `insert_recovered` defers them until the
+            // root arrives.
+            let owned = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok());
+            let effective = owned.or_else(|| root_map.get(&entry.layer2_voucher_id).copied());
+            if let Some(v) = effective {
+                if should_prune(now, SimTime(v)) {
+                    continue;
+                }
+            }
             hmc_ram.insert_recovered(tag, entry);
         }
 

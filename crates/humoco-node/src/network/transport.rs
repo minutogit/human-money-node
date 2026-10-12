@@ -158,31 +158,30 @@ pub fn verify_equivocation_first_party(
                 let shard_id = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
                 // Parent-lock binding: the signature commits to (parent_lock, lock_id),
                 // preventing cross-voucher signature transplant replay.
+                // NetworkId is NOT hardcoded: both Mainnet and Testnet domain
+                // tags verify (cross-network replay inside slashing evidence
+                // must not let an offender escape on the "wrong" network).
                 let payload_digest = humoco_sim_core::crypto::compute_attestation_payload_digest(
                     &att.parent_lock,
                     &att.lock_id,
                 );
-                let d_prov = humoco_sim_core::crypto::compute_sig_digest(
-                    humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
-                    0,
-                    0,
-                    0,
-                    shard_id,
-                    0,
-                    &payload_digest,
-                );
-                let d_final = humoco_sim_core::crypto::compute_sig_digest(
-                    humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL,
-                    0,
-                    0,
-                    0,
-                    shard_id,
-                    1,
-                    &payload_digest,
-                );
-
-                vk.verify_strict(&d_prov, &sig).is_ok()
-                    || vk.verify_strict(&d_final, &sig).is_ok()
+                let domains: [&[u8]; 4] = [
+                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
+                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
+                ];
+                domains.iter().any(|domain| {
+                    for status in [0u8, 1u8] {
+                        let d = humoco_sim_core::crypto::compute_sig_digest(
+                            domain, 0, 0, 0, shard_id, status, &payload_digest,
+                        );
+                        if vk.verify_strict(&d, &sig).is_ok() {
+                            return true;
+                        }
+                    }
+                    false
+                })
             };
 
             verify_att(&a) && verify_att(&b)
@@ -200,6 +199,7 @@ pub struct NodeRequestHandler {
     pub peer_manager: Option<Arc<crate::network::PeerManager>>,
     pub tier_controller: Option<Arc<crate::ingress::TierController>>,
     pub is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
+    pub network_id: humoco_sim_core::types::NetworkId,
 }
 
 impl NodeRequestHandler {
@@ -215,6 +215,7 @@ impl NodeRequestHandler {
             peer_manager: None,
             tier_controller: None,
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            network_id: humoco_sim_core::types::NetworkId::default(),
         }
     }
 
@@ -231,6 +232,7 @@ impl NodeRequestHandler {
             peer_manager: Some(peer_manager),
             tier_controller: None,
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            network_id: humoco_sim_core::types::NetworkId::default(),
         }
     }
 
@@ -241,6 +243,11 @@ impl NodeRequestHandler {
 
     pub fn with_sync_ready(mut self, ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.is_sync_ready = ready;
+        self
+    }
+
+    pub fn with_network_id(mut self, network_id: humoco_sim_core::types::NetworkId) -> Self {
+        self.network_id = network_id;
         self
     }
 }
@@ -266,6 +273,7 @@ impl RequestHandler for NodeRequestHandler {
         let peer_manager = self.peer_manager.clone();
         let tier_controller = self.tier_controller.clone();
         let is_sync_ready = self.is_sync_ready.clone();
+        let network_id = self.network_id;
         Box::pin(async move {
             let msg_type = header.msg_type;
 
@@ -771,13 +779,14 @@ impl RequestHandler for NodeRequestHandler {
                                     let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
                                         && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
                                     let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
-                                    let attestation = crate::api::routes::create_attestation(
+                                    let attestation = crate::api::routes::create_attestation_for_network(
                                         &identity,
                                         op_hash,
                                         parent_bytes,
                                         shard_id,
                                         final_status,
                                         now_ms,
+                                        network_id,
                                     );
                                     let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
                                     let payload_len = checked_payload_len(resp_bytes.len())?;
@@ -839,13 +848,14 @@ impl RequestHandler for NodeRequestHandler {
                                     let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
                                         && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
                                     let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
-                                    let attestation = crate::api::routes::create_attestation(
+                                    let attestation = crate::api::routes::create_attestation_for_network(
                                         &identity,
                                         entry.t_id,
                                         parent_bytes,
                                         shard_id,
                                         final_status,
                                         now_ms,
+                                        network_id,
                                     );
                                     let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
                                     let payload_len = checked_payload_len(resp_bytes.len())?;
@@ -1136,13 +1146,14 @@ impl RequestHandler for NodeRequestHandler {
 
                 if matching_and_valid {
                     let target_status = (header.flags & 0xFF) as u8;
-                    let attestation = crate::api::routes::create_attestation(
+                    let attestation = crate::api::routes::create_attestation_for_network(
                         &identity,
                         lock_id,
                         parent_lock,
                         shard_id,
                         target_status,
                         now_ms,
+                        network_id,
                     );
                     let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
                     let payload_len = checked_payload_len(resp_bytes.len())?;
@@ -1189,14 +1200,34 @@ impl RequestHandler for NodeRequestHandler {
                         hmc_locks_all.push((tag.clone(), entry.clone()));
                     }
                 }
-                for (tag, entry) in hmc_locks_all {
+                // # Architectural Invariant: Spec 03, Deterministic Digest Pull-Sync
+                //
+                // HMC follow-up locks carry no own `deletable_at`; their TTL is
+                // strictly inherited from the known voucher genesis root
+                // (Rule 10). The old `now_ms + 1 year` fallback was
+                // wall-clock dependent and broke digest convergence across
+                // nodes. Digests MUST be time-independent: inherit
+                // deterministically, skip orphans with unknown root.
+                let hmc_root_map: std::collections::HashMap<&str, u64> = {
+                    let mut m = std::collections::HashMap::new();
+                    for (_, e) in &hmc_locks_all {
+                        if let Some(v) = e.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                            m.entry(e.layer2_voucher_id.as_str()).or_insert(v);
+                        }
+                    }
+                    m
+                };
+                for (tag, entry) in &hmc_locks_all {
                     let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
                     if !locks.iter().any(|l| l.parent_lock == parent_bytes) {
                         let valid_until_ms = entry
                             .deletable_at
                             .as_deref()
                             .and_then(|s| s.parse::<u64>().ok())
-                            .unwrap_or_else(|| now_ms + 365 * 24 * 3600 * 1000);
+                            .or_else(|| hmc_root_map.get(entry.layer2_voucher_id.as_str()).copied());
+                        let Some(valid_until_ms) = valid_until_ms else {
+                            continue;
+                        };
                         locks.push(humoco_sim_core::types::LockRecord::new(
                             parent_bytes,
                             entry.sender_ephemeral_pub,

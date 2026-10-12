@@ -2,13 +2,68 @@ use serde::{Deserialize, Serialize};
 use humoco_sim_core::types::LockRecord;
 
 /// Signed attestation from a consensus or ingress node.
+///
+/// # Architectural Invariant: Pillar 3 — Cryptographic Identity Trumps Network Topology
+///
+/// The permanent signer identity is the full 32-byte Ed25519 `NodePubKey`
+/// (`node_pubkey`, hex). The legacy 16-bit `node_id` prefix (first two bytes)
+/// stays only for backward compatibility and MUST NEVER be used for key
+/// resolution — its 16-bit space collides across nodes and previously allowed
+/// `u16_to_vk` overwrite attacks. Verifiers resolve strictly via `node_pubkey`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttestationDto {
     pub lock_id: String,
     pub parent_lock: String,
     pub node_id: u16,
+    /// Full 32-byte Ed25519 NodePubKey of the signer (hex). Empty for legacy payloads.
+    #[serde(default)]
+    pub node_pubkey: String,
     pub timestamp: u64,
     pub signature: String,
+}
+
+impl AttestationDto {
+    /// Decodes the full 32-byte signer NodePubKey, if present and well-formed.
+    pub fn node_pubkey_bytes(&self) -> Option<[u8; 32]> {
+        if self.node_pubkey.is_empty() {
+            return None;
+        }
+        let raw = hex::decode(&self.node_pubkey).ok()?;
+        if raw.len() != 32 {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&raw);
+        Some(out)
+    }
+
+    /// Wire-tolerant deserialization: accepts both the current 6-field format
+    /// (with `node_pubkey`) and the legacy 5-field format (without it).
+    /// Legacy payloads upgrade to `node_pubkey == ""` and verify via the
+    /// 16-bit fallback path.
+    pub fn from_wire_bytes(bytes: &[u8]) -> Option<Self> {
+        if let Ok(att) = bincode::deserialize::<Self>(bytes) {
+            return Some(att);
+        }
+        #[derive(serde::Deserialize)]
+        struct LegacyAttestation {
+            lock_id: String,
+            parent_lock: String,
+            node_id: u16,
+            timestamp: u64,
+            signature: String,
+        }
+        bincode::deserialize::<LegacyAttestation>(bytes)
+            .ok()
+            .map(|l| Self {
+                lock_id: l.lock_id,
+                parent_lock: l.parent_lock,
+                node_id: l.node_id,
+                node_pubkey: String::new(),
+                timestamp: l.timestamp,
+                signature: l.signature,
+            })
+    }
 }
 
 /// Assembled quorum certificate with partial signatures from shard nodes.

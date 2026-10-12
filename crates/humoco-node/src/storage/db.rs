@@ -456,7 +456,125 @@ impl RedbStorage {
         Ok(())
     }
 
-    /// Retrieves an HMC lock entry by lookup_tag.
+    /// Atomically applies one mixed flush batch (locks + HMC + evidence + quota + bans)
+    /// in a single ACID write transaction (Spec 12/14 Dual-Tier Ordnung, Phase 7).
+    ///
+    /// Serialization is performed by the caller before opening the transaction; this
+    /// method only executes the ordered table inserts and commits once, guaranteeing
+    /// strict commit order per batch. Prune markers are applied in the same transaction
+    /// after all inserts so a batch never resurrects pruned state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_flush_batch_atomic(
+        &self,
+        locks: &[(&LockRecord, u64, &[u8])],
+        hmc: &[(&str, &crate::api::hmc::L2LockEntry, &[u8], u64)],
+        evidences: &[([u8; 32], Vec<u8>)],
+        quotas: &[([u8; 32], u64)],
+        bans: &[([u8; 32], u64)],
+        prune_now_secs: &[u64],
+    ) -> Result<(), StorageError> {
+        if locks.is_empty()
+            && hmc.is_empty()
+            && evidences.is_empty()
+            && quotas.is_empty()
+            && bans.is_empty()
+            && prune_now_secs.is_empty()
+        {
+            return Ok(());
+        }
+        let write_txn = self.db.begin_write()?;
+        {
+            if !locks.is_empty() {
+                let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
+                let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
+                for (lock, root_valid_until, bytes) in locks {
+                    let bucket_sec = root_valid_until.saturating_add(30_000) / 1_000;
+                    table_locks.insert(&lock.parent_lock, *bytes)?;
+                    table_ttl.insert(&(bucket_sec, &lock.parent_lock), ())?;
+                }
+            }
+            if !hmc.is_empty() {
+                let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
+                let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+                let mut table_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
+                for (tag, entry, bytes, valid_until_ms) in hmc {
+                    let bucket_sec = valid_until_ms.saturating_add(30_000) / 1_000;
+                    table_hmc.insert(*tag, *bytes)?;
+                    table_vidx.insert((entry.layer2_voucher_id.as_str(), *tag), ())?;
+                    table_ttl.insert(&(bucket_sec, *tag), ())?;
+                }
+            }
+            if !evidences.is_empty() {
+                let mut table_evidence = write_txn.open_table(TABLE_SLASHING_EVIDENCE)?;
+                for (hash, raw) in evidences {
+                    table_evidence.insert(hash, raw.as_slice())?;
+                }
+            }
+            if !quotas.is_empty() {
+                let mut table_quota = write_txn.open_table(TABLE_QUOTA_ACCOUNTS)?;
+                for (account_tag, byte_years) in quotas {
+                    table_quota.insert(account_tag, *byte_years)?;
+                }
+            }
+            if !bans.is_empty() {
+                let mut table_banned = write_txn.open_table(TABLE_BANNED_NODES)?;
+                for (node_key, timestamp_ms) in bans {
+                    table_banned.insert(node_key, *timestamp_ms)?;
+                }
+            }
+            for now_sec in prune_now_secs {
+                Self::prune_expired_in_txn(&write_txn, *now_sec)?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Prunes expired buckets inside an already-open write transaction.
+    fn prune_expired_in_txn(
+        write_txn: &redb::WriteTransaction,
+        now_sec: u64,
+    ) -> Result<(), StorageError> {
+        let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
+        let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
+        let expired_entries: Vec<(u64, [u8; 32])> = table_ttl
+            .range(..(now_sec.saturating_add(1), &[0x00u8; 32]))?
+            .map(|item| {
+                let (k_guard, _) = item?;
+                let (sec, parent) = k_guard.value();
+                let mut p = [0u8; 32];
+                p.copy_from_slice(parent);
+                Ok::<_, StorageError>((sec, p))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for (sec, parent) in expired_entries {
+            if sec <= now_sec {
+                table_ttl.remove(&(sec, &parent))?;
+                table_locks.remove(&parent)?;
+            }
+        }
+        drop(table_ttl);
+        drop(table_locks);
+
+        let mut table_hmc_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
+        let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
+        let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+        let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
+            .iter()?
+            .filter_map(|res| res.ok().map(|(k, _)| (k.value().0, k.value().1.to_string())))
+            .filter(|(sec, _)| *sec <= now_sec)
+            .collect();
+        for (sec, tag) in expired_hmc_entries {
+            table_hmc_ttl.remove(&(sec, tag.as_str()))?;
+            if let Some(guard) = table_hmc.get(tag.as_str())? {
+                if let Ok(entry) = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value()) {
+                    table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
+                }
+            }
+            table_hmc.remove(tag.as_str())?;
+        }
+        Ok(())
+    }
     pub fn get_hmc_lock(&self, lookup_tag: &str) -> Result<Option<crate::api::hmc::L2LockEntry>, StorageError> {
         let read_txn = self.db.begin_read()?;
         let table_hmc = read_txn.open_table(TABLE_HMC_LOCKS)?;

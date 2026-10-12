@@ -4,7 +4,7 @@ use humoco_sim_core::quota::ByteYears;
 use humoco_sim_core::storage::{ingress_time_window_valid, should_prune, IngressVerdictLow, RamIndex};
 use humoco_sim_core::types::{LockRecord, SimTime};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use super::db::{RedbStorage, StorageError};
 use crate::api::hmc::{L2LockEntry, L2Verdict};
@@ -325,6 +325,30 @@ pub enum FlushOp {
     },
 }
 
+/// Hardened flush-worker tuning (Spec 12/14, Phase 7 P1):
+/// - `FLUSH_BATCH_SIZE`: max ops per atomic redb commit (bounded RAM + bounded txn).
+/// - `FLUSH_INTERVAL_MS`: max batching latency before a partial batch commits.
+/// - `MAX_FLUSH_RETRIES` / `RETRY_BACKOFF_MS`: structured retry on transient
+///   storage errors instead of silent log-and-drop losses.
+/// - In-flight batches are strictly bounded to 1: the worker awaits every
+///   `spawn_blocking` commit inline, guaranteeing strict commit order and making
+///   graceful-shutdown drain deterministic (no untracked `tokio::spawn` jobs).
+pub const FLUSH_BATCH_SIZE: usize = 100;
+pub const FLUSH_INTERVAL_MS: u64 = 50;
+pub const MAX_FLUSH_RETRIES: u32 = 3;
+pub const RETRY_BACKOFF_MS: u64 = 10;
+/// Upper bound for shutdown-drain batches (channel capacity / batch size + slack),
+/// preventing an infinite drain loop if producers keep sending after cancellation.
+pub const MAX_SHUTDOWN_DRAIN_BATCHES: usize = 120;
+
+/// Structured outcome of one atomic flush commit (INV-1701 telemetry, never silent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlushOutcome {
+    pub ops_committed: usize,
+    pub attempts: u32,
+    pub failed: bool,
+}
+
 /// Diagnostic persistence & flush telemetry statistics (INV-1701).
 #[derive(Debug, Default)]
 pub struct PersistenceStats {
@@ -431,6 +455,11 @@ impl DualTierEngine {
     }
 
     /// Bans a node in memory, disconnects it across active peers, and queues persistence to redb.
+    ///
+    /// Hot-path safe (Rule 1): never blocks on I/O and never spawns untracked
+    /// background jobs. RAM is authoritative immediately; if the bounded flush
+    /// queue is full the disk write is counted as a telemetry error (never silent)
+    /// and reconciled via the next ban refresh or digest-pull sync.
     pub async fn ban_node(&self, node_key: [u8; 32], timestamp_ms: u64) {
         self.banned_nodes.write().await.insert(node_key);
         if let Some(pm) = self.peer_manager.read().await.as_ref() {
@@ -438,28 +467,23 @@ impl DualTierEngine {
         }
         match self.tx.try_send(FlushOp::BanNode { node_key, timestamp_ms }) {
             Ok(_) => {},
-            Err(tokio::sync::mpsc::error::TrySendError::Full(op)) => {
-                warn!("Persistence queue full: BanNode persisted to RAM immediately, queuing disk flush in background");
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    match tokio::time::timeout(std::time::Duration::from_secs(1), tx.send(op)).await {
-                        Ok(Ok(_)) => {},
-                        Ok(Err(e)) => {
-                            warn!("Async background flush for BanNode failed: {}", e);
-                        }
-                        Err(_) => {
-                            warn!("Async background flush for BanNode timed out after 1s (queue congested)");
-                        }
-                    }
-                });
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                warn!("Persistence queue full: BanNode kept authoritative in RAM, disk flush dropped (counted in flush_errors_total)");
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                self.stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 warn!("Persistence worker closed: BanNode active in RAM only");
             }
         }
     }
 
-    /// Processes an incoming EquivocationProof: verifies proof, commits raw evidence to redb, and bans the offender.
+    /// Processes an incoming EquivocationProof: verifies proof, queues raw evidence for
+    /// the async flush worker, and bans the offender.
+    ///
+    /// Hot-path safe (Rule 1): performs zero synchronous disk I/O. Evidence is
+    /// enqueued via `try_send` and committed atomically by the flush worker; a full
+    /// queue is counted in telemetry instead of blocking the caller.
     pub async fn process_equivocation_proof(
         &self,
         proof: &humoco_sim_core::fraud::FraudProofPayload,
@@ -474,7 +498,16 @@ impl DualTierEngine {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let _ = self.db.put_evidence(&evidence_hash, raw_payload);
+        match self.tx.try_send(FlushOp::PutEvidence {
+            hash: evidence_hash,
+            raw: raw_payload.to_vec(),
+        }) {
+            Ok(_) => {},
+            Err(_) => {
+                self.stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                warn!("Persistence queue full: equivocation evidence kept in RAM ban only (counted in flush_errors_total)");
+            }
+        }
         self.ban_node(offender, now_ms).await;
         true
     }
@@ -714,7 +747,14 @@ impl DualTierEngine {
                     .unwrap_or(0);
                 let raw_evidence = serde_json::to_vec(&(&existing, &entry_new)).unwrap_or_default();
                 let evidence_hash = *blake3::hash(&raw_evidence).as_bytes();
-                let _ = self.db.put_evidence(&evidence_hash, &raw_evidence);
+                // Async persistence only (Rule 1): never touch redb synchronously on the hot path.
+                if self.tx.try_send(FlushOp::PutEvidence {
+                    hash: evidence_hash,
+                    raw: raw_evidence,
+                }).is_err() {
+                    self.stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    warn!("Persistence queue full: equivocation evidence deferred (counted in flush_errors_total)");
+                }
                 self.ban_node(entry_new.sender_ephemeral_pub, now_ms).await;
             } else {
                 tracing::warn!("Equivocation discarded: one or both signatures failed first-party cryptographic verification");
@@ -1515,8 +1555,16 @@ impl DualTierEngine {
         None
     }
 
-    /// Flush worker loop: Batches incoming flush operations with 50ms timeout or batch size of 100.
-    /// On cancellation signal (cancel_token), the queue is fully drained and committed atomically.
+    /// Flush worker loop: batches incoming ops (`FLUSH_BATCH_SIZE` / `FLUSH_INTERVAL_MS`)
+    /// and commits each batch atomically in strict FIFO order (Spec 12/14, Phase 7 P1).
+    ///
+    /// Hardening invariants:
+    /// - No untracked `tokio::spawn` jobs: every `spawn_blocking` commit is awaited
+    ///   inline, so at most one batch is in flight (bounded) and commit order is strict.
+    /// - Graceful-shutdown drain: on `cancel_token` the worker keeps draining `rx`
+    ///   (including ops arriving during the drain) and awaits every commit before
+    ///   returning, so `daemon.rs` (`flush_handle.await`) closes redb only after the
+    ///   queue is empty. Never holds `RamIndex` locks across I/O (Rule 1).
     pub fn spawn_flush_worker(
         mut rx: mpsc::Receiver<FlushOp>,
         db: Arc<RedbStorage>,
@@ -1524,92 +1572,33 @@ impl DualTierEngine {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(100);
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(50));
+            let mut batch: Vec<FlushOp> = Vec::with_capacity(FLUSH_BATCH_SIZE);
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(FLUSH_INTERVAL_MS));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
-                        // Node is shutting down: drain any pending ops from rx and flush!
-                        while let Ok(op) = rx.try_recv() {
-                            batch.push(op);
-                            if batch.len() >= 100 {
-                                let op_count = batch.len();
-                                let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
-                                let db_clone = Arc::clone(&db);
-                                let stats_clone = Arc::clone(&stats);
-                                if let Ok(errs) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                    if errs > 0 {
-                                        stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
-                                }
-                            }
-                        }
-                        if !batch.is_empty() {
-                            let op_count = batch.len();
-                            let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
-                            let db_clone = Arc::clone(&db);
-                            let stats_clone = Arc::clone(&stats);
-                            if let Ok(errs) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                if errs > 0 {
-                                    stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
-                                }
-                                stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                        tracing::info!("Flush worker cleanly drained and terminated on cancellation");
+                        Self::drain_on_shutdown(&mut rx, &mut batch, &db, &stats).await;
+                        info!("Flush worker cleanly drained and terminated on cancellation");
                         break;
                     }
                     op = rx.recv() => {
                         match op {
                             Some(op) => {
                                 batch.push(op);
-                                if batch.len() >= 100 {
-                                    let op_count = batch.len();
-                                    let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
-                                    let db_clone = Arc::clone(&db);
-                                    let stats_clone = Arc::clone(&stats);
-                                    tokio::spawn(async move {
-                                        match tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                            Ok(errs) => {
-                                                let now_ms = std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .map(|d| d.as_millis() as u64)
-                                                    .unwrap_or(0);
-                                                if errs == 0 {
-                                                    stats_clone.last_successful_flush_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                                                } else {
-                                                    stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
-                                                }
-                                                stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                                stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
-                                            }
-                                            Err(e) => {
-                                                error!("flush_batch panicked: {:?}", e);
-                                                stats_clone.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            }
-                                        }
-                                    });
+                                if batch.len() >= FLUSH_BATCH_SIZE {
+                                    let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
+                                    Self::commit_batch(to_flush, &db, &stats).await;
                                 }
                             }
                             None => {
+                                // All senders dropped: flush remainder synchronously, then exit.
                                 if !batch.is_empty() {
-                                    let op_count = batch.len();
-                                    let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
-                                    let db_clone = Arc::clone(&db);
-                                    let stats_clone = Arc::clone(&stats);
-                                    if let Ok(errs) = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                        if errs > 0 {
-                                            stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
-                                        }
-                                        stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
-                                    }
+                                    let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
+                                    Self::commit_batch(to_flush, &db, &stats).await;
                                 }
                                 break;
                             }
@@ -1617,31 +1606,8 @@ impl DualTierEngine {
                     }
                     _ = interval.tick() => {
                         if !batch.is_empty() {
-                            let op_count = batch.len();
-                            let mut to_flush = std::mem::replace(&mut batch, Vec::with_capacity(100));
-                            let db_clone = Arc::clone(&db);
-                            let stats_clone = Arc::clone(&stats);
-                            tokio::spawn(async move {
-                                match tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await {
-                                    Ok(errs) => {
-                                        let now_ms = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_millis() as u64)
-                                            .unwrap_or(0);
-                                        if errs == 0 {
-                                            stats_clone.last_successful_flush_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                                        } else {
-                                            stats_clone.flush_errors_total.fetch_add(errs as u64, std::sync::atomic::Ordering::Relaxed);
-                                        }
-                                        stats_clone.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        stats_clone.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    Err(e) => {
-                                        error!("flush_batch panicked on interval flush: {:?}", e);
-                                        stats_clone.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                }
-                            });
+                            let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
+                            Self::commit_batch(to_flush, &db, &stats).await;
                         }
                     }
                 }
@@ -1649,61 +1615,233 @@ impl DualTierEngine {
         })
     }
 
-    /// Executes a batch of flush operations on the database.
-    /// Returns the number of encountered storage errors.
-    pub fn flush_batch(batch: &mut Vec<FlushOp>, db: &RedbStorage) -> usize {
-        if batch.is_empty() {
-            return 0;
+    /// Commits one batch inline (awaited): exactly one in-flight batch, strict order.
+    /// Updates INV-1701 telemetry; failures are counted, never silent.
+    async fn commit_batch(
+        mut to_flush: Vec<FlushOp>,
+        db: &Arc<RedbStorage>,
+        stats: &Arc<PersistenceStats>,
+    ) {
+        if to_flush.is_empty() {
+            return;
         }
+        let op_count = to_flush.len();
+        let db_clone = Arc::clone(db);
+        let outcome = tokio::task::spawn_blocking(move || Self::flush_batch(&mut to_flush, &db_clone)).await;
+        match outcome {
+            Ok(o) => {
+                stats.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                stats.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
+                if o.failed {
+                    stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    error!(
+                        ops = op_count,
+                        attempts = o.attempts,
+                        "Flush batch failed after structured retries (errors counted, RAM remains authoritative)"
+                    );
+                } else {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    stats.last_successful_flush_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Err(e) => {
+                stats.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!("flush_batch blocking task panicked/cancelled: {:?} ({} ops uncommitted, RAM authoritative)", e, op_count);
+            }
+        }
+    }
 
-        let mut errors = 0;
-        let mut locks_to_put = Vec::new();
+    /// Graceful-shutdown drain: commits the pending batch plus everything still
+    /// arriving on `rx` (bounded by `MAX_SHUTDOWN_DRAIN_BATCHES`), awaiting each
+    /// commit inline so no in-flight batch is lost before redb is closed.
+    async fn drain_on_shutdown(
+        rx: &mut mpsc::Receiver<FlushOp>,
+        batch: &mut Vec<FlushOp>,
+        db: &Arc<RedbStorage>,
+        stats: &Arc<PersistenceStats>,
+    ) {
+        let mut drained_batches = 0usize;
+        // First: everything already queued.
+        while let Ok(op) = rx.try_recv() {
+            batch.push(op);
+            if batch.len() >= FLUSH_BATCH_SIZE {
+                let to_flush = std::mem::replace(batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
+                Self::commit_batch(to_flush, db, stats).await;
+                drained_batches += 1;
+                if drained_batches >= MAX_SHUTDOWN_DRAIN_BATCHES {
+                    break;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            let to_flush = std::mem::replace(batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
+            Self::commit_batch(to_flush, db, stats).await;
+            drained_batches += 1;
+        }
+        // Second: ops that arrived while the drain commits were running.
+        while drained_batches < MAX_SHUTDOWN_DRAIN_BATCHES {
+            let mut newly_arrived = false;
+            while let Ok(op) = rx.try_recv() {
+                batch.push(op);
+                newly_arrived = true;
+                if batch.len() >= FLUSH_BATCH_SIZE {
+                    break;
+                }
+            }
+            if !newly_arrived && batch.is_empty() {
+                break;
+            }
+            if !batch.is_empty() {
+                let to_flush = std::mem::replace(batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
+                Self::commit_batch(to_flush, db, stats).await;
+                drained_batches += 1;
+            } else {
+                break;
+            }
+        }
+        if drained_batches >= MAX_SHUTDOWN_DRAIN_BATCHES {
+            warn!("Shutdown drain hit batch cap; remainder stays RAM-authoritative and counted via flush_errors_total");
+            stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Executes one batch of flush operations as a single atomic redb commit with
+    /// structured retry (Spec 12/14 Dual-Tier Ordnung, Phase 7 P1).
+    ///
+    /// Runs on a `spawn_blocking` thread: pre-serializes all payloads before opening
+    /// the write transaction, resolves HMC voucher roots (batch-local first, then a
+    /// bounded disk lookup), and commits locks + HMC + evidence + quota + bans via
+    /// one `apply_flush_batch_atomic` call. Transient commit failures are retried up
+    /// to `MAX_FLUSH_RETRIES` with linear backoff; serialization defects are permanent
+    /// and counted without retry. Never touches `RamIndex` (Rule 1: no hot-path I/O).
+    pub fn flush_batch(batch: &mut Vec<FlushOp>, db: &RedbStorage) -> FlushOutcome {
+        if batch.is_empty() {
+            return FlushOutcome { ops_committed: 0, attempts: 0, failed: false };
+        }
+        let ops_committed = batch.len();
+
+        // Categorize (drains the input vector exactly once, preserving FIFO within type).
+        let mut locks: Vec<(LockRecord, u64)> = Vec::new();
+        let mut hmc: Vec<(String, Box<L2LockEntry>)> = Vec::new();
+        let mut evidences: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+        let mut quotas: Vec<([u8; 32], u64)> = Vec::new();
+        let mut bans: Vec<([u8; 32], u64)> = Vec::new();
+        let mut prunes: Vec<u64> = Vec::new();
         for op in batch.drain(..) {
             match op {
-                FlushOp::PutLock { lock, root_valid_until } => {
-                    locks_to_put.push((lock, root_valid_until));
-                }
-                FlushOp::PutHmcLock { lookup_tag, entry } => {
-                    if let Err(e) = db.put_hmc_lock(&lookup_tag, &entry) {
-                        error!("Failed to put HMC lock to redb: {}", e);
-                        errors += 1;
-                    }
-                }
-                FlushOp::Prune { now_sec } => {
-                    if let Err(e) = db.prune_expired_buckets(now_sec) {
-                        error!("Failed to prune expired buckets in flush worker: {}", e);
-                        errors += 1;
-                    }
-                }
-                FlushOp::PutEvidence { hash, raw } => {
-                    if let Err(e) = db.put_evidence(&hash, &raw) {
-                        error!("Failed to put evidence in flush worker: {}", e);
-                        errors += 1;
-                    }
-                }
-                FlushOp::SetQuota { account_tag, byte_years } => {
-                    if let Err(e) = db.set_quota(&account_tag, byte_years) {
-                        error!("Failed to set quota in flush worker: {}", e);
-                        errors += 1;
-                    }
-                }
-                FlushOp::BanNode { node_key, timestamp_ms } => {
-                    if let Err(e) = db.ban_node(&node_key, timestamp_ms) {
-                        error!("Failed to persist banned node to redb: {}", e);
-                        errors += 1;
-                    }
+                FlushOp::PutLock { lock, root_valid_until } => locks.push((lock, root_valid_until)),
+                FlushOp::PutHmcLock { lookup_tag, entry } => hmc.push((lookup_tag, entry)),
+                FlushOp::PutEvidence { hash, raw } => evidences.push((hash, raw)),
+                FlushOp::SetQuota { account_tag, byte_years } => quotas.push((account_tag, byte_years)),
+                FlushOp::BanNode { node_key, timestamp_ms } => bans.push((node_key, timestamp_ms)),
+                FlushOp::Prune { now_sec } => prunes.push(now_sec),
+            }
+        }
+
+        // Pre-serialize locks (permanent per-op errors counted, never retried as a batch).
+        let mut lock_rows: Vec<(LockRecord, u64, Vec<u8>)> = Vec::with_capacity(locks.len());
+        let mut permanent_errors = 0u32;
+        for (lock, root) in &locks {
+            match bincode::serialize(&(lock, root)) {
+                Ok(bytes) => lock_rows.push((lock.clone(), *root, bytes)),
+                Err(e) => {
+                    permanent_errors += 1;
+                    error!("Dropping unserializable LockRecord (permanent): {}", e);
                 }
             }
         }
 
-        if !locks_to_put.is_empty() {
-            let items: Vec<(&LockRecord, u64)> = locks_to_put.iter().map(|(l, r)| (l, *r)).collect();
-            if let Err(e) = db.put_locks_batch(items) {
-                error!("Failed to batch put locks to redb: {}", e);
-                errors += 1;
+        // Pre-serialize HMC entries + resolve voucher roots.
+        let mut batch_roots: HashMap<String, u64> = HashMap::new();
+        for (_, entry) in &hmc {
+            if let Some(v) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                batch_roots.entry(entry.layer2_voucher_id.clone()).or_insert(v);
             }
         }
-        errors
+        // Keep owned HMC payloads alive across the retry loop.
+        let mut hmc_owned: Vec<(String, Box<L2LockEntry>, Vec<u8>, u64)> = Vec::with_capacity(hmc.len());
+        for (tag, entry) in &hmc {
+            let bytes = match serde_json::to_vec(entry.as_ref()) {
+                Ok(b) => b,
+                Err(e) => {
+                    permanent_errors += 1;
+                    error!("Dropping unserializable HMC lock {} (permanent): {}", tag, e);
+                    continue;
+                }
+            };
+            let valid_until_ms = match entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                Some(v) => v,
+                None => {
+                    if let Some(v) = batch_roots.get(&entry.layer2_voucher_id) {
+                        *v
+                    } else if let Some(root) = Self::lookup_voucher_root(db, &entry.layer2_voucher_id) {
+                        batch_roots.insert(entry.layer2_voucher_id.clone(), root);
+                        root
+                    } else {
+                        0
+                    }
+                }
+            };
+            hmc_owned.push((tag.clone(), entry.clone(), bytes, valid_until_ms));
+        }
+
+        // Borrowed views into the owned rows (built once, reused across retries).
+        let lock_view: Vec<(&LockRecord, u64, &[u8])> = lock_rows
+            .iter()
+            .map(|(l, r, b)| (l, *r, b.as_slice()))
+            .collect();
+        let hmc_view: Vec<(&str, &L2LockEntry, &[u8], u64)> = hmc_owned
+            .iter()
+            .map(|(t, e, b, v)| (t.as_str(), e.as_ref(), b.as_slice(), *v))
+            .collect();
+
+        // Structured retry on the single atomic commit (transient redb errors only).
+        let mut attempts: u32 = 0;
+        loop {
+            attempts += 1;
+            let res = db.apply_flush_batch_atomic(
+                &lock_view,
+                &hmc_view,
+                &evidences,
+                &quotas,
+                &bans,
+                &prunes,
+            );
+            match res {
+                Ok(()) => {
+                    if permanent_errors > 0 {
+                        error!("Flush batch committed with {} permanent serialization drops (counted)", permanent_errors);
+                    }
+                    return FlushOutcome { ops_committed, attempts, failed: permanent_errors > 0 };
+                }
+                Err(e) => {
+                    if attempts >= MAX_FLUSH_RETRIES {
+                        error!("Flush batch commit failed after {} attempts: {} ({} ops uncommitted)", attempts, e, ops_committed);
+                        return FlushOutcome { ops_committed, attempts, failed: true };
+                    }
+                    warn!("Flush batch commit attempt {}/{} failed: {} — retrying", attempts, MAX_FLUSH_RETRIES, e);
+                    std::thread::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS * attempts as u64));
+                }
+            }
+        }
+    }
+
+    /// Bounded disk lookup for an HMC voucher root (blocking worker thread only,
+    /// never on the hot path). Returns `None` when the voucher is unknown.
+    fn lookup_voucher_root(db: &RedbStorage, voucher_id: &str) -> Option<u64> {
+        match db.get_hmc_locks_for_voucher(voucher_id) {
+            Ok(locks) => locks.iter().find_map(|(_, entry)| {
+                entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok())
+            }),
+            Err(e) => {
+                warn!("Voucher root lookup failed for {}: {}", voucher_id, e);
+                None
+            }
+        }
     }
 
     /// Cold-start recovery: Scans unexpired locks from disk and re-populates both RAM indices.

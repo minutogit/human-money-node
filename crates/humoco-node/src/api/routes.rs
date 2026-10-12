@@ -588,6 +588,44 @@ async fn compute_signer_bitmap(
     bitmap
 }
 
+/// Verifies that a computed signer bitmap is consistent with the collected
+/// signatures (Phase 8, Spec 03/18: 4-byte piggyback `signers_bitmask`).
+/// The bitmap ranks the Top-32 HRW positions, while up to 40 candidates may
+/// contribute — signers ranked beyond 32 legitimately set no bit. Consistency
+/// therefore means: `bitmap != 0` when signatures are non-empty and
+/// `count_ones <= signatures.len()`. Advisory only (warns on mismatch) and
+/// never rejects a quorum on the PoS hot path.
+fn verify_signer_bitmap_consistency(signatures: &[AttestationDto], bitmap: u32) -> bool {
+    if signatures.is_empty() {
+        return bitmap == 0;
+    }
+    if bitmap == 0 {
+        tracing::warn!(
+            signers = signatures.len(),
+            "Signer bitmap is empty despite collected signatures"
+        );
+        return false;
+    }
+    let ones = bitmap.count_ones() as usize;
+    if ones > signatures.len() {
+        tracing::warn!(
+            ones,
+            signers = signatures.len(),
+            bitmap,
+            "Signer bitmap sets more bits than collected signatures"
+        );
+        return false;
+    }
+    if ones < signatures.len() {
+        tracing::debug!(
+            ones,
+            signers = signatures.len(),
+            "Signer bitmap orphans (signers ranked beyond Top-32 window set no bit)"
+        );
+    }
+    true
+}
+
 /// Verifies a peer attestation's cryptographic fields and HRW binding.
 /// Checks verifying-key existence, signature/lock_id hex decoding, lock_id
 /// equality, and Ed25519 `verify_strict` against the canonical sig digest.
@@ -722,7 +760,7 @@ async fn collect_peer_attestations(
     let mut total_queried = 0;
     let mut in_flight = std::collections::HashMap::new();
 
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(1000), async {
+    let _ = tokio::time::timeout(crate::network::manager::QUORUM_GLOBAL_TIMEOUT, async {
         let mut join_set = tokio::task::JoinSet::new();
 
         let spawn_next = |join_set: &mut tokio::task::JoinSet<_>, idx: &mut usize, t_queried: &mut usize, in_flight: &mut std::collections::HashMap<usize, (std::net::SocketAddr, usize)>| {
@@ -745,7 +783,13 @@ async fn collect_peer_attestations(
                         if (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0 {
                             return Err(PeerQueryError::QuotaExceeded);
                         }
-                        if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_IN_SHARD) != 0 {
+                        // Phase 8 (Spec 15/19 Tit-for-Tat): a locally suspended
+                        // or banned peer answers with FLAG_PEER_SUSPENDED.
+                        // Skip it via rank-21 replacement WITHOUT any further
+                        // malus — same as NOT_IN_SHARD, never a failure.
+                        if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_IN_SHARD) != 0
+                            || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED) != 0
+                        {
                             return Err(PeerQueryError::NotInShard);
                         }
                         if resp_header.msg_type == exp_resp && !resp_payload.is_empty() {
@@ -766,13 +810,51 @@ async fn collect_peer_attestations(
         };
 
         let needed = query.required_q.saturating_sub(collected_signatures.len());
-        let initial_spawns = (needed + query.shard_query_depth).min(query.candidate_nodes.len());
+        // Phase 8 (Spec 03/15): staged fanout — query the Top-20 first; the
+        // 300ms straggler partial timeout below fans in replacement ranks
+        // 21-40 only if the quorum is still short.
+        let initial_spawns = (needed + query.shard_query_depth)
+            .min(query.candidate_nodes.len())
+            .min(20);
         for _ in 0..initial_spawns {
             spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
         }
 
-        while let Some(res) = join_set.join_next().await {
-            match res {
+        // Staged partial timeout loop (Phase 8): `join_next()` alone would
+        // block indefinitely on all-straggler batches, so poll with a short
+        // timeout to re-check the 300ms straggler deadline even with zero
+        // completions. Aborted stragglers and Tier-2 15s idle closes are NEVER
+        // counted as peer failures (AGENTS.md / INV-1501, TODO-ARCH-02).
+        let fan_start = tokio::time::Instant::now();
+        let mut straggler_boost_done = query.candidate_nodes.len() <= 20;
+        loop {
+            if !straggler_boost_done
+                && fan_start.elapsed() >= crate::network::manager::QUORUM_STRAGGLER_TIMEOUT
+            {
+                straggler_boost_done = true;
+                if collected_signatures.len() < query.required_q {
+                    tracing::debug!(
+                        collected = collected_signatures.len(),
+                        required = query.required_q,
+                        "Straggler partial timeout (300ms): fanning in replacement ranks 21-40"
+                    );
+                    while candidate_idx < query.candidate_nodes.len() {
+                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+                    }
+                }
+            }
+            if collected_signatures.len() >= query.required_q {
+                break;
+            }
+            if join_set.is_empty() {
+                if candidate_idx >= query.candidate_nodes.len() {
+                    break;
+                }
+                spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+                continue;
+            }
+            match tokio::time::timeout(std::time::Duration::from_millis(50), join_set.join_next()).await {
+                Ok(Some(res)) => match res {
                 Ok((_nid, addr, rank_idx, PeerQueryResult::Success(att))) => {
                     in_flight.remove(&rank_idx);
 
@@ -789,7 +871,10 @@ async fn collect_peer_attestations(
                         continue;
                     }
 
-                    query.peer_mgr.record_success(addr, None, None).await;
+                    // Phase 8 (Spec 15/19): only genuinely performed shard
+                    // work (verified attestation) decays the Tit-for-Tat
+                    // malus — a pure handshake never does.
+                    query.peer_mgr.record_shard_work(addr).await;
                     collected_signatures.push(att);
 
                     // Early return as soon as required quorum is reached
@@ -840,6 +925,9 @@ async fn collect_peer_attestations(
                 Err(_) => {
                     // Task cancelled/panicked
                 }
+                },
+                Ok(None) => break,
+                Err(_) => continue,
             }
         }
     }).await;
@@ -955,6 +1043,7 @@ async fn assemble_quorum_certificate(
 
             let self_pubkey = *state.identity.node_pubkey();
             let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
+            verify_signer_bitmap_consistency(&collected_signatures, signer_bitmap);
 
             QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),
@@ -1105,6 +1194,7 @@ async fn assemble_status_quorum_certificate(
 
             let self_pubkey = *state.identity.node_pubkey();
             let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
+            verify_signer_bitmap_consistency(&collected_signatures, signer_bitmap);
 
             QuorumCertificateDto {
                 lock_id: hex::encode(lock_id),

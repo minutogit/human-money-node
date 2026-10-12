@@ -7,6 +7,13 @@ use crate::identity::NodeIdentity;
 
 pub const ALPN_HUMOCO_L2: &[u8] = b"humoco-l2-mainnet";
 
+/// Tier-2 (Shard-Direct) QUIC idle timeout (Phase 8 / TODO-ARCH-02, Spec 15/19).
+/// The ephemeral Tier-2 LRU pool (128-256 sockets, no keep-alive) closes idle
+/// sessions after 15s. This is the NORMAL state and must NEVER be counted as
+/// a peer failure (`record_failure`). Only Tier-1 F2F edges hold persistent
+/// sessions via keep-alive.
+pub const TIER2_QUIC_IDLE_TIMEOUT_SECS: u64 = 15;
+
 /// Returns the ALPN protocol identifier for the given network.
 /// - Mainnet => `humoco-l2-mainnet`
 /// - Testnet => `humoco-l2-testnet`
@@ -247,7 +254,7 @@ pub fn build_quinn_server_config_with_network(
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(
-        std::time::Duration::from_secs(30)
+        std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
             .try_into()
             .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
     ));
@@ -291,7 +298,7 @@ pub fn build_quinn_client_config_with_identity_and_network(
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(
-        std::time::Duration::from_secs(30)
+        std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
             .try_into()
             .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
     ));
@@ -335,7 +342,7 @@ pub fn build_quinn_client_config_with_network(
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(
-        std::time::Duration::from_secs(30)
+        std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
             .try_into()
             .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
     ));

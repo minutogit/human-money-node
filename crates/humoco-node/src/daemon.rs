@@ -150,6 +150,21 @@ impl NodeDaemon {
             dns_peers,
         ));
 
+        // Phase 8 (Spec 10/19): load persisted permanent bans from redb
+        // directly into the PeerManager at boot so equivocation offenders stay
+        // banned across restarts (First-Party Evidence, no hearsay re-learning).
+        match storage.all_banned_nodes() {
+            Ok(banned) => {
+                if !banned.is_empty() {
+                    let added = peer_manager.import_persisted_bans(&banned).await;
+                    info!(persisted = banned.len(), imported = added, "Loaded persisted permanent bans into PeerManager");
+                }
+            }
+            Err(err) => {
+                warn!(error = %err, "Failed to load persisted bans from redb; starting with empty ban set");
+            }
+        }
+
         // Wire PeerManager to DualTierEngine and PowEngine for consensus time and ban propagation (Spec 07 / Phase 6)
         engine.set_peer_manager(peer_manager.clone()).await;
         pow_engine.set_clock(peer_manager.clock().clone());

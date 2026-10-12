@@ -257,17 +257,33 @@ async fn test_peer_lifecycle_and_suspension() {
     assert_eq!(peer.status, PeerStatus::Suspended);
     assert!(peer.is_suspended());
 
-    // Auto-recovery on success
+    // Phase 8 (Spec 15/19): a pure handshake must NOT reset the malus —
+    // only genuinely performed shard work decays it.
     let node_id = [42u8; 32];
     peer_manager
         .record_success(addr, Some(node_id), None)
         .await;
 
     let peer = peer_manager.get_peer(&addr).await.unwrap();
-    assert_eq!(peer.missing_count, 0);
-    assert_eq!(peer.status, PeerStatus::Connected);
+    assert_eq!(peer.missing_count, 3);
+    assert!(peer.is_suspended());
     assert_eq!(peer.node_id, Some(node_id));
+
+    // Tier-2 15s idle timeout is normal and never a failure (TODO-ARCH-02)
+    peer_manager.note_idle_close(&addr).await;
+    let peer = peer_manager.get_peer(&addr).await.unwrap();
+    assert_eq!(peer.missing_count, 3);
+
+    // Auto-recovery only via genuine shard work (decays step by step)
+    peer_manager.record_shard_work(addr).await;
+    let peer = peer_manager.get_peer(&addr).await.unwrap();
+    assert_eq!(peer.missing_count, 2);
     assert!(!peer.is_suspended());
+    peer_manager.record_shard_work(addr).await;
+    peer_manager.record_shard_work(addr).await;
+    let peer = peer_manager.get_peer(&addr).await.unwrap();
+    assert_eq!(peer.missing_count, 0);
+    assert_eq!(peer.node_id, Some(node_id));
 }
 
 #[tokio::test]

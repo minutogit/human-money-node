@@ -14,6 +14,18 @@ pub const DEFAULT_BASE_BACKOFF_MS: u64 = 500;
 pub const DEFAULT_MAX_BACKOFF_MS: u64 = 30_000;
 pub const MAX_GOSSIP_HOPS: u32 = 16;
 
+/// Tier-2 (Shard-Direct) ephemeral LRU pool idle timeout (TODO-ARCH-02, Spec 15/19).
+/// A 15s idle close is the NORMAL state of a Tier-2 connection (no keep-alive)
+/// and must NEVER be counted as a peer failure (`record_failure`).
+pub const TIER2_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Staged partial timeout for PoS quorum stragglers (Spec 03/15, Phase 8).
+/// After this delay without quorum, replacement ranks 21-40 are fanned in.
+pub const QUORUM_STRAGGLER_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Global PoS shard verification timeout (Spec 03/15).
+pub const QUORUM_GLOBAL_TIMEOUT: Duration = Duration::from_millis(1000);
+
 /// 24h Incubation period for re-mining / routing ticket updates and newcomers (Spec 07 & 11).
 pub const HRW_INCUBATION_SECS: u64 = 24 * 60 * 60;
 pub const HRW_INCUBATION_DURATION: Duration = Duration::from_secs(HRW_INCUBATION_SECS);
@@ -607,7 +619,13 @@ impl PeerManager {
         peers.values().cloned().collect()
     }
 
-    /// Records a successful interaction with a peer.
+    /// Records a successful QUIC/TLS handshake with a peer.
+    ///
+    /// Phase 8 (Spec 15/19): a pure handshake MUST NOT reset the Tit-for-Tat
+    /// error malus (`missing_count`). It only refreshes identity, connection
+    /// handle and last-seen timestamp. The malus decays exclusively via
+    /// genuinely performed shard work (`record_shard_work`) or the hourly
+    /// autonomous healing (`decay_all_peers`).
     pub async fn record_success(
         &self,
         addr: SocketAddr,
@@ -648,6 +666,78 @@ impl PeerManager {
         if !was_connected {
             self.notify_sync_trigger();
         }
+    }
+
+    /// Records genuinely performed shard work (valid attestation, sync payload,
+    /// verified lock) for a peer. This is the ONLY interaction path (besides
+    /// hourly `decay_all_peers`) that decays the Tit-for-Tat error malus
+    /// (`missing_count -1`, activity-locked healing per Spec 19).
+    pub async fn record_shard_work(&self, addr: SocketAddr) {
+        let mut peers = self.peers.write().await;
+        if let Some(peer) = peers.get_mut(&addr) {
+            peer.mark_shard_work_success();
+        }
+    }
+
+    /// Records genuinely performed shard work by permanent node identity.
+    /// Resolves all peer entries carrying this `node_id` (address-agnostic,
+    /// NAT-safe) and decays each malus by 1. Returns the number of entries.
+    pub async fn record_shard_work_by_id(&self, node_id: &[u8; 32]) -> usize {
+        let mut peers = self.peers.write().await;
+        let mut count = 0usize;
+        for peer in peers.values_mut() {
+            if peer.node_id.as_ref() == Some(node_id) {
+                peer.mark_shard_work_success();
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Notes a graceful / idle connection close (Tier-2 15s idle timeout,
+    /// QUIC `CONNECTION_CLOSE`, orderly shutdown) WITHOUT touching the
+    /// Tit-for-Tat malus. Idle timeouts are the normal state of the ephemeral
+    /// Tier-2 LRU pool (TODO-ARCH-02) and must NEVER call `record_failure`.
+    pub async fn note_idle_close(&self, addr: &SocketAddr) {
+        let mut peers = self.peers.write().await;
+        if let Some(peer) = peers.get_mut(addr) {
+            peer.clear_connection_preserve_malus();
+        }
+    }
+
+    /// Bulk-imports permanently banned node identities (e.g. persisted bans
+    /// from redb at boot). Insert-only: never touches connections or gossip
+    /// state beyond the ban set. Returns the number of newly added bans.
+    pub async fn import_persisted_bans(&self, banned: &[[u8; 32]]) -> usize {
+        if banned.is_empty() {
+            return 0;
+        }
+        let mut guard = self.banned_nodes.write().await;
+        let mut added = 0usize;
+        for key in banned {
+            if guard.insert(*key) {
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// Checks whether a peer address is currently under local temporary work
+    /// suspension (Tit-for-Tat, `missing_count >= 3`). Suspended peers are
+    /// skipped via rank-21 replacement and must be refused on Shard-Direct RPC
+    /// until genuine shard work or hourly decay rehabilitates them.
+    pub async fn is_peer_suspended_by_addr(&self, addr: &SocketAddr) -> bool {
+        let peers = self.peers.read().await;
+        peers.get(addr).map(|p| p.is_suspended()).unwrap_or(false)
+    }
+
+    /// Checks whether a permanent node identity is currently under local
+    /// temporary work suspension (address-agnostic, NAT-safe).
+    pub async fn is_peer_suspended_by_id(&self, node_id: &[u8; 32]) -> bool {
+        let peers = self.peers.read().await;
+        peers
+            .values()
+            .any(|p| p.node_id.as_ref() == Some(node_id) && p.is_suspended())
     }
 
     /// Registers an explicit direct F2F friend.
@@ -1378,12 +1468,25 @@ impl PeerManager {
     /// or was previously learned via F2F gossip (exists in known_network_nodes).
     /// Cryptographic identity (verified remote_node_id) is primarily used for authorization.
     /// F2F check strictly on NodePubKey, HRW only for sharding scoring.
+    ///
+    /// Phase 8 (Spec 15/19 Tit-for-Tat): peers under LOCAL temporary work
+    /// suspension (`missing_count >= 3`, rank-21 replacement active) are
+    /// refused here. The caller must answer with `FLAG_PEER_SUSPENDED`.
+    /// Permanent equivocation bans (`is_banned`) are refused as well.
     pub async fn can_authorize_direct_rpc(&self, remote_addr: &SocketAddr, remote_node_id: Option<&[u8; 32]>) -> bool {
         if let Some(node_id) = remote_node_id {
             if self.is_banned(node_id).await {
                 return false;
             }
+            if self.is_peer_suspended_by_id(node_id).await
+                || self.is_peer_suspended_by_addr(remote_addr).await
+            {
+                return false;
+            }
             return self.is_known_node(node_id).await;
+        }
+        if self.is_peer_suspended_by_addr(remote_addr).await {
+            return false;
         }
         self.is_f2f_addr(remote_addr).await || self.is_known_addr(remote_addr).await
     }
@@ -1903,11 +2006,63 @@ mod tests {
         let p1 = manager.get_peer(&addr1).await.unwrap();
         assert_eq!(p1.missing_count, 1);
 
+        // Phase 8: pure handshake preserves the malus, refreshes identity
         manager.record_success(addr1, Some([7u8; 32]), None).await;
+        let p1_handshake = manager.get_peer(&addr1).await.unwrap();
+        assert_eq!(p1_handshake.missing_count, 1);
+        assert_eq!(p1_handshake.node_id, Some([7u8; 32]));
+
+        // Only genuine shard work decays the malus
+        manager.record_shard_work(addr1).await;
         let p1_recovered = manager.get_peer(&addr1).await.unwrap();
         assert_eq!(p1_recovered.missing_count, 0);
-        assert_eq!(p1_recovered.status, PeerStatus::Connected);
         assert_eq!(p1_recovered.node_id, Some([7u8; 32]));
+    }
+
+    #[tokio::test]
+    async fn test_handshake_preserves_malus_and_suspension_refuses_rpc() {
+        let addr: SocketAddr = "127.0.0.1:9098".parse().unwrap();
+        let manager = PeerManager::new(vec![addr]);
+        let nid = [9u8; 32];
+        manager.register_f2f_friend(nid, Some(addr)).await;
+        manager.record_success(addr, Some(nid), None).await;
+        assert!(manager.can_authorize_direct_rpc(&addr, Some(&nid)).await);
+
+        // Drive peer into suspension (debounced: space failures >= 60s apart)
+        let t0 = Instant::now();
+        manager.record_failure_at(addr, t0).await;
+        manager.record_failure_at(addr, t0 + Duration::from_secs(61)).await;
+        manager.record_failure_at(addr, t0 + Duration::from_secs(122)).await;
+        assert!(manager.is_peer_suspended_by_addr(&addr).await);
+        assert!(manager.is_peer_suspended_by_id(&nid).await);
+
+        // Suspended peers are refused on Shard-Direct RPC (FLAG_PEER_SUSPENDED)
+        assert!(!manager.can_authorize_direct_rpc(&addr, Some(&nid)).await);
+
+        // Handshake does not lift the suspension
+        manager.record_success(addr, Some(nid), None).await;
+        assert!(!manager.can_authorize_direct_rpc(&addr, Some(&nid)).await);
+
+        // Genuine shard work rehabilitates step by step (3 -> 2, Degrading)
+        manager.record_shard_work(addr).await;
+        assert!(!manager.is_peer_suspended_by_addr(&addr).await);
+        assert!(manager.can_authorize_direct_rpc(&addr, Some(&nid)).await);
+
+        // Idle close preserves malus accounting without penalizing
+        let before = manager.get_peer(&addr).await.unwrap().missing_count;
+        manager.note_idle_close(&addr).await;
+        let after = manager.get_peer(&addr).await.unwrap().missing_count;
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn test_import_persisted_bans() {
+        let manager = PeerManager::new(vec![]);
+        let banned = [[1u8; 32], [2u8; 32]];
+        assert_eq!(manager.import_persisted_bans(&banned).await, 2);
+        assert!(manager.is_banned(&banned[0]).await);
+        // Re-import is idempotent
+        assert_eq!(manager.import_persisted_bans(&banned).await, 0);
     }
 
     #[test]

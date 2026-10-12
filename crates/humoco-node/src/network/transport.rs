@@ -1953,13 +1953,30 @@ impl QuicTransport {
                                                 msg_type = header.msg_type,
                                                 "Rejected direct RPC from unauthorized peer (neither F2F nor known via gossip)"
                                             );
+                                            // Phase 8 (Spec 15/19 Tit-for-Tat): locally suspended
+                                            // or permanently banned peers are refused with
+                                            // FLAG_PEER_SUSPENDED so the gateway applies
+                                            // rank-21 replacement; unknown peers get a plain
+                                            // unauthorized response without any malus effect.
+                                            let suspended_or_banned = if let Some(nid) = remote_node_id {
+                                                pm.is_banned(&nid).await
+                                                    || pm.is_peer_suspended_by_id(&nid).await
+                                                    || pm.is_peer_suspended_by_addr(&remote_addr).await
+                                            } else {
+                                                pm.is_peer_suspended_by_addr(&remote_addr).await
+                                            };
                                             let resp_payload = b"unauthorized";
                                             let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
+                                            let resp_flags = if suspended_or_banned {
+                                                humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                                            } else {
+                                                humoco_sim_core::wire::FLAG_UNAUTHORIZED
+                                            };
                                             let resp_header = WireHeader::new(
                                                 MsgType::StatusResponse as u16,
                                                 header.session_seq + 1,
                                                 header.epoch_id,
-                                                0,
+                                                resp_flags,
                                                 payload_len,
                                             );
                                             if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
@@ -1987,7 +2004,15 @@ impl QuicTransport {
                                 }
                             });
                         }
-                        Err(_) => break,
+                        Err(_) => {
+                            // Phase 8 (Spec 15/19, TODO-ARCH-02): the QUIC session
+                            // ended (orderly shutdown, graceful CONNECTION_CLOSE,
+                            // or Tier-2 15s idle timeout = NORMAL state of the
+                            // ephemeral LRU pool). This is NEVER a peer failure:
+                            // clear the handle, preserve the Tit-for-Tat malus.
+                            peer_manager.note_idle_close(&remote_addr).await;
+                            break;
+                        },
                     }
                 }
                 uni_res = conn.accept_uni() => {
@@ -2196,7 +2221,13 @@ impl QuicTransport {
                                 }
                             });
                         }
-                        Err(_) => break,
+                        Err(_) => {
+                            // Phase 8 (Spec 15/19, TODO-ARCH-02): see bi-stream
+                            // branch above — session end / Tier-2 15s idle timeout
+                            // is normal and NEVER calls `record_failure`.
+                            peer_manager.note_idle_close(&remote_addr).await;
+                            break;
+                        },
                     }
                 }
             }

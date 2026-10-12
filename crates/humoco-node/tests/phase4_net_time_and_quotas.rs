@@ -231,8 +231,15 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
     };
     let hmc_payload = bincode::serialize(&humoco_node::network::framing::LockWirePayload::Hmc {
         req: hmc_req,
+        chain: None,
         root_valid_until: 86_400_000,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: declared_write_ema,
         declared_write_ema_micro_bj: declared_write_ema,
+        declared_read_ema_credits: 0,
         sender_pubkey: *identity_client.node_id(),
         sender_signature: [0; 64],
         timestamp_ms: 1000,
@@ -257,6 +264,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         parent_lock: [0x88; 32],
         shard_id: 42,
         sender_pubkey: *identity_client.node_id(),
+        declared_write_ema_micro_bj: 0,
         current_read_ema_credits: 500_000, // declared daily rate = 500_000 * 0.693 = 346_573 > 250_000
         timestamp_ms: 1000,
         sender_signature: [0; 64],
@@ -394,8 +402,15 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
 
     let lock_wire = humoco_node::network::framing::LockWirePayload::Hmc {
         req: hmc_req,
+        chain: None,
         root_valid_until,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: fraudulent_write_ema,
         declared_write_ema_micro_bj: fraudulent_write_ema,
+        declared_read_ema_credits: 0,
         sender_pubkey: *identity_client.node_pubkey(),
         sender_signature: sig2,
         timestamp_ms: t2,
@@ -505,8 +520,15 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     let sig_a = identity_g.signing_key().sign(&digest_a).to_bytes();
     let lock_wire_a = humoco_node::network::framing::LockWirePayload::Hmc {
         req: hmc_req_a,
+        chain: None,
         root_valid_until: root_valid_until_a,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: high_write_ema,
         declared_write_ema_micro_bj: high_write_ema,
+        declared_read_ema_credits: 0,
         sender_pubkey: *identity_g.node_pubkey(),
         sender_signature: sig_a,
         timestamp_ms: t1,
@@ -578,8 +600,15 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     let sig_b = identity_g.signing_key().sign(&digest_b).to_bytes();
     let lock_wire_b = humoco_node::network::framing::LockWirePayload::Hmc {
         req: hmc_req_b,
+        chain: None,
         root_valid_until: root_valid_until_b,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: fraudulent_low_ema,
         declared_write_ema_micro_bj: fraudulent_low_ema,
+        declared_read_ema_credits: 0,
         sender_pubkey: *identity_g.node_pubkey(),
         sender_signature: sig_b,
         timestamp_ms: t2,

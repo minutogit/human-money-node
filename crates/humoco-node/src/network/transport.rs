@@ -310,95 +310,226 @@ impl RequestHandler for NodeRequestHandler {
                 };
                 let write_limit = (5.0 * ncb_eff as f64).round() as u64;
 
-                if let Ok(wire_payload) = bincode::deserialize::<crate::network::framing::LockWirePayload>(&payload) {
-                    let shard_id = match &wire_payload {
-                        crate::network::framing::LockWirePayload::Sim(record, _) => {
-                            u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]])
+                let wire_payload = match bincode::deserialize::<crate::network::framing::LockWirePayload>(&payload) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        if let Ok((record, root_valid_until)) = bincode::deserialize::<(humoco_sim_core::types::LockRecord, u64)>(&payload) {
+                            crate::network::framing::LockWirePayload::Sim(record, root_valid_until)
+                        } else {
+                            warn!("LockVerifyRequest rejected: invalid payload framing");
+                            let resp_header = WireHeader::new(
+                                MsgType::LockVerifyResponse as u16,
+                                header.session_seq + 1,
+                                header.epoch_id,
+                                humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                0,
+                            );
+                            return Ok((resp_header, Vec::new()));
                         }
-                        crate::network::framing::LockWirePayload::Hmc { req, .. } => {
-                            let tag = if req.is_genesis {
-                                bs58::encode(&req.transaction_hash).into_string()
-                            } else {
-                                req.ds_tag.clone().unwrap_or_default()
-                            };
-                            let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-                            u16::from_be_bytes([p_bytes[0], p_bytes[1]])
-                        }
-                    };
+                    }
+                };
 
-                    let is_responsible = if let Some(pm) = peer_manager.as_ref() {
-                        pm.is_local_responsible_for_shard(identity.hrw_routing_id(), shard_id, 20).await
-                    } else {
-                        true
-                    };
+                let shard_id = match &wire_payload {
+                    crate::network::framing::LockWirePayload::Sim(record, _) => {
+                        u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]])
+                    }
+                    crate::network::framing::LockWirePayload::Hmc { req, .. } => {
+                        let tag = if req.is_genesis {
+                            bs58::encode(&req.transaction_hash).into_string()
+                        } else {
+                            req.ds_tag.clone().unwrap_or_default()
+                        };
+                        let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+                        u16::from_be_bytes([p_bytes[0], p_bytes[1]])
+                    }
+                };
 
-                    if !is_responsible {
-                        warn!(shard_id, "LockVerifyRequest rejected: local node is not in top-20 for shard");
+                let is_responsible = if let Some(pm) = peer_manager.as_ref() {
+                    pm.is_local_responsible_for_shard(identity.hrw_routing_id(), shard_id, 20).await
+                } else {
+                    true
+                };
+
+                if !is_responsible {
+                    warn!(shard_id, "LockVerifyRequest rejected: local node is not in top-20 for shard");
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
+                let sender_pubkey = wire_payload.sender_pubkey();
+                let sender_signature = wire_payload.sender_signature();
+                let timestamp_ms = wire_payload.timestamp_ms();
+                let declared_write_ema = wire_payload.declared_write_ema_micro_bj();
+                let declared_read_ema = wire_payload.declared_read_ema_credits();
+
+                // 1. Cheap check first: declared write rate vs 5x whale brake limit
+                let declared_daily_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_write_ema) / 1_000_000;
+                if declared_daily_rate > write_limit {
+                    warn!(declared_daily_rate, write_limit, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: declared write load exceeds 5.0 * ncb_eff");
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
+                // 2. Check authenticated QUIC identity matches sender_pubkey
+                if let Some(auth_peer) = peer_identity {
+                    if sender_pubkey != [0u8; 32] && sender_pubkey != auth_peer {
+                        warn!(
+                            claimed = %hex::encode(sender_pubkey),
+                            authenticated = %hex::encode(auth_peer),
+                            "LockVerifyRequest rejected: claimed sender pubkey does not match authenticated QUIC identity"
+                        );
                         let resp_header = WireHeader::new(
                             MsgType::LockVerifyResponse as u16,
                             header.session_seq + 1,
                             header.epoch_id,
-                            humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
                             0,
                         );
                         return Ok((resp_header, Vec::new()));
                     }
+                }
 
-                    let sender_pubkey = wire_payload.sender_pubkey();
-                    let sender_signature = wire_payload.sender_signature();
-                    let timestamp_ms = wire_payload.timestamp_ms();
-                    let declared_write_ema = wire_payload.declared_write_ema_micro_bj();
+                // 3. In production (Hmc payloads), reject null senders and null signatures
+                if matches!(wire_payload, crate::network::framing::LockWirePayload::Hmc { .. }) {
+                    if sender_pubkey == [0u8; 32] {
+                        warn!("LockVerifyRequest rejected: null sender pubkey");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+                    if sender_signature == [0u8; 64] {
+                        warn!("LockVerifyRequest rejected: null sender signature");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+                }
 
-                    let is_banned = if sender_pubkey != [0u8; 32] {
-                        if engine.is_node_banned(&sender_pubkey).await {
-                            true
-                        } else if let Some(pm) = peer_manager.as_ref() {
-                            pm.is_banned(&sender_pubkey).await
-                        } else {
-                            false
-                        }
+                // 4. Check if sender is banned
+                let is_banned = if sender_pubkey != [0u8; 32] {
+                    if engine.is_node_banned(&sender_pubkey).await {
+                        true
+                    } else if let Some(pm) = peer_manager.as_ref() {
+                        pm.is_banned(&sender_pubkey).await
                     } else {
                         false
-                    };
-                    if is_banned {
-                        warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: sender is banned");
+                    }
+                } else {
+                    false
+                };
+                if is_banned {
+                    warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: sender is banned");
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
+                // 5. Compute operation hash and footprint (including multi-hop chain multiplier)
+                let effective_ts = if timestamp_ms > 0 { timestamp_ms } else { now_ms };
+                let (op_hash, footprint, total_by) = match &wire_payload {
+                    crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
+                        let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
+                        let fp = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+                        let by = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_s);
+                        (record.id, fp, by)
+                    }
+                    crate::network::framing::LockWirePayload::Hmc { req, root_valid_until, chain, .. } => {
+                        let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
+                        let entry = crate::api::hmc::L2LockEntry::from(req);
+                        let base_fp = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+                        let base_by = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_s);
+                        let chain_len = chain.as_ref().map(|c| c.chain.len()).unwrap_or(1);
+                        (entry.t_id, base_fp.saturating_mul(chain_len as u64), base_by.saturating_mul(chain_len as u64))
+                    }
+                };
+
+                // 6. Signature verification and under-reporting check
+                if sender_pubkey != [0u8; 32] && sender_signature != [0u8; 64] {
+                    let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                        sender_pubkey,
+                        timestamp_ms,
+                        declared_write_ema,
+                        declared_read_ema,
+                        footprint,
+                        false,
+                        op_hash,
+                        sender_signature,
+                    );
+
+                    if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
+                        warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: invalid ingress envelope signature");
                         let resp_header = WireHeader::new(
                             MsgType::LockVerifyResponse as u16,
                             header.session_seq + 1,
                             header.epoch_id,
-                            humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+                            humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
                             0,
                         );
                         return Ok((resp_header, Vec::new()));
                     }
 
-                    let effective_ts = if timestamp_ms > 0 { timestamp_ms } else { now_ms };
-                    let (op_hash, footprint) = match &wire_payload {
-                        crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
-                            let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
-                            (record.id, humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s))
-                        }
-                        crate::network::framing::LockWirePayload::Hmc { req, root_valid_until, .. } => {
-                            let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
-                            let entry = crate::api::hmc::L2LockEntry::from(req);
-                            (entry.t_id, humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s))
-                        }
-                    };
+                    if let Some(pm) = peer_manager.as_ref() {
+                        if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
+                            if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
+                                warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: under-reporting detected in LockVerifyRequest! Slashing perpetrator.");
+                                let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
+                                let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+                                let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+                                engine.ban_node(sender_pubkey, now_ms).await;
+                                pm.ban_node(&sender_pubkey).await;
+                                pm.broadcast_fraud_proof(proof);
 
-                    if sender_pubkey != [0u8; 32] && sender_signature != [0u8; 64] {
-                        let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
-                            sender_pubkey,
-                            timestamp_ms,
-                            declared_write_ema,
-                            0,
-                            footprint,
-                            false,
-                            op_hash,
-                            sender_signature,
-                        );
+                                let resp_header = WireHeader::new(
+                                    MsgType::LockVerifyResponse as u16,
+                                    header.session_seq + 1,
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
+                                        | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                                        | humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
+                                    0,
+                                );
+                                return Ok((resp_header, Vec::new()));
+                            }
+                        }
+                        pm.update_node_write_evidence(&sender_pubkey, curr.clone()).await;
+                        pm.record_observed_evidence(curr.clone()).await;
+                    }
+                }
 
-                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
-                            warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: invalid ingress envelope signature");
+                // 7. Recipient-side quota reservation check BEFORE mutating RAM index
+                if let Some(tc) = &tier_controller {
+                    if sender_pubkey != [0u8; 32] {
+                        let epoch_day = tc.current_epoch_day_at(effective_ts);
+                        if let Err(e) = tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day) {
+                            warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
                             let resp_header = WireHeader::new(
                                 MsgType::LockVerifyResponse as u16,
                                 header.session_seq + 1,
@@ -408,65 +539,94 @@ impl RequestHandler for NodeRequestHandler {
                             );
                             return Ok((resp_header, Vec::new()));
                         }
+                    }
+                }
 
-                        if let Some(pm) = peer_manager.as_ref() {
-                            if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
-                                if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
-                                    warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: under-reporting detected in LockVerifyRequest! Slashing perpetrator.");
-                                    let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
-                                    let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
-                                    let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                    let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
-                                    engine.ban_node(sender_pubkey, now_ms).await;
-                                    pm.ban_node(&sender_pubkey).await;
-                                    pm.broadcast_fraud_proof(proof);
-
-                                    let resp_header = WireHeader::new(
-                                        MsgType::LockVerifyResponse as u16,
-                                        header.session_seq + 1,
-                                        header.epoch_id,
-                                        humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
-                                            | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
-                                            | humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
-                                        0,
-                                    );
-                                    return Ok((resp_header, Vec::new()));
-                                }
-                            }
-                            pm.update_node_write_evidence(&sender_pubkey, curr.clone()).await;
-                            pm.record_observed_evidence(curr.clone()).await;
+                // 8. Mutation of RAM index and attestation generation
+                match wire_payload {
+                    crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
+                        if engine.is_node_banned(&record.receiver_pub).await {
+                            let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                            return Ok((resp_header, Vec::new()));
                         }
-                    }
 
-                    let declared_daily_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_write_ema) / 1_000_000;
-                    if declared_daily_rate > write_limit {
-                        warn!(declared_daily_rate, write_limit, sender = %hex::encode(wire_payload.sender_pubkey()), "LockVerifyRequest rejected: declared write load exceeds 5.0 * ncb_eff");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq + 1,
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
+                        let ingress_res = engine.ingress_lock(
+                            record.clone(),
+                            humoco_sim_core::types::SimTime(now_ms),
+                            humoco_sim_core::types::SimTime(root_valid_until),
+                        ).await;
 
-                    match wire_payload {
-                        crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
-                            if engine.is_node_banned(&record.receiver_pub).await {
+                        match ingress_res {
+                            Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew)
+                            | Ok(humoco_sim_core::storage::IngressVerdictLow::IdempotentReplay) => {
+                                let requested_status = (header.flags & 0xFF) as u8;
+                                let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
+                                let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
+                                    && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
+                                let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
+                                let attestation = crate::api::routes::create_attestation(
+                                    &identity,
+                                    record.id,
+                                    record.parent_lock,
+                                    shard_id,
+                                    final_status,
+                                    now_ms,
+                                );
+                                let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                                let payload_len = checked_payload_len(resp_bytes.len())?;
+                                let resp_header = WireHeader::new(
+                                    MsgType::LockVerifyResponse as u16,
+                                    header.session_seq + 1,
+                                    header.epoch_id,
+                                    0,
+                                    payload_len,
+                                );
+                                return Ok((resp_header, resp_bytes));
+                            }
+                            _ => {
                                 let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
                                 return Ok((resp_header, Vec::new()));
                             }
-
-                            let ingress_res = engine.ingress_lock(
-                                record.clone(),
-                                humoco_sim_core::types::SimTime(now_ms),
-                                humoco_sim_core::types::SimTime(root_valid_until),
-                            ).await;
-
-                            match ingress_res {
-                                Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew)
-                                | Ok(humoco_sim_core::storage::IngressVerdictLow::IdempotentReplay) => {
+                        }
+                    }
+                    crate::network::framing::LockWirePayload::Hmc { req, chain, .. } => {
+                        if let Some(chain_req) = chain {
+                            if chain_req.chain.is_empty() {
+                                warn!("LockVerifyRequest rejected: empty chain");
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                return Ok((resp_header, Vec::new()));
+                            }
+                            if engine.is_node_banned(&chain_req.auth.ephemeral_pubkey).await {
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                                return Ok((resp_header, Vec::new()));
+                            }
+                            for hop in &chain_req.chain {
+                                if engine.is_node_banned(&hop.sender_ephemeral_pub).await
+                                    || engine.is_node_banned(&hop.auth.ephemeral_pubkey).await
+                                {
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                                    return Ok((resp_header, Vec::new()));
+                                }
+                                if !crate::api::hmc::verify_l2_lock_signature(hop) {
+                                    warn!("LockVerifyRequest rejected: invalid hop signature in chain");
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_SIGNATURE_INVALID, 0);
+                                    return Ok((resp_header, Vec::new()));
+                                }
+                            }
+                            let (verdict, _is_new) = engine.ingress_hmc_chain_lock(chain_req.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
+                            match verdict {
+                                crate::api::hmc::L2Verdict::Conflict { .. } | crate::api::hmc::L2Verdict::Rejected { .. } => {
+                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                    return Ok((resp_header, Vec::new()));
+                                }
+                                _ => {
+                                    let last_hop = chain_req.chain.last().unwrap();
+                                    let lookup_tag = if last_hop.is_genesis {
+                                        bs58::encode(&last_hop.transaction_hash).into_string()
+                                    } else {
+                                        last_hop.ds_tag.clone().unwrap_or_default()
+                                    };
+                                    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
                                     let requested_status = (header.flags & 0xFF) as u8;
                                     let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
                                     let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
@@ -474,8 +634,8 @@ impl RequestHandler for NodeRequestHandler {
                                     let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
                                     let attestation = crate::api::routes::create_attestation(
                                         &identity,
-                                        record.id,
-                                        record.parent_lock,
+                                        op_hash,
+                                        parent_bytes,
                                         shard_id,
                                         final_status,
                                         now_ms,
@@ -491,22 +651,17 @@ impl RequestHandler for NodeRequestHandler {
                                     );
                                     return Ok((resp_header, resp_bytes));
                                 }
-                                _ => {
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
-                                    return Ok((resp_header, Vec::new()));
-                                }
                             }
-                        }
-                        crate::network::framing::LockWirePayload::Hmc { req, root_valid_until: _, .. } => {
+                        } else {
                             if engine.is_node_banned(&req.sender_ephemeral_pub).await
-                                    || engine.is_node_banned(&req.auth.ephemeral_pubkey).await
+                                || engine.is_node_banned(&req.auth.ephemeral_pubkey).await
                             {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
                                 return Ok((resp_header, Vec::new()));
                             }
 
                             if !crate::api::hmc::verify_l2_lock_signature(&req) {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, humoco_sim_core::wire::FLAG_SIGNATURE_INVALID, 0);
                                 return Ok((resp_header, Vec::new()));
                             }
 
@@ -560,74 +715,6 @@ impl RequestHandler for NodeRequestHandler {
                         }
                     }
                 }
-
-                if let Ok((record, root_valid_until)) = bincode::deserialize::<(humoco_sim_core::types::LockRecord, u64)>(&payload) {
-                    let shard_id = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
-                    let is_responsible = if let Some(pm) = peer_manager.as_ref() {
-                        pm.is_local_responsible_for_shard(identity.hrw_routing_id(), shard_id, 20).await
-                    } else {
-                        true
-                    };
-
-                    if !is_responsible {
-                        warn!(shard_id, "LockVerifyRequest rejected: local node is not in top-20 for shard (legacy)");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq + 1,
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
-
-                    let ingress_res = engine.ingress_lock(
-                        record.clone(),
-                        humoco_sim_core::types::SimTime(now_ms),
-                        humoco_sim_core::types::SimTime(root_valid_until),
-                    ).await;
-
-                    match ingress_res {
-                        Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew)
-                        | Ok(humoco_sim_core::storage::IngressVerdictLow::IdempotentReplay) => {
-                            let requested_status = (header.flags & 0xFF) as u8;
-                            let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
-                            let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
-                                && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
-                            let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
-                            let attestation = crate::api::routes::create_attestation(
-                                &identity,
-                                record.id,
-                                record.parent_lock,
-                                shard_id,
-                                final_status,
-                                now_ms,
-                            );
-                            let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
-                            let payload_len = checked_payload_len(resp_bytes.len())?;
-                            let resp_header = WireHeader::new(
-                                MsgType::LockVerifyResponse as u16,
-                                header.session_seq + 1,
-                                header.epoch_id,
-                                0,
-                                payload_len,
-                            );
-                            return Ok((resp_header, resp_bytes));
-                        }
-                        _ => {
-                            let resp_header = WireHeader::new(
-                                MsgType::LockVerifyResponse as u16,
-                                header.session_seq + 1,
-                                header.epoch_id,
-                                0,
-                                0,
-                            );
-                            return Ok((resp_header, Vec::new()));
-                        }
-                    }
-                }
-                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
-                return Ok((resp_header, Vec::new()));
             } else if msg_type == MsgType::StatusQuery as u16 {
                 let now_ms = peer_manager
                     .as_ref()
@@ -646,60 +733,83 @@ impl RequestHandler for NodeRequestHandler {
                 };
                 let read_limit = (5.0 * ncb_read_eff as f64).round() as u64;
 
-                let (lock_id, parent_lock, shard_id, declared_read_ema, raw_sender_pubkey, timestamp_ms, sender_signature) =
+                let (lock_id, parent_lock, shard_id, declared_write_ema, declared_read_ema, raw_sender_pubkey, timestamp_ms, sender_signature) =
                     if let Ok(sq) = bincode::deserialize::<crate::network::framing::StatusQueryPayload>(&payload) {
-                        (sq.lock_id, sq.parent_lock, sq.shard_id, sq.current_read_ema_credits, sq.sender_pubkey, sq.timestamp_ms, sq.sender_signature)
+                        (sq.lock_id, sq.parent_lock, sq.shard_id, sq.declared_write_ema_micro_bj, sq.current_read_ema_credits, sq.sender_pubkey, sq.timestamp_ms, sq.sender_signature)
                     } else if let Ok((l_id, p_lock, s_id)) = bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload) {
-                        (l_id, p_lock, s_id, 0, [0u8; 32], 0, [0u8; 64])
+                        (l_id, p_lock, s_id, 0, 0, [0u8; 32], 0, [0u8; 64])
                     } else {
                         let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
                         return Ok((resp_header, Vec::new()));
                     };
 
-                // Bind sender identity to authenticated QUIC TLS peer if available
-                let sender_pubkey = if let Some(auth_peer) = peer_identity {
+                // 1. Cheap check: declared read rate vs 5x whale brake limit
+                let declared_read_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_read_ema);
+                if declared_read_rate > read_limit {
+                    warn!(declared_read_rate, read_limit, "StatusQuery rejected: declared read load exceeds 5.0 * ncb_read_eff");
+                    let resp_header = WireHeader::new(
+                        MsgType::StatusResponse as u16,
+                        header.session_seq + 1,
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
+                // 2. Check authenticated QUIC TLS peer matches claimed sender
+                if let Some(auth_peer) = peer_identity {
                     if raw_sender_pubkey != [0u8; 32] && raw_sender_pubkey != auth_peer {
                         warn!(
                             claimed = %hex::encode(raw_sender_pubkey),
                             authenticated = %hex::encode(auth_peer),
                             "StatusQuery rejected: claimed sender pubkey does not match authenticated QUIC identity"
                         );
-                        let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq + 1, header.epoch_id, 0, 0);
+                        let resp_header = WireHeader::new(
+                            MsgType::StatusResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                            0,
+                        );
                         return Ok((resp_header, Vec::new()));
                     }
+                }
+                let sender_pubkey = if let Some(auth_peer) = peer_identity {
                     auth_peer
                 } else {
                     raw_sender_pubkey
                 };
 
-                let is_banned = if sender_pubkey != [0u8; 32] {
-                    if engine.is_node_banned(&sender_pubkey).await {
-                        true
-                    } else if let Some(pm) = peer_manager.as_ref() {
-                        pm.is_banned(&sender_pubkey).await
-                    } else {
-                        false
+                // 3. Reject null sender pubkey and signature if signed payload expected
+                if raw_sender_pubkey != [0u8; 32] || sender_signature != [0u8; 64] {
+                    if sender_pubkey == [0u8; 32] {
+                        warn!("StatusQuery rejected: null sender pubkey");
+                        let resp_header = WireHeader::new(
+                            MsgType::StatusResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
                     }
-                } else {
-                    false
-                };
-                if is_banned {
-                    warn!(sender = %hex::encode(sender_pubkey), "StatusQuery rejected: sender is banned");
-                    let resp_header = WireHeader::new(
-                        MsgType::StatusResponse as u16,
-                        header.session_seq + 1,
-                        header.epoch_id,
-                        humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
-                        0,
-                    );
-                    return Ok((resp_header, Vec::new()));
-                }
+                    if sender_signature == [0u8; 64] {
+                        warn!("StatusQuery rejected: null sender signature");
+                        let resp_header = WireHeader::new(
+                            MsgType::StatusResponse as u16,
+                            header.session_seq + 1,
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
 
-                if sender_pubkey != [0u8; 32] && sender_signature != [0u8; 64] {
                     let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                         sender_pubkey,
                         timestamp_ms,
-                        0,
+                        declared_write_ema,
                         declared_read_ema,
                         0,
                         true,
@@ -713,7 +823,7 @@ impl RequestHandler for NodeRequestHandler {
                             MsgType::StatusResponse as u16,
                             header.session_seq + 1,
                             header.epoch_id,
-                            humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                            humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
                             0,
                         );
                         return Ok((resp_header, Vec::new()));
@@ -748,17 +858,46 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 }
 
-                let declared_read_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_read_ema);
-                if declared_read_rate > read_limit {
-                    warn!(declared_read_rate, read_limit, "StatusQuery rejected: declared read load exceeds 5.0 * ncb_read_eff");
+                // 4. Check banned
+                let is_banned = if sender_pubkey != [0u8; 32] {
+                    if engine.is_node_banned(&sender_pubkey).await {
+                        true
+                    } else if let Some(pm) = peer_manager.as_ref() {
+                        pm.is_banned(&sender_pubkey).await
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if is_banned {
+                    warn!(sender = %hex::encode(sender_pubkey), "StatusQuery rejected: sender is banned");
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
                         header.session_seq + 1,
                         header.epoch_id,
-                        humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                        humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
                         0,
                     );
                     return Ok((resp_header, Vec::new()));
+                }
+
+                // 5. Recipient-side read quota check
+                if let Some(tc) = &tier_controller {
+                    if sender_pubkey != [0u8; 32] {
+                        let epoch_day = tc.current_epoch_day_at(if timestamp_ms > 0 { timestamp_ms } else { now_ms });
+                        if let Err(e) = tc.evaluate_node_read_quota(&sender_pubkey, 1, epoch_day) {
+                            warn!(error = ?e, sender = %hex::encode(sender_pubkey), "StatusQuery rejected: node read quota exceeded");
+                            let resp_header = WireHeader::new(
+                                MsgType::StatusResponse as u16,
+                                header.session_seq + 1,
+                                header.epoch_id,
+                                humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                                0,
+                            );
+                            return Ok((resp_header, Vec::new()));
+                        }
+                    }
                 }
 
                 // Strict Lock & Shard & Validity Verification (INV: Close StatusQuery Signature Hole)

@@ -97,6 +97,10 @@ pub struct TierController {
     vip_writes_today: Arc<AtomicU64>,
     f2f_writes_today: Arc<AtomicU64>,
     free_writes_today: Arc<AtomicU64>,
+    epoch_seq: Arc<AtomicU64>,
+    cumulative_micro_byte_years: Arc<AtomicU64>,
+    prev_day_final_bytes: Arc<AtomicU64>,
+    current_epoch_day_cached: Arc<AtomicU64>,
 }
 
 impl TierController {
@@ -114,7 +118,34 @@ impl TierController {
             vip_writes_today: Arc::new(AtomicU64::new(0)),
             f2f_writes_today: Arc::new(AtomicU64::new(0)),
             free_writes_today: Arc::new(AtomicU64::new(0)),
+            epoch_seq: Arc::new(AtomicU64::new(0)),
+            cumulative_micro_byte_years: Arc::new(AtomicU64::new(0)),
+            prev_day_final_bytes: Arc::new(AtomicU64::new(0)),
+            current_epoch_day_cached: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Increments and returns the next epoch_seq for Spec 10 Signed Ingress Envelopes.
+    pub fn next_epoch_seq(&self) -> u64 {
+        self.epoch_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Records gateway declared usage, advancing day roll-over if needed, and returns:
+    /// `(epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes)`.
+    pub fn record_declared_usage(&self, now_ms: u64, footprint_micro_bj: u64) -> (u32, u64, u64, u64) {
+        let day = self.current_epoch_day_at(now_ms);
+        let last_day = self.current_epoch_day_cached.load(Ordering::Relaxed);
+        if day > last_day
+            && self.current_epoch_day_cached.compare_exchange(last_day, day, Ordering::SeqCst, Ordering::Relaxed).is_ok()
+        {
+            let prev_cum = self.cumulative_micro_byte_years.swap(0, Ordering::SeqCst);
+            self.prev_day_final_bytes.store(prev_cum, Ordering::SeqCst);
+            self.epoch_seq.store(0, Ordering::SeqCst);
+        }
+        let seq = self.next_epoch_seq();
+        let cum = self.cumulative_micro_byte_years.fetch_add(footprint_micro_bj, Ordering::SeqCst) + footprint_micro_bj;
+        let prev = self.prev_day_final_bytes.load(Ordering::Relaxed);
+        (day as u32, seq, cum, prev)
     }
 
     /// Returns the tier write counters: (vip, f2f, free).
@@ -358,6 +389,50 @@ impl TierController {
             Err(IngressError::QuotaExceeded {
                 available,
                 required: required_byte_years,
+            })
+        }
+    }
+
+    /// Evaluates and registers dynamic ingress for a network node against the 5x Whale Brake daily write limit.
+    pub fn evaluate_node_write_quota(
+        &self,
+        sender_pubkey: &[u8; 32],
+        required_byte_years: u64,
+        epoch_day: u64,
+    ) -> Result<(), IngressError> {
+        let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
+        let daily_quota = self.calculate_daily_quota(MAX_WHALE_MULTIPLIER, 1.0);
+        let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+        if thermo.try_accept_lock(epoch_day, node_id, required_byte_years, daily_quota) {
+            Ok(())
+        } else {
+            let used = thermo.get_node_usage(node_id);
+            let available = daily_quota.saturating_sub(used);
+            Err(IngressError::QuotaExceeded {
+                available,
+                required: required_byte_years,
+            })
+        }
+    }
+
+    /// Evaluates and registers dynamic ingress for a network node against the 5x Whale Brake daily read limit.
+    pub fn evaluate_node_read_quota(
+        &self,
+        sender_pubkey: &[u8; 32],
+        required_credits: u64,
+        epoch_day: u64,
+    ) -> Result<(), IngressError> {
+        let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
+        let daily_read_quota = self.calculate_daily_read_quota(MAX_WHALE_MULTIPLIER, 1.0);
+        let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+        if thermo.try_accept_read(epoch_day, node_id, required_credits, daily_read_quota) {
+            Ok(())
+        } else {
+            let used = thermo.get_node_read_usage(node_id);
+            let available = daily_read_quota.saturating_sub(used);
+            Err(IngressError::ReadQuotaExceeded {
+                available,
+                required: required_credits,
             })
         }
     }

@@ -160,6 +160,39 @@ mod hmc_req_json {
     }
 }
 
+mod hmc_chain_opt_json {
+    use serde::{de, Deserializer, Serializer};
+
+    pub fn serialize<S>(
+        data: &Option<crate::api::hmc::L2ChainLockRequest>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match data {
+            Some(chain) => {
+                let raw = serde_json::to_vec(chain).map_err(serde::ser::Error::custom)?;
+                serializer.serialize_some(&raw)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<crate::api::hmc::L2ChainLockRequest>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<Vec<u8>> = serde::Deserialize::deserialize(deserializer)?;
+        match opt {
+            Some(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Unified wire payload for lock verification across simulation and HMC domains.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
@@ -168,9 +201,23 @@ pub enum LockWirePayload {
     Hmc {
         #[serde(with = "hmc_req_json")]
         req: crate::api::hmc::L2LockRequest,
+        #[serde(default, with = "hmc_chain_opt_json")]
+        chain: Option<crate::api::hmc::L2ChainLockRequest>,
         root_valid_until: u64,
         #[serde(default)]
+        epoch_day: u32,
+        #[serde(default)]
+        epoch_seq: u64,
+        #[serde(default)]
+        cumulative_micro_byte_years: u64,
+        #[serde(default)]
+        prev_day_final_bytes: u64,
+        #[serde(default)]
+        current_anl_24h: u64,
+        #[serde(default)]
         declared_write_ema_micro_bj: u64,
+        #[serde(default)]
+        declared_read_ema_credits: u64,
         #[serde(default)]
         sender_pubkey: [u8; 32],
         #[serde(default = "default_signature", with = "serde_sig_64")]
@@ -181,10 +228,67 @@ pub enum LockWirePayload {
 }
 
 impl LockWirePayload {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(bytes)
+    }
+
     pub fn declared_write_ema_micro_bj(&self) -> u64 {
         match self {
             Self::Sim(..) => 0,
             Self::Hmc { declared_write_ema_micro_bj, .. } => *declared_write_ema_micro_bj,
+        }
+    }
+
+    pub fn declared_read_ema_credits(&self) -> u64 {
+        match self {
+            Self::Sim(..) => 0,
+            Self::Hmc { declared_read_ema_credits, .. } => *declared_read_ema_credits,
+        }
+    }
+
+    pub fn epoch_day(&self) -> u32 {
+        match self {
+            Self::Sim(..) => 0,
+            Self::Hmc { epoch_day, .. } => *epoch_day,
+        }
+    }
+
+    pub fn epoch_seq(&self) -> u64 {
+        match self {
+            Self::Sim(..) => 0,
+            Self::Hmc { epoch_seq, .. } => *epoch_seq,
+        }
+    }
+
+    pub fn cumulative_micro_byte_years(&self) -> u64 {
+        match self {
+            Self::Sim(..) => 0,
+            Self::Hmc { cumulative_micro_byte_years, .. } => *cumulative_micro_byte_years,
+        }
+    }
+
+    pub fn prev_day_final_bytes(&self) -> u64 {
+        match self {
+            Self::Sim(..) => 0,
+            Self::Hmc { prev_day_final_bytes, .. } => *prev_day_final_bytes,
+        }
+    }
+
+    pub fn current_anl_24h(&self) -> u64 {
+        match self {
+            Self::Sim(..) => 0,
+            Self::Hmc { current_anl_24h, .. } => *current_anl_24h,
+        }
+    }
+
+    pub fn chain(&self) -> Option<&crate::api::hmc::L2ChainLockRequest> {
+        match self {
+            Self::Sim(..) => None,
+            Self::Hmc { chain, .. } => chain.as_ref(),
         }
     }
 
@@ -225,11 +329,23 @@ pub struct StatusQueryPayload {
     #[serde(default)]
     pub sender_pubkey: [u8; 32],
     #[serde(default)]
+    pub declared_write_ema_micro_bj: u64,
+    #[serde(default)]
     pub current_read_ema_credits: u64,
     #[serde(default)]
     pub timestamp_ms: u64,
     #[serde(default = "default_signature", with = "serde_sig_64")]
     pub sender_signature: [u8; 64],
+}
+
+impl StatusQueryPayload {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(bytes)
+    }
 }
 
 mod hmc_locks_json {

@@ -1055,6 +1055,7 @@ async fn assemble_status_quorum_certificate(
                         parent_lock,
                         shard_id,
                         sender_pubkey,
+                        declared_write_ema_micro_bj: declared_write_ema,
                         current_read_ema_credits: declared_read_ema,
                         timestamp_ms: now_ms,
                         sender_signature,
@@ -1399,10 +1400,20 @@ async fn submit_hmc_lock(
                     &op_hash,
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+                    state.tier_controller.record_declared_usage(now_ms, footprint);
+                let current_anl_24h = declared_write_ema;
                 let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                     req: req.clone(),
+                    chain: None,
                     root_valid_until,
+                    epoch_day,
+                    epoch_seq,
+                    cumulative_micro_byte_years,
+                    prev_day_final_bytes,
+                    current_anl_24h,
                     declared_write_ema_micro_bj: declared_write_ema,
+                    declared_read_ema_credits: declared_read_ema,
                     sender_pubkey,
                     sender_signature,
                     timestamp_ms: now_ms,
@@ -1604,10 +1615,20 @@ async fn submit_hmc_lock(
                     &op_hash,
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+                    state.tier_controller.record_declared_usage(now_ms, footprint);
+                let current_anl_24h = declared_write_ema;
                 let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                     req: req.clone(),
+                    chain: None,
                     root_valid_until,
+                    epoch_day,
+                    epoch_seq,
+                    cumulative_micro_byte_years,
+                    prev_day_final_bytes,
+                    current_anl_24h,
                     declared_write_ema_micro_bj: declared_write_ema,
+                    declared_read_ema_credits: declared_read_ema,
                     sender_pubkey,
                     sender_signature,
                     timestamp_ms: now_ms,
@@ -1637,10 +1658,20 @@ async fn submit_hmc_lock(
             &op_hash,
         );
         let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+            state.tier_controller.record_declared_usage(now_ms, footprint);
+        let current_anl_24h = declared_write_ema;
         let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
             req: req.clone(),
+            chain: None,
             root_valid_until,
+            epoch_day,
+            epoch_seq,
+            cumulative_micro_byte_years,
+            prev_day_final_bytes,
+            current_anl_24h,
             declared_write_ema_micro_bj: declared_write_ema,
+            declared_read_ema_credits: declared_read_ema,
             sender_pubkey,
             sender_signature,
             timestamp_ms: now_ms,
@@ -1882,10 +1913,20 @@ async fn submit_hmc_chain_lock_inner(
                     &op_hash,
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+                    state.tier_controller.record_declared_usage(now_ms, footprint);
+                let current_anl_24h = declared_write_ema;
                 let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                     req: last_hop.clone(),
+                    chain: Some(chain_req.clone()),
                     root_valid_until,
+                    epoch_day,
+                    epoch_seq,
+                    cumulative_micro_byte_years,
+                    prev_day_final_bytes,
+                    current_anl_24h,
                     declared_write_ema_micro_bj: declared_write_ema,
+                    declared_read_ema_credits: declared_read_ema,
                     sender_pubkey,
                     sender_signature,
                     timestamp_ms: now_ms,
@@ -1925,10 +1966,20 @@ async fn submit_hmc_chain_lock_inner(
             &op_hash,
         );
         let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+            state.tier_controller.record_declared_usage(now_ms, footprint);
+        let current_anl_24h = declared_write_ema;
         let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
             req: last_hop.clone(),
+            chain: Some(chain_req.clone()),
             root_valid_until,
+            epoch_day,
+            epoch_seq,
+            cumulative_micro_byte_years,
+            prev_day_final_bytes,
+            current_anl_24h,
             declared_write_ema_micro_bj: declared_write_ema,
+            declared_read_ema_credits: declared_read_ema,
             sender_pubkey,
             sender_signature,
             timestamp_ms: now_ms,

@@ -340,11 +340,13 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         ),
     );
 
-    // 1. Initial Heartbeat anchors write EMA at 10_000_000 at T = 1_000_000 ms
-    let t1 = 1_000_000u64;
+    // 1. Initial Heartbeat anchors write EMA at 10_000_000 (epoch-bound, 30s freshness)
+    let t1 = pm_shard.net_time_ms();
     let initial_write_ema = 10_000_000u64;
     let digest1 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
         identity_client.node_pubkey(),
+        0,
+        0,
         t1,
         initial_write_ema,
         1000,
@@ -377,10 +379,10 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     assert_eq!(ev.unwrap().declared_write_ema_micro_bj, initial_write_ema);
 
     // 2. Under-reporting attack:
-    // Client sends LockVerifyRequest at T = 1_000_010 ms (delta = 10ms ~ 0s).
+    // Client sends LockVerifyRequest shortly after (delta ~ 10ms ~ 0s).
     // Decayed threshold is ~ 10_000_000 + footprint.
     // Client falsely reports declared_write_ema = 1_000_000 (< threshold)!
-    let t2 = 1_000_010u64;
+    let t2 = t1 + 10;
     let fraudulent_write_ema = 1_000_000u64;
     let hmc_req = humoco_node::api::hmc::L2LockRequest {
         auth: humoco_node::api::hmc::L2AuthPayload {
@@ -407,6 +409,8 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
     let digest2 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
         identity_client.node_pubkey(),
+        0,
+        0,
         t2,
         fraudulent_write_ema,
         0,
@@ -498,8 +502,8 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         ),
     );
 
-    // 1. Gateway G interacts with Shard Node A with high load (10_000_000 micro BJ) at T = 1_000_000 ms
-    let t1 = 1_000_000u64;
+    // 1. Gateway G interacts with Shard Node A with high load (10_000_000 micro BJ)
+    let t1 = pm_a.net_time_ms();
     let high_write_ema = 10_000_000u64;
     let hmc_req_a = humoco_node::api::hmc::L2LockRequest {
         auth: humoco_node::api::hmc::L2AuthPayload {
@@ -526,6 +530,8 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
     let digest_a = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
         identity_g.node_pubkey(),
+        0,
+        0,
         t1,
         high_write_ema,
         0,
@@ -610,6 +616,8 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     let root_valid_until_b = t2 + 86_400_000;
     let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
         identity_g.node_pubkey(),
+        0,
+        0,
         t2,
         fraudulent_low_ema,
         0,

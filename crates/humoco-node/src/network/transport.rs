@@ -93,17 +93,48 @@ impl RequestHandler for DefaultRequestHandler {
     }
 }
 
-/// Verifies the cryptographic authenticity of both evidence packets using Ed25519 (First-Party Evidence Doctrine, Spec 10).
+/// # Architectural Invariant: First-Party Evidence & Anti-Framing (Phase 1 P0, Spec 10)
+///
+/// A node is slashed ONLY on irrefutable cryptographic self-proof: two genuine
+/// Ed25519 signatures by the accused key itself. Simulator BLAKE3 mocks, hearsay
+/// gossip, or third-party claims NEVER trigger a ban. Each pillar enforces:
+/// - ShardEquivocation: both attestations verify under `vk` against the
+///   parent_lock-bound payload digest (`compute_attestation_payload_digest`).
+/// - IngressCounterConflict: both envelopes verify under `vk`, and both
+///   `gateway_pubkey` fields MUST equal `vk` (framing with foreign packets fails).
+/// - HeartbeatSpam: simulator heartbeats carry no Ed25519 self-proof, so this
+///   strict path always returns `false` (no ban on hearsay timing claims).
 pub fn verify_equivocation_first_party(
     vk: &ed25519_dalek::VerifyingKey,
     proof: &humoco_sim_core::fraud::FraudProofPayload,
 ) -> bool {
     match proof.proof_pillar {
         humoco_sim_core::fraud::FraudProofPillar::IngressCounterConflict => {
+            // Anti-framing: never accept unsecured simulator mocks. Both envelopes
+            // must be signed by the accused key itself.
+            let a = match humoco_sim_core::fraud::decode_ingress_envelope(&proof.evidence_packet_a) {
+                Some(e) => e,
+                None => return false,
+            };
+            let b = match humoco_sim_core::fraud::decode_ingress_envelope(&proof.evidence_packet_b) {
+                Some(e) => e,
+                None => return false,
+            };
+            let vk_bytes = vk.to_bytes();
+            if a.gateway_pubkey != vk_bytes || b.gateway_pubkey != vk_bytes {
+                return false;
+            }
+            if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&a)
+                || !humoco_sim_core::fraud::verify_ingress_envelope_signature(&b)
+            {
+                return false;
+            }
             proof.verify()
         }
         humoco_sim_core::fraud::FraudProofPillar::HeartbeatSpam => {
-            proof.verify()
+            // No genuine Ed25519 self-proof exists for simulator heartbeats;
+            // hearsay timing alone must never trigger a ban.
+            false
         }
         humoco_sim_core::fraud::FraudProofPillar::ShardEquivocation => {
             let a = match humoco_sim_core::fraud::decode_attestation(&proof.evidence_packet_a) {
@@ -125,6 +156,12 @@ pub fn verify_equivocation_first_party(
                     Err(_) => return false,
                 };
                 let shard_id = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
+                // Parent-lock binding: the signature commits to (parent_lock, lock_id),
+                // preventing cross-voucher signature transplant replay.
+                let payload_digest = humoco_sim_core::crypto::compute_attestation_payload_digest(
+                    &att.parent_lock,
+                    &att.lock_id,
+                );
                 let d_prov = humoco_sim_core::crypto::compute_sig_digest(
                     humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
                     0,
@@ -132,7 +169,7 @@ pub fn verify_equivocation_first_party(
                     0,
                     shard_id,
                     0,
-                    &att.lock_id,
+                    &payload_digest,
                 );
                 let d_final = humoco_sim_core::crypto::compute_sig_digest(
                     humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL,
@@ -141,7 +178,7 @@ pub fn verify_equivocation_first_party(
                     0,
                     shard_id,
                     1,
-                    &att.lock_id,
+                    &payload_digest,
                 );
 
                 vk.verify_strict(&d_prov, &sig).is_ok()
@@ -333,13 +370,18 @@ impl RequestHandler for NodeRequestHandler {
                 };
                 let write_limit = (5.0 * ncb_eff as f64).round() as u64;
 
+                // # Architectural Invariant: P2P Quota-Bypass Closure (Phase 1 P0)
+                //
+                // The QUIC LockVerify path accepts ONLY `LockWirePayload::Hmc`. Simulator
+                // (`LockWirePayload::Sim`) and legacy raw-tuple `(LockRecord, u64)` framings
+                // are test relics that bypass sender authentication, epoch-bound envelope
+                // signatures, and per-sender quota accounting. They are hard-rejected with
+                // FLAG_UNAUTHORIZED so production quota enforcement cannot be circumvented
+                // over the wire.
                 let wire_payload = match bincode::deserialize::<crate::network::framing::LockWirePayload>(&payload) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        if let Ok((record, root_valid_until)) = bincode::deserialize::<(humoco_sim_core::types::LockRecord, u64)>(&payload) {
-                            crate::network::framing::LockWirePayload::Sim(record, root_valid_until)
-                        } else {
-                            warn!("LockVerifyRequest rejected: invalid payload framing");
+                    Ok(p) => {
+                        if matches!(p, crate::network::framing::LockWirePayload::Sim(..)) {
+                            warn!("LockVerifyRequest rejected: Sim payload bypass forbidden on P2P wire");
                             let resp_header = WireHeader::new(
                                 MsgType::LockVerifyResponse as u16,
                                 header.session_seq.wrapping_add(1),
@@ -349,12 +391,32 @@ impl RequestHandler for NodeRequestHandler {
                             );
                             return Ok((resp_header, Vec::new()));
                         }
+                        p
+                    }
+                    Err(_) => {
+                        warn!("LockVerifyRequest rejected: invalid payload framing (legacy tuple bypass forbidden)");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
                     }
                 };
 
                 let shard_id = match &wire_payload {
-                    crate::network::framing::LockWirePayload::Sim(record, _) => {
-                        u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]])
+                    crate::network::framing::LockWirePayload::Sim(..) => {
+                        warn!("LockVerifyRequest rejected: Sim payload unreachable (defense in depth)");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
                     }
                     crate::network::framing::LockWirePayload::Hmc { req, .. } => {
                         let tag = if req.is_genesis {
@@ -390,8 +452,12 @@ impl RequestHandler for NodeRequestHandler {
                 let timestamp_ms = wire_payload.timestamp_ms();
                 let declared_write_ema = wire_payload.declared_write_ema_micro_bj();
                 let declared_read_ema = wire_payload.declared_read_ema_credits();
+                let envelope_epoch_day = wire_payload.epoch_day();
+                let envelope_epoch_seq = wire_payload.epoch_seq();
 
-                // 1. Cheap check first: declared write rate vs 5x whale brake limit
+                // 1. Cheap checks first (Rule 9): stateless declared-rate filter before
+                // any asymmetric crypto or state mutation. Over-quota senders are
+                // rejected here even with null/invalid signatures.
                 let declared_daily_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_write_ema) / 1_000_000;
                 if declared_daily_rate > write_limit {
                     warn!(declared_daily_rate, write_limit, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: declared write load exceeds 5.0 * ncb_eff");
@@ -405,9 +471,51 @@ impl RequestHandler for NodeRequestHandler {
                     return Ok((resp_header, Vec::new()));
                 }
 
-                // 2. Check authenticated QUIC identity matches sender_pubkey
+                // 2. Strict null-sender rejection: anonymous writes bypass per-sender
+                // quota accounting and first-party fraud attribution. No null sender
+                // may proceed past this point.
+                if sender_pubkey == [0u8; 32] {
+                    warn!("LockVerifyRequest rejected: null sender pubkey (quota-bypass attempt)");
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+                if sender_signature == [0u8; 64] {
+                    warn!("LockVerifyRequest rejected: null sender signature");
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
+                // 3. Sender-timestamp freshness (max 30s drift vs. network time):
+                // stale or futuristic envelopes are replay / time-warp attempts and
+                // must not consume quota or RAM.
+                const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
+                if timestamp_ms == 0 || timestamp_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
+                    warn!(timestamp_ms, now_ms, "LockVerifyRequest rejected: sender timestamp outside 30s drift window");
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+
+                // 4. Check authenticated QUIC identity matches sender_pubkey
                 if let Some(auth_peer) = peer_identity {
-                    if sender_pubkey != [0u8; 32] && sender_pubkey != auth_peer {
+                    if sender_pubkey != auth_peer {
                         warn!(
                             claimed = %hex::encode(sender_pubkey),
                             authenticated = %hex::encode(auth_peer),
@@ -424,41 +532,11 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 }
 
-                // 3. In production (Hmc payloads), reject null senders and null signatures
-                if matches!(wire_payload, crate::network::framing::LockWirePayload::Hmc { .. }) {
-                    if sender_pubkey == [0u8; 32] {
-                        warn!("LockVerifyRequest rejected: null sender pubkey");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
-                    if sender_signature == [0u8; 64] {
-                        warn!("LockVerifyRequest rejected: null sender signature");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
-                }
-
-                // 4. Check if sender is banned
-                let is_banned = if sender_pubkey != [0u8; 32] {
-                    if engine.is_node_banned(&sender_pubkey).await {
-                        true
-                    } else if let Some(pm) = peer_manager.as_ref() {
-                        pm.is_banned(&sender_pubkey).await
-                    } else {
-                        false
-                    }
+                // 5. Check if sender is banned
+                let is_banned = if engine.is_node_banned(&sender_pubkey).await {
+                    true
+                } else if let Some(pm) = peer_manager.as_ref() {
+                    pm.is_banned(&sender_pubkey).await
                 } else {
                     false
                 };
@@ -474,14 +552,20 @@ impl RequestHandler for NodeRequestHandler {
                     return Ok((resp_header, Vec::new()));
                 }
 
-                // 5. Compute operation hash and footprint (including multi-hop chain multiplier)
-                let effective_ts = if timestamp_ms > 0 { timestamp_ms } else { now_ms };
+                // 6. Compute operation hash and footprint (including multi-hop chain multiplier).
+                // Only Hmc survives the bypass gate above; Sim is unreachable defense-in-depth.
+                let effective_ts = timestamp_ms;
                 let (op_hash, footprint, total_by) = match &wire_payload {
-                    crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
-                        let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
-                        let fp = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
-                        let by = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_s);
-                        (record.id, fp, by)
+                    crate::network::framing::LockWirePayload::Sim(..) => {
+                        warn!("LockVerifyRequest rejected: Sim payload unreachable");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
                     }
                     crate::network::framing::LockWirePayload::Hmc { req, root_valid_until, chain, .. } => {
                         let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
@@ -493,124 +577,94 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 };
 
-                // 6. Signature verification and under-reporting check
-                if sender_pubkey != [0u8; 32] && sender_signature != [0u8; 64] {
-                    let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
-                        sender_pubkey,
-                        timestamp_ms,
-                        declared_write_ema,
-                        declared_read_ema,
-                        footprint,
-                        false,
-                        op_hash,
-                        sender_signature,
+                // 7. Epoch-bound signature verification and under-reporting check.
+                // The envelope digest commits to (epoch_day, epoch_seq), so replay
+                // across days or reordering within a day invalidates the signature.
+                let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                    sender_pubkey,
+                    envelope_epoch_day,
+                    envelope_epoch_seq,
+                    timestamp_ms,
+                    declared_write_ema,
+                    declared_read_ema,
+                    footprint,
+                    false,
+                    op_hash,
+                    sender_signature,
+                );
+
+                if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
+                    warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: invalid ingress envelope signature");
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
+                        0,
                     );
-
-                    if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
-                        warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: invalid ingress envelope signature");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
-
-                    if let Some(pm) = peer_manager.as_ref() {
-                        if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
-                            if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
-                                warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: under-reporting detected in LockVerifyRequest! Slashing perpetrator.");
-                                let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
-                                let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
-                                let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
-                                engine.ban_node(sender_pubkey, now_ms).await;
-                                pm.ban_node(&sender_pubkey).await;
-                                pm.broadcast_fraud_proof(proof);
-
-                                let resp_header = WireHeader::new(
-                                    MsgType::LockVerifyResponse as u16,
-                                    header.session_seq.wrapping_add(1),
-                                    header.epoch_id,
-                                    humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
-                                        | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
-                                        | humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
-                                    0,
-                                );
-                                return Ok((resp_header, Vec::new()));
-                            }
-                        }
-                        pm.update_node_write_evidence(&sender_pubkey, curr.clone()).await;
-                        pm.record_observed_evidence(curr.clone()).await;
-                    }
+                    return Ok((resp_header, Vec::new()));
                 }
 
-                // 7. Recipient-side quota reservation check BEFORE mutating RAM index
-                if let Some(tc) = &tier_controller {
-                    if sender_pubkey != [0u8; 32] {
-                        let epoch_day = tc.current_epoch_day_at(effective_ts);
-                        if let Err(e) = tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day) {
-                            warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
+                if let Some(pm) = peer_manager.as_ref() {
+                    if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
+                        if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
+                            warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: under-reporting detected in LockVerifyRequest! Slashing perpetrator.");
+                            let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
+                            let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                            let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+                            let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+                            engine.ban_node(sender_pubkey, now_ms).await;
+                            pm.ban_node(&sender_pubkey).await;
+                            pm.broadcast_fraud_proof(proof);
+
                             let resp_header = WireHeader::new(
                                 MsgType::LockVerifyResponse as u16,
                                 header.session_seq.wrapping_add(1),
                                 header.epoch_id,
-                                humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                                humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
+                                    | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                                    | humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
                                 0,
                             );
                             return Ok((resp_header, Vec::new()));
                         }
                     }
+                    pm.update_node_write_evidence(&sender_pubkey, curr.clone()).await;
+                    pm.record_observed_evidence(curr.clone()).await;
                 }
 
-                // 8. Mutation of RAM index and attestation generation
+                // 8. Reservation-First backpressure (Rule 10): the sender quota MUST be
+                // reserved BEFORE any RAM-index or persistence mutation. If the queue
+                // is full the request is rejected here and RAM stays untouched.
+                if let Some(tc) = &tier_controller {
+                    let epoch_day = tc.current_epoch_day_at(effective_ts);
+                    if let Err(e) = tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day) {
+                        warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+                }
+
+                // 9. Mutation of RAM index and attestation generation.
+                // Reservation-First is complete at this point (quota reserved in step 8);
+                // only now may RAM/persistence be touched.
                 match wire_payload {
-                    crate::network::framing::LockWirePayload::Sim(record, root_valid_until) => {
-                        if engine.is_node_banned(&record.receiver_pub).await {
-                            let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
-                            return Ok((resp_header, Vec::new()));
-                        }
-
-                        let ingress_res = engine.ingress_lock(
-                            record.clone(),
-                            humoco_sim_core::types::SimTime(now_ms),
-                            humoco_sim_core::types::SimTime(root_valid_until),
-                        ).await;
-
-                        match ingress_res {
-                            Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew)
-                            | Ok(humoco_sim_core::storage::IngressVerdictLow::IdempotentReplay) => {
-                                let requested_status = (header.flags & 0xFF) as u8;
-                                let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
-                                let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
-                                    && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
-                                let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
-                                let attestation = crate::api::routes::create_attestation(
-                                    &identity,
-                                    record.id,
-                                    record.parent_lock,
-                                    shard_id,
-                                    final_status,
-                                    now_ms,
-                                );
-                                let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
-                                let payload_len = checked_payload_len(resp_bytes.len())?;
-                                let resp_header = WireHeader::new(
-                                    MsgType::LockVerifyResponse as u16,
-                                    header.session_seq.wrapping_add(1),
-                                    header.epoch_id,
-                                    0,
-                                    payload_len,
-                                );
-                                return Ok((resp_header, resp_bytes));
-                            }
-                            _ => {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
-                                return Ok((resp_header, Vec::new()));
-                            }
-                        }
+                    crate::network::framing::LockWirePayload::Sim(..) => {
+                        warn!("LockVerifyRequest rejected: Sim payload forbidden at mutation gate");
+                        let resp_header = WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
                     }
                     crate::network::framing::LockWirePayload::Hmc { req, chain, .. } => {
                         if let Some(chain_req) = chain {
@@ -831,6 +885,8 @@ impl RequestHandler for NodeRequestHandler {
 
                     let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                         sender_pubkey,
+                        0,
+                        0,
                         timestamp_ms,
                         declared_write_ema,
                         declared_read_ema,
@@ -1242,6 +1298,8 @@ impl RequestHandler for NodeRequestHandler {
                     if hb.signature != [0u8; 64] {
                         let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                             hb.node_id,
+                            0,
+                            0,
                             hb.timestamp_ms,
                             hb.declared_write_ema_micro_bj,
                             hb.declared_read_ema_credits,
@@ -1273,6 +1331,8 @@ impl RequestHandler for NodeRequestHandler {
 
                             let ev_read = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                                 hb.node_id,
+                                0,
+                                0,
                                 hb.timestamp_ms,
                                 hb.declared_write_ema_micro_bj,
                                 hb.declared_read_ema_credits,
@@ -2149,6 +2209,8 @@ impl QuicTransport {
                                                 if hb.signature != [0u8; 64] {
                                                     let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                                                         hb.node_id,
+                                                        0,
+                                                        0,
                                                         hb.timestamp_ms,
                                                         hb.declared_write_ema_micro_bj,
                                                         hb.declared_read_ema_credits,

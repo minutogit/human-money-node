@@ -410,6 +410,9 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
                     .await
                     .expect("verifying key for FINAL signer")
             };
+            let att_parent = decode32(&att.parent_lock);
+            let payload_digest =
+                humoco_sim_core::crypto::compute_attestation_payload_digest(&att_parent, &lock_id);
             let digest = humoco_sim_core::crypto::compute_sig_digest(
                 humoco_sim_core::crypto::domain_approve_final(
                     humoco_sim_core::types::NetworkId::Mainnet,
@@ -419,7 +422,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
                 0,
                 cert.shard_id,
                 1,
-                &lock_id,
+                &payload_digest,
             );
             vk.verify_strict(&digest, &sig).expect("FINAL attestation signature must verify");
         }

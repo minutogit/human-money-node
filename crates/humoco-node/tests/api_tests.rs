@@ -921,8 +921,9 @@ async fn test_api_quorum_certificate_assembly_standalone() {
 
 #[tokio::test]
 async fn test_node_request_handler_lock_verify_and_digest() {
+    use ed25519_dalek::Signer;
     use humoco_node::network::{NodeRequestHandler, RequestHandler};
-    use humoco_sim_core::wire::{MsgType, WireHeader};
+    use humoco_sim_core::wire::{MsgType, WireHeader, FLAG_UNAUTHORIZED};
 
     let temp = tempdir().expect("tempdir");
     let db_path = temp.path().join("test_handler.redb");
@@ -932,7 +933,7 @@ async fn test_node_request_handler_lock_verify_and_digest() {
 
     let handler = NodeRequestHandler::new(engine.clone(), storage.clone(), identity.clone());
 
-    // 1. Test LockVerifyRequest
+    // 1a. Legacy tuple / Sim bypass must be hard-rejected (Phase 1 P0).
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -947,7 +948,84 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         humoco_sim_core::types::SimTime(now_ms),
         humoco_sim_core::types::SimTime(now_ms + 60_000),
     );
-    let payload = bincode::serialize(&(record.clone(), now_ms + 600_000u64)).unwrap();
+    let legacy_payload = bincode::serialize(&(record.clone(), now_ms + 600_000u64)).unwrap();
+    let legacy_header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        1,
+        0,
+        0,
+        legacy_payload.len() as u32,
+    );
+    let (legacy_resp, legacy_bytes) = handler
+        .handle(legacy_header, legacy_payload)
+        .await
+        .expect("handle legacy LockVerifyRequest");
+    assert_eq!(legacy_resp.msg_type, MsgType::LockVerifyResponse as u16);
+    assert_eq!(
+        legacy_resp.flags & FLAG_UNAUTHORIZED,
+        FLAG_UNAUTHORIZED,
+        "Legacy Sim/tuple payload must be rejected with FLAG_UNAUTHORIZED"
+    );
+    assert!(legacy_bytes.is_empty());
+
+    // 1b. Valid Hmc LockVerifyRequest (epoch-bound envelope, fresh timestamp).
+    let sender = NodeIdentity::generate();
+    let root_valid_until = now_ms + 600_000;
+    let mut hmc_req = humoco_node::api::hmc::L2LockRequest {
+        auth: humoco_node::api::hmc::L2AuthPayload {
+            ephemeral_pubkey: *sender.node_pubkey(),
+            auth_signature: None,
+        },
+        layer2_voucher_id: "handler_test_voucher".into(),
+        ds_tag: None,
+        transaction_hash: [0x55; 32],
+        is_genesis: true,
+        sender_ephemeral_pub: *sender.node_pubkey(),
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        deletable_at: Some(root_valid_until.to_string()),
+        privacy_guard: None,
+    };
+    {
+        let payload_hash = humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req);
+        hmc_req.layer2_signature = sender.signing_key().sign(&payload_hash).to_bytes();
+    }
+    let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
+    let footprint =
+        humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        sender.node_pubkey(),
+        0,
+        0,
+        now_ms,
+        0,
+        0,
+        footprint,
+        false,
+        &entry.t_id,
+    );
+    let sig = sender.signing_key().sign(&digest).to_bytes();
+    // Register sender as known peer so direct RPC auth passes without peer_manager.
+    let wire = humoco_node::network::framing::LockWirePayload::Hmc {
+        req: hmc_req,
+        chain: None,
+        root_valid_until,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *sender.node_pubkey(),
+        sender_signature: sig,
+        timestamp_ms: now_ms,
+    };
+    let payload = bincode::serialize(&wire).unwrap();
     let header = WireHeader::new(
         MsgType::LockVerifyRequest as u16,
         1,
@@ -961,11 +1039,13 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     assert!(!resp_payload.is_empty(), "Response payload must contain signed attestation");
 
     let att: humoco_node::api::AttestationDto = bincode::deserialize(&resp_payload).expect("deserialize attestation");
-    assert_eq!(att.lock_id, hex::encode(record.id));
-    assert_eq!(att.parent_lock, hex::encode(record.parent_lock));
+    assert_eq!(att.lock_id, hex::encode(entry.t_id));
     assert_eq!(att.node_id, u16::from_be_bytes([identity.node_id()[0], identity.node_id()[1]]));
 
-    // 2. Test ShardDigestRequest
+    // 2. Test ShardDigestRequest for the actual Hmc shard.
+    let lookup_tag = bs58::encode(&[0x55; 32]).into_string();
+    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+    let hmc_shard = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
     let digest_header = WireHeader::new(
         MsgType::ShardDigestRequest as u16,
         2,
@@ -973,7 +1053,7 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         0,
         2,
     );
-    let shard_payload = 1u16.to_le_bytes().to_vec();
+    let shard_payload = hmc_shard.to_le_bytes().to_vec();
     let (d_resp_header, d_resp_payload) = handler.handle(digest_header, shard_payload).await.expect("handle ShardDigestRequest");
     assert_eq!(d_resp_header.msg_type, MsgType::ShardDigestResponse as u16);
     assert_eq!(d_resp_payload.len(), 40); // 32 bytes digest + 8 bytes count
@@ -1884,10 +1964,18 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
     assert_eq!(qc.status, 0);
     assert_eq!(qc.signer_bitmap, 1);
 
-    // Verify attestation cryptographic signature
+    // Verify attestation cryptographic signature (parent_lock-bound, Phase 1 P0)
     let att = &qc.signatures[0];
     let sig_bytes = hex::decode(&att.signature).unwrap();
     let ed_sig = ed25519_dalek::Signature::from_slice(&sig_bytes).unwrap();
+    let parent_bytes = {
+        let v = hex::decode(&att.parent_lock).unwrap();
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&v);
+        a
+    };
+    let payload_digest =
+        humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_bytes, &t_id_bytes);
     let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
         humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
         0,
@@ -1895,7 +1983,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         0,
         qc.shard_id,
         0,
-        &t_id_bytes,
+        &payload_digest,
     );
     assert!(identity.verifying_key().verify_strict(&sig_digest, &ed_sig).is_ok());
 

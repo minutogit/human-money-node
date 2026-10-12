@@ -72,17 +72,63 @@ async fn test_boot_readiness_barrier_wire_flag() {
         .await
         .expect("connect");
 
-    let parent_lock = [0x55; 32];
     let now_ms = pm_server.net_time_ms();
-    let root_valid = now_ms + 300_000;
-    let rec = LockRecord::new(
-        parent_lock,
-        *client_id.node_pubkey(),
-        vec![1],
-        SimTime(now_ms),
-        SimTime(now_ms + 60_000),
+    let root_valid_until = now_ms + 600_000;
+    let mut hmc_req = humoco_node::api::hmc::L2LockRequest {
+        auth: humoco_node::api::hmc::L2AuthPayload {
+            ephemeral_pubkey: *client_id.node_pubkey(),
+            auth_signature: None,
+        },
+        layer2_voucher_id: "barrier_test_voucher".into(),
+        ds_tag: None,
+        transaction_hash: [0x55; 32],
+        is_genesis: true,
+        sender_ephemeral_pub: *client_id.node_pubkey(),
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        deletable_at: Some(root_valid_until.to_string()),
+        privacy_guard: None,
+    };
+    {
+        use ed25519_dalek::Signer;
+        let payload_hash = humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req);
+        hmc_req.layer2_signature = client_id.signing_key().sign(&payload_hash).to_bytes();
+    }
+    let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        client_id.node_pubkey(),
+        0,
+        0,
+        now_ms,
+        0,
+        0,
+        footprint,
+        false,
+        &entry.t_id,
     );
-    let raw_payload = bincode::serialize(&(rec.clone(), root_valid)).unwrap();
+    use ed25519_dalek::Signer;
+    let sig = client_id.signing_key().sign(&digest).to_bytes();
+    let wire = humoco_node::network::framing::LockWirePayload::Hmc {
+        req: hmc_req,
+        chain: None,
+        root_valid_until,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *client_id.node_pubkey(),
+        sender_signature: sig,
+        timestamp_ms: now_ms,
+    };
+    let raw_payload = bincode::serialize(&wire).unwrap();
 
     // 1. When is_sync_ready is false, LockVerifyRequest MUST return FLAG_NOT_READY
     let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, raw_payload.len() as u32);

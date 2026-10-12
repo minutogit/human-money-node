@@ -512,13 +512,16 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
     let node_u16 = u16::from_le_bytes([offender_node_id[0], offender_node_id[1]]);
     let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
 
+    // Parent_lock-bound payload digests (Phase 1 P0).
+    let p1 = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id_1);
+    let p2 = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id_2);
     let d1 = humoco_sim_core::crypto::compute_sig_digest(
         humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
-        0, 0, 0, shard_id, 0, &lock_id_1,
+        0, 0, 0, shard_id, 0, &p1,
     );
     let d2 = humoco_sim_core::crypto::compute_sig_digest(
         humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
-        0, 0, 0, shard_id, 0, &lock_id_2,
+        0, 0, 0, shard_id, 0, &p2,
     );
 
     use ed25519_dalek::Signer;

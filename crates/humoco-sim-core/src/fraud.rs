@@ -1,6 +1,6 @@
 use crate::crypto::{
-    compute_sig_digest, verify_attestation, DOMAIN_APPROVE_FINAL, DOMAIN_APPROVE_PROV,
-    DOMAIN_INGRESS_DECL,
+    compute_attestation_payload_digest, compute_sig_digest, verify_attestation,
+    DOMAIN_APPROVE_FINAL, DOMAIN_APPROVE_PROV, DOMAIN_INGRESS_DECL,
 };
 use crate::types::{Attestation, NodeId, SimTime};
 
@@ -164,7 +164,7 @@ pub struct IngressEnvelopeEvidence {
     #[serde(default)]
     pub epoch_day: u32,
     #[serde(default)]
-    pub epoch_seq: u32,
+    pub epoch_seq: u64,
     #[serde(default)]
     pub cumulative_micro_byte_years: u64,
     #[serde(default)]
@@ -210,9 +210,14 @@ impl Default for IngressEnvelopeEvidence {
 }
 
 impl IngressEnvelopeEvidence {
+    /// Epoch-bound constructor (Phase 1 P0): `epoch_day` / `epoch_seq` are part of
+    /// the signed preimage so envelopes cannot be replayed across days or reordered
+    /// within a day without invalidating the Ed25519 signature.
     #[allow(clippy::too_many_arguments)]
     pub fn new_v2(
         gateway_pubkey: [u8; 32],
+        epoch_day: u32,
+        epoch_seq: u64,
         timestamp_ms: u64,
         declared_write_ema_micro_bj: u64,
         declared_read_ema_credits: u64,
@@ -223,8 +228,8 @@ impl IngressEnvelopeEvidence {
     ) -> Self {
         Self {
             gateway_pubkey,
-            epoch_day: 0,
-            epoch_seq: 0,
+            epoch_day,
+            epoch_seq,
             cumulative_micro_byte_years: 0,
             prev_day_final_bytes: 0,
             current_anl_24h: 0,
@@ -274,8 +279,22 @@ pub fn compute_ingress_envelope_digest(
     *hasher.finalize().as_bytes()
 }
 
+/// # Architectural Invariant: Epoch-Bound Ingress Envelope (Phase 1 P0)
+///
+/// `epoch_day` and `epoch_seq` are folded into the signed preimage so a captured
+/// envelope cannot be replayed on a later day or reordered within the same day.
+/// Verifiers must reconstruct the digest from the envelope's own
+/// `(epoch_day, epoch_seq)` fields; envelopes with mismatched epochs fail
+/// Ed25519 verification and never trigger quota-fraud slashing.
+///
+/// Digest = BLAKE3(len || DOMAIN_INGRESS_DECL || gateway_pubkey || epoch_day_le
+///   || epoch_seq_le || timestamp_ms_le || write_ema_le || read_ema_le
+///   || footprint_le || is_read || op_hash)
+#[allow(clippy::too_many_arguments)]
 pub fn compute_ingress_envelope_digest_v2(
     gateway_pubkey: &[u8; 32],
+    epoch_day: u32,
+    epoch_seq: u64,
     timestamp_ms: u64,
     declared_write_ema_micro_bj: u64,
     declared_read_ema_credits: u64,
@@ -288,6 +307,8 @@ pub fn compute_ingress_envelope_digest_v2(
     hasher.update(&tag_len);
     hasher.update(DOMAIN_INGRESS_DECL);
     hasher.update(gateway_pubkey);
+    hasher.update(&epoch_day.to_le_bytes());
+    hasher.update(&epoch_seq.to_le_bytes());
     hasher.update(&timestamp_ms.to_le_bytes());
     hasher.update(&declared_write_ema_micro_bj.to_le_bytes());
     hasher.update(&declared_read_ema_credits.to_le_bytes());
@@ -324,7 +345,7 @@ pub fn sign_ingress_envelope_with_key(
     IngressEnvelopeEvidence {
         gateway_pubkey,
         epoch_day,
-        epoch_seq,
+        epoch_seq: epoch_seq as u64,
         cumulative_micro_byte_years,
         prev_day_final_bytes,
         current_anl_24h,
@@ -363,8 +384,11 @@ pub fn sign_ingress_envelope(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sign_ingress_evidence_with_key(
     signing_key: &ed25519_dalek::SigningKey,
+    epoch_day: u32,
+    epoch_seq: u64,
     timestamp_ms: u64,
     declared_write_ema_micro_bj: u64,
     declared_read_ema_credits: u64,
@@ -376,6 +400,8 @@ pub fn sign_ingress_evidence_with_key(
     let gateway_pubkey = signing_key.verifying_key().to_bytes();
     let digest = compute_ingress_envelope_digest_v2(
         &gateway_pubkey,
+        epoch_day,
+        epoch_seq,
         timestamp_ms,
         declared_write_ema_micro_bj,
         declared_read_ema_credits,
@@ -386,8 +412,8 @@ pub fn sign_ingress_evidence_with_key(
     let signature = signing_key.sign(&digest).to_bytes();
     IngressEnvelopeEvidence {
         gateway_pubkey,
-        epoch_day: 0,
-        epoch_seq: 0,
+        epoch_day,
+        epoch_seq,
         cumulative_micro_byte_years: 0,
         prev_day_final_bytes: 0,
         current_anl_24h: 0,
@@ -402,8 +428,11 @@ pub fn sign_ingress_evidence_with_key(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sign_ingress_evidence(
     gateway_key_or_seed: [u8; 32],
+    epoch_day: u32,
+    epoch_seq: u64,
     timestamp_ms: u64,
     declared_write_ema_micro_bj: u64,
     declared_read_ema_credits: u64,
@@ -414,6 +443,8 @@ pub fn sign_ingress_evidence(
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&gateway_key_or_seed);
     sign_ingress_evidence_with_key(
         &signing_key,
+        epoch_day,
+        epoch_seq,
         timestamp_ms,
         declared_write_ema_micro_bj,
         declared_read_ema_credits,
@@ -435,12 +466,14 @@ pub fn decode_ingress_envelope(bytes: &[u8]) -> Option<IngressEnvelopeEvidence> 
 }
 
 pub fn verify_ingress_envelope_signature(env: &IngressEnvelopeEvidence) -> bool {
-    let is_legacy = env.epoch_day > 0 || env.epoch_seq > 0 || env.cumulative_micro_byte_years > 0;
+    let is_legacy = env.cumulative_micro_byte_years > 0
+        || env.prev_day_final_bytes > 0
+        || env.current_anl_24h > 0;
     let digest = if is_legacy {
         compute_ingress_envelope_digest(
             &env.gateway_pubkey,
             env.epoch_day,
-            env.epoch_seq,
+            env.epoch_seq as u32,
             env.cumulative_micro_byte_years,
             env.prev_day_final_bytes,
             env.current_anl_24h,
@@ -450,6 +483,8 @@ pub fn verify_ingress_envelope_signature(env: &IngressEnvelopeEvidence) -> bool 
     } else {
         compute_ingress_envelope_digest_v2(
             &env.gateway_pubkey,
+            env.epoch_day,
+            env.epoch_seq,
             env.timestamp_ms,
             env.declared_write_ema_micro_bj,
             env.declared_read_ema_credits,
@@ -646,7 +681,9 @@ impl FraudProofPayload {
             return false;
         }
 
-        // Verify signatures of both attestations using genuine Ed25519 if valid key
+        // Verify signatures of both attestations using genuine Ed25519 if valid key.
+        // Phase 1 P0: the signed payload digest binds (parent_lock, lock_id) so a
+        // signature cannot be transplanted across vouchers.
         let is_ed25519_valid = if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.perpetrator_node_id) {
             let verify_one = |att: &Attestation| -> bool {
                 let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
@@ -654,6 +691,8 @@ impl FraudProofPayload {
                     Err(_) => return false,
                 };
                 let shard_id = crate::types::extract_shard_id(&att.parent_lock);
+                let payload_digest =
+                    compute_attestation_payload_digest(&att.parent_lock, &att.lock_id);
                 let d_prov = compute_sig_digest(
                     DOMAIN_APPROVE_PROV,
                     0,
@@ -661,7 +700,7 @@ impl FraudProofPayload {
                     0,
                     shard_id,
                     0,
-                    &att.lock_id,
+                    &payload_digest,
                 );
                 let d_final = compute_sig_digest(
                     DOMAIN_APPROVE_FINAL,
@@ -670,7 +709,7 @@ impl FraudProofPayload {
                     0,
                     shard_id,
                     1,
-                    &att.lock_id,
+                    &payload_digest,
                 );
                 vk.verify_strict(&d_prov, &sig).is_ok()
                     || vk.verify_strict(&d_final, &sig).is_ok()

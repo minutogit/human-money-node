@@ -331,8 +331,12 @@ impl NodeDaemon {
                         let declared_write_ema = hb_tc.current_write_ema_micro_bj();
                         let declared_read_ema = hb_tc.current_read_ema_credits();
                         let now_ms = hb_pm.net_time_ms();
+                        // Epoch-bound envelope (Phase 1 P0); heartbeat carries no
+                        // lock epoch state so it binds epoch (0, 0).
                         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                             &node_id,
+                            0,
+                            0,
                             now_ms,
                             declared_write_ema,
                             declared_read_ema,

@@ -19,6 +19,7 @@ pub const DOMAIN_INGRESS_DECL: &[u8] = b"HUMOCO_V1_INGRESS_DECL";
 pub const DOMAIN_BRIDGE_LOCK: &[u8] = b"HUMOCO_V1_BRIDGE_LOCK";
 pub const DOMAIN_HYBRID_NODE_ID: &[u8] = b"HUMOCO_V2_HYBRID_NODE_ID";
 pub const DOMAIN_HRW_ROUTING_TICKET: &[u8] = b"HUMOCO_V1_HRW_ROUTING_TICKET";
+pub const DOMAIN_ATTESTATION_PAYLOAD: &[u8] = b"HUMOCO_V1_ATTESTATION_PAYLOAD";
 
 /// Computes the deterministic work score W from a 32-byte PoW proof hash.
 ///
@@ -147,8 +148,35 @@ pub fn compute_canonical_hash_normalized(
     *hasher.finalize().as_bytes()
 }
 
+/// # Architectural Invariant: parent_lock Binding in Attestation Signatures (Phase 1 P0)
+///
+/// The attestation payload digest binds BOTH `parent_lock` and `lock_id` under a
+/// length-prefixed domain tag. Without this binding, an attacker could replay a
+/// valid shard signature for `lock_id` onto a divergent `parent_lock` (cross-voucher
+/// replay / signature transplant). The payload digest is the sole preimage fed into
+/// `compute_sig_digest`; verifiers must recompute it from the claimed
+/// `(parent_lock, lock_id)` pair and never trust a bare `lock_id`.
+///
+/// PayloadDigest = BLAKE3(len || "HUMOCO_V1_ATTESTATION_PAYLOAD" || parent_lock || lock_id)
+pub fn compute_attestation_payload_digest(
+    parent_lock: &[u8; 32],
+    lock_id: &[u8; 32],
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    let tag_len = DOMAIN_ATTESTATION_PAYLOAD.len() as u8;
+    hasher.update(&[tag_len]);
+    hasher.update(DOMAIN_ATTESTATION_PAYLOAD);
+    hasher.update(parent_lock);
+    hasher.update(lock_id);
+    *hasher.finalize().as_bytes()
+}
+
 /// Single source of truth preimage hashing with length prefix (docs/04:276, docs/10:193)
 /// SigDigest = BLAKE3(len || DOMAIN_TAG || epoch_id_le || session_seq_le || flags_le || shard_id_le || status_tag || payload_digest)
+///
+/// NOTE: `payload_digest` for attestations MUST be
+/// `compute_attestation_payload_digest(parent_lock, lock_id)` so the Ed25519
+/// signature transitively commits to the voucher lineage (`parent_lock`).
 pub fn compute_sig_digest(
     domain_tag: &[u8],
     epoch_id: u32,

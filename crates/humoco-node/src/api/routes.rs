@@ -483,7 +483,13 @@ async fn get_peers(
 }
 
 
-/// Creates and signs an attestation for a lock ID with the NodeIdentity using canonical SigDigest with domain separation.
+/// # Architectural Invariant: parent_lock-Bound Attestations (Phase 1 P0)
+///
+/// Creates and signs an attestation for a lock ID with the NodeIdentity using the
+/// canonical SigDigest with domain separation. The signed preimage is NOT the bare
+/// `lock_id`: it is `compute_attestation_payload_digest(parent_lock, lock_id)`, so
+/// the Ed25519 signature transitively commits to the voucher lineage. A signature
+/// replayed onto a divergent `parent_lock` fails verification.
 pub fn create_attestation_for_network(
     identity: &NodeIdentity,
     lock_id: [u8; 32],
@@ -499,6 +505,8 @@ pub fn create_attestation_for_network(
     } else {
         humoco_sim_core::crypto::domain_approve_prov(network_id)
     };
+    let payload_digest =
+        humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id);
     let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
         domain_tag,
         0,
@@ -506,7 +514,7 @@ pub fn create_attestation_for_network(
         0,
         shard_id,
         status,
-        &lock_id,
+        &payload_digest,
     );
     let signature = identity.signing_key().sign(&sig_digest);
     AttestationDto {
@@ -627,9 +635,10 @@ fn verify_signer_bitmap_consistency(signatures: &[AttestationDto], bitmap: u32) 
 }
 
 /// Verifies a peer attestation's cryptographic fields and HRW binding.
-/// Checks verifying-key existence, signature/lock_id hex decoding, lock_id
-/// equality, and Ed25519 `verify_strict` against the canonical sig digest.
-/// Returns `true` only when fully valid; logs warnings otherwise.
+/// Checks verifying-key existence, signature/lock_id/parent_lock hex decoding,
+/// lock_id equality, and Ed25519 `verify_strict` against the parent_lock-bound
+/// canonical sig digest (Phase 1 P0). Returns `true` only when fully valid;
+/// logs warnings otherwise.
 async fn verify_peer_attestation(
     peer_mgr: &crate::network::PeerManager,
     att: &AttestationDto,
@@ -678,13 +687,31 @@ async fn verify_peer_attestation(
         return false;
     }
 
+    let att_parent_lock_bytes = match hex::decode(&att.parent_lock) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            tracing::warn!(node_id = att.node_id, "Dropped attestation: invalid parent_lock hex");
+            return false;
+        }
+    };
+
     let domain_tag = if target_status == 1 {
         humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL
     } else {
         humoco_sim_core::crypto::DOMAIN_APPROVE_PROV
     };
+    // Parent-lock binding (Phase 1 P0): the signature commits to
+    // (parent_lock, lock_id); transplanted signatures fail here.
+    let payload_digest = humoco_sim_core::crypto::compute_attestation_payload_digest(
+        &att_parent_lock_bytes,
+        &expected_lock_id,
+    );
     let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
-        domain_tag, 0, 0, 0, shard_id, target_status, &expected_lock_id,
+        domain_tag, 0, 0, 0, shard_id, target_status, &payload_digest,
     );
 
     if let Err(e) = vk.verify_strict(&sig_digest, &sig) {
@@ -1156,8 +1183,12 @@ async fn assemble_status_quorum_certificate(
                     let declared_read_ema = state.tier_controller.current_read_ema_credits();
                     let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
                     let sender_pubkey = *state.identity.node_pubkey();
+                    // Epoch-bound envelope (Phase 1 P0); read path carries no
+                    // epoch state so it binds epoch (0, 0).
                     let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                         &sender_pubkey,
+                        0,
+                        0,
                         now_ms,
                         declared_write_ema,
                         declared_read_ema,
@@ -1528,8 +1559,15 @@ async fn submit_hmc_lock(
                 let ttl_sec = (root_valid_until.saturating_sub(now_ms)) / 1000;
                 let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
                 let op_hash = entry.t_id;
+                // Epoch-bound envelope (Phase 1 P0): reserve epoch first so the
+                // signed digest and the wire payload commit to the same
+                // (epoch_day, epoch_seq).
+                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+                    state.tier_controller.record_declared_usage(now_ms, footprint);
                 let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                     &sender_pubkey,
+                    epoch_day,
+                    epoch_seq,
                     now_ms,
                     declared_write_ema,
                     declared_read_ema,
@@ -1538,8 +1576,6 @@ async fn submit_hmc_lock(
                     &op_hash,
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-                    state.tier_controller.record_declared_usage(now_ms, footprint);
                 let current_anl_24h = declared_write_ema;
                 let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                     req: req.clone(),
@@ -1743,8 +1779,15 @@ async fn submit_hmc_lock(
                 let sender_pubkey = *state.identity.node_pubkey();
                 let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
                 let op_hash = entry.t_id;
+                // Epoch-bound envelope (Phase 1 P0): reserve epoch first so the
+                // signed digest and the wire payload commit to the same
+                // (epoch_day, epoch_seq).
+                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+                    state.tier_controller.record_declared_usage(now_ms, footprint);
                 let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                     &sender_pubkey,
+                    epoch_day,
+                    epoch_seq,
                     now_ms,
                     declared_write_ema,
                     declared_read_ema,
@@ -1753,8 +1796,6 @@ async fn submit_hmc_lock(
                     &op_hash,
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-                    state.tier_controller.record_declared_usage(now_ms, footprint);
                 let current_anl_24h = declared_write_ema;
                 let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                     req: req.clone(),
@@ -1786,8 +1827,13 @@ async fn submit_hmc_lock(
         let sender_pubkey = *state.identity.node_pubkey();
         let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
         let op_hash = entry.t_id;
+        // Epoch-bound envelope (Phase 1 P0).
+        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+            state.tier_controller.record_declared_usage(now_ms, footprint);
         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
             &sender_pubkey,
+            epoch_day,
+            epoch_seq,
             now_ms,
             declared_write_ema,
             declared_read_ema,
@@ -1796,8 +1842,6 @@ async fn submit_hmc_lock(
             &op_hash,
         );
         let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-            state.tier_controller.record_declared_usage(now_ms, footprint);
         let current_anl_24h = declared_write_ema;
         let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
             req: req.clone(),
@@ -2062,8 +2106,13 @@ async fn submit_hmc_chain_lock_inner(
                 let sender_pubkey = *state.identity.node_pubkey();
                 let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds).saturating_mul(chain_req.chain.len() as u64);
                 let op_hash = lock_entry.t_id;
+                // Epoch-bound envelope (Phase 1 P0).
+                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+                    state.tier_controller.record_declared_usage(now_ms, footprint);
                 let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                     &sender_pubkey,
+                    epoch_day,
+                    epoch_seq,
                     now_ms,
                     declared_write_ema,
                     declared_read_ema,
@@ -2072,8 +2121,6 @@ async fn submit_hmc_chain_lock_inner(
                     &op_hash,
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-                    state.tier_controller.record_declared_usage(now_ms, footprint);
                 let current_anl_24h = declared_write_ema;
                 let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
                     req: last_hop.clone(),
@@ -2115,8 +2162,13 @@ async fn submit_hmc_chain_lock_inner(
         let sender_pubkey = *state.identity.node_pubkey();
         let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds).saturating_mul(chain_req.chain.len() as u64);
         let op_hash = entry.t_id;
+        // Epoch-bound envelope (Phase 1 P0).
+        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+            state.tier_controller.record_declared_usage(now_ms, footprint);
         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
             &sender_pubkey,
+            epoch_day,
+            epoch_seq,
             now_ms,
             declared_write_ema,
             declared_read_ema,
@@ -2125,8 +2177,6 @@ async fn submit_hmc_chain_lock_inner(
             &op_hash,
         );
         let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-            state.tier_controller.record_declared_usage(now_ms, footprint);
         let current_anl_24h = declared_write_ema;
         let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
             req: last_hop.clone(),

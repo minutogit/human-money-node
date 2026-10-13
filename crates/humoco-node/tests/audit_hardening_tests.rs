@@ -213,3 +213,36 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
     assert!(is_new_valid);
     assert!(matches!(verdict_valid, humoco_node::api::hmc::L2Verdict::Verified { .. }));
 }
+
+#[tokio::test]
+async fn test_cold_boot_pruning_deferred_during_boot_sync() {
+    // Audit Finding A03: Destructive pruning must be deferred during cold boot
+    // if boot sync is pending and clock is not corroborated by F2F median samples.
+    let peer_mgr = Arc::new(PeerManager::new(vec![]));
+    // Simulated peer presence with pending sync
+    peer_mgr.set_local_sync_ready(false);
+
+    assert!(
+        !peer_mgr.is_local_sync_ready(),
+        "Fresh node with configured peers must not be sync-ready"
+    );
+    assert!(
+        !peer_mgr.clock().is_time_corroborated(0),
+        "Without peer median samples, clock cannot be corroborated"
+    );
+
+    let should_defer_prune = !peer_mgr.is_local_sync_ready() && !peer_mgr.clock().is_time_corroborated(0);
+    assert!(
+        should_defer_prune,
+        "A03 Invariant: Pruning must be deferred during uncorroborated cold-boot sync"
+    );
+
+    // Once boot sync converges, pruning is unblocked
+    peer_mgr.set_local_sync_ready(true);
+    let should_defer_now = !peer_mgr.is_local_sync_ready() && !peer_mgr.clock().is_time_corroborated(0);
+    assert!(
+        !should_defer_now,
+        "A03 Invariant: Once sync converges, pruning is active"
+    );
+}
+

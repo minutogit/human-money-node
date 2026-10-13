@@ -387,7 +387,13 @@ impl NodeDaemon {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(prune_interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await;
-            let mut last_prune_anchor = 0u64;
+
+            // # Architectural Invariant (A03): Cold-Boot Pruning Clock Anchor
+            // Initialize anchor immediately to current net time so first tick cannot suffer
+            // from uninspected NTP forward jumps without F2F consensus (Spec 07 / INV-1203).
+            let mut last_prune_anchor = prune_pm.net_time_ms();
+            prune_engine.last_prune_anchor.store(last_prune_anchor, std::sync::atomic::Ordering::Relaxed);
+
             loop {
                 tokio::select! {
                     _ = prune_cancel.cancelled() => {
@@ -395,6 +401,13 @@ impl NodeDaemon {
                         break;
                     }
                     _ = interval.tick() => {
+                        // Cold-start & sync barrier: if boot sync is still pending and the local clock
+                        // has not received enough F2F median samples, defer destructive pruning.
+                        if !prune_pm.is_local_sync_ready() && !prune_pm.clock().is_time_corroborated(0) {
+                            debug!("TTL pruning ticker: deferred during boot sync / uncorroborated clock");
+                            continue;
+                        }
+
                         let now_ms = prune_pm.net_time_ms();
                         // Inspect time drift BEFORE mutating the pruning anchor (Spec 07 / INV-1203)
                         if last_prune_anchor > 0 {

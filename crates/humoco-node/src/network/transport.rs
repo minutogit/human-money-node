@@ -593,8 +593,7 @@ impl RequestHandler for NodeRequestHandler {
                     return Ok((resp_header, Vec::new()));
                 }
 
-                // 6. Compute operation hash and footprint (including multi-hop chain multiplier).
-                // Only Hmc survives the bypass gate above; Sim is unreachable defense-in-depth.
+                // The envelope digest commits to sender's timestamp_ms (fresh within 30s drift window)
                 let effective_ts = timestamp_ms;
                 let (op_hash, footprint, total_by) = match &wire_payload {
                     crate::network::framing::LockWirePayload::Sim(..) => {
@@ -678,7 +677,7 @@ impl RequestHandler for NodeRequestHandler {
                 // reserved BEFORE any RAM-index or persistence mutation. If the queue
                 // is full the request is rejected here and RAM stays untouched.
                 if let Some(tc) = &tier_controller {
-                    let epoch_day = tc.current_epoch_day_at(effective_ts);
+                    let epoch_day = tc.current_epoch_day_at(now_ms);
                     if let Err(e) = tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day) {
                         warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
                         let resp_header = WireHeader::new(
@@ -1023,7 +1022,7 @@ impl RequestHandler for NodeRequestHandler {
                 // 5. Recipient-side read quota check
                 if let Some(tc) = &tier_controller {
                     if sender_pubkey != [0u8; 32] {
-                        let epoch_day = tc.current_epoch_day_at(if timestamp_ms > 0 { timestamp_ms } else { now_ms });
+                        let epoch_day = tc.current_epoch_day_at(now_ms);
                         if let Err(e) = tc.evaluate_node_read_quota(&sender_pubkey, 1, epoch_day) {
                             warn!(error = ?e, sender = %hex::encode(sender_pubkey), "StatusQuery rejected: node read quota exceeded");
                             let resp_header = WireHeader::new(

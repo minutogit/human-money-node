@@ -327,8 +327,47 @@ async fn submit_lock(
 /// Handler for POST /v1/sync
 async fn sync_locks(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<SyncRequest>,
-) -> (StatusCode, Json<SyncResponse>) {
+) -> Response {
+    state.metrics.record_read();
+    let now_ms = state.net_time_ms();
+    let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
+
+    // Rate-limiting / quota protection for heavy sync queries (A09 & Rule 9)
+    let client_node_id: u16 = if let Some(auth) = headers.get("Authorization").and_then(|h| h.to_str().ok()) {
+        let tag = state.tier_controller.resolve_account_tag(auth).unwrap_or([0u8; 32]);
+        u16::from_be_bytes([tag[0], tag[1]])
+    } else if let Some(peer_token) = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok()) {
+        let hash = *blake3::hash(peer_token.as_bytes()).as_bytes();
+        u16::from_be_bytes([hash[0], hash[1]])
+    } else {
+        let first_loc = payload.sparse_locators.first().map(|s| s.as_bytes()).unwrap_or(b"sync_anonymous");
+        let hash = *blake3::hash(first_loc).as_bytes();
+        u16::from_be_bytes([hash[0], hash[1]])
+    };
+
+    let sync_read_credits = 5;
+    if let Err(ingress_err) = state.tier_controller.evaluate_read_quota(client_node_id, sync_read_credits, epoch_day, 1.0) {
+        let reason = match ingress_err {
+            IngressError::ReadQuotaExceeded { available, required } => {
+                format!(
+                    "429 Read quota exceeded: required {} credits, available {}",
+                    required, available
+                )
+            }
+            _ => "429 Read quota exceeded".into(),
+        };
+        let err_resp = ErrorResponse {
+            error: "ReadQuotaExceeded".into(),
+            message: reason,
+            challenge: None,
+            difficulty: None,
+            expires_at: None,
+        };
+        return (StatusCode::TOO_MANY_REQUESTS, Json(err_resp)).into_response();
+    }
+
     // Bounded locators (INV-0310 & Rule 9): Max 256 locators of max 128 bytes to prevent Read-DoS memory bloat
     const MAX_SYNC_LOCATORS: usize = 256;
     const MAX_SYNC_LOCATOR_LEN: usize = 128;
@@ -339,7 +378,6 @@ async fn sync_locks(
         .filter(|l| l.len() <= MAX_SYNC_LOCATOR_LEN)
         .collect();
 
-    let now_ms = state.net_time_ms();
     let mut lock_map = std::collections::HashMap::new();
 
     // 1. Read from persistent disk storage
@@ -399,7 +437,7 @@ async fn sync_locks(
         }
     }
 
-    (StatusCode::OK, Json(SyncResponse { locks }))
+    (StatusCode::OK, Json(SyncResponse { locks })).into_response()
 }
 
 /// Handler for GET /v1/pow-challenge
@@ -1631,17 +1669,6 @@ async fn submit_hmc_lock(
         return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
     }
 
-    // 1. Verify V3 signature
-    if !verify_l2_lock_signature(&req) {
-        let envelope = wrap_and_sign_verdict(
-            &state.identity,
-            L2Verdict::Rejected {
-                reason: "Invalid cryptographic signature".into(),
-            },
-        );
-        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
-    }
-
     // Lifecycle sunset & bridge lock checks
     let suite_id = if req.privacy_guard.as_deref().is_some_and(|s| s.contains("suite2")) { 2 } else { 1 };
 
@@ -1782,6 +1809,67 @@ async fn submit_hmc_lock(
         true
     };
 
+    // # Architectural Invariant (Rule 9 / A09): Cheap-Checks-First
+    // 1. Validate credentials presence in RAM (< 1 µs) BEFORE expensive Ed25519 verification.
+    let ttl_seconds = (root_valid_until.saturating_sub(now_ms)) / 1000;
+    let auth_token = headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s));
+    let peer_token = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok());
+    let pow_challenge = headers.get("X-PoW-Challenge").and_then(|h| h.to_str().ok());
+    let pow_nonce = headers
+        .get("X-PoW-Nonce")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let parent_for_pow = if req.is_genesis {
+        None
+    } else {
+        Some(&parent_bytes)
+    };
+
+    let has_credentials = auth_token.is_some()
+        || peer_token.is_some()
+        || (pow_challenge.is_some() && pow_nonce.is_some());
+
+    if !has_credentials {
+        let (status, reason, req_diff) = match state
+            .tier_controller
+            .evaluate_and_charge_with_time(
+                None,
+                None,
+                None,
+                None,
+                ttl_seconds,
+                parent_for_pow,
+                Some(now_ms),
+            )
+            .await
+        {
+            Err(IngressError::PoWRequired { difficulty, .. }) => {
+                state.metrics.record_rejected_bad_pow_400();
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Proof-of-Work challenge response required".to_string(),
+                    Some(difficulty),
+                )
+            }
+            _ => (StatusCode::UNAUTHORIZED, "Unauthorized".to_string(), None),
+        };
+        let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
+        let mut resp = (status, Json(envelope)).into_response();
+        if let Some(req_diff) = req_diff {
+            if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
+                resp.headers_mut().insert(
+                    axum::http::HeaderName::from_static("x-required-difficulty"),
+                    hdr_val,
+                );
+            }
+        }
+        return resp;
+    }
+
     // 4. Fast-path idempotency check: if identical lock already verified in RAM, return 200 OK immediately
     // Phase 10 (Hot-Path-Locks): the RAM read guard is cloned and dropped
     // BEFORE any network await (`assemble_quorum_certificate`), so writers
@@ -1793,6 +1881,17 @@ async fn submit_hmc_lock(
         };
         if let Some(existing) = existing_opt {
             if existing.t_id == entry.t_id {
+                // Verify signature on idempotent retry so caller cannot forge verdicts with invalid signatures
+                if !verify_l2_lock_signature(&req) {
+                    let envelope = wrap_and_sign_verdict(
+                        &state.identity,
+                        L2Verdict::Rejected {
+                            reason: "Invalid cryptographic signature".into(),
+                        },
+                    );
+                    return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+                }
+
                 let verdict = L2Verdict::Verified { lock_entry: existing.clone() };
                 let now_ms = state.net_time_ms();
                 let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
@@ -1884,28 +1983,6 @@ async fn submit_hmc_lock(
         }
     }
 
-    // 5. Perform 3-Tier Access Evaluation with exact Byte-Years based on root validity
-    // Storage space is occupied until root_valid_until! Gateway cannot cheat byte-years.
-    let ttl_seconds = (root_valid_until.saturating_sub(now_ms)) / 1000;
-
-    let auth_token = headers
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s));
-    let peer_token = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok());
-    let pow_challenge = headers.get("X-PoW-Challenge").and_then(|h| h.to_str().ok());
-    let pow_nonce = headers
-        .get("X-PoW-Nonce")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-
-    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-    let parent_for_pow = if req.is_genesis {
-        None
-    } else {
-        Some(&parent_bytes)
-    };
-
     let ingress_tier = match state
         .tier_controller
         .evaluate_and_charge_with_time(
@@ -1981,10 +2058,7 @@ async fn submit_hmc_lock(
                     }
                 }
             }
-            let envelope = wrap_and_sign_verdict(
-                &state.identity,
-                L2Verdict::Rejected { reason },
-            );
+            let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
             let mut resp = (status, Json(envelope)).into_response();
             if let Some(req_diff) = required_diff_hdr {
                 if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
@@ -1997,6 +2071,25 @@ async fn submit_hmc_lock(
             return resp;
         }
     };
+
+    // 2. Verify V3 signature: only executed after cheap credential check passes!
+    if !verify_l2_lock_signature(&req) {
+        if let crate::ingress::IngressTier::Tier1Vip = ingress_tier {
+            if let Some(token) = auth_token {
+                if let Ok(account_tag) = state.tier_controller.resolve_account_tag(token) {
+                    let required_byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
+                    let _ = state.tier_controller.topup_vip_quota(account_tag, required_byte_years);
+                }
+            }
+        }
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: "Invalid cryptographic signature".into(),
+            },
+        );
+        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+    }
 
     let tier_str = match ingress_tier {
         crate::ingress::IngressTier::Tier1Vip => "VIP",

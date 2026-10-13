@@ -753,7 +753,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         _ => panic!("Expected UnknownVoucher verdict!"),
     }
 
-    // 5. Invalid Signature
+    // 5. Invalid Signature (with valid F2F token -> 400 Bad Request)
     println!("-> Sending Invalid Signature (tampered layer2_signature)...");
     let mut bad_req = genesis_req.clone();
     bad_req.layer2_signature[0] ^= 0xFF;
@@ -764,7 +764,10 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
             "POST",
             "/v1/lock",
             Some(&json_body),
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("X-Peer-Token", "cluster_f2f_token"),
+            ],
         )
         .await
         .expect("Failed to send invalid-sig request");
@@ -777,6 +780,18 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         }
         _ => panic!("Server accepted invalid cryptographic signature!"),
     }
+
+    // 5b. Rule 9 (Cheap-Checks-First): unauthenticated request must be rejected with 401 BEFORE signature check
+    let (status_unauth, _) = node
+        .http_request(
+            "POST",
+            "/v1/lock",
+            Some(&json_body),
+            &[("Content-Type", "application/json")],
+        )
+        .await
+        .expect("Failed to send unauth request");
+    assert_eq!(status_unauth, StatusCode::UNAUTHORIZED);
 
     println!("Compliance Test completed successfully!");
 }

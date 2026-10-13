@@ -819,15 +819,17 @@ async fn test_api_hmc_native_flow() {
         _ => panic!("Expected UnknownVoucher verdict"),
     }
 
-    // 5. Invalid signature
+    // 5. Invalid signature with valid F2F token -> 400 Bad Request
     let mut bad_sig_req = genesis_req.clone();
     bad_sig_req.layer2_signature[0] ^= 0xFF;
     let res_bad = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/lock")
                 .header("content-type", "application/json")
+                .header("X-Peer-Token", "hmc_test_token")
                 .body(Body::from(serde_json::to_vec(&bad_sig_req).unwrap()))
                 .unwrap(),
         )
@@ -841,6 +843,24 @@ async fn test_api_hmc_native_flow() {
         }
         _ => panic!("Expected Rejected verdict for bad signature"),
     }
+
+    // 5b. Rule 9 (Cheap-Checks-First): unauthenticated bad signature must be rejected with 401 BEFORE signature check
+    let res_unauth_bad = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&bad_sig_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_unauth_bad.status(),
+        StatusCode::UNAUTHORIZED,
+        "Rule 9 / A09: Unauthenticated spam must be rejected with 401 before expensive signature verification"
+    );
 }
 
 #[tokio::test]

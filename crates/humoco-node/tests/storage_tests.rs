@@ -183,7 +183,13 @@ async fn test_dual_tier_engine_hotpath_and_async_flush() {
         let _ = engine.ingress_lock(l, now, root_valid).await;
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(120)).await;
+    // Poll for remaining items to be flushed under heavy test-runner load (batch 2 has 20 items, waits for periodic tick)
+    for _ in 0..50 {
+        if storage.get_lock(&[219; 32]).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+    }
 
     for i in 100..220u8 {
         let parent = [i; 32];

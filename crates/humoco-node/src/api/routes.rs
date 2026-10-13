@@ -329,8 +329,15 @@ async fn sync_locks(
     State(state): State<AppState>,
     Json(payload): Json<SyncRequest>,
 ) -> (StatusCode, Json<SyncResponse>) {
-    state.metrics.record_read();
-    let locators: HashSet<String> = payload.sparse_locators.into_iter().collect();
+    // Bounded locators (INV-0310 & Rule 9): Max 256 locators of max 128 bytes to prevent Read-DoS memory bloat
+    const MAX_SYNC_LOCATORS: usize = 256;
+    const MAX_SYNC_LOCATOR_LEN: usize = 128;
+    let locators: HashSet<String> = payload
+        .sparse_locators
+        .into_iter()
+        .take(MAX_SYNC_LOCATORS)
+        .filter(|l| l.len() <= MAX_SYNC_LOCATOR_LEN)
+        .collect();
 
     let now_ms = state.net_time_ms();
     let mut lock_map = std::collections::HashMap::new();

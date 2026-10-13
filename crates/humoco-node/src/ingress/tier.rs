@@ -84,6 +84,13 @@ pub enum IngressError {
 /// failures are handled exclusively inside `PeerManager` via local TTL pruning / circuit
 /// breaker, never via ingress denial (cf. `AGENTS.md` — Local Node Perspective / First-Party
 /// Evidence doctrine).
+/// FIFO-sequenced VIP quota persist operation.
+#[derive(Debug, Clone, Copy)]
+struct VipQuotaPersistOp {
+    account_tag: [u8; 32],
+    remaining: u64,
+}
+
 #[derive(Clone)]
 pub struct TierController {
     storage: Arc<RedbStorage>,
@@ -102,11 +109,29 @@ pub struct TierController {
     prev_day_final_bytes: Arc<AtomicU64>,
     current_epoch_day_cached: Arc<AtomicU64>,
     last_thermometer_day: Arc<AtomicU64>,
+    vip_persist_tx: tokio::sync::mpsc::Sender<VipQuotaPersistOp>,
 }
 
 impl TierController {
     /// Creates a new TierController with storage, PoW engine, and initialized NetworkThermometer.
+    ///
+    /// Spawns a FIFO-sequenced VIP quota persist worker that processes write operations
+    /// in strict order, preventing out-of-order write races from unsequenced `tokio::spawn`.
     pub fn new(storage: Arc<RedbStorage>, pow_engine: Arc<PowEngine>) -> Self {
+        let (vip_persist_tx, mut vip_persist_rx) = tokio::sync::mpsc::channel::<VipQuotaPersistOp>(1_024);
+        let persist_storage = storage.clone();
+        tokio::spawn(async move {
+            while let Some(op) = vip_persist_rx.recv().await {
+                let storage = persist_storage.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    storage.set_quota(&op.account_tag, op.remaining)
+                }).await;
+                if let Err(e) = res {
+                    tracing::warn!("FIFO VIP quota persist join error: {:?}", e);
+                }
+            }
+        });
+
         Self {
             storage,
             pow_engine,
@@ -124,6 +149,7 @@ impl TierController {
             prev_day_final_bytes: Arc::new(AtomicU64::new(0)),
             current_epoch_day_cached: Arc::new(AtomicU64::new(0)),
             last_thermometer_day: Arc::new(AtomicU64::new(0)),
+            vip_persist_tx,
         }
     }
 
@@ -218,14 +244,14 @@ impl TierController {
     }
 
     /// Flushes a single cached balance to durable storage asynchronously without blocking hot-path.
+    ///
+    /// Uses a FIFO channel to sequence writes, preventing out-of-order write races
+    /// that could occur with unsequenced `tokio::spawn` calls.
     fn persist_vip_quota_async(&self, account_tag: [u8; 32], remaining: u64) {
-        let storage = self.storage.clone();
-        tokio::spawn(async move {
-            let res = tokio::task::spawn_blocking(move || storage.set_quota(&account_tag, remaining)).await;
-            if let Err(e) = res {
-                tracing::warn!("async VIP quota persist join error: {:?}", e);
-            }
-        });
+        let op = VipQuotaPersistOp { account_tag, remaining };
+        if let Err(e) = self.vip_persist_tx.try_send(op) {
+            tracing::warn!("FIFO VIP quota persist channel send failed: {:?}", e);
+        }
     }
 
     /// In-memory atomic check-and-charge for VIP quota (hot-path, <1µs, no fsync stall).

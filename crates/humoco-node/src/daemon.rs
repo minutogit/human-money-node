@@ -118,9 +118,12 @@ impl NodeDaemon {
         // Initialize RedbStorage and DualTierEngine
         let db_path = self.config.storage.data_dir.join("humoco.redb");
         let storage = std::sync::Arc::new(crate::storage::RedbStorage::open(&db_path)?);
+        // Decouple flush worker cancellation from master daemon cancellation so that
+        // HTTP/QUIC listeners can finish in-flight requests before the flush worker drains.
+        let flush_cancel_token = tokio_util::sync::CancellationToken::new();
         let (engine, flush_handle) = crate::storage::DualTierEngine::new_with_token(
             storage.clone(),
-            self.cancel_token.clone(),
+            flush_cancel_token.clone(),
         );
         // Cold-boot recovery: Load all records into RAM index without premature pruning.
         // Unverified host SystemTime must not be trusted before P2P median synchronization (Spec 07 / INV-1203).
@@ -778,6 +781,9 @@ impl NodeDaemon {
         let _ = alert_handle.await;
         let _ = stats_handle.await;
         let _ = history_handle.await;
+        // Cancel the flush worker only after all listeners have finished in-flight requests,
+        // ensuring the flush worker drains remaining operations before shutdown completes.
+        flush_cancel_token.cancel();
         let _ = flush_handle.await;
         info!("HuMoCo node daemon stopped.");
         Ok(())

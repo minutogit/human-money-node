@@ -252,6 +252,13 @@ impl HmcRamIndex {
     }
 
     /// Prune expired HMC locks where now > valid_until + 30s grace (INV-1203).
+    ///
+    /// # Architectural Invariant: Pillar 6 — Zero State Bloat
+    ///
+    /// Unexpired tags are preserved in `ttl_buckets` to prevent data loss when a bucket
+    /// contains a mix of expired and unexpired entries. When a voucher's tag set becomes
+    /// empty after pruning, the voucher root and genesis parent entries are removed to
+    /// prevent unbounded RAM growth from orphaned voucher metadata.
     pub fn prune_expired(&mut self, now: SimTime) -> usize {
         let before = self.locks.len();
         let max_expired_sec = if now.0 > 0 { (now.0 - 1) / 1_000 } else { 0 };
@@ -264,6 +271,7 @@ impl HmcRamIndex {
 
         for bucket in expired_bucket_keys {
             if let Some(tags) = self.ttl_buckets.remove(&bucket) {
+                let mut remaining_tags: Vec<String> = Vec::new();
                 for tag in tags {
                     if let Some(vu) = self.valid_until.get(&tag) {
                         if should_prune(now, SimTime(*vu)) {
@@ -272,13 +280,20 @@ impl HmcRamIndex {
                                     vtags.remove(&tag);
                                     if vtags.is_empty() {
                                         self.vouchers.remove(&entry.layer2_voucher_id);
+                                        self.voucher_roots.remove(&entry.layer2_voucher_id);
+                                        self.voucher_genesis_parents.remove(&entry.layer2_voucher_id);
                                     }
                                 }
                             }
                             self.valid_until.remove(&tag);
                             self.filter.delete(&tag);
+                        } else {
+                            remaining_tags.push(tag);
                         }
                     }
+                }
+                if !remaining_tags.is_empty() {
+                    self.ttl_buckets.insert(bucket, remaining_tags);
                 }
             }
         }

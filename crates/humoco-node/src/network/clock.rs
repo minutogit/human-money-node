@@ -137,6 +137,19 @@ impl NetworkClock {
         );
     }
 
+    /// Returns the current physical time in milliseconds derived from monotonic elapsed time.
+    ///
+    /// This method uses `base_epoch_ms + base_instant.elapsed()` instead of
+    /// `SystemTime::now()` to avoid unanchored NTP step artifacts (Rule 2 & Spec 07).
+    /// NTP corrections can cause the wall clock to jump forward or backward, which would
+    /// corrupt the median offset calculation and potentially allow an attacker to manipulate
+    /// consensus time. The monotonic `Instant` guarantees strictly forward progression.
+    #[inline]
+    pub fn physical_now_ms(&self) -> u64 {
+        let elapsed_ms = self.base_instant.elapsed().as_millis() as u64;
+        self.base_epoch_ms.saturating_add(elapsed_ms)
+    }
+
     /// Records a heartbeat time sample:
     /// `offset = t_peer_heartbeat - t_local_system_clock`.
     /// 
@@ -204,12 +217,15 @@ impl NetworkClock {
         true
     }
 
-    /// Helper method to record a heartbeat using the current local system clock
+    /// Helper method to record a heartbeat using the current local physical clock.
+    ///
+    /// Uses `self.physical_now_ms()` (monotonic elapsed time) instead of
+    /// `SystemTime::now()` to avoid unanchored NTP step artifacts (Rule 2 & Spec 07).
+    /// NTP corrections can cause the wall clock to jump forward or backward, which would
+    /// corrupt the median offset calculation and potentially allow an attacker to manipulate
+    /// consensus time. The monotonic `Instant` guarantees strictly forward progression.
     pub fn record_heartbeat(&self, is_f2f_friend: bool, peer_heartbeat_time_ms: u64) -> bool {
-        let local_now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let local_now = self.physical_now_ms();
         self.record_sample(is_f2f_friend, peer_heartbeat_time_ms, local_now)
     }
 

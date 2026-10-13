@@ -136,13 +136,19 @@ impl RamIndex {
 
         for bucket in expired_bucket_keys {
             if let Some(parents) = self.ttl_buckets.remove(&bucket) {
+                let mut remaining = Vec::new();
                 for p in parents {
                     if let Some(rv) = self.root_valid.get(&p) {
                         if should_prune(now, *rv) {
                             self.map.remove(&p);
                             self.root_valid.remove(&p);
+                        } else {
+                            remaining.push(p);
                         }
                     }
+                }
+                if !remaining.is_empty() {
+                    self.ttl_buckets.insert(bucket, remaining);
                 }
             }
         }

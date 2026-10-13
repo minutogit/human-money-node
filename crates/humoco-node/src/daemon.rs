@@ -973,7 +973,7 @@ async fn run_shard_digest_pull_sync(
     // Filter to shards where local node is in the Top-20 responsible nodes:
     let mut responsible_shards: Vec<u16> = Vec::new();
     for sid in candidate_shards {
-        if peer_manager.is_local_responsible_for_shard(identity.hrw_routing_id(), sid, 20).await {
+        if peer_manager.is_local_committee_member(*identity.node_pubkey(), *identity.hrw_routing_id(), sid).await {
             responsible_shards.push(sid);
         }
     }

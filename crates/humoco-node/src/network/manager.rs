@@ -19,10 +19,6 @@ pub const MAX_GOSSIP_HOPS: u32 = 16;
 /// and must NEVER be counted as a peer failure (`record_failure`).
 pub const TIER2_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Staged partial timeout for PoS quorum stragglers (Spec 03/15, Phase 8).
-/// After this delay without quorum, replacement ranks 21-40 are fanned in.
-pub const QUORUM_STRAGGLER_TIMEOUT: Duration = Duration::from_millis(300);
-
 /// Global PoS shard verification timeout (Spec 03/15).
 pub const QUORUM_GLOBAL_TIMEOUT: Duration = Duration::from_millis(1000);
 
@@ -1309,11 +1305,20 @@ impl PeerManager {
 
     /// Finds a node's permanent NodePubKey given its active HRW routing ticket.
     pub async fn get_pubkey_by_hrw_routing_id(&self, hrw_id: &[u8; 32]) -> Option<[u8; 32]> {
-        let nodes = self.known_network_nodes.read().await;
-        nodes
-            .values()
-            .find(|info| &info.hrw_routing_id == hrw_id)
-            .map(|info| info.node_pubkey)
+        {
+            let nodes = self.known_network_nodes.read().await;
+            if let Some(pk) = nodes.values().find(|info| &info.hrw_routing_id == hrw_id)
+                .map(|info| info.node_pubkey) {
+                return Some(pk);
+            }
+            // A known identity with another ticket must not regain the
+            // bootstrap routing id through the friendship fallback.
+            if nodes.contains_key(hrw_id) { return None; }
+        }
+        // Direct authenticated friends bootstrap with routing id = public
+        // key before their first topology announcement. Preserve read/sync
+        // targets without accepting arbitrary unknown routing ids.
+        self.f2f_friends.read().await.contains_key(hrw_id).then_some(*hrw_id)
     }
 
     /// Returns pending ticket if present (still incubating).
@@ -1981,34 +1986,69 @@ impl PeerManager {
         result
     }
 
+    /// Local ticket view for write authorization. Reachability and suspension
+    /// affect routing, never committee membership. Incubation remains based on
+    /// first observation; this view does not establish global agreement.
+    pub async fn shard_committee(
+        &self,
+        self_pubkey: [u8; 32],
+        self_hrw: [u8; 32],
+        shard_id: u16,
+    ) -> (Vec<humoco_sim_core::types::CommitteeMember>, Vec<(humoco_sim_core::types::CommitteeMember, SocketAddr)>, usize) {
+        use humoco_sim_core::types::{CommitteeMember, select_shard_committee};
+        let known = self.known_network_nodes.read().await.clone();
+        let peers = self.peers.read().await.clone();
+        let banned = self.banned_nodes.read().await.clone();
+        let mut endpoints = HashMap::new();
+        for (pk, info) in &known {
+            if *pk != self_pubkey && !info.is_immature() && !banned.contains(pk) {
+                endpoints.insert(*pk, (info.hrw_routing_id, info.addr));
+            }
+        }
+        for peer in peers.values() {
+            if let Some(pk) = peer.node_id {
+                if pk != self_pubkey && !banned.contains(&pk) && !known.contains_key(&pk) {
+                    endpoints.insert(pk, (pk, peer.addr));
+                }
+            }
+        }
+        let mut members: Vec<_> = endpoints.iter().map(|(pk, (hrw, _))| CommitteeMember {
+            node_pubkey: *pk, hrw_routing_id: *hrw,
+        }).collect();
+        members.push(CommitteeMember { node_pubkey: self_pubkey, hrw_routing_id: self_hrw });
+        let total = members.len();
+        let committee = select_shard_committee(shard_id, &members);
+        let remote = committee.iter().filter_map(|member| endpoints.get(&member.node_pubkey)
+            .map(|(_, addr)| (*member, *addr))).collect();
+        (committee, remote, total)
+    }
+
+    pub async fn is_local_committee_member(&self, self_pubkey: [u8; 32], self_hrw: [u8; 32], shard_id: u16) -> bool {
+        let (committee, _, _) = self.shard_committee(self_pubkey, self_hrw, shard_id).await;
+        committee.iter().any(|member| member.node_pubkey == self_pubkey)
+    }
+
     /// Checks whether the local node is among the responsible Top-N (default 20) shard nodes
     /// for the given shard_id according to HRW score.
     pub async fn is_local_responsible_for_shard(&self, self_hrw: &[u8; 32], shard_id: u16, top_n: usize) -> bool {
         self.local_shard_rank(self_hrw, shard_id).await.map(|r| r <= top_n).unwrap_or(true)
     }
 
-    /// # Architectural Invariant: INV-0306 Dynamic Succession & INV-1501 (Phase 2 P1)
-    ///
-    /// Returns the 1-based HRW rank of the local node for `shard_id` (`None`
-    /// when alone / no peers). Ranks 1-20 are primary custodians; ranks 21-40
-    /// are active straggler-failover replacements that MUST serve authorized
-    /// quorum requests after the gateway's 300ms partial timeout instead of
-    /// answering `FLAG_NOT_IN_SHARD`. Only ranks beyond 40 (K_max=40 successor
-    /// horizon) may refuse. Idle Tier-2 closes and aborted stragglers are never
-    /// peer failures.
+    /// Legacy rank inspection using full 256-bit scores. Runtime write
+    /// authorization uses `shard_committee` with complete public keys.
     pub async fn local_shard_rank(&self, self_hrw: &[u8; 32], shard_id: u16) -> Option<usize> {
         let active_nodes = self.active_hrw_nodes().await;
         if active_nodes.is_empty() {
             return None;
         }
-        let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(self_hrw, shard_id);
+        let self_score = humoco_sim_core::types::hrw_score_32(self_hrw, shard_id);
         let higher_nodes_count = active_nodes
             .iter()
             .filter(|(hrw_id, _)| {
                 if hrw_id == self_hrw {
                     return false;
                 }
-                let score = humoco_sim_core::client_flow::compute_hrw_score_f64(hrw_id, shard_id);
+                let score = humoco_sim_core::types::hrw_score_32(hrw_id, shard_id);
                 score > self_score || (score == self_score && hrw_id > self_hrw)
             })
             .count();
@@ -2017,14 +2057,18 @@ impl PeerManager {
 
     /// Returns the top-N candidate nodes for a given shard_id according to HRW ranking.
     pub async fn get_top_n_shards_for_lock(&self, shard_id: u16, n: usize) -> Vec<([u8; 32], SocketAddr)> {
-        let mut active = self.active_hrw_nodes().await;
-        active.sort_by(|a, b| {
-            let score_a = humoco_sim_core::client_flow::compute_hrw_score_f64(&a.0, shard_id);
-            let score_b = humoco_sim_core::client_flow::compute_hrw_score_f64(&b.0, shard_id);
-            score_b.total_cmp(&score_a)
-        });
-        active.truncate(n);
-        active
+        let active = self.active_hrw_nodes().await;
+        let mut members = Vec::new();
+        let mut endpoints = HashMap::new();
+        for (hrw, addr) in active {
+            if let Some(pk) = self.get_pubkey_by_hrw_routing_id(&hrw).await {
+                members.push(humoco_sim_core::types::CommitteeMember { node_pubkey: pk, hrw_routing_id: hrw });
+                endpoints.insert(pk, addr);
+            }
+        }
+        humoco_sim_core::types::select_shard_committee(shard_id, &members).into_iter()
+            .take(n).filter_map(|member| endpoints.get(&member.node_pubkey)
+                .map(|addr| (member.hrw_routing_id, *addr))).collect()
     }
 
     pub async fn record_observed_evidence(&self, ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
@@ -2467,6 +2511,18 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn direct_friend_without_gossip_remains_a_read_and_sync_target() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 9901));
+        let manager = PeerManager::new(Vec::new());
+        let pk = [42; 32];
+        manager.register_f2f_friend(pk, Some(addr)).await;
+        assert!(manager.known_network_nodes.read().await.is_empty());
+        assert_eq!(manager.get_pubkey_by_hrw_routing_id(&pk).await, Some(pk));
+        assert_eq!(manager.get_top_n_shards_for_lock(17, 20).await, vec![(pk, addr)]);
+        assert_eq!(manager.get_pubkey_by_hrw_routing_id(&[43; 32]).await, None);
+    }
 
     #[tokio::test]
     async fn test_peer_manager_operations() {

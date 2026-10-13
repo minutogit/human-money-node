@@ -71,7 +71,7 @@ flowchart TD
 
     subgraph StableLocal["✅ Mandatory: Subjective Local Dampening & Reflexive Circuit Breaker"]
         direction TB
-        A2["Node A registers timeout for Node B"] --> B2["Activity-locked Tit-for-Tat (+2 / -2) with Rank 21 fallback"]
+        A2["Node A registers timeout for Node B"] --> B2["Activity-locked Tit-for-Tat (+2 / -2) with local backoff"]
         B2 --> C2["If Network Stress >= 40%: Reflexive Circuit Breaker flips to (+1 / -2)"]
         C2 --> Heal["Forgiveness dominance (E[Δ] < 0 up to 66.7% fail) -> Homeostasis around 40%"]
     end
@@ -147,6 +147,8 @@ flowchart TD
 3. **Non-Authoritative Telemetry (`INV-1701`):** Telemetry warnings serve the human operator for diagnosis only. No telemetry value ever triggers an automatic ban (`triggers_auto_ban() == false`).
 
 ### 🛒 PoS Checkout Latency vs. Internal Node SLA & Quorum Fast-Exit:
+* **Fixed Checkout Committee:** Each lock request freezes one canonical HRW snapshot of at most 20 distinct `NodePubKey` identities, including self where eligible. FINAL requires 14 distinct votes from that snapshot; no ranks 21–40 may replace unavailable members during checkout. Committee selection uses full 256-bit scores with deterministic identity tie-breaking. Read routing retains its existing policy; `N < 20` retains adaptive provisional quorums.
+* **Bounded Write Collection:** Checkout signature collection uses an 800 ms budget and fails immediately when the remaining eligible members cannot supply the required quorum. `FLAG_NOT_READY`, `FLAG_NOT_IN_SHARD`, and cancellations after quorum completion are neutral outcomes, never peer failures. Statistical score thresholds and Bloom filters do not establish certificate membership. This policy prevents signer-pool expansion; it does not prove globally identical membership views or safe dynamic committee transitions.
 * **Internal Node Processing Time ($< 5\,\text{ms}$):** Pure RAM collision check and local attestation must stay $< 5\,\text{ms}$ to prevent local server queuing under high load.
 * **End-to-End Checkout Latency ($500\,\text{ms} \dots 1.500\,\text{ms}$):** For the customer at the checkout, up to 1–2 seconds is fully ergonomic and standard in payment processing. Shard verification timeouts may be relaxed to $1.000\,\text{ms}$.
 * **Quorum Fast-Exit ($14/20$) & No Cascading Death Spiral on the Checkout Path:**

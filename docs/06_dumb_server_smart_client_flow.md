@@ -331,42 +331,17 @@ When a client (e.g., smartphone or checkout terminal) receives a `QuorumCertific
 
 An attacker could spin up 14 own key pairs (or 14 own servers), issue a formally valid quorum, and make the checkout believe the lock is anchored in the Collision Lock Registry — while the voucher never actually reached the genuine shard.
 
-### 6.2 The 4-Pillar Architecture (Zero-Trust at < 1 ms Local Compute)
+### 6.2 Exact Verification Against an Authenticated Committee Snapshot
 
-To solve this problem with **minimal data overhead (2 KB sync per day) and maximum mathematical security**, the smart client uses a 4-stage verification model:
+The caller supplies an independently authenticated committee snapshot to certificate verification. The verifier cannot reconstruct the true top twenty from the certificate's signers or from a Bloom filter. Snapshot provenance is a precondition; a gateway-provided arbitrary roster is not an authority.
 
-```
-  ┌─────────────────────────────────────────────────────────────────────────┐
-  │ Pillar 1: Deterministic Consensus Bloom Filter (2 KB)                   │
-  │ • Client downloads 2-KB filter from 3 independent seed nodes            │
-  │ • Bitwise 2-of-3 voting filters out malicious single servers entirely:  │
-  │   Consensus_Filter[i] = (A[i] ∧ B[i]) ∨ (B[i] ∧ C[i]) ∨ (A[i] ∧ C[i])   │
-  │ • O(1) check: Is BLAKE3(NodeID || PubKey) in the genuine network?      │
-  └────────────────────────────────────┬────────────────────────────────────┘
-                                       │
-  ┌────────────────────────────────────▼────────────────────────────────────┐
-  │ Pillar 2: Dynamic N Estimation from Filter Bit Density (Popcount)       │
-  │ • N ≈ - (M / k) * ln(1 - popcount / M)    (< 1 µs)                      │
-  │ • Client computes exact network size N without manual config            │
-  └────────────────────────────────────┬────────────────────────────────────┘
-                                       │
-  ┌────────────────────────────────────▼────────────────────────────────────┐
-  │ Pillar 3: Seamless Quantile Threshold (Fractal Order Statistics)        │
-  │ • Score_i = BLAKE3(NodeID_i || Shard_ID) / 2^256                        │
-  │ • Uniform threshold: Score_i >= max(0.0, 1.0 - K_max / N)                │
-  │ • K_max = 40 (deterministic successor horizon)                          │
-  │ • Scales seamlessly: N <= 40 -> 0.0 (Bootstrap), N = 10k -> 0.996       │
-  │ • Proves with P > 99.9999999999999% that signers are genuine Top-K     │
-  │   nodes of this shard (Sybil chance < 1 in a quadrillion!)              │
-  └────────────────────────────────────┬────────────────────────────────────┘
-                                       │
-  ┌────────────────────────────────────▼────────────────────────────────────┐
-  │ Pillar 4: Ed25519 Batch Verification (Zero-Copy & SIMD-accelerated)     │
-  │ • Gateway delivers QuorumCertificate with signer_bitmap + partial sigs  │
-  │ • Smart client verifies via ed25519_dalek::verify_batch all >= 14 sigs  │
-  │ • Atomic check in < 0.5 ms on mobile device                             │
-  └─────────────────────────────────────────────────────────────────────────┘
-```
+Canonical selection ranks distinct full public keys by their full 256-bit HRW ticket scores, with deterministic identity tie-breaking. FINAL uses exactly twenty authorized members and requires at least fourteen distinct valid signers. Provisional operation retains `Q(N) = floor(2N/3) + 1` for `N < 20`.
+
+Every signer must match a member's full `NodePubKey` and active ticket. Duplicate identities and votes for an unexpected network, shard, parent, lock, or status are rejected. Ed25519 approvals use the existing length-prefixed protocol domains and the attestation payload digest binding parent and lock. Statistical rank-25/rank-50 thresholds and the former rank-40 horizon no longer establish quorum validity.
+
+The gateway captures one snapshot per request, including its local member where eligible. Local and remote votes satisfy the same readiness and collision constraints. Bitmap positions refer to that snapshot; no unavailable member may be replaced by a later rank. At fourteen valid FINAL votes the gateway cancels stragglers without peer penalties; write collection fails with HTTP 503 after its 800 ms budget or earlier when quorum is impossible.
+
+This hardening prevents expansion of a selected signer pool. It does not prove that partitioned nodes discover identical committees or that changes between committees preserve historical decisions. Those properties require a separate admission/transition design. The existing local-observation incubation rule is unchanged; self-signed ticket timestamps cannot shorten it.
 
 ### 6.3 QuorumCertificate Wire Layout (Compact < 1 KB)
 The quorum certificate uses a 32-bit signer bitmap and Ed25519 partial signatures:
@@ -383,4 +358,4 @@ $$\big( \text{lock\_hash} \,[32\,\text{B}], \; \text{shard\_id} \,[2\,\text{B}],
 2. **[INV-0602] Atomic First-Seen:** Setting the lock entry in a shard node's RAM is performed via atomic Compare-and-Swap (CAS) operations on `parent_lock`. There is no time window for race conditions.
 3. **[INV-0603] Merchant-centric safety:** Final confirmation always goes primarily to the merchant/recipient. The buyer cannot prevent release of goods by blocking own internet connectivity.
 4. **[INV-0604] Unforgeable causality:** A `LockEntry` is valid only if its `parent_lock` matches bit-exactly the target hash of the preceding `QuorumCertificate` in the `ProofChain`.
-5. **[INV-0605] Zero-trust quorum verification:** A smart client accepts a `QuorumCertificate` only if (1) all signer identities `BLAKE3(NodeID || PubKey)` exist in the bitwise 2-of-3 consensus Bloom filter, (2) all signers exceed the statistical HRW order threshold $\text{Score}_i \ge \max\left(0.0, \; 1.0 - \frac{K_{\text{max}}}{N_{\text{active}}}\right)$ (with $K_{\text{max}} = 40$) for `Shard_ID`, and (3) the cryptographic Ed25519 batch signature on `lock_hash` is mathematically valid.
+5. **[INV-0605] Exact quorum verification:** A smart client accepts a certificate only against an independently authenticated committee snapshot, with the required number of distinct authorized public keys and valid context-bound Ed25519 approvals. A Bloom filter, score quantile, signer count, or bitmap alone is not a committee authorization proof.

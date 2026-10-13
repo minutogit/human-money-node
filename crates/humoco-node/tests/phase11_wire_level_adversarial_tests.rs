@@ -324,6 +324,10 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
             .await;
     }
 
+    for sh in &shards {
+        gw_transport.connect_peer(sh.addr).await.expect("preconnect shard");
+    }
+
     let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
     let tier_controller = Arc::new(TierController::new(
         gw_storage.clone(),
@@ -995,4 +999,539 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
     let _ = Ordering::SeqCst;
     server.close();
     client.close();
+}
+
+static COMMITTEE_WIRE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+// A shared, complete roster is deliberately supplied here. These tests prove
+// request-scoped committee enforcement, not distributed membership agreement.
+struct ObservedShardHandler {
+    inner: Arc<NodeRequestHandler>,
+    identity: NodeIdentity,
+    attack: Arc<std::sync::atomic::AtomicU8>,
+    forged: Arc<std::sync::atomic::AtomicUsize>,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+    delay: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl humoco_node::network::RequestHandler for ObservedShardHandler {
+    fn handle_authenticated(
+        &self,
+        header: WireHeader,
+        payload: Vec<u8>,
+        peer: Option<[u8; 32]>,
+    ) -> humoco_node::network::BoxFuture<Result<(WireHeader, Vec<u8>), humoco_node::NodeError>>
+    {
+        let inner = self.inner.clone();
+        let identity = self.identity.clone();
+        let attack = self.attack.load(Ordering::SeqCst);
+        let forged = self.forged.clone();
+        let delay = if header.msg_type == MsgType::LockVerifyRequest as u16 {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            self.delay.load(Ordering::SeqCst)
+        } else {
+            0
+        };
+        Box::pin(async move {
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            let (mut response, bytes) = humoco_node::network::RequestHandler::handle_authenticated(
+                &*inner, header, payload, peer,
+            )
+            .await?;
+            if attack == 0
+                || response.msg_type != MsgType::LockVerifyResponse as u16
+                || response.flags != 0
+            {
+                return Ok((response, bytes));
+            }
+            let att = humoco_node::api::dto::AttestationDto::from_wire_bytes(&bytes)
+                .expect("successful attestation");
+            let decode = |hex_string: &str| -> [u8; 32] {
+                hex::decode(hex_string)
+                    .expect("hex")
+                    .try_into()
+                    .expect("32 bytes")
+            };
+            let mut parent = decode(&att.parent_lock);
+            let mut lock = decode(&att.lock_id);
+            let mut shard = att.shard_id;
+            let mut network = humoco_sim_core::types::NetworkId::Mainnet;
+            let signer = if attack == 5 {
+                NodeIdentity::generate()
+            } else {
+                identity
+            };
+            match attack {
+                1 => parent[0] ^= 1,
+                2 => shard ^= 1,
+                3 => network = humoco_sim_core::types::NetworkId::Testnet,
+                4 => lock[0] ^= 1,
+                5 => {}
+                _ => panic!("unknown test attack"),
+            }
+            let wrong = humoco_node::api::routes::create_attestation_for_network(
+                &signer,
+                lock,
+                parent,
+                shard,
+                1,
+                att.timestamp,
+                network,
+            );
+            // The answer really has a valid signature for its claimed context;
+            // gateway rejection must enforce the expected request/TLS context.
+            let digest = humoco_sim_core::crypto::compute_sig_digest(
+                humoco_sim_core::crypto::domain_approve_final(network),
+                0,
+                0,
+                0,
+                shard,
+                1,
+                &humoco_sim_core::crypto::compute_attestation_payload_digest(&parent, &lock),
+            );
+            let signature = ed25519_dalek::Signature::from_slice(
+                &hex::decode(&wrong.signature).expect("signature hex"),
+            )
+            .expect("signature");
+            signer
+                .verifying_key()
+                .verify_strict(&digest, &signature)
+                .expect("genuine malicious signature");
+            let bytes = bincode::serialize(&wrong).expect("serialize forged answer");
+            response.payload_len = bytes.len() as u32;
+            forged.fetch_add(1, Ordering::SeqCst);
+            Ok((response, bytes))
+        })
+    }
+}
+
+struct QuorumWireNode {
+    identity: NodeIdentity,
+    pm: Arc<PeerManager>,
+    transport: QuicTransport,
+    ready: Arc<AtomicBool>,
+    attack: Arc<std::sync::atomic::AtomicU8>,
+    forged: Arc<std::sync::atomic::AtomicUsize>,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+    delay: Arc<std::sync::atomic::AtomicU64>,
+    engine: DualTierEngine,
+    storage: Arc<RedbStorage>,
+    _temp: tempfile::TempDir,
+}
+
+impl Drop for QuorumWireNode {
+    fn drop(&mut self) {
+        self.transport.close();
+    }
+}
+
+async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2LockRequest) {
+    let mut nodes: Vec<QuorumWireNode> = Vec::new();
+    for i in 0..21 {
+        let temp = tempdir().expect("tempdir");
+        let storage = Arc::new(
+            RedbStorage::open(&temp.path().join(format!("committee{i}.redb"))).expect("storage"),
+        );
+        let (engine, _worker) = DualTierEngine::new(storage.clone());
+        let mut identity = NodeIdentity::generate();
+        while nodes
+            .iter()
+            .any(|n| n.identity.node_id_u16() == identity.node_id_u16())
+        {
+            identity = NodeIdentity::generate();
+        }
+        let pm = Arc::new(PeerManager::new(Vec::new()));
+        let ready = Arc::new(AtomicBool::new(true));
+        let attack = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let forged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let delay = Arc::new(std::sync::atomic::AtomicU64::new(100));
+        let inner = Arc::new(
+            NodeRequestHandler::with_peer_manager(
+                engine.clone(),
+                storage.clone(),
+                identity.clone(),
+                pm.clone(),
+            )
+            .with_sync_ready(ready.clone()),
+        );
+        let handler = Arc::new(ObservedShardHandler {
+            inner,
+            identity: identity.clone(),
+            attack: attack.clone(),
+            forged: forged.clone(),
+            requests: requests.clone(),
+            delay: delay.clone(),
+        });
+        let transport = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().expect("addr"),
+            &identity,
+            pm.clone(),
+            handler,
+            CancellationToken::new(),
+        )
+        .expect("bind");
+        transport.set_sync_ready(true);
+        transport.spawn_accept_loop();
+        nodes.push(QuorumWireNode {
+            identity,
+            pm,
+            transport,
+            ready,
+            attack,
+            forged,
+            requests,
+            delay,
+            engine,
+            storage,
+            _temp: temp,
+        });
+    }
+    for (i, node) in nodes.iter().enumerate() {
+        for (j, other) in nodes.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let addr = other.transport.local_addr().expect("addr");
+            node.pm
+                .learn_node_from_gossip_with_hrw(
+                    *other.identity.node_pubkey(),
+                    *other.identity.hrw_routing_id(),
+                    addr,
+                    1,
+                    None,
+                )
+                .await;
+            node.pm
+                .set_first_seen_for_test(
+                    other.identity.node_pubkey(),
+                    std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+                )
+                .await;
+            node.pm
+                .register_f2f_friend(*other.identity.node_pubkey(), Some(addr))
+                .await;
+        }
+        force_stable_ge20(&node.pm).await;
+    }
+    // Choose a real voucher route whose HRW committee includes/excludes self.
+    let sender = SigningKey::from_bytes(&[171; 32]);
+    let mut selected = None;
+    for i in 0..10_000 {
+        let req = make_hmc_genesis(
+            &format!("committee_voucher_{i}"),
+            test_now_ms() + 600_000,
+            &sender,
+        );
+        let shard = humoco_sim_core::types::canonical_voucher_shard(
+            &humoco_sim_core::types::genesis_parent_bytes_from_tag(
+                &bs58::encode(req.transaction_hash).into_string(),
+            ),
+        );
+        if nodes[0]
+            .pm
+            .local_shard_rank(nodes[0].identity.hrw_routing_id(), shard)
+            .await
+            == Some(gateway_rank)
+        {
+            selected = Some(req);
+            break;
+        }
+    }
+    let req = selected.expect("find gateway rank");
+    // Remove handshake scheduling from quorum timing assertions.
+    for node in nodes.iter().skip(1) {
+        nodes[0]
+            .transport
+            .connect_peer(node.transport.local_addr().expect("addr"))
+            .await
+            .expect("preconnect");
+    }
+    (nodes, req)
+}
+
+async fn post_committee_lock(
+    nodes: &[QuorumWireNode],
+    req: &L2LockRequest,
+) -> (StatusCode, L2ResponseEnvelope, std::time::Duration) {
+    let gw = &nodes[0];
+    let pow = Arc::new(PowEngine::new(*gw.identity.node_id(), 8));
+    let tier = Arc::new(TierController::new(gw.storage.clone(), pow.clone()));
+    tier.register_f2f_peer("committee_wire_token");
+    let mut state = AppState::new(
+        gw.engine.clone(),
+        gw.storage.clone(),
+        gw.identity.clone(),
+        tier,
+        pow,
+    );
+    state.peer_manager = Some(gw.pm.clone());
+    state.transport = Some(gw.transport.clone());
+    let app = build_router(state);
+    let started = std::time::Instant::now();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "committee_wire_token")
+                .body(Body::from(serde_json::to_vec(req).expect("serialize")))
+                .expect("request"),
+        )
+        .await
+        .expect("post");
+    let elapsed = started.elapsed();
+    (response.status(), response_json(response).await, elapsed)
+}
+
+#[tokio::test]
+async fn test_exact_committee_includes_self_and_never_queries_rank21_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(1).await;
+    let shard = humoco_sim_core::types::canonical_voucher_shard(
+        &humoco_sim_core::types::genesis_parent_bytes_from_tag(
+            &bs58::encode(req.transaction_hash).into_string(),
+        ),
+    );
+    let mut rank21 = None;
+    for (i, n) in nodes.iter().enumerate().skip(1) {
+        if n.pm
+            .local_shard_rank(n.identity.hrw_routing_id(), shard)
+            .await
+            == Some(21)
+        {
+            rank21 = Some(i);
+        }
+    }
+    let rank21 = rank21.expect("rank21");
+    let (status, body, _) = post_committee_lock(&nodes, &req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let qc = body.quorum_certificate.expect("certificate");
+    assert_eq!(qc.signer_count, 14);
+    assert!(
+        qc.signatures
+            .iter()
+            .any(|s| s.node_id == nodes[0].identity.node_id_u16())
+    );
+    assert_eq!(qc.signer_bitmap.count_ones(), 14);
+    assert_eq!(qc.signer_bitmap >> 20, 0);
+    assert_eq!(
+        nodes[rank21].requests.load(Ordering::SeqCst),
+        0,
+        "rank21 must never receive a lock RPC"
+    );
+    assert_eq!(
+        nodes
+            .iter()
+            .skip(1)
+            .filter(|n| n.requests.load(Ordering::SeqCst) > 0)
+            .count(),
+        19,
+        "self plus exactly nineteen remote targets"
+    );
+}
+
+#[tokio::test]
+async fn test_exact_committee_outside_gateway_queries_twenty_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    let (status, body, _) = post_committee_lock(&nodes, &req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let qc = body.quorum_certificate.expect("certificate");
+    assert_eq!(qc.signer_count, 14);
+    assert!(
+        !qc.signatures
+            .iter()
+            .any(|s| s.node_id == nodes[0].identity.node_id_u16())
+    );
+    assert_eq!(qc.signer_bitmap.count_ones(), 14);
+    assert_eq!(qc.signer_bitmap >> 20, 0);
+    assert_eq!(
+        nodes
+            .iter()
+            .skip(1)
+            .filter(|n| n.requests.load(Ordering::SeqCst) > 0)
+            .count(),
+        20
+    );
+}
+
+#[tokio::test]
+async fn test_seven_not_ready_peers_fail_fast_without_penalty_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    for (i, n) in nodes.iter().enumerate().skip(1) {
+        if i <= 7 {
+            n.ready.store(false, Ordering::SeqCst);
+            n.delay.store(0, Ordering::SeqCst);
+        } else {
+            n.delay.store(5_000, Ordering::SeqCst);
+        }
+    }
+    let (status, _, elapsed) = post_committee_lock(&nodes, &req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        elapsed < std::time::Duration::from_millis(700),
+        "must exit before the 800ms deadline when fourteen votes become impossible"
+    );
+    for n in nodes.iter().skip(1) {
+        let peer = nodes[0]
+            .pm
+            .get_peer(&n.transport.local_addr().expect("addr"))
+            .await
+            .expect("peer");
+        assert_eq!(
+            peer.missing_count, 0,
+            "NOT_READY and cancelled requests are neutral"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_fourteen_fast_signers_abort_stragglers_without_penalty_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    for (i, n) in nodes.iter().enumerate().skip(1) {
+        n.delay
+            .store(if i <= 14 { 100 } else { 5_000 }, Ordering::SeqCst);
+    }
+    let (status, body, elapsed) = post_committee_lock(&nodes, &req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        body.quorum_certificate.expect("certificate").signer_count,
+        14
+    );
+    // Allow loaded debug builds scheduling slack while remaining well below
+    // the controlled five-second straggler delay. Cancellation neutrality
+    // below is the essential assertion, not an Internet latency guarantee.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "quorum must not wait for five-second stragglers: {elapsed:?}"
+    );
+    for n in nodes.iter().skip(15) {
+        let peer = nodes[0]
+            .pm
+            .get_peer(&n.transport.local_addr().expect("addr"))
+            .await
+            .expect("peer");
+        assert_eq!(
+            peer.missing_count, 0,
+            "quorum cancellation must never punish stragglers"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rank21_receiving_server_rejects_over_real_quic() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    let client = &nodes[1];
+    let server = &nodes[0];
+    let now = server.pm.net_time_ms();
+    let root_valid_until = req
+        .deletable_at
+        .as_deref()
+        .expect("ttl")
+        .parse::<u64>()
+        .expect("ttl integer");
+    let entry = humoco_node::api::hmc::L2LockEntry::from(&req);
+    let footprint =
+        humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds((root_valid_until - now) / 1000);
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        client.identity.node_pubkey(),
+        0,
+        0,
+        now,
+        0,
+        0,
+        footprint,
+        false,
+        &entry.t_id,
+    );
+    let wire = humoco_node::network::framing::LockWirePayload::Hmc {
+        req,
+        chain: None,
+        root_valid_until,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *client.identity.node_pubkey(),
+        sender_signature: client.identity.signing_key().sign(&digest).to_bytes(),
+        timestamp_ms: now,
+    };
+    let payload = bincode::serialize(&wire).expect("payload");
+    let conn = client
+        .transport
+        .connect_peer(server.transport.local_addr().expect("addr"))
+        .await
+        .expect("connect rank21");
+    let header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        0,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    let (reply, body) = client
+        .transport
+        .send_request(&conn, &header, &payload)
+        .await
+        .expect("rank21 reply");
+    assert_eq!(reply.msg_type, MsgType::LockVerifyResponse as u16);
+    assert_ne!(
+        reply.flags & humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
+        0,
+        "rank21 cannot attest even when authorized and sync-ready"
+    );
+    assert!(body.is_empty(), "rank21 must not return an attestation");
+}
+
+#[tokio::test]
+async fn test_valid_signatures_for_wrong_request_or_tls_context_never_form_quorum_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, genesis) = quorum_wire_cluster(21).await;
+    for attack in 1..=5 {
+        for (i, node) in nodes.iter().enumerate().skip(1) {
+            node.ready.store(i <= 14, Ordering::SeqCst);
+            node.delay
+                .store(if i <= 14 { 100 } else { 0 }, Ordering::SeqCst);
+            node.attack
+                .store(if i == 1 { attack } else { 0 }, Ordering::SeqCst);
+        }
+        // Fresh genesis identifier with the same shard routing parent. Changing
+        // only voucher identity preserves the committee chosen by tx hash.
+        let mut req = genesis.clone();
+        req.layer2_voucher_id = format!("{}_attack_{attack}", genesis.layer2_voucher_id);
+        let sender = SigningKey::from_bytes(&[171; 32]);
+        req.layer2_signature = sender.sign(&calculate_l2_payload_hash(&req)).to_bytes();
+        let forged_before = nodes[1].forged.load(Ordering::SeqCst);
+        let (status, body, _) = post_committee_lock(&nodes, &req).await;
+        assert_eq!(
+            nodes[1].forged.load(Ordering::SeqCst),
+            forged_before + 1,
+            "attack {attack}: actually sent a genuinely signed wrong-context answer over QUIC"
+        );
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attack {attack}: thirteen valid votes plus one wrong-context answer cannot reach FINAL"
+        );
+        let certificate = body.quorum_certificate.expect("partial certificate");
+        assert!(certificate.signer_count <= 13);
+        assert!(
+            !certificate
+                .signatures
+                .iter()
+                .any(|s| s.node_pubkey_bytes() == Some(*nodes[1].identity.node_pubkey())),
+            "attack {attack}: invalid peer answer must not enter the certificate"
+        );
+        assert!(matches!(body.verdict, L2Verdict::Rejected { .. }));
+    }
 }

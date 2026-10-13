@@ -1,5 +1,5 @@
 //! Spec 16: Chaos & Partition Resilience (INV-1601..1603)
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use crate::crypto::compute_canonical_hash;
 use crate::sim::{SimMessage, SimNetwork, SimNode};
@@ -117,28 +117,13 @@ pub fn test_packet_drop_resilience(drop_rate: f64, honest_nodes: usize) -> bool 
     with_lock as f64 / honest_nodes as f64 > 0.5
 }
 
-/// Simulate crash of f nodes out of N, promote replacement (INV-1603)
+/// Simulates unavailable members without authorizing replacements or shrinking the committee.
+/// The legacy name is retained; the replacement result is always `None`.
 pub fn simulate_crash_and_promotion(total: usize, crashed: usize) -> (bool, Option<u16>) {
-    // Need top20 HRW candidates; assume nodes 0..total
     let active: Vec<u16> = (0..total as u16).collect();
-    let shard = 42u16;
-    let (top20, rank21) = crate::types::select_quorum_with_backup(&active, shard);
-    // crash 7 nodes from top20
-    let crash_set: HashSet<u16> = top20.iter().take(crashed).copied().collect();
-    let remaining: Vec<u16> = active.iter().copied().filter(|id| !crash_set.contains(id)).collect();
-    let (new_top20, _new_rank21) = crate::types::select_quorum_with_backup(&remaining, shard);
-    let can_still_quorum = if remaining.len() >= 20 {
-        // need 14 of remaining
-        new_top20.len() >= 14
-    } else {
-        let (q, _) = crate::types::required_quorum(remaining.len());
-        top20.len() >= q // simplified
-    };
-    // rank21 promotion check: if crashed includes top20, rank21 should be promoted to top20
-    let promoted = if !crash_set.is_empty() {
-        rank21
-    } else { None };
-    (can_still_quorum || promoted.is_some(), promoted)
+    let (committee, _) = crate::types::select_quorum_with_backup(&active, 42);
+    let (q, _) = crate::types::required_quorum(committee.len());
+    (q > 0 && committee.len().saturating_sub(crashed) >= q, None)
 }
 
 #[cfg(test)]

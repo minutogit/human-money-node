@@ -620,65 +620,16 @@ async fn fetch_remote_voucher_root(state: &AppState, voucher_id: &str) -> Option
     None
 }
 
-/// Computes the 32-bit signer bitmap for a quorum certificate.
-/// Ranks all active HRW ids plus self by HRW score, truncates to 32, and
-/// maps each collected signature's node_id to its HRW rank bit position.
-async fn compute_signer_bitmap(
-    peer_mgr: Option<&crate::network::PeerManager>,
-    active_for_bitmap: &[([u8; 32], std::net::SocketAddr)],
-    self_hrw: [u8; 32],
-    self_pubkey: [u8; 32],
-    shard_id: u16,
-    collected_signatures: &[AttestationDto],
-) -> u32 {
-    let mut all_hrw: Vec<[u8; 32]> = active_for_bitmap.iter().map(|(hrw, _)| *hrw).collect();
-    all_hrw.push(self_hrw);
-    all_hrw.sort_by(|a, b| {
-        let sa = humoco_sim_core::client_flow::compute_hrw_score_f64(a, shard_id);
-        let sb = humoco_sim_core::client_flow::compute_hrw_score_f64(b, shard_id);
-        sb.total_cmp(&sa).then_with(|| b.cmp(a))
-    });
-    all_hrw.truncate(32);
-    let mut bitmap: u32 = 0;
-    for sig in collected_signatures {
-        // Pillar 3: resolve strictly via 32-byte NodePubKey; the 16-bit
-        // `node_id` is only a legacy fallback for old attestations.
-        let sig_pubkey_32 = sig.node_pubkey_bytes();
-        for (idx, hrw_id) in all_hrw.iter().enumerate() {
-            let candidate_pubkey: Option<[u8; 32]> = if hrw_id == &self_hrw {
-                Some(self_pubkey)
-            } else if let Some(mgr) = peer_mgr {
-                mgr.get_pubkey_by_hrw_routing_id(hrw_id).await
-            } else {
-                None
-            };
-            let matched = if let (Some(att_pk), Some(cand_pk)) = (sig_pubkey_32, candidate_pubkey) {
-                att_pk == cand_pk
-            } else {
-                // Legacy fallback: compare 16-bit prefix only when the new
-                // 32-byte field is absent on either side.
-                let pubkey_u16 = candidate_pubkey
-                    .map(|pk| u16::from_be_bytes([pk[0], pk[1]]))
-                    .unwrap_or_else(|| u16::from_be_bytes([hrw_id[0], hrw_id[1]]));
-                pubkey_u16 == sig.node_id
-            };
-
-            if matched {
-                bitmap |= 1u32 << idx;
-                break;
-            }
-        }
-    }
-    bitmap
+/// Maps each full signer identity to its immutable committee position.
+fn compute_committee_bitmap(committee: &[humoco_sim_core::types::CommitteeMember], signatures: &[AttestationDto]) -> u32 {
+    signatures.iter().fold(0, |bitmap, att| {
+        committee.iter().position(|member| Some(member.node_pubkey) == att.node_pubkey_bytes())
+            .map(|index| bitmap | (1 << index)).unwrap_or(bitmap)
+    })
 }
 
-/// Verifies that a computed signer bitmap is consistent with the collected
-/// signatures (Phase 8, Spec 03/18: 4-byte piggyback `signers_bitmask`).
-/// The bitmap ranks the Top-32 HRW positions, while up to 40 candidates may
-/// contribute — signers ranked beyond 32 legitimately set no bit. Consistency
-/// therefore means: `bitmap != 0` when signatures are non-empty and
-/// `count_ones <= signatures.len()`. Advisory only (warns on mismatch) and
-/// never rejects a quorum on the PoS hot path.
+/// Checks that every signature occupies exactly one of the twenty
+/// canonical committee positions.
 fn verify_signer_bitmap_consistency(signatures: &[AttestationDto], bitmap: u32) -> bool {
     if signatures.is_empty() {
         return bitmap == 0;
@@ -700,13 +651,7 @@ fn verify_signer_bitmap_consistency(signatures: &[AttestationDto], bitmap: u32) 
         );
         return false;
     }
-    if ones < signatures.len() {
-        tracing::debug!(
-            ones,
-            signers = signatures.len(),
-            "Signer bitmap orphans (signers ranked beyond Top-32 window set no bit)"
-        );
-    }
+    if ones != signatures.len() || bitmap >> 20 != 0 { return false; }
     true
 }
 
@@ -724,12 +669,14 @@ fn verify_signer_bitmap_consistency(signatures: &[AttestationDto], bitmap: u32) 
 async fn verify_peer_attestation(
     peer_mgr: &crate::network::PeerManager,
     att: &AttestationDto,
-    expected_lock_id: [u8; 32],
+    expected_lock: ([u8; 32], [u8; 32]),
     shard_id: u16,
     target_status: u8,
     network_id: humoco_sim_core::types::NetworkId,
     expected_tls_pubkey: Option<[u8; 32]>,
 ) -> bool {
+    let (expected_lock_id, expected_parent_lock) = expected_lock;
+    if att.shard_id != shard_id { return false; }
     // Strict 32-byte signer resolution first.
     let signer_pubkey: Option<[u8; 32]> = att.node_pubkey_bytes();
     let vk = if let Some(pk) = signer_pubkey {
@@ -817,6 +764,8 @@ async fn verify_peer_attestation(
         }
     };
 
+    if att_parent_lock_bytes != expected_parent_lock { return false; }
+
     let domain_tag = if target_status == 1 {
         humoco_sim_core::crypto::domain_approve_final(network_id)
     } else {
@@ -848,6 +797,8 @@ struct PeerAttestationQuery<'a> {
     transport: &'a crate::network::QuicTransport,
     peer_mgr: &'a crate::network::PeerManager,
     candidate_nodes: &'a [([u8; 32], std::net::SocketAddr)],
+    expected_members: Option<&'a [[u8; 32]]>,
+    parent_lock: [u8; 32],
     msg_type: humoco_sim_core::wire::MsgType,
     resp_msg_type: humoco_sim_core::wire::MsgType,
     payload: &'a [u8],
@@ -876,21 +827,10 @@ enum PeerQueryResult {
     Failure,
 }
 
-/// # Architectural Invariant: 1000ms Verification Timeout & Quorum Fast-Exit (Spec 03/15)
-///
-/// Collects peer attestations across top HRW candidates with pipelined JoinSet fanout,
-/// early-exit on required quorum, and DoS-resilient correlated timeout dampening (INV-1501).
-///
-/// The 1000ms global timeout is calibrated for worldwide Internet RTTs: a typical inter-
-/// continental RTT is 200–250ms (fiber + QUIC handshake), leaving ~750ms for the peer's
-/// local RAM verification (`<1µs` CAS on `RamIndex`) and attestation signing. A shorter
-/// timeout would cause premature correlated failures across continents and trigger false
-/// peer penalties; a longer timeout would breach the PoS checkout SLA (500–1500ms end-to-
-/// end). Combined with Quorum Fast-Exit (14/20 `FINAL` per Spec 15), the gateway aborts
-/// stragglers via `join_set.abort_all()` as soon as 14 shard signatures are collected —
-/// straggler aborts are explicitly not counted as `record_failure` (see correlated failure
-/// suppression), guaranteeing `ΔLoad ≤ 0` and no cascading death spiral on the checkout
-/// hot-path.
+/// Collects only the immutable write committee in parallel, with an 800ms
+/// deadline and fast exit once quorum is met or cannot be reached. Cancelled
+/// stragglers and explicit readiness refusals never count as peer failures.
+/// Status reads retain their existing timeout and query depth.
 async fn collect_peer_attestations(
     query: PeerAttestationQuery<'_>,
     collected_signatures: &mut Vec<AttestationDto>,
@@ -910,7 +850,9 @@ async fn collect_peer_attestations(
     // First genuine HMC conflict evidence (FLAG_COLLISION_DETECTED) for 409.
     let mut collision_entry: Option<crate::api::hmc::L2LockEntry> = None;
 
-    let _ = tokio::time::timeout(crate::network::manager::QUORUM_GLOBAL_TIMEOUT, async {
+    let is_write = query.msg_type == humoco_sim_core::wire::MsgType::LockVerifyRequest;
+    let deadline = if is_write { std::time::Duration::from_millis(800) } else { crate::network::manager::QUORUM_GLOBAL_TIMEOUT };
+    let _ = tokio::time::timeout(deadline, async {
         let mut join_set = tokio::task::JoinSet::new();
 
         let spawn_next = |join_set: &mut tokio::task::JoinSet<_>, idx: &mut usize, t_queried: &mut usize, in_flight: &mut std::collections::HashMap<usize, (std::net::SocketAddr, usize)>| {
@@ -943,10 +885,11 @@ async fn collect_peer_attestations(
                         }
                         // Phase 8 (Spec 15/19 Tit-for-Tat): a locally suspended
                         // or banned peer answers with FLAG_PEER_SUSPENDED.
-                        // Skip it via rank-21 replacement WITHOUT any further
-                        // malus — same as NOT_IN_SHARD, never a failure.
+                        // Treat explicit unavailability as neutral abstention.
+                        // Never replace committee members or apply a malus.
                         if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_IN_SHARD) != 0
                             || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED) != 0
+                            || (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0
                         {
                             return Err(PeerQueryError::NotInShard);
                         }
@@ -969,38 +912,18 @@ async fn collect_peer_attestations(
         };
 
         let needed = query.required_q.saturating_sub(collected_signatures.len());
-        // Phase 8 (Spec 03/15): staged fanout — query the Top-20 first; the
-        // 300ms straggler partial timeout below fans in replacement ranks
-        // 21-40 only if the quorum is still short.
-        let initial_spawns = (needed + query.shard_query_depth)
-            .min(query.candidate_nodes.len())
-            .min(20);
+        let initial_spawns = if is_write { query.candidate_nodes.len() } else {
+            (needed + query.shard_query_depth).min(query.candidate_nodes.len()).min(20)
+        };
         for _ in 0..initial_spawns {
             spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
         }
-
-        // Staged partial timeout loop (Phase 8): `join_next()` alone would
-        // block indefinitely on all-straggler batches, so poll with a short
-        // timeout to re-check the 300ms straggler deadline even with zero
-        // completions. Aborted stragglers and Tier-2 15s idle closes are NEVER
-        // counted as peer failures (AGENTS.md / INV-1501, TODO-ARCH-02).
-        let fan_start = tokio::time::Instant::now();
-        let mut straggler_boost_done = query.candidate_nodes.len() <= 20;
         loop {
-            if !straggler_boost_done
-                && fan_start.elapsed() >= crate::network::manager::QUORUM_STRAGGLER_TIMEOUT
-            {
-                straggler_boost_done = true;
-                if collected_signatures.len() < query.required_q {
-                    tracing::debug!(
-                        collected = collected_signatures.len(),
-                        required = query.required_q,
-                        "Straggler partial timeout (300ms): fanning in replacement ranks 21-40"
-                    );
-                    while candidate_idx < query.candidate_nodes.len() {
-                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                    }
-                }
+            if is_write && collected_signatures.len() + join_set.len()
+                + query.candidate_nodes.len().saturating_sub(candidate_idx) < query.required_q {
+                join_set.abort_all();
+                in_flight.clear();
+                break;
             }
             if collected_signatures.len() >= query.required_q {
                 break;
@@ -1030,7 +953,9 @@ async fn collect_peer_attestations(
                         continue;
                     }
 
-                    if !verify_peer_attestation(query.peer_mgr, &att, query.lock_id, query.shard_id, query.target_status, query.network_id, tls_pubkey).await {
+                    let expected_member = query.expected_members.and_then(|members| members.get(rank_idx)).copied();
+                    if expected_member.map(|pk| Some(pk) != att.node_pubkey_bytes() || Some(pk) != tls_pubkey).unwrap_or(false)
+                        || !verify_peer_attestation(query.peer_mgr, &att, (query.lock_id, query.parent_lock), query.shard_id, query.target_status, query.network_id, tls_pubkey).await {
                         if rank_idx < 20 {
                             query.peer_mgr.record_failure(addr).await;
                         }
@@ -1164,137 +1089,66 @@ async fn assemble_quorum_certificate(
     now_ms: u64,
     record_payload: Option<Vec<u8>>,
 ) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
-    let local_attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, 0, now_ms, state.network_id);
-    let mut collected_signatures = Vec::new();
-
-    let mut should_include_self = true;
+    use humoco_sim_core::types::CommitteeMember;
+    let self_pubkey = *state.identity.node_pubkey();
     let self_hrw = *state.identity.hrw_routing_id();
-
-    if let Some(peer_mgr) = &state.peer_manager {
-        let active_nodes = peer_mgr.active_hrw_nodes().await;
-        if !active_nodes.is_empty() {
-            let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(&self_hrw, shard_id);
-            let higher_nodes_count = active_nodes
-                .iter()
-                .filter(|(hrw_id, _)| {
-                    if hrw_id == &self_hrw {
-                        return false;
-                    }
-                    let score = humoco_sim_core::client_flow::compute_hrw_score_f64(hrw_id, shard_id);
-                    score > self_score || (score == self_score && hrw_id > &self_hrw)
-                })
-                .count();
-
-            let total_active = active_nodes.len() + 1; // include self
-            let (required_q, is_final) = humoco_sim_core::types::required_quorum(total_active);
-            let target_status: u8 = if is_final && peer_mgr.is_network_stable_ge20_for_24h(now_ms) { 1 } else { 0 };
-            let local_attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, target_status, now_ms, state.network_id);
-
-            // Self rank is 1 + number of nodes with higher HRW score
-            let self_rank = higher_nodes_count + 1;
-            if self_rank > 20 {
-                should_include_self = false;
-            }
-
-            if should_include_self {
-                collected_signatures.push(local_attestation);
-            }
-
-            let active_for_bitmap = active_nodes.clone();
-            let mut candidate_nodes = active_nodes;
-            candidate_nodes.sort_by(|a, b| {
-                let score_a = humoco_sim_core::client_flow::compute_hrw_score_f64(&a.0, shard_id);
-                let score_b = humoco_sim_core::client_flow::compute_hrw_score_f64(&b.0, shard_id);
-                score_b.total_cmp(&score_a)
-            });
-            candidate_nodes.truncate(40);
-
-            if let (Some(transport), Some(payload)) = (&state.transport, record_payload) {
-                let my_load = state.tier_controller.rolling_24h_average();
-                let quota_limit = (5.0 * state.tier_controller.effective_ncb() as f64).round() as u64;
-                let collision = collect_peer_attestations(
-                    PeerAttestationQuery {
-                        transport,
-                        peer_mgr,
-                        candidate_nodes: &candidate_nodes,
-                        msg_type: humoco_sim_core::wire::MsgType::LockVerifyRequest,
-                        resp_msg_type: humoco_sim_core::wire::MsgType::LockVerifyResponse,
-                        payload: &payload,
-                        target_status,
-                        lock_id,
-                        shard_id,
-                        required_q,
-                        shard_query_depth: state.shard_query_depth,
-                        my_load,
-                        quota_limit,
-                        network_id: state.network_id,
-                    },
-                    &mut collected_signatures,
-                ).await;
-
-                let status = if collected_signatures.len() >= required_q && target_status == 1 {
-                    1
-                } else {
-                    0
-                };
-
-                let self_pubkey = *state.identity.node_pubkey();
-                let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
-                verify_signer_bitmap_consistency(&collected_signatures, signer_bitmap);
-
-                let cert = QuorumCertificateDto {
-                    lock_id: hex::encode(lock_id),
-                    shard_id,
-                    status,
-                    active_nodes_count: total_active,
-                    signer_count: collected_signatures.len(),
-                    signatures: collected_signatures,
-                    signer_bitmap,
-                };
-                return (cert, collision);
-            }
-
-            let status = if collected_signatures.len() >= required_q && target_status == 1 {
-                1
-            } else {
-                0
-            };
-
-            let self_pubkey = *state.identity.node_pubkey();
-            let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
-            verify_signer_bitmap_consistency(&collected_signatures, signer_bitmap);
-
-            (QuorumCertificateDto {
-                lock_id: hex::encode(lock_id),
-                shard_id,
-                status,
-                active_nodes_count: total_active,
-                signer_count: collected_signatures.len(),
-                signatures: collected_signatures,
-                signer_bitmap,
-            }, None)
-        } else {
-            (QuorumCertificateDto {
-                lock_id: hex::encode(lock_id),
-                shard_id,
-                status: 0,
-                active_nodes_count: 1,
-                signer_count: 1,
-                signatures: vec![local_attestation],
-                signer_bitmap: 1,
-            }, None)
-        }
+    let (committee, remote, total_active) = if let Some(pm) = &state.peer_manager {
+        pm.shard_committee(self_pubkey, self_hrw, shard_id).await
     } else {
-        (QuorumCertificateDto {
-            lock_id: hex::encode(lock_id),
-            shard_id,
-            status: 0,
-            active_nodes_count: 1,
-            signer_count: 1,
-            signatures: vec![local_attestation],
-            signer_bitmap: 1,
-        }, None)
+        (vec![CommitteeMember { node_pubkey: self_pubkey, hrw_routing_id: self_hrw }], Vec::new(), 1)
+    };
+    let (required_q, final_size) = humoco_sim_core::types::required_quorum(total_active);
+    let target_status = u8::from(final_size && state.peer_manager.as_ref()
+        .map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false));
+    let mut collected_signatures = Vec::new();
+    // A local signature requires the same authoritative, accepted RAM lock
+    // as remote shard work. Membership alone is insufficient.
+    let sync_ready = state.transport.as_ref().map(|t| t.is_sync_ready()).unwrap_or(true);
+    if sync_ready && committee.iter().any(|member| member.node_pubkey == self_pubkey) {
+        let mut local_accepted = state.engine.get_ram_lock(&parent_lock).await
+            .map(|entry| entry.parent_lock == parent_lock && entry.id == lock_id).unwrap_or(false);
+        if let Some(payload) = record_payload.as_deref() {
+            if let Ok(crate::network::framing::LockWirePayload::Hmc { req, .. }) = bincode::deserialize(payload) {
+                let tag = if req.is_genesis { Some(bs58::encode(req.transaction_hash).into_string()) } else { req.ds_tag.clone() };
+                if let Some(tag) = tag {
+                    if *blake3::hash(tag.as_bytes()).as_bytes() == parent_lock
+                        && state.engine.get_hmc_ram_lock(&tag).await.map(|entry| entry.t_id == lock_id).unwrap_or(false)
+                    {
+                        local_accepted = true;
+                    }
+                }
+            }
+        }
+        if local_accepted {
+            collected_signatures.push(create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, target_status, now_ms, state.network_id));
+        }
     }
+    let candidates: Vec<_> = remote.iter().map(|(member, addr)| (member.hrw_routing_id, *addr)).collect();
+    let expected_members: Vec<_> = remote.iter().map(|(member, _)| member.node_pubkey).collect();
+    let mut collision = None;
+    if collected_signatures.len() < required_q {
+        if let (Some(transport), Some(pm), Some(payload)) = (&state.transport, &state.peer_manager, record_payload.as_deref()) {
+            collision = collect_peer_attestations(PeerAttestationQuery {
+                transport, peer_mgr: pm, candidate_nodes: &candidates,
+                expected_members: Some(&expected_members), parent_lock,
+                msg_type: humoco_sim_core::wire::MsgType::LockVerifyRequest,
+                resp_msg_type: humoco_sim_core::wire::MsgType::LockVerifyResponse,
+                payload, target_status, lock_id, shard_id, required_q,
+                shard_query_depth: state.shard_query_depth,
+                my_load: state.tier_controller.rolling_24h_average(),
+                quota_limit: (5.0 * state.tier_controller.effective_ncb() as f64).round() as u64,
+                network_id: state.network_id,
+            }, &mut collected_signatures).await;
+        }
+    }
+    let signer_bitmap = compute_committee_bitmap(&committee, &collected_signatures);
+    let cert = QuorumCertificateDto {
+        lock_id: hex::encode(lock_id), shard_id,
+        status: if collected_signatures.len() >= required_q { target_status } else { 0 },
+        active_nodes_count: total_active, signer_count: collected_signatures.len(),
+        signatures: collected_signatures, signer_bitmap,
+    };
+    (cert, collision)
 }
 
 /// Assembles a quorum certificate for a status query by collecting signatures from active shard nodes
@@ -1309,7 +1163,6 @@ async fn assemble_status_quorum_certificate(
     read_quorum: u8,
 ) -> QuorumCertificateDto {
     let mut collected_signatures = Vec::new();
-    let mut should_include_self = true;
     let self_hrw = *state.identity.hrw_routing_id();
 
     if let Some(peer_mgr) = &state.peer_manager {
@@ -1319,21 +1172,23 @@ async fn assemble_status_quorum_certificate(
             let required_q = (read_quorum as usize).min(total_active).max(1);
             let target_status: u8 = if required_q >= 20 || (total_active >= 20 && required_q >= 14) { 1 } else { 0 };
 
-            let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(&self_hrw, shard_id);
-            let higher_nodes_count = active_nodes
-                .iter()
-                .filter(|(hrw_id, _)| {
-                    if hrw_id == &self_hrw {
-                        return false;
+            // Read eligibility retains its existing presence policy; ranking
+            // and bitmap share the same canonical committee snapshot.
+            let self_pubkey = *state.identity.node_pubkey();
+            let mut members = vec![humoco_sim_core::types::CommitteeMember {
+                node_pubkey: self_pubkey, hrw_routing_id: self_hrw,
+            }];
+            let mut endpoints = std::collections::HashMap::new();
+            for (hrw, addr) in &active_nodes {
+                if let Some(pk) = peer_mgr.get_pubkey_by_hrw_routing_id(hrw).await {
+                    if pk != self_pubkey {
+                        members.push(humoco_sim_core::types::CommitteeMember { node_pubkey: pk, hrw_routing_id: *hrw });
+                        endpoints.insert(pk, *addr);
                     }
-                    let score = humoco_sim_core::client_flow::compute_hrw_score_f64(hrw_id, shard_id);
-                    score > self_score || (score == self_score && hrw_id > &self_hrw)
-                })
-                .count();
-            let self_rank = higher_nodes_count + 1;
-            if self_rank > 20 {
-                should_include_self = false;
+                }
             }
+            let committee = humoco_sim_core::types::select_shard_committee(shard_id, &members);
+            let should_include_self = committee.iter().any(|member| member.node_pubkey == self_pubkey);
 
             let local_attestation = create_attestation_for_network(
                 &state.identity,
@@ -1348,14 +1203,8 @@ async fn assemble_status_quorum_certificate(
                 collected_signatures.push(local_attestation);
             }
 
-            let active_for_bitmap = active_nodes.clone();
-            let mut candidate_nodes = active_nodes;
-            candidate_nodes.sort_by(|a, b| {
-                let score_a = humoco_sim_core::client_flow::compute_hrw_score_f64(&a.0, shard_id);
-                let score_b = humoco_sim_core::client_flow::compute_hrw_score_f64(&b.0, shard_id);
-                score_b.total_cmp(&score_a)
-            });
-            candidate_nodes.truncate(40);
+            let candidate_nodes: Vec<_> = committee.iter().filter_map(|member|
+                endpoints.get(&member.node_pubkey).map(|addr| (member.hrw_routing_id, *addr))).collect();
 
             if collected_signatures.len() < required_q {
                 if let Some(transport) = &state.transport {
@@ -1394,6 +1243,7 @@ async fn assemble_status_quorum_certificate(
                             transport,
                             peer_mgr,
                             candidate_nodes: &candidate_nodes,
+                            expected_members: None, parent_lock,
                             msg_type: humoco_sim_core::wire::MsgType::StatusQuery,
                             resp_msg_type: humoco_sim_core::wire::MsgType::StatusResponse,
                             payload: &payload,
@@ -1417,8 +1267,7 @@ async fn assemble_status_quorum_certificate(
                 0
             };
 
-            let self_pubkey = *state.identity.node_pubkey();
-            let signer_bitmap = compute_signer_bitmap(state.peer_manager.as_deref(), &active_for_bitmap, self_hrw, self_pubkey, shard_id, &collected_signatures).await;
+            let signer_bitmap = compute_committee_bitmap(&committee, &collected_signatures);
             verify_signer_bitmap_consistency(&collected_signatures, signer_bitmap);
 
             QuorumCertificateDto {
@@ -1560,6 +1409,7 @@ async fn query_status(
                         || resp_payload.is_empty()
                         || (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0
                         || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED) != 0
+                            || (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0
                     {
                         return None;
                     }
@@ -1805,7 +1655,7 @@ async fn submit_hmc_lock(
         humoco_sim_core::types::voucher_shard_id(&req.layer2_voucher_id)
     };
     let is_responsible = if let Some(pm) = &state.peer_manager {
-        pm.is_local_responsible_for_shard(state.identity.hrw_routing_id(), shard_id, 20).await
+        pm.is_local_committee_member(*state.identity.node_pubkey(), *state.identity.hrw_routing_id(), shard_id).await
     } else {
         true
     };
@@ -2435,7 +2285,7 @@ async fn submit_hmc_chain_lock_inner(
     };
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
     let is_responsible = if let Some(pm) = &state.peer_manager {
-        pm.is_local_responsible_for_shard(state.identity.hrw_routing_id(), shard_id, 20).await
+        pm.is_local_committee_member(*state.identity.node_pubkey(), *state.identity.hrw_routing_id(), shard_id).await
     } else {
         true
     };

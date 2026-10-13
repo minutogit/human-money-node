@@ -850,7 +850,7 @@ impl FirstSeenPacer {
 /// Score(Node_i, S) = BLAKE3(NodeID_i || Shard_ID)
 ///
 /// NOTE: For all production routing, client verification, and network decisions, use
-/// `compute_hrw_score_f64` / `hrw_score_32` with the 32-byte cryptographic `HrwRoutingId` (Spec 03, INV-0301).
+/// `select_shard_committee` with the 32-byte cryptographic `HrwRoutingId` (Spec 03, INV-0301).
 pub fn hrw_score(node_id: NodeId, shard_id: ShardId) -> Hash256 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&node_id.to_le_bytes());
@@ -900,47 +900,50 @@ pub fn order_statistics_threshold(active_nodes_count: usize, k_max: f64) -> f64 
     (1.0 - (k_max / active_nodes_count as f64)).max(0.0)
 }
 
-/// Fractal, continuous quorum and order-statistics verification for gateway and client.
-/// Applies to all N_active from 1 to 1,000,000 without special-case branches.
-/// Returns: (is_valid, is_final)
+/// A cryptographic identity and its operator-authorized active shard ticket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitteeMember {
+    pub node_pubkey: NodePubKey,
+    pub hrw_routing_id: HrwRoutingId,
+}
+
+/// Selects at most twenty distinct identities by their complete 256-bit HRW hash.
+/// Inputs must already contain authenticated, mature, operator-authorized tickets.
+/// Conflicting tickets for one identity deterministically choose the smallest ticket;
+/// this is canonicalization, not a ticket-authorization or membership proof.
+pub fn select_shard_committee(shard_id: ShardId, active: &[CommitteeMember]) -> Vec<CommitteeMember> {
+    let mut identities = std::collections::BTreeMap::new();
+    for member in active {
+        identities.entry(member.node_pubkey)
+            .and_modify(|ticket: &mut HrwRoutingId| *ticket = (*ticket).min(member.hrw_routing_id))
+            .or_insert(member.hrw_routing_id);
+    }
+    let mut ranked: Vec<_> = identities.into_iter()
+        .map(|(node_pubkey, hrw_routing_id)| CommitteeMember { node_pubkey, hrw_routing_id })
+        .collect();
+    ranked.sort_by(|a, b| hrw_score_32(&b.hrw_routing_id, shard_id)
+        .cmp(&hrw_score_32(&a.hrw_routing_id, shard_id))
+        .then_with(|| a.node_pubkey.cmp(&b.node_pubkey)));
+    ranked.truncate(20);
+    ranked
+}
+
+/// Simulation-only exact quorum membership check against an authenticated snapshot.
+/// The historical name is retained for callers; statistical scores never authorize signers.
+/// Returns `(is_valid, is_final)`. Every supplied signer must be distinct and eligible.
 pub fn verify_order_statistics_quorum(
     signer_node_ids: &[NodeId],
-    shard_id: ShardId,
-    active_nodes_count: usize,
-    k_max: f64,
+    committee: &[NodeId],
 ) -> (bool, bool) {
-    if active_nodes_count == 0 || signer_node_ids.is_empty() {
+    let members: std::collections::HashSet<_> = committee.iter().copied().collect();
+    if committee.is_empty() || committee.len() > 20 || members.len() != committee.len() {
         return (false, false);
     }
-
-    let (required_q, is_final) = required_quorum(active_nodes_count);
-    if required_q == 0 {
-        return (false, false);
-    }
-
-    // 1. Compute scores for all distinct signers
-    let mut unique_signers = std::collections::HashSet::new();
-    let mut scores = Vec::new();
-    for &nid in signer_node_ids {
-        if unique_signers.insert(nid) {
-            scores.push(hrw_score_normalized(nid, shard_id));
-        }
-    }
-
-    // Not even the minimum number of distinct signers present
-    if scores.len() < required_q {
-        return (false, false);
-    }
-
-    // 2. Sort descending by score (best HRW rank first)
-    scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-    // 3. Check the threshold exactly at the Q-th best signer (index required_q - 1)
-    let threshold = order_statistics_threshold(active_nodes_count, k_max);
-    let q_th_best_score = scores[required_q - 1];
-
-    let is_valid = q_th_best_score >= threshold;
-    (is_valid, is_final && is_valid)
+    let signers: std::collections::HashSet<_> = signer_node_ids.iter().copied().collect();
+    let (required_q, is_final) = required_quorum(committee.len());
+    let valid = signers.len() == signer_node_ids.len() && signers.len() >= required_q
+        && signers.is_subset(&members);
+    (valid, valid && is_final)
 }
 
 /// Ranking of all active nodes for a shard by HRW score (descending: highest score = rank 1)
@@ -949,7 +952,8 @@ pub fn hrw_rank_nodes(active_nodes: &[NodeId], shard_id: ShardId) -> Vec<(NodeId
         .iter()
         .map(|&nid| (nid, hrw_score(nid, shard_id)))
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.dedup_by_key(|entry| entry.0);
     ranked
 }
 
@@ -960,16 +964,15 @@ pub fn select_shard_candidates(active_nodes: &[NodeId], shard_id: ShardId, n: us
     ranked.into_iter().map(|(nid, _)| nid).collect()
 }
 
-/// Top-20 candidates + rank 21 as deterministic replacement for a shard.
-/// Returns: (top-20 vector, Option<rank-21 node>)
+/// Legacy simulation selection API. No replacement is authorized as a FINAL signer.
+/// Returns the fixed top twenty and always `None` for the former backup.
 pub fn select_quorum_with_backup(
     active_nodes: &[NodeId],
     shard_id: ShardId,
 ) -> (Vec<NodeId>, Option<NodeId>) {
     let ranked = hrw_rank_nodes(active_nodes, shard_id);
     let top20: Vec<NodeId> = ranked.iter().take(20).map(|(nid, _)| *nid).collect();
-    let rank21 = ranked.get(20).map(|(nid, _)| *nid);
-    (top20, rank21)
+    (top20, None)
 }
 
 /// Checks whether a bit is set in the bitmask for the given index.

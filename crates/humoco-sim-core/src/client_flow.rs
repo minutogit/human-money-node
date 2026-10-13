@@ -293,81 +293,60 @@ impl SignerEntry {
     }
 }
 
-/// Zero-trust verification of a quorum certificate for smart clients (INV-0605)
-#[derive(Clone, Debug, PartialEq)]
+/// Errors when checking a certificate against an independently authenticated committee.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ZeroTrustVerifyError {
+    InvalidCommittee,
     InsufficientSignatures,
     UnknownNodeIdentity { index: usize },
-    StatisticalRankTooLow { index: usize, score: f64, threshold: f64 },
+    DuplicateSigner { index: usize },
     InvalidSignature { index: usize },
 }
 
+/// Checks exact membership and real Ed25519 signatures for the expected decision.
+/// The caller MUST authenticate the snapshot independently; a gateway-provided list
+/// or Bloom filter alone does not establish committee authority. This does not prove
+/// agreement between independently observed committees or safe reconfiguration.
+/// The digest matches the current Node approve attestation format (zero wire counters).
 pub fn verify_zero_trust_quorum(
-    lock_id: &[u8; 32],
+    network_id: crate::types::NetworkId,
+    expected_status: u8,
     shard_id: u16,
+    parent_lock: &[u8; 32],
+    lock_id: &[u8; 32],
     signers: &[SignerEntry],
-    consensus_filter: &ConsensusBloomFilter,
-    alpha: f64,
+    authenticated_committee: &[crate::types::CommitteeMember],
 ) -> Result<(), ZeroTrustVerifyError> {
-    if signers.len() < 14 {
+    let members: HashMap<_, _> = authenticated_committee.iter()
+        .map(|m| (m.node_pubkey, m.hrw_routing_id)).collect();
+    if members.is_empty() || members.len() > 20 || members.len() != authenticated_committee.len() {
+        return Err(ZeroTrustVerifyError::InvalidCommittee);
+    }
+    if expected_status > 1 || (expected_status == 1 && members.len() != 20) {
+        return Err(ZeroTrustVerifyError::InvalidCommittee);
+    }
+    let (required, _) = crate::types::required_quorum(members.len());
+    if signers.len() < required {
         return Err(ZeroTrustVerifyError::InsufficientSignatures);
     }
-    let n_est = consensus_filter.estimate_network_size();
-
-    // 1. Compute thresholds:
-    // Top-5 anchor: threshold for rank 25 (top nodes)
-    let top5_threshold = if n_est > 0 {
-        (1.0 - (25.0 * alpha) / (n_est as f64)).max(0.0)
-    } else {
-        0.0
-    };
-    // Median tolerance: threshold for rank 50 (allows replacements during network disruptions)
-    let median_threshold = if n_est > 0 {
-        (1.0 - (50.0 * alpha) / (n_est as f64)).max(0.0)
-    } else {
-        0.0
-    };
-
-    let mut scores = Vec::with_capacity(signers.len());
-
-    for (i, signer) in signers.iter().enumerate() {
-        // A. Consensus-filter check: does this (HrwRoutingId, NodePubKey) belong to the genuine network?
-        if !consensus_filter.contains_identity(&signer.hrw_id, &signer.pub_key) {
-            return Err(ZeroTrustVerifyError::UnknownNodeIdentity { index: i });
+    let payload = crate::crypto::compute_attestation_payload_digest(parent_lock, lock_id);
+    let domain = if expected_status == 1 { crate::crypto::domain_approve_final(network_id) }
+        else { crate::crypto::domain_approve_prov(network_id) };
+    let digest = crate::crypto::compute_sig_digest(domain, 0, 0, 0, shard_id, expected_status, &payload);
+    let mut seen = HashSet::new();
+    for (index, signer) in signers.iter().enumerate() {
+        if members.get(&signer.pub_key) != Some(&signer.hrw_id) {
+            return Err(ZeroTrustVerifyError::UnknownNodeIdentity { index });
         }
-
-        // B. Cryptographic signature check (deterministic / Ed25519 over NodePubKey)
-        if !crate::crypto::verify_deterministic_sig(&signer.pub_key, lock_id, &signer.signature) {
-            return Err(ZeroTrustVerifyError::InvalidSignature { index: i });
+        if !seen.insert(signer.pub_key) {
+            return Err(ZeroTrustVerifyError::DuplicateSigner { index });
         }
-
-        let score = compute_hrw_score_f64(&signer.hrw_id, shard_id);
-        scores.push((score, i));
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&signer.pub_key)
+            .map_err(|_| ZeroTrustVerifyError::InvalidSignature { index })?;
+        let signature = ed25519_dalek::Signature::from_bytes(&signer.signature);
+        key.verify_strict(&digest, &signature)
+            .map_err(|_| ZeroTrustVerifyError::InvalidSignature { index })?;
     }
-
-    // C. Sort scores descending for robust order statistics
-    scores.sort_by(|a, b| b.0.total_cmp(&a.0));
-
-    // 1. Check top-5 anchor (at least 5 nodes must have a genuine top score)
-    let fifth_best_score = scores[4].0;
-    if fifth_best_score < top5_threshold {
-        return Err(ZeroTrustVerifyError::StatisticalRankTooLow {
-            index: scores[4].1,
-            score: fifth_best_score,
-            threshold: top5_threshold,
-        });
-    }
-
-    // 2. Check median (the 7th-best node must be above the emergency threshold)
-    let median_score = scores[6].0;
-    if median_score < median_threshold {
-        return Err(ZeroTrustVerifyError::StatisticalRankTooLow {
-            index: scores[6].1,
-            score: median_score,
-            threshold: median_threshold,
-        });
-    }
-
     Ok(())
 }
 

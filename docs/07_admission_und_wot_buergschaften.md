@@ -1,5 +1,8 @@
 # 07. Admission, F2F Peering & Sybil Resilience
 
+> **Checkout committee policy (Rev. 4):** Write verification freezes a canonical committee of at most twenty distinct identities and never substitutes ranks 21–40 for unavailable votes. FINAL requires fourteen valid members of that snapshot; write collection has an 800 ms budget. Unready/non-member replies and cancelled stragglers are neutral. This policy supersedes legacy checkout replacement descriptions below; background succession requires a separate membership-continuity proof. Read policy and observation-based ticket incubation are unchanged.
+
+
 > **Status:** Standard  
 > **Model:** Logic & State Graph First  
 

@@ -186,7 +186,6 @@ fn test_mutant_m1o4_verify_order_statistics_quorum_boundary() {
     // We use a configuration where threshold is low enough to guarantee at least one valid quorum.
     // Mutant `>` would still pass for threshold 0, but the explicit `>=` check on exact boundary is
     // validated via order_statistics logic: for N=5, Kmax=5 threshold=0, any quorum of 4 distinct signers must be valid.
-    let shard = 7u16;
     let active_nodes: Vec<u16> = (1..=5).collect();
     let k_max = 5.0; // threshold = 1 -5/5 =0.0
     let (required_q, _) = humoco_sim_core::types::required_quorum(active_nodes.len());
@@ -196,17 +195,17 @@ fn test_mutant_m1o4_verify_order_statistics_quorum_boundary() {
 
     // With threshold 0, any 4 distinct signers must be valid (since all HRW scores in [0,1) >=0)
     let signers = vec![1, 2, 3, 4];
-    let (valid, _) = verify_order_statistics_quorum(&signers, shard, active_nodes.len(), k_max);
+    let (valid, _) = verify_order_statistics_quorum(&signers, &active_nodes);
     assert!(valid, "with threshold 0 any quorum meeting distinct count must be valid (>=)");
 
     // Fewer than required_q distinct signers must be invalid even with threshold 0
     let small = vec![1, 2, 3];
-    let (valid_small, _) = verify_order_statistics_quorum(&small, shard, active_nodes.len(), k_max);
+    let (valid_small, _) = verify_order_statistics_quorum(&small, &active_nodes);
     assert!(!valid_small, "quorum with < required distinct signers must be invalid");
 
     // Duplicate signers do not count as distinct
     let dup = vec![1, 1, 1, 1];
-    let (valid_dup, _) = verify_order_statistics_quorum(&dup, shard, active_nodes.len(), k_max);
+    let (valid_dup, _) = verify_order_statistics_quorum(&dup, &active_nodes);
     assert!(!valid_dup, "duplicates must not be counted as distinct signers");
 
     // Verify threshold 0.5 case has at least one invalid and respects boundary
@@ -216,8 +215,8 @@ fn test_mutant_m1o4_verify_order_statistics_quorum_boundary() {
     // Search across many shards for a valid quorum with this mid threshold to ensure logic holds
     let mut found_valid = false;
     let mut found_invalid = false;
-    for s in 0u16..200 {
-        let (v, _) = verify_order_statistics_quorum(&[1,2,3,4], s, 5, k_mid);
+    for _ in 0u16..200 {
+        let (v, _) = verify_order_statistics_quorum(&[1,2,3,4], &active_nodes);
         if v { found_valid = true; } else { found_invalid = true; }
         if found_valid && found_invalid { break; }
     }

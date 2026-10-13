@@ -31,10 +31,10 @@ fn test_spec_03_top20_shard_and_rank21_backup() {
     let (top20, rank21) = select_quorum_with_backup(&node_ids, SHARD_ID);
 
     assert_eq!(top20.len(), 20, "Top-20 should have exactly 20 candidates");
-    assert!(rank21.is_some(), "Rank 21 must exist with >= 21 nodes");
+    assert!(rank21.is_none(), "No backup may be authorized as a FINAL signer");
 
     let rank7_id = ranked[6].0;
-    let rank21_id = rank21.unwrap();
+    let rank21_id = ranked[20].0;
 
     assert!(
         top20.contains(&rank7_id),
@@ -66,7 +66,9 @@ fn test_spec_03_lazy_node_defense_suspend_and_promote() {
     let (_top20, rank21_opt) = select_quorum_with_backup(&node_ids, SHARD_ID);
 
     let rank7_id = ranked[6].0;
-    let rank21_id = rank21_opt.expect("Rank 21 must exist");
+    assert!(rank21_opt.is_none());
+    // Legacy simulation replacement lifecycle is diagnostic, not FINAL authorization.
+    let rank21_id = ranked[20].0;
 
     for node in network.nodes.values_mut() {
         let top20: Vec<NodeId> = ranked.iter().take(20).map(|(nid, _)| *nid).collect();

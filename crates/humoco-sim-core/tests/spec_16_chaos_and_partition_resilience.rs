@@ -167,76 +167,13 @@ fn test_inv1602_30_percent_byzantine_packet_drop_resilience() {
     assert!(test_packet_drop_resilience(0.50, 20));
 }
 
-// INV-1603: 7 von 20 Nodes Crash (f < N/3), Quorum & Replacement Node Promotion
+// INV-1603: Fixed committees tolerate six outages, not seven.
 #[test]
-fn test_inv1603_7_of_20_nodes_crash_quorum_and_replacement_promotion() {
-    // N=20, f=7 < N/3 (≈6.66) but spec says f < N/3, 7 is borderline but spec says 7 von 20 crash should still work via replacement
-    // Mathematically, with 20 nodes, Q=14, after crash 7 => remaining 13 <14 => need replacement (rank21)
-    // Test via helper
-    let (can, promoted) = simulate_crash_and_promotion(25, 7);
-    assert!(can, "with replacement, quorum must still be achievable");
-    assert!(promoted.is_some(), "rank21 should be promoted after crash");
-
-    // HRW ranking: top20 + rank21
-    let total: Vec<u16> = (0..25).collect();
-    let (top20, rank21) = humoco_sim_core::types::select_quorum_with_backup(&total, 42);
-    assert_eq!(top20.len(), 20);
-    assert!(rank21.is_some());
-    let r21 = rank21.unwrap();
-
-    // Simulate SimNetwork with 20 nodes + 5 standby, crash 7 top nodes, check quorum still via promotion
-    let mut net = SimNetwork::new();
-    net.set_latency(5,10);
-    for id in 0..25 {
-        net.add_node(SimNode::new(id, 20));
-    }
-    // Make them all know each other
-    for i in 0..25 { for j in 0..25 { if i!=j { net.nodes.get_mut(&(i as u16)).unwrap().add_peer(j as u16); } } }
-    // Need to set shard candidates for replacement logic
-    let shard = 42u16;
+fn test_inv1603_crashes_do_not_authorize_replacement_signers() {
+    assert_eq!(simulate_crash_and_promotion(25,6),(true,None));
+    assert_eq!(simulate_crash_and_promotion(25,7),(false,None));
     let active: Vec<u16> = (0..25).collect();
-    let ranked = humoco_sim_core::types::hrw_rank_nodes(&active, shard);
-    let top20_ids: Vec<u16> = ranked.iter().take(20).map(|(nid,_)| *nid).collect();
-    // Configure each node with same top20 view
-    for id in 0..25 {
-        net.nodes.get_mut(&(id as u16)).unwrap().set_shard_candidates(shard, top20_ids.clone());
-    }
-
-    // Crash 7 from top20: just remove them from network (simulate down)
-    let crash_ids: Vec<u16> = top20_ids.iter().take(7).copied().collect();
-    for cid in &crash_ids {
-        net.nodes.remove(cid);
-    }
-    let _remaining = 18; // 25-7 =18
-
-    // Remaining nodes should still be able to form quorum: need to check lock lifecycle
-    let lock = LockRecord::new([0xEE;32],[0xFF;32], b"crash_test".to_vec(), SimTime(0), SimTime(60_000));
-    let lid = lock.id;
-    // Choose a remaining top node as ingress
-    let ingress_node = *net.nodes.keys().next().unwrap();
-    net.schedule(SimTime(10), ingress_node, ingress_node, SimMessage::LockRequest(lock));
-    net.run_until(SimTime(1000));
-
-    // Count signers on a remaining node: should have 18 attestations (all remaining)
-    let sample = net.nodes.get(&ingress_node).unwrap();
-    if let Some(rec) = sample.locks.get(&lid) {
-        // With 18 nodes, all 18 will attest -> sigs 18 >=14 => FINAL possible
-        assert!(rec.signers.len() >= 14, "after crash, remaining 18 must still reach 14 sigs, got {}", rec.signers.len());
-        // If N is considered 18, Q =14 still satisfied
-        assert!(rec.signers.len() >= 14);
-    } else {
-        panic!("lock not found after crash scenario");
-    }
-
-    // Replacement node promotion: rank21 should now be in new top20
-    let remaining_ids: Vec<u16> = net.nodes.keys().copied().collect();
-    let (new_top20, new_rank21) = humoco_sim_core::types::select_quorum_with_backup(&remaining_ids, shard);
-    assert!(new_top20.contains(&r21) || new_rank21.is_some(), "replacement promotion must keep quorum size");
-    // New top20 must have 18 (since we have 18 nodes) or 20 if enough
-    assert_eq!(new_top20.len(), remaining_ids.len().min(20));
-
-    // Verify SimNode replacement lifecycle helpers: should_accept_invite and can_retire
-    // A node rank21 should accept invites from ranks <21
-    assert!(humoco_sim_core::types::should_accept_replacement_invite(5, 21));
-    assert!(!humoco_sim_core::types::should_accept_replacement_invite(22, 21));
+    let (committee, backup) = humoco_sim_core::types::select_quorum_with_backup(&active,42);
+    assert_eq!(committee.len(),20);
+    assert_eq!(backup,None);
 }

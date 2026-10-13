@@ -468,27 +468,18 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 };
 
-                // # Architectural Invariant: INV-0306 Dynamic Succession & INV-1501 (Phase 2 P1)
-                //
-                // Nodes on HRW ranks 21-40 are active straggler-failover replacements:
-                // after the gateway's 300ms partial timeout they are fanned in and MUST
-                // NOT reject authorized quorum requests with FLAG_NOT_IN_SHARD. Only
-                // ranks beyond 40 (max successor horizon K_max=40) may refuse. Aborted
-                // stragglers and Tier-2 15s idle closes are never counted as failures.
+                // Write authorization is restricted to the canonical Top-20.
+                // Local reachability never admits replacement ranks.
                 let is_responsible = if let Some(pm) = peer_manager.as_ref() {
-                    pm.is_local_responsible_for_shard(identity.hrw_routing_id(), shard_id, 40).await
+                    pm.is_local_committee_member(*identity.node_pubkey(), *identity.hrw_routing_id(), shard_id).await
                 } else {
                     true
                 };
-
                 if !is_responsible {
-                    warn!(shard_id, "LockVerifyRequest rejected: local node is beyond rank 40 for shard");
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
-                        header.session_seq.wrapping_add(1),
-                        header.epoch_id,
-                        humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
-                        0,
+                        header.session_seq.wrapping_add(1), header.epoch_id,
+                        humoco_sim_core::wire::FLAG_NOT_IN_SHARD, 0,
                     );
                     return Ok((resp_header, Vec::new()));
                 }

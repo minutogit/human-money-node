@@ -61,20 +61,15 @@ sequenceDiagram
     end
 ```
 
-### 2.1 Seamless Quorum & Order-Statistic Verification (KISS Principle)
+### 2.1 Fixed Checkout Committee and Exact Certificate Verification
 
-Both gateway and client verify signer legitimacy via a closed quantile threshold (zero special-case branches in code) and the **$O(1)$ Top-$Q$ pivot method**:
+For each write request, the gateway freezes one canonical committee snapshot. Selection deduplicates the full `NodePubKey`, uses the complete 256-bit HRW score in descending order, and breaks ties deterministically by identity. The local node and remote peers are ranked together before truncation: twenty total members at `N >= 20`, or the existing `N` members in provisional operation.
 
-1. **Determine minimum count $Q(R)$:**
-   $$R = \min(20, \; N_{\text{active}}), \quad Q(R) = \left\lfloor \frac{2}{3} \times R \right\rfloor + 1$$
-2. **Descending HRW score sort:**
-   The normalized scores $\text{Score}_i = \frac{\text{BLAKE3}(\text{HrwRoutingId}_i \parallel \text{Shard\_ID})}{2^{256}}$ of all distinct supplied signatures are sorted descending (best rank first). HRW uses exclusively the `HrwRoutingId` (Argon2d ticket); the permanent `NodePubKey` (Ed25519) is used only for F2F/TLS.
-3. **Pivot comparison at the $Q$-th element (index $Q-1$):**
-   $$\text{Score}_Q \;\ge\; \max\left(0.0, \; 1.0 - \frac{K_{\text{max}}}{N_{\text{active}}}\right) \quad (\text{with } K_{\text{max}} = 40)$$
+A FINAL certificate requires fourteen distinct authorized members of that snapshot. Every counted signature must bind the expected network, shard, parent, lock, and status. The bitmap refers to positions 0–19 of the same snapshot. A local vote is admitted only after the local shard passes readiness and collision checks. No rank-21 replacement is authorized during the request.
 
-* **Poisoning Immunity:** If the $Q$-th best signer satisfies the threshold, all $Q-1$ better signers are automatically legitimized. Any junk signatures (e.g., at rank 500) beyond the $Q$ best votes are silently ignored and can never destroy a valid quorum (*Zero Griefing Attack Vector*).
-* **Bootstrap & Village Networks ($N \le 40$):** The threshold is $0.0$. All known active nodes are eligible; only the base cardinality $Q(R)$ matters.
-* **Large Networks ($N \ge 1.000$):** The threshold automatically filters the top $\approx 40$ HRW candidates of this shard. If individual Top-20 nodes fail, deterministic successors (ranks 21..40) absorb large failures without latency, while fake identities fail with $P > 99{,}9999999999999\%$ mathematical certainty.
+Normalized score quantiles and Bloom filters are discovery hints, not membership proofs. Verification requires an explicitly supplied, independently authenticated committee; neither the gateway's claimed roster nor a statistical network-size estimate authenticates the electorate. The current snapshot rule eliminates 14/40 pool expansion. Globally consistent discovery and safe committee transitions remain separate proof obligations.
+
+Remote writes are launched concurrently and exit at the required quorum. Write collection has an 800 ms budget and stops early if the remaining eligible members cannot reach quorum. Missing quorum returns HTTP 503; it does not prove that no replica accepted the lock. Identical retries preserve the lock identifier. Unready/non-member responses and quorum-completion cancellations carry no peer malus. Existing 1-of-20 read routing and adaptive provisional quorums are preserved.
 
 ### 2.2 Semantic Decoupling & 24h Incubation Wall for HrwRoutingId
 
@@ -101,16 +96,16 @@ flowchart TD
         ActiveNodes --> Accounting["Local RAM counter:<br>missing_count[Node_7] += 1"]
     end
 
-    subgraph SelfHealing["3. Shard Repair & HRW Rank 21"]
+    subgraph SelfHealing["3. Local Routing Backoff"]
         Accounting --> Check{"missing_count > Threshold?"}
         Check -->|Yes| Evict["Node 7 locally suspended in shard"]
-        Evict --> Promote["HRW rank 21 steps in in 0 ms & syncs locks"]
+        Evict --> Promote["Keep frozen electorate; fail if quorum unavailable"]
     end
 ```
 
 1. **Parallel Broadcast Without Blocking & Local Backoff Cache (Gateway View):**  
    The gateway does not wait for stragglers, but assembles the `QuorumCertificate` as soon as the first $14$ of $20$ signatures are present.  
-   * **Local Suspension Cache ($< 16\,\text{KB}$ RAM):** If a shard node repeatedly fails to respond ($100\,\text{ms}$ timeout, $\ge 3$ debounced misses), it is marked in the local gateway cache as `SUSPENDED`. On subsequent locks the gateway no longer queries that node at all, but contacts the succeeding HRW ranks 21..24 directly ($0\,\text{ms}$ wait time for clients).
+   * **Local Suspension Cache ($< 16\,\text{KB}$ RAM):** If a shard node repeatedly fails to respond ($100\,\text{ms}$ timeout, $\ge 3$ debounced misses), it is marked in the local gateway cache as `SUSPENDED`. Routing may avoid the suspended endpoint, but checkout must not replace its authorized vote with any rank beyond the frozen top twenty.
 2. **The 4-Byte Piggyback Ack:** The gateway sends the $4$-byte `signers_bitmask` back to the shard nodes when closing the QUIC streams.
 3. **[INV-0310] Stochastic Read Routing (`StatusQuery`) & Read Backoff:**
    * **Uniform Random Load Balancing:** For read queries (`L2StatusQuery` / `StatusQuery`) the gateway does not rigidly query rank 1 (to avoid hotspotting), but uniformly at random selects an unsuspended node from the shard's Top-20:
@@ -123,11 +118,11 @@ flowchart TD
    * **Target comparison against Top-20:** The gateway compares the signers contained in the quorum certificate exactly against the primary HRW ranks $1 \dots 20$ of the shard.
    * **Transient Missing-Count Accounting & Autonomous Decay:**
      * **Missing node (rank $i \in 1..20$ without signature / timeout / unjustified 429):** $\text{missing\_count} = \min(255, \text{missing\_count} + 1)$.
-       * Local suspension: $\text{missing\_count} \ge 3 \implies \text{SUSPENDED}$ (Rank 21 promotes in $0\,\text{ms}$).
+       * Local suspension: $\text{missing\_count} \ge 3 \implies \text{SUSPENDED}$ (no replacement vote is admitted during checkout).
      * **Successful node (valid signature):** $\text{missing\_count} = 0$ (immediate reinstatement).
      * **Plausible quota rejection (`429 QuotaExceeded`, `INV-0909`):** If a `429` response falls within the tolerant margin ($75\dots 125\,\%$) or the quota overflow is confirmed by the quorum ($\ge 14$ rejections), it counts as proper participation: $\text{missing\_count} += 0$ (no penalty). Only `429` messages in the fraud zone ($< 75\,\%$ of the limit) incur $\text{missing\_count} += 1$.
      * **Hourly autonomous decay:** $\text{missing\_count} = \max(0, \text{missing\_count} - 1)$ per hour, ensuring autonomous recovery without deadlocks.
-   * **Data-Plane "Skip & Replace":** While $\text{is\_suspended}(N)$ the gateway sends no shard locks or queries to that node, but queries HRW successors directly (ranks 21..24) ($0\,\text{ms}$ client delay). Gossip heartbeats remain unconditionally forwarded.
+   * **Data-Plane "Skip & Replace":** While $\text{is\_suspended}(N)$ the gateway sends no shard locks or queries to that node, and does not enlarge the checkout committee. Gossip heartbeats remain unconditionally forwarded.
    * **Dormant Transition & Clean Re-Entry:** On transition to `DORMANT` ($> 21\text{--}24\,\text{h}$ offline) $\text{missing\_count} = 0$ is set so the node is immediately eligible for probation on re-entry. Multi-week lockouts are eliminated.
 5. **[INV-0308] Stochastic Gossip Percolation & Starvation Threshold (The 73.1% Weibull Formula):**  
    * **Censorship immunity under partial blocking ($\le 50\,\%$):** Passive non-forwarding of heartbeats by small censorship cartels ($\le 50\,\%$) **cannot isolate** an honest node. Thanks to high triadic closure and small-world paths, gossip reaches $> 99{,}8\,\%$ of all honest nodes.
@@ -140,13 +135,13 @@ flowchart TD
      * **$x \ge 78\,\% \dots 80\,\%$:** Gossip physically collapses ($< 1{,}5\,\%$ reach, $\le 7$ hops). The lazy node starves organically and falls to `DORMANT` / purging after 24–48h.
    * **The two cleanup paths:**
      1. **Genuine crash faults:** Starve organically and completely after 24–48h due to the physical absence of fresh cryptographic signatures.
-     2. **Lazy nodes (lazy workers):** Are immediately bypassed by gateways at shard level (ranks 21+). If local timeouts in the active network reach the percolation threshold of $\approx 73{,}1\,\%$, their heartbeat gossip also chokes network-wide. Definitive revocation of network presence occurs when direct F2F friends cut the edges ($k \to 0$).
+     2. **Lazy nodes (lazy workers):** May be avoided by local routing, without admitting rank-21 votes on checkout. If local timeouts in the active network reach the percolation threshold of $\approx 73{,}1\,\%$, their heartbeat gossip also chokes network-wide. Definitive revocation of network presence occurs when direct F2F friends cut the edges ($k \to 0$).
 
 ---
 
 ### 3.1 The Successor Protocol (Dynamic Shard Healing)
 
-A shard normally consists of the **Top-20 nodes** (ranks 1..20). If shard nodes fail ($> 6$ failures), the next ranks deterministically step in ($21, 22, 23 \dots$):
+A shard checkout uses the **Top-20 nodes** (ranks 1..20). More than six unavailable votes cause unavailability, not automatic replacement. The following standby lifecycle is a background proposal only: it does not authorize FINAL signatures without a separately proven membership transition and state continuity rule.
 
 ```mermaid
 stateDiagram-v2
@@ -197,7 +192,7 @@ flowchart TD
 ### Invariants of Shard Resilience
 1. **[INV-0301] No blind replication junk syncing:** A shard node never downloads historical data chains unsolicited for which no active quorum certificate or direct client proof exists.
 2. **[INV-0302] Trust-Tree Locality:** All transfers and splits of a voucher remain permanently on the same shard $\text{Shard\_ID}$. Cross-shard transactions do not exist.
-3. **[INV-0303] Zero-Gossip Shard Self-Healing:** Departure of uncooperative shard nodes is regulated exclusively shard-internally via piggyback bitmasks and HRW rank-21 promotion; there is no global gossip about faulty shard peers.
+3. **[INV-0303] Zero-Gossip Shard Self-Healing:** Checkout never promotes rank 21 because a member is uncooperative. Local diagnostics remain non-authoritative, and safe background membership transitions require a separate proof; there is no global gossip about faulty shard peers.
 4. **[INV-0304] Quorum-verified PULL Sync:** Joining shard nodes may request active state via PULL (`RequestActiveLocks`), but accept only entries with a verified quorum certificate ($\ge 14/20$ signatures or $Q(R)$ at $N < 20$).
 5. **[INV-0305] Shard Sync Barrier & Asymmetric Isolation:** A node participates in global $N \ge 20$ shard quorums (`status_tag = 0x01 (FINAL)`) only when its local state is `IN_SYNC` according to the $N_{\text{median}}$ filter. While the node is in state `SYNCING`, it rejects requests for foreign shards with `503 NodeSyncing`, while local `PROVISIONAL` transactions ($N < 20$) continue stably within the autonomous village view.
 6. **[INV-0306] Dynamic Succession via Rank Filter:** A node at rank $r$ activates responsibility for shard $S$ (`Active Replacement`) and performs a PULL sync as soon as it receives at least 3 cryptographically verified invitations from nodes with a better rank ($r_{\text{caller}} < r$) or serves a valid lock request.

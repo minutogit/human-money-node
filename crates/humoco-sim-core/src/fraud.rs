@@ -101,18 +101,19 @@ fn decode_heartbeat(bytes: &[u8]) -> Option<Heartbeat> {
 // Attestation serialisierung
 
 fn encode_attestation(att: &Attestation) -> Vec<u8> {
-    // lock_id 32 + parent_lock 32 + node_id 2 + timestamp 8 + signature 64 = 138
-    let mut v = Vec::with_capacity(138);
+    // lock_id 32 + parent_lock 32 + node_id 2 + timestamp 8 + signature 64 + shard_id 2 = 140
+    let mut v = Vec::with_capacity(140);
     v.extend_from_slice(&att.lock_id);
     v.extend_from_slice(&att.parent_lock);
     v.extend_from_slice(&att.node_id.to_le_bytes());
     v.extend_from_slice(&att.timestamp.0.to_le_bytes());
     v.extend_from_slice(&att.signature);
+    v.extend_from_slice(&att.shard_id.to_le_bytes());
     v
 }
 
 pub fn decode_attestation(bytes: &[u8]) -> Option<Attestation> {
-    if bytes.len() != 138 {
+    if bytes.len() != 138 && bytes.len() != 140 {
         return None;
     }
     let mut lock_id = [0u8; 32];
@@ -123,12 +124,18 @@ pub fn decode_attestation(bytes: &[u8]) -> Option<Attestation> {
     let ts = u64::from_le_bytes(bytes[66..74].try_into().ok()?);
     let mut sig = [0u8; 64];
     sig.copy_from_slice(&bytes[74..138]);
+    let shard_id = if bytes.len() >= 140 {
+        u16::from_le_bytes([bytes[138], bytes[139]])
+    } else {
+        crate::types::extract_shard_id(&parent_lock)
+    };
     Some(Attestation {
         lock_id,
         parent_lock,
         node_id,
         timestamp: SimTime(ts),
         signature: sig,
+        shard_id,
     })
 }
 
@@ -239,7 +246,7 @@ impl IngressEnvelopeEvidence {
             footprint_micro_bj,
             is_read,
             op_hash,
-            lock_hash: [0u8; 32],
+            lock_hash: op_hash,
             signature,
         }
     }
@@ -690,29 +697,34 @@ impl FraudProofPayload {
                     Ok(s) => s,
                     Err(_) => return false,
                 };
-                let shard_id = crate::types::extract_shard_id(&att.parent_lock);
+                let shard_candidates = [
+                    att.shard_id,
+                    crate::types::extract_shard_id(&att.parent_lock),
+                ];
                 let payload_digest =
                     compute_attestation_payload_digest(&att.parent_lock, &att.lock_id);
-                let d_prov = compute_sig_digest(
-                    DOMAIN_APPROVE_PROV,
-                    0,
-                    0,
-                    0,
-                    shard_id,
-                    0,
-                    &payload_digest,
-                );
-                let d_final = compute_sig_digest(
-                    DOMAIN_APPROVE_FINAL,
-                    0,
-                    0,
-                    0,
-                    shard_id,
-                    1,
-                    &payload_digest,
-                );
-                vk.verify_strict(&d_prov, &sig).is_ok()
-                    || vk.verify_strict(&d_final, &sig).is_ok()
+                shard_candidates.iter().any(|&shard_id| {
+                    let d_prov = compute_sig_digest(
+                        DOMAIN_APPROVE_PROV,
+                        0,
+                        0,
+                        0,
+                        shard_id,
+                        0,
+                        &payload_digest,
+                    );
+                    let d_final = compute_sig_digest(
+                        DOMAIN_APPROVE_FINAL,
+                        0,
+                        0,
+                        0,
+                        shard_id,
+                        1,
+                        &payload_digest,
+                    );
+                    vk.verify_strict(&d_prov, &sig).is_ok()
+                        || vk.verify_strict(&d_final, &sig).is_ok()
+                })
             };
             verify_one(&a) && verify_one(&b)
         } else {
@@ -802,18 +814,21 @@ impl FraudProofPayload {
             return if p1.epoch_day == p2.epoch_day {
                 // Case 1 (same day: p1.epoch_day == p2.epoch_day)
                 if p1.epoch_seq == p2.epoch_seq {
-                    if p1.lock_hash != p2.lock_hash {
+                    if p1.effective_op_hash() != p2.effective_op_hash() {
                         true // Path 2: sequence fork!
                     } else {
                         false // Path 1: idempotent duplicate
                     }
                 } else {
                     // Since normalized: p2.epoch_seq > p1.epoch_seq
-                    if p2.cumulative_micro_byte_years < p1.cumulative_micro_byte_years {
-                        true // Path 4: counter rollback!
-                    } else {
-                        false // Path 3: regular monotonic growth
-                    }
+                    let is_counter_rollback = p1.cumulative_micro_byte_years > 0
+                        && p2.cumulative_micro_byte_years > 0
+                        && p2.cumulative_micro_byte_years < p1.cumulative_micro_byte_years;
+                    let is_timestamp_rollback = p2.timestamp_ms < p1.timestamp_ms
+                        && p2.effective_op_hash() != p1.effective_op_hash();
+
+                    // Path 4: counter rollback or timestamp rollback under sequence progression
+                    is_counter_rollback || is_timestamp_rollback
                 }
             } else if p2.epoch_day == p1.epoch_day + 1 {
                 // Case 2 (next day: p2.epoch_day == p1.epoch_day + 1)

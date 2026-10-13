@@ -245,3 +245,82 @@ fn test_pillar_2_ingress_counter_conflict_bans_immediately() {
         assert!(node.is_banned(malicious_gateway_id));
     }
 }
+
+/// A08: Successor Shard Equivocation Evidence verifies when signed shard differs from parent bytes
+#[test]
+fn test_pillar_1_successor_equivocation_with_different_parent_shard_id() {
+    use ed25519_dalek::Signer;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x88; 32]);
+    let offender_pubkey = signing_key.verifying_key().to_bytes();
+    let offender_node_id = FraudProofPayload::node_id_from_pubkey(&offender_pubkey);
+
+    // Parent lock is a double-spend tag whose first bytes (e.g. 0xFE, 0xED) DO NOT match shard 42
+    let parent_lock = [0xFE; 32];
+    assert_ne!(humoco_sim_core::types::extract_shard_id(&parent_lock), 42);
+
+    let lock_a = [0x11; 32];
+    let lock_b = [0x22; 32];
+    let canonical_shard_id: u16 = 42;
+
+    let sign_successor_att = |lock_id: [u8; 32]| -> humoco_sim_core::types::Attestation {
+        let payload_digest = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id);
+        let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
+            humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL,
+            0,
+            0,
+            0,
+            canonical_shard_id,
+            1,
+            &payload_digest,
+        );
+        let sig = signing_key.sign(&sig_digest).to_bytes();
+        humoco_sim_core::types::Attestation {
+            lock_id,
+            parent_lock,
+            node_id: offender_node_id,
+            timestamp: SimTime(100),
+            signature: sig,
+            shard_id: canonical_shard_id,
+        }
+    };
+
+    let att_a = sign_successor_att(lock_a);
+    let att_b = sign_successor_att(lock_b);
+
+    let proof = FraudProofPayload::new_shard_equivocation_with_pubkey(att_a, att_b, offender_pubkey);
+    assert_eq!(proof.proof_pillar, FraudProofPillar::ShardEquivocation);
+    assert_eq!(proof.perpetrator_node_id, offender_pubkey);
+    assert!(proof.verify(), "A08: Successor equivocation proof must verify even when parent bytes differ from signed shard!");
+}
+
+/// A07: V2 Ingress Envelope Sequence Fork Detection
+#[test]
+fn test_pillar_2_v2_envelope_sequence_fork_conflict_bans_immediately() {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x66; 32]);
+    let gateway_pubkey = signing_key.verifying_key().to_bytes();
+    let malicious_gateway_id = FraudProofPayload::node_id_from_pubkey(&gateway_pubkey);
+
+    let epoch_day = 12;
+    let epoch_seq = 100;
+    let ts = 1_000_000;
+    let write_ema = 50_000;
+    let read_ema = 10_000;
+    let footprint = 5_000;
+
+    // Two divergent write envelopes with IDENTICAL epoch_day and epoch_seq but DIFFERENT op_hash
+    let op_a = [0xAA; 32];
+    let op_b = [0xBB; 32];
+
+    let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        &signing_key, epoch_day, epoch_seq, ts, write_ema, read_ema, footprint, false, op_a,
+    );
+    let p2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        &signing_key, epoch_day, epoch_seq, ts + 10, write_ema, read_ema, footprint, false, op_b,
+    );
+
+    let proof = FraudProofPayload::new_ingress_counter_conflict(p1, p2);
+    assert_eq!(proof.proof_pillar, FraudProofPillar::IngressCounterConflict);
+    assert_eq!(proof.perpetrator, malicious_gateway_id);
+    assert_eq!(proof.perpetrator_node_id, gateway_pubkey);
+    assert!(proof.verify(), "A07: V2 envelope sequence fork must be detected as fraud!");
+}

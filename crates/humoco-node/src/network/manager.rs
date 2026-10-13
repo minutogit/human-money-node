@@ -1927,11 +1927,11 @@ impl PeerManager {
     ///
     /// Phase 10: snapshot `peers` and `known` sequentially, never nested.
     pub async fn active_hrw_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
-        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool)> = {
+        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool, PeerConnectionType)> = {
             let peers = self.peers.read().await;
             peers
                 .values()
-                .map(|p| (p.node_id, p.addr, p.is_suspended()))
+                .map(|p| (p.node_id, p.addr, p.is_suspended(), p.conn_type))
                 .collect()
         };
         let known_snapshot: Vec<([u8; 32], KnownNodeInfo)> = {
@@ -1940,20 +1940,27 @@ impl PeerManager {
         };
         let known_map: HashMap<[u8; 32], KnownNodeInfo> =
             known_snapshot.into_iter().collect();
+        let f2f_snapshot: HashSet<[u8; 32]> = {
+            let friends = self.f2f_friends.read().await;
+            friends.keys().copied().collect()
+        };
         let is_suspended_by_addr = |addr: &SocketAddr| -> bool {
             peer_snapshot
                 .iter()
-                .find(|(_, a, _)| a == addr)
-                .map(|(_, _, s)| *s)
+                .find(|(_, a, _, _)| a == addr)
+                .map(|(_, _, s, _)| *s)
                 .unwrap_or(false)
         };
         let mut result = Vec::new();
-        for (nid_opt, addr, suspended) in &peer_snapshot {
+        for (nid_opt, addr, suspended, conn_type) in &peer_snapshot {
             if !suspended {
                 if let Some(nid) = nid_opt {
-                    if let Some(k) = known_map.get(nid) {
-                        if k.is_immature() || !k.is_presence_fresh() {
-                            continue;
+                    let is_f2f = f2f_snapshot.contains(nid) || *conn_type == PeerConnectionType::FriendToFriend;
+                    if !is_f2f {
+                        if let Some(k) = known_map.get(nid) {
+                            if k.is_immature() || !k.is_presence_fresh() {
+                                continue;
+                            }
                         }
                     }
                     let hrw = known_map.get(nid).map(|k| k.hrw_routing_id).unwrap_or(*nid);
@@ -2116,25 +2123,43 @@ impl PeerManager {
         let mut count = 1; // Always include self (INV: local node is active)
         if let Ok(peers) = self.peers.try_read() {
             let mut unique_nodes = HashSet::new();
+            let known_snapshot: HashMap<[u8; 32], KnownNodeInfo> = {
+                self.known_network_nodes
+                    .try_read()
+                    .map(|known| known.iter().map(|(k, v)| (*k, v.clone())).collect())
+                    .unwrap_or_default()
+            };
+            let f2f_snapshot: HashSet<[u8; 32]> = {
+                self.f2f_friends
+                    .try_read()
+                    .map(|friends| friends.keys().copied().collect())
+                    .unwrap_or_default()
+            };
             for p in peers.values() {
                 if !p.is_suspended() {
                     if let Some(nid) = p.node_id {
+                        let is_f2f = f2f_snapshot.contains(&nid) || p.conn_type == PeerConnectionType::FriendToFriend;
+                        if !is_f2f {
+                            if let Some(k) = known_snapshot.get(&nid) {
+                                if k.is_immature() || !k.is_presence_fresh() {
+                                    continue;
+                                }
+                            }
+                        }
                         unique_nodes.insert(nid);
                     }
                 }
             }
-            if let Ok(known) = self.known_network_nodes.try_read() {
-                for (&nid, kinfo) in known.iter() {
-                    if kinfo.is_immature() {
-                        continue;
-                    }
-                    if !kinfo.is_presence_fresh() {
-                        continue;
-                    }
-                    let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
-                    if !is_suspended {
-                        unique_nodes.insert(nid);
-                    }
+            for (&nid, kinfo) in known_snapshot.iter() {
+                if kinfo.is_immature() {
+                    continue;
+                }
+                if !kinfo.is_presence_fresh() {
+                    continue;
+                }
+                let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
+                if !is_suspended {
+                    unique_nodes.insert(nid);
                 }
             }
             count += unique_nodes.len();
@@ -2148,16 +2173,32 @@ impl PeerManager {
     /// Phase 10: sequential snapshots, never nested.
     pub async fn mature_network_size(&self) -> usize {
         let mut unique_nodes = HashSet::new();
-        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool)> = {
+        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool, PeerConnectionType)> = {
             let peers = self.peers.read().await;
             peers
                 .values()
-                .map(|p| (p.node_id, p.addr, p.is_suspended()))
+                .map(|p| (p.node_id, p.addr, p.is_suspended(), p.conn_type))
                 .collect()
         };
-        for (nid_opt, _, suspended) in &peer_snapshot {
+        let known_snapshot: HashMap<[u8; 32], KnownNodeInfo> = {
+            let known = self.known_network_nodes.read().await;
+            known.iter().map(|(k, v)| (*k, v.clone())).collect()
+        };
+        let f2f_snapshot: HashSet<[u8; 32]> = {
+            let friends = self.f2f_friends.read().await;
+            friends.keys().copied().collect()
+        };
+        for (nid_opt, _, suspended, conn_type) in &peer_snapshot {
             if !suspended {
                 if let Some(nid) = nid_opt {
+                    let is_f2f = f2f_snapshot.contains(nid) || *conn_type == PeerConnectionType::FriendToFriend;
+                    if !is_f2f {
+                        if let Some(k) = known_snapshot.get(nid) {
+                            if k.is_immature() || !k.is_presence_fresh() {
+                                continue;
+                            }
+                        }
+                    }
                     unique_nodes.insert(*nid);
                 }
             }
@@ -2165,12 +2206,11 @@ impl PeerManager {
         let suspended_by_addr = |addr: &SocketAddr| -> bool {
             peer_snapshot
                 .iter()
-                .find(|(_, a, _)| a == addr)
-                .map(|(_, _, s)| *s)
+                .find(|(_, a, _, _)| a == addr)
+                .map(|(_, _, s, _)| *s)
                 .unwrap_or(false)
         };
-        let known = self.known_network_nodes.read().await;
-        for (&nid, kinfo) in known.iter() {
+        for (&nid, kinfo) in known_snapshot.iter() {
             if kinfo.is_immature() || !kinfo.is_presence_fresh() {
                 continue;
             }

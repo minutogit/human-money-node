@@ -20,6 +20,8 @@ pub struct AttestationDto {
     pub node_pubkey: String,
     pub timestamp: u64,
     pub signature: String,
+    #[serde(default)]
+    pub shard_id: u16,
 }
 
 impl AttestationDto {
@@ -62,6 +64,7 @@ impl AttestationDto {
                 node_pubkey: String::new(),
                 timestamp: l.timestamp,
                 signature: l.signature,
+                shard_id: 0,
             })
     }
 }

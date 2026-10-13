@@ -155,7 +155,10 @@ pub fn verify_equivocation_first_party(
                     Ok(s) => s,
                     Err(_) => return false,
                 };
-                let shard_id = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
+                let shard_candidates = [
+                    att.shard_id,
+                    u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]),
+                ];
                 // Parent-lock binding: the signature commits to (parent_lock, lock_id),
                 // preventing cross-voucher signature transplant replay.
                 // NetworkId is NOT hardcoded: both Mainnet and Testnet domain
@@ -171,16 +174,18 @@ pub fn verify_equivocation_first_party(
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
                 ];
-                domains.iter().any(|domain| {
-                    for status in [0u8, 1u8] {
-                        let d = humoco_sim_core::crypto::compute_sig_digest(
-                            domain, 0, 0, 0, shard_id, status, &payload_digest,
-                        );
-                        if vk.verify_strict(&d, &sig).is_ok() {
-                            return true;
+                shard_candidates.iter().any(|&shard_id| {
+                    domains.iter().any(|domain| {
+                        for status in [0u8, 1u8] {
+                            let d = humoco_sim_core::crypto::compute_sig_digest(
+                                domain, 0, 0, 0, shard_id, status, &payload_digest,
+                            );
+                            if vk.verify_strict(&d, &sig).is_ok() {
+                                return true;
+                            }
                         }
-                    }
-                    false
+                        false
+                    })
                 })
             };
 

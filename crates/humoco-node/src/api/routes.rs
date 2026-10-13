@@ -572,6 +572,7 @@ pub fn create_attestation_for_network(
         node_pubkey: node_pubkey_hex,
         timestamp: timestamp_ms,
         signature: hex::encode(signature.to_bytes()),
+        shard_id,
     }
 }
 

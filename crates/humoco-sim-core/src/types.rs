@@ -197,6 +197,8 @@ pub struct Attestation {
     pub timestamp: SimTime,
     #[serde(with = "serde_bytes_64")]
     pub signature: [u8; 64],
+    #[serde(default)]
+    pub shard_id: u16,
 }
 
 pub mod serde_bytes_64 {

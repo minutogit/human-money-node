@@ -310,6 +310,7 @@ async fn test_sim_03_byzantine_resilience() {
         node_id: 0,
         timestamp: SimTime(0),
         signature: [0u8; 64],
+        shard_id: 0,
     };
 
     sim.reporter.end_phase_ok();

@@ -1067,10 +1067,11 @@ impl DualTierEngine {
                 // Determine if any new entry would fail due to unknown root or window violation
                 // We need to simulate sequential insertion to handle chain-local genesis root.
                 // Only genesis hops may initialize the immutable root TTL (Rule 10).
-                let mut temp_roots = hmc.voucher_roots.clone();
+                let mut chain_genesis_roots: std::collections::HashMap<&str, u64> = std::collections::HashMap::with_capacity(2);
                 let mut window_violation: Option<String> = None;
                 for (_tag, entry, hop_is_genesis) in &new_entries {
-                    let root_valid = temp_roots.get(&entry.layer2_voucher_id).copied();
+                    let root_valid = chain_genesis_roots.get(entry.layer2_voucher_id.as_str()).copied()
+                        .or_else(|| hmc.voucher_roots.get(&entry.layer2_voucher_id).copied());
                     if root_valid.is_none() && !hop_is_genesis {
                         window_violation = Some("Unknown voucher root: genesis lock must be anchored first".into());
                         break;
@@ -1107,7 +1108,7 @@ impl DualTierEngine {
                     // Only genesis initializes the immutable root TTL for
                     // subsequent hops in the same chain (Rule 10).
                     if *hop_is_genesis {
-                        temp_roots.entry(entry.layer2_voucher_id.clone()).or_insert(valid_until_ms);
+                        chain_genesis_roots.entry(entry.layer2_voucher_id.as_str()).or_insert(valid_until_ms);
                     }
                 }
                 if let Some(reason) = window_violation {

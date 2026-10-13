@@ -229,7 +229,21 @@ pub fn sign_lock_attestation_for_network(
         node_id,
         timestamp,
         signature,
+        shard_id: crate::types::extract_shard_id(parent_lock),
     }
+}
+
+/// Creates a deterministic test signature for a shard node with explicit shard_id
+pub fn sign_lock_attestation_for_shard(
+    node_id: NodeId,
+    lock_id: &LockId,
+    parent_lock: &Hash256,
+    shard_id: u16,
+    timestamp: SimTime,
+) -> Attestation {
+    let mut att = sign_lock_attestation_for_network(node_id, lock_id, parent_lock, timestamp, NetworkId::Mainnet);
+    att.shard_id = shard_id;
+    att
 }
 
 /// Creates a deterministic test signature for a shard node (defaults to Mainnet)

@@ -304,6 +304,7 @@ mod tests {
             node_id: 42,
             timestamp: SimTime(100),
             signature: [0xAA; 64],
+            shard_id: 0,
         };
         let att2 = Attestation {
             lock_id: l2.id,
@@ -311,6 +312,7 @@ mod tests {
             node_id: 42,
             timestamp: SimTime(101),
             signature: [0xBB; 64],
+            shard_id: 0,
         };
 
         let mut l1_copy = l1.clone();
@@ -344,6 +346,7 @@ mod tests {
             node_id: 42,
             timestamp: SimTime(101),
             signature: [0xBB; 64],
+            shard_id: 0,
         };
         let mut l1_copy2 = l1.clone();
         let mut l2_copy2 = l2.clone();
@@ -362,6 +365,7 @@ mod tests {
             node_id: 42,
             timestamp: SimTime(101),
             signature: [0xBB; 64],
+            shard_id: 0,
         };
         let mut l1_copy3 = l1.clone();
         let mut l2_copy3 = l2.clone();
@@ -385,6 +389,7 @@ mod tests {
             node_id: 99,
             timestamp: SimTime(100),
             signature: [0x11; 64],
+            shard_id: 0,
         };
         let att2_99 = Attestation {
             lock_id: l2.id,
@@ -392,6 +397,7 @@ mod tests {
             node_id: 99,
             timestamp: SimTime(101),
             signature: [0x22; 64],
+            shard_id: 0,
         };
 
         // Here attestation slice for A has node 99 and B has node 99

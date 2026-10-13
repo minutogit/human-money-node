@@ -354,11 +354,11 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
         .expect("request");
     let resp = app.oneshot(req).await.expect("oneshot");
     let status = resp.status();
+    let envelope: L2ResponseEnvelope = response_json(resp).await;
     assert!(
         status == StatusCode::CREATED || status == StatusCode::OK,
         "FINAL quorum over wire must yield 200/201, got {status}"
     );
-    let envelope: L2ResponseEnvelope = response_json(resp).await;
     let cert = envelope
         .quorum_certificate
         .expect("FINAL path must attach quorum certificate");

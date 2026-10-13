@@ -552,6 +552,37 @@ pub fn extract_shard_id(genesis_root: &[u8; 32]) -> ShardId {
     u16::from_be_bytes([genesis_root[0], genesis_root[1]])
 }
 
+/// # Architectural Invariant: Option A KISS Canonical Voucher Shard & Origin-Lock Mandate
+///
+/// Derives the canonical shard ID for a voucher deterministically from the
+/// voucher ID itself. If the voucher ID is a valid hex string with >= 2 bytes,
+/// the first 2 bytes (big-endian) form the shard ID. Otherwise, BLAKE3 of the
+/// voucher ID is used. This ensures all locks of a voucher route to the same
+/// shard without requiring genesis parent lookups on the hot path.
+pub fn voucher_shard_id(voucher_id: &str) -> ShardId {
+    let bytes = voucher_id.as_bytes();
+    if bytes.len() >= 4 {
+        let decode_nibble = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        };
+        if let (Some(n0), Some(n1), Some(n2), Some(n3)) = (
+            decode_nibble(bytes[0]),
+            decode_nibble(bytes[1]),
+            decode_nibble(bytes[2]),
+            decode_nibble(bytes[3]),
+        ) {
+            let b0 = (n0 << 4) | n1;
+            let b1 = (n2 << 4) | n3;
+            return u16::from_be_bytes([b0, b1]);
+        }
+    }
+    let h = blake3::hash(voucher_id.as_bytes());
+    u16::from_be_bytes([h.as_bytes()[0], h.as_bytes()[1]])
+}
+
 /// # Architectural Invariant: INV-0302 Trust-Tree Locality (Phase 2 P1)
 ///
 /// All transfers and splits of a voucher remain permanently on the same

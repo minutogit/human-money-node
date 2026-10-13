@@ -414,17 +414,14 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 };
 
-                // # Architectural Invariant: INV-0302 Trust-Tree Locality (Phase 2 P1, Spec 03)
+                // # Architectural Invariant: Option A KISS Canonical Voucher Shard (Spec 03)
                 //
                 // The canonical shard of EVERY transaction of a voucher (genesis AND
-                // follow-up spends) derives EXCLUSIVELY from the immutable genesis
-                // parent anchor (`BLAKE3(genesis_lookup_tag)`), NEVER from the varying
-                // per-spend `ds_tag`. Routing on `ds_tag` would scatter one voucher's
-                // trust tree across shards (a new shard per hop) and break quorum
-                // convergence. Resolution order: (1) known `voucher_genesis_parent`
-                // from RAM/disk, (2) genesis hop inside the attached ProofChain,
-                // (3) own genesis tag for self-anchoring genesis, (4) voucher-stable
-                // `BLAKE3(voucher_id)` fallback while genesis is still unknown.
+                // follow-up spends) is derived deterministically from the voucher ID
+                // itself via `voucher_shard_id(voucher_id)`. This guarantees that all
+                // locks of a voucher route to the same shard without requiring genesis
+                // parent lookups on the hot path. Hex-encoded voucher IDs use the
+                // first 2 bytes (big-endian); all others fall back to BLAKE3.
                 let shard_id = match &wire_payload {
                     crate::network::framing::LockWirePayload::Sim(..) => {
                         warn!("LockVerifyRequest rejected: Sim payload unreachable (defense in depth)");
@@ -442,44 +439,26 @@ impl RequestHandler for NodeRequestHandler {
                             .as_ref()
                             .map(|c| c.layer2_voucher_id.as_str())
                             .unwrap_or(req.layer2_voucher_id.as_str());
-                        // (1) Known genesis anchor from local index (RAM, else redb fallback).
-                        if let Some(genesis_parent) =
-                            engine.get_hmc_voucher_genesis_parent(voucher_id).await
-                        {
+                        if let Some(genesis_parent) = engine.get_hmc_voucher_genesis_parent(voucher_id).await {
                             humoco_sim_core::types::canonical_voucher_shard(&genesis_parent)
                         } else if let Some(chain_req) = chain {
-                            // (2) Genesis hop inside the client-supplied ProofChain.
-                            if let Some(genesis_hop) =
-                                chain_req.chain.iter().find(|h| h.is_genesis)
-                            {
-                                let genesis_tag =
-                                    bs58::encode(&genesis_hop.transaction_hash).into_string();
-                                let p_bytes =
-                                    humoco_sim_core::types::genesis_parent_bytes_from_tag(
-                                        &genesis_tag,
-                                    );
+                            if let Some(genesis_hop) = chain_req.chain.iter().find(|h| h.is_genesis) {
+                                let genesis_tag = bs58::encode(&genesis_hop.transaction_hash).into_string();
+                                let p_bytes = humoco_sim_core::types::genesis_parent_bytes_from_tag(&genesis_tag);
                                 humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
                             } else if req.is_genesis {
                                 let tag = bs58::encode(&req.transaction_hash).into_string();
-                                let p_bytes =
-                                    humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+                                let p_bytes = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
                                 humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
                             } else {
-                                // (4) Voucher-stable fallback while genesis unknown (never ds_tag).
-                                let v_bytes =
-                                    *blake3::hash(voucher_id.as_bytes()).as_bytes();
-                                humoco_sim_core::types::canonical_voucher_shard(&v_bytes)
+                                humoco_sim_core::types::voucher_shard_id(voucher_id)
                             }
                         } else if req.is_genesis {
-                            // (3) Self-anchoring genesis lock.
                             let tag = bs58::encode(&req.transaction_hash).into_string();
-                            let p_bytes =
-                                humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+                            let p_bytes = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
                             humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
                         } else {
-                            // (4) Voucher-stable fallback while genesis unknown (never ds_tag).
-                            let v_bytes = *blake3::hash(voucher_id.as_bytes()).as_bytes();
-                            humoco_sim_core::types::canonical_voucher_shard(&v_bytes)
+                            humoco_sim_core::types::voucher_shard_id(voucher_id)
                         }
                     }
                 };

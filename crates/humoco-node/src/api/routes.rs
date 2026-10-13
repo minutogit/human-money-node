@@ -1481,8 +1481,7 @@ async fn query_status(
             let shard_id = if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id).await {
                 sid
             } else {
-                let voucher_bytes = *blake3::hash(payload.layer2_voucher_id.as_bytes()).as_bytes();
-                humoco_sim_core::types::extract_shard_id(&voucher_bytes)
+                humoco_sim_core::types::voucher_shard_id(&payload.layer2_voucher_id)
             };
             let candidates = peer_mgr.get_top_n_shards_for_lock(shard_id, 20).await;
             if !candidates.is_empty() {
@@ -1568,8 +1567,7 @@ async fn query_status(
         let shard_id = if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id).await {
             sid
         } else {
-            let voucher_bytes = *blake3::hash(payload.layer2_voucher_id.as_bytes()).as_bytes();
-            humoco_sim_core::types::extract_shard_id(&voucher_bytes)
+            humoco_sim_core::types::voucher_shard_id(&payload.layer2_voucher_id)
         };
         match &verdict {
             L2Verdict::Verified { lock_entry } => {
@@ -1709,24 +1707,24 @@ async fn submit_hmc_lock(
         (del, del)
     } else {
         // Follow-up Lock (Transfer / Split / Spend):
-        // Smart Client, Dumb Server & Hydra Resilience (Phase 2 P1): the
-        // gateway is stateless and MUST NOT blindly 400 when the voucher root
-        // is unknown locally. The client custodies the ProofChain carrying the
-        // signed genesis TTL (`deletable_at`); otherwise the responsible shard
-        // is authoritative. Use the client-supplied TTL as provisional
-        // `root_valid_until` for local quota, forward to the shard quorum, and
-        // let the shard's INV-1202 window check decide authoritatively.
+        // Origin-Lock Mandate: the genesis lock must be anchored first.
+        // Without a known root (locally or from the client-supplied TTL),
+        // there is no immutable TTL to inherit — reject with 400 Bad Request.
         let root = match stored_root_valid {
             Some(r) => r,
             None => {
                 if let Some(del) = parsed_deletable {
                     del
-                } else if let Some(remote_root) = fetch_remote_voucher_root(&state, &req.layer2_voucher_id).await {
-                    remote_root
+                } else if let Some(disk_root) = fetch_remote_voucher_root(&state, &req.layer2_voucher_id).await {
+                    disk_root
                 } else {
-                    // Provisional default (10 min) for stateless forwarding;
-                    // the responsible shard enforces the true immutable root.
-                    now_ms.saturating_add(600_000)
+                    let envelope = wrap_and_sign_verdict(
+                        &state.identity,
+                        L2Verdict::Rejected {
+                            reason: "Unknown voucher root: genesis lock must be anchored first".into(),
+                        },
+                    );
+                    return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
                 }
             }
         };
@@ -1773,12 +1771,10 @@ async fn submit_hmc_lock(
         let sid = humoco_sim_core::types::extract_shard_id(&parent_bytes);
         state.engine.record_hmc_voucher_genesis_parent(&req.layer2_voucher_id, parent_bytes).await;
         sid
+    } else if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&req.layer2_voucher_id).await {
+        sid
     } else {
-        state
-            .engine
-            .get_hmc_voucher_genesis_shard(&req.layer2_voucher_id)
-            .await
-            .unwrap_or_else(|| humoco_sim_core::types::extract_shard_id(&parent_bytes))
+        humoco_sim_core::types::voucher_shard_id(&req.layer2_voucher_id)
     };
     let is_responsible = if let Some(pm) = &state.peer_manager {
         pm.is_local_responsible_for_shard(state.identity.hrw_routing_id(), shard_id, 20).await
@@ -2334,8 +2330,8 @@ async fn submit_hmc_chain_lock_inner(
     } else {
         first_hop.ds_tag.clone().unwrap_or_default()
     };
-    let genesis_parent_bytes = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
-    let shard_id = humoco_sim_core::types::extract_shard_id(&genesis_parent_bytes);
+    let _genesis_parent_bytes = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    let shard_id = humoco_sim_core::types::voucher_shard_id(&chain_req.layer2_voucher_id);
 
     let last_hop = chain_req.chain.last().unwrap();
     let lookup_tag = if last_hop.is_genesis {

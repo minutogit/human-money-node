@@ -67,23 +67,49 @@ impl HmcRamIndex {
         origin: IngressOrigin,
         now_ms: Option<u64>,
     ) -> (L2Verdict, bool) {
-        let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string() || entry.deletable_at.is_some();
         let root_valid = self.voucher_roots.get(&entry.layer2_voucher_id).copied();
-        let valid_until_ms = match entry
-            .deletable_at
-            .as_deref()
-            .and_then(|s| s.parse::<u64>().ok())
-            .or(root_valid)
-        {
-            Some(v) => v,
-            None => {
-                return (
-                    L2Verdict::Rejected {
-                        reason: "Missing deletable_at and unknown voucher root: genesis lock must be anchored first".into(),
-                    },
-                    false,
-                );
+        let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string()
+            || (root_valid.is_none() && entry.deletable_at.is_some());
+
+        // # Architectural Invariant: Option A KISS Origin-Lock Mandate
+        //
+        // Genesis locks (lookup_tag == bs58(t_id)) carry `deletable_at` and
+        // initialize the immutable root TTL in `voucher_roots`. Follow-up locks
+        // inherit `valid_until` EXCLUSIVELY from `voucher_roots` — never from
+        // their own `deletable_at`. A follow-up lock with an unknown root is
+        // rejected with "Unknown voucher root: genesis lock must be anchored first".
+        let valid_until_ms = if is_genesis {
+            match entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                Some(v) => {
+                    self.voucher_roots.insert(entry.layer2_voucher_id.clone(), v);
+                    v
+                }
+                None => {
+                    return (
+                        L2Verdict::Rejected {
+                            reason: "Missing deletable_at and unknown voucher root: genesis lock must be anchored first".into(),
+                        },
+                        false,
+                    );
+                }
             }
+        } else {
+            let root_v = match root_valid {
+                Some(v) => v,
+                None => {
+                    return (
+                        L2Verdict::Rejected {
+                            reason: "Unknown voucher root: genesis lock must be anchored first".into(),
+                        },
+                        false,
+                    );
+                }
+            };
+            entry
+                .deletable_at
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(root_v)
         };
 
         // HMC ingress window enforcement for client ingress (INV-1202):
@@ -200,19 +226,23 @@ impl HmcRamIndex {
     /// genesis locks initialize the immutable root TTL. Orphans with a still-
     /// unknown root are skipped (deferred, not dropped with 0).
     pub fn insert_recovered(&mut self, lookup_tag: String, entry: L2LockEntry) {
+        let root_valid = self.voucher_roots.get(&entry.layer2_voucher_id).copied();
         let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string()
-            || entry.deletable_at.is_some();
+            || (root_valid.is_none() && entry.deletable_at.is_some());
         let owned_ttl = entry
             .deletable_at
             .as_deref()
             .and_then(|s| s.parse::<u64>().ok());
-        let valid_until_ms = match (owned_ttl, is_genesis) {
-            (Some(v), _) => v,
-            (None, true) => {
+        let valid_until_ms = match (is_genesis, owned_ttl) {
+            (true, Some(v)) => {
+                self.voucher_roots.insert(entry.layer2_voucher_id.clone(), v);
+                v
+            }
+            (true, None) => {
                 // Genesis without parseable TTL: cannot anchor a root — skip.
                 return;
             }
-            (None, false) => match self.voucher_roots.get(&entry.layer2_voucher_id).copied() {
+            (false, _) => match root_valid {
                 Some(root_v) => root_v,
                 None => {
                     // Orphan follow-up: root not yet known — skip instead of

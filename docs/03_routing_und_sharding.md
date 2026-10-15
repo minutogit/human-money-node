@@ -87,7 +87,7 @@ If a shard node repeatedly fails to respond to lock requests (timeout / work ref
 flowchart TD
     subgraph ShardExecution["1. Parallel Broadcast & Quorum Gathering"]
         G["Gateway"] -->|Send LockEntry to Top-20| Q["Top-20 Shard Nodes"]
-        Q --> SigFast["19 fast partial signatures"]
+        Q --> SigFast["19 fast signed attestations"]
         Q -.-> SigLazy["Node 7: Timeout / Unresponsive"]
     end
 

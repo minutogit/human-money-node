@@ -388,7 +388,7 @@ Each fraud proof follows the mathematical invariant: **Two signed structures of 
 flowchart TD
     subgraph FraudPillars["🛡️ The 3 Fundamental HuMoCo Fraud Proof Pillars"]
         direction TB
-        F1["Pillar 1: Shard Equivocation (Double-Signing)<br>2 partial signatures for the same parent_lock"] --> S1["Permanent server ban + shard ticket invalidation + WoT exclusion"]
+        F1["Pillar 1: Shard Equivocation (Double-Signing)<br>2 conflicting signed attestations for the same parent_lock"] --> S1["Permanent server ban + shard ticket invalidation + WoT exclusion"]
         F2["Pillar 2: Ingress Counter Collision (Load Fraud)<br>Contradiction between heartbeat counter & shard writes"] --> S2["Permanent server ban + shard ticket invalidation + WoT exclusion"]
         F3["Pillar 3: Heartbeat Spam (Gossip Displacement)<br>2 signed heartbeats less than 50 minutes apart"] --> S3["Argon2id identity burned + permanent Collision Lock Registry"]
     end
@@ -396,7 +396,7 @@ flowchart TD
 
 | Pillar | Type Identifier | Data Structure | Protective Effect & Fraud Scenario | Consequence |
 | :--- | :--- | :--- | :--- | :--- |
-| **Pillar 1** | `FRAUD_SHARD_EQUIVOCATION` | $T_1 \parallel T_2$ (2 partial certificates) | **UTXO double-spend protection:** A shard node signs partial signatures for two different successor locks ($L_{3A} \neq L_{3B}$) referencing the same `parent_lock`. | Permanent `server ban`, invalidation of the shard ticket & severance of all WoT edges |
+| **Pillar 1** | `FRAUD_SHARD_EQUIVOCATION` | $T_1 \parallel T_2$ (2 conflicting node attestations) | **UTXO double-spend protection:** A shard node signs attestations for two different successor locks ($L_{3A} \neq L_{3B}$) referencing the same `parent_lock`. | Permanent `server ban`, invalidation of the shard ticket & severance of all WoT edges |
 | **Pillar 2** | `FRAUD_INGRESS_COUNTER_CONFLICT` | $P_1 \parallel P_2$ (heartbeat $\parallel$ write or write $\parallel$ write) | **Ingress & quota authenticity:** Counter runs backwards, heartbeat contradicts actual shard writes, or mathematical addition of $144\,\text{B} \times \text{TTL}$ is forged. | Permanent `server ban`, invalidation of the shard ticket & severance of all WoT edges |
 | **Pillar 3** | `FRAUD_HEARTBEAT_SPAM` | $H_1 \parallel H_2$ (2 heartbeats) | **Edge spam protection:** A node sends two heartbeats within $< 50\,\text{minutes}$ to capture edge budgets $R_{\text{soft}}$ and displace honest peers. | Permanent entry in the **Collision Lock Registry** + Argon2id PoW burned |
 

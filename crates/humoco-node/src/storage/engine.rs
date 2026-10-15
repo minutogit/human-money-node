@@ -879,7 +879,7 @@ impl DualTierEngine {
         (verdict, is_new)
     }
 
-    /// Atomares Ketten-Locking: Validates all hops in `chain_req` before any mutation.
+    /// Atomic chain locking: Validates all hops in `chain_req` before any mutation.
     /// - Signature verification per hop
     /// - Timestamp monotonicity
     /// - Cuckoo + RAM collision check (deduplication via identical t_id)

@@ -60,7 +60,7 @@ pub struct QuorumCertificate {
     /// count_ones() >= 14 and status == 1 => Guaranteed finality
     pub signer_bitmap: u32,
     
-    /// Ed25519 quorum partial signatures of the nodes (exactly popcount(signer_bitmap) entries, Ed25519 batch-verifiable)
+    /// Individual Ed25519 node attestations forming the quorum (exactly popcount(signer_bitmap) entries, Ed25519 batch-verifiable)
     pub signatures: Vec<Sig64>,
 }
 

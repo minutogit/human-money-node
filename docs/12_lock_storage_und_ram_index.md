@@ -38,7 +38,7 @@ flowchart TD
 ### 2.1 Normative Ingress Validation
 Before a lock enters the index, the shard node validates:
 1. **Clock Skew & Minimum Validity:** $\text{now} + 30\,\text{s} < \text{valid\_until} \le \text{root.valid\_until}$ (Every new lock must lie at least $30\,\text{s}$ in the future).
-2. **Causality Binding:** `parent_lock` corresponds to the consumed output of the preceding `ProofChain` (Causality ProofChain).
+2. **Causality Binding:** `parent_lock` references the specific consumed spend slot / output of the preceding `ProofChain` (Causality ProofChain).
 
 ### 2.2 First-Seen Flow
 ```mermaid

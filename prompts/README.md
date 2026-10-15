@@ -7,6 +7,27 @@ This prompt suite contains **20 highly specialized, reusable AI audits** coverin
 
 ---
 
+## Architecture Interview
+
+[architecture_interview.md](architecture_interview.md) starts or resumes a systematic
+decision interview using a compact state tree and detailed decision notes. It creates
+only missing memory files, preserves prior decisions and asks one substantive question
+at a time. This workflow prepares design decisions and a final plan; it does not invoke
+the audit orchestrator or automatically implement protocol changes.
+
+To start a new chat, ask the agent to read and execute `prompts/architecture_interview.md`.
+
+## Terminology Alignment
+
+[terminology_alignment_plan.md](terminology_alignment_plan.md) provides an executable
+plan to review the shared glossary against specifications and code comments, apply
+justified editorial fixes and record unresolved meaning/design conflicts. It retains
+proposed-name status and preserves runtime behavior, wire formats and identifiers.
+Preparing the plan does not execute its audit. Ask an agent to read and execute it
+when starting the terminology alignment work.
+
+---
+
 ## 🗂️ Overview of the Audit Suite & Systematic Orchestrator
 
 > **Central Orchestrator & Tracking:**

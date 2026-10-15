@@ -69,7 +69,7 @@ impl AttestationDto {
     }
 }
 
-/// Assembled quorum certificate with partial signatures from shard nodes.
+/// Assembled quorum certificate containing individual node attestations (Ed25519 signatures) from shard committee members.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuorumCertificateDto {
     pub lock_id: String,

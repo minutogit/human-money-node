@@ -1432,7 +1432,7 @@ impl PeerManager {
     }
 
     /// Checks if a node_id is known (either as an F2F friend or learned via F2F gossip).
-    /// F2F check basiert strikt auf permanenter NodePubKey / NodeId, nicht auf HRW-Ticket.
+    /// F2F check is strictly based on the permanent NodePubKey / NodeId, not the HRW ticket.
     pub async fn is_known_node(&self, node_id: &[u8; 32]) -> bool {
         if self.is_f2f_friend(node_id).await {
             return true;
@@ -1672,9 +1672,9 @@ impl PeerManager {
     }
 
     /// Enforces the Gossip Barrier:
-    /// Gossip (Heartbeats and Lock Announcements) is ONLY accepted from direct F2F friends.
+    /// Gossip (Heartbeats and Equivocation Proofs) is ONLY accepted from direct F2F friends.
     /// Cryptographic identity (verified remote_node_id) is primarily used for authorization.
-    /// Strikt auf permanenter NodePubKey / NodeId, nicht HRW.
+    /// Strictly based on permanent NodePubKey / NodeId, not HRW.
     pub async fn can_accept_gossip(&self, remote_addr: &SocketAddr, remote_node_id: Option<&[u8; 32]>) -> bool {
         if let Some(node_id) = remote_node_id {
             if self.is_banned(node_id).await {

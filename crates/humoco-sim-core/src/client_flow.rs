@@ -10,7 +10,7 @@ use crate::types::{Attestation, Hash256, HrwRoutingId, LockId, LockRecord, NodeP
 pub struct QuorumCertificate {
     pub lock_id: LockId,
     pub shard_id: u16,
-    pub signatures: Vec<Attestation>, // Ed25519 partials from Top-20
+    pub signatures: Vec<Attestation>, // Individual Ed25519 attestations from shard committee members
     pub signer_bitmap: u32,
 }
 

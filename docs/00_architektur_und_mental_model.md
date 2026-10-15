@@ -93,6 +93,9 @@ sequenceDiagram
 | **Global Shard Network** | $N_{\text{active}} \ge 20$ (stable for $\ge 24\text{h}$) | $\ge 14$ of $20$ ($70\%$) | `FINAL` (Green, `0x01`) | Global irreversibility and protection against cross-partition fraud |
 | **High Assurance** | $N_{\text{active}} \ge 100$ (stable for $\ge 24\text{h}$) | $\ge 16$ of $20$ ($80\%$) | `HIGH_ASSURANCE` (Dark Green, `0x02`) | Elevated security requirement for institutional transactions / large amounts |
 
+> [!NOTE]
+> **Status Regime Alignment (TERM-13):** Note that authoritative project instructions (`AGENTS.md` Pillar 4) and codebase implementation (`LockStatus` in `crates/humoco-sim-core/src/types.rs`) establish a strict binary phase transition (`PROVISIONAL` vs `FINAL`) and intentionally omit `HIGH_ASSURANCE` to preserve KISS on PoS terminals and wallets. The third tier remains recorded here as an evaluated architectural proposal pending final specification consolidation.
+
 * **Closed Quorum Formula:** For all $R \in [1, 20]$:
   $$Q(R) = \left\lfloor \frac{2}{3} R \right\rfloor + 1$$
   *(Yields exactly $R=1 \rightarrow 1/1$, $R=2 \rightarrow 2/2$, $R=3 \rightarrow 3/3$, $R=10 \rightarrow 7/10$, $R=20 \rightarrow 14/20$).*

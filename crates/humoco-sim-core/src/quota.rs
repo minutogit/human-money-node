@@ -742,21 +742,21 @@ mod tests {
         let ema_delta_0 = calculate_integer_ema(old_ema, 0, 5_000);
         assert_eq!(ema_delta_0, 105_000);
 
-        // delta = 86_400 (24h Halbwertszeit): exakt 50% Decay
+        // delta = 86_400 (24h half-life): exactly 50% decay
         let decayed_1d = decay_integer_ema(old_ema, 86_400);
         assert_eq!(decayed_1d, 50_000);
         let ema_delta_1d = calculate_integer_ema(old_ema, 86_400, 7_000);
         assert_eq!(ema_delta_1d, 57_000);
 
-        // delta = 172_800 (48h = 2 Halbwertszeiten): exakt 25% übrig (75% Decay)
+        // delta = 172_800 (48h = 2 half-lives): exactly 25% remaining (75% decay)
         let decayed_2d = decay_integer_ema(old_ema, 172_800);
         assert_eq!(decayed_2d, 25_000);
 
-        // delta = 259_200 (72h = 3 Halbwertszeiten): exakt 12.5% übrig
+        // delta = 259_200 (72h = 3 half-lives): exactly 12.5% remaining
         let decayed_3d = decay_integer_ema(old_ema, 259_200);
         assert_eq!(decayed_3d, 12_500);
 
-        // delta >= 64 Halbwertszeiten: Decay auf 0
+        // delta >= 64 half-lives: decay to 0
         let decayed_ext = decay_integer_ema(old_ema, 64 * 86_400);
         assert_eq!(decayed_ext, 0);
 

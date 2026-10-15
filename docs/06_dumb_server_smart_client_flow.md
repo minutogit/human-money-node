@@ -89,7 +89,7 @@ sequenceDiagram
         Gateway-->>Merchant: 409 Conflict (🔴 ABORT: double-spend detected)
         Merchant-->>Customer: Payment rejected
     else Hash new (successfully locked)
-        Shard-->>Gateway: AttestationSignature(Ed25519 PartialSig)
+        Shard-->>Gateway: AttestationSignature(Ed25519 Attestation / Vote)
     end
 
     %% Phase 4: Quorum Assembly & Goods
@@ -199,7 +199,7 @@ flowchart TD
 * **Flow:**
   1. `L2StatusQuery(challenge_ds_tag)` returns: *"No lock on this tag present"*.
   2. Checkout sends exactly **one** `L2LockRequest` with the new transaction.
-  3. The 20 shard nodes execute their atomic First-Seen in RAM ($< 1\,\mu\text{s}$) and send partial signatures.
+  3. The 20 shard nodes execute their atomic First-Seen in RAM ($< 1\,\mu\text{s}$) and send signed attestations (votes).
   4. Checkout receives aggregated `QuorumCertificate` (duration: $< 50\,\text{ms}$).
 
 ##### Sub-case 3C: Catch Up Offline Chain (Batch Reconciliation)
@@ -344,7 +344,7 @@ The gateway captures one snapshot per request, including its local member where 
 This hardening prevents expansion of a selected signer pool. It does not prove that partitioned nodes discover identical committees or that changes between committees preserve historical decisions. Those properties require a separate admission/transition design. The existing local-observation incubation rule is unchanged; self-signed ticket timestamps cannot shorten it.
 
 ### 6.3 QuorumCertificate Wire Layout (Compact < 1 KB)
-The quorum certificate uses a 32-bit signer bitmap and Ed25519 partial signatures:
+The quorum certificate uses a 32-bit signer bitmap and individual Ed25519 node attestations:
 $$\big( \text{lock\_hash} \,[32\,\text{B}], \; \text{shard\_id} \,[2\,\text{B}], \; \text{status} \,[1\,\text{B}], \; \text{signer\_bitmap} \,[4\,\text{B}], \; \text{signatures} \,[\text{popcount} \times 64\,\text{B}] \big)$$
 * **At 14 quorum signatures:** $32 + 2 + 1 + 1 + 4 + (14 \times 64) = \mathbf{936\,\text{Byte}}$.
 * **Network guarantee:** Fits entirely in a single unfragmented UDP/QUIC packet ($\le 1.472\,\text{Byte}$ standard MTU).

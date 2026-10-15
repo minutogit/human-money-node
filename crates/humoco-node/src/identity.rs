@@ -206,7 +206,7 @@ impl NodeIdentity {
         &self.verifying_key
     }
 
-    /// Alias / Übergangs-Getter für public_key (verifying_key).
+    /// Alias / transition getter for public_key (verifying_key).
     pub fn public_key(&self) -> &VerifyingKey {
         &self.verifying_key
     }

@@ -17,7 +17,7 @@ flowchart TD
         Incoming["LockEntry (144 Bytes, #[repr(C)])"] --> IngressCheck{"Ingress Validation:<br>now + 30s < valid_until <= root.valid_until"}
         IngressCheck -- Valid --> FastHash["BLAKE3 Parent_Lock Key (32 Bytes)"]
         FastHash --> RamIndex["DashMap<ParentLockKey, StoredLock> (192 Bytes/Lock)"]
-        RamIndex --> PoSResponse["Immediate Quorum Signature to Gateway"]
+        RamIndex --> PoSResponse["Immediate Node Attestation to Gateway"]
     end
 
     subgraph ColdPath["2. Asynchronous Persistence & TTL Path (redb)"]
@@ -72,7 +72,7 @@ Vouchers circulate over periods ranging from several months up to **10 years** (
 use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 
-/// 32-Byte Parent Lock Hash (Unique Identifier of the Predecessor Voucher)
+/// 32-byte collision key identifying the consumed predecessor/output (not the whole voucher)
 pub type ParentLockKey = [u8; 32];
 
 /// Main Storage Engine of a Shard Node

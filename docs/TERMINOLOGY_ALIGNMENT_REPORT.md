@@ -1,6 +1,9 @@
 # Terminology Alignment Report — HuMoCo Layer 2
 
-Status: Executed review and alignment report.
+Status: Editorial alignment completed for the screened terminology; naming is settled.
+Substantive architecture conflicts remain open; no glossary feedback is required.
+Continuation date: 2026-10-16 (Europe/Berlin). See section 8 for the latest scope, outcomes and verification limits.
+Sections 1–7 preserve earlier audit evidence; section 8 supersedes their pending-name status.
 Base Git revision: `82f1c4221d0507cc669ef22d71816a10c439ce3b`
 Local working tree context: active architecture interview state and glossary draft (`docs/ARCHITECTURE_INTERVIEW_*`, `docs/TRANSLATION_GLOSSARY.md`, `prompts/`).
 Execution date: 2026-10-15.
@@ -10,7 +13,10 @@ Language policy: English repository documentation and code comments; German main
 
 ## 1. Scope & File Inventory
 
-The terminology alignment audit inspected all active normative specifications, operational documentation, codebases, tests, and secondary surfaces across the repository.
+The initial report recorded the scope below. The 2026-10-16 continuation inventories
+additional current and historical surfaces and corrects overbroad completion claims
+(see section 7 and the linked inventory). File-level screening is not a proof of
+semantic consistency, implementation correctness or exhaustive review of every line.
 
 ### 1.1 Normative Specifications & Operational Guides (Inspected)
 - `AGENTS.md`: Master Architecture, Coding Rules & System Context (Rules 1–11, 5 Pillars, 2-Tier Network).
@@ -75,7 +81,10 @@ The terminology alignment audit inspected all active normative specifications, o
 
 ## 2. Review of Dictionary Concepts (`docs/TRANSLATION_GLOSSARY.md`)
 
-Each concept from the canonical domain mapping table and entries G-001 through G-066 was evaluated against project rules (`AGENTS.md`), specifications, code declarations, and current interview records.
+Each canonical mapping and G-001–066 has a review outcome below. “Established” means
+the underlying concept/English usage is supported; it does not mean every draft
+German headword or proposed mechanism was approved. Section 7 refines these outcomes
+where the earlier report conflated simulation with production or omitted aliases.
 
 ### 2.1 Canonical Domain Mapping Table (Section 1)
 
@@ -159,7 +168,7 @@ Each concept from the canonical domain mapping table and entries G-001 through G
 
 ### 3.2 Ledger of Intentional Unchanged Identifiers & Aliases
 - `parent_lock`: Retained as code identifier across DTOs, wire structs, and engine maps. Semantically refers to the predecessor output / spend slot.
-- `node_id`: Retained in `AttestationDto` and wire formats as legacy 16-bit fallback field, but permanently superseded by 32-byte `node_pubkey` for identity and cryptographic verification.
+- `node_id`: Retained per declaration. The simulator uses `u16`; `NodeIdentity::node_id()` returns a BLAKE3 fingerprint; `AttestationDto` retains a legacy `u16` field. Production `verify_peer_attestation` still has a legacy key-lookup fallback; the initial “permanently superseded” claim was too broad. Frozen checkout also applies full-key/TLS membership checks (TA-019/020).
 - `ServerBann` / `BannedNodes`: Retained in simulation code as type alias; conceptually represents permanent cryptographic `NodePubKey` identity ban with shard ticket invalidation and WoT severance.
 - `f2f_<hex>`: Retained as token prefix for client ingress Friends tier; distinct from P2P node-to-node F2F friendship edges (`trusted_pubkeys`).
 - `signer_bitmap`: Retained in certificates as 32-bit index mask over the frozen Top-20 committee snapshot.
@@ -191,11 +200,11 @@ The following material conflicts and design gaps are documented and tracked rath
 1. **Whitespace & Diff Integrity Check:**
    - Command: `git diff --check`
    - Result: Exit code 0. Zero whitespace errors, zero trailing markers.
-2. **Workspace Compilation & Test Suite Verification:**
-   - Command: `cargo check --tests`
-   - Result: Exit code 0. Both `humoco-sim-core` and `humoco-node` compile cleanly without warnings or broken doctests.
+2. **Inherited compilation claim (not re-executed in this continuation):**
+   - The initial report records `cargo check --tests`, exit code 0. Its command log was not retained here, so this continuation does not independently confirm that run or its warning status.
+   - `cargo check --tests` type-checks test targets; it does not execute tests or doctests. The earlier claim about “broken doctests” was unsupported. Current checks are listed in section 7.5.
 3. **Static Terminology Search Inspection:**
-   - Validated that all replaced instances of "partial signature", "partial certificate", and "Lock Announcements" in active specifications and source comments were resolved.
+   - The initial replacements removed the cited instances. The continuation found additional “Partial quorum signatures” wording and an intentional runtime assertion string; see TA-022 and section 7.4. Zero global hits is not claimed.
    - Confirmed that code identifiers, serialization tags, and wire formats remain 100% unaltered.
 4. **Bilingual Policy Compliance Check:**
    - Verified that all comments modified in Rust source files are written in idiomatic English.
@@ -206,7 +215,207 @@ The following material conflicts and design gaps are documented and tracked rath
 ## 6. Handoff & Next Steps
 
 1. **Glossary Detour Completion:**
-   - Terminology alignment across active specifications, dictionary, and source comments is executed and verified.
+   - Initial editorial changes are present in Git. The continuation completes the current inventory/review pass and records additional corrections; full language uniformity is not established while proposed names, legacy language and substantive conflicts remain.
    - Maintainer can review this report (`docs/TERMINOLOGY_ALIGNMENT_REPORT.md`) and the updated glossary (`docs/TRANSLATION_GLOSSARY.md`).
 2. **Next Action in Architecture Interview:**
-   - Resume architecture interview at branch **S3.3** (`docs/ARCHITECTURE_INTERVIEW_STATE.md`), addressing parked question **Q-S3.3-01** (one-round carrying vs two-round payment semantics and handoff cutoff rules).
+   - Keep **K3** active for the remaining naming/consolidation work. The parked return point is **S3.3 / Q-S3.3-01**; execution of a wording audit does not answer it or select a payment protocol.
+
+
+## 7. Continuation audit — 2026-10-16
+
+### 7.1 Reconciled starting point and coverage
+
+Inspected revision: `02983adeda594d7610194cb6a4d0abcb118ef051` (`docs: execute terminology review and align domain concepts`).
+The working tree was clean at the start. That commit already contains TA-001–017;
+the CP-0011 cursor and draft notices still incorrectly said alignment had not run.
+This continuation preserves that work and adds editorial corrections without a commit.
+The older base hash at the top describes the initial report, not this continuation.
+
+[File inventory and coverage](TERMINOLOGY_ALIGNMENT_INVENTORY.md) lists every discovered
+Markdown/Rust file with its role and review outcome. All current numbered specs,
+both 15/16 filename variants, root documents, guides, first-party Rust source/tests,
+and maintained prompts were included in contextual terminology screening. Definitions,
+ambiguous prose/diagrams and relevant declarations/consumers were read for the findings
+below; other files received text/comment screening. The inventory distinguishes those
+levels and retains unresolved language debt rather than marking it compliant.
+Generated files, build artifacts, non-prose assets and external dependencies were not
+semantically audited. The external `human-money-core` repository was not inspected;
+local HMC adapters do not establish its complete authorization or split semantics.
+
+The dated 2026-08-29 threat-model audit is historical evidence, despite its location
+beside current specifications. Its BLS/Argon2id examples are preserved with a status
+pointer. The audit registry and chronological interview records remain history.
+
+### 7.2 Additional findings and applied corrections
+
+Locations use current symbols/sections; TA-001–017 locations refer to the initial
+snapshot. Each new finding names the affected object and its evidence.
+
+| ID / concepts | Location and current meaning | Evidence / classification | Action and outcome |
+| --- | --- | --- | --- |
+| TA-018 / G-022/027/028, TERM-08 | `client_flow.rs`: `QuorumCertificate`, `DumbServer::verify_quorum_certificate`, free verifier; `types.rs::Attestation`; `crypto.rs::sign_deterministic_sig` | `sign_lock_attestation_for_network` fills a hash/ID/padding array and `verify_attestation_for_network` recomputes it. By contrast `verify_zero_trust_quorum` uses `ed25519_dalek::verify_strict`. Editorial misdescription in the initial audit. | Describe model attestations as deterministic test signatures; retain the separate real-Ed25519 path and every identifier. Glossary G-022 now explains the distinction. Applied. |
+| TA-019 / G-007/027/030/038, TERM-01/02/07 | `api/dto.rs::AttestationDto::from_wire_bytes`, `QuorumCertificateDto::is_quorum_reached`; `api/routes.rs::verify_peer_attestation` | Current DTO has eight fields; the decoder also constructs it from a five-field legacy payload. Decoding performs no signature verification; the count helper checks vector length only. Consumer retains legacy prefix lookup; frozen checkout checks full-key/TLS membership separately. | Correct decoder documentation and explicitly scope the count helper. Preserve the top-level full-key requirement; document the observed fallback instead of claiming it was removed. Applied wording; general compatibility/identity-policy consolidation remains open. |
+| TA-020 / G-007/040/041, TERM-07 | `KnownNodeInfo`, `update_routing_ticket`; Spec 15 in both filename variants; glossary G-007/041 | `NodeIdentity::node_pubkey` returns a key, `node_id` returns a fingerprint; `KnownNodeInfo` copies caller-provided identity bytes into its alias. Spec 07 defines Argon2d work plus BLAKE3 whitening for the separate routing ticket. | Remove claims that public keys, fingerprints and tickets are interchangeable. Correct the Spec 15 identity/ticket explanation and the migration-notice name. End-to-end identity-use correctness is not established by these comment changes. Applied. |
+| TA-021 / G-012/066 | Specs 05/10/11: heartbeat-spam consequence and `BannedNodes` | The contexts explicitly describe a RAM/disk node ban filter, not a map of consumed voucher slots; project rules define identity bans and ticket invalidation separately. Editorial conflation. | Name the node identity ban list and Argon2d shard-ticket invalidation; retain every fraud condition and sanction. Applied. |
+| TA-022 / G-022/027/029, TERM-01/08 | Spec 03 §2 diagram, Spec 06 proof/checkout/layout wording, Spec 12 hot-path diagram | One shard emits an attestation; the gateway assembles a certificate from individual signatures. These are not a threshold share or one aggregate signature. | Replace residual “Partial quorum signatures,” singular quorum-signature labels and ambiguous “aggregated” wording with node attestation or assembled quorum certificate as appropriate. Applied. |
+| TA-023 / G-063/064/065 | Spec 07 §5; Spec 14 §4 | Project rule 8 requires two conflicting genuine signatures of the same node for the same slot. Ordinary conflicting spends are not evidence that a node signed twice. | Distinguish node equivocation from client double-spend and identify the signed objects as attestations. Independent proof verification is distinct from storing/enforcing a ban. Applied. |
+| TA-024 / original mappings, G-009/012/056, TERM-09/12 | README introduction; glossary section 1 | RAM/disk collision state is present; client custody concerns full voucher histories. Admission vouching concerns nodes, not monetary vouchers. | Use plain descriptions of retained collision state/client history; clarify node-admission endorsement. Qualify existing local SLA separately from vote collection without changing either. Applied; durability/SLA conflict remains open. |
+| TA-025 / G-014/021/049, TERM-01–13 | Glossary status/agenda, plan/index, compact interview state and notes | Revision contains an executed report while CP-0011 says execution is pending. G-014/021/049 naming remains unselected in §7.20–7.22. | Reconcile execution status, keep draft/proposal status and K3 active, append CP-0012; preserve old checkpoints and parked Q-S3.3-01. Applied. |
+| TA-026 / G-007/028/033/048–060, TERM-03/04/10/11/13 | Specs 00/02/04/06/08/12/14 and interview register | FINAL/VOID, High Assurance, durable-before-vote and justified handoff/membership remain substantive conflicts. Compact bitmap layout also assumes authenticated context. | Preserve requirements and record concrete follow-up in §7.3; do not resolve them by renaming. Unresolved. |
+| TA-027 / verification evidence | Initial report §§1/5/6 | `cargo check --tests` cannot establish passing tests/doctests; the initial report omitted current files and overstated uniformity. | Correct those claims, distinguish inherited execution claims from checks performed now, and add explicit file coverage. Applied. |
+| TA-028 / bilingual policy | Source comments in `daemon.rs`, `ingress/pow.rs`, `network/manager.rs`, `client_flow.rs`, `fraud.rs`, `quota.rs`; legacy surfaces in inventory | Existing English-repository policy; several production comments and many test/spec passages remained German. | Translate the remaining identified German production-comment passages. Inventory the broader legacy test/document translation debt explicitly; no blanket bilingual-compliance claim. Applied to production passages; legacy prose translation remains open. |
+| TA-029 / G-014/015/027/028/062, TERM-02/06/07 | Specs 04/06/10/12 vs local `LockRecord`, HMC adapter and DTO representations | Different structures use different field sets, encodings and clocks. Spec 06's compact certificate/bitmap is not evidence that the JSON/bincode DTO has the same wire layout; the simulator uses milliseconds, while some spec timestamps use seconds. | Keep identifiers/formats unchanged. Qualify parent/output terminology without claiming every path implements split binding. Require deliberate canonical-format/output/clock review under K2/C1; unresolved. |
+| TA-030 / G-007/063/066 | Key-compromise prompt 09 | `NodePubKey` is public; theft/compromise concerns the corresponding private signing key. | Clarify the prompt's actor/key wording. Do not invoke the audit or send any message. Applied. |
+
+### 7.3 Remaining decisions and implementation work
+
+- **G-014/021/049 names:** maintain “Eltern-Lock,” “Lock-Signatur” versus combined
+  “Freigabenachweis,” and “Shard-Zusammenfassung” as proposals. Recommendation remains
+  to distinguish the individual authorization signature from combined authorization
+  evidence. No name or proof packaging is selected by this audit.
+- **TERM-10:** reconcile FINAL irreversibility and FINAL-to-VOID/minimum-hash paths
+  using DEC-022/023, justified support and S2/S3/S5. In particular, the initial
+  shorthand “DEC-023 means conflicting slots remain unresolved” is incomplete;
+  the actual recorded support gates and limits govern, not that shorthand.
+- **TERM-11:** consolidate DEC-029/033 durable-choice release with AGENTS rules 1/10
+  and Specs 12/14, specifying failure/acknowledgement/retention semantics before
+  implementation. Queue capacity, RAM insertion and durable success stay distinct.
+- **TERM-03/04/06:** justify committee authority and safe state transfer/old-write
+  closure/successor activation; ordinary sync, a digest, mature ticket or a frozen
+  local list alone does not establish them. Q-S3.3-01 remains unanswered.
+- **TERM-13:** reconcile the retained third-tier tables/tags in Specs 00/04/08/10
+  with the binary regime and `LockStatus`; no status/wire-tag removal is made here.
+- **TERM-07 / TA-019/020/029:** review retained prefix/fingerprint/key aliases and
+  canonical formats across producers and consumers before compatibility changes.
+- **Boundary inconsistencies:** Spec 13's “P2P emergency” client tier and Spec 15's
+  wallet/terminal QUIC migration examples need consolidation with AGENTS' internal
+  node-P2P/public-ingress separation. They are not approval for dual-role ingress.
+- **Language debt (TA-028):** translate the identified legacy current guides/spec
+  passages, root task/roadmap prose and test descriptions in a dedicated editorial
+  pass while preserving commands, runtime strings, historical quotations and
+  normative conditions. The inventory names the affected files. This vocabulary
+  review does not represent those untranslated passages as policy-compliant.
+
+### 7.4 Intentionally retained aliases and resolved ambiguity register
+
+- `parent_lock`, `node_id`, `signer_bitmap`, `layer2_signature`, `auth_signature`,
+  `QuorumCertificate*`, `BannedNodes`, endpoint/config/wire names and all runtime
+  strings remain unchanged. Their conceptual scope is explained per declaration.
+- `phase11_wire_level_adversarial_tests.rs` contains `expect("partial certificate")`:
+  this is a runtime assertion string about an incomplete collected certificate,
+  not terminology for a threshold-signature share. It is intentionally retained.
+- Prompt 18's “lock announcements via Gossip” is a question about obsolete code,
+  not an instruction to gossip locks. Historical reports retain their old aliases.
+- “Stateless” still legitimately describes challenge regeneration or independent
+  proof checking; it does not mean the daemon stores no collision or ban state.
+- G-001–066 and every original mapping retain the section-2 review outcomes, refined
+  by TA-018–030. G-007/022/027/041 received explicit factual qualifications. No IDs
+  were removed or renumbered and no new competing dictionary was created.
+
+| Ambiguity | Review outcome |
+| --- | --- |
+| TERM-01 | Applied actor/object distinctions; unresolved formats tracked under K2/C1. |
+| TERM-02 | Applied local/count/decoded versus verified/durable distinctions; release contract remains open. |
+| TERM-03 | Shard/committee/quorum meanings established; membership proof open. |
+| TERM-04 | Transfer/readiness meanings distinguished; handoff/recovery proof open. |
+| TERM-05 | Queue reservation distinct from binding choice; no new reservation subsystem selected. |
+| TERM-06 | Root/state/member snapshots and time contexts distinguished; canonical formats open. |
+| TERM-07 | Identity/key/fingerprint/ticket/client-token distinctions qualified; compatibility and boundary conflicts open. |
+| TERM-08 | Individual attestations distinguished from threshold shares; simulation/production distinction corrected. |
+| TERM-09 | Registry/client-history definition corrected; legitimate stateless operations retained. |
+| TERM-10 | Substantive FINAL/VOID conflict unresolved; no policy rewritten. |
+| TERM-11 | Separate latency budgets and persistence stages; durability/SLA consolidation open. |
+| TERM-12 | Free-rider/shard-RPC and island range corrections retained; merge policy open under TERM-10. |
+| TERM-13 | Binary/High-Assurance conflict documented; no new status adopted. |
+
+### 7.5 Checks performed in this continuation
+
+- `git diff --check`: passed (exit 0) after application; patch preflight also passed
+  with `git apply --check --whitespace=error-all`. The new untracked inventory was
+  included in the patch whitespace/content checks.
+- Comment-only Rust comparison against the recorded baseline: passed for all nine
+  modified Rust files. Their non-comment content is identical; Rust fenced examples
+  in modified Markdown are also unchanged except for comments.
+- All 10 introduced/edited Markdown links and anchors passed resolution checks;
+  the 24 original mappings, unique ordered G-001–066 definitions and all 13 TERM
+  outcomes are present. CP-0012 matches in state/notes; one active focus, 113-line state.
+  Existing unrelated broken links, if any, were not certified by this check.
+- Contextual searches/readback for replaced aliases and intentional remaining uses:
+  passed final readback: all 30 applied files matched the reviewed patch; replaced
+  misleading phrases are absent outside intentional historical/report quotations.
+- No Rustdoc code example, executable logic, dependency, runtime string, API/wire
+  field/tag, quorum/timer or database behavior was changed. No build, unit test,
+  doctest or QUIC integration suite was run in this continuation: this is an
+  editorial change, not verification of a network defense or protocol algorithm.
+
+Next action: review the remaining K3 names and consolidate the
+listed substantive conflicts, then return to S3.3 without inferring an A/B answer.
+
+## 8. Autonomous vocabulary alignment — 2026-10-16
+
+### 8.1 Authority, current scope and outcomes
+
+Interview DEC-049/050 select the client-signature/evidence and parent/output names;
+DEC-051 records Q-K3-G049-01 answer A for “Shard-Zusammenfassung.” The maintainer
+then explicitly removes further glossary preference questions and authorizes
+independent alignment and future refinements (DEC-052; notes §7.27).
+This supersedes the pending-name/adoption gates in sections 2/4/6/7 above. Those
+sections remain earlier audit evidence, not the current naming queue.
+
+Revision remains `02983adeda594d7610194cb6a4d0abcb118ef051`. The working tree already
+contained the preceding editorial audit and interview changes. This pass preserves
+those inputs; its verification compares against a snapshot of the working files
+at the start of this pass, not just HEAD. The inventory covers 248 Markdown/Rust
+files including itself; 247 were already individually listed. Historical/vendor
+material and project instructions are retained. Screening of current prose/comments
+used terminology/alias searches followed by contextual reading of changed passages
+and relevant producers/consumers; it is not an exhaustive semantic or security audit.
+
+All 24 original mappings and ordered G-001–066 remain. Names are established for
+editorial use under DEC-052, with definitions retained or clarified:
+
+| Concepts | Current outcome |
+| --- | --- |
+| Original mappings | Retained; clarify cryptographic first-party evidence, the non-positive-load defense, “Kein Staking” and compact shard-summary wording. |
+| G-001–013, G-015–020, G-022–048, G-050–066 | Existing scoped meanings retained; underlying design qualifications remain. No naming approval queue. |
+| G-014 | “Eltern-Lock” / parent lock and “Vorgängerausgabe” / predecessor output established (DEC-050). Exact output-binding audit remains OPEN-06. |
+| G-021 | “Lock-Signatur” / request authorization signature and “Freigabenachweis” / client authorization evidence established (DEC-049). Exact formats/enforcement remain OPEN-06. |
+| G-049 | “Shard-Zusammenfassung” / shard digest established (DEC-051). A summary is distinct from state, payment quorum and recovery readiness. |
+| TERM-01–09/12 | Apply object/actor/evidence distinctions; retain associated audit and format obligations. |
+| TERM-10/11/13 and authority/handoff aspects of TERM-03/04/06/07 | Substantive architecture obligations, not editorial choices or approval blockers. |
+
+### 8.2 Findings and changes
+
+| Finding / concepts | Evidence and locations | Action / outcome |
+| --- | --- | --- |
+| TA-031 / G-014/021/049 | DEC-049–052; glossary, maintained alignment plan and prompt index still contained proposed-name/approval gates. | Adopt settled vocabulary, remove live naming-candidate queues, retain historical provenance in notes, and explicitly authorize autonomous future editorial maintenance. Applied. |
+| TA-032 / G-021/022/027/028, TERM-01/08 | Specs 00/06/07/10/15 (both variants), ROADMAP and performance prompt still used “quorum signature” or “Partial Ed25519 signatures” where one node attestation or an assembled certificate was meant. `AttestationDto`/`QuorumCertificateDto` distinguish those objects. | Name individual node attestations, client request authorization signatures and assembled quorum certificates explicitly. Clarify actual HMC signature validators without claiming they alone check predecessor authorization. API/field names unchanged. Applied. |
+| TA-033 / G-049/050/054, TERM-04/06 | `crypto.rs::compute_shard_digest_at` hashes only `parent_lock`, `receiver_pub`, `nonce`, `id` after shard/expiry/VOID filtering; `daemon.rs::run_shard_digest_pull_sync` compares/clusters responses and initiates pulls. | Replace overbroad explanatory claims of full-set equality and guaranteed healing with the actual encoded-projection comparison and scheduling. State that digest equality proves neither full-record equality nor membership, old-write closure or prior-vote recovery. Algorithm, timers and readiness behavior unchanged. Applied comments; protocol obligations remain S2/S3/N3/O2. |
+| TA-034 / G-049 | TODO heading, Specs 20/99 and source comment headings retained inconsistent German/English digest aliases. | Use English “shard digest” in repository prose/comments and German “Shard-Zusammenfassung” in the glossary/conversation; retain identifiers and historical aliases. Applied. |
+| TA-035 / G-064/065/066, TERM-07 | Both Spec 15 variants retain a future-idea paragraph about automatic social slashing/edge severance based on silent service refusal; both Spec 16 variants' Matrix 2 discuss client-signed conflicts, receipt gossip and a node ban. AGENTS rules 7/8 and INV-1701 distinguish node equivocation from telemetry/client double-spend and restrict gossip. | Substantive specification conflicts, not synonyms. Preserve normative text and record for F1/S6/N4 consolidation and subsequent real-QUIC verification. No new sanction, gossip stream or client-proof-based ban is adopted. Unresolved. |
+
+Historical reports, archive material, chronological interview entries and runtime
+identifiers such as `quorum_signatures`, `ShardDigestRequest`, `parent_lock` and
+`layer2_signature` are intentional retained spellings. German legacy paragraphs
+and test comments unrelated to these terminology corrections remain language debt
+(TA-028); this pass is not a whole-repository prose translation.
+
+### 8.3 Verification and next action
+
+- Readback/context review of changed passages and glossary meanings performed.
+- `git diff --check`: passed after removing trailing Markdown spaces on two edited lines.
+- All changed Rust files compared against the pre-edit working-tree snapshot:
+  every non-comment line, including executable code and runtime strings, is identical.
+  No Rust code example was intentionally changed; the focused fence/link/ID checks
+  and final file inventory are recorded in the continuation inventory.
+- G-001–066 and original mappings retained; old section-3/section-5 glossary anchors
+  retained explicitly for existing links. Current naming gates removed.
+- No build, unit/QUIC tests or doctests run: changes are editorial, with no Rust code
+  example modification. No workspace-green, safety-proof, commit or PR claim.
+
+The autonomous editorial pass is complete for this scoped screening. Continue
+ordinary vocabulary maintenance without asking naming questions. The architecture
+return point is S3.3 / Q-S3.3-01 with its original unanswered A/B meanings; first
+resume bounded closure/inclusion/installation analysis. Keep S2 membership and
+other substantive conflicts explicit. Do not infer a payment-protocol answer from
+any glossary answer or the instruction to unify terminology.

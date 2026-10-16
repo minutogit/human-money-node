@@ -78,7 +78,7 @@ pub enum FraudProofPillar {
 #[archive(check_bytes)]
 #[repr(C, align(8))]
 pub struct FraudProofPayload {
-    /// NodeID / public key of the convicted perpetrator (32 bytes)
+    /// Full NodePubKey of the node identified by the fraud evidence (32 bytes)
     pub perpetrator_node_id: PubKey32,
     
     /// Fraud pillar (1..3)
@@ -93,7 +93,7 @@ pub struct FraudProofPayload {
     /// Second signed original packet (full wire format)
     pub evidence_packet_b: Vec<u8>,
     
-    /// Optional: NodeID of the discoverer / reporter
+    /// Optional: full NodePubKey of the discoverer / reporter
     pub reporter_node_id: PubKey32,
     
     /// Signature of the reporter over (perpetrator_node_id || proof_pillar || hash(A) || hash(B))
@@ -105,7 +105,7 @@ pub struct FraudProofPayload {
 #[archive(check_bytes)]
 #[repr(C, align(8))]
 pub struct HeartbeatSlashingSlot {
-    /// NodeID / public key of the node (32 bytes)
+    /// Full NodePubKey of the node (32 bytes)
     pub node_id: PubKey32,
     /// Unix timestamp of the last valid heartbeat (8 bytes)
     pub timestamp_unix: u64,

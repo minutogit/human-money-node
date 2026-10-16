@@ -5,12 +5,14 @@ use crate::crypto::{sign_lock_attestation, verify_attestation};
 use crate::storage::{ingress_time_window_valid, RamIndex};
 use crate::types::{Attestation, Hash256, HrwRoutingId, LockId, LockRecord, NodePubKey, SimTime};
 
-/// QuorumCertificate assembled by Gateway (INV-0603 case 3)
+/// Simulation quorum certificate assembled by the gateway (INV-0603 case 3).
+/// Its `Attestation` values use deterministic test signatures; production approvals
+/// and `verify_zero_trust_quorum` use real Ed25519 signatures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumCertificate {
     pub lock_id: LockId,
     pub shard_id: u16,
-    pub signatures: Vec<Attestation>, // Individual Ed25519 attestations from shard committee members
+    pub signatures: Vec<Attestation>, // Individual node attestations; this model uses deterministic test signatures
     pub signer_bitmap: u32,
 }
 
@@ -18,7 +20,7 @@ impl QuorumCertificate {
     pub fn signer_count(&self) -> usize { self.signatures.len() }
 }
 
-/// 3-Wege Ingress Verdict (INV-0603)
+/// Three-way ingress verdict (INV-0603)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IngressVerdict {
     /// Case 1: Verified - lock already exists with identical id/t_id
@@ -85,13 +87,14 @@ impl DumbServer {
         // But also if server already had verified path, that would be Verified above.
         Ok(IngressVerdict::NewLock { cert, status_is_final: is_final })
     }
-    /// Batch verify client-provided certificate (>=14 valid Ed25519 from top20)
+    /// Checks the model certificate (>=14 deterministic test attestations from `top20`).
     pub fn verify_quorum_certificate(&self, cert: &QuorumCertificate) -> bool {
         verify_quorum_certificate(cert, &self.top20, 14)
     }
 }
 
-/// Client-side verification of >=14 Ed25519 sigs (INV-0604)
+/// Checks model attestations against the caller-supplied committee and threshold (INV-0604).
+/// This helper verifies deterministic test signatures, not production Ed25519 approvals.
 pub fn verify_quorum_certificate(cert: &QuorumCertificate, top20: &[u16], threshold: usize) -> bool {
     if cert.signatures.len() < threshold {
         return false;

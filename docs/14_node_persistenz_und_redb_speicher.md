@@ -60,7 +60,7 @@ pub const TABLE_NODE_IDENTITY: TableDefinition<u8, &[u8]> =
     TableDefinition::new("node_identity");
 
 /// 2. F2F Peers & Friendship Topology
-/// Key: 32-byte NodeID | Value: Serialized PeerRecord (Address, Last-Seen, Uptime)
+/// Key: 32-byte NodePubKey (node identity) | Value: Serialized PeerRecord (Address, Last-Seen, Uptime)
 pub const TABLE_PEERS: TableDefinition<&[u8; 32], &[u8]> = 
     TableDefinition::new("peers");
 
@@ -84,7 +84,7 @@ pub const TABLE_INGRESS_ACCOUNTS: TableDefinition<&[u8; 32], &[u8]> =
 
 ## 4. Asynchronous Write Path for Locks & Fraud Evidence
 
-When a new lock is accepted in volatile RAM or a double-spend (equivocation) is detected:
+When a new lock is accepted in volatile RAM or node equivocation (conflicting attestations from the same node identity) is detected:
 
 ```mermaid
 flowchart LR

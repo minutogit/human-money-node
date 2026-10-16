@@ -8,9 +8,9 @@ use crate::types::{Attestation, NodeId, SimTime};
 // Constants per spec 11 + 05
 // ---------------------------------------------------------------------------
 
-/// Threshold for Heartbeat spam: < 50 Minuten = 3000 Sekunden
+/// Heartbeat-spam threshold: < 50 minutes = 3000 seconds
 pub const HEARTBEAT_SPAM_THRESHOLD_MS: u64 = 3_000_000; // 50*60*1000
-/// Stale slot: > 75 Minuten (toter Knoten)
+/// Stale slot: > 75 minutes (inactive node)
 pub const SLOT_STALE_THRESHOLD_MS: u64 = 4_500_000; // 75*60*1000
 
 pub const DOMAIN_HEARTBEAT: &[u8] = b"HUMOCO_V1_HEARTBEAT";

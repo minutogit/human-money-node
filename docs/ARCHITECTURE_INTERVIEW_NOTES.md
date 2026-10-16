@@ -6,7 +6,7 @@
 > and the current decision register in section 2 when resuming. Checkpoints are in section 9.
 
 Date: 2026-10-13 (Europe/Berlin)
-Last updated: 2026-10-15 (Europe/Berlin)
+Last updated: 2026-10-16 (Europe/Berlin)
 
 Status: Working interview notes, not a binding specification or an implementation plan.
 The interview was saved at the maintainer's request and subsequently resumed.
@@ -114,6 +114,10 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-046"></a>DEC-046 | S4 | Handoff progress after contention | Accepted requirement/direction | Choose A: require safe automatic progress once communication stabilizes and the relevant honest quorum is available, including competing proposals. Permit the minimum necessary handoff retry/agreement rules. No specific protocol/library, fixed pause duration, globally common ranking or recovery after permanent old-quorum loss is approved. | [Recorded selection](#evidence-dec-046) |
 | <a id="dec-047"></a>DEC-047 | S2/S5 | Intended network topology | Clarified/reaffirmed operating requirement | The maintainer expects one organically connected global network: providers and clients benefit from global connectivity; small startup meshes or deliberate islands are exceptions. Independent permanent trust domains are not the intended product model. This is an operating goal, not a selected common bootstrap anchor, a bound on transient HRW-view differences, or permission to reverse FINAL after partitions. | [Recorded selection](#evidence-dec-047) |
 | <a id="dec-048"></a>DEC-048 | C2/S5 | FINAL threshold and organic-network assumption | Clarified/reaffirmed operating requirement | Reaffirmed by the maintainer: retain FINAL from the existing N >= 20 regime with the selected 14/20 checkout policy and existing stability requirements. Organic spread through existing users and preference for globally connected providers make spontaneous independent twenty-node networks an unlikely normal deployment scenario in the maintainer's model; no measured probability is claimed. Do not repeatedly ask whether FINAL should exist at twenty nodes or force a permanent-network/anchor choice. This operating assumption does not establish dynamic committee safety or select FINAL revocation. | [Recorded selection](#evidence-dec-048) |
+| <a id="dec-049"></a>DEC-049 | K3 | Client authorization terminology | Accepted naming decision | Q-K3-G021-01 A: “Lock-Signatur” names the individual client authorization signature; “Freigabenachweis” names the combined authorization evidence, including the disclosed key's checked predecessor-output binding and valid signature. Naming only; canonical formats, enforcement and verification remain OPEN-06. | [Answer and scope](#725-client-authorization-names-selected-parent-lock-naming-next) |
+| <a id="dec-050"></a>DEC-050 | K3 | Predecessor terminology | Accepted naming decision | Q-K3-G014-01 A: “Eltern-Lock” names the predecessor record; “Vorgängerausgabe” names its particular consumed output. Exact split/output binding remains OPEN-06; no identifier or protocol-format change. | [Answer and next review](#726-parent-terminology-selected-shard-digest-naming-next) |
+| <a id="dec-051"></a>DEC-051 | K3 | Shard summary terminology | Accepted naming decision | Q-K3-G049-01 A: “Shard-Zusammenfassung” names the existing “Shard digest” concept. Compact comparison information, not full state or recovery proof. | [Answer and steering](#727-glossary-naming-complete-autonomous-editorial-alignment) |
+| <a id="dec-052"></a>DEC-052 | K3 | Autonomous vocabulary maintenance | Accepted workflow/scope direction | Stop glossary preference questions. Maintain and align vocabulary autonomously across current documentation and comments; terms may be refined later. This does not select unresolved protocol behavior. | [Maintainer instruction](#727-glossary-naming-complete-autonomous-editorial-alignment) |
 
 ### 2.2 Alternatives, refinements and superseded proposals
 
@@ -146,9 +150,11 @@ the recorded reasoning; they do not supply missing original user explanations.
 ### 2.3 Open design and decision inventory
 
 These are tracked obligations, not a list of questions to ask the maintainer in
-sequence. Investigate technical prerequisites autonomously. Only Q-S3.3-01 is the
-saved pending A/B question; §7.16 records its clarified presentation. Keep explicit accepted requirements
-separate from unresolved proof/parameter choices.
+sequence. Investigate technical prerequisites autonomously. No glossary naming question is pending: DEC-049–052 settle the names and
+authorize autonomous editorial maintenance (§7.27). The scoped editorial pass is complete; naming decisions do not close protocol-design
+obligations. Q-S3.3-01 is the resumed pending question with unchanged A/B meanings; §7.16 records its clarified
+presentation. Keep explicit accepted requirements separate from unresolved
+proof/parameter choices.
 
 | Item | Branch | Still unresolved | Detail record |
 | --- | --- | --- | --- |
@@ -166,7 +172,7 @@ separate from unresolved proof/parameter choices.
 | OPEN-12 | O5/O6 | Private admin packaging/auth/socket permissions; metric-specific aggregation, bounded persistence and reliability diagnostics. | §7.2.1/7.3; DEC-002/003/036/037/040 |
 | OPEN-13 | C4/S1 | Statistical aggregation/freshness/disagreement payment policy, provider independence, ticket/voucher grinding and quantified adversary assumptions. | §5.5, §7.1/7.3; DEC-016/018/020/021/044 |
 | OPEN-14 | F1 | Complete specification/invariant/interface coverage and consolidation of contradictions before final plan; real-wire verification remains a later delivery gate. | §1, §6, §8; CP-0003 below |
-| OPEN-15 | K3 | Review the shared dictionary draft, then align approved vocabulary throughout the repository; do not resolve protocol conflicts through wording alone. | §7.18; glossary G-001–066 / TERM-01–13 |
+| OPEN-15 | K3 | Naming and scoped editorial alignment complete (DEC-049–052); ongoing autonomous maintenance, no preference questions. Protocol conflicts remain OPEN-02/03/05/06/08/09/10/14. | §7.18–7.28; glossary G-001–066 / TERM-01–13; alignment report §8 |
 
 ### 2.4 Record gaps and pending specification consolidation
 
@@ -2289,6 +2295,206 @@ production/specification edits, Rust/QUIC tests, commit or PR. Next action: exec
 the plan when requested, or continue maintainer glossary review. K3 remains active;
 Q-S3.3-01 remains parked without an answer.
 
+### 7.23 Execute and reconcile the terminology audit
+
+Record: GLOSSARY-003. Node: K3. Date: 2026-10-16 (Europe/Berlin).
+The maintainer explicitly requests execution of the saved alignment plan in the
+new chat. This authorizes investigation and editorial alignment, not selection of
+proposed names, a payment protocol, changed interfaces or production behavior.
+
+Starting revision `02983adeda594d7610194cb6a4d0abcb118ef051` already contains an initial
+alignment report and TA-001–017. The working tree was clean. The saved CP-0011 state
+still described the audit as pending, so this continuation reconciles that cursor
+with actual repository contents and preserves the existing work.
+
+The report continuation and file inventory account for current specs, both 15/16
+filename variants, root guides/prompts and first-party Rust source/test comments,
+while distinguishing screening from contextual evidence review. Editorial fixes
+separate simulated deterministic test signatures from production Ed25519 approval,
+node attestations from quorum certificates, decoding/counting from verification,
+node keys from fingerprints/routing tickets, node ban lists from collision locks,
+and client double-spend from node equivocation. Remaining identified German
+production comments are translated. Historical audit wording is preserved with
+a current-status pointer; remaining legacy guide/test language debt is explicit.
+
+The glossary remains the only dictionary. Established meanings receive factual
+qualifications; G-014/021/049 names stay proposed. No complete uniformity or protocol
+safety claim follows. FINAL/VOID, High Assurance, durability/SLA, justified membership,
+handoff/recovery and canonical-format differences remain substantive work. The
+report corrects the old claim that `cargo check --tests` established passing doctests;
+that inherited command claim was not rerun or independently verified here.
+
+Verification: report section 7.5 records the actual final static checks and limits.
+No executable Rust logic, runtime strings, identifiers, wire/API fields, dependencies,
+thresholds or timers changed; no build/test suite, commit or PR in this continuation.
+Next action: review remaining K3 names and consolidate recorded conflicts, then return
+to S3.3. Q-S3.3-01 remains parked and unanswered; S2 remains unresolved. The audit
+execution request is not an A/B answer or wholesale approval of the glossary draft.
+
+### 7.24 Resume the pending client-authorization naming review
+
+Record: GLOSSARY-004. Node: K3, bounded focus G-021.
+Question: Q-K3-G021-01. Date: 2026-10-16 (Europe/Berlin).
+Status: proposed naming distinction; awaiting maintainer answer. No selection.
+
+The maintainer invokes the architecture-interview procedure without changing scope
+or answering a pending question. Both memory files exist and match completed
+CP-0012; no missing memory requires creation or legacy migration. Resume the recorded
+K3 naming review. G-021 is next because the preceding clarification distinguished
+one signature from the wider authorization evidence (§7.21), with no final name.
+G-014/049 and the report's substantive conflicts remain queued within K3. The
+previous S3.3 question stays parked; this invocation is not an answer to it.
+
+Evidence: glossary §3.3; §7.20–7.23; alignment report §7.3. Targeted read-only
+reinspection of `api/hmc.rs::L2LockRequest`, `calculate_l2_payload_hash` and
+`verify_l2_lock_signature` confirms separate `sender_ephemeral_pub` and
+`layer2_signature` fields and verification of the request signature under that
+public key. This function alone does not check the predecessor-output key binding
+or prove end-to-end authorization correctness; those remain OPEN-06 obligations.
+
+Recommendation A: use “Lock-Signatur” for the individual spending-client signature
+and “Freigabenachweis” for the combined authorization evidence: disclosed public
+key matching the predecessor output's commitment, plus its valid request signature.
+This retains the maintainer's proposed signature name and distinguishes the whole
+authorization relationship. A disclosed public key alone does not establish private
+key control. Neither term establishes node-quorum payment confirmation. The names
+do not select a new proof object, encoding, stored record or wire message. Genesis
+authorization is a distinct case under DEC-005, not an invented predecessor output.
+
+Exact German question (quoted interview wording):
+
+> **Q-K3-G021-01:** Sollen wir für G-021 „Lock-Signatur“ für die einzelne Client-Signatur und „Freigabenachweis“ für den beschriebenen Gesamtnachweis übernehmen?
+>
+> **A – Empfehlung:** Diese beiden Begriffe mit den beschriebenen Bedeutungen übernehmen.
+
+Free-form naming/correction remains possible; no B/C is defined or implicitly
+rejected. Silence or a generic continuation does not select A. Other naming
+candidates in §7.21 remain unselected, not rejected. Design/proof packaging and
+implementation/verification remain open; no protocol policy is reopened here.
+
+Next action: ask Q-K3-G021-01 and await its answer. On an answer, record the precise
+selection/correction, then continue the remaining K3 names. Do not treat approval
+of this pair as glossary-wide adoption or an answer to Q-S3.3-01. Keep substantive
+conflicts explicit and follow their existing architecture dependencies.
+
+### 7.25 Client authorization names selected; parent-lock naming next
+
+Record: GLOSSARY-005. Node: K3. Date: 2026-10-16 (Europe/Berlin).
+Answered question: Q-K3-G021-01. Exact maintainer answer: `a`.
+Decision: DEC-049, accepted A with the meanings recorded in §7.24. Replace the
+G-021 German signature headword with “Lock-Signatur”; record “Freigabenachweis”
+as the combined client authorization evidence. Update the existing glossary,
+preserving identifiers and English technical terms. The previously proposed
+“Freigabesignatur,” “Berechtigungsnachweis” and “Lock-Autorisierung” are not selected
+as preferred names; no separate technical rejection is attributed to the maintainer.
+The choice retains the client's signature proposal and distinguishes one signature
+from the overall evidence; no new proof structure or payment round is selected.
+Naming design: resolved for this pair. Protocol design/verification: OPEN-06;
+genesis remains a distinct case. Q-S3.3-01 is unchanged and unanswered.
+
+Next bounded focus: G-014. Existing evidence is glossary §3.2 and §7.20: the
+maintainer proposed “Eltern-Lock,” while a split can have several independent
+outputs. Recommend that name for the predecessor record and “Vorgängerausgabe”
+for its particular consumed output. This preserves the proposed plain-language
+name without conflating a record with one spend slot. No split representation,
+identifier migration or wire layout is selected; exact output binding is OPEN-06.
+
+Exact German question, Q-K3-G014-01:
+
+> Sollen wir „Eltern-Lock“ für den Vorgänger-Lock übernehmen und dessen konkret verbrauchte Ausgabe bei Bedarf „Vorgängerausgabe“ nennen?
+>
+> **A – Empfehlung:** Diese Begriffe mit der beschriebenen Unterscheidung übernehmen.
+
+Question status: awaiting answer; free-form corrections allowed, no B/C defined.
+Next action: ask Q-K3-G014-01 and record the answer before continuing to G-049.
+Keep substantive conflicts on their existing branches; return to S3.3 after K3.
+
+### 7.26 Parent terminology selected; shard-digest naming next
+
+Record: GLOSSARY-006. Node: K3. Date: 2026-10-16 (Europe/Berlin).
+Answered question: Q-K3-G014-01. Exact maintainer answer: `a`.
+Decision: DEC-050, accepted A as recorded in §7.25: “Eltern-Lock” for the
+predecessor record; “Vorgängerausgabe” for its specific consumed output. This
+preserves the distinction needed when a lock creates independent split outputs.
+Naming design resolved; exact output binding/design and verification remain
+OPEN-06. Update G-014 in the existing glossary; retain `parent_lock`, formats
+and historical proposals. No new split mechanism or protocol policy is selected.
+
+Next bounded focus: G-049, the remaining specifically proposed name. Basis:
+glossary §3.6, §7.20 and alignment report §7.3. Recommend “Shard-Zusammenfassung”
+for the existing English concept “Shard digest”: compact comparison information
+used to identify state differences before transferring relevant records. It is
+not a full state copy, a quorum certificate or sufficient recovery-readiness
+evidence. “Prüfsumme” would unnecessarily restrict the possible representation;
+no hash/tree/Bloom-filter implementation is selected by this vocabulary choice.
+
+Exact German question, Q-K3-G049-01:
+
+> Sollen wir „Shard-Zusammenfassung“ als deutschen Begriff für „Shard digest“ übernehmen?
+>
+> **A – Empfehlung:** „Shard-Zusammenfassung“ mit der beschriebenen Bedeutung übernehmen.
+
+Question status: awaiting answer; free-form corrections allowed; no B/C defined.
+Next action: ask Q-K3-G049-01 and record the answer. Then reconcile the remaining
+K3 review obligations and substantive-conflict routing before returning to S3.3.
+Do not infer glossary-wide approval, safe recovery or an answer to Q-S3.3-01.
+
+### 7.27 Glossary naming complete; autonomous editorial alignment
+
+Record: GLOSSARY-007. Node: K3. Date: 2026-10-16 (Europe/Berlin).
+Answered question: Q-K3-G049-01. Exact answer: `a`. DEC-051 accepts
+“Shard-Zusammenfassung” for “Shard digest,” with §7.26's boundaries.
+
+The maintainer then explicitly instructs the agent to stop asking glossary
+questions, unify the terminology independently, and allow later vocabulary
+adjustments without requiring feedback. DEC-052 records that scope and workflow
+change. Naming approval is complete; do not ask for dictionary-wide ratification.
+This supersedes the earlier per-name review workflow and proposed-name gates in
+the reusable terminology plan. Prior question records remain historical.
+
+Next action: align the existing glossary, maintained plan, current documentation
+and source comments under the updated authorization. Preserve historical records,
+identifiers, executable behavior and substantive protocol requirements. Record
+actual changes and checks in the existing alignment report. FINAL/VOID, durable
+vote release, membership/handoff, formats and network-boundary conflicts remain
+architecture obligations, not blockers to independent editorial improvements.
+Q-S3.3-01 remains unanswered; return there after the editorial pass, with no
+inference from the preceding glossary answers. No new architecture choice.
+
+### 7.28 Complete autonomous editorial alignment and resume architecture work
+
+Record: GLOSSARY-008. Node: K3 completion; return to S3.3.
+Date: 2026-10-16 (Europe/Berlin).
+Names and editorial maintenance policy are settled (DEC-049–052). Updated the
+single glossary, current specification prose/diagrams, source comments, roadmap,
+task heading and maintained prompts; changes/checks are in alignment report §8
+and the continuation inventory. No further glossary feedback is needed. Explicit
+legacy anchors preserve existing glossary links; earlier questions/candidates
+remain history, not pending choices.
+
+The current pass distinguishes individual client signatures, combined client
+authorization evidence, node attestations, assembled quorum certificates and
+compact shard digests. Digest documentation now describes the actual hashed
+projection rather than claiming complete-record equality or guaranteed safe
+handoff. This is a comment correction, not a runtime or normative protocol change.
+The report also retains the Spec 15 automatic-sanction idea and Spec 16
+client-conflict/receipt-gossip passages as substantive F1/S6/N4 conflicts.
+
+K3 naming/editorial work is complete for the recorded screening; future refinements
+are autonomous. Legacy language translation and substantive consolidation remain
+separate work, not reasons to keep requesting vocabulary approval. Return to S3.3
+because old-write closure, preserved binding effects and successor installation
+must precede any justified consolidated handoff wording. S2 remains unresolved.
+
+Pending question: the unchanged Q-S3.3-01, exact German wording/options in §7.16.
+Neither A (one collection round with preserved justified binding effects) nor B
+(investigate separate preparation/completion payment rounds) has been selected.
+Recommendation A remains conditional on a justified handoff; no new question or
+option mapping is created here. Next action: resume bounded closure/inclusion/
+installation analysis from §7.15–7.17, then use that pending choice where the
+payment-semantics tradeoff is necessary. Do not infer any protocol answer from
+the glossary answers or current editorial authorization.
+
 ## 8. Historical continuation summary
 
 This pre-workflow continuation text is preserved for context. The compact state
@@ -2616,3 +2822,82 @@ proposed-name statuses and the architecture return point. Read back changes and
 matching CP-0011; check plan links and whitespace. No audit-execution claim or tests.
 
 Completed checkpoint: **CP-0011**.
+
+
+### CP-0012 — Execute and reconcile terminology alignment
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded GLOSSARY-003 / §7.23, added the continuation findings and explicit file
+coverage, and reconciled compact state/glossary/plan status with the initial
+alignment already present in Git. Source-comment and specification changes are
+editorial. Naming proposals and substantive conflicts remain open; K3 stays active
+and Q-S3.3-01 stays parked. Verification and its limits are recorded in report §7.5;
+no new protocol choice, behavior/interface change, test suite, commit or PR.
+
+Completed checkpoint: **CP-0012**.
+
+
+### CP-0013 — Resume G-021 naming at the saved K3 cursor
+
+Date: 2026-10-16 (Europe/Berlin).
+Read the applicable instructions, complete compact state, decision/open-item index,
+active glossary records and alignment findings. Both memory files exist and agree
+on CP-0012. Recorded GLOSSARY-004 / §7.24 and exact Q-K3-G021-01 with A's meaning
+before presenting it; no answer or name selection is inferred from resumption.
+Updated the open-item index and navigation to one active focus, K3 / G-021.
+G-014/049, substantive conflicts and the unchanged parked Q-S3.3-01 remain pending.
+Only the two interview-memory files are edited in this continuation. No production
+or binding-specification change, test campaign, commit or deployment is performed.
+
+Completed checkpoint: **CP-0013**.
+
+
+### CP-0014 — Record G-021 answer A and advance to parent terminology
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded the maintainer's `a` against Q-K3-G021-01 as DEC-049 / GLOSSARY-005,
+updated the current decision/open-item index and adopted the two names in the
+existing glossary. Preserved the previous question and unselected candidates as
+history. Recorded exact Q-K3-G014-01 and its A meaning before asking it; K3/G-014
+is the sole active focus. Q-S3.3-01 remains parked. Changes are interview/glossary
+documentation only; no code, protocol format, test suite, commit or deployment.
+
+Completed checkpoint: **CP-0014**.
+
+
+### CP-0015 — Record G-014 answer A and advance to shard-digest terminology
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded `a` against Q-K3-G014-01 as DEC-050 / GLOSSARY-006, updated the
+current decision/open-item index and adopted the predecessor/output names in
+the glossary. Recorded exact Q-K3-G049-01 and its A meaning before asking it.
+K3/G-049 is the sole active focus; Q-S3.3-01 remains parked and unanswered.
+Only interview/glossary documents change; no code, wire format, test campaign,
+commit or deployment. Readback and document whitespace checks are the validation.
+
+Completed checkpoint: **CP-0015**.
+
+
+### CP-0016 — Save glossary completion and autonomous-alignment steering
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded G-049 answer A as DEC-051 and the explicit no-more-glossary-questions
+instruction as DEC-052 / GLOSSARY-007. K3 remains active for editorial work,
+without a pending naming question. Q-S3.3-01 stays parked. Next action: complete
+autonomous terminology alignment and document its checks before returning.
+
+Completed checkpoint: **CP-0016**.
+
+
+### CP-0017 — Finish autonomous terminology alignment
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded GLOSSARY-008 / §7.28 and report TA-031–035; glossary names are established
+and future editorial maintenance requires no naming questions. Scoped wording
+alignment is complete, with executable code, runtime strings and protocol fields
+preserved. Updated the decision/open-item navigation and returned the sole active
+focus to S3.3; Q-S3.3-01 retains its unanswered original A/B meanings. Validation:
+readback, whitespace, vocabulary IDs, links/anchors, Rust non-comment and Markdown
+Rust-example comparisons against the pre-edit working tree. No tests/commit/PR.
+
+Completed checkpoint: **CP-0017**.

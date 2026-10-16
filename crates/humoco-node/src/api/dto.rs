@@ -39,10 +39,10 @@ impl AttestationDto {
         Some(out)
     }
 
-    /// Wire-tolerant deserialization: accepts both the current 6-field format
-    /// (with `node_pubkey`) and the legacy 5-field format (without it).
-    /// Legacy payloads upgrade to `node_pubkey == ""` and verify via the
-    /// 16-bit fallback path.
+    /// Decodes the current eight-field struct or the legacy five-field payload.
+    /// Legacy payloads receive an empty `node_pubkey` and `shard_id == 0`.
+    /// Decoding does not verify the signature or establish committee membership;
+    /// callers must apply the relevant identity, signature and membership checks.
     pub fn from_wire_bytes(bytes: &[u8]) -> Option<Self> {
         if let Ok(att) = bincode::deserialize::<Self>(bytes) {
             return Some(att);
@@ -84,6 +84,8 @@ pub struct QuorumCertificateDto {
 }
 
 impl QuorumCertificateDto {
+    /// Checks the signature-vector length against the count-derived threshold.
+    /// This helper does not verify signatures, distinct identities or membership.
     pub fn is_quorum_reached(&self) -> bool {
         let (required_q, _) = humoco_sim_core::types::required_quorum(self.active_nodes_count);
         self.signatures.len() >= required_q

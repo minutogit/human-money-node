@@ -71,7 +71,7 @@ sequenceDiagram
     Note over Wallet,Gateway: Case A: Checkout / Hot Path (< 1000 ms)
     Wallet->>Gateway: POST /query (L2StatusQuery for current leaf)
     Gateway-->>Wallet: L2ResponseEnvelope(L2Verdict::Verified)
-    Note over Wallet,Gateway: Quorum signature issued immediately
+    Note over Wallet,Gateway: Quorum certificate returned immediately
 
     Note over Wallet,Gateway: Case B: Cold Path / Offline Sync (ADR-001)
     Wallet->>Gateway: POST /query (L2StatusQuery with 10-char Base58 Locators)

@@ -438,14 +438,14 @@ impl NodeDaemon {
             }
         });
 
-        // 3.5 Betreiber-Alerting (Telegram & Webhook) mit 15-min Hysterese und 15-min Intervall
+        // 3.5 Operator alerts (Telegram & webhook) with 15-minute hysteresis and interval
         let alert_config = self.config.alerts.clone();
         let alert_data_dir = self.config.storage.data_dir.clone();
         let alert_pm = peer_manager.clone();
         let alert_cancel = self.cancel_token.clone();
         let alert_lifecycle = self.config.lifecycle.clone();
         let alert_handle = tokio::spawn(async move {
-            // 15-Minuten Startup-Hysterese
+            // 15-minute startup hysteresis
             tokio::select! {
                 _ = alert_cancel.cancelled() => return,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(15 * 60)) => {}
@@ -493,7 +493,7 @@ impl NodeDaemon {
             }
         });
 
-        // 3. Non-blocking Recurring Shard-Digest Pull-Sync & Bootstrap Motor
+        // 3. Non-blocking recurring shard digest pull sync and bootstrap
         let sync_pm = peer_manager.clone();
         let sync_transport = transport.clone();
         let sync_engine = engine.clone();
@@ -803,22 +803,23 @@ impl NodeDaemon {
     }
 }
 
-/// # Architectural Invariant: BFT Shard-Digest Pull vs. Random Storage Polling (Spec 03 & KISS)
+/// # Architectural Invariant: BFT Shard Digest Pull vs. Random Storage Polling (Spec 03 & KISS)
 ///
 /// Non-blocking shard digest and bootstrap pull-sync. In small networks (N < 20) or when
 /// the local node is empty, pulls active locks directly from candidate peers. In sharded
 /// networks (N >= 20), queries known shard peers for `ShardDigestRequest` and pulls data
 /// via `ActiveSyncRequest` on divergence.
 ///
-/// Why this 2-phase pull is mathematically sufficient (Spec 03 & KISS): The digest computed
-/// by `humoco_sim_core::crypto::compute_shard_digest_at` is a canonical BLAKE3 over the
-/// sorted active lock set per shard. Equality of digests proves equality of sets under
-/// collision resistance; a single 32-byte comparison per shard replaces unbounded random
-/// probing. The daemon therefore avoids continuous random storage polling — which would
-/// need O(N) round trips, add non-deterministic disk I/O, and never give a convergence
-/// proof — and instead relies on the periodic 60s ticker plus event-driven `sync_notifier`
-/// with 5s debounce. This is the KISS-minimal sync that still guarantees deterministic
-/// partition healing (dominant-quorum pull) without background polling loops.
+/// The shard digest is compact comparison information over the sorted active-lock
+/// projection defined by `humoco_sim_core::crypto::compute_shard_digest_at`.
+/// Equal digests compare that projection under collision resistance; they do not
+/// prove full record equality, justified membership, preservation of every binding
+/// vote, old-write closure or safe successor activation.
+///
+/// The periodic 60s ticker and event-driven `sync_notifier` with 5s debounce
+/// schedule pull attempts without continuous random probing of storage keys.
+/// This describes the existing synchronization mechanism, not a completed proof
+/// of membership continuity or recovery signing readiness.
 async fn run_shard_digest_pull_sync(
     transport: &crate::network::QuicTransport,
     peer_manager: &crate::network::PeerManager,

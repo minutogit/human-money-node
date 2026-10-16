@@ -726,11 +726,11 @@ mod tests {
 
     #[test]
     fn test_micro_from_ttl_seconds() {
-        // 1 Jahr = 192 Byte-Jahre = 192_000_000 µBJ
+        // 1 year = 192 Byte-Years = 192_000_000 micro-Byte-Years
         assert_eq!(ByteYears::micro_from_ttl_seconds(SECONDS_PER_YEAR), 192_000_000);
-        // 5 Jahre = 960 Byte-Jahre = 960_000_000 µBJ
+        // 5 years = 960 Byte-Years = 960_000_000 micro-Byte-Years
         assert_eq!(ByteYears::micro_from_ttl_seconds(5 * SECONDS_PER_YEAR), 960_000_000);
-        // 0 Sekunden = mindestens 1 µBJ
+        // 0 seconds = at least 1 micro-Byte-Year
         assert_eq!(ByteYears::micro_from_ttl_seconds(0), 1);
     }
 

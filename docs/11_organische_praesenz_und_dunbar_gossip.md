@@ -115,7 +115,7 @@ To ensure that legitimate heartbeats propagate reliably and without packet explo
         - **$|\Delta t| < 50\,\text{minutes}$:** 🔴 **FRAUD!** Immediately bundle `FraudProofPayload` (both packets are directly in RAM!), flood priority-0 gossip and free the slot again.
         - **$|\Delta t| \ge 50\,\text{minutes}$:** ✅ **HONEST!** Update the slot with the new time (or free it).
      3. **Case 3 (slot occupied by DIFFERENT FRESH node):** If a foreign node with age $\le 75\,\text{minutes}$ occupies the slot, no storage is performed ("If no slot is free, so be it"). The packet is forwarded normally in the mesh; other nodes on the path take over detection.
-   * **Consequence:** The $\text{NodeID}$ is immediately and permanently placed on the global **ban registry** (Collision Lock Registry). The expensive Argon2 PoW of the identity is thus irrevocably burned.
+   * **Consequence:** The $\text{NodeID}$ is immediately and permanently placed on the **node identity ban list** (distinct from the Collision Lock Registry). The expensive Argon2 PoW of the identity is thus irrevocably burned.
 6. **Reboot safety (1h grace period & NTP immunity):**
    * After a system reboot or cold start, a node listens **passively for at least 60 minutes** before emitting its first own heartbeat. This mathematically rules out accidental double-signing after crashes or flash losses.
    * NTP time jumps never cause false bans: if the clock was wrong, the packet is simply discarded due to $|\Delta t| > 60\,\text{s}$ without triggering a fraud proof.

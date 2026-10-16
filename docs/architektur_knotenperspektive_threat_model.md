@@ -6,6 +6,11 @@
 > **Datum:** 2026-08-29 | **Perspektive:** Einzelner Node als autonomer Akteur im P2P-Mesh (kein globaler Observer)  
 > **Credo geprüft:** *„In der Dezentralität gibt es kein Vertrauen, nur mathematische Beweise.“*
 
+> **Current-status pointer (2026-10-16):** This dated audit is historical evidence.
+> Its old BLS/Argon2id and identity wording is not the current glossary. See the
+> [terminology report](TERMINOLOGY_ALIGNMENT_REPORT.md) for current distinctions
+> and unresolved specification conflicts. The original findings below are preserved.
+
 ---
 
 ## Inhaltsverzeichnis

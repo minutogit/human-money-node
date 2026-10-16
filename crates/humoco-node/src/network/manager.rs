@@ -72,14 +72,16 @@ pub struct NetworkNodeDto {
 }
 
 /// Semantically decoupled node information:
-/// - `node_pubkey` / `node_id` = permanent Ed25519 identity (BLAKE3(pubkey)), immutable for F2F & TLS
+/// - `node_pubkey` / `node_id` = stored node identity and its compatibility alias;
+///   do not conflate the full `NodePubKey` with `NodeIdentity::node_id()` (a BLAKE3 fingerprint)
 /// - `hrw_routing_id` = Argon2d Shard Ticket for HRW routing, may change via re-mining (24h incubation)
 /// - `pending_hrw_routing_id` + `pending_since` = 24h incubation buffer for new ticket
 /// - `first_seen` + `last_seen` = 24h IMMATURE threshold for newcomers
 #[derive(Clone, Debug)]
 pub struct KnownNodeInfo {
     pub(crate) addr: SocketAddr,
-    /// Permanent Ed25519 identity (NodePubKey or BLAKE3(pubkey) as NodeId) — basis for F2F & TLS.
+    /// Stored node identity bytes, supplied by the discovery caller as `node_pubkey`.
+    /// A BLAKE3 fingerprint is not interchangeable with an Ed25519 verifying key.
     pub(crate) node_pubkey: [u8; 32],
     /// Alias for `node_pubkey` for backward compatibility (permanent identity).
     #[allow(dead_code)]
@@ -1223,7 +1225,7 @@ impl PeerManager {
         }
     }
 
-    /// Alias for re-mining / routing ticket update (Spec 07: NodeIDMigrationNotice).
+    /// Alias for re-mining / routing ticket update (Spec 07: `HrwRoutingIdMigrationNotice`).
     /// Semantics identical to `learn_node_from_gossip_with_hrw` — new tickets incubate for 24h.
     pub async fn update_routing_ticket(
         &self,
@@ -2162,7 +2164,7 @@ impl PeerManager {
     /// Returns the estimated total count of active nodes in the network (peers + known nodes + self).
     /// Skips immature entries (only mature shard tickets count) and stale presence ghosts.
     /// Strictly coupled to 24h shard-ticket incubation + fresh presence (Spec 08 Phase 9 P1):
-    /// unreife oder karteileichen-Knoten duerfen N >= 20 niemals vorzeitig triggern.
+    /// Immature or stale node entries must never trigger N >= 20 prematurely.
     pub fn active_nodes_count(&self) -> usize {
         let mut count = 1; // Always include self (INV: local node is active)
         if let Ok(peers) = self.peers.try_read() {

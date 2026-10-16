@@ -8,7 +8,7 @@
 
 > [!TIP]
 > **💡 Ideenliste / Zukunfts-Gedanke (SLA-Bewertung: Aktiver QUIC-Teardown vs. Stumme Arbeitsverweigerung):**  
-> Eine saubere, explizite Trennung einer QUIC-Verbindung mit aktivem Trennsignal (`CONNECTION_CLOSE` / `DRAINING` z. B. wegen Wartung, Reboot oder regulärem Shutdown) muss systemisch **weitaus wohlwollender / unkritischer bewertet werden** als ein Knoten, der eine QUIC-Session aktiv aufrechterhält (Pings/Keepalives fließen), aber übergebene Shard-Lese-/Schreibanfragen oder Quorum-Signaturen stumm ignoriert.  
+> A clean, explicit QUIC teardown with an active disconnect signal (`CONNECTION_CLOSE` / `DRAINING`, e.g. for maintenance, reboot or regular shutdown) must be evaluated as **far more benign / non-critical** than a node that keeps its QUIC session alive (pings/keepalives continue) but silently ignores submitted shard read/write requests or requests for node attestations.
 > * **Ehrlicher Ausfall (Clean Close):** „Ich bin offline / mache Wartung“ $\to$ Sofortiges, sauberes Failover der Nachbarn, 0 % Betrugsverdacht.  
 > * **Stumme Verweigerung (Silent Zombie / Lazy Peer):** Die Verbindung steht physisch, aber die fachliche Arbeit im Shard wird verweigert $\to$ Verdacht auf böswilliges Freeriding, Griefing oder Sabotage. Dies ist ein wichtiger Baustein für zukünftige SLA-Metriken und automatisches Social Slashing / Kanten-Kappen durch direkte F2F-Freunde.
 
@@ -34,7 +34,7 @@ flowchart LR
 
 ### Kern-Eigenschaften des Transports:
 1. **Kein Head-of-Line Blocking:** Paketverluste auf einem Gossip-Stream blockieren niemals parallele Transaktions-Locks auf dem Data-Plane-Stream.
-2. **Mutual TLS 1.3 & Argon2id-Identitätsverifikation:** Jeder Knoten authentifiziert sich im TLS 1.3 Handshake über seinen Ed25519-Schlüssel. Die kryptografische Peer-Zulassung im Netzwerk (`NodeID`) erfordert den Nachweis des gültigen PoW ($\text{NodeID} = \text{Argon2id}(\text{PubKey}_{\text{Ed25519}} \mathbin{\Vert} \text{Nonce} \mathbin{\Vert} T_0)$, siehe `docs/07`).
+2. **Mutual TLS 1.3 & Argon2d Shard Tickets:** Each node authenticates the connection with its Ed25519 `NodePubKey`. The separate `HrwRoutingId` shard ticket is derived from Argon2d work and BLAKE3 whitening, subject to the admission and incubation rules in [Spec 07](07_admission_und_wot_buergschaften.md). A routing ticket is not the permanent node identity.
 3. **Verbindungs-Migration:** Mobile Wallets und Kassen können nahtlos zwischen WLAN, LTE und 5G wechseln, ohne dass die QUIC-Session abbricht.
 
 ---

@@ -121,7 +121,7 @@ flowchart TD
 
     subgraph Verification["O(1) Verification Steps of the Shard"]
         V1["1. Check chain links (hash pointers)"]
-        V2["2. Check quorum signature of Lock 2"]
+        V2["2. Check quorum certificate of Lock 2"]
         V3["3. Check owner signature on new lock"]
         V4["4. First-Seen check in RAM index on parent_lock"]
     end
@@ -133,6 +133,12 @@ flowchart TD
 * **Compactness:** The wallet custodies the gapless chain (`Voucher.transactions`).
 
 ### 3.1 The 3 Elementary Protocol Cases (Read & Write Flow)
+
+**Authorization terminology:** `layer2_signature` is the client request authorization
+signature (German: Lock-Signatur). Client authorization evidence (Freigabenachweis)
+also includes the disclosed key and its checked binding to the predecessor output.
+This evidence is distinct from node attestations and their assembled quorum
+certificate. The genesis case has its own authorization rules.
 
 Due to information asymmetry (customer only queries predecessor `challenge_ds_tag` without revealing own `t_id` in advance) and mathematical unforgeability of `layer2_signature`, the client-server interaction divides into **three elementary, deterministic cases**.
 
@@ -200,7 +206,7 @@ flowchart TD
   1. `L2StatusQuery(challenge_ds_tag)` returns: *"No lock on this tag present"*.
   2. Checkout sends exactly **one** `L2LockRequest` with the new transaction.
   3. The 20 shard nodes execute their atomic First-Seen in RAM ($< 1\,\mu\text{s}$) and send signed attestations (votes).
-  4. Checkout receives aggregated `QuorumCertificate` (duration: $< 50\,\text{ms}$).
+  4. Checkout receives the assembled `QuorumCertificate` (duration: $< 50\,\text{ms}$).
 
 ##### Sub-case 3C: Catch Up Offline Chain (Batch Reconciliation)
 * **Flow:**
@@ -271,8 +277,8 @@ The system is strictly designed for sub-second response times at the checkout te
 | **3. Ingress Check** | Gateway checks WoT voucher | Local cache lookup | $\le 10\,\text{ms}$ |
 | **4. Shard Broadcast** | Gateway $\rightarrow$ 20 Shard Nodes | QUIC UDP parallel | $\le 150\,\text{ms}$ |
 | **5. Atomic RAM Lock** | Shard node Test-and-Set | Lockless atomic concurrent map | $\le 5\,\text{ms}$ |
-| **6. Quorum Response** | Shard Nodes $\rightarrow$ Gateway | Partial Ed25519 signatures | $\le 150\,\text{ms}$ |
-| **7. Aggregation** | Gateway assembles certificate | Bitmask & Ed25519 signatures | $\le 20\,\text{ms}$ |
+| **6. Quorum Response** | Shard Nodes $\rightarrow$ Gateway | Individual Ed25519 node attestations | $\le 150\,\text{ms}$ |
+| **7. Certificate Assembly** | Gateway assembles certificate | Bitmask & Ed25519 signatures | $\le 20\,\text{ms}$ |
 | **8. PoS Confirmation** | Gateway $\rightarrow$ Merchant Terminal | QUIC Stream Response | $\le 100\,\text{ms}$ |
 | **Buffer** | Jitter & packet loss | QUIC Loss Recovery | $\le 200\,\text{ms}$ |
 | **TOTAL** | **Complete PoS finality** | **Status: FINAL (🟢)** | **$\approx 885\,\text{ms} < 1000\,\text{ms}$** |
@@ -346,7 +352,7 @@ This hardening prevents expansion of a selected signer pool. It does not prove t
 ### 6.3 QuorumCertificate Wire Layout (Compact < 1 KB)
 The quorum certificate uses a 32-bit signer bitmap and individual Ed25519 node attestations:
 $$\big( \text{lock\_hash} \,[32\,\text{B}], \; \text{shard\_id} \,[2\,\text{B}], \; \text{status} \,[1\,\text{B}], \; \text{signer\_bitmap} \,[4\,\text{B}], \; \text{signatures} \,[\text{popcount} \times 64\,\text{B}] \big)$$
-* **At 14 quorum signatures:** $32 + 2 + 1 + 1 + 4 + (14 \times 64) = \mathbf{936\,\text{Byte}}$.
+* **At 14 individual node attestations:** $32 + 2 + 1 + 1 + 4 + (14 \times 64) = \mathbf{936\,\text{Byte}}$.
 * **Network guarantee:** Fits entirely in a single unfragmented UDP/QUIC packet ($\le 1.472\,\text{Byte}$ standard MTU).
 * **Zero-overhead NodeID resolution:** NodeIDs and public keys need not be transmitted in the packet; the client deterministically reconstructs the 14 public keys from the bits set in `signer_bitmap` via the shard's HRW ranking.
 

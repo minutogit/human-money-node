@@ -188,7 +188,9 @@ impl LockRecord {
     }
 }
 
-/// Signed attestation from a shard node for a lock
+/// Shard-node attestation representation used by the simulation model.
+/// The `crypto::sign_lock_attestation*` helpers populate deterministic test signatures;
+/// a 64-byte field alone does not establish a real Ed25519 signature.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attestation {
     pub lock_id: LockId,

@@ -121,6 +121,7 @@ pub struct L2LockRequest {
     #[serde(with = "base58_32_opt", default)]
     pub change_ephemeral_pub_hash: Option<[u8; 32]>,
 
+    /// Client request authorization signature, distinct from a shard node attestation.
     #[serde(with = "base58_64")]
     pub layer2_signature: [u8; 64],
 
@@ -152,6 +153,7 @@ pub struct L2LockEntry {
     pub receiver_ephemeral_pub_hash: Option<[u8; 32]>,
     #[serde(with = "base58_32_opt", default)]
     pub change_ephemeral_pub_hash: Option<[u8; 32]>,
+    /// Client request authorization signature, distinct from a shard node attestation.
     #[serde(with = "base58_64")]
     pub layer2_signature: [u8; 64],
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,7 +334,11 @@ pub fn calculate_l2_payload_hash(req: &L2LockRequest) -> [u8; 32] {
     )
 }
 
-/// Verifies the V3 Ed25519 signature of an L2LockRequest.
+/// Verifies the V3 client request authorization signature of an L2LockRequest.
+///
+/// This checks the signature under `sender_ephemeral_pub`; it does not by itself
+/// establish that the key is authorized by the predecessor output or that a shard
+/// quorum has accepted the request.
 pub fn verify_l2_lock_signature(req: &L2LockRequest) -> bool {
     let verifying_key = match VerifyingKey::from_bytes(&req.sender_ephemeral_pub) {
         Ok(k) => k,
@@ -343,7 +349,8 @@ pub fn verify_l2_lock_signature(req: &L2LockRequest) -> bool {
     verifying_key.verify(&payload_hash, &sig).is_ok()
 }
 
-/// Verifies the V3 Ed25519 signature of an L2LockEntry against its lookup tag (challenge_ds_tag).
+/// Verifies a stored lock's V3 client request authorization signature against its lookup tag.
+/// The `challenge_ds_tag` binding is distinct from node-quorum acceptance evidence.
 pub fn verify_l2_lock_entry_signature(entry: &L2LockEntry, lookup_tag: &str) -> bool {
     let verifying_key = match VerifyingKey::from_bytes(&entry.sender_ephemeral_pub) {
         Ok(k) => k,

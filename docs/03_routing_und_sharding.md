@@ -48,7 +48,7 @@ sequenceDiagram
     end
     
     ShardQuorum->>ShardQuorum: Check First-Seen on parent_lock in RAM index
-    ShardQuorum-->>Gateway: Partial quorum signatures (at least Q(R) signatures)
+    ShardQuorum-->>Gateway: Individual node attestations (at least Q(R) signatures)
     
     par 4-Byte Piggyback Feedback (Stream Close)
         Gateway-->>ShardQuorum: signers_bitmask (4 Bytes: Who responded?)

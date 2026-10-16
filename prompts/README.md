@@ -21,12 +21,15 @@ To start a new chat, ask the agent to read and execute `prompts/architecture_int
 
 [terminology_alignment_plan.md](terminology_alignment_plan.md) provides an executable
 plan to review the shared glossary against specifications and code comments, apply
-justified editorial fixes and record unresolved meaning/design conflicts. It retains
-proposed-name status and preserves runtime behavior, wire formats and identifiers.
+justified editorial fixes and record unresolved meaning/design conflicts. It applies the settled vocabulary autonomously under interview DEC-052 and preserves
+runtime behavior, wire formats and identifiers. No glossary preference questions are required.
 Preparing the plan does not execute its audit. Ask an agent to read and execute it
 when starting the terminology alignment work.
 
 ---
+
+Current execution status and unresolved semantic architecture conflicts are recorded in
+[TERMINOLOGY_ALIGNMENT_REPORT.md](../docs/TERMINOLOGY_ALIGNMENT_REPORT.md).
 
 ## 🗂️ Overview of the Audit Suite & Systematic Orchestrator
 

@@ -3,15 +3,18 @@
 > **Purpose:** This document is the authoritative bilingual reference for developers, operators, and AI agents.  
 > **Rule:** The human maintainer communicates in German; all codebase identifiers, commits, issues, pull requests, and public documentation are in idiomatic English.
 
-> **Review draft added 2026-10-15:** Sections 1–2 retain the existing terminology
-> rules. [Section 3](#3-basic-concepts--review-draft) adds proposed definitions for
-> shared understanding; these additions await maintainer review. They do not select
-> protocol mechanisms or override specifications. [Section 4](#4-ambiguities-to-review)
-> records ambiguities to settle before repository-wide terminology alignment.
+> **Vocabulary status, 2026-10-16:** Names are settled and maintained autonomously
+> under interview DEC-049–052. No further naming approval is required.
+> [Section 3](#3-basic-concepts--review-draft) defines the shared vocabulary;
+> unresolved protocol rules remain explicitly qualified. Editorial maintenance
+> does not override specifications or establish implementation correctness.
+> Changes and checks are recorded in [the alignment report](TERMINOLOGY_ALIGNMENT_REPORT.md).
+> [Section 4](#4-ambiguities-to-review) retains the ambiguity register; the report
+> records which wording issues were fixed and which decisions remain open.
 
 Use this file as the shared dictionary rather than creating a second competing
 glossary. German headwords support conversation; English terms and definitions
-support repository documentation. Code identifiers remain unchanged during review.
+support repository documentation. Preserve code identifiers; an editorial name does not require a symbol or wire-format migration.
 
 ---
 
@@ -19,17 +22,17 @@ support repository documentation. Code identifiers remain unchanged during revie
 
 | German (Deutscher Begriff) | Canonical English Term | Context & Technical Semantics (Bedeutung) | Forbidden / False Friends (Verboten) |
 |---|---|---|---|
-| **Sperrregister** | **Collision Lock Registry** | Asynchronous, history-stateless collision registry for double-spend prevention (`parent_lock -> child_lock`; clients custody history, registry holds live collision locks). | *lock register, blocking registry* |
+| **Sperrregister** | **Collision Lock Registry** | Asynchronous collision registry for double-spend prevention (`parent_lock -> child_lock`). Clients retain full voucher histories; the registry retains live collision state. | *lock register, blocking registry* |
 | **Gutschein-Wurzel** | **Voucher Root / Root Anchor** | Origin lock (`root.valid_until`) anchoring TTL for all subsequent child locks. | *voucher tree, coupon origin* |
-| **Kassenpfad / Hot-Path** | **PoS Hot-Path / Checkout Path** | In-memory collision check ($< 1\,\mu\text{s}$) with latency SLA $< 5\,\text{ms}$. | *register path, cashbox flow* |
+| **Kassenpfad / Hot-Path** | **PoS Hot-Path / Checkout Path** | In-memory collision check ($< 1\,\mu\text{s}$); the existing local-processing SLA is $< 5\,\text{ms}$. Distinct from the 800 ms vote-collection budget and end-to-end checkout; durability/SLA consolidation remains open (TERM-11). | *register path, cashbox flow* |
 | **Dorf-Merge** | **Village Merge / Local Mesh Merge** | Deterministic convergence of small isolated clusters ($N=1\dots19$) into global mesh via $\min(H_{\text{canon}})$. | *village fusion, rural merge* |
 | **Community-Mesh / Insel-Netz** | **Community Mesh / Island Network** | Autonomous sub-quorum mesh ($N = 1\dots19$) operating on adaptive provisional quorums $Q(N) = \lfloor \frac{2}{3} N \rfloor + 1$ (Status `PROVISIONAL` 🟡, all nodes validate all 65,536 shards). | *village mode, local cluster* |
 | **Weltnetz-Föderation** | **World Network / Federated Sharding** | Full BFT consensus ($N \ge 20$) with fixed 14/20 quorum (Status `FINAL` 🟢) and dynamic HRW sharding. | *global chain, world cluster* |
 | **Knoten-Souveränität** | **Node Sovereignty** | Node operators maintain absolute veto power; zero background auto-updates. | *node dominance, node power* |
-| **First-Party Evidence** | **First-Party Evidence Doctrine** | Ban and slashing only on undisputed cryptographic self-proof (`EquivocationProof`). | *own evidence, first hand proof* |
+| **First-Party Evidence** | **First-Party Evidence Doctrine** | Identity sanctions require verified cryptographic evidence signed by the offender (`EquivocationProof`). | *own evidence, first hand proof* |
 | **Hörensagen-Verbot** | **Anti-Hearsay Principle** | Ban on network gossip about "bad peers"; prevents death spirals. | *hearsay prohibition* |
-| **Todes-Spirale** | **Cascading Death Spiral** | Feedback cascade of mutual bans, retries, and traffic blow-ups ($\Delta \text{Load} \le 0$). | *deadly spiral* |
-| **Keine Kautionen / Staking** | **Zero Financial Deposits / No Staking** | No economic staking or deposit slashing; penalties are purely identity- and reputation-based. | *deposit slashing, bond loss* |
+| **Todes-Spirale** | **Cascading Death Spiral** | Feedback cascade of mutual bans, retries, and traffic amplification; the defense aims to keep additional induced load non-positive ($\Delta \text{Load} \le 0$). | *deadly spiral* |
+| **Keine Kautionen / Kein Staking** | **Zero Financial Deposits / No Staking** | No economic staking or deposit slashing; penalties are purely identity- and reputation-based. | *deposit slashing, bond loss* |
 | **Reputationsvernichtung** | **Identity Revocation & WoT Severance** | Permanent ban of `NodePubKey`, invalidation of `HrwRoutingId` shard ticket, severing of all F2F edges. | *reputation destruction* |
 | **Netzwerk-Thermometer** | **Network Thermometer** | Decentralized median load feedback adjusting PoW difficulty dynamically. | *network heat meter* |
 | **Byte-Jahre** | **Byte-Years (Storage-Time Product)** | Accounting unit for storage reservation: $144\,\text{Bytes} \times \text{TTL}$. | *byte years product* |
@@ -39,9 +42,9 @@ support repository documentation. Code identifiers remain unchanged during revie
 | **Schmarotzer / Trittbrettfahrer** | **Free-Riders / Free-Riding** | Peers consuming network bandwidth without reciprocating by signing shard attestations or serving shard RPC requests. | *parasites, hitchhikers* |
 | **Inkubationswand (24h)** | **24h Shard Ticket Incubation Wall** | Mined Argon2d shard tickets mature for 24h before participating in HRW scoring. | *incubation barrier* |
 | **Besen-Topologie** | **Broom Topology** | Single-bridge botnet fan-in structure where many malicious nodes route through a single bridge. | *broom network* |
-| **Bürgschaft / WoT-Bürgschaft** | **Voucher Endorsement / Admission Sponsor** | Web-of-Trust vouching for new node admission into the mesh. | *deposit guarantee, bail* |
+| **Bürgschaft / WoT-Bürgschaft** | **Node-admission endorsement / Admission sponsor** | Web-of-Trust vouching for node admission into the mesh. This concerns a node friendship/admission relationship, not endorsement of a monetary voucher or financial liability. | *deposit guarantee, bail* |
 | **Kausalitätskette** | **Causality ProofChain** | Client-side sequence of cryptographic locks proving origin and lineage. | *causality string* |
-| **Verdichtetes Digest** | **Compact Shard Digest** | Lightweight bitset/hash summary of lock state for efficient pull sync. | *compressed summary* |
+| **Kompakte Shard-Zusammenfassung** | **Compact shard digest** | Lightweight bitset/hash summary of lock state for efficient pull sync. | *compressed summary* |
 | **Vorrang-Kontingent** | **Priority / VIP Quota Tier** | High-priority ingress queue allocated via Byte-Year quota tokens for merchants. | *priority contingent* |
 
 ---
@@ -55,7 +58,7 @@ When interacting with this codebase:
    - Answer the user in natural, clear **German**.
    - Write all code, Rustdoc comments (`///`), git commits, and public markdown files in idiomatic **English**.
 2. **Invariant: Zero Financial Deposits:**
-   - Never introduce "deposits", "staking", "collateral", or "slashing of funds". HuMoCo Layer 2 is a blind collision register without balances or accounts.
+   - Never introduce "deposits", "staking", "collateral", or "slashing of funds". HuMoCo Layer 2 is a blind Collision Lock Registry without balances or accounts.
 3. **Preserve Code Identifiers:**
    - Never translate code symbols (`WireHeader`, `LockRecord`, `CURRENT_PROTOCOL_VERSION`, `min_compat_ver`).
 4. **Preserve Math & Diagrams:**
@@ -63,9 +66,16 @@ When interacting with this codebase:
 
 ---
 
-## 3. Basic concepts — review draft
+<a id="3-basic-concepts--review-draft"></a>
 
-Each G-ID identifies one proposed meaning for review. An entry defines vocabulary,
+## 3. Basic concepts
+
+Each stable G-ID identifies one concept. The first English term in an entry is
+the preferred prose term; further terms are scoped aliases or exact code identifiers.
+Use German headwords in conversation and English terms in repository prose/comments.
+Qualify the actor and evidence rather than treating aliases as interchangeable proofs.
+Names can be refined editorially without another maintainer preference question.
+An entry defines vocabulary,
 not a new requirement or an implementation guarantee. “Interview direction” means
 a recorded requirement/design direction whose implementation or proof may be pending.
 Sources below identify the inspected basis; discrepancies are retained in section 4.
@@ -80,7 +90,7 @@ Sources below identify the inspected basis; discrepancies are retained in sectio
 | G-004 | Knoten | Node | A running HuMoCo daemon with a cryptographic node identity. One process may perform gateway and shard-service roles. |
 | G-005 | Gateway | Gateway | Public client-facing role that checks ingress admission, routes requests and collects shard replies. Its own assertion is not a substitute for verifiable shard evidence. Gateway and shard service are distinct roles even when co-located. |
 | G-006 | Shard-Mitglied | Shard committee member | A node whose vote is eligible in the applicable committee. Learning about a node, opening a connection or copying shard data does not by itself establish voting eligibility. |
-| G-007 | Knotenidentität | Node identity / `NodePubKey` | Full Ed25519 public key used as the identity anchor for node authentication, friendship and vote attribution. An IP address, short `node_id` or routing ticket is not this identity. |
+| G-007 | Knotenidentität | Node identity / `NodePubKey` | Full Ed25519 public key used as the identity anchor for node authentication, friendship and vote attribution. An IP address, short `node_id` or routing ticket is not this identity. `NodeIdentity::node_id()` is a 32-byte BLAKE3 fingerprint, while `node_pubkey()` returns the Ed25519 key; those byte arrays are not interchangeable. Other fields named `node_id` must be interpreted per declaration. |
 | G-008 | Betreiber | Node operator | Human or organization administering a node, retaining stop/configuration authority. A node public key does not by itself identify a real person. |
 
 Basis: `AGENTS.md` §§1–3; [Spec 00](00_architektur_und_mental_model.md) §2;
@@ -96,7 +106,7 @@ Basis: `AGENTS.md` §§1–3; [Spec 00](00_architektur_und_mental_model.md) §2;
 | G-011 | Ursprungssperre | Origin lock / Genesis lock | Initial L2 lock for a root, establishing the origin case for later locks. “Genesis certificate” needs qualification: root-origin evidence and node quorum evidence have different meanings. Exact shared formats remain under design. |
 | G-012 | Lock / Sperreintrag | Collision lock / Lock entry | A cryptographic registry entry binding a consumed predecessor/output to a successor. It prevents another conflicting use of the same spend slot. A lock is not the entire voucher or payment history. |
 | G-013 | Lock-Datensatz | Lock record | The stored representation of a lock and associated fields. `LockRecord`, `L2LockEntry` and `StoredLock` occur in different models/layers; the term does not imply identical layouts, signatures or evidentiary strength. |
-| G-014 | Eltern-Lock / Vorgängerbezug | Parent lock / Parent reference | The predecessor lock and reference to the predecessor/output being consumed. “Eltern-Lock” is a proposed German name from maintainer review. Distinguish the parent record from its specific spend slot: a split can create independent outputs of the same parent. `parent_lock` remains the code term; exact split/output binding is still a protocol-design obligation. |
+| G-014 | Eltern-Lock / Vorgängerausgabe | Parent lock / Predecessor output | German terms selected in interview DEC-050: “Eltern-Lock” names the predecessor lock record; “Vorgängerausgabe” names the particular output being consumed. A split can create independent outputs of the same parent; the record and its individual spend slots must remain distinct. `parent_lock` remains the code term; exact split/output binding is still a protocol-design obligation. |
 | G-015 | Nachfolger / Ausgabe | Successor / Output | A result that a later lock can consume. A split can create distinct outputs; spending independent outputs is not itself a collision. |
 | G-016 | Lock-Kennung | Lock identifier / `lock_id` | Identifier of a particular lock. Same parent plus same lock identity is an idempotent retry; same spend slot plus a different incompatible lock is a collision. Do not assume every historical `t_id` or hash field has the same encoding. |
 | G-017 | Kausalitätsnachweis | Causality proof | Evidence that a lock is authorized by the required predecessor/output and root. A valid signature on an unrelated record does not establish the required ancestry. |
@@ -114,13 +124,13 @@ interview DEC-005/009/013/014 and OPEN-06.
 
 | ID | German headword | English term | Meaning and boundary |
 | --- | --- | --- | --- |
-| G-021 | Antragstellersignatur | Request authorization signature | Signature authorizing the client's proposed lock under its relevant spending key. The spending client prepares it before gateway forwarding; forwarding is not the act this term names. Inspected HMC fields are `layer2_signature` and `sender_ephemeral_pub`, checked by `verify_l2_lock_signature`. Distinguish client authorization from gateway transport authentication, ingress `auth_signature`, and a shard node's vote. It does not establish registry quorum acceptance. |
-| G-022 | Knotenbestätigung / Stimme | Node attestation / Vote | One node's signed approval of a specific lock in the applicable signing context. `Attestation` and `AttestationDto` are existing representations. One valid vote does not establish a quorum. |
+| G-021 | Lock-Signatur | Request authorization signature | Signature authorizing the client's proposed lock under its relevant spending key. German headword selected in interview DEC-049. The spending client prepares it before gateway forwarding; forwarding is not the act this term names. Inspected HMC fields are `layer2_signature` and `sender_ephemeral_pub`, checked by `verify_l2_lock_signature`. Distinguish client authorization from gateway transport authentication, ingress `auth_signature`, and a shard node's vote. It does not establish registry quorum acceptance. |
+| G-022 | Knotenbestätigung / Stimme | Node attestation / Vote | One node's signed approval of a specific lock in the applicable signing context. `Attestation` and `AttestationDto` are existing representations in different layers. The simulation `sign_lock_attestation*` helpers create deterministic test signatures; production approvals and `verify_zero_trust_quorum` use real Ed25519 signatures. One valid vote does not establish a quorum. |
 | G-023 | Bindende Signierentscheidung | Binding signing decision | A node's safety-relevant choice that constrains later conflicting signing. Interview DEC-029/033 requires durable storage before releasing its binding vote. This is distinct from a client's intent or a temporary queue-capacity reservation. |
 | G-024 | Quorum | Quorum | Required support from distinct eligible committee identities. FINAL uses 14 of the frozen 20-member committee; provisional operation uses `floor(2N/3) + 1` for `N < 20`. Duplicate signatures do not add identities. |
 | G-025 | Komitee / zuständige Knotengruppe | Shard committee | The set of eligible voting identities for the relevant shard/operation. “Twenty” describes the full FINAL committee; “fourteen” describes sufficient votes, not a separately chosen permanent committee. |
 | G-026 | Komitee-Snapshot | Committee snapshot | A frozen list of eligible identities/tickets for one checkout attempt. Freezing makes that attempt's signer set fixed; it does not itself authenticate the list or prove safe changes over time. |
-| G-027 | Quorum-Nachweis / Quorum-Zertifikat | Quorum certificate | Collected valid node attestations meeting the threshold for the same lock and applicable context, checked against justified membership. `QuorumCertificate` / `QuorumCertificateDto` are existing names. This is a bundle of node confirmations; exact canonical formats and transition authority remain under review. |
+| G-027 | Quorum-Nachweis / Quorum-Zertifikat | Quorum certificate | Collected valid node attestations meeting the threshold for the same lock and applicable context, checked against justified membership. `QuorumCertificate` / `QuorumCertificateDto` are existing container names; constructing or decoding one does not establish validity. `QuorumCertificateDto::is_quorum_reached` only checks vector length against a threshold, so callers still need signature, distinct-identity and membership checks. This is a bundle of node confirmations; exact canonical formats and transition authority remain under review. |
 | G-028 | Signierkontext | Signing context | The domain and fields that determine what a signature approves, such as network, shard, spend slot, lock and status. Exact fields and binding rules must be checked per message; this definition does not claim that every existing type binds them all. |
 | G-029 | TLS-Zertifikat | TLS certificate | Transport-authentication object used in establishing a secured connection. It is distinct from G-027: authenticating a connection does not establish payment quorum acceptance. |
 
@@ -131,21 +141,17 @@ Basis: Specs [03](03_routing_und_sharding.md) §2.1,
 [`dto.rs`](../crates/humoco-node/src/api/dto.rs);
 interview DEC-029/033 and §7.17.
 
-Naming review for G-021 (2026-10-15; no selection yet): the maintainer proposes
-“Lock-Signatur” and points to the wider authorization evidence: reveal the public
-key matching the predecessor output's key commitment and provide the corresponding
-request signature. These are different evidence components. Disclosure of a public
-key alone does not prove control of its private key; the valid signature supplies
-that part. This describes the intended authorization relationship, not a newly
-audited claim that all current paths enforce every predecessor/output check.
+**Client authorization evidence (Freigabenachweis):** the combined evidence of
+client spending authorization: the disclosed public key, its checked binding to
+the predecessor output's key commitment, and the valid request authorization
+signature (Lock-Signatur). Public-key disclosure alone does not prove control of
+the private key. Genesis authorization remains a distinct case without a predecessor
+output. Neither the signature nor the combined evidence establishes node-quorum
+acceptance or completion of every lock-validity check. Canonical proof packaging
+and enforcement remain architecture obligations, not vocabulary choices.
 
-Candidates for the signature itself: **Lock-Signatur**, **Freigabesignatur**.
-Candidates for the combined authorization evidence: **Freigabenachweis**,
-**Berechtigungsnachweis**, **Lock-Autorisierung**. Proposed naming distinction:
-“Lock-Signatur” for the individual signature and “Freigabenachweis” for the combined
-evidence. Neither name implies quorum acceptance or that every lock-validity check
-has passed. Exact proof packaging and canonical fields remain open; no new proof
-object or wire message is selected merely by discussing vocabulary.
+Names selected in interview DEC-049; earlier naming candidates and rationale are
+preserved in the interview notes §7.21/7.24/7.25 rather than as a live approval queue.
 
 ### 3.4 Outcomes, readiness and uncertainty
 
@@ -171,7 +177,7 @@ interview DEC-009/022/023/026/030/048 and GAP-03/04.
 | --- | --- | --- | --- |
 | G-039 | Shard | Shard | One of 65,536 logical registry partitions. A voucher's shard is rooted in its genesis identifier. The shard is the partition; its committee is the currently applicable group serving it. |
 | G-040 | HRW-Rangfolge | Highest Random Weight ranking / HRW ranking | Deterministic ordering of eligible candidates for a shard from their routing tickets. Different candidate knowledge can produce different local lists; computing a rank does not settle transition authority. |
-| G-041 | Shard-Ticket | Shard ticket / `HrwRoutingId` | Replaceable Argon2d-derived routing input bound to `NodePubKey`. It has work and incubation rules. It is distinct from permanent identity and from short-lived client ingress PoW. |
+| G-041 | Shard-Ticket | Shard ticket / `HrwRoutingId` | Replaceable routing input bound to `NodePubKey`, derived from Argon2d work and BLAKE3 whitening (Spec 07). It has work and incubation rules. It is distinct from permanent identity and from short-lived client ingress PoW. |
 | G-042 | Lokale Netzsicht | Local network view | What one node has learned about identities, tickets, presence and transitions. “Known,” “mature,” “reachable,” “ready” and “eligible” describe different properties. |
 | G-043 | P2P-Freund | F2F friend | Explicitly trusted node identity on a direct friendship edge. Heartbeat and fraud-proof gossip follow these edges. This is distinct from a client friend token. |
 | G-044 | Bekanntes Netzmitglied | Known network node | A node identity learned through the permitted discovery path and managed for shard-direct authorization. Being known does not by itself grant committee membership. |
@@ -192,7 +198,7 @@ handoff certificate format or permanent committee-history construction is select
 | ID | German headword | English term | Meaning and boundary |
 | --- | --- | --- | --- |
 | G-048 | Datenabgleich | Synchronization / Sync | Finding and transferring relevant missing or differing state. Completing a transfer does not alone prove completeness, old-write closure or signing readiness. Qualify client ancestry sync versus replica state sync. |
-| G-049 | Shard-Zusammenfassung (proposed) / Shard-Digest | Shard digest | Compact summary used to detect/locate state differences. “Shard-Zusammenfassung” is the proposed clearer German name, pending review. It is not the full shard state; the exact digest representation may contain hashes or other summary structures, so “checksum” alone is too narrow. A matching digest is not by itself a payment certificate or proof that every prior binding vote was recovered. |
+| G-049 | Shard-Zusammenfassung | Shard digest | Compact summary used to detect/locate state differences. German name selected in interview DEC-051; “Shard-Digest” is a legacy German alias, not the preferred headword. It is not the full shard state; the exact digest representation may contain hashes or other summary structures, so “checksum” alone is too narrow. A matching digest is not by itself a payment certificate or proof that every prior binding vote was recovered. |
 | G-050 | Zustands-Snapshot | State snapshot | A captured set of records at a particular point. Distinguish this from G-026's member list. Later writes can require additional transfer. |
 | G-051 | Shard-Übergabe | Shard handoff / State transfer and cutover | Moving service responsibility while preserving relevant live collision constraints and earlier binding effects. Includes justified old-write closure, state installation and safe successor activation; exact mechanism remains open. |
 | G-052 | Abschluss alter Schreibvorgänge | Old-write closure / Cutoff | A justified boundary after which the old writing scope cannot issue fresh incompatible votes. A wall-clock timer or completed initial download does not establish this boundary. |
@@ -233,8 +239,9 @@ Basis: `AGENTS.md` rules 7/8 and §3; [Spec 10](10_p2p_wire_format_und_session_f
 
 ## 4. Ambiguities to review
 
-This is a review agenda from targeted reading, not a completed repository-wide audit.
-Existing section-1 mappings and binding specifications remain unchanged for this draft.
+This register preserves terminology distinctions and unresolved architecture obligations. See the [alignment report](TERMINOLOGY_ALIGNMENT_REPORT.md)
+for applied wording corrections, retained aliases, coverage and unresolved requirements.
+A resolved wording issue does not resolve the associated protocol-design obligation.
 
 | ID | Wording to check | Proposed clarification / unresolved point |
 | --- | --- | --- |
@@ -245,25 +252,28 @@ Existing section-1 mappings and binding specifications remain unchanged for this
 | TERM-05 | “Reservation,” “lock,” “promise” | Separate queue capacity, collision constraint and durable binding signing choice. No separate reservation service has been selected. |
 | TERM-06 | “Genesis,” “root,” “epoch,” “snapshot” | Distinguish voucher genesis from network genesis, heartbeat time slots from possible transition instances, and committee snapshots from state snapshots. No new epoch/history protocol is adopted by these words. |
 | TERM-07 | “NodeID,” “ticket,” “friend,” “tier” | Use full `NodePubKey` for identity, `HrwRoutingId` for routing; distinguish node friendship from secret client tokens. Qualify public ingress tiers versus internal P2P roles. |
-| TERM-08 | “Partial signature,” “aggregate certificate” | Current inspected certificate structs hold collections of individual Ed25519 attestations. Avoid implying threshold-signature shares or one cryptographically aggregated signature. Inspect actual consumers before changing identifiers. |
-| TERM-09 | “Stateless,” “blind,” “no history” | L2 is blind to monetary/application semantics and does not custody full client history. It still holds live collision state and requires signing-safety state. Section 1's unqualified “stateless” wording needs review. |
+| TERM-08 | “Partial signature,” “aggregate certificate” | Inspected production certificates collect individual Ed25519 attestations; the simulation model also has containers populated with deterministic test signatures (G-022). Avoid implying threshold-signature shares or one cryptographically aggregated signature. Inspect actual consumers before changing identifiers. |
+| TERM-09 | “Stateless,” “blind,” “no history” | L2 is blind to monetary/application semantics and does not custody full client history. It still holds live collision state and requires signing-safety state. Section 1 now states that live collision state is retained while clients retain full voucher history; the signing-safety contract still needs architectural consolidation. |
 | TERM-10 | “FINAL,” “irreversible,” “VOID,” “merge” | Specs 00/02 describe both irreversibility and FINAL-to-VOID paths; interview DEC-022/023 requires justified support. Reconcile the substantive policy before terminology alignment; wording alone cannot settle this conflict. |
 | TERM-11 | “Hot path,” “latency,” “persisted” | Separate RAM lookup, local processing, durable vote release, 800 ms vote collection and end-to-end checkout. Existing section-1 latency wording and selected DEC-029 durability direction require deliberate consolidation. |
-| TERM-12 | “Free-rider,” “forwarding locks,” “village merge” | Section 1 mentions lock forwarding and small-mesh merge wording. Qualify shard-direct data transfer versus prohibited lock gossip and verify island bounds against current rules before editing that mapping. |
+| TERM-12 | “Free-rider,” “forwarding locks,” “village merge” | The initial alignment corrected section 1 to shard attestations/RPC service and the N=1–19 island range. Keep shard-direct data transfer distinct from prohibited lock gossip; these wording fixes do not settle FINAL/VOID merge rules (TERM-10). |
 | TERM-13 | “High Assurance” | Spec 00 retains a third tier while `LockStatus` documents intentional omission and project instructions require a binary regime. Do not introduce it as an accepted status; reconcile the existing sources. |
 
-## 5. Review and adoption sequence
+<a id="5-review-and-adoption-sequence"></a>
 
-1. **Draft (this change):** add definitions and boundaries to the existing dictionary;
-   retain current mappings and mark unresolved meanings explicitly.
-2. **Maintainer review (next step):** review small coherent groups, correct German
-   headwords and definitions, and record accepted entries and remaining questions.
-   A vocabulary decision cannot silently decide an unresolved protocol rule.
-3. **Repository alignment (after review):** compare approved meanings against project
-   instructions, specifications, interview records, code comments, APIs and tests.
-   Separate wording-only inconsistencies from conflicting behavior/requirements;
-   handle public identifiers and formats through deliberate compatibility decisions.
+## 5. Vocabulary maintenance
 
-Preserve historical interview records as history; add corrections/supersession pointers
-where needed rather than making old proposals appear to have used the new vocabulary.
-No repository-wide alignment or production-code change has been performed in this draft.
+The glossary is the shared vocabulary reference. G-014/021/049 names are selected
+in DEC-049–051; DEC-052 authorizes autonomous alignment and future editorial
+refinement without further glossary questions. Apply these meanings in current
+documentation and source comments, preserving exact code/API/wire identifiers.
+Historical records retain their original wording and receive status pointers
+where needed; they are not retroactively rewritten as if proposals were decisions.
+
+The terminology audit and subsequent alignment are recorded in the report.
+Substantive conflicts in section 4 follow the architecture interview's existing
+branches and dependencies. Do not change quorum, finality, membership, persistence,
+proof formats or network defenses merely to make vocabulary uniform. A shared
+name is neither a protocol decision nor a proof that its enforcement is complete.
+Legacy German prose translation remains a separate editorial task; terminology
+alignment does not claim that every repository paragraph is already in English.

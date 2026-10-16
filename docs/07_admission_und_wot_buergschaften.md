@@ -143,7 +143,7 @@ stateDiagram-v2
    - **Protection:** Prevents spontaneous botnets from immediately hijacking sharding votes.
 
 2. **`ACTIVE` (Full Consensus Node):**
-   - **Role:** Included in active node set $N_{\text{active}}$, fully computed in HRW rendezvous sharding for quorum signatures, and serves transactions.
+   - **Role:** Included in active node set $N_{\text{active}}$, included in HRW rendezvous ranking for shard committee selection, and serves transactions.
    - **Interval:** Sends in discrete epoch cadence exactly **1 heartbeat per hour** ($60\,\text{minutes}$). Pillar-3 slashing penalizes multiple heartbeats within the same hourly epoch.
   
 3. **`DORMANT` (Sleeping / Maintenance / Failure) & Fast Re-Entry:**
@@ -206,7 +206,7 @@ stateDiagram-v2
    * The 3 fraud-proof pillars ([`docs/10:5.3`](docs/10_p2p_wire_format_und_session_framing.md#53-die-3-mathematischen-betrugsbeweis-säulen-in-o1-slashing-evidence)) are based on cryptographic self-incrimination by the perpetrator.
    * **Friends bear no financial liability:** To physically exclude griefing, extortion, and chilling effects (no one peers with friends for fear of foreign hardware hacks), friends are **not** co-slashed. F2F edges are purely topological peering paths.
 3. **Stateless immediate ban (`ServerBan`):**
-   If a node signs two contradictory quorum certificates (equivocation / Byzantine double-sign), presenting the two colliding signatures (`EquivocationProof`) suffices to ban the node worldwide, permanently, and statelessly from all peer lists.
+   If a node signs two conflicting attestations for the same spend slot (node equivocation / Byzantine double-sign), presenting those two verified attestations (`EquivocationProof`) suffices to ban the node worldwide and permanently from all peer lists. The proof can be verified independently; enforcing the ban still requires local ban state.
 
 ---
 

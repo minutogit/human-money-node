@@ -328,7 +328,7 @@ Dieses Dokument fasst die Ergebnisse der 3 KI-Audit-Läufe (Spezifikations-Abgle
 
 ---
 
-### 🔵 P2-2: Shard-Digest Pull-Sync statt Full-Database-Dump
+### 🔵 P2-2: Shard digest pull sync instead of a full database dump
 * **Betroffene Dateien:**
   * `crates/humoco-node/src/network/transport.rs:93-119`
   * `crates/humoco-node/src/storage/db.rs:227` (`all_valid_locks`)

@@ -354,11 +354,11 @@ mod tests {
         let (challenge, difficulty, _) = engine.generate_challenge();
         let nonce = solve_blake3_hashcash(&challenge, difficulty, 10_000).expect("Solve PoW");
 
-        // Erste Verifikation ist erfolgreich
+        // The first verification succeeds
         let first = engine.verify_pow(&challenge, nonce, difficulty).await;
         assert_eq!(first, Ok(true));
 
-        // Replay mit identischem Token und Nonce wird abgewiesen
+        // Replay with the same token and nonce is rejected
         let second = engine.verify_pow(&challenge, nonce, difficulty).await;
         assert_eq!(second, Err(PowError::ReplayDetected));
     }

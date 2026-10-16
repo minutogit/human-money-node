@@ -447,7 +447,7 @@ flowchart TD
    * **144-Byte RAM-Kosten & TTL:** Jeder Eintrag belegt feste 144 Bytes und erlischt bei `valid_until`.
 2. **Prüfung beim Digest-First PULL-Sync:**  
    Wenn Node $X$ heute Shard 42 übernimmt (Cold Start):
-   * **Digest-Quorum von amtierenden Peers:** Node $X$ fragt die 20 amtierenden Shard-Peers nach ihrem 32-Byte Shard-Digest.
+   * **Digest quorum from incumbent peers:** Node $X$ requests the 32-byte shard digest from the 20 incumbent shard peers.
    * **Quorum-Wahrheit:** Mindestens 14 von 20 amtierenden Peers müssen denselben Digest melden. Erst dann wird der Datenstream von einem Peer geladen und gegen den Digest verifiziert.
    * **Kein Spam durch tote Knoten:** Da nur die *heute lebendigen* Top-20 Shard-Peers (aus $N_{\text{aktiv}}$) befragt werden, haben tote historische Knoten keinen Einfluss auf den Sync.
 3. **1-Byte Status & Domain-Separation:**  

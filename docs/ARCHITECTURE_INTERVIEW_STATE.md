@@ -1,29 +1,31 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-15 (Europe/Berlin). Checkpoint: **CP-0011**.
-Mode: maintainer-directed glossary detour; architecture implementation/final plan pending.
+Updated: 2026-10-16 (Europe/Berlin). Checkpoint: **CP-0017**.
+Mode: architecture interview resumed after autonomous glossary alignment; final plan pending.
 Goal: justified decisions and a buildable plan under explicit assumptions, preserving KISS.
 Workflow: [start/resume prompt](../prompts/architecture_interview.md).
 Rhythm: finish one bounded problem; justified A, useful alternatives only, explicit uncertainty.
 Details: [notes](ARCHITECTURE_INTERVIEW_NOTES.md); [legacy handoff](ARCHITECTURE_INTERVIEW_HANDOFF.md).
-The notes hold decision evidence; this file indexes it. Binding specs are not changed here.
-Register: [48 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
+The notes hold decision evidence; this file indexes it. Editorial audit: [report](TERMINOLOGY_ALIGNMENT_REPORT.md).
+Register: [52 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
 [alternatives](ARCHITECTURE_INTERVIEW_NOTES.md#22-alternatives-refinements-and-superseded-proposals),
 [open items](ARCHITECTURE_INTERVIEW_NOTES.md#23-open-design-and-decision-inventory) and
 [record/spec gaps](ARCHITECTURE_INTERVIEW_NOTES.md#24-record-gaps-and-pending-specification-consolidation).
 
 ## Resume cursor
 
-- Active leaf: **K3**, dictionary review/alignment; details **7.22 / GLOSSARY-002**.
-- Next action: execute [alignment plan](../prompts/terminology_alignment_plan.md)
-  when requested, or continue glossary review; proposed names remain unselected.
-  Repository-wide alignment follows review; it has not been performed.
-- Parked question Q-S3.3-01: A retain one-round 14-vote payment confirmation and carry
-  justified binding obligations through handoff (recommendation), or B investigate
-  separate preparation/completion payment rounds with explicit safe cutoff rules.
-- Answer: **not selected**. Glossary detour does not select payment semantics.
-- Read first: notes **7.21–7.22**, alignment plan, glossary **3–5**; return to **7.17 / S3.3**
-  after the detour. S2 remains unresolved; S4 progress/round recovery follows handoff work.
+- Active leaf: **S3.3**, preserved binding effects / safe handoff; notes **7.28**.
+- K3 names/editorial screening complete: **DEC-049–052**, report **§8**.
+  No more glossary questions; maintain vocabulary autonomously and refine as needed.
+- Pending question: **Q-S3.3-01**, original wording/options in notes **7.16**.
+  A: retain one-round 14-vote payment confirmation and preserve justified binding
+  effects through handoff (conditional recommendation). B: investigate separate
+  preparation/completion payment rounds with explicit safe cutoff rules.
+- Answer: **not selected**. Glossary answers/maintenance do not select payment semantics.
+- Next action: resume bounded old-write closure/inclusion/successor-installation
+  analysis from **7.15–7.17**; resolve the payment tradeoff only where necessary.
+- Read first: notes **7.27–7.28**, **7.15–7.17**, report **§8**. S2 remains unresolved;
+  S4 progress/round recovery follows handoff work. K3 substantive conflicts follow dependencies.
 - After S3.3: investigate closure/inclusion and successor installation, then S4 recovery;
   keep S2 membership justification explicit. Return to C4/S5, K2/C1 and N/O by dependencies.
 
@@ -44,7 +46,7 @@ Register: [48 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
   bounded drain/expiry, private operator boundary and small shared protocol library.
 - Do not infer approval of ranks 21–23 as voters, FINAL revocation, a separate reservation
   subsystem, a certificate-return round or unconditional lower-hash FINAL takeover.
-- Current selections/limits: notes **2** (DEC-001–048). Legacy handoff supplies context.
+- Current selections/limits: notes **2** (DEC-001–052). Legacy handoff supplies context.
 - DEC-006 follows selected library DEC-038; DEC-039's fixed-context mechanism was reopened.
   DEC-028 remains deferred; DEC-043's hourly parameter is tentative. No new protocol choice.
 
@@ -61,7 +63,7 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 ├── K — Scope and integration
 │   ├── K1 [decided] Blind service / custody / KISS; remaining: scope consolidation
 │   ├── K2 [decided] Shared protocol library; remaining: exact formats / integration
-│   └── K3 [active] Dictionary draft and alignment plan saved; review/audit pending
+│   └── K3 [decided] Vocabulary/alignment complete; autonomous maintenance; protocol gaps tracked
 ├── C — Checkout and client evidence
 │   ├── C1 [decided] Valid-prefix causal-path batches; remaining: output/wire details; K2
 │   ├── C2 [decided] Frozen 14/20 / 800 ms / all-member dispatch; safety proof: S1–S3
@@ -75,7 +77,7 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 │   ├── S3 [partial] Pause / full turnover chosen; safe handoff unresolved; S2/O1/N3
 │   │   ├── S3.1 [finding] Raw-majority copy insufficient; not a replacement algorithm
 │   │   ├── S3.2 [finding] Copy alone insufficient; safe old-write cutoff unresolved
-│   │   └── S3.3 [partial; parked] One-round/carrying vs two-round choice; Q-S3.3-01
+│   │   └── S3.3 [active] Preserved binding effects / safe handoff; Q-S3.3-01 unanswered
 │   ├── S4 [decided] Automatic safe progress after stabilization; round/recovery design pending
 │   ├── S5 [partial] Support gate / unresolved-slot policy chosen; FINAL/merge rules unresolved
 │   └── S6 [decided] Ticket lifecycle / fresh identity / first-party fraud; wire/domain audit pending
@@ -106,6 +108,7 @@ S3.1/S3.2 retain established counterexamples; their replacement design remains t
 - Full spec/invariant/interface-to-branch coverage is still missing; F1 must establish it.
 - Latest-context verification, temporal corruption, partial conflicts and safe cleanup
   remain obligations; an algorithm name or completed download cannot close them.
-- Glossary additions are a review draft; existing mappings and protocol decisions remain.
-- No production code/specs, Rust/QUIC tests, commits or PRs changed in this detour.
-- Latest durable checkpoint: notes **9**, **CP-0011**; restart checks remain in **CP-0001**.
+- Glossary naming/alignment complete (DEC-049–052); report §8 retains protocol conflicts.
+- Current specs/source comments were clarified; runtime behavior/interfaces are unchanged.
+- Editorial checks passed; no Rust/QUIC tests, commit or PR. Scope/limits: report §8.
+- Latest durable checkpoint: notes **9**, **CP-0017**; restart checks remain in **CP-0001**.

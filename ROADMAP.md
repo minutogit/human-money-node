@@ -66,7 +66,7 @@ flowchart LR
 - [x] **3.1 QUIC endpoint & TLS certificates:**
   - Self-signed TLS 1.3 certificates based on the node identity key via `rcgen`.
 - [x] **3.2 Multiplexing of the 4 core streams:**
-  - `Data-Stream` (bidirectional, lock requests & quorum signatures, $< 5\,\text{ms}$).
+  - `Data-Stream` (bidirectional, lock requests & node attestations, $< 5\,\text{ms}$).
   - `Gossip-Stream` (unidirectional, Dunbar heartbeats, RED dampening).
   - `Sync-Stream` (digest-first pull sync for shard laggards & merges).
   - `Fraud-Stream` (priority stream for equivocation proofs).
@@ -116,6 +116,6 @@ flowchart LR
 ### ⏳ Phase 7: Decentralized Quorum Certificates & Client-Side Order Statistics
 *Goal: Mathematical plausibility check at the point of sale (PoS) without trusting individual servers (see [`TODO.md`](TODO.md)).*
 - [ ] **7.1 Wire format:** Integrate `QuorumCertificate` into `L2ResponseEnvelope`.
-- [ ] **7.2 Node gateway:** Aggregate shard-mesh signatures (`FINAL` vs. `PROVISIONAL`).
+- [ ] **7.2 Node gateway:** Assemble quorum certificates from shard-node attestations (`FINAL` vs. `PROVISIONAL`).
 - [ ] **7.3 Client plausibility (`human-money-core`):** Continuous order-statistics check $\max(0, 1 - 20/N)$ & maturity traffic-light.
 - [ ] **7.4 App UI (`human-money-app`):** Point-of-sale traffic-light display (green / yellow / red).

@@ -30,7 +30,7 @@ Analyze the code specifically for the following 5 performance dimensions:
 3. 📦 Zero-Copy Wire Framing & Deserialization:
    - Does the 32-byte `WireHeader` framing use true zero-copy (C-represented, bit-exact casts without parsing overhead)?
    - Are payloads in the QUIC stream copied unnecessarily between buffers (`Bytes` vs. `Vec<u8>`)?
-   - Can quorum signature serialization be made even more compact and faster?
+   - Can serialization of quorum certificates containing individual node attestations be made even more compact and faster?
 
 4. 🔒 Lock Contention & Concurrency:
    - Are there global RwLocks / mutexes on the RAM index or ingress limiter that block CPU cores under 10,000 concurrent lock requests?

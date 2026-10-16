@@ -117,7 +117,7 @@ $$\text{Gateways} = [\text{Node-A:4433}, \text{Node-B:4433}, \text{Node-C:4433}]
 2. Betreiber startet neuen Node mit dem gleichen Identity-Key auf neuer Hardware.
 3. Der neue Node verbindet sich mit seinen befreundeten Peers (`F2F Friends`).
 4. **Digest-First-Pull-Sync (Spec 03)** startet automatisch:
-   * Node zieht die aktuellen Shard-Digests von 3 Peers.
+   * The node requests the current shard digests from 3 peers.
    * Fehlende Locks werden blockweise gestreamt und in `redb` persistiert.
    * **Wiederherstellungszeit:** $< 500\,\text{ms}$ bei typischer Shard-Größe.
 

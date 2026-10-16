@@ -1,6 +1,8 @@
 # Terminology alignment — executable review and editing plan
 
-Status: execution plan, not an executed audit. Glossary review is still in progress.
+Status: reusable execution plan. The initial execution and the 2026-10-16 continuation
+are recorded in [the alignment report](../docs/TERMINOLOGY_ALIGNMENT_REPORT.md);
+naming is settled under interview DEC-049–052; substantive conflicts remain open.
 
 ## Objective and invocation
 
@@ -67,7 +69,7 @@ made after this plan. Give each reviewed concept a status in the report:
 | Status | Meaning | Permitted action |
 | --- | --- | --- |
 | Established | Existing applicable terminology or an explicitly selected name. | Align equivalent uses when meaning and project rules remain unchanged. |
-| Proposed | A suggested preferred name without a recorded selection. | Compare candidates, improve factual clarity and record a recommendation; retain its provisional status. |
+| Editorial naming | A preferred label or alias needing clearer wording. | Select and align it autonomously under DEC-052; record the change without asking a glossary preference question. |
 | Ambiguous | One word covers different objects or a definition conflates them. | Separate the meanings and qualify occurrences using established descriptive language. |
 | Substantive conflict | Requirements, implementation or safety claims disagree. | Document evidence and impact; leave the policy choice open while completing unaffected editorial work. |
 
@@ -75,21 +77,22 @@ For each concept, establish the German headword, English preferred term, allowed
 aliases, plain definition, exclusions, relevant code identifiers, evidence and status.
 Reuse existing G-IDs; add IDs only for genuinely distinct concepts. Do not erase an
 old meaning or change an ID to hide a semantic revision. Update glossary explanations
-where justified, marking unselected names and unresolved meanings explicitly.
+where justified, distinguishing editorial names from unresolved protocol meanings explicitly.
 
-Current naming examples are **proposals**, not blanket approvals:
+Settled naming examples (DEC-049–052):
 
-- G-014: “Eltern-Lock” for the predecessor lock; distinguish the specific consumed
-  output/spend slot, especially when a parent produces multiple outputs.
-- G-021: “Lock-Signatur” for the client's individual signature; “Freigabenachweis”
-  for the broader authorization evidence is a separate candidate meaning. Public-key
-  disclosure, matching its predecessor commitment and signature verification are
-  separate checks. No new proof format is selected by this terminology.
-- G-049: “Shard-Zusammenfassung” is a suggested German name for shard digest.
-  Preserve the distinction from full state, a single checksum and quorum evidence.
+- G-014: “Eltern-Lock” / parent lock for the predecessor record;
+  “Vorgängerausgabe” / predecessor output for the specific consumed output.
+- G-021: “Lock-Signatur” / request authorization signature for the client's
+  individual signature; “Freigabenachweis” / client authorization evidence for
+  the disclosed key, its checked predecessor-output binding and valid signature.
+  Genesis remains a separate case; no new proof format follows from the name.
+- G-049: “Shard-Zusammenfassung” / shard digest for compact comparison information.
+  Distinguish it from full state, a single checksum and node-quorum evidence.
 
-Do not infer acceptance from a request to explain, draft a plan, continue or check
-consistency. Do useful unaffected work before presenting any remaining naming choices.
+The maintainer explicitly removed glossary approval gates. Apply and refine names
+independently; do not turn spelling, aliases or term selection into interview
+questions. This does not approve unresolved payment, authority or recovery rules.
 
 ## 3. Find and classify occurrences in context
 
@@ -165,8 +168,9 @@ IDs where applicable. New conflicts get evidence and an explicit next action.
 
 Batch independent editorial fixes by concept across current specifications and
 comments. Update glossary source pointers alongside them. Complete unambiguous work
-even if other terms need a human choice. Present only the consequential unresolved
-choices with concrete examples, recommendation and impact; do not re-ask settled policy.
+while substantive architecture choices remain open. Only consequential protocol
+tradeoffs may need maintainer intent; editorial naming does not. Preserve the
+architecture interview cursor and do not re-ask settled policy.
 
 ## 5. Verify the actual change
 
@@ -202,7 +206,7 @@ Keep `docs/TERMINOLOGY_ALIGNMENT_REPORT.md` compact enough to navigate and inclu
 Completion requires every inventoried current spec and relevant source-comment area
 to be accounted for, every glossary concept to have a review outcome, and each finding
 to be fixed, justified as intentional or explicitly unresolved. Do not claim complete
-language uniformity while material naming/meaning choices remain unresolved.
+language uniformity while material semantic conflicts or unreviewed editorial surfaces remain.
 
 Report the result in German: what was aligned, which decisions remain, what was
 checked and where the report is saved. Creating the report or finding consistent

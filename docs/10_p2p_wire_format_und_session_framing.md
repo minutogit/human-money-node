@@ -155,7 +155,7 @@ pub struct EpochHeartbeatPayload {
 
 ## 3. Cryptographic Domain Separation
 
-To make **class-swapping attacks** (e.g. maliciously presenting a provisional signature as a final quorum signature) mathematically impossible, HuMoCo Layer 2 enforces strict preimage prefixes before every hash and signature step.
+To make **class-swapping attacks** (e.g. maliciously presenting a PROVISIONAL node attestation as a FINAL node attestation) mathematically impossible, HuMoCo Layer 2 enforces strict preimage prefixes before every hash and signature step.
 
 ```mermaid
 flowchart TD
@@ -390,7 +390,7 @@ flowchart TD
         direction TB
         F1["Pillar 1: Shard Equivocation (Double-Signing)<br>2 conflicting signed attestations for the same parent_lock"] --> S1["Permanent server ban + shard ticket invalidation + WoT exclusion"]
         F2["Pillar 2: Ingress Counter Collision (Load Fraud)<br>Contradiction between heartbeat counter & shard writes"] --> S2["Permanent server ban + shard ticket invalidation + WoT exclusion"]
-        F3["Pillar 3: Heartbeat Spam (Gossip Displacement)<br>2 signed heartbeats less than 50 minutes apart"] --> S3["Argon2id identity burned + permanent Collision Lock Registry"]
+        F3["Pillar 3: Heartbeat Spam (Gossip Displacement)<br>2 signed heartbeats less than 50 minutes apart"] --> S3["Node identity ban + Argon2d shard-ticket invalidation"]
     end
 ```
 
@@ -398,7 +398,7 @@ flowchart TD
 | :--- | :--- | :--- | :--- | :--- |
 | **Pillar 1** | `FRAUD_SHARD_EQUIVOCATION` | $T_1 \parallel T_2$ (2 conflicting node attestations) | **UTXO double-spend protection:** A shard node signs attestations for two different successor locks ($L_{3A} \neq L_{3B}$) referencing the same `parent_lock`. | Permanent `server ban`, invalidation of the shard ticket & severance of all WoT edges |
 | **Pillar 2** | `FRAUD_INGRESS_COUNTER_CONFLICT` | $P_1 \parallel P_2$ (heartbeat $\parallel$ write or write $\parallel$ write) | **Ingress & quota authenticity:** Counter runs backwards, heartbeat contradicts actual shard writes, or mathematical addition of $144\,\text{B} \times \text{TTL}$ is forged. | Permanent `server ban`, invalidation of the shard ticket & severance of all WoT edges |
-| **Pillar 3** | `FRAUD_HEARTBEAT_SPAM` | $H_1 \parallel H_2$ (2 heartbeats) | **Edge spam protection:** A node sends two heartbeats within $< 50\,\text{minutes}$ to capture edge budgets $R_{\text{soft}}$ and displace honest peers. | Permanent entry in the **Collision Lock Registry** + Argon2id PoW burned |
+| **Pillar 3** | `FRAUD_HEARTBEAT_SPAM` | $H_1 \parallel H_2$ (2 heartbeats) | **Edge spam protection:** A node sends two heartbeats within $< 50\,\text{minutes}$ to capture edge budgets $R_{\text{soft}}$ and displace honest peers. | Permanent **node identity ban** + Argon2d shard-ticket invalidation |
 
 ---
 
@@ -444,7 +444,7 @@ pub enum FraudProofPillar {
 #[archive(check_bytes)]
 #[repr(C, align(8))]
 pub struct FraudProofPayload {
-    /// NodeID / public key of the convicted perpetrator (32 bytes)
+    /// Full NodePubKey of the node identified by the fraud evidence (32 bytes)
     pub perpetrator_node_id: [u8; 32],
     
     /// Fraud pillar (1..3)
@@ -459,7 +459,7 @@ pub struct FraudProofPayload {
     /// Second signed original packet (full wire format)
     pub evidence_packet_b: Vec<u8>,
     
-    /// Optional: NodeID of the discoverer / reporter (for rewards / audit log)
+    /// Optional: full NodePubKey of the discoverer / reporter (for rewards / audit log)
     pub reporter_node_id: [u8; 32],
     
     /// Signature of the reporter over (perpetrator_node_id || proof_pillar || hash(A) || hash(B))
@@ -492,7 +492,7 @@ A fraud proof is a **time-critical security emergency alert**. It follows specia
 4. **Deterministic Enforcement at Receiver:**
    * As soon as a node validates the proof in $< 100\,\mu\text{s}$:
      1. **Edge severance:** All QUIC streams to the perpetrator $\text{NodeID}$ are immediately torn down with `ERR_NODE_PERMANENTLY_BANNED`.
-     2. **Permanent Collision Lock Registry:** The $\text{NodeID}$ is entered into the local O(1) RAM and disk ban filter (`BannedNodes`).
+     2. **Permanent node identity ban:** The full `NodePubKey` is entered into the local O(1) RAM and disk ban filter (`BannedNodes`). This ban list is distinct from the Collision Lock Registry of voucher spends.
      3. **Layer-1 Relay & SST:** The proof is relayed to Layer 1 to mathematically de-anonymize the perpetrator via Shared-Signature Trap (SST) and permanently brand them as `KnownOffender` in the Web of Trust.
 
 ---

@@ -29,7 +29,7 @@ Analyze the codebase against the following 5 security dimensions:
 2. ⚡ Equivocation trap (attacker's self-destruction):
    - If the attacker distributes conflicting signatures across the network using the stolen key to sow confusion:
    - How quickly do other shard nodes generate the `FraudProof`?
-   - Is the stolen key (`NodePubKey`) banned network-wide in O(1) on the P2P layer, the shard ticket invalidated, and all friendship edges severed (Zero Financial Deposits / No Staking — penalty via Identity Revocation & WoT Severance)?
+   - Is the node identity (`NodePubKey`) corresponding to the stolen private key banned network-wide in O(1) on the P2P layer, the shard ticket invalidated, and all friendship edges severed (Zero Financial Deposits / No Staking — penalty via Identity Revocation & WoT Severance)?
 
 3. 🔑 Key revocation & emergency shutdown:
    - How can a legitimate operator who detects the breach revoke their compromised node?

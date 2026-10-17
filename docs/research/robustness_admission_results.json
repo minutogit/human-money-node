@@ -1,0 +1,1185 @@
+{
+  "date": "2026-10-16",
+  "status": "bounded_composed_model_pass",
+  "command": "cargo run --release -p humoco-sim-core --example robustness_admission -- --seed-count 128",
+  "assumptions": [
+    "operator-authenticated exact checkpoint",
+    "lifetime-static <=6 compromised signing keys per configuration",
+    "fourteen honest old and successor nodes responsive",
+    "ideal authenticated BFT scheduler; signed output refinement",
+    "scripted atomic durable fence/drain/install",
+    "fixture candidate eligibility; no F2F/ticket/stability implementation",
+    "no real QUIC or crypto timing claim"
+  ],
+  "predicate_checks": 44,
+  "seeds": 128,
+  "total_model_events": 1000960,
+  "total_composition_checks": 3072,
+  "runs": [
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 1,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 2,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 3,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 4,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 5,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 6,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 7,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 8,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 9,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 10,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 11,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 12,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 13,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 14,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 15,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 16,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 17,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 18,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 19,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 20,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 21,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 22,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 23,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 24,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 25,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 26,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 27,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 28,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 29,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 30,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 31,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 32,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 33,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 34,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 35,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 36,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 37,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 38,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 39,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 40,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 41,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 42,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 43,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 44,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 45,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 46,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 47,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 48,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 49,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 50,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 51,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 52,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 53,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 54,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 55,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 56,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 57,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 58,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 59,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 60,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 61,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 62,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 63,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 64,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 65,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 66,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 67,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 68,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 69,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 70,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 71,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 72,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 73,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 74,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 75,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 76,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 77,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 78,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 79,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 80,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 81,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 82,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 83,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 84,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 85,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 86,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 87,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 88,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 89,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 90,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 91,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 92,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 93,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 94,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 95,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 96,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 97,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 98,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 99,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 100,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 101,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 102,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 103,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 104,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 105,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 106,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 107,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 108,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 109,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 110,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 111,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 112,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 113,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 114,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 115,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 116,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 117,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 118,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 119,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 120,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 121,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 122,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 123,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 124,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 125,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 126,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 127,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    },
+    {
+      "scenario": "scheduled_bft_signed_recognition",
+      "seed": 128,
+      "model_events": 7820,
+      "checks": 24,
+      "full_turnovers": 3,
+      "payments": 4,
+      "network_protocol": false
+    }
+  ],
+  "source_sha256": {
+    "crates/humoco-sim-core/examples/robustness_admission.rs": "fa7ff5ea9b7af7880e771861fd243b106a1a6c670eb6d40f021f663790156bc5",
+    "crates/humoco-sim-core/examples/membership_handoff/model.rs": "2b6536bb6db2c4bf76fc0c4069ea9117ae87719e07dfcd03c6a22ae5bd9a0036"
+  },
+  "receiver_entry_point": "verify_payment_from_anchor(anchor,root,proofs,payment,trusted_now)",
+  "receiver_checks": [
+    "exact operator-pinned root and expiry",
+    "bounded supplied ancestry",
+    "all closure/state/commit/install proofs",
+    "payment context resolved only from verified ancestry",
+    "actual payment signatures",
+    "individual installation receipt for each non-root payment signer"
+  ]
+}

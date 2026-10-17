@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-16",
+  "command": "cargo run -p humoco-sim-core --example membership_handoff_model -- --scenario handoff --seed 1 --seed-count 128",
+  "exit_code": 0,
+  "scenario_executions": 1536,
+  "abstract_steps": 4036608,
+  "seed_count": 128,
+  "unsafe_and_stalled_scenarios": "asserted expected; not successful safe schedules",
+  "source_sha256": {
+    "crates/humoco-sim-core/examples/membership_handoff/model.rs": "2b6536bb6db2c4bf76fc0c4069ea9117ae87719e07dfcd03c6a22ae5bd9a0036",
+    "crates/humoco-sim-core/examples/robustness_envelope.rs": "647abd6a27815e624486605f2d38fab8e0e2d6a244c03ffd34eb4d407c94fc85",
+    "crates/humoco-sim-core/examples/robustness_attacks.rs": "5a743f29d0b858584bb88573680500cfaee3ad340d53d5792caead918830d36b"
+  }
+}

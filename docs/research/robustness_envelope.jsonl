@@ -1,0 +1,53 @@
+{"kind":"fault_envelope","n":20,"q":14,"byzantine_withholding":6,"honest_unavailable":0,"correct_responses":14,"quorum_possible":true}
+{"kind":"fault_envelope","n":20,"q":14,"byzantine_withholding":6,"honest_unavailable":1,"correct_responses":13,"quorum_possible":false}
+{"kind":"fault_envelope","n":20,"q":14,"byzantine_withholding":6,"honest_unavailable":2,"correct_responses":12,"quorum_possible":false}
+{"kind":"fault_envelope","n":20,"q":14,"byzantine_withholding":6,"honest_unavailable":3,"correct_responses":11,"quorum_possible":false}
+{"kind":"fault_envelope","n":20,"q":14,"byzantine_withholding":6,"honest_unavailable":4,"correct_responses":10,"quorum_possible":false}
+{"kind":"fault_envelope","n":20,"q":14,"byzantine_withholding":6,"honest_unavailable":5,"correct_responses":9,"quorum_possible":false}
+{"kind":"fault_envelope","n":20,"q":14,"byzantine_withholding":6,"honest_unavailable":6,"correct_responses":8,"quorum_possible":false}
+{"kind":"minimum_extra_outage_alternative","byzantine":6,"unavailable_correct":1,"minimum_n":21,"q":14,"violates_selected_max20":true}
+{"kind":"hypergeometric","n":20,"bad":1,"p_ge7":0.000000000000,"p_ge8":0.000000000000,"expected_ge7_shards":0.00000000,"union_bound_ge7_65536":0.00000000}
+{"kind":"hypergeometric","n":20,"bad":2,"p_ge7":0.000000000000,"p_ge8":0.000000000000,"expected_ge7_shards":0.00000000,"union_bound_ge7_65536":0.00000000}
+{"kind":"hypergeometric","n":20,"bad":4,"p_ge7":0.000000000000,"p_ge8":0.000000000000,"expected_ge7_shards":0.00000000,"union_bound_ge7_65536":0.00000000}
+{"kind":"hypergeometric","n":20,"bad":6,"p_ge7":0.000000000000,"p_ge8":0.000000000000,"expected_ge7_shards":0.00000000,"union_bound_ge7_65536":0.00000000}
+{"kind":"hypergeometric","n":30,"bad":1,"p_ge7":0.000000000000,"p_ge8":0.000000000000,"expected_ge7_shards":0.00000000,"union_bound_ge7_65536":0.00000000}
+{"kind":"hypergeometric","n":30,"bad":3,"p_ge7":0.000000000000,"p_ge8":0.000000000000,"expected_ge7_shards":0.00000000,"union_bound_ge7_65536":0.00000000}
+{"kind":"hypergeometric","n":30,"bad":6,"p_ge7":0.000000000000,"p_ge8":0.000000000000,"expected_ge7_shards":0.00000000,"union_bound_ge7_65536":0.00000000}
+{"kind":"hypergeometric","n":30,"bad":9,"p_ge7":0.343608615273,"p_ge8":0.099786470401,"expected_ge7_shards":22518.73421052,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":100,"bad":5,"p_ge7":0.000000000000,"p_ge8":0.000000000000,"expected_ge7_shards":0.00000000,"union_bound_ge7_65536":0.00000000}
+{"kind":"hypergeometric","n":100,"bad":10,"p_ge7":0.000391716276,"p_ge8":0.000023782750,"expected_ge7_shards":25.67151786,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":100,"bad":20,"p_ge7":0.063668998425,"p_ge8":0.018090410871,"expected_ge7_shards":4172.61148078,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":100,"bad":30,"p_ge7":0.384920143766,"p_ge8":0.204632932837,"expected_ge7_shards":25226.12654187,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":1000,"bad":50,"p_ge7":0.000024103279,"p_ge8":0.000001768013,"expected_ge7_shards":1.57963250,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":1000,"bad":100,"p_ge7":0.002111076651,"p_ge8":0.000346805434,"expected_ge7_shards":138.35151942,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":1000,"bad":200,"p_ge7":0.084573084119,"p_ge8":0.030723531367,"expected_ge7_shards":5542.58164081,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":1000,"bad":300,"p_ge7":0.391404134723,"p_ge8":0.225717060310,"expected_ge7_shards":25651.06137319,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":10000,"bad":500,"p_ge7":0.000032858998,"p_ge8":0.000002730301,"expected_ge7_shards":2.15344733,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":10000,"bad":1000,"p_ge7":0.002357890113,"p_ge8":0.000408414922,"expected_ge7_shards":154.52668645,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":10000,"bad":2000,"p_ge7":0.086482305121,"p_ge8":0.032000823455,"expected_ge7_shards":5667.70434838,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":10000,"bad":3000,"p_ge7":0.391932586455,"p_ge8":0.227529635980,"expected_ge7_shards":25685.69398591,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":1000000,"bad":50000,"p_ge7":0.000033935176,"p_ge8":0.000002855599,"expected_ge7_shards":2.22397572,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":1000000,"bad":100000,"p_ge7":0.002385806656,"p_ge8":0.000415562444,"expected_ge7_shards":156.35622504,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":1000000,"bad":200000,"p_ge7":0.086690413379,"p_ge8":0.032141244784,"expected_ge7_shards":5681.34293121,"union_bound_ge7_65536":1.00000000}
+{"kind":"hypergeometric","n":1000000,"bad":300000,"p_ge7":0.391989612871,"p_ge8":0.227726219677,"expected_ge7_shards":25689.43126913,"union_bound_ge7_65536":1.00000000}
+{"kind":"actual_hrw_all_shards","n":100,"bad":10,"histogram":[6238, 17716, 20801, 13799, 5349, 1393, 215, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],"elapsed_ms":990}
+{"kind":"actual_hrw_all_shards","n":1000,"bad":100,"histogram":[7718, 17800, 19056, 12499, 5795, 2015, 522, 118, 12, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],"elapsed_ms":9926}
+{"kind":"ideal_valid_ticket_grinding","shard":17,"honest":1000,"attacker_identities":8,"usable_trials_each":1,"selected_attacker":0}
+{"kind":"ideal_valid_ticket_grinding","shard":17,"honest":1000,"attacker_identities":8,"usable_trials_each":16,"selected_attacker":2}
+{"kind":"ideal_valid_ticket_grinding","shard":17,"honest":1000,"attacker_identities":8,"usable_trials_each":256,"selected_attacker":8}
+{"kind":"ideal_valid_ticket_grinding","shard":17,"honest":1000,"attacker_identities":8,"usable_trials_each":4096,"selected_attacker":8}
+{"kind":"single_catalog_scan","n":20,"ticket_bytes":640,"build_us":2,"scan_us":2,"abstraction":"one catalog, not N simulated nodes"}
+{"kind":"single_catalog_scan","n":30,"ticket_bytes":960,"build_us":3,"scan_us":3,"abstraction":"one catalog, not N simulated nodes"}
+{"kind":"single_catalog_scan","n":100,"ticket_bytes":3200,"build_us":10,"scan_us":15,"abstraction":"one catalog, not N simulated nodes"}
+{"kind":"single_catalog_scan","n":1000,"ticket_bytes":32000,"build_us":98,"scan_us":150,"abstraction":"one catalog, not N simulated nodes"}
+{"kind":"single_catalog_scan","n":10000,"ticket_bytes":320000,"build_us":1190,"scan_us":1497,"abstraction":"one catalog, not N simulated nodes"}
+{"kind":"single_catalog_scan","n":1000000,"ticket_bytes":32000000,"build_us":116329,"scan_us":149172,"abstraction":"one catalog, not N simulated nodes"}
+{"kind":"connected_ttl_cut","n":36,"ttl":16,"optimistic_reached":17,"hours_do_not_accumulate_ttl":true}
+{"kind":"one_organic_network_bridge","n":39,"honest_bridge_reached":39,"withholding_bridge_reached":20,"byzantine_identities":1}
+{"kind":"ttl_ring_upper_bound","n":20,"reached":20,"delivery":"perfect, full fanout, no RED"}
+{"kind":"ttl_ring_upper_bound","n":30,"reached":30,"delivery":"perfect, full fanout, no RED"}
+{"kind":"ttl_ring_upper_bound","n":100,"reached":33,"delivery":"perfect, full fanout, no RED"}
+{"kind":"ttl_ring_upper_bound","n":1000,"reached":33,"delivery":"perfect, full fanout, no RED"}
+{"kind":"ttl_ring_upper_bound","n":10000,"reached":33,"delivery":"perfect, full fanout, no RED"}
+{"kind":"local_incubation","at_hour":25,"first_seen_hours":[0,6],"mature":[true,false]}
+{"kind":"transfer_predicates","checks":18,"records":82,"max_page":32,"source_authenticated":true,"byzantine_resigned_omission_accepted":true,"activation_is_not_distributed_closure":true}

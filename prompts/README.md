@@ -17,6 +17,28 @@ the audit orchestrator or automatically implement protocol changes.
 
 To start a new chat, ask the agent to read and execute `prompts/architecture_interview.md`.
 
+## Decentralized Robustness Research
+
+[decentralized_robustness_research.md](decentralized_robustness_research.md) is an
+autonomous research and validation assignment for the unresolved membership,
+bootstrap, handoff and operational robustness questions. It requires primary-source
+internet research, independent adversarial review, executable models, realistic
+capacity evidence and a precise safety/availability envelope. It preserves the
+interview decisions and distinguishes assumed conditions from enforceable protocol
+rules. Preparing the prompt does not execute the research or change production.
+Ask an agent to read and execute it to start or resume that focused investigation.
+
+## Trust Network Blind Spot Research
+
+[trust_network_blind_spot_research.md](trust_network_blind_spot_research.md) focuses
+on the clarified recursive operator-trust model: intended code, reliable operation
+and carefully chosen friends who exercise the same care. It audits the link from
+human admission to counted votes, rechecks prior attacks against the intended
+process, and seeks the smallest workable rule before architectural replacement.
+It requires independent review, executable safety/progress checks and practical
+evidence with explicit human/fault assumptions. Preparing this prompt does not
+resume the stopped investigation; ask an agent to read and execute it explicitly.
+
 ## Terminology Alignment
 
 [terminology_alignment_plan.md](terminology_alignment_plan.md) provides an executable

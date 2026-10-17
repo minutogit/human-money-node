@@ -1,0 +1,28 @@
+Validation performed 2026-10-16 (Europe/Berlin).
+Research-only changes; no production membership change.
+
+Command: cargo test --workspace
+Execution: approved local socket escalation; exit 0.
+Summary: 65 test-result groups; 504 passed, 0 failed, 11 ignored.
+Full transient log: /tmp/robustness-workspace-test.log
+Ignored tests were already marked ignored by the repository; they were not forced on.
+Example test execution is separate from ordinary workspace tests.
+
+Command: cargo clippy --workspace --all-targets -- -D warnings
+Execution: normal sandbox; exit 0.
+Full transient log: /tmp/robustness-workspace-clippy.log
+
+Command: cargo test -p humoco-sim-core --example robustness_envelope
+Result: 3 passed, 0 failed (transfer/crash regression, discovery, risk arithmetic).
+Full transient log: /tmp/robustness-envelope-tests.log
+
+Command: cargo clippy -p humoco-node --example robustness_probe -- -D warnings
+Result: pass.
+
+Command: rustfmt --edition 2021 --check crates/humoco-node/examples/robustness_probe.rs
+Result: pass.
+Whole-workspace formatting is separately reported as pre-existing differences; no global formatting was performed.
+
+QUIC measurement runs: baseline +25ms/batch perturbation; each exited 0.
+Receiver rejection assertions and 20/14/13 responder smoke assertions all passed.
+See robustness_experiments.md for measured limitations.

@@ -6,7 +6,7 @@
 > and the current decision register in section 2 when resuming. Checkpoints are in section 9.
 
 Date: 2026-10-13 (Europe/Berlin)
-Last updated: 2026-10-16 (Europe/Berlin)
+Last updated: 2026-10-17 (Europe/Berlin)
 
 Status: Working interview notes, not a binding specification or an implementation plan.
 The interview was saved at the maintainer's request and subsequently resumed.
@@ -145,28 +145,29 @@ the recorded reasoning; they do not supply missing original user explanations.
 | DEC-044 | Six-Byzantine design target A selected instead of weaker three-Byzantine target B. | §7.3: desired safety tolerance; eligibility, actual adversary bound and temporal scope unproved. |
 | DEC-046 | Automatic safe progress after stabilization A selected; indefinite write-disable after competing partial endorsements B not selected as intended behavior. | §7.9: immutable one-successor votes alone permit a 13-X/7-Y stall. Concrete safe round/recovery mechanism open. |
 | DEC-047/048 | One growing network and existing N >= 20 FINAL policy reaffirmed; repeated S5.1a question withdrawn without an A/B answer. | §7.12/7.13: do not force a permanent-domain product choice or infer FINAL revocation/common-anchor approval. Adversarial partitions and changing views remain in scope. |
-| Q-S3.3-01 | Neither one-round/carrying A nor redesigned two-round completion B selected. | §7.5/7.14–7.16: requests to explain existing lock reconciliation are not an answer. §7.16 records the resumed clarification and exact German presentation with unchanged option meanings. No mandatory new reservation object or certificate-return round follows. |
+| Q-S3.3-01 | Neither one-round/carrying A nor redesigned two-round completion B selected. | §7.5/7.14–7.16: requests to explain existing lock reconciliation are not an answer. §7.16 preserves the exact German presentation; §7.29 adds conditional closure/inclusion findings without changing A/B. No mandatory new reservation object or certificate-return round follows. |
+| Q-S2.2-01 | Unanswered; withdrawn as the next decision question because its predecessor-roster prerequisite is unresolved. | §7.36 preserves the exact proposal/question. Maintainer challenges "the previous group"; §7.37 corrects premature decision readiness. Conditional transition research remains, but no shared roster, initial anchor or payment-round choice is selected. |
 
 ### 2.3 Open design and decision inventory
 
 These are tracked obligations, not a list of questions to ask the maintainer in
 sequence. Investigate technical prerequisites autonomously. No glossary naming question is pending: DEC-049–052 settle the names and
 authorize autonomous editorial maintenance (§7.27). The scoped editorial pass is complete; naming decisions do not close protocol-design
-obligations. Q-S3.3-01 is the resumed pending question with unchanged A/B meanings; §7.16 records its clarified
-presentation. Keep explicit accepted requirements separate from unresolved
+obligations. Q-S3.3-01 is parked and unanswered with unchanged A/B meanings; §7.16 records its clarified
+presentation. The active S2.1 prerequisite currently has no decision question (§7.40). Keep explicit accepted requirements separate from unresolved
 proof/parameter choices.
 
 | Item | Branch | Still unresolved | Detail record |
 | --- | --- | --- | --- |
-| OPEN-01 | S3.3 | One-round obligations versus redesigned completion; inherited/own records, late certificates, authenticated inclusion and partial conflicts. | Q-S3.3-01; §7.5, §7.14–7.15 |
-| OPEN-02 | S1/S2 | Initial/continuing membership justification, candidate completeness, ticket maturity evidence and temporal Byzantine/key assumptions. No common anchor/history construction selected. | §7.1, §7.3, §7.8, §7.10–7.13 |
-| OPEN-03 | S3/S4 | Close old writes, transfer final deltas, install successor state and progress safely after competing transitions; latest-context evidence and bounded retention. | §7.4–7.10; DEC-039/041/043/045/046 |
+| OPEN-01 | S3.3 | One-round obligations versus redesigned completion; inherited/own records, late certificates, authenticated inclusion and partial conflicts. Conditional witness bound is not an inclusion algorithm. | Q-S3.3-01; §7.5, §7.14–7.17, §7.29 |
+| OPEN-02 | S1/S2 | Active S2.1: derive participant justification at first FINAL/growth boundary instead of assuming "the old group." Exact 20/21-universe intersection differs from 22; neither unbounded local activation nor a circular old-quorum endorsement is justified. Conditional closed-knowledge bootstrap and 20/21/22 model implemented; strong graph/identity/fixed-instance premise not supplied by F2F. Unrestricted first-FINAL refuted by organic39-node bridge witness; exact authenticated onboarding/certified-lineage alternative tested, but additional policy not adopted. | §7.1, §7.3, §7.8, §7.10–7.13, §7.30, §7.35–7.40, §7.44; robustness report |
+| OPEN-03 | S3/S4 | Close old writes including in-flight vote decisions, transfer final deltas, durably install successor state and progress safely after competing transitions; latest-context evidence and bounded retention. Candidate fence/inclusion-certificate/BFT/install model executed in §7.40; signed-output/anchored-recipient composition tested in §7.44; canonical/wire/TTL and general proof remain pending. Acceptance contracts in §7.34. | §7.4–7.10, §7.29–7.34; DEC-039/041/043/045/046 |
 | OPEN-04 | C4 | Hidden-query/multiple-witness read proposal, actual evidence, authenticated random sampling, retry/missing-response semantics, accepted residual risk and goods release. | §3–5, §7.1; DEC-015/017/020/021 |
 | OPEN-05 | S5/S6 | PROVISIONAL revision versus node equivocation, observation versus commitment domains, merge support thresholds and FINAL/VOID consistency. | §5.4, §7.1, §7.12–7.13; DEC-022/023/048 |
 | OPEN-06 | K2/C1 | Shared crate layout/versioning, signed fields, full identities, parent/output binding, splits, genesis/root TTL, batch behavior and all core consumers. | §2 closing clarifications, §7.3; DEC-005/006/011–014/038 |
-| OPEN-07 | C2/C3 | End-to-end targets, bounded retry counts/delays/horizon, handoff/NOT_READY feedback fields and actual shared transport backoff. | §7.2.1/7.3; DEC-008/009/027/042 |
+| OPEN-07 | C2/C3 | End-to-end targets, bounded retry counts/delays/horizon, handoff/NOT_READY feedback fields and actual shared transport backoff. QUIC retransmission versus application duplication clarified in §7.33; no three-send policy selected. | §7.2.1/7.3, §7.33; DEC-008/009/027/042 |
 | OPEN-08 | N1/N2/N4 | Session/stream/CPU/persistence admission limits, fairness, resource partitioning, exact full-budget refusal, tier lifecycle and receiver-side abuse defenses. | §7.2–7.2.1; DEC-024/025/028; existing project invariants |
-| OPEN-09 | N3/O2 | Missing independent locks, divergent partial replicas and recovery without active clients; how readiness is justified beyond complete download/matching digest. Client resubmission is a preserved assistance proposal. | §7.2–7.2.1; DEC-026/031/032 |
+| OPEN-09 | N3/O2 | Missing independent locks, divergent partial replicas and recovery without active clients; how readiness is justified beyond complete download/matching digest. Snapshot-bound pagination, no-gap deltas, full commitment coverage and catch-up capacity remain open (§7.31–7.32). Client resubmission is a preserved assistance proposal. | §7.2–7.2.1, §7.31–7.32; DEC-026/031/032 |
 | OPEN-10 | O1/O2 | Exact immutable choice/slot/context semantics, per-entry durable acknowledgment, duplicate/pending operations, loss/rollback detection and safe same-key resumption. | §7.2.1/7.3; DEC-029–033 |
 | OPEN-11 | O3/O4 | Safe time and choice retention, bounded expiry scheduling, drain/handler ordering, signal escalation and measured deployment stop deadline. | §7.2.1; DEC-034/035 |
 | OPEN-12 | O5/O6 | Private admin packaging/auth/socket permissions; metric-specific aggregation, bounded persistence and reliability diagnostics. | §7.2.1/7.3; DEC-002/003/036/037/040 |
@@ -2495,6 +2496,2034 @@ installation analysis from §7.15–7.17, then use that pending choice where the
 payment-semantics tradeoff is necessary. Do not infer any protocol answer from
 the glossary answers or current editorial authorization.
 
+### 7.29 Resume S3.3: closure boundary, minority witnesses and installation
+
+Record: S3.3-INVESTIGATION-001. Date: 2026-10-16 (Europe/Berlin).
+Resume checks: both memory files end at CP-0017. Read the current register,
+§7.5–7.10, §7.14–7.17, §7.27–7.28, the glossary and alignment report §8.
+The maintainer requests technical investigation and one justified decision question
+only when needed; glossary work stays complete. No answer to Q-S3.3-01 is inferred.
+
+**Scope and evidence.** Analyze the one-round candidate conditionally, within one
+justified old twenty-member committee, with at most six Byzantine identities over
+the relevant signing/closure interval and no honest loss/rollback of binding state.
+S2 has not established those membership/temporal assumptions. This does not select
+a globally uniform roster/history scheme. Targeted static inspection at HEAD
+`43139a3` (clean working tree before this update):
+
+- `network/transport.rs` checks the shared readiness flag at entry to
+  `LockVerifyRequest`, then reaches awaited ingress and later attestation creation
+  (single-lock and chain paths). This entry check alone is not a durable per-shard
+  old-write fence covering already admitted handlers.
+- `storage/engine.rs::FlushOp::PutHmcLock` carries the entry and lookup tag, with
+  no per-entry commit acknowledgement. The inspected ingress enqueues it; the
+  flush worker commits separately. DEC-029/033 remains selected but undelivered.
+- `daemon.rs::run_shard_digest_pull_sync` sets readiness after its convergence/
+  completed-pull logic. Successful page transport and matching summaries do not
+  establish old-write closure or durable installation of every binding effect.
+  This is a bounded path inspection, not an exhaustive source/security audit.
+
+**Derived closure conditions; not an adopted algorithm.**
+
+1. Pre-copy can run while the old committee operates. Before endorsing a final
+   closed handoff state, each honest old endorser must durably fence fresh votes
+   in that old writing scope and account for all its relevant own/inherited
+   bindings. Already admitted work must either have its potentially released vote
+   decision included, or be prevented from issuing an unaccounted binding vote.
+   Merely flipping an entry flag, waiting 800 ms, closing sockets or taking a
+   second live snapshot does not order this race. Admission, pending commits and
+   vote release need a recoverable local ordering; no RAM lock across disk I/O
+   or synchronous hot-path disk write follows from this requirement.
+2. A candidate fourteen-member old closure quorum contains at least eight honest
+   members under the stated bound. If all eight remain fenced, at most twelve
+   old identities can still issue fresh votes, fewer than fourteen. This excludes
+   a wholly fresh old certificate after closure. It does not erase pre-fence
+   votes, including those delayed in the network: an old certificate may first be
+   assembled/presented after closure and must retain its justified historical
+   effect. Network silence is not a certificate-expiry rule.
+3. Payment voters P and final closed-state endorsers C satisfy
+   `|P intersection C| >= 14 + 14 - 20 = 8`; at least two are honest. If every
+   honest endorser verifies inclusion of its earlier bindings before endorsing
+   the SAME closed state, a previously certified payment cannot be wholly omitted.
+   A list of fourteen unrelated reports, or fourteen signatures over an arbitrary
+   state hash, does not satisfy that premise. Endorsements must bind the relevant
+   predecessor scope, concrete successor and installed-state commitment; exact
+   fields, compatible obligation representation and inclusion checks remain open.
+4. Each honest successor must verify the handoff evidence and durably install the
+   collision constraints and signing-safety state before its first successor vote.
+   A crash between download, commit and activation must restart behind this gate.
+   Enough installed eligible members are needed for progress; this argument does
+   not require all twenty old or new members online or select a new readiness
+   acknowledgement threshold. Repeated turnover must carry inherited effects
+   forward until legitimate expiry, without permanent expired-lock tombstones.
+
+These are logical ordering/proof obligations, not a fixed number of protocol
+messages, extra payment rounds, a selected agreement engine or a new reservation
+object. Competing partial closures still require DEC-046's safe round/recovery
+mechanism; no timeout may simply undo fencing or prior signing choices.
+
+**Why a minority report can matter.** Strengthen §7.5's visibility explanation:
+let H1–H8 honestly sign payment A, H9–H14 honestly sign conflicting B, and M1–M6
+be Byzantine. The Byzantine members sign A, giving A fourteen votes, but report
+only B during handoff (they may also sign B). Choose closure participants
+`C = H7–H14 + M1–M6`. Their reports show two A and twelve B; the six honest A
+signers outside C are unavailable. B has at most twelve old votes in this schedule.
+All honest members signed only once. Two A reports therefore cannot be discarded
+as a minority or for lacking a locally assembled certificate. This is a symbolic
+counterexample, not a QUIC test or attack-frequency estimate. Preserving A's binding
+effect does not declare each individual report FINAL, nor does a bare Byzantine
+conflict authorize invalidating a proven FINAL. Authentication alone cannot decide
+which uncertified partial candidate can safely complete; exact compatibility,
+late-certificate adjudication and slot-local blocking/resource bounds remain OPEN-01.
+
+**Primary comparison rechecked.** [PBFT §4.3–4.4](https://pdos.csail.mit.edu/6.824/papers/castro-practicalbft.pdf)
+uses certified checkpoints and retained view-change evidence; its fixed-membership
+proof does not establish HuMoCo's turnover. [Sui Lutris §2.4/4.2–4.3](https://docs.sui.io/paper/sui-lutris.pdf)
+explicitly addresses the snapshot/late-write race, pauses old locking and sequences
+handover through its own checkpoint protocol. Its payment path includes certificate
+redistribution and quorum execution; its reset rules cannot be imported into a
+HuMoCo payment already FINAL after one collection round. These primary sources
+support the comparison, not the HuMoCo set arguments or a completed project proof.
+
+**Question and next action.** Re-present **Q-S3.3-01** with exactly §7.16's German
+wording and A/B meanings. Conditional recommendation A: retain one-round payments
+and reuse existing lock data while investigating the above preservation conditions.
+Its real cost is possible slot-local blocking from unresolved partial conflicts.
+B remains investigation of separate preparation and quorum-confirmed payment
+completion; it changes client/core/wire semantics and does not itself prove safe
+handoff or fewer blocked slots. No new ID, no approval inferred, no algorithm choice.
+After an answer, record it and derive the selected direction's exact obligation
+admission/compatibility and late-certificate rules before S4 round recovery; keep
+S2 and safe retention explicit. Design open; production implementation and real
+adversarial QUIC verification pending. No Rust tests, test campaign, commit or PR.
+
+### 7.30 Clarify local signing versus acceptance of conflicting quorums
+
+Record: S3.3-CLARIFICATION-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer challenges the German phrase "Schreibbefugnis": each node can
+insert a lock and respond when its own readiness and local shard-membership checks
+permit it; requesters contact nodes they themselves rank within the shard's top
+twenty. They ask what additional authority problem this description leaves.
+This is a request for architectural explanation, not an answer to Q-S3.3-01 or
+a new naming question. Preserve local node sovereignty and subjective discovery.
+
+**Correction to the presentation.** The previous reply compressed the conditional
+common-committee/handoff model into an apparent existing "writing authority."
+That model has not been selected or proved; §7.8 already records the same objection.
+No central permission issuer, globally identical current ranking, or accepted
+committee-authorization history follows. The actual unresolved property is whether
+the node confirmations accepted by different recipients can certify conflicting
+uses of the same unexpired spend slot as membership/views change. A node's ability
+to sign and a recipient's acceptance of that signature toward FINAL are separate
+events. Request selection alone does not establish this cross-request property.
+
+**Explain using the maintainer's local-view model.** Reuse §7.9's abstract race:
+two newcomers copy an empty slot before payment A. One requester still sees the
+old twenty; another sees twenty with two replacements. Both freeze twenty for
+their own request. Let six Byzantine nodes be common to both lists. In the old
+list, eight honest A voters comprise two departing members and six retained
+members. The new list's eight honest B voters comprise the other six retained
+honest members and the two newcomers. Byzantine members sign both A and B.
+Each requester can collect fourteen confirmations; no honest identity signs both.
+All fourteen honest old members are accounted for (eight A, six B), and all
+fourteen honest new members are accounted for (six A, eight B). Newcomers' initial
+copy was complete when taken. Local membership assessment, fixed per-request lists
+and successful initial sync do not by themselves prevent this schedule. This is
+our previously recorded symbolic counterexample, not new external research or an
+executed attack. It assumes no additional proven transition/admission restriction.
+
+**Consequence and next action.** Frame the handoff obligation as preventing an
+old-view accepted payment from disappearing while newcomers begin confirming a
+conflicting payment. Investigate which continuity/acceptance condition is sufficient;
+do not present the coordinated closure candidate as the only possible mechanism.
+Shared signing constraints among unchanged honest nodes help but the schedule
+shows they alone are insufficient for two replacements under the six-Byzantine
+target. S2 remains the explicit dependency; S3.3 is the sole active explanatory
+focus. Answer this clarification without repeating the payment-round choice.
+Q-S3.3-01 retains its original unanswered A/B meanings. No accepted decision,
+glossary rule, production behavior or specification changes. Design/proof open;
+no tests, commit or PR.
+
+### 7.31 Reconciliation methods, candidate safety contract and model-first validation
+
+Record: S3.3-RESEARCH-002. Date: 2026-10-16 (Europe/Berlin).
+Maintainer asks for established efficient reconciliation methods (hashes/Merkle
+trees, multiple sources), sufficient safety conditions and whether to simulate
+before implementation. This requests technical investigation, not an A/B answer,
+tree-library selection or permission for production changes/test campaigns.
+
+**Two complementary tasks.** Reconciliation locates/transfers differing records;
+handoff establishes which live effects must survive and when a successor may vote.
+Under canonical encoding and collision resistance, equal roots commit to equal
+encoded snapshot contents. They do not prove that those contents include every
+binding decision made before an appropriate cutoff. Multiple sources improve
+retrieval and expose differences; selecting a popular live root does not provide
+that cutoff or justify dropping minority obligations (§7.29).
+
+| Transfer option | Appropriate use / cost | Applicability to HuMoCo |
+| --- | --- | --- |
+| Sorted records, whole-snapshot hash, bounded pages | Simplest reference; transfers the whole differing snapshot, even for a small change. | Starting correctness baseline for measured small per-shard state; no assumption that a shard is always 1–3 KB. |
+| Deterministic key-prefix/range buckets with hashes | Locate differing buckets, transfer only those buckets; additional metadata and partition rules. | Intermediate candidate if full snapshot transfer is costly. Fixed key ranges avoid page-shift ambiguity. |
+| Canonical Merkle tree over keyed records | Compare roots, descend into differing ranges and verify transferred data against the committed root; tree/proof maintenance costs. | Candidate for larger state with small differences; not a finality or completeness oracle. No particular tree/library selected. |
+
+All options need one named stable snapshot across pages/ranges, bounded byte/work
+budgets, canonical fields/order/domain tags, authenticated context and proper
+root-origin/expiry validation. A per-record inclusion proof does not establish
+that the server supplied every record in a requested range. Reconstruct the whole
+committed state or use justified range-coverage proofs. A snapshot identifier/hash
+without the closure/inclusion contract still authenticates only that snapshot.
+Own durable signing choices remain identity-specific: replicas need compatible
+transferable collision obligations, not byte-identical private signer journals.
+Trusted-time/expiry policy must be fixed for comparison; differing local expiry
+filters must not silently drop still-protected obligations. Preserve root TTL,
+grace and no-tombstone rules; retention remains OPEN-10/11.
+
+**Primary sources and their limits, checked this turn.**
+
+- [Apache Cassandra repair](https://cassandra.apache.org/doc/latest/cassandra/managing/operating/repair.html)
+  compares Merkle trees and streams differences over shared ranges. This supports
+  the transfer technique; its repair/tombstone model is not Byzantine payment safety.
+- [PBFT §4.3–4.4](https://pdos.csail.mit.edu/6.824/papers/castro-practicalbft.pdf)
+  combines certified checkpoints, state transfer and retained recovery evidence.
+  Its fixed participant model does not prove dynamic HuMoCo membership.
+- [Sui Lutris §2.4/4.2–4.3](https://docs.sui.io/paper/sui-lutris.pdf)
+  separates state preparation, old locking closure and checkpointed takeover.
+  Its consensus, stake and extra payment completion phase are not imported.
+- [CometBFT consensus specification](https://raw.githubusercontent.com/cometbft/cometbft/main/spec/consensus/consensus.md)
+  has proposal rotation and justified locks across rounds. It is a comparison for
+  DEC-046 transition recovery within a defined participant instance, not permission
+  to reset payment choices, gossip locks or add a chain runtime.
+- [Kuznetsov/Tonkikh §3.4–4.2](https://drops.dagstuhl.de/storage/00lipics/lipics-vol179-disc2020/LIPIcs.DISC.2020.27/LIPIcs.DISC.2020.27.pdf)
+  permits differing local knowledge via comparable certified histories, protected
+  state transfer and temporal key assumptions. This remains a more general
+  research alternative, not a solution for arbitrary unrelated local top twenties.
+- [Lamport: A High-Level View of TLA+](https://lamport.azurewebsites.net/tla/high-level-view.html)
+  describes explicit state/step models and model checking above implementation.
+  A bounded model result is not a proof for all sizes or for the Rust/QUIC code.
+
+**Recommended candidate to model, not a selected algorithm.** Reuse the accepted
+affected-shard pause direction: pre-copy; gather authenticated own/inherited
+obligations and durably close old voting including pending work; agree on one
+compatible closed state/successor with justified inclusion; transfer final deltas;
+verify/commit locally before successor voting. Initial replicas may hold different
+partial states: do not require fourteen identical initial roots. A final common
+commitment is the output of validated reconciliation/agreement, not a majority
+shortcut for choosing an arbitrary initial state. A quorum signature is meaningful
+only with honest inclusion/closure validation (§7.29) and justified participants.
+The candidate requires a defined verifiable signer set for its handoff instance;
+S2 has not selected how to obtain it from subjective discovery. No globally
+simultaneously identical network map is assumed. Concurrent live handoff would
+need another safe cross-view rule and more protocol work; do not reopen DEC-041
+without evidence. Partial conflicting payments and late certificates remain open
+under Q-S3.3-01; the candidate does not silently select A or B.
+
+**Concrete model/validation work package.** Define two conflicting locks for one
+unexpired slot and at least three committee generations (test inherited effects).
+Track each node's local membership view, durable own choice, transferable bindings,
+pending writes, durable closure/transition round and installed/active state; track
+in-flight votes and independently held quorum evidence. Model events separately:
+admit, commit choice, emit/deliver vote, snapshot/copy page, freeze, endorse a
+candidate, install/commit, activate, crash/restart, change view and advance round.
+Begin without real hashes/trees; model exact record sets and bounded authenticated
+statements so the checker tests protocol logic rather than hash speed.
+
+Required properties and adversarial schedules:
+
+1. No two conflicting accepted FINAL outcomes for the same unexpired slot across
+   allowed views/generations; never equate storage acceptance with FINAL.
+2. Preserve previously released and inherited effects through repeated handoff;
+   delayed collection/presentation of old certificates cannot create a free slot.
+3. No unaccounted vote after durable closure; no honest successor vote before
+   verified durable installation, including crash/restart between these steps.
+4. No indefinite transition deadlock from competing partial proposals once
+   communication, candidates and sufficient honest old/new participants stabilize.
+   This is transition progress, not guaranteed completion of a malicious owner's
+   conflicting payment. Without the stated availability/stability assumptions no
+   bounded pause or completion guarantee is claimed.
+5. Exercise §7.9/7.30's two-newcomer race, §7.29's minority witnesses, independently
+   incomplete replicas, omitted/replayed pages, withheld certificates, 13-X/7-Y
+   transition endorsements and crash at every durability boundary. Include a
+   faulty variant that reproduces the known double-FINAL counterexample; a model
+   that merely disables all votes must fail its progress check.
+
+First write executable transition/admission predicates; do not hide unresolved
+inclusion, membership or recovery behind an infallible oracle. Bounded exhaustive
+checking (e.g. TLA+/TLC) should cover small instances and explicit 20/14/6 schedules;
+small-instance success does not establish the general quorum argument. Then run
+deterministic Rust event simulations with recorded seeds and fault schedules,
+followed by mandatory real adversarial QUIC tests of the implemented rules.
+Benchmark transfer alternatives only against the same validated state contract:
+live records/bytes per shard, differing fraction, churn, expiry, RTT, transferred
+bytes, CPU/RAM and tail pause/recovery times. No tree break-even point is measured.
+
+**Existing implementation/test evidence, static only.** `crypto.rs::compute_shard_digest_at`
+hashes a filtered projection; `daemon.rs::run_shard_digest_pull_sync` clusters digests
+and pulls pages; `network/framing.rs::ActiveSyncRequest` has cursor/limit and no
+snapshot commitment field. These are reuse points, not the above contract.
+The inspected `spec_03_shard_baton_handover_and_growth.rs` initializes identical
+old replicas and copies them in scripted generations; its noise test seeds fourteen
+equal digests. It does not explore the listed interleavings. Fixture warning:
+TARGET_SHARD is 1337 but the first parent starts with 0x4242, which the digest
+filters to another shard. At least that first record is excluded; no claim that
+all generated records are excluded was verified. Before reusing these tests,
+assert intended shard coverage and that a relevant change actually changes the
+digest, rather than relying on equality that could compare empty projections.
+No tests, model checker, simulation or benchmark were run in this interview turn.
+
+Next action: derive the minimal explicit handoff state machine/admission predicates
+and its membership/partial-conflict/recovery prerequisites. Ask only if a resulting
+product tradeoff needs the maintainer; do not ask them to choose tree/algorithm
+names. Q-S3.3-01 remains unanswered with its original meanings. Design open;
+implementation and verification pending. No binding spec/code changes, commit or PR.
+
+### 7.32 Online transfer under write load: snapshots, deltas and protocol boundaries
+
+Record: S3.3-RESEARCH-003. Date: 2026-10-16 (Europe/Berlin).
+The maintainer emphasizes thousands of locks per second, continually differing
+replicas, passive newcomer catch-up and a possible timestamp-X snapshot. They ask
+for established solutions rather than a new invention. This is workload/design
+steering and a technical question, not selection of Q-S3.3-01 A/B, a separate
+signing journal or a guarantee of zero interruption.
+
+**Established patterns, primary evidence checked.**
+
+- [PostgreSQL exported snapshots / logical decoding](https://www.postgresql.org/docs/current/logicaldecoding-explanation.html#LOGICALDECODING-EXPORTED-SNAPSHOTS):
+  initial state is paired with a change-stream position so subsequent replay does
+  not miss changes during copying. Its origin log defines order; its documentation
+  also requires duplicate-safe consumption after a restart and warns that stalled
+  replication slots retain resources. This supports the snapshot-plus-deltas
+  technique, not Byzantine completeness or a HuMoCo-wide ordered log.
+- [etcd learner design](https://etcd.io/docs/v3.5/learning/design-learner/):
+  a non-voting learner catches up with leader logs before validated promotion.
+  The documented design also limits learners to avoid replication overload.
+  Its described operator promotion/future automation is not HuMoCo's selected
+  automatic-progress policy; Raft's crash-fault model is not the six-Byzantine model.
+- [Bessani et al., USENIX ATC 2013, §3.3](https://www.usenix.org/system/files/conference/atc13/atc13-bessani.pdf):
+  collaborative state transfer combines checkpoints and log segments from replicas
+  with validation hashes, distributing transfer load despite differing checkpoint
+  positions. It uses an agreement ID assigned by an ordering protocol and is
+  implemented for BFT-SMaRt. This addresses the high-load transfer question, but
+  cannot be copied as if independent HuMoCo local commit counters had that meaning.
+  [BFT-SMaRt's own documentation](https://github.com/bft-smart/library#state-transfer-protocols)
+  describes basic/advanced transfer and batching; this Java SMR library is a
+  reference implementation, not a selected Rust dependency or a drop-in adapter.
+- [Sui reconfiguration documentation](https://www.docs.sui.io/develop/sui-architecture/epochs)
+  uses a consensus-derived reconfiguration trigger and finalizes remaining work/
+  checkpoints at epoch closure. It does not use a client request timestamp alone
+  to prove completion of all earlier writes. The different payment/consensus/stake
+  assumptions in §7.31 remain explicit; no global Sui runtime is imported.
+
+**Timestamp clarification.** Even a perfectly synchronized clock does not ensure
+that every request labelled before X has arrived or completed before X. A delayed
+or adversarially backdated request defeats such a cutoff. Retrying, replaying and
+in-flight durable commits add the same issue. Use a justified protocol boundary
+and source commit/change positions to describe completed work; network time still
+serves the existing root-validity rules, not an invented old-write closure proof.
+Local replica positions differ and must be bound to identity, snapshot and signing
+context; equal numeric positions on two nodes do not identify equal contents.
+HuMoCo has no already-approved global per-lock sequence. A possible collection of
+per-source bounded ranges is a candidate transport construction, not a proof of a
+consistent global cut, participant compatibility or safe successor activation.
+
+**Candidate adaptation, conditional and unselected.**
+
+1. A learned candidate prepares as a non-voter. Existing shard replicas, rather
+   than gateways forwarding every ingress request, serve bounded shard-direct
+   snapshot/delta pulls. This is a candidate extension of existing sync RPCs,
+   subject to learned-peer authorization and resource budgets; no open gossip,
+   automatic ingress bypass or extra checkout voter follows.
+2. At a source, create a stable committed snapshot and atomically relate it to
+   the beginning of retained changes. While copying its pages, collect/replay
+   subsequent relevant changes. Do not start the feed after copying (gap), use
+   moving offset pages (skip/duplicate risk), or equate a last received packet
+   with completion. Require authenticated positions, range continuity/replay
+   checks and explicit handling of truncated history. A hash chain can expose
+   changes relative to a trusted endpoint, not omissions relative to reality.
+3. Data from one or a few sources may supply bulk bytes; validated obligations
+   from enough justified old participants determine what must be present.
+   Do not require full copies from fourteen peers or fourteen equal initial
+   roots. Different replicas can converge to one verified handoff state after
+   reconciling their partial obligations. Source completion alone cannot select it.
+4. Continue catch-up until final deltas are small, then use the previously chosen
+   affected-shard pause direction to close old voting, account for pending work
+   and establish a justified final state/successor. Transfer remaining deltas,
+   commit them and only then activate successor votes. The exact inclusion,
+   membership and round-recovery rules remain §7.29–7.31 / OPEN-01–03; this pattern
+   does not establish a fixed pause duration or select a payment completion round.
+
+A snapshot and bounded change tracking are an engineering candidate, not an
+approved second persistent signing journal. DEC-033's existing-redb immutable
+choices and DEC-042's client-retained retry stay intact. If export metadata is
+needed, investigate atomic reuse of existing persistence; do not assume redb
+provides PostgreSQL-style WAL subscriptions. Retained deltas, live snapshots,
+learners and retries need byte/time/count limits. If a learner falls outside its
+retained window, restart/re-snapshot behind the signing gate instead of skipping
+history. This must not pin expired locks or old database versions indefinitely,
+retain permanent tombstones, or hold the RAM collision index across storage I/O.
+
+**Existing reusable storage primitive and current gap (static).** Cargo.lock pins
+redb 2.6.3. Its locally installed `Database::begin_read` documents a committed
+snapshot with concurrent writers (`redb-2.6.3/src/db.rs:1036–1047`);
+`ReadTransaction` captures the corresponding tree. This supplies a local stable
+read primitive, not a distributed checkpoint or complete RAM/pending-write state.
+In `network/transport.rs`'s `ActiveSyncRequest` handler, each page rebuilds the
+current combined disk/RAM lists, sorts them, and slices by offset. The inspected
+request has no snapshot/revision binding. A key inserted before the cursor can
+shift subsequent pages; removing a key can cause a later key to be skipped.
+`storage/db.rs::apply_flush_batch_atomic` commits batches, but the inspected API
+does not expose the proposed export stream/cursor contract. These are targeted
+observations, not a full implementation audit or a code-change authorization.
+
+**Throughput condition and next model work.** Distinguish whole-network rate from
+the affected shard's actual unique changes and from duplicate per-source records.
+If ongoing required transfer/verification work arrives at rate lambda and the
+learner sustainably applies it at rate mu in the same units, reducing backlog
+while writes continue requires mu > lambda; idealized net drain is mu-lambda.
+This is a capacity argument, not a measurement. If mu <= lambda, catch-up requires
+more effective capacity, less admitted work, a longer scoped pause or rescheduling;
+Merkle compression cannot eliminate the cost of genuinely new required records.
+Model and measure snapshot creation time, commit lag, feed gaps/truncation, source
+failure, duplicate work, delta retention and checkout contention under target load.
+Use small event models first for correctness; an isolated high-throughput simulation
+can then test capacity before real-QUIC validation. No benchmark or model executed.
+
+Next action: specify no-gap snapshot/source-cursor lifecycle and how old-quorum
+obligation inclusion/closure justifies its final endpoint, without assuming a
+global ordered log or safe membership oracle. Derive unresolved predicates before
+building a model that might assume the desired answer. Q-S3.3-01 remains unchanged
+and unanswered; no new maintainer decision or production/spec change, commit or PR.
+
+### 7.33 Interjection: packet loss, reliable streams and bounded request retries
+
+Record: C3-N4-RESEARCH-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer asks whether repeating an unanswered gateway-to-shard request two
+or three times would reduce replica differences, using independent 1% packet loss
+as an example. This is a proposal/question, not a selected retry count or an answer
+to Q-S3.3-01. Address the bounded interjection, then return to S3.3 / §7.32.
+
+**Transport and arithmetic.** [RFC 9000 §2.2/13.3](https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3)
+defines ordered streams and retransmission of lost stream information; it is sent
+in new packets as needed, not as whole-packet copies or new application requests.
+[RFC 9002 §6](https://www.rfc-editor.org/rfc/rfc9002.html#section-6)
+specifies loss detection/probing. Static inspection: `Transport::send_request`
+(`network/transport.rs`) opens a Quinn bidirectional stream, writes one frame,
+finishes its sending side and reads a response frame. This path is not an
+unreliable QUIC DATAGRAM service. QUIC stream retransmission reassembles the same
+byte stream instead of dispatching another application-level lock operation.
+
+For n independent transmission losses each with p=0.01, losing all copies has
+probability p^n: one 1%, two 0.01%, three 0.0001% (one in a million). This elementary
+calculation is correct under independence. Bursts, path outage, peer failure and
+overload are correlated. Packet loss probability is not the probability an entire
+QUIC request fails within its deadline: a request/reply may span multiple packets,
+and the transport already retries. No measured end-to-end residual rate follows.
+A missing response also does not prove a missing lock; the server may already have
+committed/signed while the response is delayed or the connection subsequently fails.
+Transport receipt is likewise not durable application acceptance.
+
+**Recommendation and existing decisions.** Keep DEC-027's one application attempt
+per frozen committee member as the current default; it already permits transport
+retransmissions. Two/three unconditional full requests add application load, not
+merely transport redundancy. `api/routes.rs::collect_peer_attestations` fans out
+to the frozen candidates with an 800 ms write budget, exits on quorum/impossibility,
+and deduplicates collected node identities. `network/transport.rs` performs
+authentication/quota admission before the lock result, so storage idempotency must
+not be assumed to make repeated requests CPU/queue/quota-free. Exact duplicate
+accounting/durable-response behavior remains an audit obligation.
+
+Retain DEC-009/042's bounded delayed retry of the same signed payment intent after
+an uncertain operation outcome; this is distinct from blindly duplicating every
+per-peer RPC or replacing a committee member. Preserve the 800 ms collection bound,
+same intended lock, full-identity vote deduplication, neutral quorum cancellations,
+NOT_READY/backpressure semantics and no failure-triggered retry amplification.
+No retry count/delay, automatic post-quorum repair task or server-side intent queue
+is selected. Quorum fast-exit intentionally does not promise that every one of the
+twenty replicas receives/stores the operation. Lagging replicas still need bounded
+shard-direct reconciliation (§7.31–7.32); retries reduce some incidental failures
+but cannot replace handoff closure or establish complete state.
+
+If future measurements justify changing DEC-027, model a tightly bounded retry of
+eligible uncertain transient failures, with explicit budgets, same-intent semantics,
+receiver duplicate handling and no retries against explicit overload/readiness
+refusals. Required later real-QUIC checks: independent/burst request and response
+loss, response loss after commit, connection reset, overload and quorum cancellation;
+measure useful completions, duplicate work, bytes and tail latency under load.
+No QUIC test, loss simulation, benchmark or production change was run here.
+Question/design status: no new decision requested before this transport clarification;
+OPEN-07/08 remain open. S3.3 and the original pending question are unchanged.
+
+### 7.34 Status assessment and separate repair/activation acceptance contracts
+
+Record: S3.3-DESIGN-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer welcomes QUIC's loss handling and asks whether synchronization of
+new and existing nodes is now solved, whether it is tractable and what to do next.
+This is a status/explanation request, not selection of Q-S3.3-01 or authority to
+describe research as a completed design. S3.3 remains active. No new preference
+question is needed to establish the following engineering contracts.
+
+**Honest status.** Efficient state comparison/transfer is an established engineering
+problem with available primitives. The project already has digest/pull paths and
+redb stable reads; §§7.31–7.33 identify missing snapshot, delta and delivery details.
+Safe Byzantine turnover with partial local states, durable binding one-round votes
+and subjective membership is not solved/proved/implemented by those primitives.
+Published BFT transfer/reconfiguration establishes conditional feasibility for its
+own models, not simultaneous feasibility of every HuMoCo requirement. No categorical
+impossibility claim is made either. Existing tests are not a substitute for this
+missing construction, and performance at target rates is unmeasured.
+
+**Contract R — continuing-member reconciliation (candidate).** Sources expose named
+stable committed snapshots and bounded subsequent changes as in §7.32. Compare only
+the same canonical representation and stated scope/expiry policy; differences
+between live views are expected and do not establish peer fraud. A receiver may
+retrieve/validate missing evidence through learned-peer shard RPC, idempotently
+preserving its immutable own choices and inherited live constraints. A conflicting
+record must follow the unresolved conflict/finality rules; simple repair must not
+overwrite a prior signing choice or choose a raw-majority/lower-hash FINAL winner.
+Byte-identical current RAM contents at every node are not an activation prerequisite
+for each ordinary write. Detecting/copying differences and establishing safe new
+signer eligibility are distinct obligations. Authentication and a matching hash
+still cannot prove that an unknown binding obligation was never omitted.
+
+**Contract A — successor activation (conditional candidate).** Make the local data
+contract precise before modeling the distributed endpoint: for source identity i,
+`S_i(r)` is a stable committed snapshot at source-local revision r, and
+`D_i(r,h]` is the complete replayable relevant change range after r through h.
+The pair must reconstruct that source's committed transferable state at h under
+the declared retention/expiry rules. Bind identity, shard, predecessor context,
+snapshot identifier/commitment and both endpoints; missing/truncated/replayed
+ranges cannot count as successful catch-up. Revisions from different sources are
+not comparable global ordering positions. This equation is a proposed local
+export contract, not existing code or proof of distributed completeness.
+
+For a final handoff candidate M, an honest old endorser must durably close its old
+voting and check that M preserves the relevant own/inherited bindings through its
+endpoint h, including any admitted work whose vote could escape. A successor must
+verify the justified predecessor participants, closure/inclusion evidence and the
+specific successor/state binding, durably install M and then activate. In a common
+justified 20-member predecessor with the stated temporal six-Byzantine bound,
+§7.29's intersection argument explains why inclusion checks by fourteen matching
+closure endorsers can cover prior certificates; it does not define those checks.
+No rule requires fourteen identical initial source snapshots or all twenty nodes
+online. Continuing repair can reuse the transport without running this activation
+ceremony on each routine comparison. Timeout or hash equality does not replace M.
+
+**Remaining executable predicates.** Before a useful model can be claimed, define
+which predecessor/successor rosters and evidence are admissible (S2), which partial
+binding effects M must preserve and how late certificates refine conflicts (OPEN-01),
+and how transition rounds replace failed proposals without discarding protected
+choices (S4 / DEC-046). These must be actual model rules, not assumptions named
+"safe state" or an oracle returning the desired answer. Q-S3.3-01 remains the
+unchanged payment-semantics choice; investigate independent predicates first and
+ask only where that distinction or another genuine product tradeoff matters.
+
+**Next bounded delivery.** Use R/A as the acceptance checklist for a written
+minimal state machine, explicitly mark every unfilled predicate, then use §7.31's
+small adversarial model and subsequent load/real-QUIC gates once those predicates
+are defined. Under continuing writes, require adequate source/learner capacity;
+under partitions/lost quorums permit unavailable affected writes rather than
+claiming guaranteed progress. No permanent all-node equality or unconditional
+low-latency handoff is promised. This turn adds a contract decomposition, not an
+approved protocol, executed model or production implementation.
+
+Sources rechecked for the feasibility boundary:
+[Cassandra repair](https://cassandra.apache.org/doc/latest/cassandra/managing/operating/repair.html),
+[BFT durable transfer](https://www.usenix.org/system/files/conference/atc13/atc13-bessani.pdf),
+[Byzantine reconfiguration](https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.DISC.2020.27).
+Their respective repair, ordered-replication and certified-configuration assumptions
+remain distinct. No new external claim that one of them is a drop-in HuMoCo solution.
+
+### 7.35 Maintainer-directed prerequisite: robustness and compression of local views
+
+Record: S2.2-RESEARCH-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer explores median/majority views from gossip, efficient representation
+at a million nodes, and the alternative of each node syncing and voting from its
+own view. Latest steering: do not assume a common view fixes safety; investigate
+how robust subjective views actually are using existing theory/research and then
+targeted simulation as needed. This moves the single active focus to **S2.2**, a
+prerequisite of S3.3. Return point: §7.34 repair/activation contract. Q-S3.3-01 is
+parked with original unanswered meanings; no payment, global-membership or reduced-
+safety decision is inferred. Ticket possession still has the existing maturation,
+validation and readiness conditions; no immediate voting on ticket creation.
+
+**Research found; applicability limits.**
+
+| Primary work | Useful result/mechanism | What it does not establish for HuMoCo |
+| --- | --- | --- |
+| [SWIM](https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf) | Scalable weakly consistent membership and dissemination. | Byzantine-safe voting membership, bounded disagreement on HuMoCo's friend graph or safe finality. Its failure-report mechanics are not permission to gossip hearsay sanctions. |
+| [T-Man, Jelasity/Montresor/Babaoglu](https://cs.unibo.it/babaoglu/papers/pdf/tman.pdf), §§2–5 | Ranking-based topology construction using bounded descriptor exchanges; theoretical/empirical convergence analysis. | Explicitly excludes Byzantine faults and assumes a peer-sampling service with random samples. Fixed F2F edges/TTL/RED do not automatically supply these assumptions. |
+| [Correctness of a Gossip Based Membership Protocol](https://www.cs.cornell.edu/courses/cs6452/2012sp/papers/gossip-podc05.pdf), §§4–5 | Analysis of partial-view maintenance, partition risk and the need for reinforcement of live identities. | Its randomness, dependence approximations and churn model are not a theorem for this project's topology/filtering or payment certificates. |
+| [Practical Rateless Set Reconciliation, SIGCOMM 2024](https://cs.stanford.edu/~keithw/sigcomm2024/sigcomm24-final47-acmpaginated.pdf) | Rateless IBLT communicates differences between large sets without first knowing their difference size. | Global membership completeness, adversarial availability, ticket validity or safe activation. CPU still depends on input size; retain decoding/work bounds and validated full records/fallback. |
+| [Stellar Consensus Protocol §4.1](https://stellar.org/papers/stellar-consensus-protocol.pdf) | Local trust choices still need honest quorum intersection. | Arbitrary local HRW top-twenties or an adopted Stellar/ledger trust model. |
+
+**Median proposal.** Sets and identities have no numerical median analogous to
+clock readings. One can count support for identities or whole rosters, but then
+must justify the reporters/denominator, independence/Sybil resistance, freshness
+and comparability of sampled neighborhoods. Different honest friend neighborhoods
+can produce different majorities. Forwarded copies of one signed announcement are
+not independent witnesses. Such aggregation may help discovery/diagnosis but does
+not by itself prove membership or authorize automatic bans. Prefer reconciling
+authenticated original node/ticket announcements as an investigation baseline;
+no median-voting or network-wide agreement subsystem is selected.
+
+**Own analytical result: measure rank-critical overlap.** Let two frozen twenty-
+member candidate committees share k identities. Their union has size 40-k, so any
+two fourteen-vote sets have intersection at least `max(0, k-12)`. If at most six
+identities in this UNION over the relevant interval are Byzantine, and common
+honest signers preserve the same spend-slot exclusion across the compared votes,
+then k>=19 guarantees an honest common voter for this pair. At k=18 the lower
+bound is six, allowing the common voters to be precisely the six Byzantine nodes.
+Executed a bounded set/arithmetic check for k=18/19/20 and rechecked §7.9's concrete
+22-identity/two-replacement counterexample: two valid-size committees and two
+fourteen-vote sets, with only the six Byzantine identities common to both votes.
+This is not a new formal proof tool, simulation or network test.
+
+The UNION/temporal bound is an explicit premise, stronger than merely saying each
+unrelated local set has at most six Byzantine identities. k>=19 is a pairwise
+certificate exclusion lemma under immutable shared signing constraints, NOT a
+complete membership/handoff rule: cumulative turnover, inherited effects, key
+corruption and rollback still require §7.29–7.34. A valid attack schedule already
+refutes an unconditional guarantee for the unrestricted local-view baseline;
+simulation can quantify occurrence under stated workloads or evaluate a restriction
+that excludes that schedule, not turn an observed low frequency into impossibility.
+Near-equality of million-entry catalogs does not imply adequate top-twenty overlap:
+discovering only two additional high-ranking mature candidates can replace two
+members while nearly all catalog entries remain identical. Median node count and
+overall heartbeat-reach percentages therefore do not establish the needed property.
+
+**Million-node representation and KISS.** Do not exchange every observer's roster
+for every shard. Signed identity/ticket announcements are candidate facts; HRW
+computes rankings from facts. One twenty-member list needs only 20*32=640 raw bytes
+for keys, or 1,280 with 32-byte tickets, before signatures/proofs/endpoints/framing.
+One million keys+tickets already require 64,000,000 raw bytes; this is a lower bound,
+not an actual wire/storage benchmark. Hashes cheaply compare the same canonical
+catalog snapshot; Merkle/range reconciliation or, conditionally, IBLTs retrieve
+differences. Small messages do not prove no better unknown ticket exists. When
+freshness updates or differences are large, payload/work cannot remain constant.
+Keep candidate lists/caches for relevant shards rather than transmitting all
+opinions; cache correctness and bounded invalidation need design, and a hidden
+candidate cannot be authenticated into nonexistence by a hash. No tree/sketch,
+new gossip stream or global catalog protocol is approved.
+
+Existing constraints remain: only presence/heartbeat and equivocation-proof F2F
+gossip; no lock gossip, no arbitrary-peer probing, shard RPC only with learned
+identities. T-Man's arbitrary/random exchanges cannot be imported verbatim.
+Any descriptor reconciliation must fit authorized discovery paths and be treated
+as a deliberate protocol change if messages/semantics change. No telemetry/root
+disagreement becomes fraud evidence. Preserve twenty-four-hour ticket incubation.
+
+**Current evidence versus assumptions (static inspection).** Spec 11 claims
+small-world percolation with TTL=16, hourly heartbeats, edge RED/drop budgets and
+24h/heartbeat qualification. Those stated ingredients are not a bound on rank-
+critical disagreement: an owner announcement cannot traverse a path longer than
+its allowed hop budget; connectivity/average diameter alone does not bound tails
+or overcome selective filtering. `KnownNodeInfo` uses local first-seen/pending
+`Instant` values, so equal incubation durations can finish at different nodes at
+different times. `PeerManager::shard_committee` uses local known/mature/non-banned
+records, cloning/scanning maps and then selecting candidates. Million-node request-
+time cost is an unmeasured scaling obligation, not a proven performance result.
+
+The existing 10k censorship test's `simulate_gossip` is breadth-first propagation
+over all honest adjacent edges after excluding selected Byzantine forwarders; it
+does not implement timed hourly fan-out/TTL/RED/maturity/churn or measure committee
+overlap and competing certificates. The merge-wave tests include an example
+90/95%-of-median-node-count syncing gate; that gate alone cannot distinguish
+equal-sized catalogs containing different rank-critical nodes. Existing coverage
+can supply topology fixtures, not the requested safety result. No tests were run.
+
+**Next bounded research/model deliverable.** Audit the baseline's exact discovery,
+maturity, ticket replacement and rank-selection rules against code/spec conflicts;
+define assumptions before importing literature bounds. Measure per-shard committee
+overlap LOWER TAILS, duration of incompatible views, discovery-before-maturity lag,
+rank-critical missing tickets, accepted conflicting certificates and false-ready
+events. Include clustered F2F graphs, sparse/failed bridges, TTL, RED, delayed
+discovery, fresh/pending replacement tickets, network growth, stale views and
+strategic withholding/grinding under a separately stated adversary model. Trace
+signing/transfer events to connect discovery to §7.9's attack; do not simulate only
+catalog coverage. Track byte/CPU/cache costs and finality availability as separate
+outcomes. Start with known counterexamples and small models, then sampled observers/
+relevant ticket candidates and scalable event simulations rather than an N-by-N
+matrix of complete million-node views. Count-only/graph-only simulations cannot
+close the branch. Literature supplies useful mechanisms and conditional analyses;
+no verified bound currently shows the unrestricted HuMoCo baseline safe or gives
+its failure probability. No policy choice, production change, benchmark or large
+simulation is authorized/inferred by this research record.
+
+### 7.36 Decision-ready recommendation and the role of social trust
+
+Current status: CP-0026 / §7.37 withdraws decision readiness and Q-S2.2-01 as the
+next question. The conditional proposal and exact wording below remain history;
+the maintainer did not select it. Its predecessor-roster premise must be resolved.
+
+Record: S2.2-RECOMMENDATION-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer asks for a solution/decision rather than further open-ended study,
+and whether human intervention/reputation in an F2F network materially changes
+the result. This is not an answer to Q-S3.3-01 or permission to lower the accepted
+six-Byzantine design target. Active focus remains S2.2; no large test run needed
+to decide whether an already exhibited permitted counterexample is safe.
+
+**Engineering finding.** Do not approve unrestricted "local mature rank + copy +
+start voting" as satisfying the existing FINAL/six-Byzantine requirements. The
+§7.9/7.30/7.35 schedule already uses no more than six Byzantine identities and
+only two honest newcomers; it is not an argument that all friends are malicious,
+that thousands of Sybils are inevitable or that two independent large networks
+form spontaneously. Better average gossip coverage or additional reputation
+does not exclude the schedule. Rejecting this baseline as a safety justification
+is an analytical finding, not a new maintainer-selected protocol or implementation.
+Further simulations remain useful for availability, attack cost and performance,
+but observing no failures cannot reverse this worst-case counterexample.
+
+**F2F effect, with primary research.**
+[SybilLimit, Yu/Gibbons/Kaminsky/Xiao, §§1–4](https://www.comp.nus.edu.sg/~yuhf/yuh-sybillimit.pdf)
+uses social trust edges to limit admitted Sybil identities under explicit graph/
+attack-edge/mixing assumptions and its random-route acceptance procedure. It also
+notes that historical good behavior does not prevent later coordinated attacks.
+The paper's simulations/real-world graph evidence are not proof of HuMoCo's graph,
+admission procedure or per-shard fault count. Its quantitative admitted-Sybil bounds
+cannot be imported into simple friendship approval plus heartbeat percolation.
+[SCP §4.1](https://stellar.org/papers/stellar-consensus-protocol.pdf) separately
+requires honest quorum intersection despite local trust choices; reputation does
+not replace that condition.
+
+Human friend approval, loss of established identity/relationships after verified
+fraud, operator oversight, ticket work and incubation can raise practical attack
+costs. This is relevant defense and preserves DEC-018/019/040. It supplies no
+currently justified probability or bound on six controlled identities. Compromised
+keys of previously legitimate friends need no new social admission. One existing
+F2F edge suffices in Spec 07; a malicious sponsor can approve multiple keys, and
+clusters/bridges can delay honest discovery. Do not equate a distinct public key
+with a distinct independent human. No sponsor liability, financial deposit,
+reputation-weighted vote, rumor-based penalty or automatic friend ban is proposed.
+Retain first-party proof requirements for protocol sanctions. Social friction
+reduces attack feasibility; the protocol must still handle the faults it claims
+to tolerate once they occur.
+
+**Concrete recommended direction (not yet selected).** Local signed presence and
+HRW remain discovery/candidate selection. For a justified current per-shard roster,
+keep counted membership stable until a validated transition binds one concrete
+successor roster and the preserved live state/obligations. Investigate old-quorum
+fourteen-of-twenty agreement for that transition, including durable old-write
+closure and per-successor installation before voting. This is a bounded per-shard
+change protocol, not an all-million-node median or new per-payment agreement round.
+Bulk sync can run beforehand. Different nodes may learn the completed transition
+at different times; they cannot each install unrelated successors. Stale gateways
+need evidence/temporary failure handling, not automatic replacement voters.
+
+The tradeoff requiring maintainer intent is concrete: a mature high-ranking and
+locally synchronized newcomer may wait before its signatures count. If evidence
+is unavailable, an affected shard cannot simply invent a replacement electorate
+to continue FINAL writes. Preserve DEC-046's automatic safe progress requirement
+once enough honest participants and communication stabilize; no permanent partial-
+proposal stall is selected. Proposal rotation/recovery, precise inclusion/partial-
+conflict semantics, latest-context discovery and bounded retention remain to prove.
+An old-quorum signature alone is not the completed proof. Initial roster authority
+and temporal/admission bounds remain OPEN-02; do not re-ask the withdrawn common-
+genesis/domain question or silently select a global authorization-history scheme.
+The rule under consideration is a new joint-transition constraint, not a repetition
+of the already accepted local recovery/readiness gate.
+
+**Exact pending decision question — Q-S2.2-01:**
+
+> Sollen wir als Architekturregel ausarbeiten, dass Gossip und HRW weiterhin
+> lokal die Kandidaten bestimmen, ein Wechsel der mitzählenden Shard-Gruppe aber
+> einen geprüften Übergabenachweis der bisherigen Gruppe benötigt — mit 14 von
+> 20 Bestätigungen für dieselbe Nachfolge und den erhaltenen Zustand — und ein
+> neuer Knoten bis dahin trotz reifem Ticket und Datenabgleich noch nicht mitzählt?
+
+Recommended answer/direction: yes, investigate this jointly justified transition
+as the architectural constraint, accepting the stated availability/activation
+tradeoff. Free-form disagreement/constraints remain valid. Do not manufacture a
+second option that silently weakens the existing FINAL/fault requirements. This
+selects a direction only, not a finished algorithm, measured pause, dependency or
+production change. It does not select Q-S3.3-01 A/B or add a payment completion
+round; its original wording/meanings stay parked.
+
+After an answer, record the constraint (or reason for rejecting it), then specify
+one transition instance's signed fields, closure/inclusion/installation and safe
+round-recovery predicates under explicit participant assumptions. Evaluate known
+counterexamples before expanding simulations; no more median/global-view machinery
+without demonstrated need. No code/spec changes, model or test execution this turn.
+
+### 7.37 Correct the circular predecessor premise; start with actual network growth
+
+Record: S2.1-CLARIFICATION-002. Date: 2026-10-16 (Europe/Berlin).
+The maintainer objects that every node still has only its own view, so "the previous
+shard group" has not been defined. They point out the simpler N<=20 growth phase:
+every newcomer is added to the all-shard participant set instead of replacing a
+top-twenty member. This is a prerequisite challenge, not a yes/no answer to
+Q-S2.2-01 and not a request to replay the withdrawn genesis/domain choices.
+
+**Correction.** The assistant prematurely presented a conditional handoff sketch
+as decision-ready. Neither naming the old group nor collecting signatures from a
+locally selected group proves that the recipient should recognize that group.
+Withdraw Q-S2.2-01 as the next question, preserving its wording/history and
+unanswered status. The old-quorum transition remains a conditional research option,
+not a selected rule. Do not repeat it as a solution to its own missing premise.
+Move the sole active leaf to **S2.1**, participant justification at the actual
+19->20->21 growth/first-FINAL boundary. Return to S2.2 / §7.35 and conditional
+S3.3 / §7.34 after this prerequisite. Preserve the one growing network and existing
+N>=20 FINAL requirements; do not demand another threshold/domain preference answer.
+
+**Growth arithmetic, explicitly conditional.** With a fixed eligible universe of
+exactly twenty identities, two fourteen-vote sets intersect in at least eight;
+with twenty-one, at least seven; with twenty-two, at least six. Under at most six
+Byzantine identities across the compared votes and immutable common honest
+spend-slot exclusions, the first two cases force an honest common voter. A single
+replacement among a genuinely common twenty-one-identity universe is therefore
+not automatically unsafe. The prior two-newcomer counterexample uses twenty-two.
+Rechecked these bounded cardinality calculations this turn; no simulation/test.
+
+For nested nineteen- and twenty-member rosters, Q(19)=13 and Q(20)=14 give a
+minimum intersection of seven in their twenty-identity union. This does not decide
+PROVISIONAL revision, promotion of earlier provisional locks, or arbitrary
+small-network fault tolerance. N<20 retains PROVISIONAL; the current implementation
+also requires N>=20 stability hysteresis before FINAL. It is not correct to
+describe the twentieth discovery event as immediate unconditional FINAL.
+
+The real question is whether all simultaneously accepted voting sets remain
+within a sufficiently bounded identity universe OVER THE relevant interval, or
+whether a justified state/participant transition preserves safety when that
+universe changes. Nodes do not know the actual global N merely by counting local
+messages; a local twenty/ twenty-one view can coexist with undiscovered mature
+candidates. Twenty-four-hour incubation alone bounds neither concurrent admissions
+nor discovery delay, and repeated one-at-a-time changes do not establish cumulative
+safety. Do not replace the missing guarantee with an assumed global growth clock.
+
+**What would remove the circle (research alternatives, not selected).**
+One construction would make membership itself durable protocol state: a justified
+first FINAL participant/state checkpoint in the organically grown network, followed
+by independently verifiable, compatible membership changes and state continuity.
+Then "previous" means the participant list verified from that checkpoint/change
+evidence, not today's HRW result. There need be no permanently privileged founders
+or globally identical live discovery map. However, establishing that first checkpoint
+and distributing its recognition to nodes AND payment verifiers is an explicit
+bootstrap obligation, not solved by having a list sign itself. A chain starting
+with one self-signed key does not automatically provide six-Byzantine safety; an
+early compromised signer can fork such a chain unless further assumptions/rules
+exclude it. No genesis anchor/history design is thereby approved.
+
+A different construction could retain independently selected local lists but
+prove honest quorum intersection and preserved effects across every set clients
+are allowed to accept. §7.35 gives a conditional pairwise criterion, not an
+operational enforcement rule. Current gossip/incubation has no demonstrated bound
+that supplies it. These are ways to discharge the premise, not a new forced A/B
+choice or proof that globally identical membership is mathematically necessary.
+
+[Kuznetsov/Tonkikh §3.3–3.5](https://drops.dagstuhl.de/storage/00lipics/lipics-vol179-disc2020/LIPIcs.DISC.2020.27/LIPIcs.DISC.2020.27.pdf)
+separates verifiable/comparable configuration histories from transfer and permits
+temporarily differing current knowledge; that result depends on its configuration,
+quorum and temporal-key assumptions. [SCP §4.1 and reconfiguration discussion](https://stellar.org/papers/stellar-consensus-protocol.pdf)
+retains intersection requirements across local configurations. Neither authenticates
+an arbitrary self-declared first group. These comparisons support the prerequisite
+decomposition, not a ready HuMoCo construction.
+
+**Observed code and next action.** Rechecked `NetworkId` (Mainnet/Testnet label),
+`required_quorum` and the N>=20 stability/readiness gate. The known local roster
+selection is not a stored common first participant checkpoint. Next write out the
+19->20->21 trace and concurrent 21/22-admission variant: what evidence each signer
+and verifier has, how a first common accepted participant state can be justified,
+and which concrete bound/transition prevents incompatible descendants. Audit this
+against the already accepted PROVISIONAL/FINAL policy and §7.13's scope; do not
+smuggle in a trusted membership oracle or reopen glossary/threshold questions.
+No new human question during this clarification. Q-S3.3-01 remains parked with
+unchanged meanings. Design open; no production/spec change, model or test campaign.
+
+### 7.38 Growth evidence check and unknown-participant consensus applicability
+
+Record: S2.1-RESEARCH-003. Date: 2026-10-16 (Europe/Berlin).
+Maintainer: "gut wie weiter?" This authorizes continued investigation, not a choice
+of an initial anchor, a membership protocol or either parked question's options.
+S2.1 remains active; §7.37's correction and return points remain in force.
+
+**Executed bounded check, not a protocol simulation.** A small Python enumeration
+(`/tmp/humoco_growth_evidence_cp0027.py`, temporary research artifact) enumerated
+every first q-vote subset in a fixed identity universe. Byzantine IDs 0..5 may vote
+for both conflicting values; honest first-voters are excluded from the second
+value. For each first subset F, second subsets are counted exactly as
+`comb(n - len(F - faulty), q)` when the remaining universe has at least q members.
+No probability model, network scheduling engine or implementation is exercised.
+
+| Fixed universe | Votes required | First subsets enumerated | Ordered conflicting vote-set pairs |
+| --- | --- | --- | --- |
+| 20 | 14 | 38,760 | 0 |
+| 21 | 14 | 116,280 | 0 |
+| 22 | 14 | 319,770 | 12,870 |
+| 19 | 13 | 27,132 | 0 |
+
+The last row assumes one exclusive durable decision in an already justified common
+nineteen-member predecessor, not ordinary presence reports. The 22 row ranges over
+all fourteen-element sets of that universe; it is not the count for one fixed pair
+of HRW committees. These results confirm the cardinality argument, not dynamic
+safety, actual membership justification, progress or million-node performance.
+The script and its assertions were inspected; the execution result was reviewed.
+Its temporary path is not a durable dependency: method and witnesses are recorded here.
+
+**Concrete growth traces and evidence.**
+
+- Nested 19->20: q19=13 and q20=14 intersect in at least seven within a common
+  twenty-identity union. With at most six Byzantine identities and the same durable
+  exclusion slot, conflicting votes cannot both reach those thresholds. Earlier
+  PROVISIONAL revision/promotion and different small-network fault bounds remain
+  separate obligations. Twenty-four-hour FINAL stability hysteresis is retained.
+- Concurrent additions to a common nineteen P={B1..B6,H1..H13}: local views P+X
+  and P+Y each have twenty identities. A fourteen-signature roster report for X
+  can use B1..B6,H1..H7,X; one for Y can use B1..B6,H7..H13,Y. H7 can truthfully
+  report both discoveries. This is not equivocation unless an actual protocol
+  establishes an exclusive successor-decision slot. Conversely, this common
+  twenty-one-identity universe still prevents two conflicting fourteen-vote LOCK
+  decisions if honest nodes keep the same immutable slot choices. Different roster
+  reports alone are therefore neither a double-spend witness nor membership consensus.
+- Two replacements: C={B1..B6,H1..H14}; D={B1..B6,H3..H14,X,Y}.
+  X,Y first copy an empty slot. A then receives votes B1..B6,H1..H8 in C.
+  X,Y activate from their earlier copies; conflicting B receives
+  B1..B6,H9..H14,X,Y in D. Both have fourteen votes and only Byzantine double-voters.
+  Copy completion and individually valid tickets do not close that old-write race.
+- A node's received messages can be identical in a twenty-node execution and in
+  a twenty-two-node execution whose other mature tickets are delayed. A signature
+  proves who sent a statement; it does not prove absence of undiscovered members.
+  Local maturity timers, gossip convergence on typical graphs and social deterrence
+  do not by themselves establish the required universe/temporal bound.
+
+**Published route from partial knowledge; no universal founder requirement.**
+[On the Minimal Knowledge Required for Solving Stellar Consensus, ICDCS 2023,
+§III and §V](https://www.di.fc.ul.pt/~bessani/publications/icdcs23-stellar-cup.pdf)
+studies Consensus with Unknown Participants (CUP). Nodes initially know subsets,
+not a common full roster. Suitable knowledge-graph conditions permit discovery of
+a shared sink component and consensus; SCP alone needs additional knowledge beyond
+the minimum CUP conditions. The paper assumes a fixed participant set per consensus
+instance, a static adversary, unique Sybil-resistant identities, authenticated
+reliable channels and partial synchrony. Its knowledge graph is not the physical
+friendship/communication graph. This establishes that a manually agreed founder
+roster is not a universal mathematical necessity; it supplies no HuMoCo bootstrap.
+
+[Knowledge Connectivity Requirements for Solving BFT Consensus with Unknown
+Participants and Fault Threshold, extended version,
+§II–IV](https://arxiv.org/html/2405.06055v2) gives authenticated discovery and
+sink-identification protocols and a stronger graph model allowing an unknown fault
+threshold. Digital signatures simplify protocols but do not remove the knowledge
+requirements. Its known-f construction uses a bound for the participating discovery
+instance, not an independent bound in each subsequently selected shard. The
+unknown-f construction needs stronger structural assumptions. Neither result allows
+arbitrary disconnected local views to produce one guaranteed consensus outcome.
+
+**Applicability gate against HuMoCo — current result: no drop-in proof.**
+
+| Required by the compared construction | HuMoCo evidence / missing obligation |
+| --- | --- |
+| Suitable knowledge connectivity despite faulty participants | F2F admission and presence rules constrain who communicates; no matching cut/connectivity guarantee is established. A malicious discovery bridge may conceal an honest community. |
+| Fault/identity premise for that instance | Six Byzantine identities is a selected shard design target. It is not a global six-identity bound for million-node discovery; replaceable keys/tickets and human reputation do not prove Sybil resistance. |
+| Reliable authenticated communication between discovered participants | QUIC/TLS is relevant, but mutual learned-peer authorization can still refuse a peer learned only through protocol-carried lists. A discovery protocol cannot silently bypass the F2F barrier. |
+| Fixed participants/initial knowledge for an instance | Continuous discovery, local 24h timers, concurrent arrivals, removal and repeated turnover need an explicit mapping and proof. Freezing one's local list alone does not supply it. |
+| External acceptance of the outcome | Payment verifiers need a justified acceptance predicate too; node-to-node agreement alone does not authenticate an arbitrary claimed decision group to them. |
+
+Rechecked `network/manager.rs::shard_committee` (local maps/maturity and identity
+selection), `KnownNodeInfo` timers, and transport's learned-peer authorization.
+These do not implement the compared discovery/consensus construction. No claim
+that all live discovery maps must be identical, that CUP is impossible in every
+F2F network, or that six real-world attackers are enforced follows from this gate.
+
+**Technical disposition and next action.** Unrestricted own-view activation plus
+a completed copy is not a sufficient safety argument under DEC-044 and the growth
+cases above. A compatible-membership mechanism or an established intersection
+bound remains necessary for the accepted FINAL contract. A small separate operation
+for membership changes is a research recommendation, not a selected extra checkout
+round, global lock log, permanent founder role or new gossip stream.
+
+Next construct the first-FINAL admission/recognition contract: list exactly what a
+new node AND a payment verifier would verify, where the initial justification comes
+from, and how concurrent additions preserve compatibility. Compare partial-knowledge
+consensus premises with that contract rather than inserting an unnamed "old group."
+If an additional operational/trust/availability assumption is unavoidable for a
+concrete candidate, identify its effect and only then ask one genuine tradeoff
+question; do not replay §7.11–7.13's withdrawn threshold/domain choices. Simulation
+can falsify schedules and measure dissemination/cost after the predicates are
+explicit; empirical similarity cannot certify an unspecified safety premise.
+
+No new human question or protocol selection. Q-S2.2-01 stays withdrawn as the next
+question and unanswered; Q-S3.3-01 remains parked with its exact §7.16 meanings.
+DEC-001–052 unchanged. No production/spec edits, Rust/QUIC tests, benchmark,
+large simulation campaign, commit or PR. Design open.
+
+### 7.39 Autonomous design and simulation work authorized
+
+Record: S2-S3-SIMULATION-001. Date: 2026-10-16 (Europe/Berlin).
+Maintainer explicitly authorizes autonomous continuation until a solution is found,
+then writing its simulation, using subagents to retain the overall view. This
+extends the earlier interview-only scope to implementation and execution of an
+isolated research simulation. It does not authorize deployment, changing binding
+specifications/production protocol behavior, commits, or silently selecting either
+meaning of Q-S3.3-01. Conditional candidates may be implemented for evaluation.
+
+Delegated independent membership analysis, simulation inventory/implementation and
+adversarial handoff review. Initial findings refine the candidate: epoch-wide
+fence/drain; non-exclusive closure-inclusion endorsements; separate BFT agreement
+with publicly verifiable validity; durable installation before successor voting.
+A private own-inclusion rule inside BFT agreement can stall after a prepared value;
+this is an explicit adversarial regression, not a solved implementation claim.
+
+Implementation target: isolated Rust example and support modules under
+`crates/humoco-sim-core/examples/membership_handoff*`, no new dependencies or daemon
+changes. Include faulty-baseline witnesses, real progress gates, multiple full
+turnovers, durable ordering, replay/evidence checks and virtual capacity experiments.
+The first-recognition premise stays explicit. A recognized initial configuration
+fixture tests conditional handoff only and must not be reported as automatic
+first-FINAL discovery. Unknown-participant literature is being checked at executable
+predicate level; a paper citation alone supplies no admission oracle.
+
+Work in progress. Preserve DEC-001–052 and exact parked Q-S3.3-01, withdrawn
+Q-S2.2-01. Next complete the isolated candidate and independent review, execute
+bounded adversarial/seeded checks, record outcomes and any remaining impossibility
+or new assumptions rather than claiming an unconditional solution.
+
+### 7.40 Conditional membership/handoff candidate implemented and exercised
+
+Record: S2-S3-SIMULATION-002. Date: 2026-10-16 (Europe/Berlin).
+The maintainer repeats autonomous continuation until a solution, explicitly allowing
+subagents. No additional policy choice or A/B answer is implied. Produced an
+isolated executable candidate, not a production/spec change or unconditional FINAL
+proof. Detailed contract, argument, assumptions, source discrepancy and validation:
+[Membership/handoff research report](MEMBERSHIP_HANDOFF_RESEARCH.md). Executable:
+[`membership_handoff_model.rs`](../crates/humoco-sim-core/examples/membership_handoff_model.rs),
+with `bootstrap.rs`, `model.rs`, `lifecycle.rs`, and `capacity.rs` alongside it.
+No dependencies or production modules changed.
+
+**Independent work and corrections.** Three subagents investigated membership,
+simulator reuse/implementation and adversarial handoff review. The primary agent
+integrated and finished the model, including the actual first-FINAL bridge and
+additional finite lifecycle/capacity checks. Review uncovered private-inclusion
+BFT deadlock, fabricated closure-signature acceptance, mutable numeric value
+aliases, vacuous forged-prepare tests, missing prepared-value carryover, successor
+installation/context replay gaps and leaked global-monitor knowledge. The final
+model uses separate signature-emission provenance, immutable exact value bindings,
+explicit historical-proof delivery and monotone closed-epoch watermarks. These
+are model fixes, not evidence that equivalent daemon defenses were implemented.
+
+**Initial-admission candidate, explicitly conditional.** Authenticated immutable
+participant-detector rows define received issuers R and their named universe U.
+Require at least thirteen authenticated issuers, at most six missing rows in U,
+and authentic instance-participation evidence for every named identity. Verification
+sees only the supplied transcript, never actual global membership/fault sets.
+An additional premise is that the fixed correct bootstrap participants' effective
+knowledge graph is seven-vertex-connected and the instance contains at most six
+Byzantine eligible identities. Then an undiscovered correct participant would
+require a separator of at most six missing correct identities, contradicting the
+premise. U contains all correct instance participants; adaptive quorums in such
+universes have honest intersection and availability when h>=13. The arithmetic
+check covers h=13..64 and b=0..6. This stronger construction is our own research
+candidate, not a theorem/implementation imported from the CUP paper.
+
+The existing F2F policy DOES NOT establish that global graph/identity/fixed-instance
+premise. The model demonstrates different local admissible views outside it; this
+cannot be hidden behind matching digests, social deterrence or a successful seed
+run. General ongoing bootstrap admissions, heterogeneous live agreement electorates,
+late-observer recognition and full provisional merge semantics remain open. No
+manual founder privilege, initial trusted roster, changed twenty-node threshold or
+reduced guarantee is selected. The earlier circular predecessor question stays
+withdrawn. Its premise now has a concrete conditional research construction and
+an explicit unfulfilled integration gate.
+
+The model integrates local transcript verification, adaptive initial membership
+agreement, conservative provisional-choice import, existing full-score HRW
+selection of twenty voters, virtual twenty-four-hour stability, first fresh FINAL,
+and a full subsequent turnover for initial populations 20, 21 and 22. It does not
+promote old PROVISIONAL certificates into FINAL. Conflicting imported slots stay
+blocked; unaffected and consistent slots can complete without Byzantine assistance.
+These are bounded fixed-instance fixtures, not general dynamic bootstrap proof.
+
+**Primary-source finding.** The literal P3 in
+[Heydari et al. v2, Theorem 3 / Algorithm 2](https://arxiv.org/html/2405.06055v2)
+counts sources with exterior outgoing edges. In the complete-twenty/six-silent
+fixture every candidate available S1 has more than six such sources, so the printed
+predicate never returns a sink despite the fixture's strong correct connectivity.
+The model reproduces that narrow liveness discrepancy. No silent correction or
+claim that all CUP results are refuted. The report distinguishes this from the
+independent stronger candidate and cites the compared sources.
+
+**Handoff candidate and exact preservation claim.** Persist an epoch-wide fence,
+drain or cancel unreleased old decisions, obtain complete available state, and
+collect fourteen non-exclusive own/inherited-inclusion endorsements for the same
+state. This closure certificate is PUBLIC validity for a separate BFT successor
+agreement. Actual propose/prepare/commit and highest-prepared view-change messages
+select a successor/state; no omniscient winner selector is used. Each successor
+commits the verified payload before its vote; installation receipts bind context.
+A prospective old fourteen-vote certificate intersects closure endorsers in at
+least two honest inclusion witnesses. Eight honest fences leave only twelve old
+identities able to issue fresh old votes. Preserve inherited effects in every
+later transition; keep each reused identity's private exact choice separately.
+This does not recover every unavailable non-endorser's singleton. Competing
+partial payment effects may block their slot; unrelated slots continue. A late
+valid historical certificate is explicitly presented to selected recipients and
+may resolve transferred ambiguity without erasing any private own choice. The
+global safety monitor never informs node state. No lock gossip.
+
+The example explores the original one-payment-round A as a conditional candidate;
+Q-S3.3-01 is STILL unanswered with §7.16's original meanings. Exact bounded effect
+sets stand in for normalized BLOCKED/proven effects; TTL, actual signed encodings,
+rollback, dynamic ticket eligibility and temporal-key/late-compromise protection
+are not implemented. Fault identities are static in the model; six per configuration
+must hold throughout its evidence lifetime, not merely while currently active.
+No permanent founders or current-committee-only fault assumption is smuggled in.
+
+**Executed evidence.** Twelve example tests passed. Twelve handoff scenarios over
+seeds 1..128 produced 1,536 scenario executions / 4,036,608 abstract model steps.
+They include expected unsafe copy/activation, three full turnovers with six static
+faulty identities per generation, the two-A/twelve-B report split, withheld/late
+certificates, three-way conflicts, split and genuinely prepared-value recovery,
+forged/replayed/incomplete evidence, individual durable/install gates, overlapping
+membership and stale-epoch requests. Expected unsafe/stall variants must exhibit
+their failures for the regression check to pass; these counts do not imply safety
+for arbitrary schedules. The finite local lifecycle checker exhausts 34 reachable
+states / 56 edges and produces a seven-action counterexample for early snapshot.
+Agreement has seeded message scheduling; other distributed durable steps remain
+scripted. Exhausting a model bound is inconclusive/error, not progress proof.
+
+Fourteen bootstrap-study checks passed their explicitly stated expectations,
+including out-of-assumptions and literal-source counterexamples. Six virtual
+capacity/transfer checks use 1k/10k offered records/s, bounded admission, snapshot
+plus contiguous source changes and final drain. At configured 10k ingress / 5k
+transfer records/s, the remaining 125k records cause roughly 25 seconds of pause.
+No node-throughput/crypto/disk/network benchmark or deployment SLA is inferred.
+Live-offset pagination mutation reproduces an omitted live record.
+
+`cargo test --workspace` passed after sandbox escalation enabled existing loopback
+QUIC tests; the first restricted attempt failed to bind sockets. This run preceded
+final isolated-model refinements, covered by final example tests and
+`cargo clippy --workspace --all-targets -- -D warnings`, which passed. Existing wire
+tests do not verify this new unimplemented protocol. No production/spec edits,
+commit or PR. Full validation detail and reproduction commands are in the report.
+
+**Disposition and next work.** There is now a concrete conditional design and
+executable adversarial simulation. S2.1 remains the sole active prerequisite:
+justify/adopt the initial-admission premise or discharge it with another compatible
+mechanism, and complete dynamic bootstrap/late-verifier acceptance. Do not claim
+unconditional solvability under arbitrary subjective F2F views. Return to S2.2,
+S3.3's original choice and remaining wire/canonical/TTL/recovery design gates before
+production implementation. Do not repeat withdrawn threshold/anchor or glossary
+questions. DEC-001–052 remain unchanged.
+
+### 7.41 Operational verdict for the planned decentralized deployment
+
+Record: S2-S3-ASSESSMENT-001. Date: 2026-10-16 (Europe/Berlin).
+Maintainer asks for a direct answer: does this actually work robustly and stably in
+the intended decentralized deployment? This is an assessment request, not a new
+protocol selection or an answer to either parked/withdrawn question.
+
+**Verdict:** the currently planned complete system cannot be rated robust enough
+for reliable irreversible FINAL payment acceptance. The original unrestricted
+local-view activation has a concrete conflicting-certificate counterexample; that
+is stronger evidence than merely lacking production benchmarks. The new handoff
+is a useful conditional research candidate, not a demonstrated end-to-end remedy.
+
+Separate the conclusions:
+
+- Safety: local ticket maturity plus completed state copy does not prevent the
+  modeled twenty-two-identity double-FINAL schedule. Conditional closure/inclusion/
+  agreement/installation addresses that race within justified configurations.
+- Membership/initial recognition: the first-admission construction needs additional
+  fixed-instance, identity/fault and strong knowledge-connectivity premises not
+  provided by current F2F rules. Human reputation does not establish them.
+  Continuous bootstrap and independently joining late verifiers remain unproved.
+- Availability/progress: worst-case six Byzantine members may all withhold. A
+  single additional unavailable correct member leaves only thirteen responsive
+  correct members in a twenty-node shard, insufficient for fourteen. Thus a
+  six-Byzantine safety target does not additionally guarantee progress through
+  arbitrary honest churn/partitions. The handoff progress premise requires the
+  corresponding correct quorums and state available after stabilization. Genuine
+  unresolved payment conflicts may still block their affected slots by DEC-023.
+- Capacity: configured virtual 1k/10k arrival rates are not measurements of real
+  signature verification, disk commits, network queues or large/churning meshes.
+  Passing the finite model and existing workspace tests cannot establish a
+  deployment throughput, acceptable pause distribution or real robustness rate.
+
+No production/payment-system readiness recommendation follows. Preserve the
+potential of the candidate without presenting model success as demonstrated
+robustness of the actual planned network. The decision-relevant next gate is an
+implementable, justified membership/late-verifier contract under explicit viable
+assumptions, followed by end-to-end adversarial implementation and measured load/
+churn validation. This assessment introduces no new user question, assumption
+adoption, changed quorum, FINAL revocation or Q-S3.3-01 selection.
+
+### 7.42 Autonomous robustness research brief prepared
+
+Record: S2-S3-RESEARCH-BRIEF-001. Date: 2026-10-16 (Europe/Berlin).
+Maintainer requests a precise executable prompt for an agent to research existing
+solutions online, investigate the blockers to a real robustness verdict, develop
+solutions, simulate/test them and determine what changes are necessary. This turn
+creates the brief; it does not execute the new research assignment.
+
+Created [decentralized robustness research prompt](../prompts/decentralized_robustness_research.md)
+and indexed it in `prompts/README.md`. It preserves the current interview evidence,
+DEC-001–052 and original Q-S3.3-01 meanings; requires autonomous lead/subagent work,
+primary-source verification, exact node/verifier knowledge, explicit enforceable
+assumptions, end-to-end candidates, adversarial simulation and measured versus
+configured-rate evidence. It prohibits hiding first membership in an oracle,
+assuming a stronger graph without realization, confusing convergence with FINAL,
+adding nonresponse tolerances independently, and treating green sampled tests as
+proof or actual deployment readiness. Necessary changes to accepted requirements
+must be concrete proposals with evidence, not silently selected policy.
+
+The brief defines outcomes, evidence/claim tracking, realistic failure and scale
+scenarios, reproduction artifacts, independent review, minimal workable alternatives
+when requirements conflict, and persistence/restart discipline. It authorizes
+research prototypes/harnesses when invoked, without silently deploying or changing
+binding specifications/production behavior. Source discrepancies and current model
+claims must be independently checked. The actual research cursor stays S2.1;
+first-admission and late-verifier acceptance remain unresolved. No new human
+question or protocol choice. No simulation or Rust tests were run for this prompt
+creation; readback/link/preservation/whitespace checks are appropriate.
+
+### 7.43 Decentralized robustness research execution
+
+Record: S2-S3-RESEARCH-EXECUTION-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer explicitly invoked the research brief, requested the current
+interview state and subagents, and authorized autonomous work to a defensible
+result. Starting checkpoint CP-0031 was consistent. Existing uncommitted model,
+notes, state and prompt work is preserved. Three independent agents investigate
+membership/late verification, adversarial safety and measured execution costs.
+
+Active leaf remains S2.1. Initial falsifiable claim: local mature-ticket activation
+and an empty pre-copy admit two conflicting fourteen-vote outcomes in the exact
+22-identity growing-network schedule. The broader blocker is compatible first and
+late verifier recognition. A recipient-configured checkpoint with certified
+successors is investigated as an explicit additional premise/proposal, never as
+an adopted policy or proof that present F2F establishes membership. The new
+[robustness research report](DECENTRALIZED_ROBUSTNESS_RESEARCH.md) holds stable
+R-01–R-12 claim IDs, evidence and continuation. No production changes, specification
+rewrite, deployment, commit or PR is authorized by this work. DEC-001–052 and exact
+unanswered Q-S3.3-01 remain unchanged. Findings and results will be appended here
+before the next checkpoint; this entry records execution in progress.
+
+### 7.44 Decentralized robustness result and tested minimum alternative
+
+Record: S2-S3-ROBUSTNESS-RESULT-001. Date: 2026-10-16 (Europe/Berlin).
+Research assignment executed with three disjoint agents, primary-source reads,
+independent attacks, isolated executable models and measured real QUIC/storage.
+The [focused report](DECENTRALIZED_ROBUSTNESS_RESEARCH.md) owns R-01–R-12,
+assumption/enforcement and scenario-coverage tables, sources, proposed protocol,
+measured costs, reproducible commands and exact integration gaps. Subreports and
+machine-readable manifests live under `docs/research/`.
+
+**Decisive result:** automatic first FINAL from an arbitrary subjective mature
+local set is incompatible with irreversible globally compatible payment acceptance
+on the allowed F2F discovery cuts. The new 39-identity witness uses one organically
+grown network and just one Byzantine bridge. Each hidden nineteen-honest-node
+community knows itself plus the bridge and can form a genuine fourteen-signer
+certificate for a conflicting owner-authorized spend. The bridge alone double-
+signs. Its local transcripts match a legitimate twenty-node world until decision;
+waiting a fixed 24-hour interval cannot detect the hidden side before stabilization.
+The independent exact 22-identity newcomer/copy-before-A race is also reproduced.
+This is a counterexample under permitted discovery conditions, not a universal
+impossibility theorem for CUP or stronger externally established graph premises.
+The printed CUP v2 source-count P3 discrepancy was independently rechecked against
+all fifteen relevant available-row subsets; it is a narrow predicate finding.
+
+**Minimum investigated proposal:** operator-authenticated exact checkpoint bytes
+from its own authenticated setup/provisioning/in-person established installation,
+followed by certified admitted catalogs/configurations, public closure/inclusion,
+BFT successor agreement and durable individual installation. F2F presence supplies
+candidates, never self-authorizing votes. No permanent founder must remain; every
+original member can be replaced. Late recipients start from their own approved
+manifest and verify exact descendant/state/closure/commit/install/payment proofs.
+The pure recipient predicate receives no harness membership/fault map. This is an
+explicit additional onboarding/admission trust rule, not a selected common root,
+not a self-signed list disguised as authority, and not an accepted product change.
+
+The executed security envelope requires <=6 adversarial signing identities per
+historical configuration throughout retained evidence use, fourteen responsive
+correct old/successor members with required state, eventual authorized learned-
+peer communication and nonrollback durable own choices. Current tickets/F2F do
+not enforce that key/fault bound. Fourteen recovered retired epoch secrets really
+forge history; present-time correctness or fresh labels alone does not prevent
+it. Forward-secure/erasure retirement remains a separate unimplemented proposal,
+with backup/rollback and final-old-signature ordering costs explicit. Checkpoint
+refresh is not a substitute for preserving live old exclusion effects.
+
+**Executed evidence:** original handoff campaign rerun on additive model changes:
+seeds1..128, 1,536 scenarios / 4,036,608 abstract steps; all original twelve example
+tests passed. New composed campaign: 128 seeds, 1,000,960 scheduled events,
+3,072 checks, three full replacements and four honest-only payments per seed,
+plus44 recognition/unsafe predicates; fourteen tests passed. This composes actual
+model closure/BFT/install/payment outputs with genuine Ed25519 verification.
+It retains ideal message authentication and scripted atomic durability; no real
+membership wire implementation is claimed. Lead review required the pure anchored
+recipient entry point and actual negative tests, including a missing individual
+installation receipt despite a valid fourteen-receipt aggregate.
+
+Independent attacks enumerate38,760 closure subsets, retain minority/inherited
+conflicts, reproduce private-validity prepared deadlock and long-range mutants.
+The new source-transfer verifier has eighteen predicate checks and three tests.
+Independent review exposed `install -> crash -> complete -> install` reusing an
+old cursor with empty volatile staging. Resetting cursor/root with staging fixes
+that regression and retains the previous installed exclusion; a second agent
+reviewed the fix. A genuinely re-signed omitted source stream still passes source
+cryptography, explicitly demonstrating the separate distributed inclusion gate.
+
+Exact production-HRW-score census over all65,536 shards at N100/10 attackers finds
+25 shards above the target six; at N1000/100 attackers it finds131, including13
+with at least eight. These deterministic research tickets are not Argon2-verified
+eligibility or empirical network probabilities. Hypergeometric sensitivity and
+ideal usable-ticket grinding show why a low global fraction, incubation and a
+single active ticket are not a per-shard fault guarantee. TTL16 connected-ring/
+chain and withheld-bridge counterexamples expose discovery limits even under
+optimistic perfect all-edge delivery; local observation times differ.
+
+**Measured execution:** isolated real QUIC/Ed25519/redb Immediate prototype,
+queue64/batch32, three3-second repeats. Offered1k/s yields998.7–999.1 useful/s and
+p99 5.01–6.77ms. Offered10k/s yields2908–5552 useful/s with saturation; no stable
+10k hot-replica result. Adding25ms per storage batch lowers10k offered to950–1116
+useful/s. Twenty distinct keys/endpoints/databases complete5/5 low-load checkouts
+with20 or14 responders;13 gets0/5 by800ms. Six withholding Byzantine plus one
+unavailable correct member therefore cannot progress. Arithmetic minimum for
+that extra fault margin is21 voters/q14; it violates selected max20 and is only
+an unadopted consequence/proposal. Aggregate network throughput and hot-replica
+throughput remain distinct. Million compact catalog rows use96MB and a favorable
+single-shard scan about149ms; no million-node all-pairs simulation or deployment
+SLA. Handoff latency, real loss/bandwidth/jitter, powercuts, rollback and erasure
+remain explicitly unmeasured. Real probe receiver tests reject exact malformed/
+tampered/context/conflict cases and demonstrate capacity refusals, not absent
+candidate membership/fence/quota/F2F defenses.
+
+**Project checks:** workspace504 passed/0 failed/11 existing ignored tests; strict
+workspace all-targets clippy passed, with final changed examples separately
+retested. Normal sandbox forbids UDP sockets; authorized loopback execution passed.
+Whole-workspace formatting has pre-existing differences and was not rewritten;
+new examples formatted, whitespace/links/source hashes and preservation read back.
+No production/specification/manifest change, commit, PR or deployment.
+
+**Disposition:** the research establishes a specific incompatibility and a tested
+conditional alternative with explicit operational costs. It does not approve
+payment deployment or close all implementation obligations. S2.1 remains the sole
+active leaf, now at the concrete recognition/admission policy gate; no question
+is asked or answered by inference. The next decision must address this researched
+onboarding/control-plane tradeoff, then return to S2.2, original Q-S3.3-01 and
+resource/durability/wire integration. Preserve DEC-001–052, N>=20/14-of20/800ms,
+original unanswered Q-S3.3-01 A/B meanings and withdrawn Q-S2.2-01 status. A broader
+six-plus-one outage guarantee cannot be promised without changing max20 or another
+explicit requirement. No glossary/threshold/network-domain re-interview.
+
+### 7.45 Project implications and alternative registry architectures
+
+Record: S2-S3-PROJECT-IMPLICATIONS-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer asks whether the project works as planned, what must change and
+whether a fundamentally different Collision Lock Registry architecture exists.
+This requests explanation/comparison; it does not select checkpoint trust,
+federated admission, SCP, an external chain or a new payment-round policy.
+
+Answer: the current complete architecture cannot justify irreversible payment
+FINAL under the allowed adversarial discovery/growth schedules. The registry
+purpose remains implementable. Blind parent-to-child records, client custody,
+origin TTL, bounded queues, QUIC and storage can remain useful components without
+claiming each is fully audited. The major required change is counted membership
+and its safe state/key succession, not a tuning fix or proof that signatures are
+mathematically invalid. A genuine signature authenticates a key's statement; it
+does not by itself establish the key's authority in a globally compatible voting
+configuration. Every spend slot needs compatible exclusion decisions across time;
+independent spends do not inherently need one global total transaction order.
+
+Concrete architecture classes and costs:
+
+- Recognized BFT notary/registry: explicitly authenticate initial voting authority,
+  use certified admissions, established round recovery and fenced state transfer.
+  This is closest to the tested alternative and preserves blind data/no deposits.
+  It introduces onboarding trust and an admission control plane; the historical
+  fault/key bound remains an external operating assumption. Fast ordinary spends
+  can remain separate from membership agreement. Do not claim an implemented
+  or proven one-round HuMoCo design merely because a known engine is available.
+- Federated Byzantine agreement: personal trust/quorum choices as in SCP. This is
+  a real decentralized alternative, but needs honest quorum intersection and
+  explicit trust configuration. Arbitrary F2F friends/HRW views do not supply that
+  property. It changes counting and likely the fixed 14/20 architecture.
+- External consensus service/ledger: delegate the authoritative consumed-output
+  decision (or a separately specified sufficient admission/control protocol) to
+  a verifiable existing consensus system. A blind registry can expose only the
+  necessary opaque identifiers/proofs, but metadata/privacy must be assessed.
+  Import that system's actual finality, availability, cost and trust assumptions.
+  Recording an arbitrary later hash does not retroactively prevent double FINAL.
+- Single authoritative operator is an engineering baseline with explicit operator
+  trust, rather than a solution satisfying the decentralized product objective.
+
+Recommendation is a project judgment, not a selected decision: preserve the blind
+registry purpose and useful implementation, simplify/replace the membership and
+consensus safety design using an established recognized-group model before
+expanding organic sharding. If explicit admission trust is unacceptable, compare
+FBA and an external consensus security basis as deliberate larger changes; do not
+promise that another algorithm removes all trust/adversary assumptions.
+
+Primary sources rechecked on 2026-10-16:
+[SCP §3–4](https://stellar.org/papers/stellar-consensus-protocol.pdf),
+[Sui Lutris §2.4/4.2–4.3](https://docs.sui.io/paper/sui-lutris.pdf),
+[Kuznetsov/Tonkikh §2–3.5 and Appendix C](https://arxiv.org/html/2005.13499v2),
+[Bitcoin §2–5/11](https://bitcoin.org/bitcoin.pdf). SCP's honest-intersection
+condition, Lutris's recognized committee/epoch handoff and stake assumption,
+reconfiguration's given initial authority and Bitcoin's computational/probabilistic
+security are distinct premises, not interchangeable HuMoCo guarantees. No stake
+is silently imported into blind L2; no public network product is recommended
+without a concrete fit analysis. No new tests or production edits are necessary
+for this explanation. DEC-001–052 and original questions remain unchanged.
+Active leaf remains S2.1; next action is the researched admission/trust tradeoff,
+with the concrete alternatives now explained. No new decision question asked.
+
+### 7.46 Maintainer-directed trust-premise and blind-spot audit
+
+Record: S2.1-TRUST-PREMISE-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer suspects a simple omitted premise and emphasizes that the network
+is built through human trust, rather than arbitrary growth. They ask how to find
+that blind spot. This steers the next prerequisite within S2.1 toward fidelity of
+the intended social admission model before selecting an alternative architecture.
+No prior counterexample is erased and no stronger trust rule is inferred.
+
+Read Spec07 §2/2.1, Spec01, current F2F key registration and shard_committee paths.
+[Trust audit](research/robustness_trust_blind_spot.md),
+[executable finite checks](research/robustness_trust_audit.py) and
+[results](research/robustness_trust_audit.json) record the comparison.
+Concrete finding: the specification requires meaningful personal/reciprocal/
+existing-community checks, but also says one friend suffices for worldwide
+activation. Configured NodePubKeys already anchor local friend identity. The
+examined committee selector counts local learned mature identities; it does not
+verify a transferable human-vetting/delegation predicate. The intended scope of
+trust across this step is the active unknown. This is not an assertion that all
+social admission is useless or that a new externally issued anchor is necessary.
+
+The bridge fixture models no human performing the qualitative diversity check.
+It therefore refutes the precise modeled activation assumptions, not every
+possible intended social admission procedure. A stricter intended rule must be
+identified concretely and replayed, not invented as a reason to dismiss an attack.
+Finite audit shows even minimum nineteen reciprocal friends per identity allows
+the 39-identity bridge-only intersection; minimum degree is not correct-graph
+connectivity. A separate all-honest weak-handoff mutant with eight newcomers
+reproduces fourteen A/fourteen B without honest double-signing when empty pre-A
+copy is followed by activation without final cutoff. This isolates protocol
+ordering from personal honesty. No real-wire defense or full human model claim.
+
+Working method: reconstruct actual named-human startup/admission actions; identify
+which exact honest rule each attack would violate and using what received/local
+evidence; formalize only the smallest justified predicate; replay safety and
+successful growth/turnover; independently attack colluding introducers, distinct
+operator versus machine counts, delays and compromise. Existing friend identity,
+reliance on a node's statement and authorization to introduce further voters are
+different possible semantics. Signed bounded admission endorsements are an
+unselected hypothesis; no transitive guilt, hearsay ban, deposit or new gossip
+stream is approved. Preserve separate durability/temporal-key obligations.
+
+Clarification **Q-S2.1-TRUST-01**, sent asynchronously during source review;
+exact wording preserved here (ID assigned on durable save):
+
+> Welche Zusage bedeutet eine F2F-Freundschaft für dich konkret: „Ich kenne diesen Betreiber“, „ich vertraue seinen Bestätigungen“ oder zusätzlich „ich stehe für die von ihm aufgenommenen weiteren Betreiber ein“? Beschreibe gern mit einem Beispiel, was ein ehrlicher Betreiber vor einer Aufnahme tatsächlich prüfen muss.
+
+Status at save: clarification pending, no answer or policy selection inferred.
+This question does not imply financial liability or punishment of an endorser;
+its wording asks the scope of social endorsement. Original Q-S3.3-01 meanings and
+withdrawn Q-S2.2-01 status remain unchanged. DEC-001–052 unchanged. Active S2.1;
+return to recognition/admission architecture choice only after this premise audit.
+No production/specification edit or new Rust/workspace test campaign. Python
+finite checks, local links/source hash/preservation/readback checked.
+
+### 7.47 Clarified recursive operator trust; investigation stopped
+
+Record: S2.1-TRUST-CLARIFICATION-002. Date: 2026-10-16 (Europe/Berlin).
+The maintainer asks to end the investigation and give only a short statement of
+promising directions. Their clarification answers Q-S2.1-TRUST-01: an operator
+adds nodes whose operators they believe will keep the intended code unchanged,
+operate reliably and themselves select similarly trustworthy friends, recursively.
+This is a meaningful intended social admission model and operator belief, not
+proof of unmodified execution, a guarantee of zero Byzantine faults or an accepted
+unlimited delegation rule. It creates no financial liability, transitive guilt,
+automatic ban, measured failure probability or selected protocol change.
+
+Stop further investigation now. Suggested future direction, only: make existing
+recursive operator trust explicit in a small F2F admission/delegation contract;
+examine what an introducer attests, what other nodes can verify, and how the
+influence of a mistaken or compromised friend is bounded. Federated trust/quorum
+models are a useful comparison, not an adopted SCP replacement. Preserve the
+independent requirement for safe durable state/member succession even when
+operators are honest. No new experiments, source search or production edits.
+
+Clarification Q-S2.1-TRUST-01 is answered at the intent level; exact executable
+endorsement/delegation rules remain unselected. Q-S3.3-01 remains unanswered and
+Q-S2.2-01 remains withdrawn as the next question. DEC-001–052 preserved. S2.1
+remains the saved focus; resume further work only on a later maintainer request.
+
+### 7.48 Focused trust-network blind-spot research prompt prepared
+
+Record: S2.1-TRUST-RESEARCH-BRIEF-001. Date: 2026-10-16 (Europe/Berlin).
+The maintainer requests a prompt for a future AI investigation into the clarified
+recursive operator-trust direction and practical whole-system robustness. This
+turn prepares the prompt; it does not resume the stopped investigation.
+
+Created [trust_network_blind_spot_research.md](../prompts/trust_network_blind_spot_research.md)
+and indexed it in the prompt README. It starts from §7.47's intended-code,
+reliability and recursively careful friendship premise. It requires mapping human
+intent/spec/operator actions/local evidence/code/model, checking the admissibility
+of prior counterexamples under actual human admission, seeking an existing or
+minimal missing mechanism first, primary-source research and independent agents.
+It preserves calibrated social premises without pretending acquaintance proves
+honesty, key independence, runtime integrity, graph connectivity or stable state.
+
+The future assignment authorizes isolated research models/prototypes and real
+execution measurements when explicitly invoked, not production deployment or
+specification rewriting. It requires successful growth/full-turnover/late-recipient
+and recovery paths, negative mutants, bounded resources, practical operator costs,
+wire defense tests and measured-versus-assumed evidence. A positive result is not
+predetermined; an unresolved in-envelope double FINAL excludes a safety approval.
+A field-robustness claim must disclose unmeasured human behavior and its concrete
+validation gap. No blanket algorithm/anchor/FBA choice or smaller attacker assumed.
+
+The planned output is `docs/TRUST_NETWORK_BLIND_SPOT_RESEARCH.md`, stable T-claims,
+runnable artifacts/results, operating conditions and a clear verdict. Latest
+consistent checkpoint and original decisions/questions must be resumed. DEC-001–052,
+answered Q-S2.1-TRUST-01 intent, parked Q-S3.3-01 and withdrawn Q-S2.2-01 unchanged.
+Validation is document readback, local links/content gates/preservation and
+whitespace only; no experiments or source behavior changes performed here.
+
+### 7.49 Bounded review of the Certified Epoch Handoff proposal
+
+Record: S2-S3-CEH-REVIEW-001. Date: 2026-10-16 (Europe/Berlin).
+Maintainer supplies [CERTIFIED_EPOCH_HANDOFF_PLAN.md](CERTIFIED_EPOCH_HANDOFF_PLAN.md)
+and asks whether it solves the problem. This authorizes review of that proposal;
+it does not invoke the future trust-research prompt, resume a broad experiment
+campaign, adopt the proposal or select Q-S3.3-01. The proposed plan was not edited.
+
+**Verdict:** a sound architectural direction for recognized authority, but the
+current v1.0.0 text is not a complete safe/live handoff specification. Its "Resolved"
+labels and liveness theorem overstate what its actual steps establish.
+
+**What it addresses.** §4.1 line135 introduces authenticated out-of-band approval
+of an exact genesis/checkpoint anchor. Given that independently established
+reference, a verifier can derive the predecessor roster from the validated chain;
+today's local gossip view no longer defines voting authority. This removes the
+circular predecessor premise WITHIN that recognized network. Fourteen signatures
+from the manifest's own claimed roster do not themselves authenticate the initial
+reference, select a globally unique genesis, guarantee honest participants or
+establish that every operator was provisioned consistently. Recognition must apply
+to nodes/gateways as well as payment recipients. No permanent founders are necessary.
+This is explicit onboarding trust proposed by the document, not proof that original
+unconstrained subjective activation was sufficient and not an adopted user policy.
+
+**P1 — Successor sign-once is not recoverable BFT agreement (§4.3 lines173–189;
+§5 Theorem3 lines244–250).** A permitted execution has six Byzantine members withholding endorsements
+and fourteen responsive honest members. A Byzantine proposer sends proposal
+X to eight honest nodes and Y to six (e.g. different locally matching roots). Those honest nodes fence and durably sign
+once for E+1. Neither proposal reaches fourteen; their immutable choices prevent
+later convergence even after communication stabilizes. A failed rank-one proposer
+has no specified failover either. Safety of two competing certificates within a
+fixed roster follows from the intersection arithmetic, but progress does not.
+Define rounds, phase/instance-scoped signing rules and safe prepared-evidence
+carryover; resetting sign-once or choosing another proposer alone is insufficient.
+[PBFT §4.4](https://www.usenix.org/legacy/publications/library/proceedings/osdi99/full_papers/castro/castro_html/node4.html)
+is the checked primary reference for known-roster view change; its recovery
+machinery does not itself provide closure validity or unknown membership.
+
+**P1 — No construction of the common closed state (§4.3 lines178–206).**
+Different honest replicas can have different valid partial lock/own-choice sets.
+Literal equality of the proposed root with each local root does not reconcile
+these sets. A union root may differ from every initial local root; forcing equality
+can stall despite available honest members. Quorum intersection proves preservation
+only when the common available payload is actually validated for inclusion of the
+signer's own AND inherited exclusions, including released votes without a stored
+full payment certificate. "All active locks" must specify those effects. An
+individual released binding vote must not be reclassified as nonbinding merely
+because a fourteen-vote aggregate is absent (§2 line30).
+Use the prior researched separation: durable proposal-independent fence/drain,
+non-exclusive closure-inclusion certificate, then publicly valid successor BFT
+agreement. Reintroducing private inclusion validity on every later agreement vote
+also reproduces §7.40's prepared-value deadlock; equality cannot simply be replaced
+with an unqualified per-voter private inclusion veto.
+
+**P1 — Durable fence/drain/install ordering incomplete (lines179,201–210).**
+The proposer computes a root before other members finish closing pending writes.
+Specify the final source endpoints after all endorsed effects are closed. An
+800ms timeout cannot prove disk commits finished: on expiry, preserve or safely
+cancel pending operations and withhold the transition endorsement as necessary.
+Persist the fence and inherited state/readiness atomically as appropriate; merely
+installing into RamIndex (line193) gives no crash/restart safety argument. An old
+pre-fence durable vote may arrive after closure and must remain covered. These are
+required ordering contracts, not a finding that every possible implementation of
+the current underspecified prose necessarily violates safety.
+
+**P1 — Epoch-history pruning/checkpoint authorization is unsound as stated
+(§2 line38; §6 lines258–264).** An old certificate is also an authority link for
+later configurations and newly created vouchers. Expiry of its former voucher
+records does not remove that verification dependency. Deleting intermediate hash
+links breaks a genesis-to-current proof. A Merkle branch against a gateway-published
+root proves inclusion in that root, not that the root is an authorized checkpoint.
+Require a concrete independently trusted refreshed checkpoint/policy, an adequate
+certified compaction proof or retained necessary lineage, including cold/offline
+recipient behavior. One shared epoch certificate also has no single root TTL;
+its retention cannot be inferred from an unspecified voucher maximum.
+
+**P1/P2 — Remaining security/integration premises.** EpochPubKey fields alone do
+not specify genesis epoch-key bindings, exact vote verification keys, safe old-key
+retirement/erasure, backup/rollback handling or protection against later compromise
+of retired signing quorums. Either explicitly maintain the historical lifetime
+fault bound or supply the temporal-key design; a current-committee-only bound is
+insufficient. Likewise "HRW rank correct" and ticket age need one agreed proposal
+input/eligibility contract; differing live discovery/maturity views are not an
+objective shared catalog merely because a successor certificate exists. The six-
+fault target is still assumed, not established by admission or signature validity.
+
+**Performance/claim corrections.** Durable redb acknowledgment is on the described
+payment path; the entire path is not RAM-only and a CAS timing does not imply a
+<5ms processing bound. This also conflicts with the interview's selected removal
+of that rigid target. A fenced shard pauses writes during transition; doing work
+in a background task does not erase that pause. <=6 total faulty/unavailable
+members plus communication/round/state prerequisites is different from six
+Byzantine members plus another outage. The 14/20 intersection bound, not CAP alone,
+explains why thirteen replies cannot satisfy the chosen quorum.
+
+**Next disposition.** Keep the explicit recognized-anchor/certified-succession
+architecture as a candidate. Revise the closure/recovery/pruning/key/eligibility
+contracts and replay the existing corresponding mutants before marking them
+resolved. No automatic anchor acceptance, new payment round, alternate quorum,
+production edit or new test execution. The broad recursive-trust investigation
+remains stopped; this bounded proposal review is complete. DEC-001–052, original
+Q-S3.3-01 wording/options and other pending/withdrawn statuses are preserved.
+
+### 7.50 Review CEH v1.1.0: improvements and remaining prepared-state trap
+
+Record: S2-S3-CEH-REVIEW-002. Date: 2026-10-16 (Europe/Berlin).
+Maintainer asks to inspect the updated [CEH plan](CERTIFIED_EPOCH_HANDOFF_PLAN.md),
+now version 1.1.0. Bounded proposal review only; no adoption, plan edit, broad trust
+research resumption or new test campaign. Preserve all original decisions/questions.
+
+**Progress compared with v1.0.0.** The text now includes PREPARE/COMMIT rounds,
+proposer rotation, prepared-proof carryover, missing-obligation reconciliation,
+durable fence/installation and explicitly operator-authenticated recent checkpoints
+for cold recipients. These directly address the earlier concerns. Recognized
+anchor/lineage remains a sound conditional authority architecture. A genuinely
+approved recent checkpoint can replace deleted genesis prefixes for newly
+provisioned recipients. It does not authenticate itself via a remote boolean.
+
+**P1 — Public prepared validity versus repeated private inclusion remains
+underspecified and admits a stalled execution (lines159–194,218–227).**
+Eight honest members and six Byzantine members can issue fourteen PREPAREs for P,
+while six other honest members have genuine own obligations missing from P and
+refuse its phase-one validation. Deliver the prepared proof to the eight honest
+supporters; Byzantine members withhold COMMIT. On round change, the highest
+prepared rule carries P. If the new round repeats the written phase-one own-
+inclusion check, the six omitted honest members still refuse P; extending P
+changes its locked value. Only eight honest votes remain despite all fourteen
+honest members being connected. The theorem's step2 (split proposals cannot
+produce fourteen prepares) is false: eight honest plus six Byzantine suffice.
+
+The diagram's phase-two validation could be intended to accept a valid prepared
+certificate publicly without requiring personal phase-one inclusion. If so, that
+exception and recovery path must be explicit, especially after a round change:
+may a replica that refused PREPARE still commit based on a prior prepared proof,
+and how does the new proposer resume without requiring fresh private inclusion?
+Do not claim every conceivable completion of this sketch deadlocks; the literal
+repeated phase-one path permits it, so "deadlock-free" has not been established.
+Minimal requirement: certified inclusion is PUBLIC validity for agreement/recovery;
+private own decisions remain locally immutable even if their singleton effects
+were not in the selected closure. A separate non-exclusive closure certificate is
+one already researched construction. Missing/inherited conflict effects and genuine
+late full certificates must keep their §7.40/7.44 semantics.
+
+**P1 — Fixed five-second rounds do not establish partially synchronous progress
+(lines192,222–227).** GST means eventual finite delay, not an established five-
+second upper bound for message/state/commit processing. Specify adaptive growing
+timeouts and round catch-up, or an explicit sufficient measured/assumed bound.
+The next proposer must present fourteen authenticated round-change reports and a
+checkable highest-prepared selection FROM THOSE reports; an unknowable global
+highest proof is not an executable rule. Phase/round/slot signing domains must
+also distinguish legitimate PREPARE/COMMIT and independent payment slots.
+[PBFT §4.4–4.5.2](https://www.usenix.org/legacy/publications/library/proceedings/osdi99/full_papers/castro/castro_html/node4.html)
+was rechecked: explicit new-view evidence validation and increasing timeouts are
+part of the compared recovery mechanism, not supplied by a proposer rotation label.
+
+**P1 — Old admitted writes and transferable effects still need exact closure
+ordering.** v1.1 persists the admission fence and installation, improving crash
+safety, but does not state the final drain/cancel boundary for already admitted
+writes before the endorsed snapshot. Prohibit later unrepresented vote release.
+Define own/inherited bindings without requiring a stored full payment certificate;
+clarify how a union containing conflicting choices becomes a conservative blocked
+effect rather than overwriting one entry or making the whole transition invalid.
+Atomic install/readiness and restart checks must remain explicit.
+
+**New scope conflict: one-year voucher maximum (§2 line39; §6 line247).**
+`humoco-sim-core/src/storage.rs` lines7–18 currently permits eleven years through
+`MAX_LOCK_TTL_YEARS=11`, consistently with the previously inspected ingress tests.
+Reducing this to one year changes accepted voucher validity/product compatibility;
+it is not implied by approval of a bounded certificate cache. No such requirement
+change is selected here. Certificate proof retention/checkpoint refresh and live
+own/inherited exclusion retention are distinct concerns; the latter must last
+until the authentic root expires plus grace. Explicitly cover an existing terminal
+returning after its last verified head has fallen outside the available history,
+not only a newly installed terminal. A trusted moving window boundary/refresh
+policy is needed. The checkpoint trust direction itself is now materially improved.
+
+**P2 — Self-contained candidate proofs do not establish global HRW completeness
+(lines182–185).** Twenty valid identity/ticket/endorsement bundles authenticate
+those candidates. They do not prove absence of a higher-ranked omitted identity or
+which maturity/first-observation statement others should accept. Define ranking
+against a certified common proposal catalog/cutoff, or explicitly authorize the
+agreed successor set with HRW as proposal generation. There is no need to demand
+identical live discovery caches. The permitted introducer, ticket replacement and
+maturity attestation predicate remains to specify; a timestamp alone does not
+prove twenty-four-hour network observation.
+
+**P2 — Resource arithmetic and latency remain overstated.** With 32-byte Ed25519
+identity and epoch keys, the declared two twenty-key arrays use1,280 bytes. Fourteen
+(NodePubKey,Signature) tuples use1,344 bytes, and fixed fields use78 bytes:2,702
+bytes before vector/framing overhead, about2.7kB rather than1.5kB. At one committed
+transition/day this is roughly1MB per shard/year, not550kB total. State/root/proof
+payload and failed-round logs are additional. The <5ms SLA still counts batch
+enqueue while invariant2.4 requires durable completion before releasing the vote;
+those have different latency semantics. Prior measured costs are not a guarantee.
+Historical epoch-key binding/retirement, late compromise and rollback remain
+unresolved from v1.0.0; merely retaining the epoch-key field does not resolve them.
+
+**Disposition.** v1.1 is a better foundation and resolves some previous omissions,
+but the claim that all six ledger items are resolved is premature. Correct the
+prepared/private-validity recovery path, adaptive timing and closure contracts;
+resolve the unapproved one-year change and specify checkpoint/eligibility/key
+semantics before safety/liveness approval. No new A/B choice or experiment result.
+The broad investigation remains stopped; this requested version review is complete.
+
+### 7.51 Review CEH v1.2.0: public prepared validity improved, closure and recovery still conditional
+
+Record: S2-S3-CEH-REVIEW-003. Date: 2026-10-16 (Europe/Berlin).
+Maintainer requests another bounded assessment of the current
+[CEH plan](CERTIFIED_EPOCH_HANDOFF_PLAN.md), version 1.2.0. This is review only;
+the plan's new specification/baseline label is not architecture adoption. Broad
+recursive-trust research remains stopped. No proposal/production edits or tests.
+
+**Verdict and actual improvements.** Recognized starting authority plus certified
+succession remains a viable conditional architecture. The earlier eight-honest/
+six-Byzantine prepared/private-veto scenario is now explicitly addressed (§4.3
+rule3): honest replicas may accept the prepared value without repeating private
+inclusion vetoes, while retaining their own choices. Do not report this particular
+omission as unchanged. The eleven-year voucher maximum is restored and the raw
+certificate calculation corrected to approximately2.7kB. These are substantive
+repairs. They do not establish the document's unconditional "Resolved" or
+deadlock-free claims, nor replace the fault/admission and historical-key premises.
+
+**P1 — Capped backoff contradicts the stated liveness proof (§4.3 lines189–193;
+§5 lines218–228).** T(r)=min(2*2^r seconds,60seconds) never exceeds60seconds.
+Partial synchrony supplies an eventual finite delay, not a bound below30seconds.
+For example, with a stabilized one-way delay of40seconds, T(r)>2*Delta is never
+reached; a schedule can keep votes arriving after their round has expired. The
+proof and diagram silently use an uncapped formula instead. Require an eventually
+sufficient timeout/round synchronizer, or explicitly narrow the operational timing
+assumption and retain safe stalled behavior beyond it. State-transfer and durable
+processing time also belong in the required interval. Reaching an honest proposer
+within seven consecutive leaders does not itself synchronize fourteen replicas.
+
+**P1 — A collection deadline is not a write-completion barrier (§4.3 lines171–173).**
+Waiting800ms and flushing currently submitted disk work does not establish that
+every previously admitted handler/job finished or was irrevocably canceled. A
+paused admitted job can resume after the flush/snapshot; gateway timeout does not
+cancel a server-side decision. The claimed no-race property needs an explicit
+admission fence plus drain/cancel accounting, followed by the final durable state
+and snapshot. If a drain budget expires, remain fenced/not-ready rather than
+endorse an incomplete closure. Include shard-direct lock RPC admission, not only
+the gateway's POST route. This is a missing executable ordering contract; a proper
+barrier can satisfy it without relying on every old node being available.
+
+**P1 — Public validity needs safe round-change evidence, not unconditional
+acceptance of any prepared proof (§4.3 lines147,157,186,190).** Define authenticated
+NEW_VIEW evidence (fourteen reports in this model), the highest permitted prepared
+value within that report set, current-round checks and safe lock carryover. A
+delayed proof from an older round must not blindly "force Commit" after a later
+decision. Specify exact phase/instance/round signing domains; PREPARE and COMMIT
+for the same proposal are legitimate distinct signatures. The same-round sign-once
+rule and quorum arithmetic alone do not prove unique successors across rounds.
+The cited algorithm's concrete recovery machinery matters:
+[PBFT §4.4–4.5.2](https://www.usenix.org/legacy/publications/library/proceedings/osdi99/full_papers/castro/castro_html/node4.html),
+rechecked for this review. Its proof is not automatically a proof of this sketch.
+Theorem2 step2 is still false as written (eight honest plus six Byzantine can
+prepare despite a split), although step6 now explicitly handles that case.
+
+**State-transfer semantics (§4.3 rule3b).** The intersection argument can preserve
+every possible old fourteen-vote payment certificate if honest preparers verify
+inclusion of all safety-relevant own AND inherited effects after the completed
+fence, even without holding the payment aggregate. Define that predicate and the
+available authenticated payload. It does not imply that every unreachable
+singleton choice is globally present. Keeping a private omitted lock only on a
+retired node, then forwarding it after successor activation, does not by itself
+make the slot globally blocked. Separate immutable local own-choice retention,
+certified inherited exclusions, genuine partial-conflict BLOCKED effects and late
+full-certificate handling. Do not invent a requirement to contact all twenty old
+nodes. "Retain them permanently" contradicts root-valid-until plus30s expiry;
+retain necessary effects until justified expiry instead. Original Q-S3.3-01 stays
+unanswered; this review selects neither payment-round alternative.
+
+**Remaining bounded integration gaps.** The preceding-epoch catalog reference
+improves the HRW basis, but twenty ticket bundles plus rejection on a locally known
+omission proof do not establish catalog completeness. Define the committed catalog
+root/cutoff/update and verifiable selection, or explicitly make HRW proposal
+generation for an agreed eligible set. Identical live discovery caches are not
+required. Existing/checkpointed recipients also need a refresh rule before deleting
+authority links they still depend on; recent trusted cold checkpoints are a valid
+direction. Epoch-key bindings, retirement/rollback and later compromise of historical
+quorums remain unspecified. A current-committee fault bound alone does not cover
+old signing-key compromise. The enqueue-only <5ms calculation still omits the
+mandatory durable acknowledgment before a binding vote is released.
+
+**Resource scope correction (§1.2 line26; §6).** Approximately10.8MB is PER SHARD
+at daily transitions over the stated4015-day window. Keeping independent histories
+for all65536 shards would be approximately710GB before payloads, indexes and failed
+round logs. This matters at N=20 where every node serves all shards, or for a
+verifier configured to retain every shard's history; it is not a claim that every
+terminal must retain every shard. Shared/batched certificate structures or newer
+trusted checkpoints can change costs, but are not described here. Bounded history
+can be O(1) in network age without being one small constant-cost verification.
+
+**Disposition and next gate.** Retain CEH as a concrete architecture/prototype
+candidate. Repair the timer/drain/view-change predicates and explicit obligation
+semantics, then map this exact version into an executable state machine and replay
+the existing adversarial cases before calling it verified. Do not start that
+implementation or a broad campaign from this review request alone. No new human
+decision is needed for these technical corrections. DEC-001–052 and all exact
+pending/withdrawn question meanings are preserved.
+
+### 7.52 Review CEH v1.3.0: improved recovery, unsafe abort inference and incomplete client authority proof
+
+Record: S2-S3-CEH-REVIEW-004. Date: 2026-10-16 (Europe/Berlin).
+Maintainer asks to assess the current [CEH plan](CERTIFIED_EPOCH_HANDOFF_PLAN.md),
+now version 1.3.0. Bounded review, preserving the stopped broad investigation and
+all existing policy/question states. No plan or production edits, new simulation,
+benchmark or test execution. Findings below are static protocol reasoning.
+
+**Verdict and progress.** The certified-succession architecture remains a viable
+conditional prototype basis, not yet a complete verified deployment design.
+Uncapped timeout growth repairs the specific sixty-second-cap defect. Fourteen
+signed round-change reports, independently checked highest-prepared selection
+and a NewViewCertificate materially improve recovery. The write counter is a
+useful barrier ingredient; explicit successor UNRESOLVED_CONFLICT representation
+and root-expiry retention improve the transfer discussion. On-demand caching can
+reduce terminal persistence. Credit these changes; do not repeat the earlier
+absence of growing timeouts or new-view evidence as if unchanged. The audit ledger
+now distinguishes specification from empirical verification, but assertions called
+formalized are still prose, not an executed formal model or established proof.
+
+**P1 — Forced timeout abort does not discharge a binding write (§4.3 lines212–217).**
+The new rule forcefully terminates a write after800ms, marks RAM aborted and
+decrements the counter. A gateway deadline is not a local transaction deadline:
+the durable choice may already exist or its signature may have escaped, and an
+ongoing persistence job may still complete after the request task is canceled.
+Neither fact may be erased by a RAM abort marker. Require atomic fencing versus
+admission/counter acquisition on every shard-write RPC path; count actual owned
+work through durable completion or demonstrably irrevocable pre-decision cancel.
+Release the counter only once no unrepresented decision/signature can appear.
+Already committed/released choices remain in the closure and immutable own-choice
+table. If that cannot be established within a drain budget, stay fenced/not-ready.
+Merely forcing the counter to zero does not prove a completed drain. The current
+POST-only description also misses the separate shard-direct receiving boundary.
+
+**P1 — New on-demand client tier omits the authority dependency (§4.2 lines154–165).**
+Checking fourteen receipt signatures against the roster in the attached current
+EpochCertificate proves internal consistency, not recognition by the trusted
+network. That certificate is signed by its predecessor; its predecessor roster
+must itself be authenticated back to the terminal's trusted checkpoint/anchor.
+A cold cache therefore needs the missing chain, or a verifiable membership proof
+against a sufficiently current authenticated checkpoint root. An LRU cache of
+current certificates does not create that proof. An attacker-supplied roster plus
+its own genuine signatures is the simple counterexample if the described two
+checks are treated as complete. §4.1's track-forward rule is compatible with a
+correct on-demand implementation, but §4.2 must explicitly require and cost the
+missing proof rather than imply2.7kB alone authenticates any current committee.
+Statistical HRW plausibility is diagnostic only; it cannot independently authorize
+FINAL. The diagram's Mode A/B wording and separate Tier2 need that restriction.
+A deliberately trusted local gateway is an explicit different verification policy,
+not zero-trust client verification. No such policy is selected by this review.
+
+**P1/P2 — A node cannot know a lock never reached quorum (§4.3 lines229–231).**
+Concrete permitted history: eight honest nodes sign A, the other six honest nodes
+sign B, and six Byzantine members additionally send A signatures only to a gateway.
+The gateway holds A's authentic fourteen-vote receipt, while the honest source
+records visible during transfer show eight A choices and six B choices. No honest
+node double-signed. The same visible honest records are possible when those six
+Byzantine A votes never existed. Thus the successor cannot infer "neither reached
+14" from the observed partial counts. Both effects may conservatively block the
+slot pending evidence; a later genuine A receipt must be re-evaluated under the
+selected sufficient-support policy, not categorically ignored until expiry.
+The new until-expiry blanket statement lacks this late-evidence path. Also define
+which verified conflict effects must be in the certified payload BEFORE readiness;
+optional reporting after activation is insufficient for obligations promised by
+the closure. Preserve expiry relative to the authentic root, including grace.
+This does not require collecting all twenty old nodes or settling Q-S3.3-01.
+
+**Remaining proof and integration limits.** NewViewCertificate is progress, but
+the executable round synchronizer, stale-message gating, phase/slot/network/shard
+signing domains, durable lock rules and safe state availability still need exact
+predicates. Increasing local timeout lengths alone does not prove sufficient
+overlap in one round. The reviewed primary reference specifies those recovery
+mechanisms explicitly:
+[PBFT §4.4–4.5.2](https://www.usenix.org/legacy/publications/library/proceedings/osdi99/full_papers/castro/castro_html/node4.html).
+Theorem2 step2 remains false (a split can still yield eight honest plus six
+Byzantine prepares); the later prepared-case branch must replace that assertion.
+The committed candidate catalog/completeness contract, historical epoch-key
+bindings/retirement/compromise and checkpoint refresh before history pruning
+remain open from §7.51. The <5ms enqueue-only SLA still does not measure durable
+vote release. These are carried obligations, not newly discovered impossibility.
+
+**Resource scope.** Terminal LRU caching is a legitimate storage optimization;
+it does not eliminate chain retrieval/verification cost. Assigned-shard storage
+uses approximately20/N of all shards: at N=20 every member is still assigned all
+65536 shards, so the stated daily eleven-year independent histories still total
+approximately710GB per such node if retained for that whole interval. The ledger's
+claim that a terminal stores only its voucher shard's10.8MB also contradicts the
+main text's multi-shard ephemeral cache description. Shared history/checkpoint
+compaction would need its own concrete proof and cost contract.
+
+**Next gate.** Correct the forced-abort semantics, require authenticated client
+lineage, and define partial/late-certificate transfer behavior. Then validate this
+exact state machine with adversarial scheduling/crash/replay cases before claiming
+safe and robust operation. Simulation is evidence, not a substitute for proving
+the stated safety assumptions. No new preference question or protocol selection
+is necessary for these technical findings. DEC-001–052 and the original unanswered
+Q-S3.3-01 remain unchanged; broad trust research remains stopped.
+
+### 7.53 Review CEH v1.4.0: prior fixes credited, new retention and unified-mode contracts incomplete
+
+Record: S2-S3-CEH-REVIEW-005. Date: 2026-10-16 (Europe/Berlin).
+Maintainer requests assessment of the current [CEH plan](CERTIFIED_EPOCH_HANDOFF_PLAN.md),
+version 1.4.0. Bounded review only. The document's proposed Phase8 freeze does not
+constitute maintainer approval, architecture adoption or execution authorization.
+Broad trust research stays stopped; DEC-001–052 and exact questions are preserved.
+
+**Verdict and credited repairs.** The previous three highlighted defects are now
+addressed at architectural intent level: committed/released votes survive gateway
+timeouts and the counter tracks real storage work; FINAL requires an authenticated
+epoch-to-anchor/checkpoint chain; a valid late predecessor certificate may resolve
+a partial conflict. Do not repeat forced abort, standalone roster verification or
+unconditional until-expiry conflict retention as if still prescribed. Atomic
+admission fencing across shard-direct writes, crash/replay details and exact
+closure validity remain implementation/proof obligations. CEH is a plausible
+conditional prototype basis; the new storage rules are not yet a complete safe
+retention/compression protocol. This review finds specific gaps, not impossibility
+of certified succession or of bounded certificate storage.
+
+**P1 — Thirty-day pruning must preserve old-evidence authorization (§2 line43;
+§4.3 line233; §6 lines303–305).** The separation of voucher lifetime from certificate
+cache lifetime is legitimate in principle. However, checkpoints must explicitly
+preserve the dependencies that the new late-certificate rule needs. Example: at
+day0 an authorized old committee produces A's fourteen-vote receipt, held by a
+client; successors retain a partial conflict. Certificates are pruned after30days.
+At day60, a fresh successor or terminal trusted only from a recent checkpoint
+receives A's still-live receipt. Its fourteen public-key signatures cannot alone
+prove membership in the day0 authorized committee. A root authenticating only
+current rosters does not prove historical membership. Define preserved per-slot
+authorization context, a client-carried historical authority proof recognized from
+the retained trust basis, or adequate authenticated checkpoint commitments/proofs.
+Also cover a verifier returning after more than30days. Do not assume a checkpoint
+label automatically supplies either proof availability or backward verification.
+The existing structures provide no such contract. This is a carried dependency
+made concrete by the newly shortened retention window, not a demand to retain
+all historical chains everywhere for eleven years.
+
+**P1/P2 — Unified manifests need a defined commitment; N<=40 changes membership
+policy (§4.1 lines111–113; §6 lines297–302).** At N=20 the same identities can serve
+all shards, so batching is useful. Nevertheless the declared EpochCertificate
+contains shard_id and closed_state_root: certificates for different shards are
+not identical even when the signer roster matches. A unified certificate needs
+an authenticated mapping/commitment (for example a Merkle root over shard-bound
+closure and successor data), a canonical signed format, leaf proofs and durable
+activation/transfer rules. Reusing the old2.7kB count alone does not specify this.
+At N=21..40, per-shard HRW top20 sets generally differ. Assigning all shards one
+common pioneer committee changes eligibility/work distribution and the existing
+N>=20 sharding policy; it is not merely certificate deduplication and is not
+approved by this review. The executive summary says N<=20 while the detailed
+rules say N<=40. Prefer investigating proof batching compatible with the existing
+membership rule before constructing a second small-network regime. This is a
+technical recommendation, not a selected replacement protocol.
+
+**P2 — The under150MB total-node bound is false (§1.2 line27; §6; ledger row4).**
+Using the plan's own approximate2700byte certificate and30daily certificates per
+shard gives81000bytes/shard. Bounded arithmetic evaluated this review:
+
+| Network size | Mean assigned shards, 20*65536/N | Thirty-day certificate bytes/node |
+| --- | ---: | ---: |
+| 41 | 31968.78 | 2589471220 (approximately2.59GB) |
+| 100 | 13107.20 | 1061683200 (approximately1.06GB) |
+| 1000 | 1310.72 | 106168320 (approximately106MB) |
+
+The all-shard figure is5308416000bytes, matching the document's own5.3GB worst
+case. HRW's20/N fraction is an average, not a deterministic per-node upper bound.
+These numbers cover certificate bodies only: live eleven-year lock state, payloads,
+proofs, indexes and recovery logs are additional. One shared daily certificate
+uses985500bytes/year for one logical history; twenty replicated copies use
+19710000physical bytes/year, so "across the entire network" must not be used for
+the single-copy size. Thirty days also does not imply thirty certificates without
+an enforced one-transition/day bound. Updated triggers now say ranks-shift routine
+windows. Separate actual byte/epoch cadence assumptions from hard bounds.
+
+**Carried proof gates and next action.** Historical key compromise/retirement,
+candidate-catalog commitment/completeness, inherited effect inclusion, safe
+new-view/current-round gating and round synchronization remain open from §7.52.
+Theorem2 step2 still incorrectly says a split cannot produce fourteen PREPAREs;
+eight honest plus six Byzantine suffice. The enqueue-only <5ms claim still omits
+the mandatory durable vote acknowledgment. Do not confuse these carried gaps with
+new experiments or evidence that the three repaired requirements remain absent.
+Before freezing this as a complete simulation specification, define checkpoint
+history coverage and unified-manifest semantics, preserve existing sharding unless
+explicitly changed, and replace the storage cap with scoped measured/derived
+figures. Then test the exact state machine, including day60 late receipt and
+20->21 / 40->41 transitions. No simulation was run in this review; only the printed
+bounded resource arithmetic was evaluated. No new preference question is required.
+
+### 7.54 Cross-interview risk priority: central handoff problem versus other critical gates
+
+Record: ARCH-RISK-ASSESSMENT-001. Date: 2026-10-17 (Europe/Berlin).
+Maintainer asks whether the problem just discussed was the most critical and
+whether the remaining interview items are less uncertain/critical. Reviewed the
+compact state, decision/open/gap registers, §7.3/7.41/7.44 and §7.49–7.53, plus
+the robustness report's evidence ledger, operating envelope and delivery gates.
+The current proposal has independently advanced to CEH v1.5.0; this is a bounded
+cross-interview assessment, not a full new version review or implementation run.
+
+**Direct answer.** Justified membership and safe preservation across committee
+turnover were the largest foundational architecture blocker. R-01/R-02 establish
+actual conflicting-FINAL executions under the investigated original rules, not
+merely untested performance or a missing cache optimization. Authenticated authority
+and certified turnover provide a plausible conditional way forward; related
+bounded models demonstrate important cases, not a delivered whole-system proof.
+The latest certificate-storage debate is a subproblem of historical verification
+and live-obligation continuity, not the original entire blocker. Some remaining
+items are more conventional engineering, but several remain equally consequential
+to security. Probability/effort/completeness cannot be inferred from this ranking.
+
+| Priority/class | Interview/result references | Remaining consequence and evidence limit |
+| --- | --- | --- |
+| Fundamental safety: recognized membership, correct closure/inclusion, unique successor and individual durable install | OPEN-01/02/03/09; R-01/02/03/04/09/11 | Incompatible FINAL or lost exclusions if wrong. Concrete original attacks; conditional alternative tested; current CEH not proved end-to-end. |
+| Critical security premise: per-shard adversary bound and historical key security | OPEN-02/13; S1/S6; R-05/07 | F2F/tickets do not establish <=6 hostile identities in each relevant committee. Later compromise of fourteen retired secrets reproduced authentic forged history. A current-committee-only bound is insufficient. |
+| Critical implementation: durable own choices, crash/loss/rollback gate, safe expiry/time | OPEN-09/10/11; O1/O2/O3; R-09/12 | Losing an issued vote or deleting its exclusion early can enable conflicting signing. Requirements selected, exact production integration and abrupt-failure/rollback validation incomplete. |
+| Critical acceptance: genuine signatures, recognized roster, exact intent/slot/root and FINAL/PROVISIONAL distinction at every client consumer | OPEN-04/05/06/13; GAP-03/04; §7.3 | A correct shard protocol cannot protect a recipient accepting an invalid or provisional proof. Prior static core findings are dated observations, not a fresh audit proving the same code is unchanged today. CEH describes intent, not completed shared-library rollout. |
+| Operationally critical availability/capacity | OPEN-07/08/09; R-06/08/10 | Six withholding plus one additional correct outage leaves thirteen replies, so14/20 stops. Safe refusal avoids false FINAL but can still make payments unusable. Real local probes do not establish multi-host/churn/high-load robustness. |
+| Usually downstream tuning/operations | Parts of OPEN-07/08/12; O4/O5/O6 | Exact retry intervals, cache sizes, metrics, packaging and latency targets are generally bounded engineering once safety semantics are fixed. Administration authentication and receiver-side resource limits remain security relevant; the entire operations branch is not low priority. |
+
+**Interpretation of existing results.** The robustness report records positive
+recognized-alternative models (128 seeds,3072 composed checks and multiple full
+turnovers), deliberate negative mutants and real QUIC/storage measurements. These
+establish feasibility evidence for scoped mechanisms and explicit failures of
+others. They do not validate the full current CEH plan, actual human/F2F attacker
+distribution, repeated old-key compromise or production integration. Workspace
+tests passing in the earlier campaign do not implement missing certified-control-
+plane protections. No completion percentage or low residual-risk probability is
+justified. Full specification/interface/invariant coverage remains OPEN-14.
+
+**New consequential proposal noticed, not adopted.** CEH v1.5.0 §2.5 and §4.3 rule3
+limit late receipt redemption to30days and leave unredeemed conflicts blocked
+until voucher expiry. In the §7.52 eight-honest-A/six-honest-B plus six hidden
+Byzantine-A-votes history, a legitimate old fourteen-vote receipt presented on
+day60 would therefore no longer clear the conflict. This can preserve no-double-
+spend safety while denying continued use of an already confirmed, still-live
+voucher. It is an additional product/security-availability tradeoff against the
+chosen continuity direction DEC-045, not merely a shorter certificate cache and
+not approval inferred from this question. The executive assertion that certified
+payments can "always" be redeemed must be qualified accordingly. Settled-state
+carryover can legitimately summarize old evidence once correctly authenticated;
+that does not resolve the separate hidden-certificate conflict case. No A/B choice,
+new cutoff, FINAL revocation or Q-S3.3-01 answer is selected.
+
+**Recommended priority.** Establish the full membership/closure/retention contract
+with explicit fault/key premises; verify exact client acceptance and durable
+restart/install behavior against it; then measure availability and catch-up under
+adversarial wire/load/churn conditions. Peripheral tuning follows those gates.
+This ordering is an assessment recommendation, not authorization to restart the
+stopped broad research campaign or make production changes. No new test/model
+execution, deployment or new policy question; DEC-001–052 and original question
+meanings preserved. S2.1 remains the saved active prerequisite.
+
 ## 8. Historical continuation summary
 
 This pre-workflow continuation text is preserved for context. The compact state
@@ -2901,3 +4930,393 @@ readback, whitespace, vocabulary IDs, links/anchors, Rust non-comment and Markdo
 Rust-example comparisons against the pre-edit working tree. No tests/commit/PR.
 
 Completed checkpoint: **CP-0017**.
+
+### CP-0018 — Resume handoff analysis without changing the pending choice
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded S3.3-INVESTIGATION-001 / §7.29: bounded current-code inspection, the
+in-flight vote/closure race, conditional old-quorum fencing and inclusion bounds,
+the two-A/twelve-B report counterexample, late-certificate preservation and durable
+successor activation obligations. Rechecked the PBFT and Sui Lutris primary papers;
+their different assumptions are retained. Findings are conditional research, not
+an accepted handoff algorithm, completed proof or implementation.
+Updated OPEN-01/03 and the pending-question index. The sole active leaf is S3.3;
+Q-S3.3-01 is still unanswered and will be presented with §7.16's original wording
+and A/B meanings. DEC-001–052 remain unchanged; no glossary question is reopened.
+Validation: readback, checkpoint/ID/option and local-link checks, compact-state line
+count and `git diff --check`. No production edits, Rust/QUIC tests, commit or PR.
+
+Completed checkpoint: **CP-0018**.
+
+### CP-0019 — Correct authority wording and explain the local-view safety gap
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded the maintainer's clarification request and S3.3-CLARIFICATION-001 / §7.30.
+Distinguished local signing/query selection from compatibility of confirmations
+accepted toward FINAL. Corrected the presentation of coordinated writing authority
+as if already selected; no central grantor or globally identical ranking is assumed.
+Reused §7.9's two-replacement, six-Byzantine schedule with explicit honest-voter
+counts. S3.3 remains active with S2 as dependency. Explain before asking again;
+Q-S3.3-01 is unanswered and unchanged. DEC-001–052 are preserved.
+Validation: readback, original-question/decision-register preservation, compact-state
+line count and `git diff --check`. No production edits or tests, commit or PR.
+
+Completed checkpoint: **CP-0019**.
+
+### CP-0020 — Research reconciliation and define the model-first work package
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded S3.3-RESEARCH-002 / §7.31: transfer options, authenticated snapshot/range
+coverage requirements, primary-system comparisons and the conditional paused-handoff
+candidate. Defined model state/events, safety and progress properties, adversarial
+schedules, non-vacuity checks and later Rust/real-QUIC/benchmark gates. Inspected
+existing digest/pagination and scripted handoff tests, including a scoped fixture
+coverage warning. No procedure is approved or proved by these observations.
+Updated OPEN-03/09 and the resume cursor; S3.3 stays active. No new maintainer
+decision or A/B answer inferred; DEC-001–052 and Q-S3.3-01 meanings preserved.
+Validation: readback, checkpoint/question/register checks, local link paths,
+compact-state length and `git diff --check`. No model/test/benchmark execution,
+production implementation, commit or PR.
+
+Completed checkpoint: **CP-0020**.
+
+### CP-0021 — Research online snapshot/delta transfer under sustained writes
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded S3.3-RESEARCH-003 / §7.32: PostgreSQL snapshot/change-stream pattern,
+etcd non-voting catch-up and BFT-SMaRt collaborative checkpoint/log transfer;
+checked their ordering/fault assumptions. Explained why request timestamps do not
+close old writes, shard replicas can serve preparation data without gateway fanout,
+and bounded delta replay/activation needs a justified endpoint. Inspected redb's
+existing stable-read primitive and the live offset-pagination gap. Recorded the
+conditional catch-up capacity inequality and additional model/benchmark obligations.
+Updated OPEN-03/09 and the cursor. S3.3 remains active; DEC-001–052 and the exact
+unanswered Q-S3.3-01 are preserved. No new logging subsystem or algorithm selected.
+Validation: readback, checkpoint/question/register/link checks, compact-state line
+count and `git diff --check`. No production edits, simulation/model/test/benchmark
+execution, commit or PR.
+
+Completed checkpoint: **CP-0021**.
+
+### CP-0022 — Clarify QUIC loss recovery and the duplicate-request proposal
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded C3-N4-RESEARCH-001 / §7.33: reliable Quinn stream path, correct conditional
+p-squared/p-cubed arithmetic, correlated failures and receipt/commit distinctions.
+Retained DEC-027's one application attempt and DEC-009/042's same-intent bounded
+retry; no three-send policy, post-quorum repair queue or extra checkout load selected.
+Recorded real-QUIC fault/duplicate-accounting validation obligations. This is a
+bounded interjection; S3.3 / §7.32 remains the sole active architectural focus.
+DEC-001–052 and Q-S3.3-01 wording/options are preserved; no A/B answer inferred.
+Validation: readback, checkpoint/question/register/local-link checks, compact-state
+line count and `git diff --check`. No test/model/benchmark execution, production
+implementation, commit or PR.
+
+Completed checkpoint: **CP-0022**.
+
+### CP-0023 — Assess solvability and separate repair from signer activation
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded S3.3-DESIGN-001 / §7.34: synchronization is conditionally tractable, but
+HuMoCo's safe dynamic turnover is not yet proved or delivered. Defined separate
+continuing-repair and successor-activation acceptance contracts, including the
+source-local snapshot/delta endpoint relation. Identified membership, obligation
+inclusion/partial conflicts and transition recovery as explicit missing model
+predicates. No automatic all-node-equality condition or new protocol selection.
+S3.3 stays active. DEC-001–052 and the original unanswered Q-S3.3-01 are preserved.
+Validation: readback, checkpoint/question/register/local-link checks, compact-state
+length and `git diff --check`. No production edits, model/test/benchmark execution,
+commit or PR.
+
+Completed checkpoint: **CP-0023**.
+
+### CP-0024 — Investigate subjective-view robustness before adding common views
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded the maintainer's successive steering as S2.2-RESEARCH-001 / §7.35:
+median/compact gossip considered, then priority placed on theoretical/research
+analysis of the own-view baseline. Single active focus moves to S2.2 because it
+is a prerequisite; S3.3 returns at §7.34 with Q-S3.3-01 parked and unchanged.
+Consulted SWIM, T-Man, partial-view correctness, Rateless IBLT and SCP primary
+sources, keeping their assumptions explicit. Executed only bounded set/arithmetic
+checks; derived the conditional k-12 quorum-intersection bound and raw descriptor
+sizes. Inspected local maturity/selection and limits of existing gossip tests.
+Recorded targeted overlap/acceptance/cost metrics rather than assuming global
+coverage proves safety. No new accepted policy, changed guarantee, production
+implementation or simulation/test campaign.
+Validation: readback, checkpoint/question/register/link checks, compact-state
+length and `git diff --check`; no commit or PR.
+
+Completed checkpoint: **CP-0024**.
+
+### CP-0025 — Recommend a joint shard transition and record the F2F tradeoff
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded S2.2-RECOMMENDATION-001 / §7.36: unrestricted local activation is not a
+valid safety justification under the already chosen fault target. Researched
+SybilLimit/social-graph assumptions and preserved F2F's practical deterrence while
+distinguishing it from fault/intersection guarantees. Prepared exact Q-S2.2-01:
+local discovery with predecessor-quorum-certified changes and a waiting newcomer.
+This asks about the concrete joint-transition/availability constraint; it neither
+replays the withdrawn bootstrap question nor selects a payment round. No answer
+yet. Q-S3.3-01 remains parked and unchanged; DEC-001–052 are preserved.
+Validation: readback, checkpoint/question/register/link checks, compact-state
+length and `git diff --check`. No production edits, model/test campaign, commit or PR.
+
+Completed checkpoint: **CP-0025**.
+
+### CP-0026 — Withdraw the premature transition question and resolve its premise
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded S2.1-CLARIFICATION-002 / §7.37 and the maintainer's objection to an
+undefined "previous group." Q-S2.2-01 remains unanswered and is withdrawn as the
+next question; its exact proposal is preserved. Corrected the recommendation's
+premature decision-ready status. Active focus moves to S2.1 at the first FINAL/
+19->20->21 growth boundary; S2.2 and S3.3 retain return points. Rechecked the
+20/21/22 universe bounds and recorded why incremental growth helps but does not
+itself establish compatible authority/history. No anchor, founder trust or
+reduced guarantee is selected. Q-S3.3-01 and DEC-001–052 remain unchanged.
+Validation: readback, original question/decision preservation, checkpoint/link
+checks, compact-state length and `git diff --check`. Only bounded arithmetic and
+static inspection; no protocol model/test execution, production edits, commit or PR.
+
+Completed checkpoint: **CP-0026**.
+
+### CP-0027 — Check growth witnesses and unknown-participant consensus premises
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded S2.1-RESEARCH-003 / §7.38: exhaustive bounded vote-set enumeration,
+nested/concurrent additions and the two-replacement copy/activation race. Kept
+ordinary signed roster reports distinct from exclusive membership decisions and
+from conflicting lock votes. Consulted primary CUP/Stellar knowledge-connectivity
+research; recorded its fixed-instance, identity, fault and graph assumptions and
+the failed drop-in applicability gate against current F2F discovery/authorization.
+No universal manual-founder requirement or automatically sufficient local signing
+list is inferred. Next: concrete first-FINAL node/verifier admission contract and
+its initial justification, before any genuine new policy tradeoff question.
+S2.1 remains the sole active focus; Q-S2.2-01 is withdrawn as next question and
+unanswered; Q-S3.3-01 stays parked with original meanings; DEC-001–052 unchanged.
+Validation: readback, preserved question/register sections, checkpoint/ID/link
+checks, compact-state length and `git diff --check`. The bounded set calculation
+is not a full protocol model, Rust/QUIC test, performance or large simulation run.
+No production/spec changes, commit or PR.
+
+Completed checkpoint: **CP-0027**.
+
+### CP-0028 — Autonomous simulation scope and parallel investigation
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded explicit maintainer authorization for autonomous design, subagents and
+research-simulation implementation/execution (§7.39). Delegated independent
+membership investigation, simulator construction and adversarial review; retained
+one active prerequisite S2.1 and S3.3 return point. Isolated examples are in progress;
+no result or protocol selection is inferred. Questions/DEC register unchanged.
+Validation: saved notes before compact state; readback and whitespace checks.
+
+Completed checkpoint: **CP-0028**.
+
+### CP-0029 — Conditional design, executable simulation and validation
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded §7.40 and the standalone research report with the implemented local
+closed-knowledge admission predicate, integrated 20/21/22 first-FINAL fixtures,
+separate inclusion/BFT handoff candidate and explicit global-premise/integration
+limits. Recorded independent review fixes, printed-source liveness discrepancy,
+1,536 seeded handoff runs / 4,036,608 abstract steps, finite 34-state lifecycle
+check, fourteen bootstrap checks and six virtual capacity checks. Twelve example
+tests, workspace tests (loopback permitted), final all-target strict clippy and
+format/whitespace checks passed within their stated scopes. General bootstrap,
+canonical wire/TTL/key-lifetime proof and original S3.3 policy choice remain open.
+No production/spec behavior changed or new human choice inferred. S2.1 is the
+single active prerequisite. DEC register and exact original Q-S3.3-01 preserved.
+Validation: notes-first/state-second save, readback, checkpoint/ID/link checks,
+compact-state length and `git diff --check`. No commit or PR.
+
+Completed checkpoint: **CP-0029**.
+
+### CP-0030 — Direct decentralized-operation assessment
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded the maintainer's request for a clear operational verdict and §7.41:
+current full design is not sufficiently justified/robust for irreversible FINAL;
+original local activation is concretely unsafe, conditional handoff is not a
+complete deployment solution. Distinguished safety, membership premises,
+worst-case fourteen-responsive-correct availability and unmeasured real capacity.
+No new protocol selection, test run or production edit. DEC-001–052 and exact
+Q-S3.3-01 unchanged; S2.1 remains the sole active prerequisite.
+Validation: notes-first/state-second, readback, checkpoint/ID/link and whitespace
+checks; compact-state length retained. No commit or PR.
+
+Completed checkpoint: **CP-0030**.
+
+### CP-0031 — Prepare the executable robustness research assignment
+
+Date: 2026-10-16 (Europe/Berlin).
+Recorded §7.42 and created `prompts/decentralized_robustness_research.md`, indexed
+from the prompt-suite README. The assignment defines precise blockers, preserved
+decisions, online research, independent subagents, protocol/evidence requirements,
+adversarial models, operational measurements and honest completion criteria.
+Prompt creation only; no new research results, production changes or policy answers.
+S2.1 and the original questions retain their states. Validation: notes-first/state-
+second, readback, decision/question preservation, local links, compact-state length
+and `git diff --check`. No tests, commit or PR.
+
+Completed checkpoint: **CP-0031**.
+
+### CP-0032 — Start the invoked robustness research
+
+Read the current workflow, compact state, decision/open/gap registers, active
+evidence and existing model. Distributed disjoint research work to three agents;
+created the R-01–R-12 evidence ledger and §7.43. Active S2.1, selected decisions
+and original questions retained. Research is in progress; no positive deployment
+claim or new policy selection. Next: execute attacks, recognition alternative,
+resource experiments and real QUIC/storage measurement, then reconcile reviews.
+
+Completed checkpoint: **CP-0032**.
+
+### CP-0033 — Complete the robustness investigation and save its policy boundary
+
+Executed the invoked brief with three subagents; §7.44 and the focused robustness
+report record a concrete organic-network first-FINAL incompatibility, independently
+reproduced turnover/provenance attacks, tested externally recognized alternative,
+measured QUIC/storage limits and explicit unimplemented gates. Final source-level
+review fixed the new transfer crash/cursor defect and strengthened pure recipient
+verification. Model/measurement manifests and checks are linked in the report.
+
+DEC-001–052 and exact §7.16 question text byte-preserved. Original Q-S3.3-01 stays
+unanswered; Q-S2.2-01 stays withdrawn as next question. S2.1 is the sole active
+leaf at the recognition/admission-policy consequence, not an implicitly adopted
+checkpoint or new production protocol. Notes saved first, compact state second;
+readback verifies matching checkpoint, local links, source hashes and statuses.
+No deployment, specification rewrite, production edit, commit or PR.
+
+Completed checkpoint: **CP-0033**.
+
+### CP-0034 — Explain project impact and architectural alternatives
+
+§7.45 distinguishes the unsafe present FINAL/membership design from the viable
+blind-registry purpose and reusable components. Compared recognized BFT notaries,
+federated quorum trust and external consensus, retaining each assumption/cost.
+Primary sources rechecked; no algorithm, onboarding policy or payment round
+selected, no production/specification changes. S2.1 remains the sole active leaf.
+DEC register and exact original question preserved; notes saved before compact
+state and read back at the same checkpoint.
+
+Completed checkpoint: **CP-0034**.
+
+### CP-0035 — Audit the intended meaning of socially vetted growth
+
+Maintainer steers S2.1 toward a potential missing trust premise. §7.46 and the
+trust-audit artifact distinguish human entry checks, existing configured friend
+keys and counted voting authority. Narrow runnable graph/handoff checks executed;
+full qualitative human process remains unmodeled. Q-S2.1-TRUST-01 clarification
+pending, no selection inferred. Existing verdict remains scoped to its modeled
+rules; no checkpoint/consensus replacement adopted. DEC/original question preserved.
+Notes saved first, compact state second; matching checkpoint and links read back.
+
+Completed checkpoint: **CP-0035**.
+
+### CP-0036 — Record recursive operator trust and stop investigation
+
+Maintainer explicitly ends the investigation and clarifies Q-S2.1-TRUST-01: trust
+in unmodified intended code, reliable operation and recursively careful friendship
+selection. Recorded intent without turning belief into a fault bound or protocol
+selection. Future directions summarized only; no research/tests/production edits.
+Original decisions/questions preserved. Notes saved before compact state; matching
+checkpoint and clarification status read back.
+
+Completed checkpoint: **CP-0036**.
+
+### CP-0037 — Prepare focused recursive-trust research assignment
+
+Created and indexed the reusable trust-network blind-spot prompt (§7.48). It
+requires premise fidelity, minimal mechanisms, independent attacks, executable
+whole-system checks and honest practical evidence. Preparing it does not execute
+it or resume the stopped research. DEC register and question meanings preserved.
+Notes saved before compact state, then local links and statuses read back.
+
+Completed checkpoint: **CP-0037**.
+
+### CP-0038 — Review certified epoch handoff proposal without adopting it
+
+Reviewed the user-supplied CEH v1.0.0 plan (§7.49). Recognized the explicit external
+anchor plus predecessor chain as a conditional resolution of authority recognition.
+Recorded a concrete eight/six honest split with six silent faults disproving the
+stated handoff-liveness argument, and missing common-state/inclusion, durable
+ordering, authenticated pruning, historical-key and shared-HRW input contracts.
+Primary PBFT recovery source rechecked. No plan/production edits, new tests or
+broad trust-research resumption. DEC register and original questions preserved;
+notes saved before compact state, read back and whitespace/link checks completed.
+
+Completed checkpoint: **CP-0038**.
+
+### CP-0039 — Review the hardened CEH v1.1.0 proposal
+
+Recorded §7.50: credited rounds, union reconciliation, durable install and explicit
+cold-checkpoint trust. Identified the still-permitted prepared/private-inclusion
+stall, fixed-timeout liveness gap, admitted-write closure details and the newly
+introduced one-year voucher restriction conflicting with current eleven-year code.
+Recorded candidate-completeness, certificate-size, latency and historical-key gaps.
+Primary PBFT recovery reference checked; no plan/production edits, fresh tests or
+broad research resumption. DEC register and original questions unchanged. Notes
+saved before compact state and matching checkpoint/readback/link checks performed.
+
+Completed checkpoint: **CP-0039**.
+
+### CP-0040 — Review CEH v1.2.0 without adopting its verification claims
+
+Recorded §7.51: credited explicit public prepared validity, restored eleven-year
+TTL and corrected certificate bytes. Identified the sixty-second timeout cap versus
+general partial-synchrony proof, timer-versus-admitted-work drain, and missing
+checkable new-view/phase rules. Distinguished local singleton retention from
+globally inherited exclusions and corrected permanent-retention/per-shard resource
+claims. Catalog, checkpoint, historical-key and durable-latency gates remain open.
+PBFT primary recovery source rechecked. No plan/production edits, fresh tests,
+architecture selection or broad research resumption. DEC register and original
+questions preserved; notes saved before compact state, then readback, matching
+checkpoint, local-link, length and whitespace checks.
+
+Completed checkpoint: **CP-0040**.
+
+### CP-0041 — Review CEH v1.3.0 and preserve the verification boundary
+
+Recorded §7.52: credited uncapped timeouts, authenticated new-view evidence,
+counter-based drain intent and explicit conflict effects. Identified unsafe
+timeout-to-abort inference, incomplete on-demand terminal authority verification
+and the inability to distinguish partial-only locks from privately aggregated
+quorums. Retained late-certificate handling and historical-key/catalog/checkpoint
+gates; qualified assigned-shard and LRU resource claims. Primary PBFT recovery
+source rechecked. Static review only; no plan/production edits or new experiments.
+DEC register, original questions and stopped broad-research scope preserved.
+Notes saved before compact state; readback, matching checkpoint, local links,
+compact-state length and whitespace checked.
+
+Completed checkpoint: **CP-0041**.
+
+### CP-0042 — Review CEH v1.4.0 storage and historical-verification changes
+
+Recorded §7.53: credited committed-write retention, mandatory terminal lineage and
+late-certificate conflict resolution. Identified the thirty-day pruning versus
+historical receipt authorization dependency, missing unified-manifest commitment
+and unapproved common-committee policy through N=40. Recalculated certificate-only
+storage at N=41/100/1000; under150MB is not a general bound or total live-state size.
+Bounded static review/arithmetic only, no plan/production edits, tests, simulation,
+broad investigation restart or architecture adoption. DEC register and original
+questions preserved. Notes saved before state; readback, checkpoint, links,
+compact-state length and whitespace checks performed.
+
+Completed checkpoint: **CP-0042**.
+
+### CP-0043 — Assess relative criticality across the interview and research results
+
+Recorded §7.54: membership/turnover was the largest foundational blocker; recent
+storage questions are a related verification/continuity subproblem. Distinguished
+other critical fault/key, durability/rollback/expiry and client-acceptance gates
+from availability/capacity and downstream tuning. Evidence remains conditional;
+earlier static code findings are not a fresh production audit. Noticed CEH v1.5's
+new30day late-receipt cutoff as an unapproved continuity tradeoff, without a full
+version review. No policy adoption, experiments, production edit or broad research
+resumption. Notes saved before compact state; question/register preservation,
+readback, matching checkpoint, local links, length and whitespace checked.
+
+Completed checkpoint: **CP-0043**.

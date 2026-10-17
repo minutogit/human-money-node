@@ -1,7 +1,7 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-16 (Europe/Berlin). Checkpoint: **CP-0017**.
-Mode: architecture interview resumed after autonomous glossary alignment; final plan pending.
+Updated: 2026-10-17 (Europe/Berlin). Checkpoint: **CP-0043**.
+Mode: cross-interview risk assessment complete (§7.54); broad trust research remains stopped.
 Goal: justified decisions and a buildable plan under explicit assumptions, preserving KISS.
 Workflow: [start/resume prompt](../prompts/architecture_interview.md).
 Rhythm: finish one bounded problem; justified A, useful alternatives only, explicit uncertainty.
@@ -14,20 +14,23 @@ Register: [52 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
 
 ## Resume cursor
 
-- Active leaf: **S3.3**, preserved binding effects / safe handoff; notes **7.28**.
+- Saved focus: **S2.1**, recursive operator trust; investigation stopped, **7.47**.
 - K3 names/editorial screening complete: **DEC-049–052**, report **§8**.
   No more glossary questions; maintain vocabulary autonomously and refine as needed.
-- Pending question: **Q-S3.3-01**, original wording/options in notes **7.16**.
-  A: retain one-round 14-vote payment confirmation and preserve justified binding
-  effects through handoff (conditional recommendation). B: investigate separate
-  preparation/completion payment rounds with explicit safe cutoff rules.
-- Answer: **not selected**. Glossary answers/maintenance do not select payment semantics.
-- Next action: resume bounded old-write closure/inclusion/successor-installation
-  analysis from **7.15–7.17**; resolve the payment tradeoff only where necessary.
-- Read first: notes **7.27–7.28**, **7.15–7.17**, report **§8**. S2 remains unresolved;
-  S4 progress/round recovery follows handoff work. K3 substantive conflicts follow dependencies.
-- After S3.3: investigate closure/inclusion and successor installation, then S4 recovery;
-  keep S2 membership justification explicit. Return to C4/S5, K2/C1 and N/O by dependencies.
+- **Q-S2.1-TRUST-01** answered at intent level (**7.47**); no executable policy selected.
+- **Q-S2.2-01** unanswered, withdrawn as next question (**7.37**);
+  exact proposal preserved in **7.36**. Its "previous group" prerequisite is unresolved.
+  Do not repeat the conditional transition sketch as if it establishes its own authority.
+- Parked **Q-S3.3-01**, unchanged/unanswered, exact A/B in **7.16** (one vs two payment rounds).
+- Investigation ended at maintainer request. Future execution prompt prepared (**7.48**):
+  [trust-network blind-spot research](../prompts/trust_network_blind_spot_research.md); invoke explicitly.
+  Operator belief is not a proved fault bound; no architecture/protocol change selected.
+- Interjection **7.33**: QUIC already retries stream data; no blind triple-RPC policy selected.
+  DEC-027/009/042 retained; application retry/duplicate accounting stays OPEN-07/08.
+- Read first: risk assessment **7.54**, CEH v1.4 review **7.53**, [current plan](CERTIFIED_EPOCH_HANDOFF_PLAN.md).
+  CEH v1.5 adds a 30-day late-receipt cutoff: unapproved continuity tradeoff, not a cache-only change.
+  Membership/handoff is central; fault/key/rollback/client/availability gates remain. No adoption.
+- Return: S2.2 / **7.35**, then S3.3 / **7.34**, S4 recovery, C4/S5, K2/C1 and N/O.
 
 ## Constraints and settled requirements to retain
 
@@ -72,12 +75,12 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 ├── S — Consensus and membership
 │   ├── S1 [partial] Coordinated attacker / six-Byzantine target; bound/time model unresolved
 │   ├── S2 [unresolved] Justified participants despite subjective HRW views
-│   │   ├── S2.1 [unresolved] Initial participant justification; needs S1
-│   │   └── S2.2 [unresolved] Compatible membership/certificates over time
+│   │   ├── S2.1 [active] Audit intended human trust vs counted membership; §7.46 / §7.44
+│   │   └── S2.2 [unresolved] Local-view robustness; Q-S2.2-01 withdrawn as next question
 │   ├── S3 [partial] Pause / full turnover chosen; safe handoff unresolved; S2/O1/N3
 │   │   ├── S3.1 [finding] Raw-majority copy insufficient; not a replacement algorithm
 │   │   ├── S3.2 [finding] Copy alone insufficient; safe old-write cutoff unresolved
-│   │   └── S3.3 [active] Preserved binding effects / safe handoff; Q-S3.3-01 unanswered
+│   │   └── S3.3 [unresolved] Conditional handoff model run; Q-S3.3-01 parked; §7.40 / §7.34
 │   ├── S4 [decided] Automatic safe progress after stabilization; round/recovery design pending
 │   ├── S5 [partial] Support gate / unresolved-slot policy chosen; FINAL/merge rules unresolved
 │   └── S6 [decided] Ticket lifecycle / fresh identity / first-party fraud; wire/domain audit pending
@@ -106,9 +109,10 @@ S3.1/S3.2 retain established counterexamples; their replacement design remains t
   early legacy-only records lack original Q/A/rationale. **7.3** records core/node inspection.
 - Legacy handoff indexes seven abstract counterexamples; these are not real-wire tests.
 - Full spec/invariant/interface-to-branch coverage is still missing; F1 must establish it.
-- Latest-context verification, temporal corruption, partial conflicts and safe cleanup
-  remain obligations; an algorithm name or completed download cannot close them.
+- Notes **7.44** / robustness report: incompatible local first-FINAL, tested recognized alternative;
+  trust/key/resource limits and exact production gaps; contracts **7.29–7.34** retained.
 - Glossary naming/alignment complete (DEC-049–052); report §8 retains protocol conflicts.
 - Current specs/source comments were clarified; runtime behavior/interfaces are unchanged.
-- Editorial checks passed; no Rust/QUIC tests, commit or PR. Scope/limits: report §8.
-- Latest durable checkpoint: notes **9**, **CP-0017**; restart checks remain in **CP-0001**.
+- Original handoff: 1,536 runs; composition: 128 seeds / 3,072 checks; real QUIC costs measured.
+  Workspace: 504 pass / 11 ignored; strict clippy pass; candidate remains research, no production edit.
+- Latest durable checkpoint: notes **9**, **CP-0043**; restart checks remain in **CP-0001**.

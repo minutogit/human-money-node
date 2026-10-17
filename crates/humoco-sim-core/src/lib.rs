@@ -11,6 +11,7 @@
 //! - Mathematical maturity traffic light: `PROVISIONAL` (< 20 nodes) and `FINAL` (>= 20 nodes, >= 14 signatures).
 //! - Split-brain resilience and deterministic convergence on network merge.
 
+pub mod ceh;
 pub mod chaos;
 pub mod client_flow;
 pub mod crypto;
@@ -25,6 +26,7 @@ pub mod transport;
 pub mod types;
 pub mod wire;
 
+pub use ceh::*;
 pub use chaos::*;
 pub use client_flow::*;
 pub use crypto::*;
@@ -40,3 +42,4 @@ pub use telemetry::{
 pub use transport::*;
 pub use types::*;
 pub use wire::*;
+

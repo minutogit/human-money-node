@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-16",
+  "status": "bounded_premise_audit_not_new_protocol",
+  "bridge_fixture": {
+    "identities": 39,
+    "byzantine": 1,
+    "mutual_friendships": true,
+    "minimum_direct_friends": 19,
+    "local_known_counts": [
+      20,
+      20
+    ],
+    "qc_sizes": [
+      14,
+      14
+    ],
+    "qc_common_identities": [
+      0
+    ],
+    "correct_components_after_bridge_removal": [
+      19,
+      19
+    ],
+    "unique_humans_and_acquaintance": "supplied fixture premises",
+    "five_finger_diversity_check": "no measurable predicate established; actual human procedure not simulated"
+  },
+  "all_honest_turnover_mutant": {
+    "old_n": 20,
+    "new_n": 20,
+    "newcomers": 8,
+    "byzantine": 0,
+    "snapshot": "complete empty before A",
+    "a_signers": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "b_signers": [
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27
+    ],
+    "honest_double_signers": 0,
+    "expected_unsafe": true,
+    "meaning": "honest operators do not repair a missing handoff cutoff"
+  },
+  "interpretation": [
+    "minimum degree and honest graph connectivity differ",
+    "personal admission requires exact scope and evidence",
+    "no proof that every actual social network permits this fixture",
+    "no new admission or trust-transitivity rule selected"
+  ],
+  "source_sha256": "5d3d415dfa1c03953e1c83e07ad7f6755588301d270047e72ed6d9c90b9587e7"
+}

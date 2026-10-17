@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-16",
+  "timezone": "Europe/Berlin",
+  "command": "CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo run -p humoco-sim-core --example robustness_envelope --release -- all",
+  "profile": "release opt3 LTO=false codegen_units=16",
+  "machine": {
+    "system": "Linux",
+    "node": "TP14",
+    "release": "7.0.0-38-generic",
+    "version": "#38~24.04.4-Ubuntu SMP PREEMPT_DYNAMIC Mon Sep 14 16:37:11 UTC 2",
+    "machine": "x86_64",
+    "processor": "x86_64"
+  },
+  "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+  "configuration": "deterministic tickets/graphs; no random scheduler; all u16 shards for n100 and n1000",
+  "output_rows": 53,
+  "assumptions": [
+    "ticket trials independently usable: no Argon2 work/rachet implementation",
+    "actual production HRW score, optimized O(N log20) subset selector",
+    "perfect all-edge topology reach is upper bound, not actual heartbeat process",
+    "source-range crypto does not prove distributed closure",
+    "atomic durable installation abstraction; no real storage expiry or network receiver"
+  ],
+  "source_sha256": {
+    "crates/humoco-sim-core/examples/robustness_envelope.rs": "647abd6a27815e624486605f2d38fab8e0e2d6a244c03ffd34eb4d407c94fc85",
+    "crates/humoco-sim-core/src/types.rs": "daf28c44e8598c068214d47bf87bbed727b8a6d8399a1b663a112b9e3b5e7f38"
+  }
+}

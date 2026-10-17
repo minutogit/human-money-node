@@ -10,12 +10,18 @@
 //! - Deterministic resolver via `min(H_canon)` with BLAKE3 domain tags.
 //! - Mathematical maturity traffic light: `PROVISIONAL` (< 20 nodes) and `FINAL` (>= 20 nodes, >= 14 signatures).
 //! - Split-brain resilience and deterministic convergence on network merge.
+//!
+//! These traffic-light names describe the existing specification modules. The
+//! research-only [`p0`] model uses regional/provisional receipts and reserves
+//! global finality behind a separate proof guard; it does not change the daemon.
 
 pub mod ceh;
 pub mod chaos;
 pub mod client_flow;
 pub mod crypto;
 pub mod fraud;
+/// Research-only P0 regional confirmation model; does not change daemon finality.
+pub mod p0;
 pub mod quota;
 pub mod resolver;
 pub mod sim;

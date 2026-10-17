@@ -168,10 +168,163 @@ impl RamIndex {
         }
         start.elapsed()
     }
+    pub fn remove(&mut self, parent: &Hash256) -> Option<LockRecord> {
+        let rec = self.map.remove(parent)?;
+        self.root_valid.remove(parent);
+        Some(rec)
+    }
 }
 
 impl Default for RamIndex {
     fn default() -> Self { Self::new() }
+}
+
+/// Maturity tier distinguishing final (CEH BFT quorum committed) from provisional locks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LockTier {
+    Final,
+    Provisional,
+}
+
+/// Dual-store RAM index providing total isolation between BFT finalized state and provisional locks.
+///
+/// Ensures zero-contamination: provisional locks never enter state roots or Merkle handoffs
+/// until certified through epoch consensus.
+#[derive(Default)]
+pub struct DualRamIndex {
+    final_index: RamIndex,
+    provisional_index: RamIndex,
+}
+
+impl DualRamIndex {
+    /// Creates a new empty `DualRamIndex`.
+    pub fn new() -> Self {
+        Self {
+            final_index: RamIndex::new(),
+            provisional_index: RamIndex::new(),
+        }
+    }
+
+    /// Checks if a parent lock exists in final state, either as an active lock key or as an output ID.
+    pub fn has_final_predecessor(&self, parent_lock: &Hash256) -> bool {
+        self.final_index.get(parent_lock).is_some()
+            || self.final_index.iter().any(|r| &r.id == parent_lock)
+    }
+
+    /// Inserts a lock directly into final index.
+    ///
+    /// If `!is_root`, enforces that the causal predecessor lock is already final.
+    pub fn insert_final(
+        &mut self,
+        record: LockRecord,
+        now: SimTime,
+        root_valid_until: SimTime,
+        is_root: bool,
+    ) -> Result<IngressVerdictLow, crate::ceh::types::CehError> {
+        if !is_root && !self.has_final_predecessor(&record.parent_lock) {
+            return Err(crate::ceh::types::CehError::CausalPredecessorNotFinal(
+                record.parent_lock,
+            ));
+        }
+        match self.final_index.try_insert(record, now, root_valid_until) {
+            Ok(verdict) | Err(verdict) => Ok(verdict),
+        }
+    }
+
+    /// Inserts a lock into provisional index.
+    pub fn insert_provisional(
+        &mut self,
+        record: LockRecord,
+        now: SimTime,
+        root_valid_until: SimTime,
+    ) -> Result<IngressVerdictLow, IngressVerdictLow> {
+        self.provisional_index.try_insert(record, now, root_valid_until)
+    }
+
+    /// Promotes a provisional lock to final status after BFT certification.
+    pub fn promote_to_final(
+        &mut self,
+        parent_lock: &Hash256,
+        now: SimTime,
+        root_valid_until: SimTime,
+        is_root: bool,
+    ) -> Result<LockRecord, crate::ceh::types::CehError> {
+        let Some(rec) = self.provisional_index.get(parent_lock).cloned() else {
+            return Err(crate::ceh::types::CehError::CausalPredecessorNotFinal(
+                *parent_lock,
+            ));
+        };
+
+        if !is_root && !self.has_final_predecessor(&rec.parent_lock) {
+            return Err(crate::ceh::types::CehError::CausalPredecessorNotFinal(
+                rec.parent_lock,
+            ));
+        }
+
+        self.provisional_index.remove(parent_lock);
+        if self.final_index.try_insert(rec.clone(), now, root_valid_until).is_err() {
+            self.final_index.replace_lock(rec.clone(), root_valid_until);
+        }
+        Ok(rec)
+    }
+
+    /// Looks up a lock by parent key, checking final index first then provisional index.
+    pub fn get(&self, parent: &Hash256) -> Option<(&LockRecord, LockTier)> {
+        if let Some(rec) = self.final_index.get(parent) {
+            Some((rec, LockTier::Final))
+        } else if let Some(rec) = self.provisional_index.get(parent) {
+            Some((rec, LockTier::Provisional))
+        } else {
+            None
+        }
+    }
+
+    /// Returns true if a lock is present in the final index.
+    pub fn is_final(&self, parent: &Hash256) -> bool {
+        self.final_index.get(parent).is_some()
+    }
+
+    /// Returns true if a lock is present in the provisional index.
+    pub fn is_provisional(&self, parent: &Hash256) -> bool {
+        self.provisional_index.get(parent).is_some()
+    }
+
+    /// Returns an iterator over all finalized lock records.
+    pub fn final_records(&self) -> impl Iterator<Item = &LockRecord> {
+        self.final_index.iter()
+    }
+
+    /// Returns an iterator over all provisional lock records.
+    pub fn provisional_records(&self) -> impl Iterator<Item = &LockRecord> {
+        self.provisional_index.iter()
+    }
+
+    /// Prunes expired records across both tiers.
+    pub fn prune_expired(&mut self, now: SimTime) -> (usize, usize) {
+        let final_pruned = self.final_index.prune_expired(now);
+        let prov_pruned = self.provisional_index.prune_expired(now);
+        (final_pruned, prov_pruned)
+    }
+
+    /// Number of finalized records.
+    pub fn final_len(&self) -> usize {
+        self.final_index.len()
+    }
+
+    /// Number of provisional records.
+    pub fn provisional_len(&self) -> usize {
+        self.provisional_index.len()
+    }
+
+    /// Total count across both tiers.
+    pub fn len(&self) -> usize {
+        self.final_index.len() + self.provisional_index.len()
+    }
+
+    /// True if both tiers are empty.
+    pub fn is_empty(&self) -> bool {
+        self.final_index.is_empty() && self.provisional_index.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------

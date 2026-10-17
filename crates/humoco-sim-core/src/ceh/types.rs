@@ -100,6 +100,13 @@ pub enum CehError {
         expected: [u8; 32],
         got: [u8; 32],
     },
+    /// Incompatible genesis manifest encountered during peer handshake.
+    IncompatibleGenesisManifest {
+        local: [u8; 32],
+        remote: [u8; 32],
+    },
+    /// Causal predecessor lock is not yet finalized in the collision lock registry.
+    CausalPredecessorNotFinal([u8; 32]),
 }
 
 impl fmt::Display for CehError {
@@ -144,6 +151,21 @@ impl fmt::Display for CehError {
                     "proposal hash mismatch: expected {}, got {}",
                     hex_prefix(expected),
                     hex_prefix(got)
+                )
+            }
+            Self::IncompatibleGenesisManifest { local, remote } => {
+                write!(
+                    f,
+                    "incompatible genesis manifest: local {}, remote {}",
+                    hex_prefix(local),
+                    hex_prefix(remote)
+                )
+            }
+            Self::CausalPredecessorNotFinal(parent) => {
+                write!(
+                    f,
+                    "causal predecessor lock not final: {}",
+                    hex_prefix(parent)
                 )
             }
         }
@@ -200,6 +222,11 @@ impl GenesisManifest {
     /// Adds a valid signature to the genesis manifest.
     pub fn add_signature(&mut self, pubkey: NodePubKey, signature: [u8; 64]) {
         self.genesis_signatures.push((pubkey, signature));
+    }
+
+    /// Verifies all pioneer signatures on this genesis manifest against its initial committee.
+    pub fn verify_signatures(&self) -> Result<(), CehError> {
+        crate::ceh::crypto::verify_genesis_manifest_signatures(self, CEH_BFT_QUORUM)
     }
 }
 
@@ -709,4 +736,37 @@ pub fn validate_signatures_against_committee(
     }
 
     Ok(())
+}
+
+/// Verifies genesis compatibility during a peer handshake.
+///
+/// - If both manifests are present, ensures their canonical hashes match.
+///   If they diverge, returns `Err(CehError::IncompatibleGenesisManifest)`.
+/// - If local manifest is missing (`None`, e.g. island node) and remote is present (`Some(rem)`),
+///   validates remote pioneer signatures. If valid, returns `Ok(Some(rem.clone()))`.
+/// - If local manifest is present and remote is missing, or both are missing, accepts as compatible returning `Ok(None)`.
+pub fn verify_handshake_genesis(
+    local: Option<&GenesisManifest>,
+    remote: Option<&GenesisManifest>,
+) -> Result<Option<GenesisManifest>, CehError> {
+    match (local, remote) {
+        (Some(loc), Some(rem)) => {
+            let loc_hash = loc.canonical_hash();
+            let rem_hash = rem.canonical_hash();
+            if loc_hash != rem_hash {
+                Err(CehError::IncompatibleGenesisManifest {
+                    local: loc_hash,
+                    remote: rem_hash,
+                })
+            } else {
+                Ok(None)
+            }
+        }
+        (None, Some(rem)) => {
+            rem.verify_signatures()?;
+            Ok(Some(rem.clone()))
+        }
+        (Some(_), None) => Ok(None),
+        (None, None) => Ok(None),
+    }
 }

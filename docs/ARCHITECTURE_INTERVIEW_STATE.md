@@ -1,36 +1,36 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-17 (Europe/Berlin). Checkpoint: **CP-0043**.
-Mode: cross-interview risk assessment complete (§7.54); broad trust research remains stopped.
+Updated: 2026-10-17 (Europe/Berlin). Checkpoint: **CP-0048**.
+Mode: DEC-053/054 selected; P0 draft0.2 formal contract/scenarios verified in simulation (§7.59).
 Goal: justified decisions and a buildable plan under explicit assumptions, preserving KISS.
 Workflow: [start/resume prompt](../prompts/architecture_interview.md).
 Rhythm: finish one bounded problem; justified A, useful alternatives only, explicit uncertainty.
 Details: [notes](ARCHITECTURE_INTERVIEW_NOTES.md); [legacy handoff](ARCHITECTURE_INTERVIEW_HANDOFF.md).
 The notes hold decision evidence; this file indexes it. Editorial audit: [report](TERMINOLOGY_ALIGNMENT_REPORT.md).
-Register: [52 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
+Register: [54 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
 [alternatives](ARCHITECTURE_INTERVIEW_NOTES.md#22-alternatives-refinements-and-superseded-proposals),
 [open items](ARCHITECTURE_INTERVIEW_NOTES.md#23-open-design-and-decision-inventory) and
 [record/spec gaps](ARCHITECTURE_INTERVIEW_NOTES.md#24-record-gaps-and-pending-specification-consolidation).
 
 ## Resume cursor
 
-- Saved focus: **S2.1**, recursive operator trust; investigation stopped, **7.47**.
+- Active focus: **S2.2** validated (T01–T12 pass); next: S2.1 admission prerequisites and S3 turnover / recovery.
 - K3 names/editorial screening complete: **DEC-049–052**, report **§8**.
   No more glossary questions; maintain vocabulary autonomously and refine as needed.
 - **Q-S2.1-TRUST-01** answered at intent level (**7.47**); no executable policy selected.
 - **Q-S2.2-01** unanswered, withdrawn as next question (**7.37**);
-  exact proposal preserved in **7.36**. Its "previous group" prerequisite is unresolved.
-  Do not repeat the conditional transition sketch as if it establishes its own authority.
+  exact proposal preserved in **7.36**; its old-group premise belongs to the former candidate.
+  DEC-053 removes mandatory predecessor permission; do not repeat the old question.
 - Parked **Q-S3.3-01**, unchanged/unanswered, exact A/B in **7.16** (one vs two payment rounds).
-- Investigation ended at maintainer request. Future execution prompt prepared (**7.48**):
+- Broad trust investigation stays stopped; current P0 is explicitly authorized (**7.57–7.58**):
   [trust-network blind-spot research](../prompts/trust_network_blind_spot_research.md); invoke explicitly.
-  Operator belief is not a proved fault bound; no architecture/protocol change selected.
+  Operator belief is not a fault bound; DEC-053 selects the direction, with implementation pending.
 - Interjection **7.33**: QUIC already retries stream data; no blind triple-RPC policy selected.
   DEC-027/009/042 retained; application retry/duplicate accounting stays OPEN-07/08.
-- Read first: risk assessment **7.54**, CEH v1.4 review **7.53**, [current plan](CERTIFIED_EPOCH_HANDOFF_PLAN.md).
-  CEH v1.5 adds a 30-day late-receipt cutoff: unapproved continuity tradeoff, not a cache-only change.
-  Membership/handoff is central; fault/key/rollback/client/availability gates remain. No adoption.
-- Return: S2.2 / **7.35**, then S3.3 / **7.34**, S4 recovery, C4/S5, K2/C1 and N/O.
+- Read first: DEC-053/054 **7.57–7.58**, [P0 draft0.2](PARTITION_RESILIENT_REGISTRY_P0.md), [results](P0_SIMULATION_RESULTS.md), [work plan v0.4](CEH_SECURITY_CLOSURE_WORK_PLAN.md).
+  **Q-K1-FINALITY-01** answered B; regional receipts may lose on merge. No repeated product question.
+  Next: T01–T12 verified (12/12 pass in simulation suite); proceed to S2.1 admission / work integration, S3 turnover and S4 recovery.
+- Return after P0: original S3.3 applicability, S4 recovery, C4/S5, K2/C1 and N/O.
 
 ## Constraints and settled requirements to retain
 
@@ -40,18 +40,18 @@ Register: [52 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
   The interview selects durable signing-before-response and removes a rigid local
   5 ms target; this is a pending consolidation conflict with existing project rules,
   not authorization to silently rewrite specs or production behavior.
-- N >= 20 FINAL policy and one organically growing network are reaffirmed. Do not
-  re-ask threshold/anchor choices; subjective-view/membership safety remains open.
-- Up to six Byzantine identities is a conditional design target, not an enforced bound.
+- N >= 20 retains 14/20 regional receipts; DEC-053 permits later conflict revision.
+  DEC-054 guards admission/merchant risk; global proof schemes empty, so baseline green is unavailable.
+- Up to six Byzantine identities is a per-view conditional target, not a global-view bound.
 - Repeated safe full committee turnover and automatic progress after communication
-  stabilizes are selected requirements; no handoff algorithm/history scheme is approved.
+  stabilizes are selected; old-quorum permission is not required; local readiness/repair remains open.
 - Keep immutable durable own-choice storage, same-key loss/rollback safety gate,
   bounded drain/expiry, private operator boundary and small shared protocol library.
-- Do not infer approval of ranks 21–23 as voters, FINAL revocation, a separate reservation
-  subsystem, a certificate-return round or unconditional lower-hash FINAL takeover.
-- Current selections/limits: notes **2** (DEC-001–052). Legacy handoff supplies context.
+- Do not infer checkout pool expansion, a separate reservation subsystem, an extra
+  payment round or unsupported one-node lower-hash takeover from DEC-053.
+- Current selections/limits: notes **2** (DEC-001–054). Legacy handoff supplies context.
 - DEC-006 follows selected library DEC-038; DEC-039's fixed-context mechanism was reopened.
-  DEC-028 remains deferred; DEC-043's hourly parameter is tentative. No new protocol choice.
+  DEC-028 remains deferred; DEC-043's hourly parameter is tentative. P0 timing/support rules are candidates.
 
 ## Branch tree
 
@@ -65,6 +65,7 @@ Keep stable IDs; design/proof gaps remain until resolved or explicitly scoped.
 HuMoCo architecture/security interview [in progress; prior decisions retained]
 ├── K — Scope and integration
 │   ├── K1 [decided] Blind service / custody / KISS; remaining: scope consolidation
+│   │   └── K1.1 [decided] Regional availability/revocable acceptance; DEC-053/054; global proof reserved
 │   ├── K2 [decided] Shared protocol library; remaining: exact formats / integration
 │   └── K3 [decided] Vocabulary/alignment complete; autonomous maintenance; protocol gaps tracked
 ├── C — Checkout and client evidence
@@ -75,14 +76,14 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 ├── S — Consensus and membership
 │   ├── S1 [partial] Coordinated attacker / six-Byzantine target; bound/time model unresolved
 │   ├── S2 [unresolved] Justified participants despite subjective HRW views
-│   │   ├── S2.1 [active] Audit intended human trust vs counted membership; §7.46 / §7.44
-│   │   └── S2.2 [unresolved] Local-view robustness; Q-S2.2-01 withdrawn as next question
-│   ├── S3 [partial] Pause / full turnover chosen; safe handoff unresolved; S2/O1/N3
+│   │   ├── S2.1 [unresolved] Saved operator-trust/admission prerequisite; §7.46 / §7.44
+│   │   └── S2.2 [decided] Regional contract/T01–T12 validation completed; 12/12 pass; draft0.2 verified; §7.59
+│   ├── S3 [partial] Full turnover chosen; regional readiness / repair under DEC-053 pending
 │   │   ├── S3.1 [finding] Raw-majority copy insufficient; not a replacement algorithm
 │   │   ├── S3.2 [finding] Copy alone insufficient; safe old-write cutoff unresolved
 │   │   └── S3.3 [unresolved] Conditional handoff model run; Q-S3.3-01 parked; §7.40 / §7.34
-│   ├── S4 [decided] Automatic safe progress after stabilization; round/recovery design pending
-│   ├── S5 [partial] Support gate / unresolved-slot policy chosen; FINAL/merge rules unresolved
+│   ├── S4 [decided] Automatic local progress after stabilization; activation/recovery design pending
+│   ├── S5 [partial] Revocable regional receipts; support/merge/fraud contract drafted; tests pending
 │   └── S6 [decided] Ticket lifecycle / fresh identity / first-party fraud; wire/domain audit pending
 ├── N — P2P and resources
 │   ├── N1 [decided] F2F barrier / learned shard peers / idle-first eviction; enforcement audit pending
@@ -109,10 +110,10 @@ S3.1/S3.2 retain established counterexamples; their replacement design remains t
   early legacy-only records lack original Q/A/rationale. **7.3** records core/node inspection.
 - Legacy handoff indexes seven abstract counterexamples; these are not real-wire tests.
 - Full spec/invariant/interface-to-branch coverage is still missing; F1 must establish it.
-- Notes **7.44** / robustness report: incompatible local first-FINAL, tested recognized alternative;
-  trust/key/resource limits and exact production gaps; contracts **7.29–7.34** retained.
+- Prior **7.44** results concern irreversible global acceptance; DEC-053 changes that target.
+  Keep their witnesses/limits as references; new regional admission/merge properties need verification.
 - Glossary naming/alignment complete (DEC-049–052); report §8 retains protocol conflicts.
 - Current specs/source comments were clarified; runtime behavior/interfaces are unchanged.
 - Original handoff: 1,536 runs; composition: 128 seeds / 3,072 checks; real QUIC costs measured.
   Workspace: 504 pass / 11 ignored; strict clippy pass; candidate remains research, no production edit.
-- Latest durable checkpoint: notes **9**, **CP-0043**; restart checks remain in **CP-0001**.
+- Latest durable checkpoint: notes **9**, **CP-0048**; restart checks remain in **CP-0001**.

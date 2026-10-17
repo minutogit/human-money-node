@@ -11,6 +11,7 @@ pub mod crypto;
 pub mod snapshot;
 pub mod types;
 pub mod verifier;
+pub mod voucher_tree;
 
 pub use barrier::*;
 pub use consensus::*;
@@ -18,6 +19,7 @@ pub use crypto::*;
 pub use snapshot::*;
 pub use types::*;
 pub use verifier::*;
+pub use voucher_tree::*;
 
 #[cfg(test)]
 mod tests {
@@ -56,6 +58,9 @@ mod tests {
         assert_eq!(DOMAIN_CEH_PREPARE, b"HUMOCO_V1_CEH_PREPARE");
         assert_eq!(DOMAIN_CEH_COMMIT, b"HUMOCO_V1_CEH_COMMIT");
         assert_eq!(DOMAIN_CEH_ROUND_CHANGE, b"HUMOCO_V1_CEH_ROUND_CHANGE");
+        assert_eq!(DOMAIN_CEH_VOUCHER_HOP, b"HUMOCO_V1_CEH_VOUCHER_HOP");
+        assert_eq!(DOMAIN_CEH_VOUCHER_TREE, b"HUMOCO_V1_CEH_VOUCHER_TREE");
+        assert_eq!(DOMAIN_CEH_HIERARCHICAL_STATE_ROOT, b"HUMOCO_V1_CEH_HIERARCHICAL_STATE_ROOT");
     }
 
     #[test]

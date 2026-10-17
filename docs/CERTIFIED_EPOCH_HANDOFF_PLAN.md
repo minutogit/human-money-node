@@ -1,7 +1,16 @@
 # HuMoCo Layer 2 – Certified Epoch Handoff Specification (CEH)
-**Deterministic Committee Succession, BFT State Continuity & Verified Light-Client Checkpoints**
 
-- **Document Version:** 1.5.0 (Post-Audit CP-0042 Hardening & Subagent Execution Architecture)
+> Direction update, 2026-10-17 — DEC-053: this predecessor-certified architecture
+> is retained as a historical/alternative candidate. Current P0 investigates regional
+> activation from the living mesh without mandatory old-quorum permission, with
+> potentially revocable receipts and deterministic merge. See
+> [current P0 contract](PARTITION_RESILIENT_REGISTRY_P0.md) and
+> [revised work plan](CEH_SECURITY_CLOSURE_WORK_PLAN.md). The older specification
+> claims below are not the selected regional-activation contract.
+
+**Deterministic Committee Succession, Hierarchical Voucher Split-Trees & Verified Light-Client Checkpoints**
+
+- **Document Version:** 1.6.0 (Post-Review Consolidation: Voucher Split-Trees, Client-Side Custody & Scale-Free Mesh)
 - **Status:** Architectural Specification & Formal Verification Baseline
 - **Target Components:** `crates/humoco-node`, `crates/humoco-sim-core`
 - **Applicable Specs:** Spec 01, Spec 07, Spec 11, Spec 12, Spec 14, Spec 15
@@ -23,7 +32,9 @@ CEH replaces continuous, subjective rank recalculation with **discrete, cryptogr
 - The PoS checkout hot-path remains completely decoupled from consensus and state machine replication ($< 1\,\mu\text{s}$ in-RAM CAS, local node time $< 5\,\text{ms}$, end-to-end checkout latency $500\dots1500\,\text{ms}$).
 - Committee transition is an infrequent, asynchronous background control-plane event executed via a deadlock-free 2-phase BFT round protocol with proposer fallback, unboundedly growing timeout backoff, and verifiable `NewViewCertificate` proofs.
 - In-flight writes are cleanly drained via an atomic write barrier where committed decisions are never discarded (`active_in_flight_writes` barrier).
-- State continuity across epoch boundaries resolves pre-quorum splits via **Late-Certificate Redemption** within a bounded 30-day window, ensuring that previously certified payments can always be redeemed on successors while unredeemed splits freeze permanently to guarantee double-spend prevention.
+- **Hierarchical Voucher Split-Trees:** Supports binary tree branching of vouchers (change/split transactions) and linear chains identically. Each voucher has a deterministic `voucher_tree_root`, enabling $O(\log n)$ state difference detection across nodes.
+- **Client-Side Custody for Late Receipts:** Eliminates artificial 30-day deadlines. Clients custody their historic `EpochCertificate` ($\approx 2.1\,\text{KB}$) alongside their receipt, preserving 100% voucher usability over 11 years without node state bloat.
+- **Scale-Free / Fractal Mesh Operation:** The identical hierarchical Merkle tree engine operates in isolated village networks ($N < 20$, `PROVISIONAL` 🟡) and the federated world network ($N \ge 20$, `FINAL` 🟢) with domain separation.
 - **Radical Storage Optimization:** At $N = 20$, a single Unified Network Epoch Manifest with a 65,536-leaf Merkle root commits to all shards in $\approx 2.1\,\text{KB/day}$. For $N \ge 21$, standard HRW applies with a rolling 30-day certificate window, bounding per-node certificate storage realistically (e.g. $\approx 2.59\,\text{GB}$ at $N=41$, $\approx 106\,\text{MB}$ at $N=1,000$).
 
 ---
@@ -31,18 +42,22 @@ CEH replaces continuous, subjective rank recalculation with **discrete, cryptogr
 ## 2. Core Invariants & Fault Model
 
 1. **Quorum Size ($Q = 14 / 20$):** Every binding decision (payment lock attestation, state closure, and successor handoff) requires at least 14 valid, distinct signatures from the 20 authorized members of that epoch.
-2. **Fault Bound ($f \le 6$):** Within any authorized 20-member committee, at most $f = 6$ members may be Byzantine (offline, malicious, equivocating, or silent).
-3. **Quorum Intersection Property:**
+2. **No Checkout Signer-Pool Expansion:** The 20-member committee for an epoch is strictly fixed. Dynamically including ranks 21..30 during a checkout vote is mathematically forbidden because quorum intersection collapses to $\le 0$, enabling conflicting quorums without double-signing. Committee member replacement occurs strictly via scheduled `EpochCertificate(E+1)` handoffs.
+3. **Fault Bound ($f \le 6$):** Within any authorized 20-member committee, at most $f = 6$ members may be Byzantine (offline, malicious, equivocating, or silent).
+4. **Quorum Intersection Property:**
    $$\forall Q_A, Q_B \subset C_E \text{ with } |Q_A| \ge 14, |Q_B| \ge 14, |C_E| = 20:$$
    $$|Q_A \cap Q_B| \ge 14 + 14 - 20 = 8$$
    With at most $f = 6$ Byzantine members, the intersection contains at least:
    $$|Q_A \cap Q_B \cap \text{Honest}| \ge 8 - 6 = 2 \text{ honest members}$$
-4. **Durable Sign-Once Mandate (No Equivocation):** Honest nodes persist their signing decisions to non-volatile storage (`redb` WAL) *before* releasing signatures over the wire. An honest node never signs two divergent payloads for the same epoch round. Any detected dual signature constitutes irrefutable first-party fraud (`HUMOCO_V1_EQUIVOCATION`) resulting in immediate identity ban and WoT severance.
-5. **Decoupled TTL Horizons (Vouchers vs. Certificates):**
+5. **Durable Sign-Once Mandate (No Equivocation & WAL-Before-Wire):** Honest nodes persist their signing decisions to non-volatile storage (`redb` WAL with `fsync`) *before* releasing signatures over the wire. An honest node never signs two divergent payloads for the same epoch round. Any detected dual signature constitutes irrefutable first-party fraud (`HUMOCO_V1_EQUIVOCATION`) resulting in immediate identity ban and WoT severance.
+6. **Decoupled TTL Horizons (Vouchers vs. Certificates):**
    - **Voucher Lock Retention:** Collision locks remain stored in `redb` until the voucher root expires ($T_{\text{max}} = 11\,\text{years} + 30\,\text{s}$ per `crates/humoco-sim-core/src/storage.rs:7`).
    - **Certificate Sliding Window:** Shard nodes and gateways maintain a rolling **30-day verification window** of historical `EpochCertificate`s.
-   - **Historical Evidence vs. Settled State:** Once a lock is certified and incorporated into a committed `closed_state_root` of Epoch $E+1$, it is an established invariant in canonical node storage. Verification of ancient settled locks queries the active storage state; it does not require an unbroken 11-year certificate chain.
-   - **Late Conflict Redemption Window ($T_{\text{late}} = 30\,\text{days}$):** Pre-quorum splits marked `PROVISIONAL_CONFLICT` accept late 14-vote predecessor certificates for up to 30 days. After 30 days, unredeemed split slots become permanently blocked until voucher root expiry (`valid_until + 30s`).
+   - **Historical Evidence via Client-Side Custody:** Once a lock is certified, it is permanent local state. If a client presents a late receipt after $> 30$ days to resolve an old `ProvisionalConflict`, the client provides the historic `EpochCertificate` ($\approx 2.1\,\text{KB}$). The node verifies it against its trusted checkpoint, clearing the conflict to `Settled` without requiring 11 years of certificate chains on nodes.
+7. **Dual-Store Isolation (`FINAL` vs `PROVISIONAL`):**
+   - **Zero Cross-Contamination:** `FINAL` collision locks (14/20 certified) and `PROVISIONAL` locks ($N < 20$ sub-quorum, island meshes, unconfirmed client hints) are physically decoupled in separate storage tables and RAM indices (`TABLE_FINAL_LOCKS` vs `TABLE_PROVISIONAL_LOCKS`).
+   - **Pure FINAL State Closure:** The CEH `closed_state_root` and Merkle tree calculation operate **strictly and exclusively** over `TABLE_FINAL_LOCKS`. Provisional locks are quarantined and can never pollute the canonical shard state.
+   - **Atomic Promotion:** A lock transitions from provisional to final if and only if an authorized 14/20 BFT committee quorum issues an `Attestation` / `EpochCertificate`.
 
 ---
 
@@ -58,7 +73,7 @@ pub struct GenesisManifest {
     pub network_id: [u8; 32],
     pub genesis_timestamp: u64,
     pub initial_committee: [NodePubKey; 20],
-    pub genesis_signatures: Vec<(NodePubKey, Signature)>, // >= 14 valid
+    pub genesis_signatures: Vec<(NodePubKey, [u8; 64])>, // >= 14 valid
 }
 ```
 
@@ -72,14 +87,9 @@ pub struct EpochCertificate {
     pub predecessor_cert_hash: [u8; 32],
     pub closed_state_root: [u8; 32],
     pub successor_committee: [NodePubKey; 20],
-    pub predecessor_signatures: Vec<(NodePubKey, Signature)>, // >= 14 from predecessor committee
+    pub predecessor_signatures: Vec<(NodePubKey, [u8; 64])>, // >= 14 from predecessor committee
 }
 ```
-**Exact Wire Size Analysis:**
-- Header (shard_id, epoch, round, predecessor_hash, closed_state_root): $2 + 8 + 4 + 32 + 32 = 78\,\text{bytes}$.
-- 20 NodePubKeys: $20 \times 32 = 640\,\text{bytes}$.
-- Up to 20 Signatures with identity tags: $20 \times (32 + 64) = 1,920\,\text{bytes}$ ($\ge 14$ signatures = $1,344\,\text{bytes}$).
-- **Total Certificate Wire Size:** $\approx 2.1\dots2.7\,\text{KB}$.
 
 ### 3.3 `UnifiedNetworkEpochManifest` (Pioneer Mode at $N=20$)
 At $N=20$, all 65,536 shards share the identical 20-node pioneer committee. To prevent 65,536-fold duplication, a single unified manifest is issued daily committing to a 65,536-leaf BLAKE3 Merkle tree:
@@ -91,10 +101,9 @@ pub struct UnifiedNetworkEpochManifest {
     pub predecessor_manifest_hash: [u8; 32],
     pub shards_merkle_root: [u8; 32],
     pub pioneer_committee: [NodePubKey; 20],
-    pub pioneer_signatures: Vec<(NodePubKey, Signature)>, // >= 14 from pioneer committee
+    pub pioneer_signatures: Vec<(NodePubKey, [u8; 64])>, // >= 14 from pioneer committee
 }
 ```
-**Wire Size:** $\approx 2.1\,\text{KB}$ total per day for the entire network ($N=20$).
 
 ### 3.4 `LockReceipt` (The PoS Checkout Evidence)
 Presented to the merchant PoS terminal to prove irreversible finality.
@@ -105,55 +114,28 @@ pub struct LockReceipt {
     pub parent_lock: [u8; 32],
     pub child_lock: [u8; 32],
     pub valid_until: u64,
-    pub attestations: Vec<(NodePubKey, Signature)>, // >= 14 from current epoch committee
+    pub attestations: Vec<(NodePubKey, [u8; 64])>, // >= 14 from current epoch committee
 }
 ```
 
-### 3.5 BFT Control-Plane Messages
+### 3.5 Hierarchical Voucher Split-Trees (`voucher_tree.rs`)
+Models both linear voucher transfers (1-to-1) and change/split transactions (1-to-2) as causal binary trees.
 ```rust
-pub struct EpochProposal {
-    pub shard_id: u16,
-    pub epoch: u64,
-    pub round: u32,
-    pub closed_state_root: [u8; 32],
-    pub successor_committee: [NodePubKey; 20],
-    pub candidate_proofs: Vec<CandidateProof>,
-    pub prepared_proof: Option<PreparedProof>, // Present if locked from earlier round
+pub struct VoucherHop {
+    pub parent_lock: [u8; 32],
+    pub children: Vec<[u8; 32]>, // Canonically sorted; 1 child for direct transfer, 2 for split
+    pub valid_until: u64,
 }
 
-pub struct PrepareVote {
-    pub shard_id: u16,
-    pub epoch: u64,
-    pub round: u32,
-    pub proposal_hash: [u8; 32],
-    pub voter: NodePubKey,
-    pub signature: Signature,
+pub struct VoucherSplitTree {
+    pub voucher_root: [u8; 32], // Genesis Parent Anchor per INV-0302
+    pub hops: BTreeSet<VoucherHop>,
 }
 
-pub struct CommitVote {
+pub struct HierarchicalShardSnapshot {
     pub shard_id: u16,
     pub epoch: u64,
-    pub round: u32,
-    pub proposal_hash: [u8; 32],
-    pub voter: NodePubKey,
-    pub signature: Signature,
-}
-
-pub struct RoundChangeMessage {
-    pub shard_id: u16,
-    pub epoch: u64,
-    pub failed_round: u32,
-    pub next_round: u32,
-    pub highest_prepared: Option<PreparedProof>,
-    pub voter: NodePubKey,
-    pub signature: Signature,
-}
-
-pub struct NewViewCertificate {
-    pub shard_id: u16,
-    pub epoch: u64,
-    pub new_round: u32,
-    pub round_change_messages: Vec<RoundChangeMessage>, // >= 14 valid
+    pub voucher_trees: BTreeMap<[u8; 32], VoucherSplitTree>,
 }
 ```
 
@@ -161,11 +143,13 @@ pub struct NewViewCertificate {
 
 ## 4. Protocol Lifecycle & Execution Workflows
 
-### 4.1 Cold Bootstrap & Network Scaling Boundaries
+### 4.1 Cold Bootstrap, Network Scaling & Organic Growth
+
+#### 4.1.1 Network Scaling Boundaries & Phase Transitions
 1. **Community-Mesh Phase ($N < 20$):**
-   - The network operates in `PROVISIONAL` mode 🟡.
-   - All nodes validate all 65,536 shards with adaptive quorum $Q(N) = \lfloor \frac{2}{3} N \rfloor + 1$.
-   - Payments carry provisional status.
+   - The network operates in `PROVISIONAL` mode 🟡 with adaptive provisional quorum $Q(N) = \lfloor \frac{2}{3} N \rfloor + 1$.
+   - Uses the identical `HierarchicalShardSnapshot` and `VoucherSplitTree` engine under domain tag `HUMOCO_V1_CEH_PROVISIONAL_ROOT`.
+   - All nodes validate all 65,536 shards; full local diff-detection and set-union reconciliation operate scale-free.
 2. **Transition to Pioneer Mode ($N = 20$):**
    - When the 20th mature F2F identity passes the 24-hour incubation wall, the 20 pioneer nodes construct `GenesisManifest(Epoch = 0)`.
    - At least 14 pioneer nodes sign the manifest. The hash of this manifest becomes the immutable `NetworkAnchor`.
@@ -173,57 +157,49 @@ pub struct NewViewCertificate {
 3. **Transition to Federated Sharding ($N \ge 21$):**
    - As soon as $N \ge 21$, standard HRW sharding applies strictly: each shard has its own deterministically computed 20-node committee.
    - Transitions occur per shard via individual `EpochCertificate`s.
-   - No ad-hoc clustering or altered membership rules are introduced for $N \in [21, 40]$.
+
+#### 4.1.2 Dual Storage & Village Mesh Merge (Zero Cross-Contamination)
+- **Physical Separation in Storage:** Nodes maintain two strictly decoupled storage spaces:
+  - `FINAL Storage` (`TABLE_FINAL_LOCKS` & `RamIndex`): Exclusively holds locks certified by a 14/20 BFT committee. Only this storage is hashed for the CEH `closed_state_root`.
+  - `PROVISIONAL Storage` (`TABLE_PROVISIONAL_LOCKS` & `ProvisionalRamIndex`): Quarantined storage for provisional village locks ($N < 20$) and unconfirmed client submissions.
+- **Anti-Spam Isolation:** When an isolated village network ($N < 20$) merges with the federated world network ($N \ge 20$), the world network **does not** automatically take over or bulk-import the village's locks. The world network ignores the village's provisional storage completely.
+- **Strict Causal Completeness for FINAL:** A voucher lock can only be promoted to `FINAL` if its entire causal ancestry (from the voucher root to the current hop) is verified and committed to `TABLE_FINAL_LOCKS`. A payment at a world merchant cannot be certified `FINAL` if intermediate hops only exist as unverified provisional records.
+- **Client-Side Proof Re-Anchoring:** Clients (wallets / PoS terminals) custodies their own `ProofChain`. When moving to the world network, the wallet submits the causal chain (`valid-prefix causal-path batch`), allowing the 14/20 shard committee to certify each hop directly into `TABLE_FINAL_LOCKS`.
+
+#### 4.1.3 Resolution of Parallel $N \ge 20$ Networks: F2F Handshake Hard-Reject
+In the rare event that two independent networks reach $N \ge 20$ in isolation before discovering each other:
+1. **F2F Handshake Hard-Reject (`INCOMPATIBLE_GENESIS`):**
+   - Mutual P2P handshakes on QUIC port 9090 exchange and verify `genesis_hash`.
+   - If both nodes are in $N \ge 20$ mode and `local.genesis_hash != peer.genesis_hash`, the connection is **immediately rejected** (`ConnectionRefused` / `INCOMPATIBLE_GENESIS`).
+   - The networks refuse to bridge at the P2P wire level. This eliminates all deep-merge consensus complexity, split-brain risk, and cross-network shard corruption by construction (KISS doctrine).
+2. **Administrative Migration (Out-of-Protocol):**
+   - If operators of the smaller network choose to unite with the world network, they perform an administrative migration: resetting their node database and joining with the canonical `GenesisManifest`.
+   - Clients from the migrating network re-anchor their vouchers via the normal client ingress by submitting their causal proof chains.
+
+#### 4.1.4 Organic Web-of-Trust Growth ("Mund-zu-Mund-Vernetzung")
+- **Social F2F Graph Propagation:**
+  - P2P admission on QUIC port 9090 is strictly Friend-to-Friend (`f2f.trusted_pubkeys`). A new node can only participate if an existing operator explicitly adds its `NodePubKey`.
+  - The project does not use indiscriminate mass-advertising or public cluster broadcasting. Instead, it expands organically through personal word of mouth ("Mund-zu-Mund") within interconnected communities interested in alternative monetary systems.
+- **Genesis Propagation during Initial Handshake:**
+  - When an existing operator invites a peer, the initial F2F handshake automatically transmits the authentic `GenesisManifest`.
+  - All joining nodes are rooted in the single existing `NetworkAnchor`, completely eliminating accidental parallel Genesis formation at the source.
+
+
 
 ---
 
-### 4.2 Checkout Hot-Path & Latency Budget
+### 4.2 Checkout Hot-Path & Gateway Auto-Forwarding
 
 - **Local RAM CAS on Shard Nodes:** $< 1\,\mu\text{s}$.
 - **Node Internal Processing SLA:** $< 5\,\text{ms}$ (in-RAM collision check + redb WAL write).
 - **End-to-End PoS Checkout Latency:** $500\dots1500\,\text{ms}$ (parallel QUIC network RTTs with an 800 ms collection deadline).
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant App as 🛒 PoS Terminal / Wallet
-    participant GW as 🌐 Gateway
-    participant Shard as 🛡️ Top-20 Shard Nodes (Epoch E)
-
-    App->>GW: POST /v1/lock (parent_lock, child_lock, pow_nonce)
-    Note over GW: Gateway computes shard_id = hash(parent_lock) % 65536<br/>Gateway queries Top-20 HRW nodes
-    GW->>Shard: Parallel LockVerifyRequest to all 20 members (Timeout: 800ms)
-    
-    par In-RAM CAS on Shard Nodes
-        Shard->>Shard: Atomic first-seen check in RamIndex (< 1 µs)
-        Shard->>Shard: Persist durable vote to redb WAL
-    end
-    
-    Shard-->>GW: LockVerifyResponse(Signature + EpochCertificate)
-    Note over GW: Fast-Exit as soon as 14 valid signatures are collected
-    GW->>GW: Cancel remaining RPC tasks (join_set.abort_all())
-    GW-->>App: 200 OK + LockReceipt + EpochCertificate(E) + AnchorProof
-    
-    Note over App: Client Cryptographic Verification:<br/>1. Verifies EpochCertificate links to trusted Anchor/Checkpoint<br/>2. Verifies >= 14 lock signatures match committee<br/>=> FINAL 🟢 (Release goods)
-```
-
-#### Client Verification Tiers:
-1. **Tier 1 (Zero-Trust Cryptographic Verification - Mandatory for FINAL):**
-   - The Gateway returns the `LockReceipt` (with $\ge 14$ signatures) together with the active `EpochCertificate(E)` and missing intermediate certificates linking back to the terminal's trusted Anchor or recent Checkpoint.
-   - The terminal cryptographically verifies:
-     a) `EpochCertificate(E)` validly chains to the trusted Checkpoint/Anchor.
-     b) At least 14 signatures on `LockReceipt` belong to the 20 members authorized in `EpochCertificate(E)`.
-   - The terminal caches verified certificates in an **in-RAM LRU cache** ($\approx 1.35\,\text{MB}$ for 500 daily checkouts across distinct shards). Zero persistent disk footprint for foreign shards!
-2. **Tier 2 (Statistical HRW Sanity Check):**
-   - As an immediate local heuristic, the terminal calculates deterministic HRW ranks on its known-node catalog:
-     $\text{Score} = \text{BLAKE3}(\text{HrwRoutingId} \parallel \text{shard\_id})$.
-   - Checks whether the signers are plausible high-ranking members. This detects eclipse attempts early, but does not substitute for the cryptographic certificate chain.
-3. **Tier 3 (Trusted Gateway / In-Store Node):**
-   - For merchants running their own node on LAN (`localhost:8080`), the local node performs complete CEH chain verification, and the terminal accepts the gateway's verified `FINAL` receipt directly.
+- **Micro-Retry Policy:** At 300 ms, if 13 responses are collected, the gateway fires an immediate micro-retry to the remaining 7 nodes, resolving $>95\%$ of temporary packet drops in 50–80 ms.
+- **Gateway Auto-Forwarding on Epoch Transition:**
+  If a gateway sends a request for Epoche $E$ after the shard has transitioned to $E+1$, the shard returns `EPOCH_STALE` carrying `EpochCertificate(E+1)`. The gateway updates its pointer and transparently resubmits for $E+1$ within 10–20 ms without user impact.
 
 ---
 
-### 4.3 The Transition Protocol: Deadlock-Free BFT Handoff (CP-0042 Hardened)
+### 4.3 The Transition Protocol: Deadlock-Free BFT Handoff
 
 ```mermaid
 sequenceDiagram
@@ -241,7 +217,7 @@ sequenceDiagram
     
     loop Phase 1 Validation (Prepare)
         C->>C: Check Lock-on-Prepared: If locked on earlier value V, proposal must carry V
-        C->>C: Check Candidate Proofs & State Completeness
+        C->>C: Reconcile missing hops via reconcile_union
         C->>C: Persist PREPARE to redb WAL
     end
     C-->>P: PREPARE(Signature)
@@ -264,37 +240,17 @@ sequenceDiagram
 
 #### Detailed Protocol Rules:
 
-1. **True In-Flight Write Barrier (No Revocation of Committed Choices):**
-   - Every committee node tracks in-flight write operations: `active_in_flight_writes: AtomicU32`.
-   - **Stage 1 (`FENCE_DRAIN`):** When the handoff maintenance window opens, new ingress requests are rejected with `HTTP 503 Service Unavailable` and header `Retry-After: 2`. The node awaits:
-     $$\text{active\_in\_flight\_writes} == 0$$
-   - **No Revocation of Signed Choices:** If an in-flight operation has already persisted a vote to `redb` or emitted a signature over the wire, it is **never cancelled or revoked**. It completes fully and is included in the active lock set. The counter decrements only when the task completely finishes its storage interaction. If a socket times out at the gateway, the server-side vote remains binding.
-   - **Stage 2 (`FENCE_LOCKED`):** With `active_in_flight_writes == 0`, a synchronous `redb` disk flush freezes the active lock set. `closed_state_root` is computed. No write can race the snapshot.
-
-2. **Self-Contained Candidate Pool & Objective Selection:**
-   - The proposer provides full cryptographic proof bundles for all 20 candidates:
-     `CandidateProof = (NodePubKey, Argon2dTicket, Timestamp, F2FSignature)`.
-   - Members verify:
-     a) All 20 candidate tickets are cryptographically valid, mature ($> 24\,\text{h}$), and non-banned.
-     b) Candidates are sorted deterministically by $\text{BLAKE3}(\text{HrwRoutingId} \parallel \text{Shard\_ID})$.
-     c) Objective inclusion: Candidates match the active catalog. Honest members reject a proposal if and only if an authenticated proof of an omitted higher-ranking candidate from the previous catalog is proven.
-
-3. **Public Validity vs. Private Retention & Late-Certificate Redemption:**
-   - *Public Validity:* A proposal carrying an authentic `PreparedProof` (14 valid Prepares) is publicly valid. In Round $r+1$, all honest members commit $P$, overriding subjective omission objections.
-   - *Pre-Quorum Conflict Handling & Late-Certificate Redemption:*
-     a) **Confirmed Locks:** Any lock with 14 votes intersects any 14-member prepare set in $\ge 2$ honest nodes; it is guaranteed to be in `closed_state_root`.
-     b) **Divergent Pre-Quorum Splits:** If old nodes split votes (e.g., 8 honest signed $A$, 6 honest signed $B$, neither reaching 14 in the old nodes' view), the successor committee marks the slot as `PROVISIONAL_CONFLICT`.
-     c) **Late-Certificate Redemption ($T_{\text{late}} = 30\,\text{days}$):** If a client, merchant, or gateway presents a valid 14-vote `LockReceipt` for $A$ signed by the authorized predecessor committee within 30 days, the successor committee **must accept and redeem $A$, clearing the conflict in favor of $A$**!
-     d) If no 14-vote certificate is presented within 30 days, both branches remain blocked until voucher expiry (`valid_until + 30s`), permanently preventing double spends.
-
-4. **Verifiable View-Change & Unbounded Timeout Backoff:**
-   - If a round fails to assemble 14 Prepares or 14 Commits within the timeout, members broadcast:
-     `ROUND_CHANGE(Round r+1, HighestPreparedProof, Signature)`.
-   - Timeout scales exponentially without artificial cap: $T(r) = T_0 \times 2^r$ ($T_0 = 2\,\text{s}$). Under partial synchrony after GST, progress is mathematically guaranteed.
-   - **`NewViewCertificate` Mandate:** The new proposer for Round $r+1$ gathers 14 valid `ROUND_CHANGE` messages into a `NewViewCertificate`. Members independently verify that the proposed value matches the highest prepared proof in the certificate before preparing.
-
-5. **Crash-Safe Persistence:**
-   `FENCE_LOCKED`, `PREPARE` votes, `COMMIT` votes, and successor state installation are synchronously flushed to `redb` WAL before any network message is transmitted.
+1. **Causal Barrier Cutoff (No Fragile Clock Timestamps):**
+   - The transition is governed by the `FENCE_DRAIN` barrier, not uncoordinated system clocks.
+   - In-flight writes that entered before drain complete durably; new writes pause with HTTP 503 `Retry-After: 2s`.
+2. **Hierarchical State Closure & Set-Union Reconciliation:**
+   - Proposer packages all active voucher split-trees.
+   - Members perform `reconcile_union`: any valid unexpired hop present in $\ge 2$ honest nodes is merged.
+   - Canonical sorting ensures all nodes compute the exact same 32-byte `closed_state_root`.
+3. **Late-Certificate Redemption via Client-Side Custody:**
+   - Pre-quorum splits are marked `ProvisionalConflict`.
+   - When a valid 14-vote predecessor `LockReceipt` is presented accompanied by its `EpochCertificate`, the successor verifies the certificate against a trusted checkpoint and clears the conflict to `Settled`.
+   - Vouchers retain 100% usability over their full 11-year validity without node state bloat.
 
 ---
 
@@ -343,6 +299,20 @@ sequenceDiagram
 
 ---
 
+### Theorem 4: Invariance under Independent Genesis Networks (Domain Isolation)
+*Claim:* Two networks initialized with distinct Genesis Manifests $G_A \neq G_B$ cannot corrupt each other's epoch certificates or closed state roots.
+
+*Proof:*
+1. Every epoch certificate $C_E$ carries an unbroken backward hash chain terminating at its specific $G$.
+2. The domain-separated hash of an epoch certificate is defined as:
+   $$H(C_E) = \text{BLAKE3}(\text{len} \parallel \text{"HUMOCO\_V1\_CEH\_CERT"} \parallel \dots \parallel H(C_{E-1}))$$
+   where $H(C_0) = H(G)$.
+3. If $G_A \neq G_B$, then $H(G_A) \neq H(G_B)$ with overwhelming probability ($1 - 2^{-256}$).
+4. Consequently, no certificate $C_E^B$ can be accepted as an ancestor of $C_E^A$.
+5. Shard verification, state roots, and attestations are thus strictly domain-isolated. An honest node adhering to protocol validation rejects certificates rooted in a foreign genesis manifest. $\blacksquare$
+
+---
+
 ## 6. Zero State Bloat & Honest Storage Accounting
 
 | Network Size ($N$) | Mean Shards / Node ($\frac{20}{N} \times 65,536$) | 30-Day Certificate Storage / Node | Storage Mode |
@@ -354,61 +324,4 @@ sequenceDiagram
 | **$N = 10,000$** | $\approx 131$ | **$\approx 10.6\,\text{MB}$** | Federated HRW Sharding ($2.7\,\text{KB} \times 30\,\text{days}$) |
 | **Worst-case single node** | 65,536 (All Shards) | **$\approx 5.3\,\text{GB}$** | Retaining all shards for 30 days |
 
-*Note:* Storage figures cover rolling 30-day certificate history only. Active collision locks are persisted in `redb` until voucher root expiry ($T_{\text{max}} = 11\,\text{years} + 30\,\text{s}$) with fixed 144-byte binary footprint per lock.
-
----
-
-## 7. Subagent Implementation Architecture & Work Packages
-
-To execute the implementation cleanly without merge collisions or context exhaustion, the implementation is partitioned into **five independent, contract-bounded work packages**:
-
-```mermaid
-flowchart TD
-    P1["📦 Package 1: CEH Cryptography & Wire Types\n(types.rs, crypto.rs, Merkle tree)"] --> P2["📦 Package 2: In-Flight Write Barrier & State Snapshot\n(barrier.rs, snapshot.rs, closed_state_root)"]
-    P1 --> P3["📦 Package 3: 2-Phase BFT State Machine & View Change\n(consensus.rs, NewViewCertificate, backoff)"]
-    P1 & P2 --> P4["📦 Package 4: Verification Tiers & Late Redemption\n(verifier.rs, LRU cache, 30-day conflict resolution)"]
-    P1 & P2 & P3 & P4 --> P5["🔬 Package 5: Adversarial Simulation Test Suite\n(Bridge attack, newcomer race, 8/6 split, N=20 Merkle)"]
-```
-
-### 7.1 Package 1: CEH Cryptography, Types & Merkle Tree
-- **Scope:** `crates/humoco-sim-core/src/ceh/types.rs`, `crates/humoco-sim-core/src/ceh/crypto.rs`
-- **Deliverables:**
-  1. Rust structs: `GenesisManifest`, `EpochCertificate`, `UnifiedNetworkEpochManifest`, `LockReceipt`, `EpochProposal`, `PrepareVote`, `CommitVote`, `RoundChangeMessage`, `NewViewCertificate`.
-  2. Length-prefixed BLAKE3 domain separation (`HUMOCO_V1_CEH_*`).
-  3. BLAKE3 Merkle Tree computation for 65,536 shard roots in `UnifiedNetworkEpochManifest`.
-  4. Safe binary serialization/deserialization without `unsafe`.
-  5. Unit tests verifying canonical encoding and deterministic hashing.
-
-### 7.2 Package 2: In-Flight Write Barrier & State Snapshot
-- **Scope:** `crates/humoco-sim-core/src/ceh/barrier.rs`, `crates/humoco-sim-core/src/ceh/snapshot.rs`
-- **Deliverables:**
-  1. `AtomicU32` in-flight write tracker with two-stage barrier (`FENCE_DRAIN` $\to$ `FENCE_LOCKED`).
-  2. Guaranteed non-revocation: in-flight operations with durable disk writes complete fully before `FENCE_LOCKED`.
-  3. Snapshot builder: computes set union of active, unexpired locks and deterministically calculates `closed_state_root`.
-  4. Unit tests verifying race-free drain under simulated concurrent ingress.
-
-### 7.3 Package 3: 2-Phase BFT State Machine & View Change
-- **Scope:** `crates/humoco-sim-core/src/ceh/consensus.rs`
-- **Deliverables:**
-  1. Discrete-event BFT transition state machine (Propose $\to$ Prepare $\to$ Commit).
-  2. Public Prepared Validity: 14 Prepares force Commit in Round $r+1$.
-  3. Lock-on-Prepared: prevents equivocation across rounds.
-  4. View-change protocol with `RoundChangeMessage`, `NewViewCertificate`, and unbounded exponential backoff ($T_0 \times 2^r$).
-  5. Deterministic proposer selection: $\text{proposer}(r) = r \pmod{20}$.
-  6. Unit tests proving liveness under $f \le 6$ silent/byzantine nodes.
-
-### 7.4 Package 4: Verification Tiers, LRU Cache & Late-Certificate Redemption
-- **Scope:** `crates/humoco-sim-core/src/ceh/verifier.rs`
-- **Deliverables:**
-  1. Tier-1 cryptographic chain verifier linking `EpochCertificate(E)` back to `GenesisManifest` or trusted checkpoint.
-  2. In-RAM LRU cache for PoS terminals ($\approx 1.35\,\text{MB}$ for 500 shards).
-  3. Late-Certificate Redemption: evaluates 14-vote predecessor receipt presented within $T_{\text{late}} = 30\,\text{days}$ to resolve `PROVISIONAL_CONFLICT`.
-  4. Permanent block after 30 days for unresolved splits.
-
-### 7.5 Package 5: Adversarial Simulation Test Suite
-- **Scope:** `crates/humoco-sim-core/tests/ceh_adversarial_suite.rs`
-- **Deliverables:**
-  1. **Test 1 (39-Node Bridge Attack):** Reproduces two partitions separated by a bridge; proves conflicting 14-vote certificates are rejected.
-  2. **Test 2 (22-Node Newcomer Activation Race):** Proves write-fencing and state transfer prevent conflicting lock issuance during node turnover.
-  3. **Test 3 (8/6 Split + View Change):** Proves progress and late-certificate resolution under 8 honest + 6 Byzantine nodes.
-  4. **Test 4 (Unified Manifest at $N=20$):** Proves Merkle-root verification covers all 65,536 shards in a single $2.1\,\text{KB}$ payload.
+*Note:* Storage figures cover rolling 30-day certificate history only. Active collision locks are persisted in `redb` until voucher root expiry ($T_{\text{max}} = 11\,\text{years} + 30\,\text{s}$) with fixed binary footprint per lock.

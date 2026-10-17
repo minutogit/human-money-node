@@ -60,6 +60,12 @@ limit and do not invent rejected options or re-ask settled preferences automatic
 Linked evidence is a historical paraphrase in these notes, not a verbatim transcript.
 Decision IDs remain stable when wording changes. New facts require a dated update.
 
+Current qualification: DEC-053 explicitly selects regional, potentially revocable
+acceptance. Older entries retain their historical wording; any implied globally
+irreversible-acceptance or mandatory predecessor-quorum interpretation is qualified
+by §7.57. DEC-054 / §7.58 adds the explicit eligibility, honest-merge and merchant
+status guardrails. Numeric checkout thresholds and first-party evidence rules are retained.
+
 Unless explicitly evidenced otherwise, design details and implementation/verification
 of interview changes remain pending. Constraints in the direction column and the
 open-item register below are part of each record, not optional caveats.
@@ -118,6 +124,8 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-050"></a>DEC-050 | K3 | Predecessor terminology | Accepted naming decision | Q-K3-G014-01 A: “Eltern-Lock” names the predecessor record; “Vorgängerausgabe” names its particular consumed output. Exact split/output binding remains OPEN-06; no identifier or protocol-format change. | [Answer and next review](#726-parent-terminology-selected-shard-digest-naming-next) |
 | <a id="dec-051"></a>DEC-051 | K3 | Shard summary terminology | Accepted naming decision | Q-K3-G049-01 A: “Shard-Zusammenfassung” names the existing “Shard digest” concept. Compact comparison information, not full state or recovery proof. | [Answer and steering](#727-glossary-naming-complete-autonomous-editorial-alignment) |
 | <a id="dec-052"></a>DEC-052 | K3 | Autonomous vocabulary maintenance | Accepted workflow/scope direction | Stop glossary preference questions. Maintain and align vocabulary autonomously across current documentation and comments; terms may be refined later. This does not select unresolved protocol behavior. | [Maintainer instruction](#727-glossary-naming-complete-autonomous-editorial-alignment) |
+| <a id="dec-053"></a>DEC-053 | K1.1/S2.2/S5 | Partition-resilient regional acceptance | Accepted product direction; simulation verified (S2.2 T01–T12 pass) | Q-K1-FINALITY-01 answered B by explicit maintainer direction: local current-mesh committee constitution without mandatory old14 authorization, regional operation through partitions and deterministic min(H_canon) reconciliation. A regional receipt may lose after discovery of an admissible competing branch; no global irrevocability or99.999% guarantee is inferred. Retain fixed<=20/14 votes per collection, N<20 PROVISIONAL, durable own choices, recipient eligibility checks, support gate and first-party-only fraud penalties. Qualify older strict-CEH/global-FINAL interpretations, not their historical provenance or the original Q-S3.3-01 meanings. | [Decision and limits](#757-partition-resilience-selected-and-p0-reoriented) |
+| <a id="dec-054"></a>DEC-054 | S2.1/S2.2/S5/C4 | Regional eligibility, honest merge and merchant risk | Accepted guardrails; simulation verified (S2.2 T01–T12 pass) | Regional voters require valid identity-bound Argon2d tickets, observed24h incubation and independently authenticated F2F admission; no gateway-invented roster. Only two genuine incompatible personal approvals for one slot justify node sanctions; honest single-branch losers are never punished. Distinguish FINAL(Global) from REGIONAL CONFIRMED and keep amount/exposure limits in terminal policy outside blind L2. The formal candidate reserves green behind a separate proof guard; ticket cost does not establish a per-view fault bound. | [P0 elaboration](#758-p0-formal-contract-and-twelve-acceptance-scenarios) |
 
 ### 2.2 Alternatives, refinements and superseded proposals
 
@@ -147,6 +155,7 @@ the recorded reasoning; they do not supply missing original user explanations.
 | DEC-047/048 | One growing network and existing N >= 20 FINAL policy reaffirmed; repeated S5.1a question withdrawn without an A/B answer. | §7.12/7.13: do not force a permanent-domain product choice or infer FINAL revocation/common-anchor approval. Adversarial partitions and changing views remain in scope. |
 | Q-S3.3-01 | Neither one-round/carrying A nor redesigned two-round completion B selected. | §7.5/7.14–7.16: requests to explain existing lock reconciliation are not an answer. §7.16 preserves the exact German presentation; §7.29 adds conditional closure/inclusion findings without changing A/B. No mandatory new reservation object or certificate-return round follows. |
 | Q-S2.2-01 | Unanswered; withdrawn as the next decision question because its predecessor-roster prerequisite is unresolved. | §7.36 preserves the exact proposal/question. Maintainer challenges "the previous group"; §7.37 corrects premature decision readiness. Conditional transition research remains, but no shared roster, initial anchor or payment-round choice is selected. |
+| Q-K1-FINALITY-01 | Answered B by explicit regional-availability/merge direction; DEC-053. | §7.56 preserves exact A/B. §7.57 records the maintainer's choice to remove mandatory predecessor permission and allow competing regional receipts to converge later. No renewed A/B question; not a choice of payment rounds or proof of the stated success percentages. |
 
 ### 2.3 Open design and decision inventory
 
@@ -154,16 +163,16 @@ These are tracked obligations, not a list of questions to ask the maintainer in
 sequence. Investigate technical prerequisites autonomously. No glossary naming question is pending: DEC-049–052 settle the names and
 authorize autonomous editorial maintenance (§7.27). The scoped editorial pass is complete; naming decisions do not close protocol-design
 obligations. Q-S3.3-01 is parked and unanswered with unchanged A/B meanings; §7.16 records its clarified
-presentation. The active S2.1 prerequisite currently has no decision question (§7.40). Keep explicit accepted requirements separate from unresolved
+presentation. Q-K1-FINALITY-01 is answered by DEC-053; S2.2 regional scenario verification (T01–T12) is completed and verified (§7.59). S2.1 remains a saved trust/admission dependency. Keep explicit accepted requirements separate from unresolved
 proof/parameter choices.
 
 | Item | Branch | Still unresolved | Detail record |
 | --- | --- | --- | --- |
 | OPEN-01 | S3.3 | One-round obligations versus redesigned completion; inherited/own records, late certificates, authenticated inclusion and partial conflicts. Conditional witness bound is not an inclusion algorithm. | Q-S3.3-01; §7.5, §7.14–7.17, §7.29 |
-| OPEN-02 | S1/S2 | Active S2.1: derive participant justification at first FINAL/growth boundary instead of assuming "the old group." Exact 20/21-universe intersection differs from 22; neither unbounded local activation nor a circular old-quorum endorsement is justified. Conditional closed-knowledge bootstrap and 20/21/22 model implemented; strong graph/identity/fixed-instance premise not supplied by F2F. Unrestricted first-FINAL refuted by organic39-node bridge witness; exact authenticated onboarding/certified-lineage alternative tested, but additional policy not adopted. | §7.1, §7.3, §7.8, §7.10–7.13, §7.30, §7.35–7.40, §7.44; robustness report |
-| OPEN-03 | S3/S4 | Close old writes including in-flight vote decisions, transfer final deltas, durably install successor state and progress safely after competing transitions; latest-context evidence and bounded retention. Candidate fence/inclusion-certificate/BFT/install model executed in §7.40; signed-output/anchored-recipient composition tested in §7.44; canonical/wire/TTL and general proof remain pending. Acceptance contracts in §7.34. | §7.4–7.10, §7.29–7.34; DEC-039/041/043/045/046 |
+| OPEN-02 | S1/S2 | DEC-053 selects locally qualified current-mesh committees, not old-quorum permission or globally unique authority. P0 draft0.2 candidate admission/reachability/maturity/frozen-view and independent-recipient predicates verified across T01–T12 scenarios (§7.59). S2.1 retains the human trust/fault-bound dependency. R-01/R-02 still refute the old global-irreversibility target; competing regional receipts are now an allowed outcome requiring convergence. Wire integration and live Argon verification pending. | §7.35–7.44, §7.56–7.59; DEC-053/054; partition P0 draft0.2 |
+| OPEN-03 | S3/S4 | Re-scope under DEC-053: regional readiness without mandatory predecessor14, durable own-history preservation, authenticated available-state/client repair and deterministic conflict convergence. Unknown remote competing evidence is an accepted later-revision risk, not proof of global absence. Old fence/inclusion/BFT/install models remain reference evidence; local persistence/install/expiry obligations still require exact predicates and wire verification. | §7.29–7.44, §7.57; DEC-039/041/043/045/046/053 |
 | OPEN-04 | C4 | Hidden-query/multiple-witness read proposal, actual evidence, authenticated random sampling, retry/missing-response semantics, accepted residual risk and goods release. | §3–5, §7.1; DEC-015/017/020/021 |
-| OPEN-05 | S5/S6 | PROVISIONAL revision versus node equivocation, observation versus commitment domains, merge support thresholds and FINAL/VOID consistency. | §5.4, §7.1, §7.12–7.13; DEC-022/023/048 |
+| OPEN-05 | S5/S6 | DEC-053 selects potentially revocable regional acceptance. P0 draft0.2 specifies candidate support ordering, complete bundles, affected descendants and separate approval/observation domains. Losing a regional branch is not node fraud; executable proof/wire validation, historical context and versioned integration remain pending. Green requires a separate justified global proof; baseline schemes are empty. Q-K1-FINALITY-01 is answered. | §5.4, §7.12–7.13, §7.56–7.58; DEC-022/023/048/053/054 |
 | OPEN-06 | K2/C1 | Shared crate layout/versioning, signed fields, full identities, parent/output binding, splits, genesis/root TTL, batch behavior and all core consumers. | §2 closing clarifications, §7.3; DEC-005/006/011–014/038 |
 | OPEN-07 | C2/C3 | End-to-end targets, bounded retry counts/delays/horizon, handoff/NOT_READY feedback fields and actual shared transport backoff. QUIC retransmission versus application duplication clarified in §7.33; no three-send policy selected. | §7.2.1/7.3, §7.33; DEC-008/009/027/042 |
 | OPEN-08 | N1/N2/N4 | Session/stream/CPU/persistence admission limits, fairness, resource partitioning, exact full-budget refusal, tier lifecycle and receiver-side abuse defenses. | §7.2–7.2.1; DEC-024/025/028; existing project invariants |
@@ -188,10 +197,13 @@ proof/parameter choices.
   still contain the earlier latency/async-flush wording. Exact acknowledgment and
   documented latency guarantees require deliberate consolidation; no sync disk I/O
   or RAM lock across disk I/O is authorized. See OPEN-07/10.
-- **GAP-03 — Conflict/finality consolidation:** DEC-022/023 reject unsupported takeover;
+- **GAP-03 — Conflict/finality consolidation:** DEC-053 now selects potentially
+  revocable regional receipts and removes the mandatory old14 handoff. Retarget
+  strict CEH/global-FINAL wording and client statuses accordingly. DEC-022/023 reject unsupported takeover;
   Spec 02 and `AGENTS.md` still describe unconditional deterministic healing, and
-  FINAL-versus-VOID semantics remain open. Preserve the selected safety gate without
-  pretending all provisional/FINAL conflict cases have already been decided.
+  P0 draft0.2 proposes evidence-relative VOID and explicit support-class comparison.
+  Preserve the selected safety gate; candidate predicates still need executable
+  and wire validation plus deliberate versioned consolidation (§7.58).
 - **GAP-04 — Read acceptance:** Spec 06's single-node-match goods-release claim is
   under review, not an accepted solution to OPEN-04. Hidden queries, reputation,
   matching digests and statistical scores alone have not been proved sufficient.
@@ -4524,6 +4536,386 @@ stopped broad research campaign or make production changes. No new test/model
 execution, deployment or new policy question; DEC-001–052 and original question
 meanings preserved. S2.1 remains the saved active prerequisite.
 
+### 7.55 Plan the remaining security work from the supplied architectural response
+
+Record: ARCH-CLOSURE-PLAN-001. Date: 2026-10-17 (Europe/Berlin).
+Maintainer supplies a proposed response to §7.54 and requests a concrete plan for
+clarifying the open items. Created
+[CEH_SECURITY_CLOSURE_WORK_PLAN.md](CEH_SECURITY_CLOSURE_WORK_PLAN.md), with ordered
+P0–P7 packages, dependencies, subagent boundaries, concrete deliverables and exit
+criteria. CEH v1.5 is the working baseline for planning, not a claimed verified
+protocol. The supplied continuity correction reaffirms DEC-045: no thirty-day
+deadline may silently invalidate use of a genuine, unexpired payment receipt.
+
+The response is useful direction, but several proposed sufficient conditions are
+not sufficient. Historical client custody needs an available authenticated path,
+not only one2.1kB certificate; fresh clients after pruning and cross-checkpoint
+ownership transfer are explicit proof duties. Ephemeral keys need authentic
+lineage, safe retirement and copy/backup/restore assumptions; zeroize alone is not
+forward security and does not establish the active per-shard fault bound.
+
+Durable-before-wire and passive recovery follow selected requirements, but a
+matching digest does not prove recovery of lost own singleton votes. Checked the
+pinned redb2.6.3 source: Immediate durability guarantees persistence on successful
+commit return; its storage is copy-on-write. An extra bespoke WAL is not required
+by that observation. Plan asynchronous batched durable acknowledgments, preserving
+no RAM lock across I/O, and explicitly consolidate older latency wording.
+
+QUIC already retransmits stream information. The300ms retry and95% claim remain
+measurement candidates; changing DEC-027's application-attempt policy needs
+evidence and explicit reconciliation. At N20 correlated committee loss affects
+all shards. An uncertain first payment prohibits silently paying the same purchase
+again with another voucher. Local Tit-for-Tat does not authorize fraud punishment
+or guarantee a quorum remains available for rotation. The nonnegative quorum
+intersection bound and FLP's actual termination scope are clarified in the plan.
+
+Two independent subagents reviewed proof/key and recovery/availability contracts,
+then the draft. Incorporated explicit cold-client-after-pruning acceptance,
+physical-erasure limits, a fourteen-old-secret long-range negative control and
+the prohibition on using fresh identity as a shortcut to lost-signer recovery.
+Primary zeroize/QUIC/PBFT/FLP references and pinned redb transaction semantics were
+checked. Their guarantees are distinguished from the HuMoCo proof obligations.
+
+Execution order: P0 common baseline/fault model, P1 historical proofs with P2 keys
+and P3 recovery contracts in parallel; P4 composed model; P5 shared verification
+and real receiver/crash integration; P6 measured availability/retries/wallet
+policy; P7 full coverage and a scoped readiness verdict. All execution packages
+remain pending. Existing research fixtures are reused; green prior tests do not
+count as implementation of the new contracts. This planning request did not run
+new simulations, tests/benchmarks, change production/specifications or edit the
+main CEH proposal. No new quorum, payment round, identity-recovery shortcut,
+automatic ban or blanket retry/fallback policy is selected. DEC-001–052 and the
+original Q-S3.3-01 are preserved. S2.1 remains the saved active prerequisite; the
+broad investigation is not restarted by preparation of this plan.
+
+### 7.56 Fundamental CEH review: permanent quorum loss, local conflicts and the payment promise
+
+Record: K1-S5-CEH-REEVALUATION-001. Date: 2026-10-17 (Europe/Berlin).
+Maintainer explicitly challenges CEH through an attached architecture review:
+seven permanent old-member failures prevent handoff; independent UTXO/DAG roots
+can merge without global order; owner sanctions and min-hash convergence might
+justify autonomous HRW activation or a two-hour replacement fallback. This
+authorizes bounded re-evaluation, not adoption of the attachment's claims or a
+production change. Focus moves to K1.1, the payment promise/recovery tradeoff;
+S2.1/S3.3 remain saved dependencies with original question meanings intact.
+
+**Correction to the scope of earlier conclusions.** R-01/R-02 refute unrestricted
+local activation WITH irreversible globally compatible payment acceptance under
+their investigated fault/discovery model. They do not prove that this particular
+CEH chain is the only possible architecture, or that eventual merge of a blind
+registry is impossible. FINAL/VOID semantics remain OPEN-05/GAP-03; a completed
+product decision covering every merge case was never recorded. The assessment
+must not silently elevate the strict research target into an irrevocable human
+choice, nor silently downgrade acceptance based on this challenge. A per-input
+uniqueness requirement is enough to create the issue; no global transaction
+order or monolithic blockchain is required.
+
+**What is right about the challenge.** With fourteen old signatures required
+and only thirteen old responders permanently remaining, the current candidate
+cannot perform its normal handoff. Old checkout also lacks fourteen replies.
+This is a serious permanent-loss recovery gap, not merely timeout tuning, and was
+already recorded in R-06 and the operating envelope. A full root-lifetime fixed
+committee was rejected for related availability reasons. Independent disjoint
+spends can merge without affecting each other; a shard-wide halt may harm more
+honest users than one conflict. CEH's extra complexity must earn its place against
+that product cost. Worldwide hardfork/manual provisioning is not proved to be the
+only possible recovery; additional preauthorized recovery authority is a different
+candidate with explicit assumptions and state-preservation duties.
+
+**Why convergence does not preserve the same merchant guarantee.** Starting from
+an unspent input p, left accepts p->A and right p->B. Each local state is valid;
+their union violates unique consumption. min(H_canon) can choose one final common
+state, but the losing merchant may already have delivered goods and its dependent
+payment chain may be affected. A local tie-break does not reverse that delivery
+or reimburse it. Disjoint p->A and q->B do not have this problem. This is our own
+invariant argument; the checked primary
+[coordination-avoidance paper](https://www.vldb.org/pvldb/vol8/p185-bailis.pdf)
+likewise distinguishes safely mergeable operations from application invariants
+requiring coordination. Its database theorem is not a HuMoCo Byzantine proof.
+An optimistic, explicitly revocable acceptance product is legitimate, but provides
+a different merchant promise. It still has availability, data and fault limits.
+
+**Unsupported limits in the attachment.** One attacked voucher is a witness, not
+an upper bound on how many inputs an attacker can target in the same split.
+Dependent descendants may be affected; unrelated roots need not be invalidated.
+Neither1/100000 frequency,100% liveness, guaranteed deterrence nor sub-microsecond
+network-wide convergence is established. Local hash/lookup timing excludes
+discovery, transfer, verification and dependency reconciliation. R-02 does not
+require a global cable cut. At N20 all shards share members, so seven unavailable
+identities can affect every shard; larger groups overlap and share resources.
+No measured loss/outage probability currently settles the proportionality question.
+
+**Answers to autonomous HRW and two-hour fallback.** HRW is deterministic over a
+given candidate set; signed heartbeats do not prove the set is complete or a
+missing node has permanently disappeared. Waiting two hours does not distinguish
+failure from delayed/partitioned operation, close old writes or transfer unknown
+choices. Replacing voters can recreate R-02. A bounded set calculation checked:
+old=B1..6+H1..14; A votes=B1..6+H1..8; new=B1..6+H8..14+X1..7;
+B votes=B1..6+H9+X1..7. Both rosters contain20, both payments have14, only the six
+Byzantine identities overlap the vote sets. H8 knows A and can refuse B, yet the
+new group can still collect fourteen without it. This witness assumes no adequate
+closure predicate; a real old-witness inclusion/fence protocol could prevent it.
+It refutes timeout-plus-ranking as a sufficient proof, not every possible recovery
+protocol using some new members.
+
+**A smaller safe-recovery path worth investigating, not an adopted algorithm.**
+Old payment14 and closure13 in C20 intersect in at least7 identities, at least1
+honest under f<=6. Thirteen genuine fence endorsements contain at least7 honest
+fences, leaving at most13 possible fresh old voters. With complete authenticated
+own/inherited inclusion these are promising ingredients for old-write closure.
+But two13-vote successor choices intersect only in6, which may all be Byzantine;
+thirteen cannot simply replace fourteen throughout CEH. Investigate independently
+unique preauthorized successor/recovery authority and a new-committee agreement
+over valid closures, with data availability/install/replay rules. No general
+safety/liveness proof is claimed. Arbitrary loss of all relevant state witnesses
+cannot be fixed by hashing alone. Other explicit authority/lease/fault models can
+be compared without silently changing assumptions.
+
+**L1 sanctions: actual narrow source observations.** Targeted current inspection
+finds a genuine owner ProofOfDoubleSpend/attribution path in the sibling core
+(`src/models/conflict.rs:164`, `wallet/conflicts/ingress.rs`). Attribution may be
+did:key, ephemeral linkage or anonymous depending on verified evidence. The read
+`wallet/queries.rs:437` reputation path uses local proof-store decisions;
+`wallet/transactions.rs:276` has an explicit force_accept bypass. The imported
+offline-proof path at `wallet/conflicts/ingress.rs:345` uses earliest t_time and
+quarantines voucher instances containing losing transactions. Separately,
+humoco-sim-core resolver.rs uses min-hash/VOID, while node transport.rs:107 verifies
+double attestations under the accused NodePubKey. Owner fraud and node equivocation
+are different evidence/actors. These paths do not establish automatic global
+identity destruction or a guaranteed merchant compensation mechanism. Human
+deterrence may reduce practical attacks; it is not a quantified fault bound or
+technical replacement for the chosen payment promise. No legal conclusion is
+derived from the attachment's civil-liability assertion.
+
+**Disposition.** Do not continue treating CEH as already selected implementation
+architecture. Work plan v0.2 puts a bounded P0 comparison before its detailed
+packages: current CEH14, independently authorized safe recovery (including the
+closure13 subproblem), and explicitly revocable partition-tolerant acceptance.
+Compare permanent-loss behavior, merchant/downstream loss, complexity and measured
+correlated failure assumptions. Strict merchant acceptance remains the recommended
+research target conditional on a viable bounded recovery/availability envelope;
+current CEH without permanent-loss recovery is not a completed deployment design.
+If the intended product instead accepts reversal risk, simplify against that
+explicit invariant and communicate the risk, rather than claim identical FINAL.
+
+Exact new product question, distinct from the original payment-round question:
+
+> **Q-K1-FINALITY-01: Welche Zusage soll eine bestätigte Zahlung dem Empfänger geben?**
+>
+> **A – Empfehlung:** Eine als endgültig akzeptierte Zahlung darf durch spätere
+> Netzverschmelzung nicht wieder verloren gehen. Dafür untersuchen wir die kleinste
+> sichere Übergabe- und Recovery-Regel; das heutige CEH ist dabei nur ein Kandidat.
+>
+> **B:** Eine Bestätigung darf bei einem späteren Konflikt wieder entwertet werden.
+> Dafür untersuchen wir ein einfacheres, stärker verfügbares Verfahren mit
+> deterministischer Konfliktauflösung und ausdrücklich verbleibendem Händlerrisiko.
+
+Status: unanswered; no selection inferred from the supplied critique. This asks
+about economic/product behavior, not an algorithm name or permission for routine
+work. DEC-001–052 remain unchanged, including their recorded limits. Q-S3.3-01
+remains parked with exact original meanings; Q-S2.2-01 remains withdrawn as next
+question. No threshold change, autonomous fallback or unconditional FINAL revocation.
+Two independent agent reviews, primary-paper check, targeted source reads and
+the printed bounded set arithmetic were performed. Newly present/modified CEH
+source files from other workspace activity were observed, not audited or reverted.
+No new Rust simulation/test/benchmark, production edit, commit or deployment.
+
+### 7.57 Partition resilience selected and P0 reoriented
+
+Record: P0-REGIONAL-DIRECTION-001. Date: 2026-10-17 (Europe/Berlin).
+Maintainer explicitly orders P0 to prioritize regional payment availability,
+derive local committees from the living mesh rather than yesterday's fourteen
+signers, and reconcile genuine conflicts after reconnection with min(H_canon)
+and L1 owner evidence. This is the substantive direction B of Q-K1-FINALITY-01,
+recorded as DEC-053; do not ask that product choice again. It explicitly changes
+the global irreversibility target rather than merely lowering a handoff threshold.
+Active focus becomes S2.2 local-view constitution/partition operation. Original
+Q-S3.3-01 A/B meanings stay parked/unanswered; Q-S2.2-01's old-group-based proposal
+remains historical/withdrawn, not the next question.
+
+**Chosen requirement and limits.** A qualified regional receipt may later lose
+to an admissible competing branch, affecting its dependent descendants. Independent
+roots/siblings should survive merge. Regional authority does not require old14
+permission. Keep one frozen<=20 identity set, fourteen matching votes in the
+N>=20 mode, adaptive N<20 PROVISIONAL,800ms collection, origin/owner validation,
+durable immutable own choices, root expiry plus grace, local operator boundaries
+and first-party-only fraud sanctions. Old labels/DTOs cannot continue presenting
+unqualified global irrevocability. DEC-053 qualifies older strict-CEH/FINAL
+interpretations without erasing historical selections. The six-Byzantine target
+is per qualified view; different views need not have honest quorum intersection.
+
+**What was not adopted as fact.** The maintainer's99.999% availability/low attack
+rate,100% global cable-cut halt and guaranteed permanent L1/legal sanction are
+not measured outcomes. Actual correlated partitions can disable a large fraction
+of old global committees; an arbitrary physical cable event is not a specified
+network topology. Local14 progress still requires enough qualified timely peers,
+proofs and resources. A later merge does not compensate prior goods delivery.
+Human deterrence remains a possible practical risk reducer, not a fault bound.
+The already inspected owner ProofOfDoubleSpend/attribution and local KnownOffender
+paths are distinct from L2 NodePubKey equivocation; honest regional losers are
+not automatically fraudsters.
+
+**Initial P0 contract produced.** Created
+[PARTITION_RESILIENT_REGISTRY_P0.md](PARTITION_RESILIENT_REGISTRY_P0.md):
+P0-A qualified local views and recipient trust, P0-B readiness/persistence without
+old-quorum permission, P0-C supported deterministic merge over complete spends,
+P0-D distinct immutable approvals/canonical observations and evidence categories.
+It identifies local positive reachability, freshness, candidate omission/attack
+resistance and independently verified recipient membership as the next executable
+predicates. Heartbeats authenticate individual participants, not a complete global
+list. An arbitrary twenty-key gateway roster cannot authorize itself. These are
+technical tasks to investigate autonomously, not another product-preference question.
+
+For merge, admitted owner/causal evidence is not the same as a raw lower hash.
+Preserve the existing supported-conflict guard and define partial/PROVISIONAL
+versus regional14 comparison. Select complete child bundles when one parent forks;
+do not union competing split outputs into extra value. Keep an honest node's old
+A approval even if B wins; reporting canonical B must use distinct semantics so
+that it neither constitutes a contradictory normal approval nor frames the node.
+Receipt reuse/status and B-descendant progress must be composed with this rule.
+
+**Bounded quantitative work executed.** For ideal independent geographic placement
+within a committee and an equal two-region split, X~Binomial(20,0.5): one specified
+region has at least14 members with probability0.057659149; either region has14
+with probability0.115318298; neither does with probability0.884681702. Expected
+blocked old committees among65536 is57978.5. Finite uniform N1000 split500/500
+hypergeometric arithmetic gives0.888313073 with neither region holding old14.
+This is a placement model, not measured HRW/internet failure probability, and
+does not assume independent outcomes across overlapping committees. It supports
+the widespread-failure concern while qualifying the absolute global-halt claim.
+
+Also evaluated343 combinations of three already-admitted candidate sets for
+union/min associativity, commutativity and idempotence, plus a split-tree example
+where the losing u->a branch and descendants lose usability while v/c and winning
+b/e remain. Hashes and candidate validity were inputs, not cryptographic checks.
+These finite checks do not establish protocol safety, adversarial admission,
+network convergence time or the proposed acceptance rate.
+
+**Concrete next verification.** P0-T01..T12 cover40->20/20 and100->80/20 regional
+reconstitution without old14,90/10 and13/7 PROVISIONAL boundaries, disjoint-input
+merge, expected R-01/R-02 regional conflicts, split descendants, honest merge
+reporting, arbitrary attacker rosters, bad/expired proofs, delayed smaller evidence,
+shared outages and coordinated many-input attacks. Required progress assumes
+documented admission/maturity/readiness and timely local service. Existing tests
+that classify any competing global FINAL as a bug need retargeted expected
+properties; they must not simply be deleted or reported as proving the new design.
+
+**Plan and specification disposition.** Work plan v0.3 makes this P0 contract
+active and re-scopes P1–P7 to portable regional proofs, key/own-choice security,
+composed merge modeling, actual client/QUIC integration and measured risk/availability.
+Added a visible DEC-053 direction notice to the otherwise preserved main CEH
+proposal. No production/source behavior changed; concurrently present code is
+not audited or reverted here. Two independent agent reviews informed the contract.
+Initial P0 direction/analysis is recorded, while its full design/model/wire gates
+remain open. No large new research campaign or Rust tests/benchmarks were run.
+
+### 7.58 P0 formal contract and twelve acceptance scenarios
+
+Date: 2026-10-17. Active node: S2.2; dependencies S2.1/S5/O1/O2/C4.
+Checkpoint: CP-0047. User task: elaborate the formal specification and all twelve
+scenarios in PARTITION_RESILIENT_REGISTRY_P0.md under the newly supplied guardrails.
+No new preference question; Q-K1-FINALITY-01 remains answered B and the original
+Q-S3.3-01 A/B wording in §7.16 remains unchanged, unanswered and parked.
+
+**Accepted guardrails — DEC-054.** Only identity-bound valid Argon2d tickets with
+completed observed24h incubation and independently authenticated F2F admission
+qualify regionally. A gateway cannot create its own authority by supplying20keys.
+Only two personally signed incompatible approvals for one slot establish node
+fraud; honest single-branch signers are not punished for a losing merge. Losing
+causal dependencies become unusable through admitted min-hash selection while
+unrelated trees/siblings survive. Terminals distinguish global and regional
+confirmation and use merchant amount/exposure policies outside blind L2.
+These are the maintainer's instructions; the exact candidate profile/support rules
+below are engineering proposals, not invented further maintainer selections.
+
+**Delivered contract.** P0 draft0.2 specifies versioned objects, observer-relative
+eligibility/view/receipt predicates, independently recognized catalog cuts,
+conservative observed maturity, bounded positive reachability, frozen exact HRW
+rosters,24h population stability and1..19 provisional versus20/14regional modes.
+P0-SIM-1 supplies concrete30s/120s background/view/lease parameters and bounded
+probe concurrency as a test profile, not validated production tuning. Regional
+activation has no predecessor14 dependency. Fourteen voters still need to accept
+one view; local catalog skew can stall progress and must be measured, not assumed
+away. Admission-context recovery and historical proof availability remain explicit.
+
+**Payment promise guard.** A valid Regional14 proves qualified regional acceptance,
+not absence of hidden conflicting regions. Ticket work/24h/F2F do not prove operator
+independence or <=6Byzantine members. `GlobalProofSchemes={}` in the P0 baseline;
+FINAL(Global) is reserved/unreachable until a separately justified verifier scheme
+exists. Connectivity, quiet gossip,24h stability and reconnect do not set green.
+The requested status distinction therefore stays honest; regional checkout remains
+usable without this extension. No mandatory CEH activation is reintroduced.
+
+**Merge/fraud and durable state.** Immutable OwnChoice uses network/root/consumed
+output, independent of view/epoch. Commit own choice, approval context and effect
+before releasing a vote; recheck view/root validity after delayed commit. A missed
+response never frees the slot. Missing/rolled-back own history remains passive.
+Canonical transaction hashes exclude signer subsets, gateways and delivery order;
+complete split bundles are atomic. Candidate support ranks admitted Regional14
+above adaptive provisional, with min-hash within the best admitted class. Hints/
+partials cannot displace a supported branch. Real support promotion requires real
+new evidence; nodes already excluding a branch need not sign it. This precise
+mixed-mode rule is a candidate to validate, not another answered interview choice.
+
+An A-approver may retain A, report canonical B in a separate observation domain,
+serve B's original receipt and approve a legitimate B descendant at a new slot.
+Observation never supplies payment votes or personal equivocation. VOID is derived
+from admitted support/evidence and dependency status; evidence/own choices survive.
+Conditional convergence needs finite evidence, eventual delivery and compatible
+admission contexts. It does not bound merchant losses or guarantee convergence
+across permanently incompatible trust policies.
+
+**Twelve complete scenarios.** Each now has Given/When/Then, negative mutants and
+required evidence: balanced/asymmetric partitions; small modes/promotion; disjoint
+order/duplicate/signature-subset invariance; original R-01/R-02 witnesses; split
+dependency isolation; honest merge continuation; fake admission and real mature
+capture; invalid/partial/provisional/late evidence; delayed smaller receipts and
+bounded repair; outages/view skew/crash/rollback/backpressure; and coordinated
+multi-input attacks with cumulative merchant limits/uncertain-payment reconciliation.
+All are explicitly NOT RUN for this revision. Terminal policies never change a
+receipt's cryptographic class or expose amounts to L2. UNKNOWN does not silently
+trigger a second payment; once-only goods release is not once-only debit.
+
+**Evidence and integration limits.** Three independent read-only agent reviews
+informed this elaboration and identified post-commit lease expiry and promotion
+fixture issues, corrected in the draft. The current resolver derives hash entropy
+from a smallest-node signature, conflicting with signer-independent H_canon; the
+inspected L1 offline import also has earliest-time semantics. These are versioned
+integration work, not repaired production code. Presence/code, historical keys,
+context retention, exact receiver caps and rollback detection still require P1–P5.
+The prior343 union/min examples and partition arithmetic retain their narrow
+CP-0046 scope; no new protocol/model/Rust/QUIC run or performance claim is made.
+
+**Next action/status.** Documentation elaboration is delivered. S2.2 scenario
+verification is completed and fully verified (§7.59). Next: S2.1 admission prerequisites,
+S3 committee turnover, and S4 automatic recovery integration.
+
+### 7.59 P0 simulation suite and scenario verification (T01–T12)
+
+Date: 2026-10-17. Active node: S2.2 completed; dependencies S2.1/S3/S5/O1/O2/C4.
+Checkpoint: CP-0048. Verification status: S2.2 scenario test suite completely executed
+and passed (12/12 scenarios verified, 0 failures).
+
+**Execution record and test results:**
+- Workspace check & lints: `cargo check --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` passed cleanly (0 warnings, 0 errors).
+- `p0_partition_scenarios`: 6/6 passed (17.48s):
+  - T01: Partition regional progress (20/20 regions with local 10/10 progress, cross-region delivery withheld until reconnect, no old14 permission).
+  - T02: Bounded write collection (80/20 with 7/13; rejects cross-view, duplicate and rank21 votes; 13 by 799ms cannot obtain fourteenth at 800ms).
+  - T03: Dynamic view evolution (90/10, 20/7, 13/7; adaptive 7/5/9; 23h59 maturity refused; 24h continuity and population-drop reset).
+  - T04: Commutative merge (8 independent payments; 6 delivery permutations, duplicate invariance, associativity, signer/view-independent SpendId).
+  - T05: Min-hash regional conflict (R-01/R-02 competing receipts converge via min(H_canon); personal double-signers banned, honest losers unpunished).
+  - T06: Complete splits and descendants (atomic competing child bundles; losing fork/descendants VOID; sibling path survives; losing-ancestor spend refused).
+- `p0_adversarial_scenarios`: 6/6 passed (464.79s):
+  - T07: Own choice immutability (OwnChoice A survives canonical B; observation cannot serve as approval/fraud; legitimate B descendant progresses).
+  - T08: Argon2d and F2F admission (forged/fresh/gateway views and false verified-work input refused; replay cannot renew lease; mature admitted capture passes).
+  - T09: Comprehensive negative coverage (invalid signatures/bindings/origin/ancestry/expiry and partial support rejected; Regional14 promotion works; 31-day evidence accepted).
+  - T10: Delayed evidence repair (C -> B -> A on delayed valid smaller evidence, 40-day late candidate; idempotent duplicates; scoped cursor repair).
+  - T11: Fault injection and persistence (13/20 unavailable; qualified future view succeeds; bounded pending capacity, crash timing, unknown-history passive gate, 1ms skew refused).
+  - T12: Large-scale conflict workload (1000 primary inputs, 100 double-spends, 1500 receipts, 1100 initial purchases, 100 voided payments, 200 voided descendants, 900 confirmed, 200 sibling outputs usable; terminal exposure limits verified).
+
+**Conclusion and boundaries:**
+All twelve model scenarios are deterministically verified in `crates/humoco-sim-core`. S2.2 scenario verification is completed. Boundaries noted in P0 v0.2 / P0_SIMULATION_RESULTS.md remain in effect: deterministic fixture/profile models regional convergence without global green; actual Argon2d proof verification on wire, production QUIC integration, and real durable redb power-loss tests remain scheduled for future gates.
+
 ## 8. Historical continuation summary
 
 This pre-workflow continuation text is preserved for context. The compact state
@@ -5320,3 +5712,75 @@ resumption. Notes saved before compact state; question/register preservation,
 readback, matching checkpoint, local links, length and whitespace checked.
 
 Completed checkpoint: **CP-0043**.
+
+### CP-0044 — Create the security closure work plan
+
+Recorded §7.55 and the new CEH_SECURITY_CLOSURE_WORK_PLAN.md. Normalized supplied
+answers into P0–P7 contracts, dependency gates, adversarial cases and measurable
+acceptance criteria. Two independent agent reviews and primary/pinned-source checks
+informed the plan. Historical-proof, key-copy and rollback assumptions stay open;
+retry percentages, universal shard isolation and instant voucher fallback are not
+adopted as facts. Requirements/questions and production behavior preserved. Notes
+saved before compact state; readback, matching checkpoint, local links, state
+length, question/register preservation and whitespace checked. Execution pending.
+
+Completed checkpoint: **CP-0044**.
+
+### CP-0045 — Re-evaluate CEH proportionality and ask about the payment promise
+
+Recorded §7.56 and updated the work plan to v0.2. Accepted the permanent old-quorum
+loss concern as a real design gap, narrowed earlier necessity claims to their
+irreversible-acceptance target, and separated merge convergence from merchant
+loss. Checked local L1 owner-proof/reputation versus L2 node-equivocation paths.
+Recorded a bounded timeout-replacement witness and closure13 versus successor13
+intersection limits. Added explicit P0 comparison of strict CEH, separately
+authorized recovery and revocable acceptance. New Q-K1-FINALITY-01 is pending;
+original questions/DEC register unchanged. Single active focus moves to K1.1.
+Independent reviews, primary-source read and bounded arithmetic only; no production
+edit or new simulation/test campaign. Notes saved before compact state, read back
+with matching checkpoint, links, question/register preservation and whitespace.
+
+Completed checkpoint: **CP-0045**.
+
+### CP-0046 — Select regional availability and begin the new P0 contract
+
+Recorded DEC-053 / §7.57 and Q-K1-FINALITY-01 direction B from explicit maintainer
+instructions. Created the regional P0 contract/acceptance matrix, revised the work
+plan to v0.3 and marked strict CEH as a historical/alternative activation design.
+Computed ideal/finitely sampled partition-quorum bounds and343 finite merge cases,
+with their limits disclosed. Independent reviews retained eligibility, proof,
+honest-signing and fraud separation gates. Existing DEC-001–052 wording and exact
+Q-S3.3-01 retained; newer DEC-053 explicitly qualifies global-finality interpretations.
+S2.2 is the sole active design focus; no repeated product question. No production
+edit or new Rust/network test campaign. Notes saved before compact state; readback,
+checkpoint/links, decision/question preservation, state length and whitespace checked.
+
+Completed checkpoint: **CP-0046**.
+
+
+### CP-0047 — Elaborate the regional P0 specification under approved guardrails
+
+Recorded DEC-054 / §7.58 and P0 draft0.2: admission/view/receipt/global predicates,
+concrete reference timing profile, support ordering, complete splits, immutable
+approvals versus observations and merchant risk/purchase boundaries. Expanded all
+12scenarios with deterministic setup, required outcomes, mutants and evidence;
+execution remains pending. Green is reserved behind a separately justified proof,
+not inferred from regional14. Three independent reviewers contributed; production
+integration mismatches are recorded without code changes. Work plan v0.4 updated.
+Earlier DEC-001–053 rows and original §7.16 Q-S3.3-01 preserved. Notes saved before
+compact state; readback, checkpoint, links, state length and whitespace checked.
+No new product question, protocol simulation, Rust or real-wire test is claimed.
+
+Completed checkpoint: **CP-0047**.
+ 
+ 
+### CP-0048 — Verify P0 simulation suite and scenario test suite (T01–T12)
+ 
+Completed deterministic verification of S2.2 via `p0_partition_scenarios` (6/6 pass, 17.48s)
+and `p0_adversarial_scenarios` (6/6 pass, 464.79s). Workspace checks and clippy with `-D warnings`
+passed cleanly (0 warnings, 0 errors). Confirmed all fixture counters for large-scale conflict
+workload T12. S2.2 regional scenario verification completed and documented in
+`P0_SIMULATION_RESULTS.md`, `ARCHITECTURE_INTERVIEW_STATE.md`, and `ARCHITECTURE_INTERVIEW_NOTES.md`.
+Prior decisions DEC-001–054 and parked questions preserved.
+ 
+Completed checkpoint: **CP-0048**.

@@ -56,6 +56,7 @@ impl From<redb::CommitError> for StorageError {
 }
 
 pub const TABLE_LOCKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("locks");
+pub const TABLE_PROVISIONAL_LOCKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("provisional_locks");
 pub const TABLE_TTL_INDEX: TableDefinition<(u64, &[u8; 32]), ()> = TableDefinition::new("ttl_index");
 pub const TABLE_SLASHING_EVIDENCE: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("slashing_evidence");
 pub const TABLE_QUOTA_ACCOUNTS: TableDefinition<&[u8; 32], u64> = TableDefinition::new("quota_accounts");
@@ -89,6 +90,7 @@ impl RedbStorage {
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(TABLE_LOCKS)?;
+            let _ = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
             let _ = write_txn.open_table(TABLE_TTL_INDEX)?;
             let _ = write_txn.open_table(TABLE_SLASHING_EVIDENCE)?;
             let _ = write_txn.open_table(TABLE_QUOTA_ACCOUNTS)?;
@@ -704,6 +706,14 @@ impl RedbStorage {
                 let (k, v) = item?;
                 dst_locks.insert(k.value(), v.value())?;
                 locks_count += 1;
+            }
+
+            // 1b. TABLE_PROVISIONAL_LOCKS
+            let src_prov_locks = read_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
+            let mut dst_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
+            for item in src_prov_locks.iter()? {
+                let (k, v) = item?;
+                dst_prov_locks.insert(k.value(), v.value())?;
             }
 
             // 2. TABLE_TTL_INDEX

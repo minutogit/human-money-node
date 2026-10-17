@@ -1,13 +1,13 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-17 (Europe/Berlin). Checkpoint: **CP-0048**.
-Mode: DEC-053/054 selected; P0 draft0.2 formal contract/scenarios verified in simulation (§7.59).
+Updated: 2026-10-17 (Europe/Berlin). Checkpoint: **CP-0049**.
+Mode: DEC-053/054/055 selected; P0 draft0.2 formal contract/scenarios verified (§7.59); negative guardrails set (§7.60).
 Goal: justified decisions and a buildable plan under explicit assumptions, preserving KISS.
 Workflow: [start/resume prompt](../prompts/architecture_interview.md).
 Rhythm: finish one bounded problem; justified A, useful alternatives only, explicit uncertainty.
 Details: [notes](ARCHITECTURE_INTERVIEW_NOTES.md); [legacy handoff](ARCHITECTURE_INTERVIEW_HANDOFF.md).
 The notes hold decision evidence; this file indexes it. Editorial audit: [report](TERMINOLOGY_ALIGNMENT_REPORT.md).
-Register: [54 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
+Register: [55 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
 [alternatives](ARCHITECTURE_INTERVIEW_NOTES.md#22-alternatives-refinements-and-superseded-proposals),
 [open items](ARCHITECTURE_INTERVIEW_NOTES.md#23-open-design-and-decision-inventory) and
 [record/spec gaps](ARCHITECTURE_INTERVIEW_NOTES.md#24-record-gaps-and-pending-specification-consolidation).

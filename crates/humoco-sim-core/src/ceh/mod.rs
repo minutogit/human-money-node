@@ -4,6 +4,14 @@
 //!
 //! Provides deterministic epoch transition, BFT round progression,
 //! shard handoff certificates, and pioneer mode unified manifests.
+//!
+//! ⚠️ ARCHITECTURAL BOUNDARY & EVALUATED DEAD-END:
+//! Mandatory predecessor epoch chaining (where epoch E+1 strictly requires 14 signatures
+//! from the epoch E committee) has been evaluated and rejected as an architectural dead end
+//! (DEC-053). If > f nodes disappear or an internet partition occurs, mandatory predecessor
+//! baton passing produces a fatal, unrecoverable liveness deadlock (halting ~88.5% of shards).
+//! The canonical HuMoCo design derives epoch membership autonomously from the living active
+//! mesh via HRW, using deterministic `min(H_canon)` convergence upon network merge.
 
 pub mod barrier;
 pub mod consensus;

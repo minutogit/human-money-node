@@ -126,6 +126,8 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-052"></a>DEC-052 | K3 | Autonomous vocabulary maintenance | Accepted workflow/scope direction | Stop glossary preference questions. Maintain and align vocabulary autonomously across current documentation and comments; terms may be refined later. This does not select unresolved protocol behavior. | [Maintainer instruction](#727-glossary-naming-complete-autonomous-editorial-alignment) |
 | <a id="dec-053"></a>DEC-053 | K1.1/S2.2/S5 | Partition-resilient regional acceptance | Accepted product direction; simulation verified (S2.2 T01–T12 pass) | Q-K1-FINALITY-01 answered B by explicit maintainer direction: local current-mesh committee constitution without mandatory old14 authorization, regional operation through partitions and deterministic min(H_canon) reconciliation. A regional receipt may lose after discovery of an admissible competing branch; no global irrevocability or99.999% guarantee is inferred. Retain fixed<=20/14 votes per collection, N<20 PROVISIONAL, durable own choices, recipient eligibility checks, support gate and first-party-only fraud penalties. Qualify older strict-CEH/global-FINAL interpretations, not their historical provenance or the original Q-S3.3-01 meanings. | [Decision and limits](#757-partition-resilience-selected-and-p0-reoriented) |
 | <a id="dec-054"></a>DEC-054 | S2.1/S2.2/S5/C4 | Regional eligibility, honest merge and merchant risk | Accepted guardrails; simulation verified (S2.2 T01–T12 pass) | Regional voters require valid identity-bound Argon2d tickets, observed24h incubation and independently authenticated F2F admission; no gateway-invented roster. Only two genuine incompatible personal approvals for one slot justify node sanctions; honest single-branch losers are never punished. Distinguish FINAL(Global) from REGIONAL CONFIRMED and keep amount/exposure limits in terminal policy outside blind L2. The formal candidate reserves green behind a separate proof guard; ticket cost does not establish a per-view fault bound. | [P0 elaboration](#758-p0-formal-contract-and-twelve-acceptance-scenarios) |
+| <a id="dec-055"></a>DEC-055 | S3/C1/K1 | Rejection of predecessor baton chaining and chained L2 receipts | Accepted negative guardrails / architecture direction | Explicitly rejects mandatory predecessor epoch baton chaining as a permanent dead-end: succession is derived autonomously from the living active mesh via HRW, with min(H_canon) convergence upon merge. Rejects recursive client-side L2 receipt chaining on spend: recipients do not verify historical L2 receipt chains; live collision checking in-RAM suffices, while L1 carries causal ownership. Rejects active 30s background ping storms in favor of passive hourly F2F Dunbar heartbeats. | [Maintainer directive](#760-predecessor-baton-chaining-and-chained-l2-receipts-rejected) |
+
 
 ### 2.2 Alternatives, refinements and superseded proposals
 
@@ -5784,3 +5786,19 @@ workload T12. S2.2 regional scenario verification completed and documented in
 Prior decisions DEC-001–054 and parked questions preserved.
  
 Completed checkpoint: **CP-0048**.
+
+### 7.60 Predecessor baton chaining and chained L2 receipts rejected (DEC-055)
+
+The maintainer conducted a structural re-examination of the operational boundaries and explicitly directed the following architectural simplifications:
+1. **Mandatory Predecessor Epoch Chaining is Permanently Rejected:**
+   Requiring the previous epoch's 20 members to sign off on the next epoch's 20 members (as originally modeled in CEH `EpochCertificate`) is an architectural dead-end. If $> f$ members fail or an internet partition occurs, it produces a fatal, unrecoverable liveness deadlock (halting ~88.5% of shards globally). Shard succession derives autonomously from the living active mesh via HRW, with deterministic `min(H_canon)` convergence upon merge.
+2. **Recursive Client-Side L2 Receipt Chaining on Spend is Rejected:**
+   Recipients on Layer 1 do NOT verify a recursive chain of historical Layer-2 lock receipts from previous spends. Layer 2 is an atomic live collision registry: checking the parent lock in-RAM ($< 1\,\mu\text{s}$) is sufficient. The voucher on Layer 1 carries full ownership and causal history; the L2 receipt is purely a merchant checkout safety proof / backup insurance.
+3. **Active Background Ping Storms are Rejected:**
+   Active 30s background ping storms to refresh candidate windows violate Dunbar gossip economics. Network presence is strictly derived passively from hourly F2F Dunbar heartbeats.
+
+### CP-0049 — Record negative guardrails DEC-055 and architectural simplification
+
+Recorded DEC-055 in decision table and section 7.60. Added negative guardrails 6 and 7 to `AGENTS.md` and module warning to `crates/humoco-sim-core/src/ceh/mod.rs` to permanently prevent re-introducing predecessor baton chaining, recursive receipt chains, or active ping storms. Workspace checks clean. Prior decisions DEC-001–054 preserved.
+
+Completed checkpoint: **CP-0049**.

@@ -192,6 +192,13 @@ Before writing new code for a new feature or requirement, apply this test:
    * It is NOT a backup orchestrator: Hot backups run via `cron` / scripts through the local UNIX control socket (`/tmp/humoco.sock`), NOT via manual browser clicks.
    * TTL pruning is strictly automatic (Spec 12/14); manual "prune now" buttons are prohibited placebos.
    * No cosmetic gimmicks: No pulsing dots, no vim-like keyboard navigation traps. Pure substance only.
+6. **Ban on Mandatory Predecessor Epoch Baton Chaining (Liveness Deadlock Anti-Pattern):**
+   * Requiring the previous epoch's 20 members to sign off on the next epoch's 20 members is strictly rejected as an architectural dead end. If $> f$ members disappear or a network partition occurs, it permanently kills the shard and paralyzes ~88.5% of shards globally.
+   * Shard membership derives autonomously from the living active mesh via HRW, with deterministic $\min(H_{\text{canon}})$ merge upon reconnect.
+7. **Ban on Recursive L2 Receipt Chaining & Active Ping Storms (KISS Principle):**
+   * Recipients do NOT verify a recursive chain of historical L2 lock receipts on spend. The live collision lock registry checks the parent lock in-RAM ($< 1\,\mu\text{s}$); the voucher on Layer 1 carries ownership and causal history. The L2 receipt is purely a merchant checkout safety proof / backup insurance.
+   * Network presence is strictly derived passively from hourly F2F Dunbar gossip heartbeats; active background ping storms to refresh candidate windows are forbidden.
+
 
 ---
 

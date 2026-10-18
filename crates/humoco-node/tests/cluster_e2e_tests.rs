@@ -52,6 +52,7 @@ fn make_e2e_hmc_genesis(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -84,6 +85,7 @@ fn make_e2e_hmc_spend(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -574,6 +576,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         "none",
         "none",
         0,
+        0,
         Some(&del_str),
         "",
     );
@@ -595,6 +598,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -671,6 +675,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         "none",
         "none",
         0,
+        0,
         None,
         "",
     );
@@ -692,6 +697,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -1045,6 +1051,7 @@ async fn test_e2e_sync_garbage_and_invalid_lock_rejection() {
         layer2_signature: [0xAAu8; 64],
         sender_ephemeral_pub: [0x99u8; 32],
         encrypted_timestamp: now_ms as u128,
+        created_at_ms: now_ms,
         deletable_at: None, // Missing deletable_at and unknown voucher root!
         receiver_ephemeral_pub_hash: None,
         change_ephemeral_pub_hash: None,

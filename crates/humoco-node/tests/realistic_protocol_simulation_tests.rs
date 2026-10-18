@@ -85,6 +85,7 @@ impl HmcTestWallet {
             "none",
             "none",
             timestamp,
+            timestamp as u64,
             Some(&del_str),
             "",
         );
@@ -105,6 +106,7 @@ impl HmcTestWallet {
             trap_r: Some("none".into()),
             trap_s: Some("none".into()),
             encrypted_timestamp: timestamp,
+            created_at_ms: timestamp as u64,
             deletable_at: Some(del_str),
             privacy_guard: None,
         }
@@ -134,6 +136,7 @@ impl HmcTestWallet {
             "none",
             "none",
             timestamp,
+            timestamp as u64,
             None,
             "",
         );
@@ -154,6 +157,7 @@ impl HmcTestWallet {
             trap_r: Some("none".into()),
             trap_s: Some("none".into()),
             encrypted_timestamp: timestamp,
+            created_at_ms: timestamp as u64,
             deletable_at: None,
             privacy_guard: None,
         }
@@ -178,6 +182,7 @@ impl HmcTestWallet {
             "none",
             "none",
             timestamp,
+            timestamp as u64,
             None,
             "",
         );
@@ -198,6 +203,7 @@ impl HmcTestWallet {
             trap_r: Some("none".into()),
             trap_s: Some("none".into()),
             encrypted_timestamp: timestamp,
+            created_at_ms: timestamp as u64,
             deletable_at: None,
             privacy_guard: None,
         }

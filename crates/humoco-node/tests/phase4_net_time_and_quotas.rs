@@ -238,6 +238,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -400,6 +401,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -521,6 +523,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -609,6 +612,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };

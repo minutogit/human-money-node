@@ -63,6 +63,33 @@ pub fn resolve_split_brain_canonical(
         None => compute_canonical_hash(&lock_b.parent_lock, &lock_b.receiver_pub, &lock_b.nonce),
     };
 
+    // Finality immunity (INV-0206): A FINAL certified lock (has quorum) is immutable
+    // against unquorated / provisional locks.
+    if lock_a.status.is_final() && !lock_b.status.is_final() {
+        lock_b.status = LockStatus::Void {
+            reason: format!(
+                "Equivocation collision: cannot displace FINAL certified lock {:?}",
+                lock_a.id
+            ),
+        };
+        return ResolutionResult::WinnerA {
+            winner_hash: h_a,
+            loser_hash: h_b,
+        };
+    }
+    if !lock_a.status.is_final() && lock_b.status.is_final() {
+        lock_a.status = LockStatus::Void {
+            reason: format!(
+                "Equivocation collision: cannot displace FINAL certified lock {:?}",
+                lock_b.id
+            ),
+        };
+        return ResolutionResult::WinnerB {
+            winner_hash: h_b,
+            loser_hash: h_a,
+        };
+    }
+
     if h_a < h_b {
         lock_b.status = LockStatus::Void {
             reason: format!(

@@ -75,6 +75,7 @@ fn make_test_hmc_genesis(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -107,6 +108,7 @@ fn make_test_hmc_spend(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -492,6 +494,7 @@ async fn test_api_hmc_native_flow() {
         "none",
         "none",
         0,
+        0,
         Some(&del_str),
         "",
     );
@@ -513,6 +516,7 @@ async fn test_api_hmc_native_flow() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -645,6 +649,7 @@ async fn test_api_hmc_native_flow() {
         "none",
         "none",
         0,
+        0,
         None,
         "",
     );
@@ -666,6 +671,7 @@ async fn test_api_hmc_native_flow() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -713,6 +719,7 @@ async fn test_api_hmc_native_flow() {
         "none",
         "none",
         0,
+        0,
         None,
         "",
     );
@@ -734,6 +741,7 @@ async fn test_api_hmc_native_flow() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -1007,6 +1015,7 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: now_ms,
         deletable_at: Some(root_valid_until.to_string()),
         privacy_guard: None,
     };
@@ -1083,7 +1092,7 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     assert_ne!(digest, [0u8; 32]);
 
     // 3. Test ShardBucketRangeRequest for 5-minute bucket sync (docs/PLAN_BUCKETED_SHARD_SYNC.md).
-    let bucket_id = humoco_sim_core::types::timestamp_to_bucket_id(hmc_req.encrypted_timestamp as u64);
+    let bucket_id = humoco_sim_core::types::timestamp_to_bucket_id(hmc_req.created_at_ms);
     let bucket_req = humoco_sim_core::types::ShardBucketRangeRequest {
         shard_id: hmc_shard,
         start_bucket: bucket_id,
@@ -1246,6 +1255,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         "none",
         "none",
         0,
+        0,
         Some(&genesis_del_str),
         "",
     );
@@ -1266,6 +1276,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(genesis_del_str),
         privacy_guard: None,
     };
@@ -1292,6 +1303,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         "none",
         "none",
         0,
+        0,
         None,
         "",
     );
@@ -1313,6 +1325,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -1875,6 +1888,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         "none",
         "none",
         0,
+        0,
         Some(&del_str),
         "",
     );
@@ -1896,6 +1910,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -2144,6 +2159,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         "none",
         "none",
         0,
+        0,
         Some(&del_str),
         "",
     );
@@ -2165,6 +2181,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(del_str.clone()),
         privacy_guard: None,
     };
@@ -2206,6 +2223,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         "none",
         "none",
         0,
+        0,
         None,
         "",
     );
@@ -2227,6 +2245,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -2292,6 +2311,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         "none",
         "none",
         0,
+        0,
         None,
         "",
     );
@@ -2313,6 +2333,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -2489,6 +2510,7 @@ fn make_genesis_hmc_req(
         "none",
         "none",
         encrypted_timestamp,
+        0,
         Some(&del_str),
         "",
     );
@@ -2506,6 +2528,7 @@ fn make_genesis_hmc_req(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp,
+        created_at_ms: 0,
         deletable_at: Some(del_str),
         privacy_guard: None,
     }
@@ -2535,6 +2558,7 @@ fn make_follow_hmc_req(
         "none",
         "none",
         encrypted_timestamp,
+        0,
         None,
         "",
     );
@@ -2552,6 +2576,7 @@ fn make_follow_hmc_req(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp,
+        created_at_ms: 0,
         deletable_at: None,
         privacy_guard: None,
     }

@@ -727,6 +727,12 @@ impl RequestHandler for NodeRequestHandler {
                                     return Ok((resp_header, Vec::new()));
                                 }
                             }
+                            let mut chain_req = chain_req.clone();
+                            for hop in &mut chain_req.chain {
+                                if hop.created_at_ms == 0 {
+                                    hop.created_at_ms = now_ms;
+                                }
+                            }
                             let (verdict, _is_new) = engine.ingress_hmc_chain_lock(chain_req.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
                             match verdict {
                                 crate::api::hmc::L2Verdict::Conflict { existing_lock } => {
@@ -800,7 +806,10 @@ impl RequestHandler for NodeRequestHandler {
                                 }
                             };
 
-                            let entry = crate::api::hmc::L2LockEntry::from(&req);
+                            let mut entry = crate::api::hmc::L2LockEntry::from(&req);
+                            if entry.created_at_ms == 0 {
+                                entry.created_at_ms = now_ms;
+                            }
                             // INV-1202: validate the ingress time window at the shard with
                             // the current network time (never blindly trust gateway time).
                             let (verdict, _is_new) = engine.ingress_hmc_lock_with_origin(lookup_tag.clone(), entry.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
@@ -1292,7 +1301,7 @@ impl RequestHandler for NodeRequestHandler {
                         let Some(valid_until_ms) = valid_until_ms else {
                             continue;
                         };
-                        let created_at_ms = entry.encrypted_timestamp as u64;
+                        let created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
                         locks.push(humoco_sim_core::types::LockRecord::new(
                             parent_bytes,
                             entry.sender_ephemeral_pub,
@@ -1358,7 +1367,7 @@ impl RequestHandler for NodeRequestHandler {
                 }
                 if let Some(tb) = req.target_bucket_id {
                     hmc_locks.retain(|(_, entry)| {
-                        let created_at_ms = entry.encrypted_timestamp as u64;
+                        let created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
                         humoco_sim_core::types::timestamp_to_bucket_id(created_at_ms) == tb
                     });
                 }

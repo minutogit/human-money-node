@@ -103,6 +103,7 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
             trap_r: Some("none".into()),
             trap_s: Some("none".into()),
             encrypted_timestamp: 0,
+            created_at_ms: 0,
             deletable_at: Some(del_str),
             privacy_guard: None,
         };

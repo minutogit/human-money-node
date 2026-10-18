@@ -90,6 +90,7 @@ async fn test_boot_readiness_barrier_wire_flag() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(root_valid_until.to_string()),
         privacy_guard: None,
     };
@@ -316,6 +317,7 @@ async fn test_cryptographic_verification_on_partition_sync() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("60000".into()),
         privacy_guard: None,
     };

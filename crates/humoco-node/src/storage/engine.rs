@@ -1570,7 +1570,7 @@ impl DualTierEngine {
                 if let Some(del) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
                     root_valid_until_ms = del;
                 }
-                created_at_ms = entry.encrypted_timestamp as u64;
+                created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
             }
 
             let raw_json = serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null);

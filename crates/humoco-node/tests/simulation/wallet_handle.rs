@@ -103,6 +103,7 @@ impl SimWallet {
             TRAP_NONE_PLACEHOLDER,
             TRAP_NONE_PLACEHOLDER,
             0,
+            0,
             Some(&deletable_at),
             "",
         );
@@ -123,6 +124,7 @@ impl SimWallet {
             trap_r: Some(TRAP_NONE_PLACEHOLDER.to_string()),
             trap_s: Some(TRAP_NONE_PLACEHOLDER.to_string()),
             encrypted_timestamp: 0,
+            created_at_ms: 0,
             deletable_at: Some(deletable_at),
             privacy_guard: None,
         }
@@ -147,6 +149,7 @@ impl SimWallet {
             TRAP_NONE_PLACEHOLDER,
             TRAP_NONE_PLACEHOLDER,
             0,
+            0,
             None,
             "",
         );
@@ -167,6 +170,7 @@ impl SimWallet {
             trap_r: Some(TRAP_NONE_PLACEHOLDER.to_string()),
             trap_s: Some(TRAP_NONE_PLACEHOLDER.to_string()),
             encrypted_timestamp: 0,
+            created_at_ms: 0,
             deletable_at: None,
             privacy_guard: None,
         }
@@ -198,6 +202,7 @@ impl SimWallet {
                 TRAP_NONE_PLACEHOLDER,
                 TRAP_NONE_PLACEHOLDER,
                 ts,
+                0,
                 None,
                 "",
             );
@@ -218,6 +223,7 @@ impl SimWallet {
                 trap_r: Some(TRAP_NONE_PLACEHOLDER.to_string()),
                 trap_s: Some(TRAP_NONE_PLACEHOLDER.to_string()),
                 encrypted_timestamp: ts,
+                created_at_ms: 0,
                 deletable_at: None,
                 privacy_guard: None,
             };

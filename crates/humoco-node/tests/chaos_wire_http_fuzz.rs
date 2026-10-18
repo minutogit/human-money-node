@@ -72,7 +72,7 @@ fn make_genesis(parent_hex: &str, valid_until_ms: u64, key: &SigningKey) -> L2Lo
         change_ephemeral_pub_hash: None,
         layer2_signature: [0u8;64],
         trap_r: Some("none".into()), trap_s: Some("none".into()),
-        encrypted_timestamp: 0, deletable_at: Some(del), privacy_guard: None,
+        encrypted_timestamp: 0, created_at_ms: 0, deletable_at: Some(del), privacy_guard: None,
     };
     let h = calculate_l2_payload_hash(&req);
     req.layer2_signature = key.sign(&h).to_bytes();
@@ -357,6 +357,7 @@ async fn test_chaos_hmc_bad_signatures_no_panic() {
             layer2_signature: fake_sig,
             trap_r: Some("none".into()), trap_s: Some("none".into()),
             encrypted_timestamp: 0,
+            created_at_ms: 0,
             deletable_at: Some((std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 600_000).to_string()),
             privacy_guard: None,
         };

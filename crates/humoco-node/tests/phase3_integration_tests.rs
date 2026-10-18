@@ -164,6 +164,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
             entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
             entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
             entry.encrypted_timestamp,
+            entry.created_at_ms,
             entry.deletable_at.as_deref(),
             privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
         );
@@ -180,6 +181,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("600000".into()),
         privacy_guard: None,
     };
@@ -195,6 +197,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("600000".into()),
         privacy_guard: None,
     };
@@ -246,6 +249,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("600000".into()),
         privacy_guard: None,
     };
@@ -365,6 +369,7 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("600000".into()),
         privacy_guard: None,
     };
@@ -380,6 +385,7 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
             hmc_entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
             hmc_entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
             hmc_entry.encrypted_timestamp,
+            hmc_entry.created_at_ms,
             hmc_entry.deletable_at.as_deref(),
             privacy_guard_commitment(hmc_entry.privacy_guard.as_deref()).as_str(),
         );

@@ -167,6 +167,7 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some((now_ms + 10_000).to_string()),
         privacy_guard: None,
     };
@@ -197,6 +198,7 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some((now_ms + 60_000).to_string()),
         privacy_guard: None,
     };

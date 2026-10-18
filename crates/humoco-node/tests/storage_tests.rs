@@ -285,6 +285,7 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("50000".to_string()), // 50s -> expires at 50s + 30s = 80s
         privacy_guard: None,
     };
@@ -299,6 +300,7 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("500000".to_string()), // 500s -> expires at 530s
         privacy_guard: None,
     };
@@ -382,6 +384,7 @@ fn test_defensive_deserialization_corrupted_entries() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("600000".to_string()),
         privacy_guard: None,
     };
@@ -501,6 +504,7 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("150000".to_string()),
         privacy_guard: None,
     };
@@ -535,6 +539,7 @@ async fn test_voucher_query_methods() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 1000,
+        created_at_ms: 1000,
         deletable_at: Some("2000000000000".to_string()),
         privacy_guard: None,
     };
@@ -550,6 +555,7 @@ async fn test_voucher_query_methods() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 2000,
+        created_at_ms: 2000,
         deletable_at: Some("2500000000000".to_string()),
         privacy_guard: None,
     };

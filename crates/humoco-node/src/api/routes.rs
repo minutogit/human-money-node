@@ -423,12 +423,13 @@ async fn sync_locks(
         let id_hex = hex::encode(entry.t_id);
         if !locators.contains(&parent_hex) && !locators.contains(&tag) && !locators.contains(&id_hex) {
             let valid_until_ms = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
             let rec = humoco_sim_core::types::LockRecord {
                 id: entry.t_id,
                 parent_lock: parent_bytes,
                 receiver_pub: entry.receiver_ephemeral_pub_hash.unwrap_or_default(),
                 nonce: blake3::hash(entry.t_id.as_slice()).as_bytes().to_vec(),
-                created_at: SimTime(entry.encrypted_timestamp as u64),
+                created_at: SimTime(created_at_ms),
                 valid_until: SimTime(valid_until_ms),
                 status: humoco_sim_core::types::LockStatus::Final { sigs: 1 },
                 signers: Default::default(),
@@ -1111,13 +1112,25 @@ async fn collect_peer_attestations(
 /// Returns the certificate plus the first genuine HMC conflict evidence
 /// (`FLAG_COLLISION_DETECTED`) when any shard reports a diverging lock on the
 /// same parent tag, so the stateless gateway can return `409 Conflict`.
-async fn assemble_quorum_certificate(
+pub async fn assemble_quorum_certificate(
     state: &AppState,
     lock_id: [u8; 32],
     parent_lock: [u8; 32],
     shard_id: u16,
     now_ms: u64,
     record_payload: Option<Vec<u8>>,
+) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
+    assemble_quorum_certificate_with_override(state, lock_id, parent_lock, shard_id, now_ms, record_payload, None).await
+}
+
+pub async fn assemble_quorum_certificate_with_override(
+    state: &AppState,
+    lock_id: [u8; 32],
+    parent_lock: [u8; 32],
+    shard_id: u16,
+    now_ms: u64,
+    record_payload: Option<Vec<u8>>,
+    quorum_override: Option<usize>,
 ) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
     use humoco_sim_core::types::CommitteeMember;
     let self_pubkey = *state.identity.node_pubkey();
@@ -1127,7 +1140,8 @@ async fn assemble_quorum_certificate(
     } else {
         (vec![CommitteeMember { node_pubkey: self_pubkey, hrw_routing_id: self_hrw }], Vec::new(), 1)
     };
-    let (required_q, final_size) = humoco_sim_core::types::required_quorum(total_active);
+    let (base_q, final_size) = humoco_sim_core::types::required_quorum(total_active);
+    let required_q = quorum_override.unwrap_or(base_q).min(total_active).max(base_q);
     let target_status = u8::from(final_size && state.peer_manager.as_ref()
         .map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false));
     let mut collected_signatures = Vec::new();
@@ -1468,6 +1482,7 @@ async fn query_status(
                             trap_r: None,
                             trap_s: None,
                             encrypted_timestamp: 0,
+                            created_at_ms: 0,
                             deletable_at: None,
                             privacy_guard: None,
                         };
@@ -1533,7 +1548,7 @@ async fn query_status(
 async fn submit_hmc_lock(
     state: AppState,
     headers: HeaderMap,
-    req: L2LockRequest,
+    mut req: L2LockRequest,
     start: std::time::Instant,
 ) -> Response {
     state.metrics.record_write();
@@ -1588,6 +1603,20 @@ async fn submit_hmc_lock(
         .warn_deprecated_suite_after
         .is_some_and(|warn_time| (state.net_time_ms() / 1000) >= warn_time && suite_id == 1);
     let now_ms = state.net_time_ms();
+
+    const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
+    if req.created_at_ms == 0 {
+        req.created_at_ms = now_ms;
+    } else if req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: "Sender timestamp outside 30s clock drift window".into(),
+            },
+        );
+        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+    }
+
     let stored_root_valid = state
         .engine
         .get_hmc_voucher_root_valid(&req.layer2_voucher_id)
@@ -1703,6 +1732,10 @@ async fn submit_hmc_lock(
         .get("X-PoW-Nonce")
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
+    let req_q_override = headers
+        .get("X-Required-Quorum")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok());
 
     let parent_for_pow = if req.is_genesis {
         None
@@ -1815,7 +1848,7 @@ async fn submit_hmc_lock(
                     timestamp_ms: now_ms,
                 }).ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+                let (cert, remote_collision) = assemble_quorum_certificate_with_override(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload, req_q_override).await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
                 state.metrics.record_local_latency(std::time::Duration::from_micros(1));
 
@@ -2038,7 +2071,7 @@ async fn submit_hmc_lock(
                     timestamp_ms: now_ms,
                 }).ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+                let (cert, remote_collision) = assemble_quorum_certificate_with_override(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload, req_q_override).await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
                 (Some(cert), remote_collision)
             }
@@ -2089,7 +2122,7 @@ async fn submit_hmc_lock(
             timestamp_ms: now_ms,
         }).ok();
         let start_quorum = std::time::Instant::now();
-        let (cert, remote_collision) = assemble_quorum_certificate(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload).await;
+        let (cert, remote_collision) = assemble_quorum_certificate_with_override(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload, req_q_override).await;
         state.metrics.record_quorum_latency(start_quorum.elapsed());
         // FLAG_COLLISION_DETECTED from any shard proves double-spend: 409.
         if let Some(existing_lock) = remote_collision {
@@ -2160,7 +2193,7 @@ async fn submit_hmc_chain_lock(
 async fn submit_hmc_chain_lock_inner(
     state: AppState,
     headers: HeaderMap,
-    chain_req: L2ChainLockRequest,
+    mut chain_req: L2ChainLockRequest,
     start: std::time::Instant,
 ) -> Response {
     if state.transport.as_ref().map(|t| !t.is_sync_ready()).unwrap_or(false) {
@@ -2212,6 +2245,21 @@ async fn submit_hmc_chain_lock_inner(
     }
 
     let now_ms = state.net_time_ms();
+
+    const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
+    for hop in &mut chain_req.chain {
+        if hop.created_at_ms == 0 {
+            hop.created_at_ms = now_ms;
+        } else if hop.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
+            let envelope = wrap_and_sign_verdict(
+                &state.identity,
+                L2Verdict::Rejected {
+                    reason: "Sender timestamp outside 30s clock drift window".into(),
+                },
+            );
+            return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+        }
+    }
 
     // Derive root_valid_until for Byte-Years accounting (same logic as engine)
     let stored_root = state

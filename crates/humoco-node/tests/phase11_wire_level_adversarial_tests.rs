@@ -70,6 +70,7 @@ fn make_hmc_genesis(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some(valid_until_ms.to_string()),
         privacy_guard: None,
     };

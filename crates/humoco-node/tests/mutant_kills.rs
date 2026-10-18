@@ -67,6 +67,7 @@ async fn test_mutant_m2s3_hmc_ram_filter_consistency_after_prune() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("50000".to_string()), // 50s
         privacy_guard: None,
     };
@@ -115,6 +116,7 @@ fn test_mutant_m2s6_hmc_disk_prune_removes_expired() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("50000".to_string()), // 50s -> bucket 80
         privacy_guard: None,
     };
@@ -128,6 +130,7 @@ fn test_mutant_m2s6_hmc_disk_prune_removes_expired() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("500000".to_string()), // 500s -> bucket 530
         privacy_guard: None,
     };
@@ -177,6 +180,7 @@ fn test_mutant_m2s6_hmc_disk_prune_retains_unexpired_until_grace() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
+        created_at_ms: 0,
         deletable_at: Some("100000".to_string()), // 100s -> bucket 130
         privacy_guard: None,
     };

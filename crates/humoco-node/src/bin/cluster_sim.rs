@@ -66,6 +66,7 @@ fn make_hmc_genesis(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: timestamp_ms as u128,
+        created_at_ms: timestamp_ms,
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -577,6 +578,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 trap_r: Some("none".into()),
                                 trap_s: Some("none".into()),
                                 encrypted_timestamp: timestamp,
+                                created_at_ms: timestamp as u64,
                                 deletable_at: None,
                                 privacy_guard: None,
                             };
@@ -710,6 +712,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     trap_r: Some("none".into()),
                                     trap_s: Some("none".into()),
                                     encrypted_timestamp: timestamp,
+                                    created_at_ms: timestamp as u64,
                                     deletable_at: None,
                                     privacy_guard: None,
                                 };

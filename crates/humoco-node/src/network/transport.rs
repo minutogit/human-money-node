@@ -83,6 +83,7 @@ impl RequestHandler for DefaultRequestHandler {
                 x if x == MsgType::LockVerifyRequest as u16 => MsgType::LockVerifyResponse as u16,
                 x if x == MsgType::ActiveSyncRequest as u16 => MsgType::ActiveSyncDone as u16,
                 x if x == MsgType::ShardDigestRequest as u16 => MsgType::ShardDigestResponse as u16,
+                x if x == MsgType::ShardBucketRangeRequest as u16 => MsgType::ShardBucketRangeResponse as u16,
                 x if x == MsgType::EquivocationProof as u16 => MsgType::EquivocationAck as u16,
                 _ => MsgType::StatusResponse as u16,
             };
@@ -1237,17 +1238,114 @@ impl RequestHandler for NodeRequestHandler {
                     payload_len,
                 );
                 return Ok((resp_header, resp_bytes));
+            } else if msg_type == MsgType::ShardBucketRangeRequest as u16 {
+                let req: humoco_sim_core::types::ShardBucketRangeRequest = bincode::deserialize(&payload)
+                    .unwrap_or(humoco_sim_core::types::ShardBucketRangeRequest {
+                        shard_id: 0,
+                        start_bucket: 0,
+                        bucket_count: humoco_sim_core::types::BUCKETS_PER_DAY as u16,
+                    });
+                let shard_id = req.shard_id;
+                let now_ms = peer_manager
+                    .as_ref()
+                    .map(|pm| pm.net_time_ms())
+                    .unwrap_or_else(|| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0)
+                    });
+                let mut locks: Vec<humoco_sim_core::types::LockRecord> = storage
+                    .all_valid_locks(now_ms)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(rec, _)| rec)
+                    .collect();
+                for (rec, _) in engine.ram.read().await.all_locks() {
+                    if !locks.iter().any(|l| l.parent_lock == rec.parent_lock) {
+                        locks.push(rec);
+                    }
+                }
+                let mut hmc_locks_all = storage.all_valid_hmc_locks(now_ms).unwrap_or_default();
+                for (tag, entry) in &engine.hmc_ram.read().await.locks {
+                    if !hmc_locks_all.iter().any(|(t, _)| t == tag) {
+                        hmc_locks_all.push((tag.clone(), entry.clone()));
+                    }
+                }
+                let hmc_root_map: std::collections::HashMap<&str, u64> = {
+                    let mut m = std::collections::HashMap::new();
+                    for (_, e) in &hmc_locks_all {
+                        if let Some(v) = e.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                            m.entry(e.layer2_voucher_id.as_str()).or_insert(v);
+                        }
+                    }
+                    m
+                };
+                for (tag, entry) in &hmc_locks_all {
+                    let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+                    if !locks.iter().any(|l| l.parent_lock == parent_bytes) {
+                        let valid_until_ms = entry
+                            .deletable_at
+                            .as_deref()
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .or_else(|| hmc_root_map.get(entry.layer2_voucher_id.as_str()).copied());
+                        let Some(valid_until_ms) = valid_until_ms else {
+                            continue;
+                        };
+                        let created_at_ms = entry.encrypted_timestamp as u64;
+                        locks.push(humoco_sim_core::types::LockRecord::new(
+                            parent_bytes,
+                            entry.sender_ephemeral_pub,
+                            entry.t_id.to_vec(),
+                            humoco_sim_core::types::SimTime(created_at_ms),
+                            humoco_sim_core::types::SimTime(valid_until_ms),
+                        ));
+                    }
+                }
+
+                let mut buckets = Vec::new();
+                let end_bucket = req.start_bucket.saturating_add(req.bucket_count as u64);
+                for b_id in req.start_bucket..end_bucket {
+                    let digest = humoco_sim_core::crypto::compute_shard_bucket_digest(shard_id, b_id, &locks);
+                    let count = locks
+                        .iter()
+                        .filter(|l| {
+                            let sid = u16::from_be_bytes([l.parent_lock[0], l.parent_lock[1]]);
+                            sid == shard_id
+                                && !l.status.is_void()
+                                && humoco_sim_core::types::timestamp_to_bucket_id(l.created_at.0) == b_id
+                        })
+                        .count() as u32;
+                    let is_sealed = humoco_sim_core::types::is_bucket_sealed(b_id, now_ms);
+                    buckets.push(humoco_sim_core::types::ShardBucketDigest {
+                        bucket_id: b_id,
+                        digest,
+                        lock_count: count,
+                        is_sealed,
+                    });
+                }
+                let resp = humoco_sim_core::types::ShardBucketRangeResponse { shard_id, buckets };
+                let resp_bytes = bincode::serialize(&resp).unwrap_or_default();
+                let payload_len = checked_payload_len(resp_bytes.len())?;
+                let resp_header = WireHeader::new(
+                    MsgType::ShardBucketRangeResponse as u16,
+                    header.session_seq.wrapping_add(1),
+                    header.epoch_id,
+                    0,
+                    payload_len,
+                );
+                return Ok((resp_header, resp_bytes));
             } else if msg_type == MsgType::ActiveSyncRequest as u16 {
                 let req = crate::network::framing::ActiveSyncRequest::from_bytes(&payload)
-                    .unwrap_or(crate::network::framing::ActiveSyncRequest {
-                        cursor: 0,
-                        limit: 500,
-                    });
+                    .unwrap_or_else(|_| crate::network::framing::ActiveSyncRequest::new(0, 500));
                 let mut locks = storage.all_valid_locks(0).unwrap_or_default();
                 for (rec, rv) in engine.ram.read().await.all_locks() {
                     if !locks.iter().any(|(l, _)| l.parent_lock == rec.parent_lock) {
                         locks.push((rec, rv.0));
                     }
+                }
+                if let Some(tb) = req.target_bucket_id {
+                    locks.retain(|(l, _)| humoco_sim_core::types::timestamp_to_bucket_id(l.created_at.0) == tb);
                 }
                 locks.sort_by(|a, b| a.0.parent_lock.cmp(&b.0.parent_lock));
 
@@ -1257,6 +1355,12 @@ impl RequestHandler for NodeRequestHandler {
                     if !hmc_locks.iter().any(|(t, _)| t == tag) {
                         hmc_locks.push((tag.clone(), entry.clone()));
                     }
+                }
+                if let Some(tb) = req.target_bucket_id {
+                    hmc_locks.retain(|(_, entry)| {
+                        let created_at_ms = entry.encrypted_timestamp as u64;
+                        humoco_sim_core::types::timestamp_to_bucket_id(created_at_ms) == tb
+                    });
                 }
                 hmc_locks.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -1982,15 +2086,44 @@ impl QuicTransport {
         Ok((digest, count))
     }
 
-    /// Requests a single paginated active sync page from a peer.
-    pub async fn request_active_sync_page(
+    /// Requests bucket digests for a specific shard over a range of buckets (docs/PLAN_BUCKETED_SHARD_SYNC.md).
+    pub async fn request_shard_bucket_range(
+        &self,
+        conn: &quinn::Connection,
+        shard_id: u16,
+        start_bucket: u64,
+        bucket_count: u16,
+        seq: u64,
+    ) -> Result<humoco_sim_core::types::ShardBucketRangeResponse, NodeError> {
+        let req = humoco_sim_core::types::ShardBucketRangeRequest {
+            shard_id,
+            start_bucket,
+            bucket_count,
+        };
+        let payload = bincode::serialize(&req).unwrap_or_default();
+        let payload_len = checked_payload_len(payload.len())?;
+        let header = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, seq, 0, 0, payload_len);
+        let (resp_hdr, resp_payload) = self.send_request(conn, &header, &payload).await?;
+        if resp_hdr.msg_type != MsgType::ShardBucketRangeResponse as u16 {
+            return Err(NodeError::Network(format!(
+                "Unexpected ShardBucketRange response msg_type {}",
+                resp_hdr.msg_type
+            )));
+        }
+        bincode::deserialize(&resp_payload)
+            .map_err(|e| NodeError::Network(format!("bucket range deserialize: {}", e)))
+    }
+
+    /// Requests a single paginated active sync page from a peer (optionally filtered by bucket).
+    pub async fn request_active_sync_page_for_bucket(
         &self,
         conn: &quinn::Connection,
         seq: u64,
         cursor: u64,
         limit: usize,
+        target_bucket_id: Option<u64>,
     ) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
-        let req = crate::network::framing::ActiveSyncRequest::new(cursor, limit);
+        let req = crate::network::framing::ActiveSyncRequest::with_bucket(cursor, limit, target_bucket_id);
         let req_bytes = req.to_bytes().unwrap_or_default();
         let payload_len = checked_payload_len(req_bytes.len())?;
         let header = WireHeader::new(MsgType::ActiveSyncRequest as u16, seq, 0, 0, payload_len);
@@ -2003,6 +2136,17 @@ impl QuicTransport {
         }
         crate::network::framing::ActiveSyncResponse::from_bytes(&resp_payload)
             .map_err(|e| NodeError::Network(format!("active sync deserialize: {}", e)))
+    }
+
+    /// Requests a single paginated active sync page from a peer.
+    pub async fn request_active_sync_page(
+        &self,
+        conn: &quinn::Connection,
+        seq: u64,
+        cursor: u64,
+        limit: usize,
+    ) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
+        self.request_active_sync_page_for_bucket(conn, seq, cursor, limit, None).await
     }
 
     /// Requests full active sync data across all pages from a peer.
@@ -2167,7 +2311,8 @@ impl QuicTransport {
                                         let is_restricted_rpc = header.msg_type == MsgType::LockVerifyRequest as u16
                                             || header.msg_type == MsgType::StatusQuery as u16
                                             || header.msg_type == MsgType::ActiveSyncRequest as u16
-                                            || header.msg_type == MsgType::ShardDigestRequest as u16;
+                                            || header.msg_type == MsgType::ShardDigestRequest as u16
+                                            || header.msg_type == MsgType::ShardBucketRangeRequest as u16;
 
                                         if is_restricted_rpc
                                             && !pm.can_authorize_direct_rpc(&remote_addr, remote_node_id.as_ref()).await

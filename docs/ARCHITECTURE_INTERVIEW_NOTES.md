@@ -6,7 +6,7 @@
 > and the current decision register in section 2 when resuming. Checkpoints are in section 9.
 
 Date: 2026-10-13 (Europe/Berlin)
-Last updated: 2026-10-17 (Europe/Berlin)
+Last updated: 2026-10-18 (Europe/Berlin)
 
 Status: Working interview notes, not a binding specification or an implementation plan.
 The interview was saved at the maintainer's request and subsequently resumed.
@@ -64,7 +64,14 @@ Current qualification: DEC-053 explicitly selects regional, potentially revocabl
 acceptance. Older entries retain their historical wording; any implied globally
 irreversible-acceptance or mandatory predecessor-quorum interpretation is qualified
 by §7.57. DEC-054 / §7.58 adds the explicit eligibility, honest-merge and merchant
-status guardrails. Numeric checkout thresholds and first-party evidence rules are retained.
+status guardrails. DEC-055 / §7.60 rejects predecessor baton chaining, recursive
+L2 receipt chaining and active background presence probes. CP-0050 / §7.61 records
+the resulting passive-presence integration gap. DEC-056 / §7.62 subsequently
+selects three consecutive missed gossip heartbeats; timing/enforcement remain pending.
+DEC-057 / §7.63 requires restart sync-readiness and rejects an empty-state disaster
+fallback. DEC-058 / §7.65 selects quorum-backed verified digest-pull as the
+mechanism; source coverage and stable-transfer proof remain open.
+Numeric checkout thresholds and first-party evidence rules are retained.
 
 Unless explicitly evidenced otherwise, design details and implementation/verification
 of interview changes remain pending. Constraints in the direction column and the
@@ -127,7 +134,10 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-053"></a>DEC-053 | K1.1/S2.2/S5 | Partition-resilient regional acceptance | Accepted product direction; simulation verified (S2.2 T01–T12 pass) | Q-K1-FINALITY-01 answered B by explicit maintainer direction: local current-mesh committee constitution without mandatory old14 authorization, regional operation through partitions and deterministic min(H_canon) reconciliation. A regional receipt may lose after discovery of an admissible competing branch; no global irrevocability or99.999% guarantee is inferred. Retain fixed<=20/14 votes per collection, N<20 PROVISIONAL, durable own choices, recipient eligibility checks, support gate and first-party-only fraud penalties. Qualify older strict-CEH/global-FINAL interpretations, not their historical provenance or the original Q-S3.3-01 meanings. | [Decision and limits](#757-partition-resilience-selected-and-p0-reoriented) |
 | <a id="dec-054"></a>DEC-054 | S2.1/S2.2/S5/C4 | Regional eligibility, honest merge and merchant risk | Accepted guardrails; simulation verified (S2.2 T01–T12 pass) | Regional voters require valid identity-bound Argon2d tickets, observed24h incubation and independently authenticated F2F admission; no gateway-invented roster. Only two genuine incompatible personal approvals for one slot justify node sanctions; honest single-branch losers are never punished. Distinguish FINAL(Global) from REGIONAL CONFIRMED and keep amount/exposure limits in terminal policy outside blind L2. The formal candidate reserves green behind a separate proof guard; ticket cost does not establish a per-view fault bound. | [P0 elaboration](#758-p0-formal-contract-and-twelve-acceptance-scenarios) |
 | <a id="dec-055"></a>DEC-055 | S3/C1/K1 | Rejection of predecessor baton chaining and chained L2 receipts | Accepted negative guardrails / architecture direction | Explicitly rejects mandatory predecessor epoch baton chaining as a permanent dead-end: succession is derived autonomously from the living active mesh via HRW, with min(H_canon) convergence upon merge. Rejects recursive client-side L2 receipt chaining on spend: recipients do not verify historical L2 receipt chains; live collision checking in-RAM suffices, while L1 carries causal ownership. Rejects active 30s background ping storms in favor of passive hourly F2F Dunbar heartbeats. | [Maintainer directive](#760-predecessor-baton-chaining-and-chained-l2-receipts-rejected) |
+| <a id="dec-056"></a>DEC-056 | S2.1a/N1 | Passive presence exclusion | Accepted requirement; exact timing/enforcement pending | After three consecutive missed hourly gossip heartbeats, exclude an already admitted peer from future HRW snapshots. This supersedes Q-S2.1-PRESENCE-01's proposed 2h baseline and slow-dormancy alternative. Preserve ticket maturity, historical approvals, frozen in-flight membership and first-party-only sanctions. Exact slot deadlines, safe-time tolerance, restart/re-entry and production/model enforcement still require consolidation. | [Maintainer answer and next question](#762-three-missed-heartbeats-selected-and-total-state-loss-boundary) |
+| <a id="dec-057"></a>DEC-057 | S3.4/N3/O2 | Mandatory restart sync-readiness; no empty-state disaster fallback | Accepted requirement / Q-S3-STATELOSS-01 A; recovery proof and implementation pending | After restart or state loss, return FLAG_NOT_READY and withhold lock approvals until justified P2P digest-pull recovery of the affected shard state. No reachable recoverable state means the affected scope remains unrecovered/blocked; L1 evidence alone cannot authorize an empty-state restart. Successful transfer must establish the required scope/coverage, not only matching digests. Preserve the independent lost-own-choice same-key gate; no old-quorum authorization or global completeness claim is inferred. | [Answer, source findings and recovery contract](#763-mandatory-sync-readiness-selected-recovery-completeness-still-open) |
 
+| <a id="dec-058"></a>DEC-058 | S3.4a/N3 | Quorum-backed verified digest-pull | Accepted mechanism / Q-S3-RECOVERY-BASIS-01 A; completeness proof pending | Use Spec03-style agreement among distinct justified shard peers on a state digest (14/20 in regional mode), then fetch the bound snapshot, verify lock signatures, reconstruct the committed state and durably install before readiness. Stay FLAG_NOT_READY until justified complete recovery. Designated-source trust alternative B rejected. Digest agreement and signatures do not by themselves prove preservation of omitted prior locks; source coverage, stable cuts and own-choice recovery remain obligations. | [Selection, proof boundary and live-transfer question](#765-quorum-digest-pull-selected-stable-transfer-under-write-load) |
 
 ### 2.2 Alternatives, refinements and superseded proposals
 
@@ -159,26 +169,36 @@ the recorded reasoning; they do not supply missing original user explanations.
 | Q-S2.2-01 | Unanswered; withdrawn as the next decision question because its predecessor-roster prerequisite is unresolved. | §7.36 preserves the exact proposal/question. Maintainer challenges "the previous group"; §7.37 corrects premature decision readiness. Conditional transition research remains, but no shared roster, initial anchor or payment-round choice is selected. |
 | Q-K1-FINALITY-01 | Answered B by explicit regional-availability/merge direction; DEC-053. | §7.56 preserves exact A/B. §7.57 records the maintainer's choice to remove mandatory predecessor permission and allow competing regional receipts to converge later. No renewed A/B question; not a choice of payment rounds or proof of the stated success percentages. |
 
+| Q-S3-RECOVERY-BASIS-01 | Answered A / DEC-058; designated recovery-source trust B rejected. | §7.64 preserves exact options; §7.65 selects Spec03 quorum-digest transfer while retaining source-coverage and concurrent-write proof obligations. Selection is not proof of historical completeness. |
+
 ### 2.3 Open design and decision inventory
 
 These are tracked obligations, not a list of questions to ask the maintainer in
 sequence. Investigate technical prerequisites autonomously. No glossary naming question is pending: DEC-049–052 settle the names and
 authorize autonomous editorial maintenance (§7.27). The scoped editorial pass is complete; naming decisions do not close protocol-design
 obligations. Q-S3.3-01 is parked and unanswered with unchanged A/B meanings; §7.16 records its clarified
-presentation. Q-K1-FINALITY-01 is answered by DEC-053; S2.2 regional scenario verification (T01–T12) is completed and verified (§7.59). S2.1 remains a saved trust/admission dependency. Keep explicit accepted requirements separate from unresolved
-proof/parameter choices.
+presentation. Q-K1-FINALITY-01 is answered by DEC-053. S2.2 retains its historical 12/12
+P0-SIM-1 result (§7.59); that probe-dependent profile does not verify DEC-055
+passive presence. Q-S2.1-PRESENCE-01 is answered by DEC-056: three consecutive
+missed gossip heartbeats (§7.62). S2.1a enforcement remains pending; broad recursive-
+trust research stays stopped. Q-S3-STATELOSS-01 is answered A by DEC-057 (§7.63).
+Q-S3-RECOVERY-BASIS-01 is answered A / DEC-058: quorum-backed verified
+digest-pull (§7.65). S3.4a source coverage remains open; its active subleaf
+S3.4a.1 / Q-S3-SYNC-WRITES-01 asks about stable transfer under ongoing writes.
+Loss of the node's own signing history remains a separate gate.
+Keep selected requirements separate from unresolved proof/parameter choices.
 
 | Item | Branch | Still unresolved | Detail record |
 | --- | --- | --- | --- |
 | OPEN-01 | S3.3 | One-round obligations versus redesigned completion; inherited/own records, late certificates, authenticated inclusion and partial conflicts. Conditional witness bound is not an inclusion algorithm. | Q-S3.3-01; §7.5, §7.14–7.17, §7.29 |
-| OPEN-02 | S1/S2 | DEC-053 selects locally qualified current-mesh committees, not old-quorum permission or globally unique authority. P0 draft0.2 candidate admission/reachability/maturity/frozen-view and independent-recipient predicates verified across T01–T12 scenarios (§7.59). S2.1 retains the human trust/fault-bound dependency. R-01/R-02 still refute the old global-irreversibility target; competing regional receipts are now an allowed outcome requiring convergence. Wire integration and live Argon verification pending. | §7.35–7.44, §7.56–7.59; DEC-053/054; partition P0 draft0.2 |
-| OPEN-03 | S3/S4 | Re-scope under DEC-053: regional readiness without mandatory predecessor14, durable own-history preservation, authenticated available-state/client repair and deterministic conflict convergence. Unknown remote competing evidence is an accepted later-revision risk, not proof of global absence. Old fence/inclusion/BFT/install models remain reference evidence; local persistence/install/expiry obligations still require exact predicates and wire verification. | §7.29–7.44, §7.57; DEC-039/041/043/045/046/053 |
+| OPEN-02 | S1/S2 | DEC-053 selects qualified current-mesh regional committees. T01–T12 passed under probe-dependent P0-SIM-1; DEC-055 removes those probes, so passive selection needs revised predicates/scenario validation. DEC-056 selects three consecutive missed heartbeats; exact passive timing and enforcement remain pending. Broad recursive-trust research remains stopped. The human fault bound and live Argon/wire integration remain open. Competing regional receipts are allowed, not globally irreversible. | §7.35–7.44, §7.56–7.61; Q-S2.1-PRESENCE-01; DEC-053–055 |
+| OPEN-03 | S3/S4 | DEC-057 answers Q-S3-STATELOSS-01 A: mandatory P2P recovery gate after restart/loss; no empty-state fallback. Active S3.4a (§7.63) must establish source continuity, scoped recovery coverage and durable activation; matching empty digests do not prove recovery. Re-scope under DEC-053: regional readiness without mandatory predecessor14, durable own-history preservation, authenticated available-state/client repair and deterministic conflict convergence. Unknown remote competing evidence is an accepted later-revision risk, not proof of global absence. Old fence/inclusion/BFT/install models remain reference evidence; local persistence/install/expiry obligations still require exact predicates and wire verification. | §7.29–7.44, §7.57; DEC-039/041/043/045/046/053 |
 | OPEN-04 | C4 | Hidden-query/multiple-witness read proposal, actual evidence, authenticated random sampling, retry/missing-response semantics, accepted residual risk and goods release. | §3–5, §7.1; DEC-015/017/020/021 |
 | OPEN-05 | S5/S6 | DEC-053 selects potentially revocable regional acceptance. P0 draft0.2 specifies candidate support ordering, complete bundles, affected descendants and separate approval/observation domains. Losing a regional branch is not node fraud; executable proof/wire validation, historical context and versioned integration remain pending. Green requires a separate justified global proof; baseline schemes are empty. Q-K1-FINALITY-01 is answered. | §5.4, §7.12–7.13, §7.56–7.58; DEC-022/023/048/053/054 |
 | OPEN-06 | K2/C1 | Shared crate layout/versioning, signed fields, full identities, parent/output binding, splits, genesis/root TTL, batch behavior and all core consumers. | §2 closing clarifications, §7.3; DEC-005/006/011–014/038 |
 | OPEN-07 | C2/C3 | End-to-end targets, bounded retry counts/delays/horizon, handoff/NOT_READY feedback fields and actual shared transport backoff. QUIC retransmission versus application duplication clarified in §7.33; no three-send policy selected. | §7.2.1/7.3, §7.33; DEC-008/009/027/042 |
 | OPEN-08 | N1/N2/N4 | Session/stream/CPU/persistence admission limits, fairness, resource partitioning, exact full-budget refusal, tier lifecycle and receiver-side abuse defenses. | §7.2–7.2.1; DEC-024/025/028; existing project invariants |
-| OPEN-09 | N3/O2 | Missing independent locks, divergent partial replicas and recovery without active clients; how readiness is justified beyond complete download/matching digest. Snapshot-bound pagination, no-gap deltas, full commitment coverage and catch-up capacity remain open (§7.31–7.32). Client resubmission is a preserved assistance proposal. | §7.2–7.2.1, §7.31–7.32; DEC-026/031/032 |
+| OPEN-09 | N3/O2 | Missing independent locks, divergent partial replicas and recovery without active clients; how readiness is justified beyond complete download/matching digest. Snapshot-bound pagination, no-gap deltas, full commitment coverage and catch-up capacity remain open (§7.31–7.32). Client resubmission is assistance, not a replacement for the DEC-057 restart P2P gate. | §7.2–7.2.1, §7.31–7.32, §7.63; DEC-026/031/032/057 |
 | OPEN-10 | O1/O2 | Exact immutable choice/slot/context semantics, per-entry durable acknowledgment, duplicate/pending operations, loss/rollback detection and safe same-key resumption. | §7.2.1/7.3; DEC-029–033 |
 | OPEN-11 | O3/O4 | Safe time and choice retention, bounded expiry scheduling, drain/handler ordering, signal escalation and measured deployment stop deadline. | §7.2.1; DEC-034/035 |
 | OPEN-12 | O5/O6 | Private admin packaging/auth/socket permissions; metric-specific aggregation, bounded persistence and reliability diagnostics. | §7.2.1/7.3; DEC-002/003/036/037/040 |
@@ -234,6 +254,10 @@ not silently modify those files or establish a safe membership transition.
   only, explicit uncertainty and one substantive human decision question at a time.
 - **WF-003 (CP-0003):** migrate existing records into stable IDs/status/provenance;
   preserve historical derivations and distinguish selected, reopened, tentative and open.
+- **WF-004 (CP-0053):** maintainer requests A and B for each interview decision,
+  with proposals and a recommendation. Keep factual uncertainty explicit; an option
+  selection is not a safety proof. This updates the earlier no-fixed-option-count
+  presentation preference, not any accepted protocol requirement.
 
 The maintainer emphasized that locks form a chain, or a branching graph when vouchers
 split. Each accepted lock must be causally authorized by the correct predecessor/output;
@@ -5802,3 +5826,508 @@ The maintainer conducted a structural re-examination of the operational boundari
 Recorded DEC-055 in decision table and section 7.60. Added negative guardrails 6 and 7 to `AGENTS.md` and module warning to `crates/humoco-sim-core/src/ceh/mod.rs` to permanently prevent re-introducing predecessor baton chaining, recursive receipt chains, or active ping storms. Workspace checks clean. Prior decisions DEC-001–054 preserved.
 
 Completed checkpoint: **CP-0049**.
+
+
+### 7.61 Passive regional presence after DEC-055
+
+Record: S2.1-PASSIVE-PRESENCE-001. Date: 2026-10-17 (Europe/Berlin).
+Checkpoint: CP-0050. Active leaf: S2.1a; dependencies S2.2/S3/S4/N1.
+Task: resume from CP-0049 using the interview prompt. No new production or binding
+specification changes, experiments or test campaign authorized by this continuation.
+
+**Checkpoint reconciliation.** CP-0049 is present in both memories; the state's
+last evidence bullet still said CP-0048 and is corrected. DEC-001–055 remain
+selected as previously recorded. CP-0048's twelve passing model scenarios are
+preserved as historical evidence for their actual profile, not silently rerun or
+claimed to verify the later DEC-055 constraint.
+
+**Bounded source findings.** P0 draft0.2 §3.1/3.3 requires positive reachability
+in addition to admission/presence and specifies 30-second refresh, 120-second
+reachability leases and 30-second view leases. P0_SIMULATION_RESULTS.md §2 explicitly
+says the successful partition variant refreshes local probes every 30 seconds.
+`p0/admission.rs` gates `selectable` on `reachable_until`; the test fixture in
+`tests/p0_support/mod.rs::Fixture::catalog` refreshes simulated responses every
+minute while establishing continuity. Removing probes without changing this
+predicate expires local eligibility too; it does not implement passive recovery.
+These are source observations, not executed new tests.
+
+Spec07 §3 and Spec11 distinguish initial 24h / eight-hourly-observation maturity
+from slow ACTIVE/DORMANT hysteresis (at most 3/24 observed hours; roughly 21–24h
+absence after regular hourly reception). P0's `admitted` instead requires >=8
+observations continuously, and its report already discloses missing exact dormant
+re-entry behavior. Spec07 §3's re-entry prose also differs from INV-0704; two
+consecutive hourly observations alone do not establish two elapsed hours.
+These state-machine details remain technical consolidation work, not accepted
+changes or additional preference questions now.
+
+`humoco-node/src/network/manager.rs::PRESENCE_FRESHNESS_SECS` is 2h;
+`KnownNodeInfo::is_presence_fresh` applies it to population/routing paths.
+`PeerManager::shard_committee` admits known mature non-banned identities without
+that freshness filter and explicitly separates routing reachability from write
+membership. Thus neither the current count nor the existing frozen write roster
+is evidence of a delivered passive regional-reconstitution policy. Ticket age,
+presence eligibility, signing readiness and actual RPC success remain distinct.
+
+**Why this leaf comes first.** Regional successor selection cannot be integrated
+until its selectable population is defined under DEC-055. This is a bounded
+policy-consolidation dependency, not permission to restart §7.47's stopped broad
+trust investigation or invoke its separate research prompt. DEC-055 already
+settles passive hourly gossip; do not ask whether to restore active probes.
+
+**Recommendation status: proposed, conditional baseline.** Prefer a separate
+2h passive selection-freshness window for already admitted identities: keep ticket
+maturity and historical evidence, exclude stale members only from future attempts,
+then recompute exact HRW from the independently accepted passive catalog. Reuse the
+existing duration as an initial candidate rather than claim it is measured optimal.
+It trades sensitivity to delayed/lost gossip for earlier removal of stale members.
+The slower existing ACTIVE/DORMANT policy remains a viable lower-churn alternative
+if its longer payment interruption is acceptable. Neither choice establishes a
+Byzantine bound, common views, direct RPC reachability or a restart deadline.
+
+**Exact pending question — Q-S2.1-PRESENCE-01 (unanswered):**
+
+> Wie lange sollen bekannte, ausgereifte Knoten ohne frischen authentifizierten
+> Heartbeat noch für die Auswahl künftiger regionaler Komitees zählen?
+>
+> **A — Zwei Stunden als erste Entwurfsgrenze (Empfehlung):** Danach fallen sie
+> aus neuen Komitee-Snapshots heraus. Ticket-Reife und alte Bestätigungen bleiben
+> erhalten; verlorene oder verzögerte Heartbeats können dadurch früher zu einer
+> anderen lokalen Auswahl führen.
+>
+> **B — Die bisherige träge ACTIVE/DORMANT-Regel:** Nach zuvor regelmäßigen
+> Heartbeats erfolgt der Ausschluss grob nach 21–24 Stunden. Das vermeidet mehr
+> Wechsel bei Gossip-Aussetzern, kann Zahlungen mit unerreichbaren alten
+> Komiteemitgliedern aber entsprechend länger blockieren.
+>
+> Eine andere gewünschte Zeitgrenze kann frei genannt werden.
+
+**Unchanged guards and validation obligations.** No replacement inside a frozen
+checkout, no rank21 fallback on timeout, no aggregation across views, no hearsay
+ban, no loss of own choices or historical receipt validity. Timeout alone does not
+change membership. Qualification remains per independently admitted local context;
+shorter silence is not fraud. Hourly gossip cannot promise second-scale partition
+detection, and a partition that blocks RPC while preserving heartbeat delivery
+need not change the passive roster at all. A selection threshold is not a total
+recovery bound: enough accepting ready signers, local population continuity / 24h
+mode hysteresis, safe time and state repair remain additional prerequisites.
+
+After the answer, derive exact safe-time freshness boundaries, replay/dedup rules,
+ACTIVE versus selection re-entry behavior and view-interval semantics. Track
+long-retained ticket maturity separately from short selection freshness; do not
+silently replace the existing dormant re-entry rule. Establish compatibility under
+observer skew / 14-of-20 acceptance without assuming identical receipt times.
+Revalidate T01–T03/T08/T11 with hourly passive events and no probe refresh, including
+missed/jittered heartbeats, one-way paths, gossip-live/RPC-dead, restart, continuity
+reset and neutral old-attempt cancellation. Later integration needs real adversarial
+receiver-side QUIC tests; no model-only network-defense claim. Reconcile DEC-055's
+receipt-chain exclusion separately in P1/C1; do not add recursive client receipts
+as a workaround for this presence issue.
+
+Design: open; recommendation and threshold unselected. Implementation/verification:
+read-only repository inspection only in this continuation. Next action: ask the
+recorded question, await an explicit answer, then derive the selected passive
+policy before S3/S4 repair integration. Original parked question mappings unchanged.
+
+### CP-0050 — Resume at passive presence integration
+
+Reconciled CP-0049 and retained DEC-001–055. Recorded §7.61's conflict between
+DEC-055 and the passing probe-dependent P0 profile; preserved the exact historical
+test scope. Active leaf S2.1a / Q-S2.1-PRESENCE-01 asks passive exclusion tolerance:
+A = proposed 2h selection freshness; B = slow existing ACTIVE/DORMANT hysteresis.
+No answer inferred from the resume request. Broad trust research remains stopped.
+Production, binding specifications and test results unchanged. Next: await answer,
+derive precise passive policy and revalidation obligations, then resume S3/S4.
+
+Completed checkpoint: **CP-0050**.
+
+
+### 7.62 Three missed heartbeats selected and total-state-loss boundary
+
+Record: S2.1-PRESENCE-DECISION-002 / S3-STATELOSS-001.
+Date: 2026-10-17 (Europe/Berlin). Checkpoint: CP-0051.
+
+**Answer / DEC-056.** The maintainer reports the choice from another chat and
+explicitly adopts "3 gossip ausfälle" here, requesting the next question.
+AGENTS.md §3 guardrail 6.3 now also names three consecutive missed hourly heartbeats
+and exclusion from subsequent HRW snapshots. Record that policy as selected,
+not as A or B of Q-S2.1-PRESENCE-01. Its original alternatives remain historical;
+the proposed 2h baseline is superseded. No claim of an optimal measured threshold
+or completed implementation follows from the maintainer's assessment.
+
+Three missed expected heartbeat opportunities are not an unconditional exact
+three-hour wall-clock deadline: slot definition, permitted delivery/clock tolerance,
+deduplication, persistence and restart/re-entry boundaries still need precise
+consolidation. Preserve 24h ticket incubation, immutable own choices, historical
+evidence and the frozen committee within each checkout. Missing gossip alone is
+not fraud evidence. Existing P0 30s probes / 120s leases and the runtime 2h counting
+filter are not silently treated as compliant. Keep passive-profile/model and real
+QUIC validation obligations from §7.61; do not reopen the chosen miss count.
+
+**Concurrent changes.** Re-read both memories, git status and the relevant diffs
+before editing. The other chat changed AGENTS.md, Spec03 and Rust architecture
+comments; these edits are preserved. They clarify living-mesh selection versus
+calendar epochs / ticket maturity. This interview changes only its two memory
+files. Commentary in other files is not executed proof of automatic regional
+recovery or of arbitrary-partition liveness.
+
+**Next leaf / why it matters.** User steering moves to the next substantive
+question; S2.1a's engineering obligations remain recorded. S3.4 makes the recovery
+operating envelope explicit before justifying new regional signers. This is a
+narrow failure case, not a return to predecessor permission or global finality.
+P0 §4.1 requires completed available-state repair but does not define an empty-source
+fallback. DEC-053 accepts hidden competing regional evidence and later revision;
+it does not explicitly accept permanent disappearance of all conflict evidence.
+DEC-026/031/032 still guard readiness and same-key history. The model's
+`p0/state.rs::Signer::lose_own_history` disables signing and offers no hidden-history
+recovery oracle. That guard is distinct from this next question.
+
+Scenario: the identities proposed to resume are independently admitted and have
+intact own signing histories (or are genuinely fresh eligible identities); the
+missing data is the shard's live collision state. No reachable qualified replica
+or client can provide the relevant previous lock records/receipts. Clients can
+still present valid origin and L1 ownership/causal evidence for a new request.
+Such evidence alone does not establish absence of a previously registered
+incompatible spend. If older evidence later returns, ordinary supported merge
+applies; if it is permanently gone, convergence cannot recover the missing proof.
+This scenario is not an ordinary restart, transient peer outage, or proof that
+all remote copies are globally gone.
+
+**Exact pending question — Q-S3-STATELOSS-01 (unanswered):**
+
+> Wenn für noch gültige Gutscheine kein erreichbarer Knoten oder Client den
+> bisherigen Sperrzustand wiederherstellen kann: Soll die Region für diese
+> betroffenen Ausgaben warten, oder darf sie allein auf Grundlage gültiger
+> L1-Nachweise neue Sperren annehmen?
+>
+> **A — Warten auf wiederherstellbaren Sperrzustand (Empfehlung):** Die betroffenen
+> Ausgaben bleiben nicht signierbereit; unabhängig wiederhergestellte Bereiche
+> können weiterarbeiten. Das vermeidet einen bewussten Neustart ohne die alten
+> Kollisionsdaten, kann die betroffenen Gutscheine aber bis zum Ablauf blockieren.
+>
+> **B — Neustart trotz fehlender Kollisionsdaten zulassen:** Mit gültigen
+> Ursprungs- und L1-Nachweisen dürfen neue regionale Sperren entstehen. Frühere
+> Ausgaben können dadurch erneut angenommen werden; bei dauerhaft verlorenen
+> Nachweisen ist auch eine spätere Konfliktauflösung nicht gesichert.
+
+**Recommendation and limits.** A retains recovery-before-signing and avoids silently
+expanding the accepted partition risk into an empty-state recovery policy. Its
+implementation still needs a justified scope/readiness predicate: there is no
+claim that absence of missing records is detectable from a matching digest.
+B is an explicit proposed relaxation for this loss scenario, not current approval
+and not a cryptographic safety fix. Neither option permits lost-choice same-key
+signing, weaker owner/origin checks, invented ticket maturity, recursive historical
+client L2 receipt chains, raw unsupported min-hash takeover, hearsay bans or an
+old-quorum activation veto. No new identity by itself repairs missing lock state.
+Regional hidden-evidence risk already accepted under DEC-053 remains unchanged.
+
+Design: miss-count requirement selected; presence implementation/verification pending.
+State-loss fallback unselected. No tests, source or binding-spec edits in this turn.
+Next: ask Q-S3-STATELOSS-01, await answer, then specify available-state recovery
+sources, coverage and refusal scope under the selected operating envelope.
+
+### CP-0051 — Adopt three missed heartbeats and ask about unrecoverable live state
+
+Recorded DEC-056 from explicit maintainer instruction and corroborating AGENTS.md
+changes. Q-S2.1-PRESENCE-01 answered with a third policy; original A/B preserved.
+Active leaf moves to S3.4 / Q-S3-STATELOSS-01: A = wait for recoverable collision
+state; B = explicitly permit client-assisted empty-state restart with duplicate-
+acceptance and permanently missing-evidence risk. No answer inferred. Existing
+DEC-001–055, other-chat edits, same-key loss gate and parked question meanings
+preserved. Technical presence/recovery and wire validation remain pending.
+
+Completed checkpoint: **CP-0051**.
+
+
+### 7.63 Mandatory sync-readiness selected; recovery completeness still open
+
+Record: S3-STATELOSS-DECISION-002 / S3-RECOVERY-CONTRACT-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0052.
+Active technical leaf: S3.4a; dependencies N3/O1/O2/S2.2.
+
+**Answer / DEC-057.** The maintainer explicitly selects Q-S3-STATELOSS-01 A:
+a node with an empty DB cannot distinguish genuinely new use from resubmission
+after disaster. After restart/data loss it must pass a sync-readiness gate,
+return FLAG_NOT_READY and issue no lock approvals/countable quorum vote until
+its shard state has been successfully recovered by P2P digest-pull from shard
+peers. If peers and state remain unavailable, the affected scope remains
+unrecovered/blocked rather than accepting pure L1 evidence. Safety and collision
+protection take priority over availability in this recovery case. B's deliberate
+empty-state restart is rejected. No fixed deadline opens this gate.
+
+This reinforces DEC-026/031 and specifies the restart/no-source case; it does not
+replace DEC-032. Restoring visible confirmed locks cannot recover a hidden prior
+individual signing choice. Loss/rollback of own choices retains the independent
+same-identity signing gate. DEC-053's revocable regional acceptance and admitted
+merge remain selected; this answer does not claim irreversible global exclusion
+of conflicting regional spends or authorize predecessor-quorum permission.
+
+**Current source evidence (read-only, not newly executed tests).**
+- `humoco-node/src/daemon.rs` initializes `initial_sync_ready` from whether resolved
+  configured peer endpoints are empty. In `run_shard_digest_pull_sync`, an empty
+  `candidate_addrs` list explicitly marks the node ready. These are recovery-gate
+  bypass paths to remove or narrowly distinguish from a justified initial network
+  start; no peer availability/configuration condition proves recovered state.
+- The sub-20/empty-local bootstrap branch sets ready after its pull loop. The
+  larger-network path clusters digests and marks ready after local equality or
+  successful page handling. Record-import results are discarded in the examined
+  loops; page termination and import/durable-install success need explicit checks.
+  The code comments themselves limit the digest's projected-state claim.
+- `network/transport.rs` checks the shared sync-ready flag before LockVerify and
+  returns FLAG_NOT_READY. `tests/phase5_pull_sync_and_readiness.rs` contains real
+  QUIC request/response coverage of a false flag and then manually sets it true.
+  This demonstrates the intended test structure, not verified completeness of the
+  daemon's automatic transition. The test was inspected, not run here.
+- Readiness uses a shared AtomicBool in the inspected daemon/transport. Per-shard
+  or finer refusal scope is not established by the current boolean. Do not claim
+  unaffected recovered shards continue independently without verifying that path.
+
+**Minimal recovery contract derived from the selected requirement (proposed
+engineering predicates, not a completed safety proof).**
+1. Enter RECOVERING on every restart and on detected relevant loss/rollback. Serve
+   no new approval for the affected scope. Retained authentic state/evidence must
+   remain available for bounded learned-peer sync while signing is gated, otherwise
+   simultaneous restarts could deadlock solely because every source is not ready.
+2. Identify the exact shard/scope and independently admitted source identities.
+   Source readiness/continuity cannot be inferred from an address, a completed RPC,
+   or agreement between equally empty new/recovering replicas. Empty source sets
+   never satisfy the recovery predicate by vacuous agreement.
+3. Transfer authenticated, bounded, snapshot-bound records and necessary evidence;
+   verify the complete canonical representation, scope, pagination endpoints,
+   declared counts/digests and each admission/import result. Missing pages, stalled
+   cursors, invalid records, cancellation or unacknowledged durable writes keep the
+   gate closed. Existing limits, reservation-first and trusted expiry still apply.
+4. Account for concurrent changes through a named source-local revision endpoint
+   with complete deltas or another justified equivalent. Revisions across different
+   peers are not a global order. A local transfer endpoint is not an old-committee
+   fence, and no predecessor signature chain is required. Exact coverage of
+   concurrent/partial accepted state remains an obligation, not an asserted result.
+5. Activate only after the installed durable state and source/coverage basis are
+   justified AND relevant own-choice history is intact/recovered AND current
+   storage/membership/time conditions permit signing. Persist enough recovery
+   basis to audit the transition. Admission to a frozen committee does not supply
+   this missing evidence. Unknown or failed checks return NOT_READY neutrally.
+
+**Counterexample / evidence limit.** Compare a never-used shard with a shard that
+previously accepted A and then lost every accessible copy/evidence of A. If the
+observable state in both cases is the same collection of empty replicas, equal
+empty digests and valid new L1 requests are identical inputs. A rule consulting
+only those inputs cannot distinguish these histories. Fourteen signatures over
+that empty digest prove agreement on reported data, not survival of A. The same
+problem exists if only the source holding a relevant accepted lock is omitted.
+This is a logical indistinguishability witness, not an executed simulation or a
+new global-impossibility claim. It motivates establishing source-state continuity
+and a precise recovery premise before calling digest equality sufficient.
+
+**Unresolved design work.** Specify the minimum justified surviving-state/source
+coverage under qualified regional views, including partial prior writes and late
+receipts. Determine how previously empty healthy shards and genuine first startup
+are distinguished from disaster recovery without a configuration toggle that
+silently clears existing-network history. This is an initialization/continuity
+boundary, not a renewed product question about permanent networks or old14 vetoes.
+Keep declared regional hidden-evidence risk separate from known recovery gaps.
+No numeric source threshold is selected by the answer; derive it against the
+stated fault/data-survival premise rather than ask the maintainer to guess one.
+
+**Required validation, not executed here.** Real receiver-side QUIC/daemon cases:
+restart rejects votes until justified install; no peers / DNS resolution failure
+never marks ready; several empty fresh peers do not establish recovery of a used
+shard; simultaneous restarts with intact stores can exchange recovery evidence;
+truncated/replayed snapshot pages, skipped invalid imports, missing deltas and
+failed durable commits keep the gate closed; unrelated ready scope behavior is
+verified explicitly; same-key choice loss stays blocked despite matching visible
+state. Combine with three missed-heartbeat selection, partitions and delayed valid
+receipts in the model, then verify on wire. Existing test names or manually
+flipping the flag are not proof of these automatic transitions.
+
+Question status: Q-S3-STATELOSS-01 answered A; no new preference question pending.
+Requirement: selected. Design: open at source-coverage/continuity predicate and
+scoped activation; no claim of complete collision-freedom proof. Delivery: interview
+memory only, no production/spec changes, tests or large research campaign.
+Next action: continue bounded technical derivation of S3.4a's source/coverage
+predicate; ask a human question only for a remaining operating-envelope tradeoff.
+
+### CP-0052 — Require P2P recovery before restart signing
+
+Recorded DEC-057 / Q-S3-STATELOSS-01 A with the mandatory FLAG_NOT_READY restart
+sync gate and permanently unavailable-state block. Preserved the separate lost-own-
+choice gate and revocable regional policy. Read-only inspection identified no-peer
+ready bypasses and manual-flag test limitations. Recorded a proposed recovery
+contract and empty-state indistinguishability witness, without claiming source
+coverage established or tests executed. S3.4 policy decided; S3.4a is the single
+active technical leaf. No new human choice is pending; engineering uncertainty
+must be investigated before proposing a numeric recovery threshold.
+
+Completed checkpoint: **CP-0052**.
+
+
+### 7.64 Present the recovery-basis question with A and B
+
+Record: S3-RECOVERY-BASIS-QUESTION-001 / WF-004.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0053.
+Active node: S3.4a. The maintainer asks for A/B proposals as the normal interview
+format and requests the current question again. CP-0052 contained an unresolved
+technical next action, not an unanswered A/B question. Assign a new stable question
+ID; do not re-ask or change the answered Q-S3-STATELOSS-01 / DEC-057.
+
+**Decision boundary.** Snapshot integrity, complete pagination/delta processing,
+durable install and independent own-choice safety remain required in either
+option. They establish agreement with the named source/reference state, not
+unconditional absence of every hidden lock. The unresolved choice concerns the
+basis on which that reference state is trusted as sufficient for local recovery.
+A matching digest is not itself such a basis. This bounded recovery question does
+not restart the stopped general recursive-trust research or select old14 authority.
+
+**Exact pending question — Q-S3-RECOVERY-BASIS-01 (unanswered):**
+
+> Welche Grundlage soll das Sync-Readiness-Gate verlangen, bevor es den
+> wiederhergestellten Shard zum Signieren freigibt?
+>
+> **A — Überprüfbare Wiederherstellungsgrundlage (Empfehlung als Entwurfsziel):**
+> Wir verlangen einen begründeten Referenzzustand aus fortgeführten Peer-Beständen,
+> prüfen den vollständigen Snapshot samt nötigen Nachträgen und speichern ihn
+> dauerhaft. Lässt sich die erforderliche Zustandsabdeckung nicht belegen,
+> bleibt FLAG_NOT_READY gesetzt. Welche Nachweise dafür ausreichen, muss noch
+> technisch hergeleitet werden.
+>
+> **B — Explizit vertrauensbasierte Wiederherstellungsquellen:** Der Betreiber
+> benennt Quellen, deren Aussage über den vollständigen Shard-Zustand als
+> zusätzliche Vertrauensannahme gilt. Übertragung, enthaltene Nachweise und
+> Speicherung werden weiterhin geprüft. Verschwiegene oder bei diesen Quellen
+> verlorene Einträge können damit aber unentdeckt bleiben.
+
+**Recommendation status.** A follows the chosen preference for collision protection
+and avoids adding a designated recovery-source trust assumption. It is conditional
+as a construction: no source-continuity/coverage mechanism is established by
+choosing it, and unprovable recovery remains blocked. A is not a promise of a
+universal cryptographic completeness proof or automatic liveness after arbitrary
+loss. B is a proposed explicitly trusted recovery model, not equivalent mathematical
+assurance and not permission to use arbitrary peer majorities as authority. It
+would refine DEC-057's justified-state premise only if explicitly accepted; no
+such refinement or activation bypass is inferred now. Compromised or incomplete
+trusted sources are an explicit residual risk. Source identity authentication
+alone verifies neither honesty nor storage continuity under either model.
+
+No automatic bootstrap on an empty DB, empty peer set, timeout or expired waiting
+period is approved by either proposal. B still requires the configured P2P recovery
+source and validated transfer; it does not permit pure-L1 restart. The separate
+same-key own-history loss/rollback gate remains intact, as do frozen 14/20 checkout,
+qualified membership, regional merge limits and first-party-only sanctions.
+Implementation, source-count derivation and adversarial QUIC/crash validation are
+pending. Existing source findings and counterexamples in §7.63 are unchanged.
+
+Next: ask the recorded A/B question; await an explicit answer. Then derive/test
+the selected recovery basis without treating preference as proof. DEC-001–057
+remain unchanged. Only interview memory was edited; no new source inspection,
+external research, production/spec edit or tests were needed for this presentation.
+
+### CP-0053 — Restore A/B presentation at the recovery-basis leaf
+
+Recorded WF-004 from explicit maintainer steering. Prepared and saved new
+Q-S3-RECOVERY-BASIS-01: A = investigate a verifiable source/reference coverage
+contract, stay blocked if unproved; B = explicitly designated trusted recovery
+sources with residual omission/loss risk and unchanged transfer checks.
+Both are unselected. DEC-057 remains answered A; no repeated state-loss choice.
+S3.4a remains the sole active focus. Technical uncertainty and independent
+own-choice protection remain visible; no completed safety proof is claimed.
+
+Completed checkpoint: **CP-0053**.
+
+
+### 7.65 Quorum digest-pull selected; stable transfer under write load
+
+Record: S3-RECOVERY-BASIS-DECISION-002 / S3-SYNC-WRITES-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0054.
+Node S3.4a: mechanism selected, proof open. Active subleaf S3.4a.1.
+
+**Answer / DEC-058.** The maintainer explicitly selects Q-S3-RECOVERY-BASIS-01 A
+and cites Spec03 ShardDigest: query shard peers, require quorum agreement on a
+cryptographic digest/root of active locks, fetch the snapshot, verify lock
+signatures, and activate only when shard state is mathematically gap-free.
+Until then remain FLAG_NOT_READY. Record quorum-backed verified digest-pull as
+the selected mechanism and gap-free recovery as the required property, not as
+an already demonstrated theorem. The designated-source trust alternative B is
+rejected. No mandatory Merkle implementation is inferred: Spec03 uses BLAKE3
+whole-state hashing, and the user mentions either representation.
+
+**Bounded specification/code check.** Spec03 §5 describes a 14-of-20 digest
+cluster and download from one matching peer; §2.1 requires distinct authenticated
+identities in one justified frozen committee for checkout. Recovery needs its own
+exact source/context binding; it must not count arbitrary duplicate responses or
+assume the recovering node contributes a justified vote. `types.rs::
+evaluate_digest_clusters` groups supplied simulation NodeIds by digest without
+independent signature/membership/dedup verification. Its inputs need verification;
+calling this helper alone proves no real quorum. Adaptive small-network mode is
+retained; no forced fourteen-peer dependency for N<20 is newly selected.
+`crypto.rs::compute_shard_digest_at` hashes a filtered projection of LockRecord
+fields; the transport constructs synthetic HMC LockRecords for this projection.
+That is not a demonstrated commitment to every required signed wire field,
+root/expiry constraint, conflict proof or private own-choice history. These are
+read-only observations, not new executions or production fixes.
+
+**Proof boundary retained.** A digest verifies equality to its canonical encoded
+reference state under the hash assumptions. Valid signatures verify the supplied
+statements; they do not establish absence of omitted statements. Fourteen newly
+assigned empty replicas can agree on an empty digest after inaccessible state
+loss. The source-coverage witness in §7.63 remains unresolved by agreement alone.
+A common justified committee, appropriate fault/data-survival bounds and preserved
+honest state can support a quorum-intersection argument; changing committees or
+honest history loss do not automatically satisfy those premises. This is local
+mathematical reasoning, not a new external proof or a rejection of the selected
+Spec03 transfer mechanism. Keep DEC-053 regional revision and DEC-057 loss gating.
+No claims of unconditional global completeness, same-key history recovery, old14
+permission, a third gossip stream or automatic readiness from empty agreement.
+
+**Next bounded prerequisite.** Define the immutable state/cut that the quorum
+digest commits to before completing the source-coverage argument. Locks and TTL
+expiry can change during a multi-page transfer. Never silently combine pages
+from different snapshots or compare different expiry cutoffs as one state.
+Earlier §7.31–7.32 investigated snapshots/deltas but did not select this precise
+live-transfer tradeoff. DEC-041's planned pause for affected takeover scope does
+not select a pause of all serving source nodes during every recovery. Both
+options below retain source-coverage checks, signature verification, durable
+install and FLAG_NOT_READY until the full readiness predicate is satisfied.
+
+**Exact pending question — Q-S3-SYNC-WRITES-01 (unanswered):**
+
+> Wie soll der Wiederherstellungsabgleich mit neuen Locks umgehen, die während
+> der Snapshot-Übertragung bei den weiterarbeitenden Shard-Peers eintreffen?
+>
+> **A — Fester Snapshot plus begrenzte Nachträge (Empfehlung):** Der Knoten lädt
+> einen eindeutig gebundenen, unveränderlichen Snapshot und übernimmt danach
+> die seit dessen Stand hinzugekommenen relevanten Änderungen. Das vermeidet
+> wiederholte Vollübertragungen, benötigt aber zusätzliche Cursor-, Aufbewahrungs-
+> und Vollständigkeitsregeln. Reicht das sichere Nachtragsfenster nicht, bleibt
+> er nicht signierbereit und muss den Abgleich neu beginnen.
+>
+> **B — Vollabgleich ohne Nachtragsmechanismus:** Der Knoten lädt einen festen
+> Snapshot und prüft anschließend erneut gegen den begründeten aktuellen
+> Quorum-Zustand. Hat dieser sich relevant geändert, beginnt der Vollabgleich
+> erneut. Das ist einfacher, kann bei häufigen Änderungen aber viel Bandbreite
+> kosten und den Knoten dauerhaft auf FLAG_NOT_READY halten.
+
+A is recommended for the previously stated sustained write workload (§7.32),
+subject to bounded catch-up capacity and a justified activation endpoint. It is
+not a global ordered log, mandatory predecessor fence or liveness guarantee.
+B is a simpler initial design for a workload with sufficiently quiet intervals;
+that workload restriction and possible recovery starvation would be explicit.
+Neither final digest equality nor finishing deltas proves the source-coverage
+premise; these transfer alternatives do not close it. No numeric retention size,
+source count or protocol library is selected. Existing N2 protected budgets and
+expiry/no-bloat rules constrain either design.
+
+Next: ask Q-S3-SYNC-WRITES-01 A/B; after selection derive snapshot/context/expiry
+and bounded transfer semantics together with the still-open source-coverage proof.
+Implementation and adversarial model/real-QUIC verification remain pending. Only
+interview memory updated; no production/spec changes, tests or new research campaign.
+
+### CP-0054 — Select quorum-backed digest-pull and ask about concurrent writes
+
+Recorded DEC-058 / Q-S3-RECOVERY-BASIS-01 A faithfully, separating required gap-free
+recovery from unproved sufficiency of the present Spec03/code mechanism. Preserved
+source-coverage, distinct-identity/context, durable-install and own-choice gates.
+Prepared Q-S3-SYNC-WRITES-01: A = stable snapshot plus bounded deltas; B = stable
+full-snapshot retry without delta machinery, with quiet-workload limitations.
+No option selected. S3.4a.1 is the sole active leaf, a prerequisite within the same
+recovery problem; previous decisions and parked questions unchanged.
+
+Completed checkpoint: **CP-0054**.

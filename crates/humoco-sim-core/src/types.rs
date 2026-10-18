@@ -913,6 +913,11 @@ pub struct CommitteeMember {
 /// Inputs must already contain authenticated, mature, operator-authorized tickets.
 /// Conflicting tickets for one identity deterministically choose the smallest ticket;
 /// this is canonicalization, not a ticket-authorization or membership proof.
+///
+/// ⚠️ ARCHITECTURAL INVARIANT: Autonomous Mesh Snapshot vs. Epoch Baton Handover:
+/// Committee membership is derived autonomously on demand per routing event / lock request
+/// from the living active mesh snapshot. There is NO daily committee tenure, NO 24h predecessor
+/// baton handoff requirement (DEC-053/055), and NO static epoch assignment.
 pub fn select_shard_committee(shard_id: ShardId, active: &[CommitteeMember]) -> Vec<CommitteeMember> {
     let mut identities = std::collections::BTreeMap::new();
     for member in active {
@@ -993,9 +998,57 @@ pub fn bitmask_count(bitmask: SignersBitmask) -> u32 {
 // ---------------------------------------------------------------------------
 // Scenario 1: Digest-first pull sync (spec_03)
 // ---------------------------------------------------------------------------
+// 5-Minuten Bucket Shard Digest (docs/PLAN_BUCKETED_SHARD_SYNC.md)
+// ---------------------------------------------------------------------------
+
+/// Standard duration of one time-bucket for shard sync: 5 minutes (300 seconds = 300,000 ms).
+pub const BUCKET_DURATION_MS: u64 = 300_000;
+
+/// Grace period before a bucket is sealed and considered immutable: 30 seconds (30,000 ms).
+pub const BUCKET_SEAL_GRACE_MS: u64 = 30_000;
+
+/// Maximum number of 5-minute buckets in a 24-hour rotating window (24 * 12 = 288).
+pub const BUCKETS_PER_DAY: usize = 288;
+
+/// Computes the linear 5-minute bucket ID from a timestamp in milliseconds.
+#[inline]
+pub fn timestamp_to_bucket_id(timestamp_ms: u64) -> u64 {
+    timestamp_ms / BUCKET_DURATION_MS
+}
+
+/// Checks whether a given bucket_id is sealed at the given net_time_ms.
+#[inline]
+pub fn is_bucket_sealed(bucket_id: u64, now_ms: u64) -> bool {
+    let seal_threshold = (bucket_id.saturating_add(1)).saturating_mul(BUCKET_DURATION_MS).saturating_add(BUCKET_SEAL_GRACE_MS);
+    now_ms >= seal_threshold
+}
+
+/// 32-byte Merkle/BLAKE3 fingerprint for a specific 5-minute shard bucket.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShardBucketDigest {
+    pub bucket_id: u64,
+    pub digest: Hash256,
+    pub lock_count: u32,
+    pub is_sealed: bool,
+}
+
+/// Request to fetch bucket digests for a specific shard over a range of buckets.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShardBucketRangeRequest {
+    pub shard_id: u16,
+    pub start_bucket: u64,
+    pub bucket_count: u16,
+}
+
+/// Response containing the list of bucket digests.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShardBucketRangeResponse {
+    pub shard_id: u16,
+    pub buckets: Vec<ShardBucketDigest>,
+}
 
 /// 32-byte fingerprint response from a shard peer (simplified for simulation)
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ShardDigestResponse {
     pub peer_id: NodeId,
     pub digest: Hash256,

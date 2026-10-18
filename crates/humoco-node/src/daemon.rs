@@ -1156,10 +1156,17 @@ async fn run_shard_digest_pull_sync(
             continue;
         }
 
-        info!(shard_id, divergent = dominant_addrs.len(), "Shard digest divergence detected via evaluate_digest_clusters, pulling paginated active sync");
+        info!(shard_id, divergent = dominant_addrs.len(), "Shard digest divergence detected via evaluate_digest_clusters, pulling bucketted active sync");
 
-        // Pull missing locks from dominant quorum peers via paginated ActiveSyncRequest
+        // 5-Minuten Bucket Shard Sync (docs/PLAN_BUCKETED_SHARD_SYNC.md):
+        // Statt den gesamten Shard blind herunterzuladen, fragen wir den dominanten Peer
+        // nach den Merkle-Roots der 5-Minuten-Buckets der letzten 24h (288 Buckets) ab
+        // und ziehen gezielt NUR die abweichenden Buckets nach!
         let mut shard_pull_ok = false;
+        let curr_bucket = humoco_sim_core::types::timestamp_to_bucket_id(now_ms);
+        let start_bucket = curr_bucket.saturating_sub(humoco_sim_core::types::BUCKETS_PER_DAY as u64);
+        let bucket_count = (curr_bucket.saturating_sub(start_bucket) + 1).min(humoco_sim_core::types::BUCKETS_PER_DAY as u64) as u16;
+
         for addr in dominant_addrs {
             if cancel_token.is_cancelled() {
                 break;
@@ -1172,57 +1179,96 @@ async fn run_shard_digest_pull_sync(
                 }
             };
 
-            let mut cursor: u64 = 0;
-            let limit: usize = 500;
-            let mut peer_pull_ok = true;
-            loop {
-                if cancel_token.is_cancelled() { break; }
-                let page_res = match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    transport.request_active_sync_page(&conn, seq, cursor, limit),
-                )
-                .await
-                {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) => {
-                        debug!(peer=%addr, error=%e, "ActiveSync page request failed");
-                        peer_pull_ok = false;
-                        break;
-                    }
-                    Err(_) => {
-                        debug!(peer=%addr, "ActiveSync page request timeout");
-                        peer_pull_ok = false;
-                        break;
-                    }
-                };
-                seq = seq.wrapping_add(1);
-                let now_ms2 = peer_manager.net_time_ms();
+            // Versuche zunächst den zielgerichteten Bucket-Range Sync
+            let bucket_range_res = transport
+                .request_shard_bucket_range(&conn, shard_id, start_bucket, bucket_count, seq)
+                .await;
+            seq = seq.wrapping_add(1);
 
-                for (rec, root_valid) in page_res.payload.locks {
-                    if cancel_token.is_cancelled() { break; }
-                    let _ = engine
-                        .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
-                        .await;
+            let divergent_buckets: Option<Vec<u64>> = match bucket_range_res {
+                Ok(resp) => {
+                    let mut diffs = Vec::new();
+                    for peer_b in resp.buckets {
+                        let local_b_digest = humoco_sim_core::crypto::compute_shard_bucket_digest(shard_id, peer_b.bucket_id, &locks);
+                        if local_b_digest != peer_b.digest {
+                            diffs.push(peer_b.bucket_id);
+                        }
+                    }
+                    Some(diffs)
                 }
-                for (tag, entry) in page_res.payload.hmc_locks {
-                    if cancel_token.is_cancelled() { break; }
-                    let _ = engine
-                        .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
-                        .await;
+                Err(e) => {
+                    debug!(peer=%addr, error=%e, "ShardBucketRangeRequest failed, falling back to full shard sync");
+                    None
                 }
+            };
 
-                if !page_res.has_more {
+            let buckets_to_sync: Vec<Option<u64>> = match divergent_buckets {
+                Some(diffs) if !diffs.is_empty() => diffs.into_iter().map(Some).collect(),
+                Some(_) => {
+                    // Alle Buckets der letzten 24h stimmen überein
+                    shard_pull_ok = true;
                     break;
                 }
-                if let Some(next) = page_res.next_cursor {
-                    if next <= cursor {
+                None => vec![None], // Fallback auf Gesamtabgleich
+            };
+
+            let mut peer_pull_ok = true;
+            for target_b in buckets_to_sync {
+                let mut cursor: u64 = 0;
+                let limit: usize = 500;
+                loop {
+                    if cancel_token.is_cancelled() { break; }
+                    let page_res = match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        transport.request_active_sync_page_for_bucket(&conn, seq, cursor, limit, target_b),
+                    )
+                    .await
+                    {
+                        Ok(Ok(p)) => p,
+                        Ok(Err(e)) => {
+                            debug!(peer=%addr, target_b=?target_b, error=%e, "ActiveSync page request failed");
+                            peer_pull_ok = false;
+                            break;
+                        }
+                        Err(_) => {
+                            debug!(peer=%addr, target_b=?target_b, "ActiveSync page request timeout");
+                            peer_pull_ok = false;
+                            break;
+                        }
+                    };
+                    seq = seq.wrapping_add(1);
+                    let now_ms2 = peer_manager.net_time_ms();
+
+                    for (rec, root_valid) in page_res.payload.locks {
+                        if cancel_token.is_cancelled() { break; }
+                        let _ = engine
+                            .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
+                            .await;
+                    }
+                    for (tag, entry) in page_res.payload.hmc_locks {
+                        if cancel_token.is_cancelled() { break; }
+                        let _ = engine
+                            .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
+                            .await;
+                    }
+
+                    if !page_res.has_more {
                         break;
                     }
-                    cursor = next;
-                } else {
-                    cursor += limit as u64;
+                    if let Some(next) = page_res.next_cursor {
+                        if next <= cursor {
+                            break;
+                        }
+                        cursor = next;
+                    } else {
+                        cursor += limit as u64;
+                    }
+                }
+                if !peer_pull_ok {
+                    break;
                 }
             }
+
             if peer_pull_ok {
                 shard_pull_ok = true;
                 break;

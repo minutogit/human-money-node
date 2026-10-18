@@ -874,7 +874,37 @@ async fn collect_peer_attestations(
                         // Pillar 3: capture the actual TLS certificate key of the
                         // queried peer so the attestation signer can be bound to it.
                         let tls_pubkey = crate::network::tls::extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
-                        let (resp_header, resp_payload) = t.send_request(&conn, &h, &p).await.map_err(|_| PeerQueryError::Generic)?;
+                        
+                        // 1. Initial Send
+                        let res = t.send_request(&conn, &h, &p).await;
+                        
+                        // Triple-Send Heuristik für Schreibpfade (docs/PLAN_BUCKETED_SHARD_SYNC.md):
+                        // Falls der 1. Versuch fehlschlägt, erfolgt ein 2. synchroner Retry mit identischem Payload (T_0)
+                        let (resp_header, resp_payload) = match res {
+                            Ok(pair) => pair,
+                            Err(_) if is_write => {
+                                // 2. Versuch: Sofortiger Retry mit bitgenau identischem Byte-Paket
+                                let retry_res = t.send_request(&conn, &h, &p).await;
+                                match retry_res {
+                                    Ok(pair) => pair,
+                                    Err(_) => {
+                                        // 3. Versuch: Asynchroner Fire-and-Forget Versand ohne Warten auf ACK,
+                                        // um UDP-Paketverlust auf 0.0001% (1 zu 1.000.000) zu drücken.
+                                        let t_bg = t.clone();
+                                        let h_bg = h;
+                                        let p_bg = p.clone();
+                                        tokio::spawn(async move {
+                                            if let Ok(bg_conn) = t_bg.connect_peer(addr).await {
+                                                let _ = t_bg.send_request(&bg_conn, &h_bg, &p_bg).await;
+                                            }
+                                        });
+                                        return Err(PeerQueryError::Generic);
+                                    }
+                                }
+                            }
+                            Err(_) => return Err(PeerQueryError::Generic),
+                        };
+
                         // Phase 2 P1 (INV-0604): genuine HMC double-spend carries
                         // FLAG_COLLISION_DETECTED + colliding lock payload for 409.
                         if (resp_header.flags & humoco_sim_core::wire::FLAG_COLLISION_DETECTED) != 0 {

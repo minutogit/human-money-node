@@ -458,6 +458,8 @@ pub struct ActiveSyncRequest {
     pub cursor: u64,
     #[serde(default = "default_sync_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub target_bucket_id: Option<u64>,
 }
 
 pub fn default_sync_limit() -> usize {
@@ -466,7 +468,11 @@ pub fn default_sync_limit() -> usize {
 
 impl ActiveSyncRequest {
     pub fn new(cursor: u64, limit: usize) -> Self {
-        Self { cursor, limit }
+        Self { cursor, limit, target_bucket_id: None }
+    }
+
+    pub fn with_bucket(cursor: u64, limit: usize, target_bucket_id: Option<u64>) -> Self {
+        Self { cursor, limit, target_bucket_id }
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
@@ -478,6 +484,7 @@ impl ActiveSyncRequest {
             Ok(Self {
                 cursor: 0,
                 limit: default_sync_limit(),
+                target_bucket_id: None,
             })
         } else {
             bincode::deserialize(bytes)

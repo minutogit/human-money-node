@@ -5,13 +5,24 @@
 //! Provides deterministic epoch transition, BFT round progression,
 //! shard handoff certificates, and pioneer mode unified manifests.
 //!
-//! ⚠️ ARCHITECTURAL BOUNDARY & EVALUATED DEAD-END:
+//! ⚠️ ARCHITECTURAL BOUNDARY & EVALUATED DEAD-END (DEC-053 / DEC-055):
 //! Mandatory predecessor epoch chaining (where epoch E+1 strictly requires 14 signatures
-//! from the epoch E committee) has been evaluated and rejected as an architectural dead end
-//! (DEC-053). If > f nodes disappear or an internet partition occurs, mandatory predecessor
+//! from the epoch E committee) has been evaluated and rejected as an architectural dead end.
+//! If > f nodes disappear or an internet partition occurs, mandatory predecessor
 //! baton passing produces a fatal, unrecoverable liveness deadlock (halting ~88.5% of shards).
-//! The canonical HuMoCo design derives epoch membership autonomously from the living active
-//! mesh via HRW, using deterministic `min(H_canon)` convergence upon network merge.
+//! The canonical HuMoCo design derives shard membership autonomously from the living active
+//! mesh via HRW (`select_shard_committee`), using deterministic `min(H_canon)` convergence upon network merge.
+//!
+//! ⚠️ THE 4-FOLD EPOCH & LIVENESS DISAMBIGUATION:
+//! 1. Argon2d Incubation Wall (24h): Cryptographic maturation for newly mined shard tickets (`HrwRoutingId`)
+//!    to prevent opportunistic grinding / shard-hopping. Unchanged.
+//! 2. Calendar `epoch_day`: Purely calendar integer slot `(unix_sec - T0) / 86400` in wire envelopes for
+//!    rate-limiting, ingress quotas, and network thermometer EMA decay. Zero connection to committee elections.
+//! 3. Dynamic Presence (Passive Dunbar Liveness): Peer liveness is tracked via hourly Dunbar heartbeats;
+//!    peers missing consecutive heartbeats (e.g. 3 missed hours -> `missing_count >= 3`) become suspended/dormant
+//!    and are excluded from upcoming HRW snapshots. There is NO 24h committee tenure and NO 24h wait for offline detection.
+//! 4. Autonomous HRW Computation: Shard committees are computed per request/snapshot via Rendezvous Hashing
+//!    from the local active mesh view, NOT via predecessor epoch certificates ("Staffelstab").
 
 pub mod barrier;
 pub mod consensus;

@@ -247,7 +247,7 @@ sequenceDiagram
 
 Since L2 servers are ephemeral and semantically blind, the system does not rely on historical witnesses from years ago, but on the **incumbent Top-20 shard custodians of the current generation**:
 
-1. **Baton Liability:** The incumbent Top-20 peers (from $N_{\text{active}}$) collectively vouch for the current shard state.
+1. **Baton Liability (Data Sync on HRW Rank Shift):** The incumbent Top-20 peers (from $N_{\text{active}}$) collectively vouch for the current shard state. When network membership grows or shifts, joining successors pull shard state via Digest-Pull from incumbents. *Note on Architectural Boundary (DEC-055):* This data-sync handover must not be confused with rejected "predecessor epoch baton chaining". In HuMoCo, committee succession derives autonomously from the living mesh via HRW; there is no mandatory predecessor committee signature requirement to authorize new epochs.
 2. **Compact 1-Byte Status Tiers in Canonical Signature Digest:**
    When signing a lock, the status is embedded directly into the canonical `SigDigest` via the domain tag and the `status_tag` field (`docs/10:3.2` & `docs/04:224`):
    $$\text{SigDigest} = \text{BLAKE3}\Big(\text{len}(\text{DOMAIN\_TAG}) \parallel \text{DOMAIN\_TAG} \parallel \text{epoch\_id}_{\text{le}} \parallel \text{session\_seq}_{\text{le}} \parallel \text{flags}_{\text{le}} \parallel \text{shard\_id}_{\text{le}} \parallel \text{status\_tag} \parallel \text{payload\_digest}\Big)$$

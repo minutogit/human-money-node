@@ -93,6 +93,8 @@ pub enum MsgType {
     ActiveSyncDone = 0x0109,
     ShardDigestRequest = 0x010A,
     ShardDigestResponse = 0x010B,
+    ShardBucketRangeRequest = 0x010C,
+    ShardBucketRangeResponse = 0x010D,
     Heartbeat = 0x0201,
     HeartbeatAck = 0x0202,
 }

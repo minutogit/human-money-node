@@ -4,6 +4,15 @@
 //!
 //! Defines the core message structures for epoch progression,
 //! shard handoffs, pioneer mode manifests, and consensus votes.
+//!
+//! ⚠️ ARCHITECTURAL NOTICE (DEC-053 / DEC-055):
+//! The types in this module originate from the evaluated/historical Certified Epoch Handoff
+//! (CEH) specification. In production HuMoCo:
+//! - Shard committees are computed dynamically per snapshot/request via HRW (`select_shard_committee`).
+//! - Predecessor baton passing (requiring the old committee to sign off on the new one) is strictly rejected.
+//! - `epoch_day` is strictly a calendar slot for Ingress rate-limiting and thermometer decay, not a committee term.
+//! - The 24h incubation wall applies strictly to Argon2d ticket mining maturity.
+//! - Peer liveness is tracked dynamically via passive Dunbar gossip without 24h committee tenures.
 
 use std::collections::HashSet;
 use std::fmt;

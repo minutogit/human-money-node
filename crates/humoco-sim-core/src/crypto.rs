@@ -364,6 +364,42 @@ pub fn compute_shard_digest_at(shard_id: ShardId, locks: &[LockRecord], now: Sim
     *hasher.finalize().as_bytes()
 }
 
+/// Computes the deterministic Merkle/BLAKE3 fingerprint for a specific 5-minute bucket of a shard.
+///
+/// Filters locks matching `shard_id`, whose timestamp belongs to `bucket_id`,
+/// and sorts them canonically by `parent_lock` / `id` before hashing.
+pub fn compute_shard_bucket_digest(
+    shard_id: ShardId,
+    bucket_id: u64,
+    locks: &[LockRecord],
+) -> Hash256 {
+    let mut bucket_locks: Vec<&LockRecord> = locks
+        .iter()
+        .filter(|l| {
+            let sid = u16::from_be_bytes([l.parent_lock[0], l.parent_lock[1]]);
+            sid == shard_id
+                && !l.status.is_void()
+                && crate::types::timestamp_to_bucket_id(l.created_at.0) == bucket_id
+        })
+        .collect();
+    bucket_locks.sort_by(|a, b| a.parent_lock.cmp(&b.parent_lock).then_with(|| a.id.cmp(&b.id)));
+
+    let mut hasher = blake3::Hasher::new();
+    let tag = b"HUMOCO_V1_BUCKET_DIGEST";
+    hasher.update(&[tag.len() as u8]);
+    hasher.update(tag);
+    hasher.update(&shard_id.to_le_bytes());
+    hasher.update(&bucket_id.to_le_bytes());
+    hasher.update(&(bucket_locks.len() as u32).to_le_bytes());
+    for lock in bucket_locks {
+        hasher.update(&lock.parent_lock);
+        hasher.update(&lock.receiver_pub);
+        hasher.update(&lock.nonce);
+        hasher.update(&lock.id);
+    }
+    *hasher.finalize().as_bytes()
+}
+
 /// Creates a deterministic equivocation proof hash
 pub fn create_equivocation_proof(node_id: NodeId, lock_a: &Hash256, lock_b: &Hash256) -> Hash256 {
     let mut hasher = blake3::Hasher::new();

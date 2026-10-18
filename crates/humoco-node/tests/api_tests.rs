@@ -1031,7 +1031,7 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     let sig = sender.signing_key().sign(&digest).to_bytes();
     // Register sender as known peer so direct RPC auth passes without peer_manager.
     let wire = humoco_node::network::framing::LockWirePayload::Hmc {
-        req: hmc_req,
+        req: hmc_req.clone(),
         chain: None,
         root_valid_until,
         epoch_day: 0,
@@ -1081,6 +1081,30 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     let (digest, count): ([u8; 32], u64) = bincode::deserialize(&d_resp_payload).expect("deserialize digest response");
     assert_eq!(count, 1, "Should have 1 active lock");
     assert_ne!(digest, [0u8; 32]);
+
+    // 3. Test ShardBucketRangeRequest for 5-minute bucket sync (docs/PLAN_BUCKETED_SHARD_SYNC.md).
+    let bucket_id = humoco_sim_core::types::timestamp_to_bucket_id(hmc_req.encrypted_timestamp as u64);
+    let bucket_req = humoco_sim_core::types::ShardBucketRangeRequest {
+        shard_id: hmc_shard,
+        start_bucket: bucket_id,
+        bucket_count: 1,
+    };
+    let b_payload = bincode::serialize(&bucket_req).unwrap();
+    let b_header = WireHeader::new(
+        MsgType::ShardBucketRangeRequest as u16,
+        3,
+        0,
+        0,
+        b_payload.len() as u32,
+    );
+    let (b_resp_header, b_resp_payload) = handler.handle(b_header, b_payload).await.expect("handle ShardBucketRangeRequest");
+    assert_eq!(b_resp_header.msg_type, MsgType::ShardBucketRangeResponse as u16);
+    let b_resp: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&b_resp_payload).expect("deserialize bucket response");
+    assert_eq!(b_resp.shard_id, hmc_shard);
+    assert_eq!(b_resp.buckets.len(), 1);
+    assert_eq!(b_resp.buckets[0].bucket_id, bucket_id);
+    assert_eq!(b_resp.buckets[0].lock_count, 1);
+    assert_ne!(b_resp.buckets[0].digest, [0u8; 32]);
 }
 
 #[tokio::test]

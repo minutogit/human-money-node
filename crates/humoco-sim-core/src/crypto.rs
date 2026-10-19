@@ -349,6 +349,26 @@ pub fn compute_shard_digest(shard_id: ShardId, locks: &[LockRecord]) -> Hash256 
 /// for the supplied time-filtered inputs. They do not establish committee authority,
 /// old-write closure, complete recovery of prior votes or successor signing readiness.
 ///
+/// ### Objective Lock State vs. Signature Hoarding (KISS & Anti-Bloat)
+///
+/// This digest intentionally hashes ONLY the objective double-spend collision state:
+/// `parent_lock`, `receiver_pub`, `nonce`, and `id`.
+///
+/// Node attestations and quorum signature bundles are EXPLICITLY EXCLUDED:
+/// 1. **KISS & Zero Signature Bloat:** Quorum certificates with 14–20 Ed25519 signatures
+///    weigh 896 to 1280+ bytes per lock. Synchronizing or hashing historical signature
+///    bundles across shard nodes would cause massive, unnecessary network and storage bloat.
+/// 2. **Physical Double-Spend Barrier:** The collision prevention mechanism (`parent_lock -> id`)
+///    is an objective physical barrier. Once a lock record is present in a node's local RAM
+///    index and redb storage, any colliding double-spend attempt is immediately rejected
+///    with `409 Conflict`—completely independent of which ephemeral node identities signed
+///    the checkout attestation months or weeks ago.
+/// 3. **Living Mesh vs. Ghost Nodes:** In a dynamic P2P network, nodes join, rotate keys,
+///    or go offline. Demanding historical signature chains from retired nodes ("ghost nodes")
+///    creates liveness deadlocks. Synchronizing the pure objective state allows newly joined
+///    shard custodians to take over authoritative responsibility immediately and answer live
+///    queries under their own active cryptographic identities.
+///
 /// Digest comparison avoids continuous random probing of individual storage keys.
 /// The daemon schedules pull attempts using a periodic 60s ticker and event-driven
 /// `sync_notifier`; scheduling alone does not prove eventual convergence or safe handoff.

@@ -256,6 +256,16 @@ Since L2 servers are ephemeral and semantically blind, the system does not rely 
    * `status_tag = 0x02` (`HUMOCO_V1_APPROVE_HIGH`) $\implies$ **`HIGH_ASSURANCE` (Blue/Gold):** $N_{\text{active}} \ge 100$ (large transactions).
 3. **Cryptographic Self-Protection:** Honest nodes sign with `status_tag = 0x01` only when their local heartbeat presence indicates $N_{\text{active}} \ge 20$ for at least 24h. A small 14-node network can therefore never produce a valid `FINAL` signature.
 
+---
 
+### 5.2 Objektiver Zustand statt Signatur-Archivierung (KISS-Prinzip) / Objective Lock State vs. Signature Hoarding
 
+See also dedicated specification [`docs/03_statusabgleich_und_sync.md`](03_statusabgleich_und_sync.md).
 
+1. **Separation of Concerns:**
+   * **One-time release signal at checkout (Hot-Path):** The Quorum Certificate ($\ge 14/20$ Ed25519 signatures, $\approx 896\,\text{Bytes}$) serves strictly as an ephemeral release signal ("green light") for the merchant at the point of sale. Once checkout is complete, this certificate is NOT hoarded or chained into downstream transactions.
+   * **Durable lean state in shard (Collision Registry):** In the shard registry, only the pure objective record is retained: `parent_lock -> child_lock` (with `receiver_pub`, `nonce`, `id`, `valid_until`). The record itself forms the physical double-spend barrier: any conflicting spend fails atomically on RAM / storage collision check (`409 Conflict`), regardless of which nodes attested to it originally.
+2. **Shard-Sync without Signature Bloat:**
+   * Shard sync (`compute_shard_digest_at`) hashes and synchronizes strictly the objective state (`parent_lock`, `receiver_pub`, `nonce`, `id`). Historical node attestations and 896-byte quorum bundles are excluded by design to prevent network and storage bloat.
+3. **Living Mesh Authority:**
+   * Newly joined or recovered shard nodes adopt the objective lock state and answer live status queries (`POST /v1/status` or QUIC `StatusQuery`) directly under their own active cryptographic keys, eliminating any dependency on stale or departed "ghost nodes".

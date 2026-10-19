@@ -207,6 +207,10 @@ Before writing new code for a new feature or requirement, apply this test:
    * **Zero Spending Utility of Past Certificates:** An old Quorum Certificate proves nothing about whether a voucher is unspent *now* (since a spend could have occurred afterwards). Any recipient must perform a fresh live check.
    * **No Client Storage Bloat:** The L2 receipt is purely a merchant checkout safety proof / green light at the instant of checkout. Clients/merchants do NOT need to hoard, chain, or back-fill historical quorum certificates once checkout is complete.
    * Network presence is strictly derived passively from hourly F2F Dunbar gossip heartbeats; active background ping storms to refresh candidate windows are forbidden.
+8. **Ban on Historical Signature Hoarding & Objective Lock State Doctrine (KISS Principle):**
+   * **Physical Double-Spend Barrier:** The lock entry `parent_lock -> child_lock` in the shard collision registry is the physical barrier against double-spends. Once a lock is synchronized, any conflicting double-spend attempt immediately fails on atomic in-RAM / storage collision check (`409 Conflict`) — completely independent of which specific nodes attested to it months ago.
+   * **Objective State Synchronization:** Shard sync (`compute_shard_digest_at`) synchronizes strictly the objective state (`parent_lock`, `receiver_pub`, `nonce`, `id`), never legacy signatures or historical 896-byte quorum bundles of retired or departed nodes.
+   * **Living-Mesh Attestation:** Status queries are answered and signed on demand by the *currently* authoritative shard nodes based on their synchronized live state (Living Mesh vs. stale ghost-node signatures).
 
 
 ---

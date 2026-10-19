@@ -105,8 +105,31 @@ read-safety remains a technical proof gap, not established by receipt disposabil
 DEC-073 / §7.82 rejects automatic alternate payment strictly in human-money-core/
 PoS client policy, including partial multi-voucher purchases; no node purchase logic.
 DEC-074 / §7.83 selects idempotent repeated stop signals preserving the original
-bounded drain. O4.2 now asks whether the node or only its supervisor enforces
-the elapsed-time stop limit; deadline sizing remains unmeasured.
+bounded drain. DEC-075 / §7.84 selects a daemon-internal stop deadline with a
+longer outer supervisor margin; example durations are not fixed settings. O4.3
+is answered A / DEC-076 (§7.85): stop success requires verified clean completion,
+process termination and DB release. O4 user policies are selected; implementation/
+validation remains. DEC-077 / §7.86 selects private operator metrics without a
+public metrics subset. DEC-078 / §7.87 selects additional dynamic public gateway
+discovery using existing passive mesh knowledge and explicitly published HTTP
+endpoints. DEC-079 / §7.88 selects bounded cached-address fallback strictly in
+the client domain. O5 discovery/cache policies are selected; advertisement and
+endpoint verification remain engineering work. DEC-080 / §7.89 selects verified
+quorum evidence for payment release; a matching record alone never means paid.
+DEC-081 / §7.90 retains cheap ordinary 1-of-20 lookup and explicit quorum-backed
+payment verification. WF-005 replaces micro-question sequencing with concise
+problem/solution batches for derived details; consequential human tradeoffs retain
+A/B. DEC-082 / §7.91 records explicit maintainer acceptance of DETAIL-BATCH-001
+as future implementation requirements. DEC-083 / §7.93 rejects the archival
+premise of Q-C4-ACTIVE-PROOF-CONTINUITY-01: neither A nor B is selected. Current
+qualified shard nodes attest their safely synchronized live lock state; no inherited
+original-quorum archive or unconfirmed outcome solely from retired original signers.
+LRC-002 replaces LRC-001 where it imposed original-approval prerequisites on live
+clearance. Active C4.3b integrates this live-state contract; no human question is
+pending. Safe recovery, own-history and actual verifier implementation remain open.
+CP-0084 / §7.95 consolidates the LRC-002 request/signature/collector contract and
+finds an ungated status-signing path. No new decision is selected; C4.3b remains
+active on the authority/readiness premises rather than historical archives.
 
 Unless explicitly evidenced otherwise, design details and implementation/verification
 of interview changes remain pending. Constraints in the direction column and the
@@ -147,7 +170,7 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-031"></a>DEC-031 | O2 | Automatic storage recovery | Accepted requirement/direction | Resume automatically once durable storage and justified recovery of relevant lock/signing state are established, respecting operator stop/veto. The maintainer expects synchronization to restore missing locks before normal work resumes. Exact completeness/readiness evidence remains unresolved; neither a completed download nor a matching digest proves recovery of every prior individual vote. Distinguish a transient write failure with intact durable choices from irrecoverable choice loss or stale-backup rollback. | [Recorded selection](#evidence-dec-031) |
 | <a id="dec-032"></a>DEC-032 | O2 | Lost signing choices | Accepted requirement/direction | After loss or rollback of prior signing choices, withhold new binding votes under the existing identity for affected scope until signing safety is justified. Ordinary confirmed-state sync alone is insufficient. The maintainer approves this safety gate even if ordinary sync has completed; exact detection, scope and recovery remain open. | [Recorded selection](#evidence-dec-032) |
 | <a id="dec-033"></a>DEC-033 | O1 | Signing protection layout | Immutable-choice table direction retained; pre-response commit order superseded by DEC-062 | Separate immutable own choices in existing redb remains the selected layout direction. Persist related choice/lock atomically through the bounded background worker; DEC-062 removes waiting for its durable success before attestation. Layout is not an implementation or a proof of recovery of volatile issued choices after crash. | [Historical selection](#evidence-dec-033); [ordering change](#769-ram-first-attestation-restored-durability-ordering-superseded) |
-| <a id="dec-034"></a>DEC-034 | O4 | Graceful shutdown | Bounded drain selected; acknowledgment qualification updated by DEC-062 | Stop new admission, allow bounded in-flight/persistence drain, then stop within the configured deadline. Preserve durable choices and report incomplete drain honestly. DEC-062 permits earlier RAM-based approvals, so a failed drain may now leave already issued choices undurable; do not retain the superseded assertion that every binding success awaited commit. DEC-074 selects idempotent repeated stop signals; deadline ownership, deployment sizing and exact completion semantics remain pending. | [Historical selection](#evidence-dec-034); [RAM-first qualification](#769-ram-first-attestation-restored-durability-ordering-superseded) |
+| <a id="dec-034"></a>DEC-034 | O4 | Graceful shutdown | Bounded drain selected; acknowledgment qualification updated by DEC-062 | Stop new admission, allow bounded in-flight/persistence drain, then stop within the configured deadline. Preserve durable choices and report incomplete drain honestly. DEC-062 permits earlier RAM-based approvals, so a failed drain may now leave already issued choices undurable; do not retain the superseded assertion that every binding success awaited commit. DEC-074 selects idempotent repeated stop signals; DEC-075 selects internal deadline enforcement plus outer supervisor fallback; DEC-076 selects verified default CLI completion/DB release; deployment sizing, producer ordering and implementation verification remain pending. | [Historical selection](#evidence-dec-034); [RAM-first qualification](#769-ram-first-attestation-restored-durability-ordering-superseded) |
 | <a id="dec-035"></a>DEC-035 | O3 | Automatic expiry processing | Accepted requirement/direction | Choose A: remove eligible expired locks and associated justified signing-safety state in bounded background chunks, using short RAM mutation sections and bounded disk work, with enough progress budget to avoid indefinite backlog. Keep verified root TTL plus 30-second grace, no signing of expired roots and no permanent expired-lock tombstones. Expiry rejection does not wait for physical deletion. Exact scheduling, safe time/retention criteria and batch sizes remain to be specified and measured. | [Recorded selection](#evidence-dec-035) |
 | <a id="dec-036"></a>DEC-036 | O5 | Deployment default | Accepted requirement/direction | Choose A: native systemd as the primary documented Linux deployment path; retain Docker/Compose as an alternative. Both must obey the same persistence, signing, shutdown and operator-sovereignty rules. Existing template settings are not validated production guarantees. | [Recorded selection](#evidence-dec-036) |
 | <a id="dec-037"></a>DEC-037 | O5 | Private operator access | Accepted requirement/direction | Choose A: dedicated local dashboard/admin endpoint, with protected control-socket authority and operator SSH forwarding for remote access. Keep operator routes separate from public client ingress and retain useful local dashboard functions. Exact UI/backend packaging, authentication and permission enforcement remain to be specified and verified. | [Recorded selection](#evidence-dec-037) |
@@ -182,12 +205,28 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-066"></a>DEC-066 | C1.1/K2 | Inline compact conflict evidence | Accepted policy / Q-C1-CONFLICT-RESPONSE-01 A | Include the already available compact signed collision evidence and confirmation status directly in the 409 envelope; no full losing trees, hot-path proof retrieval or required second proof-fetch round. Reject reference-only B to reduce latency and gateway complexity. Exact signer/slot/time binding, encoding, payload limits and verification remain work; a single attestation is not a quorum certificate. | [Selection and checkout conflict-veto question](#774-inline-conflict-evidence-selected-checkout-veto-policy-open) |
 | <a id="dec-067"></a>DEC-067 | C2.1/S5 | No minority collision veto at checkout | Accepted policy / Q-C2-CONFLICT-VETO-01 A | A valid14/20 certificate from the frozen committee completes checkout despite weaker authenticated collisions. Reject conservative minority-veto B. A sufficiently supported competitor is evaluated by DEC-064; a peer may carry a full certificate, so transport-source count is not support strength. Partial-only outcomes remain unresolved without payment success or slot rollback. Exact collector/response ordering and wire defenses pending; no global-finality or fault-bound proof inferred. | [Selection, derived response rules and uncertain-payment follow-up question](#775-quorum-checkout-priority-selected-uncertain-payment-follow-up-open) |
 | <a id="dec-068"></a>DEC-068 | C3.1/C4 | Bounded automatic client reconciliation | Accepted policy / Q-C3-UNCERTAIN-FOLLOWUP-01 A | Wallet retains the original uncertain intent, performs automatic status reconciliation with growing/exponential backoff and strict attempt/traffic budget, and uses only reads after the original30s freshness window. No historical-order push state at servers; normal status routing remains INV-0310. Reject manual-only B. Example5 attempts and5s/15s/45s schedule are illustrative, not frozen parameters. Budget exhaustion/absence cannot become failure, free slot or14/20 success; sufficient read evidence and exact bounds remain open. | [Selection and proof-retrieval scope question](#776-bounded-client-reconciliation-selected-completion-evidence-retrieval-open) |
-| <a id="dec-069"></a>DEC-069 | C4.1/C4.2/K2/O1 | Read-only recovery of original checkout approvals | Accepted policy / Q-C4-COMPLETION-EVIDENCE-01 A | Wallet may recover existing approvals of the original fixed20 within its total retry/read budget, verify14 distinct eligible signatures in one original context for an unresolved checkout; DEC-072 removes mandatory certificate custody/back-fill after completion. No new lock, changed T_0, new write vote, full-tree fetch or replacement committee. Reject status-only B. Missing/insufficient approvals stay unresolved. Original-attestation retention and retrieval are not established in inspected production paths; derive exact format/availability and capacity costs. One-roundtrip cap is an example, not a frozen value or guaranteed single packet. | [Selection and technical retrieval contract](#777-original-approval-retrieval-selected-technical-contract-and-storage-gap) |
-| <a id="dec-070"></a>DEC-070 | C4.2a/O1/O3 | Root-lifetime retention of original own approvals | Accepted policy / Q-C4-APPROVAL-RETENTION-01 A | Keep exact own original approvals and required verification context until root.valid_until+30s, preferably with the already protected own-choice record and common TTL pruning. Reject shorter-window B as a second lifecycle and avoidable offline-wallet recovery loss. No full losing-tree archive or synchronous node commit is added. Actual signature/context storage costs and safe coordinated RAM/disk purge need verification; no guarantee that14 original signers remain reachable. | [Selection and wallet send-order question](#779-root-lifetime-original-approval-retention-selected-wallet-send-order-open) |
+| <a id="dec-069"></a>DEC-069 | C4.1/C4.2/K2/O1 | Read-only recovery of original checkout approvals | Accepted policy / Q-C4-COMPLETION-EVIDENCE-01 A | Wallet may recover existing approvals of the original fixed20 within its total retry/read budget, verify14 distinct eligible signatures in one original context for an unresolved checkout; DEC-072 removes mandatory certificate custody/back-fill after completion. No new lock, changed T_0, new write vote, full-tree fetch or replacement committee. Reject status-only B. Missing/insufficient approvals stay unresolved. Original-attestation retention and retrieval are not established in inspected production paths; derive exact format/availability and capacity costs. One-roundtrip cap is an example, not a frozen value or guaranteed single packet. DEC-083 qualifies this as an optional exceptional original-evidence path, not a prerequisite/archive duty for current live-quorum clearance. | [Selection and technical retrieval contract](#777-original-approval-retrieval-selected-technical-contract-and-storage-gap) |
+| <a id="dec-070"></a>DEC-070 | C4.2a/O1/O3 | Root-lifetime retention of original own approvals | Accepted policy / Q-C4-APPROVAL-RETENTION-01 A | Keep exact own original approvals and required verification context until root.valid_until+30s, preferably with the already protected own-choice record and common TTL pruning. Reject shorter-window B as a second lifecycle and avoidable offline-wallet recovery loss. No full losing-tree archive or synchronous node commit is added. Actual signature/context storage costs and safe coordinated RAM/disk purge need verification; no guarantee that14 original signers remain reachable. DEC-083 preserves own signing-safety retention, not migration of old quorum bundles or dependence of current clearance on original signers. | [Selection and wallet send-order question](#779-root-lifetime-original-approval-retention-selected-wallet-send-order-open) |
 | <a id="dec-071"></a>DEC-071 | C3.2/K2 | Durable wallet intent before network dispatch | Accepted policy / Q-C3-WALLET-SEND-DURABILITY-01 A | Durably commit the exact signed request bytes/T_0 and atomic pending state of the consumed output before the wallet first sends to a gateway. Reject client RAM-first send B: crash must not lose the only original intent while the network may have accepted it. Reuse existing wallet storage; WAL/SQLite are examples, not a selected new dependency. Preserve exact retries, read-only reconciliation after freshness and server RAM-first. Actual client durability/latency and rollback recovery need verification. | [Selection and PoS receipt-order question](#780-wallet-durable-before-send-selected-pos-receipt-order-open) |
 | <a id="dec-072"></a>DEC-072 | C2.2/K1/C4 | Durable L1 voucher/purchase, ephemeral completed-checkout certificate | Accepted corrected A / Q-C2-POS-RECEIPT-DURABILITY-01; original A content amended | Before goods release, durably store the received L1 voucher deed and its purchase-journal binding. Verify the live quorum signal during checkout; no mandatory merchant archival/back-fill of its14-signature bundle after completion, no recursive receipt chain and no treating certificates as money/current-unspent proof. Supersede §7.80 certificate-in-durable-purchase requirement, not wallet pre-send durability or node signing-safety retention. Live status is the selected post-restart interface; sufficient read-evidence semantics remain unproved. | [Correction, scope reconciliation and alternate-payment question](#781-merchant-l1-custody-selected-completed-checkout-receipts-ephemeral) |
 | <a id="dec-073"></a>DEC-073 | C3.3/K1 | No automatic substitute payment; strict client boundary | Accepted policy / Q-C3-ALTERNATE-PAYMENT-01 A with explicit scope | Wallet/PoS must not automatically issue a second different-voucher payment while the first is uncertain. Multi-voucher purchases retain completed components as partial payment and timed-out components as uncertain; changing tender for the remainder is a conscious cashier/customer decision. Reject automated replacement/refund B. This is exclusively human-money-core/PoS commercial logic: humoco-node knows no carts, purchase IDs, remaining amounts or substitute payments and gains no new API/state for them. | [Client-boundary selection and next node-operation question](#782-client-only-payment-policy-selected-repeated-node-stop-signal-question) |
 | <a id="dec-074"></a>DEC-074 | O4.1/O1 | Idempotent repeated termination signals | Accepted policy / Q-O4-SECOND-SIGNAL-01 A | Once bounded graceful shutdown starts, repeated SIGTERM/SIGINT must neither shorten nor restart/extend its original deadline. Continue eligible in-flight work and async persistence within that budget; reject second-signal early-abort B. Operator force-stop remains OS SIGKILL. Bound expiry/incomplete reporting follows DEC-034; readiness and lost-own-choice gates still apply after unclean stop. Reported few-hundred-ms drain is an unmeasured expectation. | [Signal selection, derived stop contract and deadline-enforcement question](#783-idempotent-stop-signals-selected-deadline-enforcement-boundary-open) |
+| <a id="dec-075"></a>DEC-075 | O4.2/O5 | Internal shutdown deadline with outer supervisor margin | Accepted policy / Q-O4-DEADLINE-OWNER-01 A | Daemon enforces one finite stop deadline in CLI/service/container operation; supervisor has a longer outer fallback. Reject supervisor-only B.5–10s internal and30s external are examples, not measured/frozen defaults. Use bounded drain and truthful incomplete result; deadline cannot force failed/stuck storage to persist or make a timed-out blocking task vanish. Operator veto, idempotent signals and recovery gates remain. | [Selection, derived lifecycle and stop-CLI semantics question](#784-internal-deadline-selected-stop-cli-completion-contract-open) |
+| <a id="dec-076"></a>DEC-076 | O4.3/O5 | Stop CLI waits for verified completion and released DB | Accepted policy / Q-O4-STOP-CLI-01 A | Default humoco stop waits boundedly; exit0 requires confirmed clean shutdown, actual target-daemon termination and released redb handle/lock. Timeout, stuck task, failed/incomplete drain or unverified result is nonzero; request acceptance/socket disappearance is insufficient. Reject immediate-acceptance default B. Existing execute_stop has wait intent but the inspected socket-based check does not prove this full contract. Keep original daemon deadline independent of client wait. | [Selection, shutdown acceptance table and metrics-exposure question](#785-stop-cli-completion-selected-shutdown-acceptance-table-and-metrics-exposure) |
+
+| <a id="dec-077"></a>DEC-077 | O5.1/O6/N1 | Operator-only metrics and diagnostic topology | Accepted policy / Q-O5-METRICS-EXPOSURE-01 A | Expose Prometheus metrics and dashboard only through the private operator boundary; reject a public base-metrics subset. Public clients keep intended payment/status/health interfaces, without private queue, storage, quota or peer diagnostics being re-exported under another route. Enforce listener/route separation and bounded diagnostic cost; current shared router is not proof of private exposure. Public gateway discovery is a separate unselected client policy, never authority for internal P2P admission. | [Selection, endpoint matrix and gateway-discovery question](#786-private-metrics-selected-endpoint-boundary-and-client-gateway-discovery) |
+
+| <a id="dec-078"></a>DEC-078 | O5.2/C3/N1 | Dynamic public gateway discovery | Accepted policy / Q-O5-GATEWAY-DISCOVERY-01 B | Offer clients a simple read endpoint for additional explicitly published HTTP gateways, reusing passive gossip/known-node data; bootstrap/custom lists remain entry points rather than the sole source. Reject A-only discovery. Preserve private internal topology, public free-tier protection, exact-payload failover, recipient source choice and bounded read cost. Existing P2P sockets are not authenticated public HTTP URLs, and hourly presence is not current reachability proof. Route name /v1/gateways is an example; metadata, authentication and delivery remain engineering work. | [Selection, advertisement gap and stale-discovery fallback question](#787-dynamic-gateway-discovery-selected-passive-advertisement-and-stale-cache-policy) |
+
+| <a id="dec-079"></a>DEC-079 | O5.2a/C3/K1 | Bounded last-known gateway fallback belongs to clients | Accepted policy / Q-O5-GATEWAY-STALE-CACHE-01 A with explicit scope | Wallet/app may try locally cached public gateway addresses within its existing attempt/time budget when discovery is stale. Reject current-directory-only automatic fallback B. Cache/connection policy belongs to human-money-core/app, outside node consensus authority; no node cache-control consensus rule or state is added. Preserve endpoint authentication, explicit revocations, provider-scoped credentials and exact original payment retries. Concrete cache parameters and client failure checks remain delivery work. | [Selection, gateway acceptance map and single-status acceptance question](#788-client-cache-fallback-selected-return-to-single-status-acceptance) |
+
+| <a id="dec-080"></a>DEC-080 | C4.3/C2/K2 | Quorum proof required for paid/goods release | Accepted policy / Q-C4-SINGLE-STATUS-ACCEPTANCE-01 A | A matching owner-signed lock or single-source assertion alone never authorizes paid/goods release. FINAL checkout requires mathematically verified14/20 support, with distinct eligible identities and exact context. Reject weaker trusted-single-source B. One transport reply may carry sufficient multi-signer evidence; no mandatory client archive or recursive receipt chain is added. Original-approval recovery and current-state/read semantics remain separate proof obligations; current optional read collector does not establish them. | [Selection, read-path findings and status-verification scope question](#789-quorum-backed-release-selected-status-verification-scope) |
+
+| <a id="dec-081"></a>DEC-081 | C4.3a/C2/N4 | Cheap ordinary lookup, explicit quorum-backed release verification | Accepted policy / Q-C4-STATUS-VERIFICATION-SCOPE-01 A | Keep ordinary status lookup at default read_quorum1 / INV-0310; payment release explicitly requests and verifies the full required quorum (14/20 in FINAL mode). Reject full quorum on every routine read B. Requested read_quorum>=14 is not itself proof: count distinct eligible verified signers/context and support, never lower FINAL to an available minority. Wallet balances remain client-derived, outside the blind node. Routing, current-state evidence and receiver implementation still need proof/testing. | [Selection, batching workflow and derived-detail batch](#790-targeted-quorum-verification-selected-batch-derived-details) |
+
+| <a id="dec-082"></a>DEC-082 | C4/K2/C3/O5 | Confirm derived implementation batch | Explicitly accepted / DETAIL-BATCH-001 DB1-01–06 | Maintainer explicitly confirms all six previously derived directions as requirements for later implementation: distinguish found from confirmed, validate real distinct qualified signatures, preserve uncertainty/original intent, advertise actual public HTTP endpoints, scope provider credentials and isolate every private diagnostic alias. This is requirement acceptance, not source-change authorization, completed design or test evidence. | [Confirmation and conditional live-read verification contract](#791-confirmed-detail-batch-and-live-read-verification-contract) |
+
+| <a id="dec-083"></a>DEC-083 | C4.3b/C4.3c/S3/K1 | Current shard-state quorum, no inherited historical certificate archive | Explicit correction / Q-C4-ACTIVE-PROOF-CONTINUITY-01 withdrawn; neither A nor B | L1 holds the transaction/deed; L2 holds the live parent->child collision barrier. Qualified current shard nodes answer and attest their safely synchronized state, with14/20 live evidence for FINAL release. Do not carry historical signature bundles through successive shard generations or require old signers/certificates for current clearance. Their absence alone cannot make a recovered lock unconfirmed. Keep owner validation, safe state-transfer/readiness, full-key current-quorum verification and separate own-choice/crash safeguards; no claim these are implemented/proved. | [Correction and replacement live-state contract](#793-current-state-authority-selected-historical-proof-archive-premise-withdrawn) |
 
 ### 2.2 Alternatives, refinements and superseded proposals
 
@@ -253,6 +292,24 @@ the recorded reasoning; they do not supply missing original user explanations.
 
 | Q-O4-SECOND-SIGNAL-01 / DEC-074 | Answered A: repeated ordinary stop signals preserve the original bounded drain; early second-signal abort B rejected. | §7.83 records persistence protection and fixed deadline with SIGKILL as explicit OS escape. This does not approve unlimited drain or treat ordinary boot sync as complete lost-own-choice recovery. |
 
+| Q-O4-DEADLINE-OWNER-01 / DEC-075 | Answered A: internal daemon deadline plus longer external supervisor fallback; supervisor-only B rejected. | §7.84 records standalone autonomy and diagnostic opportunity. Example5–10s/30s values are not frozen. Timeout cannot guarantee successful flush; incomplete stop and reboot safety gates remain. |
+
+| Q-O4-STOP-CLI-01 / DEC-076 | Answered A: default CLI waits for verified clean completion/DB release; acceptance-only default B rejected. | §7.85 records exit0/nonzero maintenance scripting contract and checks the claimed existing implementation: wait intent exists, but socket unlink occurs before final flush and does not prove DB release/clean completion. |
+
+| Q-O5-METRICS-EXPOSURE-01 / DEC-077 | Answered A: metrics and dashboard operator-only; public base-metrics subset B rejected. | §7.86 records operator ownership, topology/load privacy and KISS. Existing public status/health remains, but must not serve as an alternative exporter of the same private diagnostic data. This choice does not yet select a public gateway-directory mechanism. |
+
+| Q-O5-GATEWAY-DISCOVERY-01 / DEC-078 | Answered B: additional public gateway discovery selected; bootstrap/custom-only A rejected. | §7.87 records reuse of passive mesh knowledge, automatic Hydra failover and a simple public read interface. B retains explicit public HTTP advertisement and private topology. Claimed minimal effort and practical all-node ingress are design expectations, not measured cost or verified universal reachability. |
+
+| Q-O5-GATEWAY-STALE-CACHE-01 / DEC-079 | Answered A, expressly client-only; fresh-directory-only B rejected. | §7.88 records local cached fallback as app/human-money-core connection policy outside node consensus. Existing security and retry budgets remain; this does not select new node cache management, liveness rules or active background probes. |
+
+| Q-C4-SINGLE-STATUS-ACCEPTANCE-01 / DEC-080 | Answered A: matching record alone never means paid; single-source trust B rejected. | §7.89 records mandatory14/20 proof for FINAL PoS release. This resolves the acceptance policy, not the live-read mechanism, committee authority or receipt/current-state distinction. Ordinary lookup routing versus verification scope is the next explicit question. |
+
+| Q-C4-STATUS-VERIFICATION-SCOPE-01 / DEC-081 | Answered A: cheap default lookup plus explicit quorum-backed payment verification; universal strong-status B rejected. | §7.90 records INV-0310, read_quorum1 and targeted>=14 intent. The request parameter is not evidence; actual verifier/membership/current-state integration remains open. WF-005 bundles routine derived details rather than asking more micro-questions. |
+
+| DETAIL-BATCH-001 / DEC-082 | Maintainer explicitly accepts DB1-01–06 as future implementation requirements. | §7.91 records free-form confirmation of the exact §7.90/chat table. No alternatives were newly posed or rejected; no authorization to change production code or binding specs is inferred. WF-005 remains active. |
+
+| Q-C4-ACTIVE-PROOF-CONTINUITY-01 / DEC-083 | Withdrawn after explicit correction; neither A nor B selected. | §7.93 rejects the assumed need to reconstruct/archive original-quorum signatures for current clearance. Selected contract is a fresh quorum of current qualified shard-state assertions after safe sync, without weakening full-turnover serviceability. Historical §7.92 is retained as rejected reasoning, not an active storage obligation. |
+
 ### 2.3 Open design and decision inventory
 
 These are tracked obligations, not a list of questions to ask the maintainer in
@@ -292,9 +349,32 @@ C2.2 / Q-C2-POS-RECEIPT-DURABILITY-01 is answered with corrected A / DEC-072
 after completion. C3.3 / Q-C3-ALTERNATE-PAYMENT-01 is answered A / DEC-073
 (§7.82), strictly client-side, including partial multi-voucher purchases. Active
 O4.1 / Q-O4-SECOND-SIGNAL-01 is answered A / DEC-074 (§7.83). Active O4.2 /
-Q-O4-DEADLINE-OWNER-01 asks internal deadline enforcement with outer supervisor
-margin versus supervisor-only elapsed-time enforcement. Node RAM-first and live
-proof thresholds are not reopened; no purchase logic enters the node.
+Q-O4-DEADLINE-OWNER-01 is answered A / DEC-075 (§7.84): daemon deadline plus
+longer supervisor fallback. O4.3 / Q-O4-STOP-CLI-01 is answered A / DEC-076
+(§7.85), requiring actual clean completion and DB release. O5.1 /
+Q-O5-METRICS-EXPOSURE-01 is answered A / DEC-077 (§7.86): operator-only metrics,
+no public basic subset. O5.2 / Q-O5-GATEWAY-DISCOVERY-01 is answered B /
+DEC-078 (§7.87): additional public gateway discovery. O5.2a /
+Q-O5-GATEWAY-STALE-CACHE-01 is answered A / DEC-079 (§7.88), strictly client-side
+bounded cached-address fallback. C4.3 / Q-C4-SINGLE-STATUS-ACCEPTANCE-01 is
+answered A / DEC-080 (§7.89): matching record alone never authorizes paid/goods
+release, FINAL requires verified14/20. C4.3a /
+Q-C4-STATUS-VERIFICATION-SCOPE-01 is answered A / DEC-081 (§7.90): cheap ordinary
+lookup and explicit quorum-backed release verification. WF-005 batches derived
+details and reserves A/B for consequential choices. Active C4.3b consolidates the
+technical read-evidence contract; no human question is pending. DEC-082 confirms
+all six DETAIL-BATCH-001 requirements (§7.91). LRC-001 maps separate evidence
+roles, shared validation, freshness and bounded collection to source gaps and
+planned adversarial checks. Its live-current-state predicate and membership/
+recovery premises remain unproved. No completed-receipt archive duty is reopened.
+Node RAM-first remains. DEC-083 withdraws C4.3c /
+Q-C4-ACTIVE-PROOF-CONTINUITY-01 after correction (§7.93), neither A nor B: current
+qualified shards attest synchronized lock state; no inherited historical signature
+archive, no unconfirmed outcome solely because old signers left. LRC-002 replaces
+original-proof prerequisites in LRC-001. §7.95 consolidates its verifier/collector
+contract, records status signing without the write-path readiness gate, and
+separates replay resistance from coverage/authority proof. Active C4.3b continues
+on those premises; no human question is pending.
 DEC-060 refines retry policy.
 Loss of the node's own signing history remains a separate gate.
 Keep selected requirements separate from unresolved proof/parameter choices.
@@ -304,15 +384,15 @@ Keep selected requirements separate from unresolved proof/parameter choices.
 | OPEN-01 | S3.3 | One-round obligations versus redesigned completion; inherited/own records, late certificates, authenticated inclusion and partial conflicts. Conditional witness bound is not an inclusion algorithm. | Q-S3.3-01; §7.5, §7.14–7.17, §7.29 |
 | OPEN-02 | S1/S2 | DEC-053 selects qualified current-mesh regional committees. T01–T12 passed under probe-dependent P0-SIM-1; DEC-055 removes those probes, so passive selection needs revised predicates/scenario validation. DEC-056 selects three consecutive missed heartbeats; exact passive timing and enforcement remain pending. Broad recursive-trust research remains stopped. The human fault bound and live Argon/wire integration remain open. Competing regional receipts are allowed, not globally irreversible. | §7.35–7.44, §7.56–7.61; Q-S2.1-PRESENCE-01; DEC-053–055 |
 | OPEN-03 | S3/S4 | DEC-057 answers Q-S3-STATELOSS-01 A: mandatory P2P recovery gate after restart/loss; no empty-state fallback. Active S3.4a (§7.63) must establish source continuity, scoped recovery coverage and durable activation; matching empty digests do not prove recovery. Re-scope under DEC-053: regional readiness without mandatory predecessor14, durable own-history preservation, authenticated available-state/client repair and deterministic conflict convergence. Unknown remote competing evidence is an accepted later-revision risk, not proof of global absence. Old fence/inclusion/BFT/install models remain reference evidence; local persistence/install/expiry obligations still require exact predicates and wire verification. | §7.29–7.44, §7.57; DEC-039/041/043/045/046/053 |
-| OPEN-04 | C4 | Hidden-query/multiple-witness read proposal, actual evidence, authenticated random sampling, retry/missing-response semantics, accepted residual risk and goods release. DEC-069 selects bounded recovery of original approvals for exceptional uncertain-payment reconciliation (§7.77). C4.2 must establish exact context/read-only wire retrieval. DEC-070 selects original-approval retrieval until root TTL+30s (§7.79); exact storage/context/wire integration remains pending. DEC-072 removes post-completion merchant certificate custody; live-status interface remains selected, while single-node sufficiency is unproved. Ordinary INV-0310 routing stays. | §3–5, §7.1; DEC-015/017/020/021 |
+| OPEN-04 | C4 | Hidden-query/multiple-witness read proposal, actual evidence, authenticated random sampling, retry/missing-response semantics, accepted residual risk and goods release. DEC-069 selects bounded recovery of original approvals for exceptional uncertain-payment reconciliation (§7.77). C4.2 must establish exact context/read-only wire retrieval. DEC-070 selects original-approval retrieval until root TTL+30s (§7.79); exact storage/context/wire integration remains pending. DEC-072 removes post-completion merchant certificate custody; live-status interface remains selected, while single-node sufficiency is unproved. Ordinary INV-0310 routing stays. DEC-080 resolves release policy: no paid without verified quorum (§7.89). DEC-081 retains cheap default lookup plus targeted payment verification (§7.90). DEC-083 replaces original-proof availability with current qualified shard-state quorum after safe sync; no archival/retired-signer prerequisite (§7.93, LRC-002). Active C4.3b integrates current-state validity, freshness, current authority and purpose-separated signatures. Q-C4-ACTIVE-PROOF-CONTINUITY-01 is withdrawn, neither A/B. | §3–5, §7.1; DEC-015/017/020/021 |
 | OPEN-05 | S5/S6 | DEC-053 selects potentially revocable regional acceptance. DEC-064 selects the P0 class ordering. DEC-065 selects minimum sufficient retention rather than full losing-tree archival. Complete bundles, affected descendants, the exact minimal evidence set and separate approval/observation domains still need integration/verification. Losing a regional branch is not node fraud; executable proof/wire validation, historical context and versioned integration remain pending. Green requires a separate justified global proof; baseline schemes are empty. Q-K1-FINALITY-01 is answered. | §5.4, §7.12–7.13, §7.56–7.58; DEC-022/023/048/053/054 |
 | OPEN-06 | K2/C1 | Shared crate layout/versioning, signed fields, full identities, parent/output binding, splits, genesis/root TTL, batch behavior and all core consumers. DEC-066 selects inline compact conflict evidence; exact authenticated response envelope and bounds remain pending (§7.74). | §2 closing clarifications, §7.3; DEC-005/006/011–014/038 |
 | OPEN-07 | C2/C3 | DEC-067 selects no minority veto; ordered collector/response integration remains pending (§7.75). DEC-068 selects bounded automatic client follow-up; exact budgets/backoff/state transitions remain pending. DEC-071 selects wallet durable intent ordering before first dispatch; DEC-072 selects durable L1 voucher/purchase before release, with no completed-checkout certificate archive. DEC-073 rejects automatic alternate payments at the client only; partial-purchase/tender handling stays outside humoco-node (§7.82). End-to-end targets, bounded retry counts/delays/horizon, handoff/NOT_READY feedback fields and actual shared transport backoff. DEC-060 now selects exact-payload conditional three-send retries; reconcile 800ms cancellation, detached-work bounds, quota/duplicate work, gateway failover and transport retransmissions. This is not a delivery/completeness proof. | §7.2.1/7.3, §7.33; DEC-008/009/027/042 |
 | OPEN-08 | N1/N2/N4 | Session/stream/CPU/persistence admission limits, fairness, resource partitioning, exact full-budget refusal, tier lifecycle and receiver-side abuse defenses. | §7.2–7.2.1; DEC-024/025/028; existing project invariants |
 | OPEN-09 | N3/O2 | Missing independent locks, divergent partial replicas and recovery without active clients; how readiness is justified beyond complete download/matching digest. Snapshot-bound pagination, no-gap deltas, full commitment coverage and catch-up capacity remain open (§7.31–7.32). Client resubmission is assistance, not a replacement for the DEC-057 restart P2P gate. | §7.2–7.2.1, §7.31–7.32, §7.63; DEC-026/031/032/057 |
 | OPEN-10 | O1/O2 | DEC-062 permits RAM-based approval before flush; derive immutable choice/slot/context semantics, issued-but-unflushed loss detection, background durable acknowledgment, duplicate/pending operations and safe same-key resumption under DEC-032. Prior durable-before-vote model is not this crash proof. | §7.2.1/7.3; DEC-029–033 |
-| OPEN-11 | O3/O4 | Safe time and choice retention, bounded expiry scheduling, drain/handler ordering and measured deployment stop deadline. DEC-074 selects idempotent repeated stop signals. Active O4.2 asks daemon-internal versus supervisor-only stop deadline enforcement (§7.83); sizing, producer joins and truthful completion remain engineering work. | §7.2.1; DEC-034/035 |
-| OPEN-12 | O5/O6 | Private admin packaging/auth/socket permissions; metric-specific aggregation, bounded persistence and reliability diagnostics. | §7.2.1/7.3; DEC-002/003/036/037/040 |
+| OPEN-11 | O3/O4 | Safe time and choice retention, bounded expiry scheduling, drain/handler ordering and measured deployment stop deadline. DEC-074 selects idempotent repeated stop signals. DEC-075 selects an internal deadline with outer supervisor margin. DEC-076 selects verified stop completion/process exit/DB release for CLI exit0. O4 policies are selected; sizing, producer joins, clean-result transport and teardown remain engineering/validation work (§7.85). | §7.2.1; DEC-034/035 |
+| OPEN-12 | O5/O6 | Private admin packaging/auth/socket permissions; operator-only metrics selected by DEC-077, exact public/private endpoint enforcement and bounded diagnostic cost pending. DEC-078 selects additional public HTTP-gateway discovery using passive mesh knowledge; advertisement/authentication/bounds remain pending. DEC-079 selects bounded cached fallback strictly on the client (§7.88). Gateway policies are selected; exact listener/admission/metadata delivery remains pending. Internal topology is not a public directory. Metric aggregation and persistence remain engineering work. | §7.2.1/7.3; DEC-002/003/036/037/040/077 |
 | OPEN-13 | C4/S1 | Statistical aggregation/freshness/disagreement payment policy, provider independence, ticket/voucher grinding and quantified adversary assumptions. | §5.5, §7.1/7.3; DEC-016/018/020/021/044 |
 | OPEN-14 | F1 | Complete specification/invariant/interface coverage and consolidation of contradictions before final plan. §7.78 adds a provisional map of22 numbered families/24 physical spec files and113 distinct mentioned invariant IDs; this is not item-level semantic or wire-test coverage. Real-wire verification remains a later delivery gate. | §1, §6, §8; CP-0003 below |
 | OPEN-15 | K3 | Naming and scoped editorial alignment complete (DEC-049–052); ongoing autonomous maintenance, no preference questions. Protocol conflicts remain OPEN-02/03/05/06/08/09/10/14. | §7.18–7.28; glossary G-001–066 / TERM-01–13; alignment report §8 |
@@ -371,6 +451,11 @@ not silently modify those files or establish a safe membership transition.
   with proposals and a recommendation. Keep factual uncertainty explicit; an option
   selection is not a safety proof. This updates the earlier no-fixed-option-count
   presentation preference, not any accepted protocol requirement.
+- **WF-005 (CP-0079):** maintainer requests faster grouped treatment of small details:
+  present a short problem/obvious-solution list, derive routine consequences from
+  existing decisions autonomously, and keep individual A/B for important choices.
+  This refines WF-004; do not invent micro-questions or treat a proposed new policy
+  as accepted because it appears in a batch. Unresolved proof obligations stay open.
 
 The maintainer emphasized that locks form a chain, or a branching graph when vouchers
 split. Each accepted lock must be causally authorized by the correct predecessor/output;
@@ -8361,3 +8446,1377 @@ with explicit standalone-run responsibility. Neither selected. Client date is
 2026-10-19. No code/spec edits, commits, tests or external process signals.
 
 Completed checkpoint: **CP-0072**.
+
+
+### 7.84 Internal deadline selected; stop-CLI completion contract open
+
+Record: O4-DEADLINE-OWNER-DECISION-001 / O4-STOP-CLI-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0073.
+
+**Answer / DEC-075.** The maintainer explicitly selects
+Q-O4-DEADLINE-OWNER-01 A. The daemon enforces its own finite graceful-stop
+limit, including direct humoco run without an external supervisor. A longer
+systemd/container stop limit is the outer fallback. Reject B's supervisor-only
+boundary. Internal5–10s and external30s are examples, not selected measured
+production constants. Local diagnostics should identify deadline expiry before
+an outer hard kill when possible. No claim that a failed/stuck disk flush can
+be forced to succeed: preserve finite shutdown and honest incomplete result
+under DEC-034 rather than assuming a log entry or timeout creates durability.
+
+**Consolidated node lifecycle.** First stop sets one monotonic deadline and
+blocks new mutation admission. Quiesce all accepted mutation/flush producers,
+join tracked work within the remaining budget, then finish asynchronous commits
+and cleanup. Duplicate ordinary signals preserve the same deadline (DEC-074).
+Clean requires verified commits and required producer completion; otherwise
+propagate incomplete/failure and terminate using the bounded process teardown
+path. A timed-out future does not cancel a blocking storage task; specify an
+actual end-of-process strategy and supervisor fallback, preserving redb's valid
+committed state and allowing uncommitted work to remain lost/uncertain. Do not
+claim an application can defeat an indefinitely uninterruptible OS/kernel I/O.
+Stop outcome/reboot detection must not rely solely on best-effort logging or a
+marker written only after a disk already failed. Reuse justified startup/clean
+metadata where possible, but its exact durability/rollback predicate remains
+O1/O2 engineering work. Restart never bypasses DEC-032/063 or FLAG_NOT_READY
+merely because a bounded timer elapsed or ordinary shard-state sync finished.
+
+Node policy is now selected; remaining O4 runtime work includes producer tracking,
+shared budget propagation, truthful flush result, CLI/control response coordination,
+process teardown and measured supervisor margin. No extra fsync on the PoS path,
+new signing journal or unbounded final drain is selected. Numeric settings are
+measurement/configuration work, not another arbitrary preference question.
+
+**Targeted control/CLI finding.** The inspected `control/server.rs` Shutdown arm
+spawns a50ms-delayed token cancellation and returns ControlResponse::Ok before
+shutdown. `control/client.rs::shutdown` optionally waits for the socket path to
+vanish; timeout_secs==0 skips that wait. `cli.rs::execute_stop` then prints stopped
+success. The daemon awaits control-server termination before cancelling/awaiting
+the flush worker. Therefore acceptance/socket disappearance alone is not evidence
+of completed durable drain. This is a bounded source finding, not an executed
+failure reproduction. Preserve the existing wait/nonwait capability; its default
+user-facing contract has not been explicitly selected in the decision register.
+
+**Exact pending question — Q-O4-STOP-CLI-01 (unanswered):**
+
+> Was soll `humoco stop` standardmäßig bestätigen: den abgeschlossenen Stopp
+> oder nur die Annahme des Stoppauftrags?
+>
+> **A — Auf das Abschlussresultat warten (Empfehlung):**
+> Der Befehl wartet begrenzt auf den bestätigten Shutdown-Ausgang. Erfolg
+> bedeutet einen nachweislich sauber abgeschlossenen Stopp; unvollständiger
+> Drain oder Zeitüberschreitung wird als Fehler beziehungsweise ungeklärt
+> gemeldet. Das ist für Betreiber und Wartungsskripte eindeutig.
+>
+> **B — Sofort die Auftragsannahme bestätigen:**
+> Der Befehl meldet lediglich „Stopp angefordert“ und kehrt sofort zurück.
+> Der Node arbeitet seinen begrenzten Shutdown selbstständig ab.
+> Für die Feststellung, ob er sauber beendet wurde, ist eine spätere
+> Prüfung durch Betreiber oder Prozessmanager nötig.
+
+Recommend A to preserve the existing wait intent while correcting evidence and
+completion reporting. B is a legitimate explicit asynchronous CLI contract with
+less coupling, never a false claim that durable shutdown already completed.
+Existing code/defaults are evidence of current intent, not a new maintainer
+selection. An explicit nonwaiting mode may remain available regardless of default;
+no flag name or protocol layout is chosen. Request acceptance, daemon completion
+and client wait timeout are distinct states. Losing the CLI/control connection
+must not revoke operator stop or reset the daemon's deadline. Coordinate final
+result delivery without waiting on a control task before the flush that task's
+reply needs; avoid this producer/control lifecycle deadlock. Socket unlink/EOF/PID
+absence alone is insufficient evidence of clean flush. Reuse existing local
+control boundary and return truthful known results; do not invent an unbounded
+historical shutdown-log service. Exact lifetime/result transport remains engineering
+work. No source changes, test run or actual process signaling occurred.
+
+Next active O4.3: ask saved A/B, then complete the stop/control result table and
+return to F1 node-interface verification. Other safety/read/membership proof gaps
+remain open; no claim the overall architecture is finished.
+
+### CP-0073 — Select daemon deadline with supervisor fallback; ask stop-CLI acknowledgment scope
+
+Recorded DEC-075 / Q-O4-DEADLINE-OWNER-01 A; supervisor-only B rejected. Derived
+finite lifecycle/teardown and honest flush limits, preserving example-versus-fixed
+parameters and recovery gates. Source control/CLI acceptance/socket wait does not
+prove completed flush. Active O4.3 / Q-O4-STOP-CLI-01: A = bounded wait for verified
+shutdown outcome; B = immediate truthful request acceptance. Neither selected.
+No code/spec changes, tests, commits or external process signals.
+
+Completed checkpoint: **CP-0073**.
+
+
+### 7.85 Stop-CLI completion selected; shutdown acceptance table and metrics exposure
+
+Record: O4-STOP-CLI-DECISION-001 / O4-ACCEPTANCE-001 / O5-METRICS-EXPOSURE-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0074.
+
+**Answer / DEC-076.** The maintainer explicitly selects Q-O4-STOP-CLI-01 A.
+Default humoco stop waits for actual shutdown completion and released redb file
+ownership, so maintenance chaining can rely on exit0. A stuck task, timeout,
+incomplete drain or otherwise unverified completion returns nonzero. Reject B's
+acceptance-only default. A disconnect/client timeout cannot cancel the node's
+operator-requested stop or change its original deadline. This is local operator
+control, not public ingress or a new remote shutdown interface.
+
+**Current implementation qualification.** The maintainer identifies execute_stop
+as already implementing that intent. Read-back confirms a wait-capable control
+client and success/error propagation, but the inspected code watches socket-path
+existence and execute_stop treats no socket as already stopped. ControlServer
+unlinks that socket on cancellation; daemon shutdown awaits this server before
+cancelling/joining the final flush worker. Thus the full clean-completion/process-
+exit/DB-release guarantee is not established by that check. A vanished/missing
+socket alone is insufficient, and an old clean result must not identify a new
+process instance. No live process, lock-release or failure experiment was run.
+Reuse the existing control boundary; fix the proof/lifecycle rather than claim
+that a polling loop or clean log message already supplies the guarantee.
+
+**Consolidated O4 acceptance table (planned, not executed).**
+
+| Case | Required behavior / evidence |
+| --- | --- |
+| First stop signal/control request | Close admission once and record one monotonic deadline; subsequent signals do not move it. |
+| Accepted in-flight work | Stop/quiesce all possible producers before final persistence drain; track detached QUIC work explicitly. |
+| Normal completion | Verify required commits, cleanup and target-process termination/DB release before default CLI exit0. |
+| Stalled/failed disk, producer hang or deadline expiry | Finite teardown attempt; truthful incomplete/error result and nonzero CLI status, no invented successful flush. |
+| Socket removed/EOF but flush still active | Not stop-success evidence; no early exit0. |
+| CLI disconnect or its own wait timeout | Node continues original bounded stop; CLI reports unknown/error, not a successful or cancelled stop. |
+| Already stopped / stale socket / replacement daemon | Verify the actual target instance's state; do not infer clean stop only from a path or stale result. |
+| Subsequent maintenance | Database can be opened by the authorized next operation; no wrong-instance/PID-reuse confusion. |
+| Forced/incomplete exit then reboot | FLAG_NOT_READY and lost-own-choice gates remain; no claim ordinary sync alone recovers all individual approvals. |
+
+O4.1–O4.3 policies are selected. O4 design/delivery is not closed: exact stop-result
+transport, complete producer accounting, blocking-worker teardown, crash metadata,
+exit-status mapping and measured internal/outer limits remain explicit engineering
+and lifecycle-test gates. Do not ask arbitrary duration/micro-policy questions to
+substitute for those tasks. C4 read-safety and F1 coverage remain open.
+
+**Next access-boundary review / O5.1.** DEC-037 already selects local/private
+dashboard and administrative authority with SSH forwarding, not public admin.
+Spec17 §4 and Spec20 observability describe Prometheus metrics but do not explicitly
+select whether a public base subset is desirable. `api/routes.rs` currently mounts
+/metrics on the same router as payment ingress with body/CORS/trace layers. The
+inspected `prometheus_metrics` accepts State only and emits activity, storage,
+queue/flush-error, quota and connectivity aggregates; it also performs state/peer
+reads. No handler-specific authorization was found in that inspection. Exposure
+still depends on listener/deployment and was not tested remotely. Spec17 additionally
+proposes peer-labelled metrics; do not assert those labels already appear in the
+current exporter. Private admin is settled; only this read-only metrics exception
+needs an explicit public-versus-operator choice. Preserve public node-status/health
+and payment-client access independently of operator diagnostics.
+
+**Exact pending question — Q-O5-METRICS-EXPOSURE-01 (unanswered):**
+
+> Soll der Prometheus-Endpunkt `/metrics` ausschließlich für den Betreiber
+> erreichbar sein, oder soll es eine öffentlich abrufbare Basis-Auswahl geben?
+>
+> **A — Prometheus-Metriken nur am privaten Betreiber-Endpunkt (Empfehlung):**
+> Vollständige Metriken bleiben lokal beziehungsweise über den geschützten
+> Betreiberzugang erreichbar. Für öffentliche Clients bleiben die vorgesehenen
+> Status-/Health-Endpunkte. Das hält interne Last-, Speicher- und Peer-Diagnosen
+> aus dem öffentlichen Gateway heraus.
+>
+> **B — Öffentliche Basis-Metriken, Details weiterhin privat:**
+> Zusätzlich darf das öffentliche Gateway eine ausdrücklich begrenzte Auswahl
+> aggregierter Betriebsmetriken liefern. Peer-Identitäten, Topologiedetails und
+> detaillierte Quoten-/Fehlerdiagnosen bleiben privat. Das erleichtert externes
+> Monitoring, benötigt aber eine gepflegte Trennung der öffentlichen Daten.
+
+Recommend A to reuse the selected operator boundary without an additional public
+metrics policy/filter surface. B is viable for an explicit transparency/monitoring
+requirement; use an allowlist, bounded cached output/refresh and read admission so
+scraping cannot monopolize lock/peer state or write service. Private export also
+needs bounded cost; locality alone is not proof of cheapness. No numeric limits,
+new backend framework or full metrics overhaul is selected by either option.
+Telemetry remains non-authoritative and cannot trigger identity bans. Payment
+clients remain permissionless; choosing private diagnostics does not apply the
+P2P friends barrier to public ingress. Existing private admin choice is not reopened.
+
+Next active O5.1: ask saved A/B, then fold selected exposure into F1's endpoint/
+authority/resource matrix and continue consequential node security/interface gaps.
+No production/spec changes, tests, process signals or DB-open experiments this turn.
+
+### CP-0074 — Select verified stop completion; return to node access-boundary review
+
+Recorded DEC-076 / Q-O4-STOP-CLI-01 A: CLI exit0 requires clean completion, process
+exit and DB release. Current wait intent was credited; socket unlink alone is not
+that proof. Consolidated O4 acceptance/failure table; implementation remains pending.
+Active O5.1 / Q-O5-METRICS-EXPOSURE-01: A = private operator metrics; B = explicit
+public basic subset with private details. Neither selected. Administrative privacy
+remains settled. No code/spec edits, tests, commits or operational experiments.
+
+Completed checkpoint: **CP-0074**.
+
+
+### 7.86 Private metrics selected; endpoint boundary and client gateway discovery
+
+Record: O5-METRICS-EXPOSURE-DECISION-001 / F1-ENDPOINT-BOUNDARY-001 / O5-GATEWAY-DISCOVERY-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0075.
+
+**Answer / DEC-077.** The maintainer explicitly selects
+Q-O5-METRICS-EXPOSURE-01 A. Prometheus metrics and dashboard are exclusively
+operator diagnostics through the already selected private endpoint (DEC-037).
+Queue, RAM, quota and peer/topology diagnostics belong to the operator; public
+export can disclose bottlenecks and internal infrastructure. Reject B's public
+base-metrics subset and its extra filtering policy. Public clients retain the
+intended status/health and payment interfaces. This is not a P2P friend whitelist
+for HTTP clients, a new public-admin exception or automatic banning from telemetry.
+
+**Derived endpoint/authority matrix (requirement, not implementation).**
+
+| Surface | Authority and remaining acceptance obligation |
+| --- | --- |
+| Lock, chain-lock, client sync and PoW routes | Intended public client functions retain their access tiers and receiver-side bounds; private diagnostics do not restrict permissionless client admission. Exact per-route input/output/resource audit remains F1. |
+| /v1/status | Public scoped lock query under the existing read policy; no operator topology dump. A returned lock or a single node's assertion is not automatically a valid14/20 certificate; OPEN-04 remains. |
+| /v1/node-status and public health aliases | Minimal client-facing identity/network/service status as required by clients. Do not re-export private metrics under a status alias. Review current storage/quota counters and detailed readiness causes against this boundary. Exact DTO compatibility and cheap bounded readiness computation remain engineering tasks. |
+| /metrics and /dashboard including data/history/events/detail routes | Private operator listener/access boundary; verify every subroute and alias. Locality alone does not establish bounded CPU, memory, storage or peer-lock cost. |
+| Dashboard administration and local control socket | DEC-037 protected local authority/SSH forwarding, preserved operator veto; audit binding, authentication, permissions and request-origin handling. A bearer check on a public listener does not establish selected local isolation. |
+| /peers and /api/v1/network/peers | Current learned-node dump contains internal P2P addresses. Keep internal peer diagnostics private. Whether clients additionally need an explicitly public gateway directory is the next separate question; do not silently turn every learned shard peer into a public gateway. |
+| Internal QUIC shard RPC and F2F gossip | Existing learned-peer and friend barriers apply only to internal P2P. A public gateway URL does not establish P2P friendship, membership, ticket maturity or signing authority. |
+
+**Bounded source findings.** `api/routes.rs::build_router` mounts metrics,
+dashboard, public status and both peer aliases on the same router. get_node_status
+is shared by /health and /v1/node-status and currently returns lock/storage/quota
+aggregates alongside node identity/version/network. health_ready returns storage,
+peer and sync booleans on failure and reads storage; the public/private split and
+bounded-cost gate are not yet verified. These are source observations, not an
+external exposure experiment or a complete listener/deployment audit.
+
+`get_peers` calls `network/manager.rs::get_pex_peers`, which snapshots learned
+known_network_nodes filtered for banned/suspended status. PeerEntryDto includes
+NodePubKey, url formed as https:// plus the same known P2P socket address,
+advertised_p2p and a last_seen_epoch filled from response time. This does not
+prove a working HTTP gateway, explicit operator publication consent, or the
+peer's actual last-seen time. Do not describe the returned list as a verified
+public gateway directory. Internal peer listing privacy follows DEC-077/037;
+there is no need to ask that same privacy question again.
+
+`human-money-core/src/models/discovery.rs` already defines BootstrapSeedFile
+(with network, URLs, mirrors and optional key pinning) and CustomServerEntry.
+These are data containers, not evidence of an implemented authenticated download,
+refresh or admission policy. The node config contains bootstrap_gateways, but the
+bounded source search found config/example/tests rather than a production consumer.
+The inspected core source search did not find consumption of the node's /peers
+aliases. External wallet/app consumers were not audited. Existing seed/custom
+models therefore support a simpler direction, not a claim of complete client
+failover delivery. DEC-015 source choice and exact-payload failover remain intact.
+
+**Exact pending question — Q-O5-GATEWAY-DISCOVERY-01 (unanswered):**
+
+> Wie sollen Wallets und Kassen zusätzliche öffentliche Gateways finden,
+> wenn bekannte Zugänge ausfallen?
+>
+> **A — Bootstrap-Listen und eigene Gateway-Adressen verwenden (Empfehlung):**
+> Clients nutzen mitgelieferte beziehungsweise aktualisierbare Bootstrap-Listen
+> und vom Nutzer ergänzte Adressen. Sie wechseln zwischen diesen Gateways.
+> Der Node benötigt dafür kein zusätzliches öffentliches Gateway-Verzeichnis;
+> interne Peer-Listen bleiben privat. Dafür müssen die Listen außerhalb des
+> P2P-Sperrregisters gepflegt werden.
+>
+> **B — Zusätzlich öffentliche Gateway-Suche anbieten:**
+> Gateways dürfen weitere ausdrücklich zur Veröffentlichung freigegebene
+> HTTP-Gateway-Adressen liefern. Interne P2P-Adressen und Topologiediagnosen
+> bleiben privat. Das erleichtert das Finden neuer Zugänge, benötigt aber
+> zusätzliche Regeln für Veröffentlichung, Aktualität und Missbrauchsschutz.
+
+Recommend A for reuse of existing client configuration models and fewer node
+responsibilities, unless decentralized automatic gateway discovery is an explicit
+requirement. B is a meaningful resilience/operability tradeoff, not permission
+to publish learned P2P sockets. Neither option trusts a directory for payment
+truth, forces a central provider, blocks custom gateways, changes frozen checkout
+membership, or authorizes node-to-node discovery through public ingress. Seed
+provenance, malicious/stale endpoints, client choice, bounded fallback and secret
+handling still require acceptance criteria under either option. Avoid sending
+provider-specific bearer credentials to a different gateway during failover.
+This last boundary is an engineering security obligation, not a new user choice.
+
+Next active O5.2: ask the saved A/B. After selection, finish the public/private
+interface matrix and F1 acceptance mapping without manufacturing more privacy
+microquestions. Exact router split, client compatibility, auth and resource checks
+remain pending implementation/verification. No production/spec changes, test run,
+commit, network probe or process operation occurred.
+
+### CP-0075 — Select operator-only metrics; separate gateway discovery from internal topology
+
+Recorded DEC-077 / Q-O5-METRICS-EXPOSURE-01 A, rejected public metric-subset B,
+and derived the endpoint/authority boundary. Source findings distinguish current
+public diagnostic counters and learned P2P socket listing from intended client
+interfaces and explicit public gateway publication. Active O5.2 /
+Q-O5-GATEWAY-DISCOVERY-01: A = bootstrap/custom client gateway lists without a new
+node directory; B = additional opt-in public HTTP-gateway discovery. Neither
+selected. Internal topology privacy stays settled. No code/spec edits, tests,
+commits or operational experiments.
+
+Completed checkpoint: **CP-0075**.
+
+
+### 7.87 Dynamic gateway discovery selected; passive advertisement and stale-cache policy
+
+Record: O5-GATEWAY-DISCOVERY-DECISION-001 / O5-GATEWAY-STALE-CACHE-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0076.
+
+**Answer / DEC-078.** The maintainer explicitly selects
+Q-O5-GATEWAY-DISCOVERY-01 B. Expose additional public HTTP gateways through a
+simple read interface, with /v1/gateways as an example name. Reuse the node's
+passively learned active mesh information rather than relying exclusively on
+aging static bootstrap files. Clients should automatically fail over among
+available gateways for Hydra resilience. Bootstrap/custom lists still serve as
+initial entry points; A's prohibition on an additional node directory is rejected.
+The maintainer expects practically every node to provide free-tier ingress and
+considers this a small extension. Neither universal public reachability nor
+endpoint implementation cost is established by this interview answer.
+
+The exact saved B included explicitly published HTTP endpoints and private
+internal topology. The answer selects B and does not explicitly revoke those
+bounds. Retain them without another privacy/opt-in preference question. Reusing
+known-node data is compatible with storing only public gateway advertisement
+metadata alongside the existing entry, not publishing friendship edges, internal
+P2P sockets, load counters or diagnostic history. Existing local admin and
+operator veto remain unchanged. Public discovery does not authorize client
+traffic on internal QUIC or node admission outside the learned/F2F barriers.
+
+**Targeted source findings and technical consequences.**
+`network/framing.rs::HeartbeatWirePayload` currently contains node_id, one addr,
+time, ticket fields, signature, suite mask, observations and TTL; no distinct public
+HTTP URL was found. `network/manager.rs::KnownNodeInfo` similarly contains the
+P2P socket and local observation metadata, not a separate gateway URL. Config
+NetworkConfig distinguishes rpc_listen_addr, p2p_listen_addr and advertised_addr
+(SocketAddr), but has no distinct published HTTP URL in the inspected struct.
+The current get_peers construction of https:// plus the known socket therefore
+does not establish the required endpoint. NAT, reverse proxy, DNS and TLS may
+make the actual public ingress URL different from a local bind or QUIC address.
+This is bounded static inspection, not a connectivity experiment.
+
+Derive the missing public-URL advertisement/integrity contract as engineering:
+explicit operator publication, origin identity/network binding, authenticated
+updates and removal/expiry semantics with bounded representation. Reuse the
+existing hourly heartbeat stream and learned-node store where justified; do not
+add a third gossip stream, active background pings, a separate consensus service,
+or synchronous work on the checkout path. The exact signed encoding/version
+transition remains K2/N1 integration work, not established by the current presence
+of a heartbeat signature field. An identity signature alone does not prove URL
+ownership, public reachability, honesty or committee authority. Clients validate
+normal endpoint security independently and treat advertisements as routing hints.
+
+The directory is a bounded public read service: restrict output to intended
+public gateway fields, bound response/refresh/allocation work and enforce read
+admission without consuming write reservations. Selection/pagination/cache sizes
+are engineering tasks rather than arbitrary new user choices. Existing ban and
+local eligibility filters need explicit scope; no diagnostic failure becomes
+network-wide fraud evidence. Real request failures may drive bounded local
+fallback, never gossip bans. Keep the exact original signed payment bytes/T_0,
+read-only reconciliation after freshness, total retry budget, and gateway-scoped
+credentials. Discovering an alternative does not authorize a new payment or
+trusting that gateway's unsupported payment assertions.
+
+**One remaining client availability tradeoff.** Hourly passive presence and
+three missed heartbeats (DEC-056) are not instantaneous HTTP reachability. A
+client may lose contact with its directory while still holding previously learned
+public URLs. Cached contact attempts do not re-admit a node to HRW or establish
+payment truth. Whether to retain this last-resort automatic client behavior is
+not explicitly selected by discovery B. Distinguish stale routing data from
+invalid TLS, explicit withdrawal and verified bans; cached fallback must never
+silently override security failures or explicit operator/user revocation.
+
+**Exact pending question — Q-O5-GATEWAY-STALE-CACHE-01 (unanswered):**
+
+> Wenn die Gateway-Suche vorübergehend keine aktuelle Liste liefert: Darf die
+> Wallet automatisch auch zuletzt bekannte öffentliche Gateway-Adressen versuchen?
+>
+> **A — Zuletzt bekannte Adressen als begrenzten Rückfall nutzen (Empfehlung):**
+> Die Wallet darf gespeicherte Gateway-Adressen mit ihrem bestehenden Zeit- und
+> Versuchsbudget ausprobieren. Eine veraltete Liste allein sperrt dadurch keinen
+> noch erreichbaren Zugang. TLS-Prüfungen und ausdrückliche Sperren bleiben gültig;
+> erfolglose Versuche verursachen begrenzte zusätzliche Wartezeit und Netzlast.
+>
+> **B — Automatisch nur mit aktueller Discovery-Liste wechseln:**
+> Veraltete Discovery-Einträge werden nicht mehr automatisch ausprobiert.
+> Die Wallet nutzt ihre weiterhin konfigurierten Zugänge oder wartet auf eine
+> aktuelle Liste. Das vermeidet Versuche zu alten Adressen, kann aber erreichbare
+> frühere Gateways während einer Discovery-Störung ungenutzt lassen.
+
+Recommend A for the selected Hydra availability goal without active background
+probe traffic. B is a stricter discovery-freshness preference with lower futile
+contact cost and possible temporary loss of automatic alternatives. No numeric
+cache TTL or attempt count is fixed. Neither option changes the three-missed-
+heartbeat HRW policy, cryptographic identity, ticket maturity, signature checks,
+quorum membership or payment uncertainty semantics. Stale data does not imply
+safe success, and a successful transport connection is not a payment certificate.
+
+Next active O5.2a: ask the saved A/B, then consolidate gateway advertisement,
+bounded discovery/failover and public/private endpoint acceptance obligations.
+Implementation and wire/HTTP/client failure validation remain pending. No source/
+spec changes, test run, commit, external network access or process operation.
+
+### CP-0076 — Select dynamic public gateway discovery; ask stale-client-cache fallback policy
+
+Recorded DEC-078 / Q-O5-GATEWAY-DISCOVERY-01 B and rejected bootstrap/custom-only A.
+Derived public HTTP advertisement requirements from the missing distinct URL in
+current heartbeat/known-node/config structures while retaining the two-stream
+passive gossip and private topology boundaries. Active O5.2a /
+Q-O5-GATEWAY-STALE-CACHE-01: A = bounded last-known public-address fallback;
+B = automatic discovery failover only from a current list, with configured
+entry points still available. Neither selected. No code/spec edits, tests,
+commits or operational experiments.
+
+Completed checkpoint: **CP-0076**.
+
+
+### 7.88 Client cache fallback selected; return to single-status acceptance
+
+Record: O5-GATEWAY-STALE-CACHE-DECISION-001 / O5-DISCOVERY-ACCEPTANCE-001 / C4-SINGLE-STATUS-ACCEPTANCE-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0077.
+
+**Answer / DEC-079.** The maintainer explicitly selects
+Q-O5-GATEWAY-STALE-CACHE-01 A and emphasizes its strictly client-side scope.
+Wallet/app connection logic (human-money-core and its consumers) may fall back to
+locally cached last-known public gateways within the existing bounded attempt/time
+budget when directory discovery is unavailable. Reject B's fresh-directory-only
+automatic discovery fallback. The maintainer considers cached fallback a normal
+resilience practice; this is a rationale, not external research or a new node
+consensus invariant. Do not add node-side wallet cache management or negotiate
+cache validity through shard consensus. Endpoint authentication, explicit revocation,
+provider-specific credentials, exact payment bytes/T_0 and uncertainty semantics
+remain. Concrete cache lifetimes and retry tuning are client engineering tasks,
+not further node-interview preference questions.
+
+**Consolidated gateway acceptance obligations (planned, not executed).**
+
+| Component | Required scope and verification |
+| --- | --- |
+| Node directory read | Bounded public gateway metadata only; test field/alias isolation from private P2P topology, metrics and admin, plus read admission and bounded allocation/response cost. |
+| Gossip/known-node data | Advertise actual public HTTP URL through existing passive presence only, with justified identity/network/update binding; real QUIC checks for malformed, forged, stale and oversized announcements when delivered. No third stream or active probe loop. |
+| Client discovery/failover | Bootstrap/custom initial entries plus dynamic hints; bounded local cached fallback during directory outage, endpoint security and credential isolation, unchanged original request bytes and no extra replacement payment. Client behavior tests belong to core/app, not a new node consensus state machine. |
+| Status/payment truth | Gateway discovery and successful connectivity do not establish valid votes, support class, committee authority or a payment outcome. This separate C4 prerequisite remains unresolved. |
+
+O5.1/2/2a human policies are selected. Their implementation, authentication,
+resource sizing, compatibility and verification remain pending. No claim of a
+complete operational design follows from selecting them. Avoid more preference
+questions about cache eviction, URL encoding or response pagination where existing
+requirements already permit autonomous engineering.
+
+**Reason for branch return / C4.3.** Resume OPEN-04's consequential acceptance
+contract after the bounded O5 policy sequence. This is not a new broad trust
+investigation, a re-vote on 1-of-20 routing, a mandatory historical certificate
+archive, or a return to predecessor epoch chaining. The exact current interface
+claim matters before final-plan closure. A source re-read of Spec06 §3.1 case1
+still explicitly permits immediate green goods release for an owner-signed
+matching t_id returned by L2Verdict::Verified. DEC-072 selected live-status
+rechecking and discarded completed-checkout archive duties, but explicitly did
+not prove that a single matching record establishes quorum acceptance. Earlier
+notes §3–5.3 and §7.81 already preserve this gap. Retain DEC-015's equal proof
+requirements across access tiers and DEC-016's coordinated malicious-owner model.
+
+**Concrete witness, without dynamic committee assumptions.** Fix one legitimate
+20-node committee and one consumed output/parent. A malicious owner creates two
+genuine authorized divergent candidates X and Y, and pre-shares X with one
+colluding shard node before a recipient query. The owner gets Y accepted by14
+other committee identities, then presents X to another merchant. If its status
+query reaches the colluding node, that node can return the exact genuine X even
+when the query discloses only the predecessor challenge tag. A correct owner
+signature, matching t_id, and even that one node's response signature do not
+establish14 votes for X. No owner signature forgery, committee turnover, clock
+boundary or more than six Byzantine nodes is needed for this witness. Even an
+honest gateway may transport that one malicious peer reply. This is logical
+analysis of the permitted attacker model and documented acceptance predicate,
+not an executed end-to-end exploit or a measured attack probability.
+
+Transport-source count and evidence support are distinct: one peer could carry
+sufficient independently verified evidence, while one matching owner-signed
+record alone is insufficient to infer it. A historical approval bundle likewise
+is not automatically a fresh current-unspent proof. The mechanism reconciling
+current status, support and conflicts remains C4/S3/S5 engineering/proof work.
+Do not silently solve it by always collecting a new14-vote write certificate,
+mutating T_0, restoring recursive L2 receipt chains, or claiming every ordinary
+read requires14 network round trips. Existing bounded unresolved-attempt recovery
+DEC-069 and node approval retention DEC-070 remain available requirements, not
+proof that the ordinary read protocol already supplies the needed evidence.
+
+**Exact pending question — Q-C4-SINGLE-STATUS-ACCEPTANCE-01 (unanswered):**
+
+> Darf eine einzelne Statusantwort mit passendem, vom Eigentümer signiertem Lock
+> allein die Warenfreigabe auslösen, obwohl sie keine Quorum-Annahme nachweist?
+>
+> **A — Einzelantwort allein genügt nicht für quorumgesicherten Erfolg (Empfehlung):**
+> Die Antwort liefert den gefundenen Lock. Für „Bezahlt“ braucht die Kasse
+> zusätzlich einen überprüfbaren Nachweis der erforderlichen Netzwerkbestätigung.
+> Fehlt er, bleibt die Zahlung ungeklärt. Wie die Live-Abfrage diesen Nachweis
+> effizient liefert, ist technische Arbeit; ein dauerhaftes Archiv alter
+> L2-Belege bei der Kasse wird dadurch nicht verlangt.
+>
+> **B — Einzelantwort als ausdrückliche Vertrauensannahme akzeptieren:**
+> Die Kasse darf aufgrund dieser einen passenden Antwort freigeben. Der Ablauf
+> bleibt besonders schlank, hängt für diesen Fall aber von der Ehrlichkeit der
+> antwortenden Quelle ab. Das wäre eine bewusst schwächere Zusage als die
+> 14/20-Absicherung; eine Eigentümersignatur allein schließt den beschriebenen
+> Angriff nicht aus.
+
+Recommend A for the existing proof-based checkout target. B is viable only as an
+explicitly weaker consumer trust/risk contract, not as a proof of BFT safety or
+an inferred prior selection from the live-status interface. Choosing B would
+require reconciling that exception with DEC-009/015 and documenting the actual
+merchant risk; do not silently redefine FINAL or make paid providers exempt.
+A selection establishes an acceptance requirement, not a finished read-evidence
+algorithm or a global-finality guarantee under DEC-053. No unsupported probability
+or latency guarantee is attached to either option. No option has been selected.
+
+Next active C4.3: ask the saved A/B, then derive the evidence contract and acceptance
+checks from the answer while preserving selected client custody/routing and node
+scope. O1.1 crash/lost-choice recovery, source continuity and membership proof
+obligations remain open before justified readiness/final plan. No source/spec
+changes, test run, commit, external research or process operation this turn.
+
+### CP-0077 — Select client-only cached fallback; return to the open read-success contract
+
+Recorded DEC-079 / Q-O5-GATEWAY-STALE-CACHE-01 A with explicit app/core scope;
+rejected current-directory-only B. Consolidated gateway delivery/verification
+obligations without adding node cache rules. Active C4.3 /
+Q-C4-SINGLE-STATUS-ACCEPTANCE-01: A = matching record alone cannot establish
+quorum-backed success; B = explicit weaker single-source trust for goods release.
+Neither selected. Re-read Spec06's immediate-green predicate and retained the
+existing coordinated-owner witness; no current end-to-end exploit/test claimed.
+No code/spec edits, tests, commits or operational experiments.
+
+Completed checkpoint: **CP-0077**.
+
+
+### 7.89 Quorum-backed release selected; status verification scope
+
+Record: C4-SINGLE-STATUS-ACCEPTANCE-DECISION-001 / C4-READ-PATH-AUDIT-001 / C4-STATUS-VERIFICATION-SCOPE-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0078.
+
+**Answer / DEC-080.** The maintainer explicitly selects
+Q-C4-SINGLE-STATUS-ACCEPTANCE-01 A. A single matching owner-signed lock without
+quorum support must never produce paid or authorize goods release as a confirmed
+payment. The PoS requires mathematical14/20 BFT evidence; blind trust in one
+source would permit coordinated owner/server double spends. Reject B's weaker
+single-source trust exception. Retain DEC-015 equal proof requirements for all
+access tiers and the original coordinated attacker model.
+
+One peer/gateway response may carry valid14-distinct-signer evidence; number of
+HTTP responses is not number of verified approvals. Verify exact intended lock,
+consumed output/parent, network, shard, admissible committee/context, support
+class and signatures before promotion. In the already selected N<20 regime,
+PROVISIONAL remains explicitly provisional/yellow under its separate policy;
+this answer does not invent14-member availability there, declare yellow FINAL,
+or silently abolish the island regime. No historical client-certificate archive,
+recursive receipt chain, new ordinary checkout round or synchronous node flush
+is selected. DEC-072's completed-checkout custody boundary stays intact.
+
+**Evidence distinctions derived from the selection.**
+
+| Evidence | Claim allowed / remaining limit |
+| --- | --- |
+| Owner signature and matching t_id | Candidate authorization/binding only; cannot imply14/20 acceptance, current canonicality or current unspent status. |
+| Single node/gateway signature | Authenticates that source's statement; does not create quorum support. |
+| Valid original approval bundle | Establishes the approved statement in its justified original context; not automatically a fresh current-unspent proof or immunity to DEC-053 regional revision. |
+| Newly signed live observation | Must use explicit observation semantics/context, freshness and support rules; cannot masquerade as the node's original immutable approval or upgrade an unsupported lock to FINAL. |
+| Missing/insufficient/unverified evidence | Remains unconfirmed/uncertain; no paid, no automatic retry with changed bytes, no inferred free slot. |
+
+**Bounded current source audit.** `api/hmc.rs::L2StatusQuery` defaults
+read_quorum to1. `api/routes.rs::query_status` performs a local lookup and on
+UnknownVoucher may read one tag-selected Top20 peer; it can expose a Verified
+lock without a quorum certificate. It invokes assemble_status_quorum_certificate
+only when read_quorum>1. This is current implementation structure, not evidence
+that consumers enforce DEC-080. Review the meaning of Verified and certificate
+absence across core/app consumers; do not let a misleading verdict name authorize
+release. Exact output naming/DTO design is K2 engineering, not a new naming vote.
+
+The status collector creates local attestations with
+create_attestation_for_network, and remote StatusQuery processing in
+network/transport.rs similarly signs currently matching entries. The helper
+selects APPROVE_FINAL/APPROVE_PROV domains and uses zero values for three context
+arguments. The optional read path therefore is not established as returning exact
+stored original approvals. Its requested-count threshold is capped by the local
+active-node count and is not proof of the required support class. A small requested
+quorum or arbitrary read_quorum parameter must never weaken FINAL14/20 validation.
+Audit local self-vote eligibility and actual local record/state before counting
+self; choosing a node in HRW alone is not authority to attest a remotely supplied
+candidate. These are static findings, not an executed exploit or a complete
+collector/consumer security audit.
+
+Do not patch this merely by changing the default read_quorum to14: original
+approval recovery, current observations, membership/context, signer validation,
+failed/partial responses and replay domains still need their own contracts.
+Re-signing after a canonical merge can conflict with a preserved own choice;
+separate observations from approval/fraud semantics as already required by P0
+and OPEN-05. Preserve DEC-069 bounded read-only retrieval of already issued
+approvals and DEC-070 node retention, without pretending those obligations are
+implemented or that a historical bundle alone answers current-unspent status.
+
+**Next human tradeoff: scope of expensive verification, not proof strength.**
+DEC-080 settles what paid means. It does not explicitly require every monitoring,
+reconciliation-progress or data lookup to collect a full quorum. Existing INV-0310
+and read_quorum1 favor cheap ordinary lookup; the interface also has an opt-in
+collector. The maintainer should choose whether that distinction remains or the
+new requirement intentionally changes ordinary status collection. Both options
+must enforce the same evidence gate before goods release. No numerical throughput
+or exact amplification claim is made: work depends on cached usable evidence and
+any necessary collection, which must be bounded and accounted for.
+
+**Exact pending question — Q-C4-STATUS-VERIFICATION-SCOPE-01 (unanswered):**
+
+> Soll die Quorumprüfung gezielt für die Zahlungsfreigabe erfolgen oder bei jeder
+> Statusabfrage, auch wenn ein Client nur den vorhandenen Datensatz nachschlägt?
+>
+> **A — Günstige Statusabfrage und gezielte Quorumprüfung unterscheiden (Empfehlung):**
+> Normale Nachschlageabfragen behalten die 1-of-20-Abfrage. Ihre Antwort weist
+> klar aus, welcher Nachweis tatsächlich vorliegt. Für die Warenfreigabe fordert
+> die Kasse ausdrücklich eine quorumgesicherte Prüfung an; ohne ausreichenden
+> Nachweis gibt es kein „Bezahlt“. Das erhält die günstigen Lesezugriffe,
+> verlangt aber eine klare Trennung in API und Client-Verifikation.
+>
+> **B — Jede Statusabfrage quorumgesichert beantworten:**
+> Auch reine Nachschlageabfragen verlangen den vollständigen Quorum-Nachweis.
+> Das vereinheitlicht den Erfolgsfall der Schnittstelle, verursacht aber bei
+> fehlendem vorhandenen Nachweis zusätzliche Abfragen und geringere Verfügbarkeit.
+> Die bisherige 1-of-20-Regel für gewöhnliche Statusantworten müsste dafür
+> ausdrücklich angepasst werden. Fehlt das Quorum, gibt es keinen bestätigten Erfolg.
+
+Recommend A to retain the selected low-cost read routing while removing the unsafe
+inference from found data to paid. B is a deliberate stronger all-status service
+contract requiring explicit revision of ordinary INV-0310 behavior, not an automatic
+consequence of DEC-080. Neither alternative authorizes new signing decisions on
+a read, weak FINAL certificates, silently treating current observations as original
+approvals, or using status absence as proof that a slot is free. Exact route/mode
+shape, safe defaults for payment consumers, evidence transport and budgets remain
+engineering work under either choice. No option has been selected.
+
+Next active C4.3a: ask saved A/B, then consolidate the read/verification matrix
+and explicit client acceptance gates before further mechanism analysis. Mandatory
+adversarial QUIC checks must cover forged single-peer match, duplicate/wrong
+signers/context, partial collection, class downgrade and observation/approval
+confusion; HTTP/core consumers must prove no paid transition on insufficient
+proof. These are planned acceptance checks, not executed tests. O1.1 recovery,
+regional membership/source continuity and current-state proof remain open.
+No code/spec changes, test run, commit, external research or process operation.
+
+### CP-0078 — Require quorum evidence for paid; ask verification scope for ordinary status reads
+
+Recorded DEC-080 / Q-C4-SINGLE-STATUS-ACCEPTANCE-01 A; rejected single-source
+trust B. Derived explicit evidence categories and checked current default1/optional
+status collection, including fresh approval-domain signing versus original-byte
+retrieval. Active C4.3a / Q-C4-STATUS-VERIFICATION-SCOPE-01: A = ordinary cheap
+lookup plus explicit quorum-backed release verification; B = quorum evidence on
+every status request with explicit ordinary-routing revision. Neither selected.
+No implementation or read-safety proof claimed; no code/spec edits, tests,
+commits or operational experiments.
+
+Completed checkpoint: **CP-0078**.
+
+
+### 7.90 Targeted quorum verification selected; batch derived details
+
+Record: C4-STATUS-VERIFICATION-SCOPE-DECISION-001 / WF-005 / DETAIL-BATCH-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0079.
+
+**Answer / DEC-081.** The maintainer explicitly selects
+Q-C4-STATUS-VERIFICATION-SCOPE-01 A. Keep ordinary lightweight status requests at
+read_quorum1 using INV-0310's one-shard-node read policy. For payment/goods release,
+the PoS explicitly requests and validates full quorum evidence (read_quorum>=14
+in FINAL mode). Reject B's quorum requirement on every ordinary read. Reasons:
+scale routine reads, avoid unnecessary multi-peer work, and use the distinction
+already represented in L2StatusQuery. A request count alone never substitutes
+for valid14 distinct qualified signatures, correct context and support semantics.
+Local count capping must not turn an incomplete FINAL query into confirmed success.
+Do not infer20-of20 for a parameter20, a new committee, relaxed membership or new
+read-time approval decisions. Existing adaptive PROVISIONAL rules remain separate.
+
+The maintainer mentions wallet balance queries; this describes client use of
+status data. The blind node still stores no accounts, amounts or balances; the
+wallet derives its own view. Sub-microsecond RAM lookup is a target for the local
+lookup, not an established end-to-end latency or an audit that every current
+read path avoids disk/locks. Avoiding14-way routine collection is a rationale,
+not a measured exactly14-fold network saving.
+
+**Workflow change / WF-005.** The maintainer asks whether many detail questions
+remain and requests a faster list-based treatment of small details: state each
+problem and the intuitively clear solution; important decisions retain normal
+A/B presentation. Apply immediately. No fixed question count is justified by
+the inventory: many remaining items are engineering/proof/testing obligations,
+not maintainer choices. Do not continue converting each such obligation into
+a separate interview decision. A batch of derived consequences adds no new
+accepted protocol policy. A genuinely new tradeoff still requires a saved exact
+question/options and an actual answer. No blanket waiver of safety proof or
+implementation validation is inferred from the requested pace.
+
+**DETAIL-BATCH-001 — derived work, not new preference questions.**
+
+| Item | Problem | Derived direction and basis |
+| --- | --- | --- |
+| DB1-01 | A found lock or a successful HTTP response can be mistaken for paid. | Represent found data and actual confirmation evidence distinctly; payment consumers enforce the quorum gate. DEC-080/081; exact DTO names/shape are engineering. |
+| DB1-02 | read_quorum>=14 or signer_count14 can be claimed without sufficient valid votes. | Verify distinct full identities, signatures, justified membership, exact target/context and confirmation class; no threshold downgrade on partial results. Existing checkout rules/DEC-080/081. This is a mandatory validator obligation, not a completed proof. |
+| DB1-03 | Timeout/partial collection could trigger a new spend or falsely free the parent. | Preserve uncertain state and exact original request; use bounded read-only reconciliation after freshness. DEC-009/060/068/073. |
+| DB1-04 | A learned P2P socket is not necessarily a usable public HTTP gateway. | Publish actual intended public HTTP endpoint metadata through existing passive discovery; expose no internal topology dump. DEC-077/078. Authentication/encoding remains technical work. |
+| DB1-05 | Automatic gateway fallback could disclose a provider-specific bearer secret. | Keep credentials scoped to their authorized gateway/provider; use only access actually configured for the alternative, including normal free-tier PoW where applicable. DEC-015/078/079 and access-tier separation; no automatic credential portability. |
+| DB1-06 | Private diagnostics might remain reachable through aliases/subroutes. | Apply the selected private boundary to the whole metrics/dashboard/admin route families and equivalent aliases; audit public status DTOs for private diagnostic re-export. DEC-037/077. |
+
+These directions follow selected requirements; they are neither a new approval
+request nor a claim of production changes. Translate them into the eventual
+component/acceptance plan. Sizes, field names, pagination, cache tuning and test
+fixtures are autonomous engineering unless a concrete new tradeoff emerges.
+
+**Material remaining work — not small-detail batch items.**
+1. C4/S5: define a sound live-read/current-state evidence contract, separating
+   immutable original approvals from current observations and regional revision.
+   Existing optional collector does not become safe merely by setting14.
+2. O1.1/O2: justify same-key resumption after issued-but-unflushed choice loss;
+   the finite bucket-quarantine claim still has the later-fresh-conflict witness.
+3. S2/S3: justified regional membership/source continuity and safe recovery during
+   turnover. Keep DEC-053 availability/revocability and no predecessor baton.
+4. F1: finish semantic invariant/interface/failure-scenario coverage and a
+   prioritized plan with explicit proof and adversarial wire-test gates.
+
+These are work packages, not four promised remaining questions. Broad trust
+research remains stopped; existing accepted policies are not reopened to manufacture
+choices. Return point after this batch is C4.3b, technical consolidation of the
+read-evidence contract with OPEN-04/05/06. No human question is pending at this
+checkpoint. Before another A/B, investigate which consequential tradeoff actually
+needs maintainer intent. No source/spec edits, tests, commits or external operations.
+
+### CP-0079 — Retain cheap reads and targeted quorum verification; batch routine details
+
+Recorded DEC-081 / Q-C4-STATUS-VERIFICATION-SCOPE-01 A and rejected all-status
+quorum B. Recorded WF-005, refining WF-004: grouped problem/solution treatment
+for derived details; A/B retained for important unresolved choices. Saved
+DETAIL-BATCH-001 with six derived obligations and their decision bases. Active
+C4.3b is technical read-evidence consolidation, not a pending preference question.
+No remaining-question count, complete read proof or implemented delivery claimed.
+No code/spec edits, tests, commits or operational experiments.
+
+Completed checkpoint: **CP-0079**.
+
+
+### 7.91 Confirmed detail batch and live-read verification contract
+
+**Current qualification (DEC-083 / §7.93):** LRC-001 is historical where it requires
+original-payment approval proof for current live clearance. Use LRC-002 instead.
+Full-key validation, freshness, truthful outcomes and own-choice safety remain.
+
+Record: DETAIL-BATCH-001-CONFIRMATION / LRC-001 / C4-CORE-NODE-RECONCILIATION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0080.
+
+**Answer / DEC-082.** The maintainer explicitly confirms all six directions in
+DETAIL-BATCH-001 as requirements for later implementation and requests the next
+steps. Preserve the exact DB1-01–06 meanings in §7.90. No new alternatives were
+posed, no other policy was selected, and this is not authorization to implement
+production changes or alter binding specifications. WF-005's grouped treatment
+of routine details and separate important A/B choices remains in force.
+
+**Inspection basis.** Bounded static source re-read at node HEAD03b5e2e and core
+HEADb9bbdf7; node working changes are the two interview memory files only. Core
+has unrelated untracked fuzz/ and a simulation __pycache__; neither was touched.
+No executed protocol/consumer exploit or test run is claimed. Relevant sources:
+node api/routes.rs::create_attestation_for_network and
+assemble_status_quorum_certificate; api/hmc.rs::wrap_and_sign_verdict_with_quorum;
+api/dto.rs::QuorumCertificateDto; network/transport.rs StatusQuery;
+core services/l2_gateway.rs::verify_quorum_plausibility,
+evaluate_quorum_certificate and process_l2_verdict; P0 §§4–6.
+
+**Observed integration gaps, requalified against selected policies.**
+- Node status collection and StatusQuery handling mint signatures through the
+  APPROVE_FINAL/APPROVE_PROV helper. The helper binds parent+lock, network domain,
+  shard/status and three zero context fields. DTO timestamp is not in that
+  helper's signed digest. Updating that timestamp cannot establish freshness.
+  Current status signatures are not proven exact-original approval retrieval.
+- The status collector counts self when selected in the committee; the inspected
+  local self-signing branch does not itself establish local record/own-choice
+  authorization. A noncustodial gateway must not create a vote merely because it
+  received an entry remotely or appears in a selected roster.
+- The core plausibility helper uses short u16 node IDs, count-derived thresholds
+  and hash-score statistics. The inspected helper does not cryptographically
+  verify each node signature or establish full-key eligible roster membership.
+  Its evaluate_quorum_certificate caller can return ConfirmFinal from that result;
+  absence of a certificate can return ConfirmLocal. The outer gateway signature
+  and owner-proof checks do not establish the missing14-node proof. This records
+  a bounded observed path, not a claim that every external app releases goods.
+- The node envelope wrapper signs the serialized verdict, not the optional
+  certificate or a client read challenge. Hence outer authenticity alone cannot
+  authenticate a substituted certificate or its freshness. Independently valid
+  signed evidence may protect a field; do not require redundant signing blindly,
+  but bind every fact that influences acceptance through a justified proof.
+- Node QuorumCertificateDto::is_quorum_reached is documented as a length check,
+  not a cryptographic verifier. No caller may promote its boolean to paid.
+- P0's explicit observation/approval distinction is useful, but P0's durable-
+  before-response wording was superseded by DEC-062 and its historical client
+  receipt-custody/recursive-validation language by DEC-055/072. Current DTO
+  comments also broadly reject historical node-certificate requirements. These
+  sources cannot be copied wholesale as the final contract; needed active
+  collision/support proof and client archive duties are different questions.
+
+**LRC-001 — conditional verification contract, derived design draft.** This
+consolidates accepted requirements and necessary verification boundaries. It is
+not a newly approved wire format, a complete live-read algorithm, or a safety
+proof under missing membership/state-transfer premises.
+
+| Rule | Contract / owner |
+| --- | --- |
+| LR-01: explicit purpose | Cheap lookup returns data and actual evidence class at default1. Payment verification is an explicit strong operation; found/HTTP200/ConfirmLocal alone cannot release goods. Node DTO, core consumers and PoS all enforce this distinction. |
+| LR-02: exact target | Verify the canonical requested voucher/root, consumed output/parent and spend binding, network and shard, owner authorization and authentic root lifetime. Use checked canonical commitments rather than trusting server-selected fallback shard IDs or duplicating fields unnecessarily. Shared protocol/core domain rules own this mapping. |
+| LR-03: evidence roles | Distinguish owner intent, immutable node approval, current node observation, and transport/gateway authenticity. Each role has unambiguous authenticated type/domain/context. A collection of observations is not relabeled original payment approvals or node fraud evidence. |
+| LR-04: real quorum | FINAL validation needs14 distinct qualified full NodePubKeys from one applicable frozen at-most20 committee/context, individually verified signatures and correct class/target. No count, bitmap, short ID, statistical score, available-node cap or request parameter substitutes for it. PROVISIONAL remains explicitly separate. |
+| LR-05: historical versus current | An original valid approval proves its original statement. Current usable state needs its own justified live predicate. Neither a stale receipt alone nor fresh signatures over unsupported found data automatically satisfy both. Define admissible live-quorum semantics before accepting it as a clearance signal. |
+| LR-06: freshness | Current-state assertions bind the actual read context/challenge and their statement to the verifier's request, or an equivalently justified replay defense. Unbound DTO timestamps and a fresh transport session do not prove a record is current. Exact encoding/window is engineering; timing assumptions and read linearization/compatibility need proof. |
+| LR-07: read-only discipline | Repeated status reads do not create a new lock, change OwnChoice, renew wallet T_0 or issue a contradictory original approval after merge. Existing original approvals may be returned verbatim; optional current observations remain separate. No sync disk write on the checkout path. |
+| LR-08: canonical/conflict handling | Validate competing support using DEC-064 before class/hash resolution. Weak hints cannot veto a valid14/20 result or promote an unsupported candidate; partial/absent data cannot prove a free slot. Regional revision risk remains DEC-053. |
+| LR-09: truthful failure | Missing, insufficient, incompatible or invalid evidence never yields paid. Report bounded incomplete/unknown versus invalid as appropriate; preserve existing intent and permit justified later reconciliation. No new commercial payment/refund state in the node. |
+| LR-10: bounded collection | Reuse existing direct shard RPC and read budgets. Freeze relevant collection context, bound bytes/CPU/concurrency/total attempts, stop on quorum or impossibility, and treat NOT_READY/quorum cancellations neutrally. No automatic second write round, new gossip stream or expanded signer pool is selected. |
+| LR-11: custody/availability | Completed merchants keep the L1 deed/purchase journal, not a mandatory L2 certificate archive. Nodes retain their own original approvals per DEC-070. Required live exclusion/support evidence must survive justified recovery/turnover; how to achieve this without a historical receipt chain is still an explicit design gate. |
+| LR-12: one verifier contract | The selected shared Rust protocol library defines signed preimages, domains, full identities and proof-validation results. Node, gateway and core use the same validation semantics. Provider payment/tier changes admission priority, never the proof predicate. |
+
+The acceptance expression is deliberately conditional:
+
+```text
+CanReleaseFinal(request, response, recipient_basis) :=
+    ExactAuthorizedTargetAndLiveRoot(request, response)
+    AND QualifiedConfirmationEvidenceValid(response, FINAL14, recipient_basis)
+    AND CurrentUsableStateEvidenceValid(request, response, recipient_basis)
+```
+
+QualifiedConfirmationEvidenceValid must not count an observation as an original
+approval, or accept sender-supplied membership solely because it is self-consistent.
+CurrentUsableStateEvidenceValid is not implemented/proved by this expression.
+It must state which assertions, knowledge/canonical basis, timing and recovered
+state permit acceptance. Do not implement it as true after parsing14 signatures.
+The expression implies neither global finality nor atomic physical goods handover.
+
+**Component/delivery sequence (candidate, not final master plan).**
+1. Specify the two proof predicates and request/slot/context mapping in the
+   shared protocol work (K2), preserving living-mesh regional authority and no
+   predecessor baton. This is prerequisite to changing the production collector.
+2. Define original-approval retrieval versus live observation messages, safe
+   signing preconditions, and necessary active evidence retention/repair. Resolve
+   the historical-proof/current-observation wording conflict explicitly.
+3. Replace plausibility-only promotion in core with the shared verifier and
+   make payment consumers fail closed. Preserve ordinary data lookup behavior.
+4. Wire node/gateway collection, response proof binding, budgets and neutral
+   cancellation to those verified types; do not let unsupported self votes count.
+5. Validate node QUIC behavior, HTTP boundaries and actual client release gates
+   against the same fixtures; only then claim the gap closed.
+
+**Adversarial acceptance matrix (planned; not executed).**
+
+| Case | Required result / boundary |
+| --- | --- |
+| Genuine matching owner lock, one colluding peer, no quorum | Data may be found; no paid. Real QUIC -> HTTP -> core release-consumer fixture. |
+| Fourteen entries with forged signatures or repeated full key under varied short IDs | Reject proof; count each genuine eligible full identity at most once. Shared verifier plus wire/API consumer checks. |
+| Valid signatures for another network/parent/spend/shard/context | No transplant; no mixing membership snapshots to reach14. |
+| Optional certificate added/replaced after a valid gateway verdict signature | Accept only if independently complete target/context-bound evidence passes; outer signature alone is insufficient. |
+| Old signed response retimed via unsigned DTO timestamp or replayed under a new read challenge | Not a fresh live-state proof. |
+| Thirteen valid FINAL approvals or requested14 capped to a smaller local set | No FINAL success; explicit incomplete/unknown, not silent downgrade. |
+| Honest node approved A, then canonical state selects B | Preserve OwnChoice A; no fresh B approval from a status read; lawful observation B cannot be reused as approval or fraud proof. |
+| Noncustodial gateway qualifies for HRW but lacks justified local signing state | No local approval invented from remote candidate possession. |
+| Missing source/history after turnover, valid old bundle or matching empty digests | No fabricated current readiness/acceptance; expose the actual missing prerequisite. |
+| Quota exhaustion, oversized proof, NOT_READY or cancelled stragglers | Bounded failure, no write-queue pollution or false peer misconduct; no paid without proof. |
+
+**Unclosed gates and next action.** LRC-G1 = sufficient live-current-state evidence
+under the selected regional/1-of20-plus-targeted model. LRC-G2 = compatible authority
+and state/support continuity after turnover/loss. LRC-G3 = issued-own-choice safety
+and observation/approval separation after crash/merge. LRC-G4 = concrete shared
+encoding, storage cost and executed wire/client validation. These map to OPEN-04,
+02/03/09,05/10 and06/08/14 respectively; they are not four new interview questions.
+Active C4.3b remains on G1, with G2/G3 dependencies. Next investigate which surviving
+RAM/persistent state can justify a live assertion after merge or turnover and what
+minimal authenticated evidence must accompany it. Investigate technically before
+asking another A/B; no routine field/nonce naming vote is needed. Do not reopen
+broad trust research or erase client no-archive policy to bypass the gap.
+No source/spec edits, tests, commits or external network operations this turn.
+
+
+**LRC-STATE-001 — stored-state follow-through.** A further targeted read confirms
+that HmcRamIndex::locks stores lookup_tag -> L2LockEntry. That entry describes
+the owner-signed transaction, not a14-full-key signed approval bundle or verified
+confirmation class. put_hmc_lock serializes that entry to TABLE_HMC_LOCKS.
+SyncPayload transports (lookup_tag, L2LockEntry) for HMC records; legacy LockRecord
+has status and a BTreeSet of short NodeIds, which is not a signature bundle.
+Therefore the inspected containers alone cannot answer whether a found entry
+was owner-valid only, individually approved, or quorum-supported. No whole-repo
+absence claim is made; this is a concrete missing integration in the shown path.
+
+HmcRamIndex::insert_or_check(PartitionSync) verifies the owner entry signature
+and resolves divergent candidates by canonical hash in the inspected branch.
+It has no verified support bundle/class input there. This is insufficient to
+implement DEC-064's class-first rule and cannot by itself establish a safe source
+for newly minted status approvals. Do not claim exploitation without checking
+all upstream gates and real wire behavior; record the structural integration gap.
+
+Derived repair boundary: keep per-entry owner data, verified admitted support and
+the node's own immutable signing choice semantically distinct. A replica copy is
+not a local original vote; an unconfirmed synced record remains unconfirmed until
+its support is independently validated. Reuse existing storage/TTL and selected
+own-choice work where justified, rather than adding an unrelated history service.
+Digest equality over owner-lock content cannot alone prove support completeness;
+include authenticated support coverage in recovery acceptance, whether committed
+as part of the chosen state representation or verified through associated evidence.
+Exact representation, evidence availability after full turnover, storage cost and
+safe activation remain LRC-G1/G2/G3 work. No change to the selected fixed-bucket
+seal, digest projection or client no-archive requirement is silently approved.
+This establishes where the proof must connect to storage/sync; it does not finish
+the live-current-state algorithm. The next concrete step is to specify the minimal
+admitted-support/own-choice fields and their preservation/import rules against
+these source containers, then check the merge/crash witnesses before implementation.
+
+### CP-0080 — Confirm implementation batch; consolidate live-read verifier and acceptance gates
+
+Recorded DEC-082 confirming DB1-01–06. Added conditional LRC-001 with evidence roles,
+12 verification boundaries, source findings at node03b5e2e/coreb9bbdf7, delivery
+sequence and ten planned adversarial cases. No proof, tested exploit, deployed
+fix or final implementation plan claimed. Active C4.3b remains technical analysis
+of LRC-G1 live evidence, dependent on membership/state continuity and own-choice
+safety; no human question pending. No code/spec edits, tests, commits or operational
+experiments; unrelated core untracked work preserved.
+
+Completed checkpoint: **CP-0080**.
+
+
+### 7.92 Active support proof across full turnover: storage versus confirmation availability
+
+**Withdrawn premise (DEC-083 / §7.93):** The maintainer rejects this archival
+versus unavailable framing. Neither option is selected. This preserved question
+does not impose old-certificate retention or block current qualified shard replies.
+
+Record: C4-ACTIVE-PROOF-CONTINUITY-001 / LRC-G2-PREREQUISITE-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0081.
+
+**Prerequisite and branch reason.** LRC-STATE-001 shows that the inspected HMC
+state/SyncPayload preserves owner records without verified quorum support.
+Before claiming the live-read contract buildable, resolve the conjunction of
+DEC-045 (full original-signer turnover must remain serviceable), DEC-072 (completed
+merchants have no certificate archive duty), DEC-070 (each node retains its own
+original approval) and DEC-080 (no confirmed release without valid quorum proof).
+DEC-065 already requires minimum sufficient winning/exclusion proof; it does not
+specify its representation or demonstrate surviving proof availability after all
+original holders disappear. This question makes the storage/availability impact
+explicit rather than silently introducing a full certificate archive at each node.
+C4.3b stays partial with LRC-001; C4.3c is active on this G2 prerequisite. Return
+to the live-evidence predicates after selection. No broad trust research is reopened.
+
+**Bounded witness / not an executed test.** Committee C accepts X with14 original
+approvals. The completed merchant discards its L2 bundle while retaining its L1
+deed/purchase. Over time all original approval holders leave; replacement nodes
+receive only X's owner entry and unauthenticated class/signers metadata. A later
+request cannot reconstruct14 genuine original approvals from those bytes. The
+same entry bytes could also have been copied before any quorum accepted X.
+Fresh observational signatures establish current holders' statements, not the
+missing original approval history. Treating those observations as payment approvals
+would require a separately justified protocol/acceptance model and signing-safety
+rules; it is not a free consequence of a successful lookup or matching digest.
+LRC-G1's current-state predicate remains necessary even if original proof survives.
+
+This is not a theorem that every possible live-state-quorum protocol needs old
+receipts forever. A sound alternative authenticated support construction may
+replace a retained original bundle, but none is established in the inspected
+path/selected draft. Do not use an unexplained live14 observation bundle as that
+replacement. Conversely, retaining old proof alone does not prove current unspent
+state or remove DEC-053 regional revision risk.
+
+**Concrete resource consequence.** With the selected individual64-byte Ed25519
+approvals,14 signature values alone occupy14*64=896 bytes for a complete bundle,
+before signer/context/reference/encoding overhead. This is a representation-size
+arithmetic bound, not a measured per-node footprint: deduplication, proof placement,
+replication and context sharing can change actual costs. Current144-byte Byte-Years
+assumptions cannot silently be treated as including every possible proof layout.
+No new compression/signature scheme, all-node full-bundle replication, price change,
+mandatory extra checkout round or new gossip stream is selected here. A minimal
+active-state proof must still respect TTL, bounded admission and async persistence.
+
+**Exact pending question — Q-C4-ACTIVE-PROOF-CONTINUITY-01 (unanswered):**
+
+> Wie soll der erforderliche Bestätigungsnachweis verfügbar bleiben, wenn alle
+> ursprünglichen Unterzeichner eines noch gültigen Locks ausgeschieden sind?
+>
+> **A — Notwendigen Nachweis mit dem aktiven Shard-Zustand erhalten (Empfehlung):**
+> Das Netz bewahrt den für aktive Locks erforderlichen überprüfbaren
+> Bestätigungsnachweis und übernimmt ihn bei der Zustandsübertragung. Das kann
+> ein kompakter Quorum-Beleg oder ein nachweislich gleichwertiger Beweis sein.
+> Die Kasse benötigt weiterhin kein Belegarchiv. Dafür müssen zusätzlicher
+> Speicher und Übertragungsaufwand ehrlich eingeplant werden; nach Wurzel-TTL
+> plus Grace-Period wird der zugehörige Lock-Zustand bereinigt.
+>
+> **B — Bei verschwundenem Nachweis keine bestätigte Freigabe mehr ermöglichen:**
+> Knoten behalten nur ihre eigenen Zustimmungen und den sonst nötigen
+> Sperrzustand; ein dauerhaft verfügbarer übernommener Quorum-Nachweis wird
+> nicht zugesichert. Sind die ursprünglichen Nachweise nicht mehr erreichbar,
+> bleibt eine Prüfung ungeklärt, auch wenn der Lock selbst noch vorhanden ist.
+> Das spart Beweisspeicher, schwächt aber die bisher gewünschte Nutzbarkeit
+> nach vollständigem Wechsel der Unterzeichner.
+
+Recommend A to preserve the combined selected continuity, no-client-archive and
+quorum-evidence requirements. B is a deliberate narrower confirmation-availability
+contract and would explicitly qualify DEC-045 rather than falsely claim all earlier
+serviceability promises remain met. Neither permits accepting an unproven lock,
+new contradictory original signatures, synchronous hot-path commits, historical
+client receipt chains, predecessor-committee permission or permanent expired-lock
+tombstones. A does not choose physical proof replication or a settled alternative
+proof algorithm; those require a concrete bounded design and validation. Choosing
+A also does not justify safe state recovery, current-live acceptance or same-key
+crash recovery by itself. Both options keep LRC-G1/G3 and all original safety gates.
+No option has been selected.
+
+Next: ask saved A/B, then determine minimal active evidence/retention and transfer
+acceptance without silently choosing an unmeasured whole-certificate-per-node
+layout. Preserve the existing no-archive client boundary and current-state proof
+gap. No new code/spec edits, tests, commits or external operations.
+
+### CP-0081 — Expose active proof continuity as the next consequential tradeoff
+
+LRC-001 follow-through identifies a concrete prerequisite: active owner records
+alone do not preserve authenticated support through loss of every original proof
+holder. Recorded the source-bound witness, existing-policy conjunction and896-byte
+raw-signature arithmetic without claiming a full footprint or impossible alternative
+protocols. Active C4.3c / Q-C4-ACTIVE-PROOF-CONTINUITY-01: A = preserve necessary
+proof with active shard state, accounting for cost; B = explicitly accept loss of
+confirmation availability when original evidence vanishes. Neither selected.
+DEC-082/DETAIL-BATCH-001 acceptance from CP-0080 retained. No production/spec
+changes, tests, commits or operational experiments.
+
+Completed checkpoint: **CP-0081**.
+
+
+### 7.93 Current state authority selected; historical proof archive premise withdrawn
+
+Record: C4-ACTIVE-PROOF-CONTINUITY-CORRECTION-001 / LRC-002.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0082.
+
+**Explicit correction / DEC-083.** The maintainer rejects the premise of
+Q-C4-ACTIVE-PROOF-CONTINUITY-01. Do not map this answer to either A or B.
+The transaction/deed lives on the L1 voucher. L2's parent->child record is the
+atomic collision barrier. Once that state has been safely registered and
+synchronized, a competing spend is refused against the existing RAM/redb record,
+independently of the identities that originally signed it. Current qualified
+shard nodes answer and attest from their synchronized state. A lock does not
+become unconfirmed merely because old signers leave. Historical14-signature
+bundles are not to be carried across shard generations; the proposed896-byte
+archive burden is explicitly rejected. No weakening of DEC-045 serviceability
+or selection of §7.92 B's unconfirmed-after-turnover contract is inferred.
+
+**What was wrong in the previous framing.** It made preservation/reconstruction
+of original approvals a prerequisite for current clearance, then presented an
+archive versus availability tradeoff. That was not a logical consequence of
+DEC-080/081, which demand quorum-backed live verification, and conflicted with
+the state-based model/no-receipt-chain boundary. Preserve §7.92 as historical
+rejected reasoning. The arithmetic14*64=896 remains arithmetic only; it is not
+a required per-lock footprint or justification for a new archive requirement.
+LRC-001's original-approval gate and LRC-STATE-001's proposed inherited support-
+proof necessity are superseded for current clearance by LRC-002 below.
+
+**Bounded source alignment.** Re-read crypto.rs::compute_shard_digest_at at node
+HEAD03b5e2e. It filters active non-VOID records, sorts by parent and hashes the
+parent/receiver/nonce/id projection, not historical node signature bundles.
+This matches the selected state digest purpose. Do not silently add old signatures
+to its projection, add receipt-chain migration or make readiness depend on
+historical signer reachability. Digest equality alone still establishes equality
+of its encoded projection, not committee authority, source completeness, safe
+old-write cutoff or lost-own-choice recovery. Those already recorded independent
+proof obligations remain; the correction is a selected contract, not an executed
+end-to-end recovery or safety proof.
+
+**LRC-002 — replacement current-state verification contract.**
+
+| Area | Current direction and limits |
+| --- | --- |
+| Cheap lookup | Preserve DEC-081 default1 and honest indication of what is actually attested. One match cannot yield quorum-backed paid by itself. |
+| Strong live verification | The PoS verifies14 distinct currently qualified shard identities attesting the exact requested live lock/state in a compatible current context. Sufficient current live-state evidence is the selected basis; original approval bundles are not an additional prerequisite. PROVISIONAL stays separately labelled. |
+| Signing purpose | Give current-state attestations an authenticated read-state purpose, exact target and freshness binding. They count toward the live-read quorum, not as reconstructed original write approvals. A current read may sign a state response without initiating a new spend/write decision. |
+| Merge and own choices | A node that originally approved A may report synchronized canonical B in its current-state role while retaining OwnChoice A. Such a report is not a second original approval or automatic equivocation proof. Original approval domains/fraud checks must not confuse these roles. |
+| Live authority/readiness | Count only justified current shard participants with safely recovered relevant state. Raw owner data supplied by a caller, membership-by-count, a single digest or an unverified snapshot does not replace that prerequisite. Existing FLAG_NOT_READY, DEC-057/058 and same-key gates retain their actual scope. |
+| State handover | Transfer the necessary active collision records and enforce owner/root/canonical integrity and existing class-first conflict rules. No old-quorum archive, original-signer permission or predecessor baton is introduced. Exact state validation/metadata and coverage remain technical work. |
+| Retention | Keep live exclusion state and the separately selected own signing-safety records under their TTL policies. Do not turn the latter into a requirement to retain/forward every retired node's approval bundle. No permanent expired-lock tombstones. |
+| Client custody | Keep the L1 voucher/purchase locally before goods release. No completed-checkout certificate archive/back-fill duty. Missing historical receipts alone cannot invalidate a valid current-state quorum. |
+| Uncertainty | Missing/invalid current quorum, unready or incompletely recovered state, expired root, incompatible context or unresolved genuine conflict can still prevent confirmed success. Retired original signers alone cannot. |
+
+The revised acceptance shape is:
+
+```text
+CanReleaseFinal(request, response, recipient_basis) :=
+    ExactAuthorizedTargetAndLiveRoot(request, response)
+    AND QualifiedCurrentLiveStateQuorumValid(request, response, FINAL14, recipient_basis)
+```
+
+The current-quorum predicate includes authentic full-key signatures, exact
+state/request binding, replay resistance, justified current committee/readiness
+and applicable canonical/exclusion checks. It has no extra OriginalApprovalBundle
+predicate. Encoding this predicate or selecting it as policy does not prove its
+membership, state-transfer or crash-safety premises. Keep those as named gates;
+do not declare global objective knowledge from one local view or reopen DEC-053.
+
+**Reconcile earlier records.** DEC-080's14/20 proof requirement is satisfied by
+the selected valid current-state quorum, not necessarily an original checkout
+bundle. DEC-081 retains the cheap-versus-strong split. DEC-069's existing-original-
+approval recovery remains a possible bounded exceptional operation; it must not
+be a mandatory path when a valid current-state quorum can answer. DEC-070/032
+own signing-safety retention and lost-history safeguards are not erased by rejecting
+old shared bundles. DEC-065 minimal state does not become a full receipt archive.
+Historical P0 text saying observations never count toward14 applies to original
+payment-approval aggregation; it cannot prohibit the distinct live-read14 quorum
+selected here. P0/DTO/core/source alignment is future authorized implementation/
+specification work, not a silent production modification in these notes.
+
+**Bundled implementation implications (derived, no new preference vote).**
+- Shared protocol/core: introduce explicit current-state proof semantics and
+  full-key signature verification; do not use short-ID plausibility as proof.
+- Node/gateway: emit/collect current-state responses from justified ready peers,
+  bind the read context/freshness, and stop using a write-approval signature as
+  an ambiguous current-state answer. Existing count/budget/neutral-cancellation
+  constraints remain.
+- Storage/sync: preserve actual active exclusions through validated digest-pull,
+  with no historical-signature expansion. Verify class/canonical handling and
+  own-choice independence without requiring prior committee approval.
+- Acceptance checks: all original signers can leave; after justified sync the
+  current quorum can confirm the existing lock without old receipts. Also test
+  competing live spend rejection, forged/duplicate/wrong-context state signatures,
+  replayed state responses, read-after-merge without false slashing, incomplete
+  sync/readiness refusal and truthful quorum shortfall. These are planned checks.
+
+**Next action.** Return active focus to C4.3b, applying LRC-002 to current read
+signature/verifier and recovery contracts. No human question is pending; do not
+re-ask the rejected archive/availability choice. The next safety prerequisites
+are justified state coverage, current membership/freshness and same-key own-history
+recovery, kept separate from historical certificate availability. Follow WF-005:
+derive routine details in batches, ask A/B only for actual unresolved intent.
+No source/spec edits, tests, commits or external operations this turn.
+
+### CP-0082 — Correct historical-archive premise; select current synchronized state quorum
+
+Recorded DEC-083 and withdrew Q-C4-ACTIVE-PROOF-CONTINUITY-01, neither A/B.
+LRC-002 supersedes LRC-001's original-proof prerequisite: qualified current nodes
+attest synchronized state; no inherited historical signature archive, no unknown
+solely from retired original signers. Confirmed digest projection excludes old
+signatures; own-choice, source coverage/readiness and regional membership proof
+gates remain. Active C4.3b resumes live-state protocol integration, no human
+question pending. No production/spec changes, tests, commits or operations.
+
+Completed checkpoint: **CP-0082**.
+
+
+### 7.94 New-chat handoff after the current-state correction
+
+Record: INTERVIEW-HANDOFF-CP0083.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0083.
+
+The maintainer requests a saved handoff/summary for a new chat. No new architecture
+decision or question is introduced. DEC-001–083 remain indexed in §2; compact state
+is the resume cursor. Use these two memory files, not a new parallel handoff file.
+
+**Resume procedure and scope.** Read applicable AGENTS.md, prompts/architecture_interview.md,
+the whole compact state, the decision/open-item indexes in §2, and §§7.90–7.94.
+Read older referenced evidence only as needed. German maintainer communication,
+English repository documents. The interview authorizes targeted research/inspection
+and its own notes/state, not production/spec changes, commits, deployment or a broad
+test campaign. Preserve concurrent work. Last source observations were node03b5e2e
+and coreb9bbdf7; inspect current revisions/working changes before repeating claims.
+The only node modifications at handoff inspection were the two interview documents.
+
+**Critical correction — DEC-083 / LRC-002.** L1 holds the transaction/deed. L2 holds
+and synchronizes active parent->child collision exclusions. Current qualified shard
+nodes attest their safely synchronized state; FINAL clearance requires14 distinct
+verified currently qualified signers in the applicable context. No historical
+quorum-bundle archive or original-signer availability is required after turnover.
+Do not reconstruct the rejected896-byte archival premise or declare a recovered
+lock unknown solely because original signers left. Q-C4-ACTIVE-PROOF-CONTINUITY-01
+is withdrawn, neither A/B. LRC-002 (§7.93) supersedes conflicting original-proof
+prerequisites in LRC-001/P0 draft reasoning. Those earlier texts are not accepted
+requirements merely because they are detailed. Preserve independent own-choice/
+crash safeguards; rejecting shared old bundles does not erase DEC-032/063/070.
+
+**Recent accepted requirements.**
+- DEC-080/081: default read_quorum1 / INV-0310 remains cheap lookup; only explicit
+  quorum-verified payment clearance can mean paid. A matching owner lock, HTTP200,
+  request parameter or plausibility/count check is insufficient on its own.
+- DEC-082 confirms the six-item implementation batch: found versus confirmed,
+  actual full-key quorum validation, honest timeout/original-intent handling,
+  real public HTTP advertisements, provider-scoped credentials and private
+  diagnostics on every alias/subroute (§7.90–7.91).
+- DEC-077–079: operator-only metrics/dashboard; additional public gateway
+  discovery via existing passive knowledge; bounded cached gateway fallback is
+  strictly client/app policy. No internal topology dump or new gossip stream.
+- DEC-074–076: duplicate ordinary stop signals preserve the original bounded
+  deadline; node has internal deadline plus longer supervisor fallback; stop CLI
+  exit0 requires actual clean completion/process exit/DB release, not socket unlink.
+
+**Working style — WF-005.** Group routine derived details into short problem/solution
+lists; analyze implementation choices autonomously. Ask one saved A/B question only
+for consequential unresolved human intent, with a justified A recommendation when
+available. Do not manufacture micro-questions, re-ask accepted choices or promise a
+remaining-question count. Requirement selection, design proof, implementation and
+executed verification are different states. Broad recursive-trust research remains
+stopped unless explicitly invoked separately.
+
+**Immediate next action.** Active C4.3b: integrate the current live-state proof
+contract into the component/acceptance plan. Check authenticated read-purpose
+signatures, exact target/context and replay binding, current full-key membership,
+ready synchronized sources, and core fail-closed verification. Inspect the known
+source gap where node status uses approval-domain signatures and core's considered
+path uses short-ID/statistical plausibility; those are static findings, not executed
+wire exploits. A read-state quorum is distinct from a new original spend approval:
+a lawful post-merge state report must not become false equivocation evidence.
+No human question is pending at handoff.
+
+**Keep remaining safety gates explicit.** Safe state coverage/activation during
+turnover and data loss; current regional membership and timing assumptions; same-key
+resumption after issued-but-unflushed own-choice loss (O1.1); actual class-first merge
+and own-choice separation. Finish semantic invariant/interface/failure-scenario
+coverage before the final prioritized plan. Existing22-family/113-ID inventory is
+provisional, not verified completeness. Planned adversarial QUIC/HTTP/core-consumer
+checks have not been executed by this interview. No historical certificate archive
+is an acceptable shortcut around these proofs.
+
+### CP-0083 — Save new-chat handoff without reopening architecture choices
+
+Saved §7.94 resume summary, DEC-083/LRC-002 correction, WF-005 batching, latest
+accepted requirements, scope limits and concrete C4.3b next action.83 decisions
+retained, no new question. No source/spec changes, tests, commits or operations.
+The compact state and this checkpoint are the durable handoff; the chat reply
+provides a copyable German resume prompt.
+
+Completed checkpoint: **CP-0083**.
+
+
+### 7.95 Live-state proof integration: request binding, signer readiness and proof boundaries
+
+Record: LRC-002-INTEGRATION-001 / DETAIL-BATCH-002 / C4-READINESS-FINDING-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0084.
+Active node: C4.3b. Decisions remain DEC-001–083. No question/options or new
+maintainer selection: the following derives from DEC-017/032/038/053/057/058/
+064/080–083. It elaborates LRC-002, without reinstating LRC-001's archive premise.
+Design is conditional on unresolved authority, state-coverage and crash premises;
+implementation and executed verification remain pending.
+
+**Targeted source evidence.** Node HEAD03b5e2e, core HEADb9bbdf7. The inspected
+files retain these SHA-256 prefixes at the end of inspection: node api/routes.rs
+639ae64aeb6b6ba9, api/hmc.rs 6268d0b8a3a0e0b4, network/transport.rs
+86ced3f70bd86a76, network/framing.rs 729c53af5e6e8158; core
+services/l2_gateway.rs 8c5cf57cd3ca705b. These are static source observations,
+not reproduced wire attacks or a whole-repository security audit. Concurrent
+edits appeared in AGENTS.md, sim-core crypto.rs/types.rs and node daemon.rs;
+they were left untouched. The added AGENTS.md historical-signature guardrail
+agrees with DEC-083. Do not infer recovery correctness from concurrent comments.
+
+- routes.rs::create_attestation_for_network (539–579) still signs the approval
+  domain over parent+lock, network/shard/class and three zero context values;
+  its DTO timestamp is unsigned. StatusQueryPayload (framing.rs 374–388) and
+  L2StatusQuery (hmc.rs 234–243) have no explicit recipient live-read nonce.
+  challenge_ds_tag locates a collision slot; its name does not make it a fresh
+  unpredictable verifier challenge. The gateway's signed request envelope is
+  distinct from a shard response bound to the recipient's request.
+- routes.rs::assemble_status_quorum_certificate (1201–1349) constructs a local
+  status attestation without the write collector's sync-readiness condition or
+  a local record validation in that self-signing branch. It also caps requested
+  support by total_active and calls collection with expected_members=None.
+  Inspected peer collection does perform Ed25519 verification and full-key/TLS
+  checks when available (680–792, 975–1002); it also has a legacy short-ID fallback.
+  This is useful existing verification, not the complete LRC-002 membership,
+  read-purpose or freshness predicate. Do not claim node collection has no
+  signature verification merely because the core consumer lacks it.
+- transport.rs checks is_sync_ready in LockVerifyRequest (357–368), but not in
+  its StatusQuery branch (859–1153) before the matching-record signature at1133.
+  That branch checks record match/shard/validity and request-side admission; those
+  do not establish safe recovered state or independently justified membership.
+  **New finding:** the inspected status-signing path can reach its signing helper
+  without the write-path readiness test. Its practical exploitability and full
+  deployment path are untested. A signed ready=true field would not repair this.
+- core verify_quorum_plausibility (80 onward) still checks short IDs/count/score,
+  without verifying the supplied node signatures. evaluate_quorum_certificate
+  (537 onward) can produce ConfirmFinal from it. A target-bound owner signature
+  or gateway envelope does not replace the missing current-shard proof.
+
+**DETAIL-BATCH-002 — problem → derived solution, not a new policy vote.**
+
+| Item | Problem | Derived integration contract / owner |
+| --- | --- | --- |
+| DB2-01 | Original spend approval and a lawful post-merge report could be confused. | Use distinct authenticated proof kinds/domains for original write approval and current live-state response. The shared library defines canonical length-prefixed domains. Read signing never inserts a spend or overwrites OwnChoice. A report of canonical B after own approval A is not a second original approval or automatic fraud proof. |
+| DB2-02 | A valid signature might concern another output or a weaker statement. | Bind protocol/network, read purpose, canonical root/shard, exact consumed-output/parent and requested lock/state predicate, returned state/class and collection context. Commit canonical data transitively where justified; avoid redundant fields. Confirmation that a payment lock is registered is not an unqualified proof that every descendant/output remains unspent. C1/K2 must map each query to the actual slot/predicate. |
+| DB2-03 | A gateway could replay/retime an old response, or manufacture the challenge itself. | For strong verification, the recipient originates a fresh unpredictable read nonce and retains the outstanding target/context locally. Every counted shard response authenticates that nonce and its exact answer; verification requires the same outstanding request and a bounded local collection lifetime. A new independent check uses a fresh nonce, including after client restart. This adds no server challenge registry, no new wallet T_0 and no write retry. Nonce size/encoding and bounded parameters are engineering. |
+| DB2-04 | Fourteen genuine keys need not be the current qualified committee. | Freeze one at-most20 full-key committee context per strong collection; authenticate its canonical commitment in the responses. Validate tickets, admission, presence and HRW selection against a justified recipient basis, not only a sender-supplied roster/hash. Signers also validate their own authority. No mixed-context union, rank21 replacement, count/statistics shortcut or short-ID fallback for strong proof. A commitment binds a roster; it does not prove that roster legitimate. |
+| DB2-05 | A stateless gateway or recovering replica might sign from copied input. | At every countable self/remote live-state signing site, require current authority and safely installed relevant state, a coherent local slot observation, valid root and canonical/class handling. Input possession and roster inclusion are insufficient. Unready sources may serve bounded retained recovery data or clearly qualified lookup data; they supply no countable strong-state vote. Keep ordinary read_quorum1 routing and lookup cost. |
+| DB2-06 | A collector could silently weaken the requested proof. | Group only compatible answers for the same request/target/context; count each verified full key once, require14 for FINAL and distinguish PROVISIONAL. Return explicit incomplete/invalid/unknown on failure. Do not cap FINAL to reachable support or treat absence as a free slot. Existing collection/CPU/byte/concurrency bounds and neutral NOT_READY/cancellation rules apply; read timing is not silently changed to the write800ms deadline. |
+| DB2-07 | A request may be fresh while its source state is incomplete or changes during collection. | Require the separate readiness/coverage premise and a coherent observation during the bounded request. Bind any claimed observation time/basis if used; unsigned timestamps and fresh TLS are insufficient. A nonce proves request linkage, not global recency, a common atomic shard snapshot, safe turnover or irrevocability. Mixed lawful observations may yield no matching quorum without proving fraud. |
+| DB2-08 | A valid gateway envelope or existing DTO boolean could bypass client checks. | Shared verification returns an explicit verified live-state result only after target/root, signatures, distinct current members, purpose/context and replay checks pass. Payment consumers enforce it plus durable L1 purchase custody. Raw DTOs, requested read_quorum, is_quorum_reached, ConfirmLocal and plausibility-only ConfirmFinal cannot supply that result. All ingress tiers use the same predicate. |
+
+This is a semantic contract, not a selected byte layout or a new persistent
+epoch/version mechanism. No common whole-shard digest is required for every
+per-slot live read merely to bind its answer. The existing authenticated context
+must express the actual chosen scope. There is no new gossip stream, historical
+receipt migration, server purchase logic or client certificate archive.
+
+**Signing and readiness must have separate predicates.**
+
+```text
+CountableLiveStateResponse :=
+    CurrentAuthorityJustified(scope, collection_context)
+    AND RelevantStateSafelyRecoveredAndUsable(scope)
+    AND CoherentAuthorizedSlotObservation(target, root, canonical_state)
+    AND AuthenticatedReadPurposeAndRequestBinding(response)
+
+NewOriginalWriteApproval :=
+    CurrentWriteAuthorityAndStateUsable(scope)
+    AND OwnSigningChoiceSafetyJustified(identity, consumed_output)
+    AND the selected live-write collision/admission rules
+    AND authenticated original-approval purpose and write binding
+```
+
+This separation prevents read reports from rewriting OwnChoice or posing as
+new spend votes. It **does not authorize** a lost-history node to count for live
+clearance merely because it downloaded visible locks. Whether a proposed recovery
+basis establishes the live-state predicate while the own-choice gate remains closed
+requires a concrete safety argument. DEC-032/063 stays unrestricted for new
+binding votes; no blanket extension or relaxation of its scope is selected here.
+No synchronous disk wait is added to RAM-first write acceptance by this contract.
+
+**Coverage boundary — why fresh signatures alone do not finish the design.**
+For two14-member sets inside the *same fixed20-member universe*, intersection
+is at least14+14-20=8; under an actually enforced six-Byzantine bound, at least
+two intersecting identities are honest. This arithmetic only helps preserve a
+prior accepted exclusion if the relevant honest holders retain and serve that
+state and the transfer/read protocol uses it correctly. Full turnover has no
+such same-set intersection guarantee. Safe transfer can preserve the exclusion
+without preserving old signature bundles or asking old members for permission;
+its actual coverage construction remains S3.4a/OPEN-03/09 work.
+
+Concrete counterexample obligation:14 new/partially recovered nodes can freshly
+sign the same nonce and matching incomplete state. All their signatures can be
+genuine while an earlier live exclusion is absent. Thus neither freshness nor a
+self-reported readiness bit can establish the premise they rely on. Distinguish
+this known recovery omission from DEC-053's accepted risk of later discovery of
+a competing admissible regional branch. No unknown global-history oracle is
+required, and no retained old-quorum certificate is proposed as the solution.
+
+**Planned acceptance obligations; none executed.**
+
+| Case | Required outcome / verification boundary |
+| --- | --- |
+| All original signers retired; justified active state recovered | Current14 can verify the existing lock without old receipts; a fresh conflicting live write is rejected. Real QUIC/HTTP/core consumer. |
+| is_sync_ready=false but a matching lock remains in RAM/disk | No countable state signature from QUIC or gateway self-signing; bounded recovery serving may continue. Verify automatic gate, not a fixture that merely hides the response. |
+| Gateway obtains a remote lock but lacks justified local shard state | No invented self vote, even if HRW lists it. |
+| Replayed response, retimed DTO, wrong nonce/purpose/root/output/network/context | No current FINAL proof; a correctly signed gateway wrapper cannot repair the mismatch. |
+| Forged signatures, duplicate full keys, legacy short IDs, authentic nonmembers | Shared verifier rejects/counts only genuinely eligible distinct full keys; receiver and client release-gate coverage. |
+| Thirteen matching votes, mixed committee contexts or incompatible state replies | No FINAL or silent downgrade; preserve uncertainty and bounded reconciliation. |
+| Honest A approval followed by canonical B live report | OwnChoice A unchanged; report B cannot satisfy original-approval aggregation or alone trigger equivocation sanctions. |
+| Matching fresh digest/state replies from incomplete recovery; omitted page/delta or bad install | No readiness from self-consistent agreement alone; fail the concrete recovery acceptance predicate. |
+| Partial/oversized/flooded proof, cancellation, root expiry during verification | Bound resources, enforce actual root lifetime with justified time, keep NOT_READY/quorum cancellation neutral; no false paid result. |
+
+**Next action and closure status.** C4.3b's interface/verification duties are now
+consolidated against LRC-002. It remains active and technically incomplete:
+derive a concrete source/coverage and activation predicate under DEC-058/059/061/
+062, then apply the same-key lost-own-choice witness of §7.71 separately.
+Membership/time premises remain explicit; do not reopen broad trust research.
+The next bounded analysis must distinguish an intact authoritative state source,
+a replica still recovering and a new current member, and explain why their
+readiness cannot be established by circular empty/matching responses. Keep
+snapshot/delta/expiry and class-first state integrity in that proof without
+introducing signature archives or mandatory predecessor permission.
+No genuine new human-intent tradeoff has been established, so no A/B is pending.
+F1 specification/interface/scenario reconciliation remains mandatory before a
+final prioritized plan. Only the two interview documents were edited; no tests,
+production/specification edits, commits or external operations were performed.
+
+### CP-0084 — Consolidate LRC-002 and expose the status-signing readiness gap
+
+Recorded DETAIL-BATCH-002, dated source evidence, separate write/live-state
+signing predicates and nine planned adversarial acceptance cases. Added the
+static finding that inspected status signing lacks the write-path sync-ready
+check; did not claim an executed exploit. Replay binding and fixed-set quorum
+intersection are explicitly insufficient to prove safe full-turnover coverage.
+DEC-001–083 retained; no new decision or question. Active C4.3b continues on
+readiness/authority premises, with S3.4a and O1.1 dependencies. Concurrent
+production changes were preserved. No tests or production/spec edits by this
+interview; only notes/state updated.
+
+Completed checkpoint: **CP-0084**.

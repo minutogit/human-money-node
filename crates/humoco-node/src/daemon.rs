@@ -816,6 +816,18 @@ impl NodeDaemon {
 /// prove full record equality, justified membership, preservation of every binding
 /// vote, old-write closure or safe successor activation.
 ///
+/// ### Objective Lock State & Living-Mesh Authority (KISS Principle)
+///
+/// When new shard nodes join or catch up via shard sync, they adopt the objective
+/// lock state (`parent_lock`, `receiver_pub`, `nonce`, `id`) into their local RAM index
+/// and redb storage. Once synchronized, the node acts as a fully authoritative,
+/// living shard instance: it answers subsequent status queries and participates in
+/// hot-path collision detection directly using its own active key.
+///
+/// Shard synchronization strictly transfers objective double-spend collision records
+/// (`LockRecordDto`), completely omitting historical node attestations or stale 896-byte
+/// quorum signature bundles from past or departed nodes.
+///
 /// The periodic 60s ticker and event-driven `sync_notifier` with 5s debounce
 /// schedule pull attempts without continuous random probing of storage keys.
 /// This describes the existing synchronization mechanism, not a completed proof

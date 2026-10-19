@@ -1,26 +1,23 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-19 (Europe/Berlin). Checkpoint: **CP-0072**.
-Mode: DEC-074 preserves bounded drain across repeated stop signals; deadline-enforcement owner pending (§7.83).
-Workflow: [start/resume prompt](../prompts/architecture_interview.md); always present A/B proposals (WF-004).
+Updated: 2026-10-19 (Europe/Berlin). Checkpoint: **CP-0084**.
+Mode: LRC-002 integration consolidated (§7.95); status-signing readiness gap observed; no new decision/question.
+Workflow: [start/resume prompt](../prompts/architecture_interview.md); batch derived details; important choices retain A/B (WF-005 refines WF-004).
 Details: [notes](ARCHITECTURE_INTERVIEW_NOTES.md); [legacy handoff](ARCHITECTURE_INTERVIEW_HANDOFF.md).
-Register: [74 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
+Register: [83 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
 [alternatives](ARCHITECTURE_INTERVIEW_NOTES.md#22-alternatives-refinements-and-superseded-proposals),
 [open items](ARCHITECTURE_INTERVIEW_NOTES.md#23-open-design-and-decision-inventory) and
 [record/spec gaps](ARCHITECTURE_INTERVIEW_NOTES.md#24-record-gaps-and-pending-specification-consolidation).
 
 ## Resume cursor
-- Active focus: **O4.2**, pending **Q-O4-DEADLINE-OWNER-01**, exact A/B **§7.83**.
-- A = node deadline plus longer outer supervisor limit (recommended); B = supervisor-only limit, explicit standalone-run responsibility. Await answer.
+- Active focus: **C4.3b**, LRC-002 integration **§7.95 / DETAIL-BATCH-002**; readiness/authority proof pending, no human question.
+- **DEC-083** withdraws Q-C4-ACTIVE-PROOF-CONTINUITY-01, neither A/B: no old-quorum archive; old signers leaving alone cannot make synchronized state unconfirmed.
+- **Q-O4-DEADLINE-OWNER-01 answered A / DEC-075**: internal node deadline with longer supervisor fallback; 5–10s/30s examples, not fixed settings.
 - **Q-O4-SECOND-SIGNAL-01 answered A / DEC-074**: repeated SIGTERM/SIGINT neither shorten nor reset/extend original drain; OS SIGKILL remains force-stop.
 - **Q-C3-ALTERNATE-PAYMENT-01 answered A / DEC-073**: strictly client-only no automatic substitute; partial multi-voucher purchase/tender choice stays outside node.
 - **Q-C2-POS-RECEIPT-DURABILITY-01 corrected A / DEC-072**: durable L1 voucher/purchase before release; no completed-checkout certificate archive/back-fill.
-- **Q-C3-WALLET-SEND-DURABILITY-01 answered A / DEC-071**: durable original wallet intent/pending-output before first dispatch; WAL/SQLite examples only.
-- **DEC-070**: node own approvals/context until root TTL+30s; no shorter timer. DEC-072 does not require merchants to archive/retrieve completed-checkout bundles.
-- **DEC-069**: bounded original-approval recovery for still-uncertain checkout; no new votes. Completed-checkout archive duty removed by DEC-072; current read proof remains open.
-- **Q-C3-UNCERTAIN-FOLLOWUP-01 answered A / DEC-068**: bounded automatic growing-backoff reads; example5 attempts not frozen; no guaranteed resolution.
-- **Q-C2-CONFLICT-VETO-01 answered A / DEC-067**: valid14/20 completes despite weaker authenticated collisions; no minority veto.
-- **Q-S5-MIXED-SUPPORT-01 answered A / DEC-064**: FINAL/Regional14 > PROVISIONAL > partials; min-hash within highest confirmed class; no sanction for honest losers.
+- **DEC-070/083**: keep own signing-safety records until root TTL+30s; no inherited old-quorum bundle or client archive duty.
+- **DEC-069/083**: bounded exceptional original-approval reads are not mandatory if current live quorum answers; no new spend votes, no archive-dependent clearance.
 - **Q-O1-CRASH-RESUME-01 answered A / DEC-063**: DEC-032 unrestricted. Finite bucket quarantine proposed; proof against later fresh conflicting spends remains O1.1.
 - **Q-S3-FRESH-COMMIT-01 withdrawn**: neither A nor B. **DEC-062** selects RAM attestation before async flush, ingress-only freshness and fixed nominal seal; no renewed choice on that policy.
 - **Q-S3-LATE-BUCKET-01 withdrawn**, neither A/B: DEC-059/061 fixed closed windows+bounded open tail, direct sync/projection, no added correction/version system; public wallet T_0 differs from encrypted_timestamp.
@@ -31,7 +28,7 @@ Register: [74 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
 - Broad trust research stays stopped; [separate prompt](../prompts/trust_network_blind_spot_research.md) requires explicit invocation. Operator belief is not a fault bound.
 - **DEC-060 / §7.66**: exact-payload/T_0 conditional three-send refines DEC-027; §7.33 historical. QUIC/correlated loss,800ms/cancellation,quotas/background bounds require composition.
 - Read first: DEC-053/054 **7.57–7.58**, [P0 draft0.2](PARTITION_RESILIENT_REGISTRY_P0.md), [results](P0_SIMULATION_RESULTS.md), [work plan v0.4](CEH_SECURITY_CLOSURE_WORK_PLAN.md).
-  Next: ask §7.83 deadline-owner A/B; derive daemon/supervisor contract and O4/F1 checks, then current-read evidence/C4. Status possession is not14/20 proof. O1.1 recovery proof remains mandatory before readiness claims.
+  Next: derive source/coverage and activation predicates for live-state signing (S3.4a); distinguish intact source/recovering replica/new member and rule out circular matching-state readiness. §7.95 consolidates purpose, recipient nonce, target/current committee binding, full-key verification and truthful partial outcomes. Own-history recovery remains separate (O1.1); no archive prerequisite or new A/B. No implementation/tests claimed.
 
 ## Constraints and settled requirements to retain
 - German conversation; English repository documents. Apply `AGENTS.md` and glossary.
@@ -43,13 +40,13 @@ Register: [74 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
 - Safe full turnover/automatic progress after stabilization selected; no old-quorum permission. Restart requires justified P2P repair (DEC-057); source completeness open.
 - Keep immutable own choices, async persistence, same-key loss gate, bounded drain/expiry, private operator boundary and shared protocol library.
 - DEC-053 does not imply expanded checkout pools, a reservation subsystem, extra payment round or unsupported one-node takeover.
-- Current selections/limits: notes **2** (DEC-001–074), including superseded timing policy. Legacy handoff supplies context.
+- Current selections/limits: notes **2** (DEC-001–083), including superseded timing policy. Legacy handoff supplies context.
 - DEC-006 follows DEC-038; DEC-039 reopened; DEC-028 deferred; DEC-043 hourly tentative. P0 timing/support rules remain candidates.
 
 ## Branch tree
 Decision and delivery differ: `decided` names a selected policy; `partial` has selected and unresolved choices.
 `unresolved` marks an unselected mechanism; `finding` marks an established counterexample.
-`active` is the pending question. None of these labels claims implementation/test completion.
+`active` is the current focus; pending human questions, if any, are in the cursor. No label claims implementation/test completion.
 Keep stable IDs; design/proof gaps remain until resolved or explicitly scoped.
 ```text
 HuMoCo architecture/security interview [in progress; prior decisions retained]
@@ -69,9 +66,10 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 │   │   ├── C3.2 [decided] Wallet durable intent/pending-output before first send; DEC-071; client crash tests pending
 │   │   └── C3.3 [decided] Client-only no auto substitute; partial-purchase/tender outside node; DEC-073
 │   └── C4 [partial] Recipient chooses sources; safe read acceptance unresolved; S2/S3/S5
-│       ├── C4.1 [decided] Bounded recovery for unresolved checkout; DEC-069/072; no completed-certificate archive duty
-│       └── C4.2 [partial] Retrieval skeleton derived; context/storage/wire integration pending; §7.77–7.78
-│           └── C4.2a [decided] Own original approvals/context until root TTL+30s; DEC-070; layout/purge verification pending
+│       ├── C4.1 [decided] Bounded unresolved recovery DEC-069/083; current live quorum need not retrieve old approvals
+│       ├── C4.2 [partial] Retrieval skeleton derived; context/storage/wire integration pending; §7.77–7.78
+│       │   └── C4.2a [decided] Own original approvals/context until root TTL+30s; DEC-070; layout/purge verification pending
+│       └── C4.3/3a/3c [decided] Current-state quorum/no archive DEC-080/081/083; C4.3b [active] Contract consolidated §7.95; authority/readiness proof pending
 ├── S — Consensus and membership
 │   ├── S1 [partial] Coordinated attacker / six-Byzantine target; bound/time model unresolved
 │   ├── S2 [unresolved] Justified participants despite subjective HRW views
@@ -105,8 +103,10 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 │   ├── O3 [decided] Root TTL+grace / bounded expiry; safe choice retention/time details pending
 │   ├── O4 [decided] Bounded graceful shutdown; drain/measured deadline pending
 │   │   ├── O4.1 [decided] Repeated ordinary signals preserve original deadline/drain; DEC-074; lifecycle tests pending
-│   │   └── O4.2 [active] Internal node deadline+supervisor margin vs supervisor-only; Q-O4-DEADLINE-OWNER-01
+│   │   ├── O4.2 [decided] Internal deadline+longer supervisor fallback; DEC-075; process teardown/measurement pending
+│   │   └── O4.3 [decided] Default CLI waits for clean stop/process exit/DB release; DEC-076; result/lifecycle tests pending
 │   ├── O5 [decided] systemd-first / private local admin / operator veto; enforcement audit pending
+│   │   └── O5.1/2/2a [decided] Private metrics/public discovery/client-only cache fallback DEC-077–079; delivery pending
 │   └── O6 [decided] Bounded metric history / direct diagnostics; aggregation details pending
 └── F1 [partial] 22 numbered families mapped (§7.78); exact invariant/interface/scenario coverage and final plan pending
 ```
@@ -116,5 +116,5 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 - F1 initial map:22 numbered families/24 files,113 distinct mentioned invariant IDs; definitions/interfaces/scenarios/test evidence still unmapped (§7.78).
 - **7.44** witnesses concern old global finality; DEC-053 regional proof pending. Concurrent created_at_ms/hash/bucket edits require fresh audit; do not repeat field-absent claim (§7.68).
 - DEC-055/056 require passive-profile integration; P0 probe tests do not verify three-miss enforcement.
-- DEC-057 audit: no-peer ready paths/manual QUIC readiness flags; source coverage unproven. DEC-069 audit: stored-original vote retrieval not established (§7.77).
-- Latest durable checkpoint: notes **9**, **CP-0072**. O1.1 return trigger: concrete recovery model / any proposed activation / final plan.
+- §7.95: static status-signing path lacks write sync-ready gate; source fingerprints recorded, concurrent production edits preserved. Planned QUIC/HTTP/core checks unexecuted. Nonce/signatures do not prove recovery coverage; no archive prerequisite.
+- Latest durable checkpoint: notes **9**, **CP-0084 / §7.95**;83 decisions retained. O1.1 return trigger: concrete recovery model / any proposed activation / final plan.

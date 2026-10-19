@@ -158,6 +158,14 @@ impl LockStatus {
 ///    NOT bearer bonds, and NOT the primary proof of payment; they are merely
 ///    clearance receipts ("Unbedenklichkeitsbescheinigung") proving that no
 ///    conflicting double-spend was registered in the decentralized collision registry.
+/// 4. OBJECTIVE LOCK STATE DOCTRINE (KISS Principle):
+///    The lock record itself (`parent_lock -> id`) constitutes the physical barrier
+///    against double-spends in the shard registry. Once committed or synchronized,
+///    any conflicting spend on `parent_lock` fails via atomic in-RAM / storage collision.
+///    The validity and enforceability of the lock within the shard is strictly objective
+///    and NOT tied to the survival, availability, or continued membership of the nodes
+///    that originally signed the checkout attestation. Shards synchronize objective state,
+///    not historical signature bundles.
 /// ============================================================================
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LockRecord {

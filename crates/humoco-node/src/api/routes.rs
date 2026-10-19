@@ -323,6 +323,11 @@ async fn submit_lock(
 ///   Read requests (status queries) query a deterministic or uniform-random shard node
 ///   from the Top-20 active set. They NEVER hold disk write locks or trigger P2P gossip.
 /// - Sync Limits: Max 10,000 items per sync response with strictly validated net_time_ms.
+/// - Objective Lock State vs. Signature Hoarding (KISS Principle):
+///   Locks returned via `/v1/sync` are serialized strictly as `LockRecordDto`
+///   representing the pure objective collision state (`parent_lock`, `receiver_pub`, `nonce`, `id`).
+///   No legacy node attestations or historical 896-byte quorum signature bundles are transferred,
+///   preventing network bloat and ghost-node dependencies.
 ///
 /// Handler for POST /v1/sync
 async fn sync_locks(
@@ -1356,6 +1361,10 @@ async fn assemble_status_quorum_certificate(
 /// An old quorum certificate cannot prove that a voucher is currently unspent, because a spend
 /// could have occurred at any point afterwards. Therefore, every recipient performs a fresh live status check.
 /// Clients and merchants do NOT hoard or chain historical quorum certificates; live status is the single source of truth.
+///
+/// The current node acknowledges and signs the status verdict directly from its synchronized
+/// local state using its own active key (`wrap_and_sign_verdict*`). It does not rely on or verify
+/// stale attestation bundles from historical or departed predecessor nodes (Living Mesh vs. ghost nodes).
 async fn query_status(
     State(state): State<AppState>,
     headers: HeaderMap,

@@ -1,4 +1,4 @@
-# Architecture Interview — Decisions and Open Read-Safety Question
+# Architecture Interview — Decisions, Evidence and Open Proof Gates
 
 > Live navigation: [ARCHITECTURE_INTERVIEW_STATE.md](ARCHITECTURE_INTERVIEW_STATE.md).
 > Workflow: [start/resume prompt](../prompts/architecture_interview.md).
@@ -6,13 +6,16 @@
 > and the current decision register in section 2 when resuming. Checkpoints are in section 9.
 
 Date: 2026-10-13 (Europe/Berlin)
-Last updated: 2026-10-19 (Europe/Berlin)
+Last updated: 2026-10-20 (Europe/Berlin)
 
 Status: Working interview notes, not a binding specification or an implementation plan.
 The interview was saved at the maintainer's request and subsequently resumed.
 No protocol changes have been implemented as part of this interview.
-DEC-087 / CP-0089 explicitly authorizes specification changes for durable-before-
-release; those normative documents are updated, while production code remains unchanged.
+DEC-087 / CP-0089 authorizes durable-release specification changes; DEC-089 /
+CP-0092 completes the approved broader documentary consolidation. This interview
+has not modified production code; concurrent implementation/test edits are
+preserved and unverified here. See the current [consolidation result](ARCHITECTURE_CONSOLIDATION.md)
+and [invariant/acceptance registry](INVARIANT_REGISTRY.md).
 
 ## 1. Purpose and interview position
 
@@ -160,6 +163,14 @@ DETAILS-01 is answered yes. No further human choice is pending. Documentary
 consolidation is active; material authority/source/activation, merge, clock and
 actual storage-loss proof gates remain open. No production edits/tests/commits
 are authorized by this approval.
+
+Completion CP-0092 / §7.107: approved F1.1 documentary consolidation is complete.
+The25-file/22-family corpus has115 owned definitions/topics and two retired
+undefined references (117 mentioned IDs). New0404/1307 disambiguate legacy uses.
+A per-rule interface/scenario map and conditional dependency plan are saved;
+current-authority, transfer/activation, merge, clock/reentry and actual-loss proof
+gates remain open. No human question is pending. Next technical continuation is
+G2/S3.4a source coverage, subject to G1; no new policy is selected by the plan.
 
 Unless explicitly evidenced otherwise, design details and implementation/verification
 of interview changes remain pending. Constraints in the direction column and the
@@ -10631,12 +10642,12 @@ and a verification mapping, not a production rewrite, executed proof or new
 consensus mechanism. It does not restart settled interviews or close the edges
 above by relabeling them. No new substantive A/B is ready.
 
-**Pending question — Q-F1-CONSOLIDATION-DETAILS-01.** Exact German wording:
+**Question at CP-0090 — Q-F1-CONSOLIDATION-DETAILS-01.** Answered yes by DEC-089 / §7.106; original German wording:
 
 > Gibst du dieses Bereinigungs- und Prüfkriterienpaket für den abschließenden
 > Spezifikationsabgleich frei?
 
-No answer. Clear assent selects DB5-01–05 and authorizes their focused
+At CP-0090 no answer had been recorded. DEC-089 subsequently supplies full assent. The proposed approval scope was: DB5-01–05 and their focused
 specification/documentation consolidation and acceptance mapping, preserving
 unresolved proof gates. It does not authorize production code, commits or a
 large test campaign. After assent, reconcile current concurrent files before
@@ -10682,3 +10693,85 @@ approved specification consolidation and interface/scenario/invariant mapping.
 No human question pending.89 decisions. Delivery and proof gates remain separate.
 
 Completed checkpoint: **CP-0091**.
+
+
+### 7.107 F1.1 — Completed documentary consolidation and honest acceptance boundary
+
+Date: 2026-10-20. Basis: DEC-089 / DB5-01–05; no new preference decision.
+State: **approved documentary work completed; material design/proof gates open**.
+
+Delivered [ARCHITECTURE_CONSOLIDATION.md](ARCHITECTURE_CONSOLIDATION.md): five
+selected blocks, family/interface coverage, explicit remaining G1–G5 proof gates
+and a prioritized dependency/acceptance map. This is the final result of the
+requested consolidation, not a completed unconditional buildable security plan or
+a third live handoff. [INVARIANT_REGISTRY.md](INVARIANT_REGISTRY.md) owns each
+reviewed invariant meaning/topic and concrete positive/adversarial scenario.
+
+Scope and reconciliation:
+- Reviewed/consolidated25 numbered physical files in22 families, plus relevant
+  AGENTS/glossary language. English15/16 are canonical, former German paths
+  redirect;03 routing and03 status/sync remain complementary;18/19 informative.
+- L1 causality/current ephemeral live proof replaces recursive L2 receipt/archive
+  requirements. Immutable own choices and atomic durable-before-release remain
+  separate; ordinary read1 stays cheap, payment requires actual full current14/20.
+- Frozen<=20/14/800ms, binary regional/revisable FINAL, no rank21 replacement,
+  passive three-miss presence, neutral cancellation/capacity and no hearsay bans
+  replace contradictory legacy guarantees. Source/membership premises remain visible.
+- Safe checked32-byte header example replaces the unsafe pointer cast. Variable
+  HMC DTOs/proofs/own-choice cost are distinguished from legacy144/192/224-byte
+  estimates; exact shared encoding, total caps and measured accounting remain work.
+- INV-0404 now owns Spec04's evidence size (formerly overloaded1402);1402 retains
+  durable fraud storage. INV-1307 owns pacing/protected budgets;1302 retains account
+  privacy.1501/1502 belong to canonical15 early-data/priority rules; their former
+  missing-count/rank21 meanings are retired.0309 is qualified local diagnosis only.
+  Undefined1101/1102 remain retired references, not invented definitions/aliases.
+-115 owned definitions/topics plus two undefined references yield117 mentioned IDs.
+  Every owned row maps canonical location, enforcement boundary, concrete scenario
+  and expected outcome; eight additional decision contracts cover live proof,
+  frozen committee, no archive, bounded worker, client safety, stop, privacy and
+  discovery/cache. Model topics are qualified; counts are not proof/coverage rates.
+- Private metrics/dashboard/topology aliases and explicit public HTTP gateway
+  discovery remain separate; cached fallback is strictly client-side. Operational
+  deadlines and durability targets are not measured service guarantees.
+
+Validation actually performed (document-only): `python3 /tmp/check_arch_docs.py`
+checked29 current documentation files,197 relative-file links, paired code fences,
+no unsafe Rust example block, whitespace and exact117-ID/115-owned-row mapping:
+PASS. It also confirmed literal Spec16 test inspection candidate filenames exist;
+names establish no assertions or executed coverage. `git diff --check -- AGENTS.md docs`
+passed. Manual reconciliation searches/readback checked the retired receipt,
+third-tier, rank-expansion, unsafe-parser and overloaded-ID claims. The temporary
+checker is not a repository artifact; the counts/scope/result are recorded here.
+No compilation, cargo/QUIC/HTTP/crash campaign, benchmark or commit was performed.
+All stated runtime checks are acceptance obligations, not pass results.
+
+Concurrent production/test edits in API metrics/routes, network transport,
+storage engine/db and storage tests, and existing merchant/alignment-report edits
+were preserved. They are not this interview's implementation or verification.
+The documentary baseline does not infer absence of an implementation merely
+because its full enforcement has not been audited here.
+
+Open technical boundaries remain G1 justified current roster/domain/fault basis;
+G2 noncircular full-live-root transfer coverage and concurrent safe activation;
+G3 admissible support/descendants/own-choice merge composition; G4 clock/T0/entry/
+insert/fixed-seal plus passive-slot/restart/reentry composition; G5 actual storage
+loss/rollback/key-copy safety.8+6+6 and incomplete agreeing new replicas remain
+required counterexamples. DEC-087 closes the ordinary intact-storage crash
+ordering requirement, not G5. Q-S3.3-01 stays parked/unanswered. Broad trust
+research remains stopped. No new user question is pending.
+
+Next continuation, if requested: S3.4a/G2 source-continuity and coverage contract,
+with explicit G1 assumptions; investigate the counterexamples before proposing
+an actual A/B tradeoff. Do not repeat accepted packages or silently select a
+second payment round, old-quorum permission/archive, or full-turnover safety claim.
+
+### CP-0092 — Deliver approved consolidation and per-rule acceptance baseline
+
+Saved DEC-089 and completed the authorized documentary reconciliation, final
+consolidation artifact and115-row canonical rule map. Static document checks pass.
+Five requirement blocks are approved; implementation/executed evidence and the
+five material proof gates remain separate.89 decisions, no pending human question.
+Resume technical source-coverage work from §7.107 rather than re-asking settled
+requirements. Production/code/test work and commits remain outside this mandate.
+
+Completed checkpoint: **CP-0092**.

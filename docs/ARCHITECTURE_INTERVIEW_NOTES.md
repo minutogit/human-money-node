@@ -456,6 +456,11 @@ not silently modify those files or establish a safe membership transition.
   existing decisions autonomously, and keep individual A/B for important choices.
   This refines WF-004; do not invent micro-questions or treat a proposed new policy
   as accepted because it appears in a batch. Unresolved proof obligations stay open.
+- **WF-006 (CP-0085):** maintainer reiterates exactly two options with a reasoned
+  recommendation for important decisions. Present quickly derived details as a
+  short problem/solution batch for explicit maintainer sign-off before recording
+  that batch as accepted. This refines WF-005's presentation/confirmation workflow;
+  no manufactured A/B, renewed settled choices or vote on mathematical truth.
 
 The maintainer emphasized that locks form a chain, or a branching graph when vouchers
 split. Each accepted lock must be causally authorized by the correct predecessor/output;
@@ -9719,6 +9724,10 @@ agrees with DEC-083. Do not infer recovery correctness from concurrent comments.
 
 **DETAIL-BATCH-002 — problem → derived solution, not a new policy vote.**
 
+Confirmation status at CP-0085: presented as a five-item summary in §7.96;
+maintainer batch sign-off is pending under WF-006. Existing underlying decisions
+remain accepted; this elaboration is not yet an explicitly accepted batch.
+
 | Item | Problem | Derived integration contract / owner |
 | --- | --- | --- |
 | DB2-01 | Original spend approval and a lawful post-merge report could be confused. | Use distinct authenticated proof kinds/domains for original write approval and current live-state response. The shared library defines canonical length-prefixed domains. Read signing never inserts a spend or overwrites OwnChoice. A report of canonical B after own approval A is not a second original approval or automatic fraud proof. |
@@ -9820,3 +9829,65 @@ production changes were preserved. No tests or production/spec edits by this
 interview; only notes/state updated.
 
 Completed checkpoint: **CP-0084**.
+
+
+### 7.96 Explicit detail-batch sign-off and remaining-work orientation
+
+Record: WF-006 / DETAIL-BATCH-002-SIGNOFF-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0085.
+Active node: C4.3b. Decision count remains83.
+
+**Maintainer instruction.** Important decisions again receive two meaningful
+options and a reasoned recommendation. Quickly derived details receive a short
+problem/solution list which the maintainer also signs off. The maintainer asks
+whether many issues remain. This accepts the workflow, not DETAIL-BATCH-002 or
+a recovery algorithm. Record WF-006 as a refinement of WF-005; do not manufacture
+a substantive A/B while the actual issue is unresolved technical evidence.
+
+**Remaining-work orientation.** Five work packages summarize the current tree:
+(1) current live-state proof and justified participant authority (C4/S2/K2),
+(2) safe shard turnover/state coverage/activation (S3/S4/N3),
+(3) same-key resumption after lost own signing choices (O1.1/O2),
+(4) bounded timing/resource/retry/expiry and operational integration (C3/N/O),
+and (5) specification/interface/failure-scenario reconciliation and final plan
+(F1). These overlap and are not five promised questions, a completion percentage
+or five equally sized tasks. Many product policies are already selected;
+remaining implementation details and proof obligations need technical work rather
+than repeated preference questions. The first three contain material unresolved
+safety premises. Pending production implementation/tests remain separate.
+
+**Compact package presented for sign-off.** This summarizes §7.95's eight DB2
+items; the mapping preserves the detailed obligations and their proof limits.
+
+| Presented item | Problem → solution | Detailed basis |
+| --- | --- | --- |
+| 1 | A live report can be confused with an original approval → distinct authenticated signature purposes; reads do not change OwnChoice or by themselves prove equivocation. | DB2-01 |
+| 2 | Old or transplanted responses can look current → signatures bind exact root/output/lock/state, network, context and fresh recipient challenge; bounded outstanding request. | DB2-02/03 |
+| 3 | Counts or genuine but wrong signers can masquerade as a quorum → individually verify14 distinct full keys from one justified current committee; no mixed contexts or silent FINAL downgrade. | DB2-04/06 |
+| 4 | A matching record may exist before recovery is safe → readiness and authority gate directly at each countable signing site, including self votes; fresh signatures alone do not establish coverage. | DB2-05/07 |
+| 5 | Consumers may trust a DTO flag instead of evidence → shared verifier enforces the same rules and exposes a verified result to the payment-release gate. | DB2-08 |
+
+**Pending question — Q-C4-DETAIL-BATCH-002-APPROVAL-01.** Exact German wording:
+
+> Gibst du diese fünf Punkte als Anforderungspaket für die spätere Umsetzung frei?
+
+This is batch sign-off, not a two-alternative architecture tradeoff. Clear assent
+accepts all five presented items/eight mapped DB2 items as future requirements;
+partial assent/corrections must be recorded faithfully. No answer has arrived.
+Acceptance would not prove safe current membership, source coverage or crash
+recovery, authorize production/specification edits, or require old certificates.
+DEC-083, cheap default reads and own-history safeguards remain unchanged.
+
+**Next action.** Await batch sign-off, then resume the concrete C4.3b readiness/
+coverage investigation with S3.4a and O1.1 dependencies. Ask one saved A/B with
+a reasoned recommendation when an actual consequential human tradeoff is ready.
+Only interview memory changed; no production/spec edits, tests or commits.
+
+### CP-0085 — Restore explicit batch sign-off; present bounded remaining-work overview
+
+Recorded WF-006 and the pending five-item DETAIL-BATCH-002 approval question,
+with exact wording and mappings to DB2-01–08. Saved five overlapping work packages
+without promising a question count or implying complete security proof.83 decisions
+retained. Active C4.3b awaits batch sign-off; no new architecture selection inferred.
+
+Completed checkpoint: **CP-0085**.

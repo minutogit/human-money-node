@@ -1,8 +1,8 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-19 (Europe/Berlin). Checkpoint: **CP-0084**.
-Mode: LRC-002 integration consolidated (§7.95); status-signing readiness gap observed; no new decision/question.
-Workflow: [start/resume prompt](../prompts/architecture_interview.md); batch derived details; important choices retain A/B (WF-005 refines WF-004).
+Updated: 2026-10-19 (Europe/Berlin). Checkpoint: **CP-0085**.
+Mode: Await DETAIL-BATCH-002 sign-off (§7.96); LRC-002 integration §7.95; no new architecture decision.
+Workflow: [start/resume prompt](../prompts/architecture_interview.md); important choices: two options+recommendation; short derived batches require sign-off (WF-006).
 Details: [notes](ARCHITECTURE_INTERVIEW_NOTES.md); [legacy handoff](ARCHITECTURE_INTERVIEW_HANDOFF.md).
 Register: [83 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
 [alternatives](ARCHITECTURE_INTERVIEW_NOTES.md#22-alternatives-refinements-and-superseded-proposals),
@@ -10,7 +10,7 @@ Register: [83 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
 [record/spec gaps](ARCHITECTURE_INTERVIEW_NOTES.md#24-record-gaps-and-pending-specification-consolidation).
 
 ## Resume cursor
-- Active focus: **C4.3b**, LRC-002 integration **§7.95 / DETAIL-BATCH-002**; readiness/authority proof pending, no human question.
+- Active focus: **C4.3b**; pending **Q-C4-DETAIL-BATCH-002-APPROVAL-01 / §7.96**: “Gibst du diese fünf Punkte als Anforderungspaket für die spätere Umsetzung frei?” No answer; underlying decisions retained.
 - **DEC-083** withdraws Q-C4-ACTIVE-PROOF-CONTINUITY-01, neither A/B: no old-quorum archive; old signers leaving alone cannot make synchronized state unconfirmed.
 - **Q-O4-DEADLINE-OWNER-01 answered A / DEC-075**: internal node deadline with longer supervisor fallback; 5–10s/30s examples, not fixed settings.
 - **Q-O4-SECOND-SIGNAL-01 answered A / DEC-074**: repeated SIGTERM/SIGINT neither shorten nor reset/extend original drain; OS SIGKILL remains force-stop.
@@ -28,7 +28,7 @@ Register: [83 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
 - Broad trust research stays stopped; [separate prompt](../prompts/trust_network_blind_spot_research.md) requires explicit invocation. Operator belief is not a fault bound.
 - **DEC-060 / §7.66**: exact-payload/T_0 conditional three-send refines DEC-027; §7.33 historical. QUIC/correlated loss,800ms/cancellation,quotas/background bounds require composition.
 - Read first: DEC-053/054 **7.57–7.58**, [P0 draft0.2](PARTITION_RESILIENT_REGISTRY_P0.md), [results](P0_SIMULATION_RESULTS.md), [work plan v0.4](CEH_SECURITY_CLOSURE_WORK_PLAN.md).
-  Next: derive source/coverage and activation predicates for live-state signing (S3.4a); distinguish intact source/recovering replica/new member and rule out circular matching-state readiness. §7.95 consolidates purpose, recipient nonce, target/current committee binding, full-key verification and truthful partial outcomes. Own-history recovery remains separate (O1.1); no archive prerequisite or new A/B. No implementation/tests claimed.
+  Next: await DB2 sign-off (five-item summary maps DB2-01–08, §7.96); then derive live-state source/coverage/activation predicates (S3.4a), distinguishing intact/recovering/new sources without circular readiness. Own-history recovery remains separate (O1.1). Five remaining work packages in §7.96 are not a promised question count. No archive prerequisite or implementation/tests claimed.
 
 ## Constraints and settled requirements to retain
 - German conversation; English repository documents. Apply `AGENTS.md` and glossary.
@@ -69,7 +69,7 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 │       ├── C4.1 [decided] Bounded unresolved recovery DEC-069/083; current live quorum need not retrieve old approvals
 │       ├── C4.2 [partial] Retrieval skeleton derived; context/storage/wire integration pending; §7.77–7.78
 │       │   └── C4.2a [decided] Own original approvals/context until root TTL+30s; DEC-070; layout/purge verification pending
-│       └── C4.3/3a/3c [decided] Current-state quorum/no archive DEC-080/081/083; C4.3b [active] Contract consolidated §7.95; authority/readiness proof pending
+│       └── C4.3/3a/3c [decided] Current-state quorum/no archive DEC-080/081/083; C4.3b [active] DB2 sign-off §7.96 pending; authority/readiness proof open
 ├── S — Consensus and membership
 │   ├── S1 [partial] Coordinated attacker / six-Byzantine target; bound/time model unresolved
 │   ├── S2 [unresolved] Justified participants despite subjective HRW views
@@ -117,4 +117,4 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 - **7.44** witnesses concern old global finality; DEC-053 regional proof pending. Concurrent created_at_ms/hash/bucket edits require fresh audit; do not repeat field-absent claim (§7.68).
 - DEC-055/056 require passive-profile integration; P0 probe tests do not verify three-miss enforcement.
 - §7.95: static status-signing path lacks write sync-ready gate; source fingerprints recorded, concurrent production edits preserved. Planned QUIC/HTTP/core checks unexecuted. Nonce/signatures do not prove recovery coverage; no archive prerequisite.
-- Latest durable checkpoint: notes **9**, **CP-0084 / §7.95**;83 decisions retained. O1.1 return trigger: concrete recovery model / any proposed activation / final plan.
+- Latest durable checkpoint: notes **9**, **CP-0085 / §7.96**;83 decisions retained. O1.1 return trigger: concrete recovery model / any proposed activation / final plan.

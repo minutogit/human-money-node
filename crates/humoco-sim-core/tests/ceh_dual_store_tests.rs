@@ -241,3 +241,191 @@ fn test_inv_ceh_05_genesis_pioneer_adoption() {
     // Local Some, remote None -> Ok(None)
     assert_eq!(verify_handshake_genesis(Some(&pioneer_g), None), Ok(None));
 }
+
+/// Test 6: Complete Network Progression & Phase Transition (19 -> 20 -> 21 Nodes)
+///
+/// Validates:
+/// 1. $N = 19$: All nodes start unanchored (`network_id = 0`, `manifest = None`).
+///    Handshakes among 19 nodes succeed freely (`verify_handshake_genesis(None, None) == Ok(None)`).
+/// 2. $N = 20$: Pioneer Activation Ceremony. The 20 nodes co-sign `GenesisManifest` with 14/20 BFT quorum.
+///    The network seals its non-zero `NetworkGenesisFingerprint`.
+/// 3. $N = 21$: Node 21 starts unanchored (`manifest = None`), connects to the federation,
+///    and adopts the sealed manifest via Pioneer Adoption.
+/// 4. Incompatibility Defense: An independently grown second 20-node Federation B is strictly rejected.
+#[test]
+fn test_inv_ceh_06_phase_transition_19_to_20_to_21_nodes() {
+    // -------------------------------------------------------------------------
+    // Phase 1: N = 19 Unanchored Community Mesh (network_id = 0, manifest = None)
+    // -------------------------------------------------------------------------
+    let mut node_manifests: Vec<Option<GenesisManifest>> = vec![None; 19];
+
+    // Any two island nodes can peer without restriction
+    for i in 0..19 {
+        let peer_j = (i + 1) % 19;
+        assert_eq!(
+            verify_handshake_genesis(node_manifests[i].as_ref(), node_manifests[peer_j].as_ref()),
+            Ok(None),
+            "Unanchored nodes below N=20 must peer freely with Ok(None)"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 2: N = 20 Transition — Federation Activation Ceremony
+    // -------------------------------------------------------------------------
+    // A 20th node joins; the 20 nodes form the pioneer committee
+    let (signers_20, committee_20) = generate_committee(50);
+    let mut federation_manifest = GenesisManifest::new(1, [0x42; 32], 1_700_000_000, committee_20);
+
+    // 14 pioneer signatures (CEH_BFT_QUORUM) seal the manifest
+    for sk in signers_20.iter().take(CEH_BFT_QUORUM) {
+        let (pk, sig) = sign_genesis_manifest(sk, &federation_manifest);
+        federation_manifest.add_signature(pk, sig);
+    }
+
+    // All 20 nodes adopt the sealed manifest (network_id transitions from 0 to fingerprint)
+    let fingerprint = federation_manifest.canonical_hash();
+    assert_ne!(fingerprint, [0u8; 32], "Fingerprint must be non-zero");
+
+    node_manifests.push(None); // Node 20 joined
+    assert_eq!(node_manifests.len(), 20);
+
+    // 20 nodes update their local manifest to the sealed Federation Genesis
+    for node_m in node_manifests.iter_mut() {
+        *node_m = Some(federation_manifest.clone());
+    }
+
+    // Peering within the established federation is strictly verified and compatible
+    for i in 0..20 {
+        let peer_j = (i + 1) % 20;
+        assert_eq!(
+            verify_handshake_genesis(node_manifests[i].as_ref(), node_manifests[peer_j].as_ref()),
+            Ok(None),
+            "Peers within same federation must succeed with Ok(None)"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3: N = 21 Node Joins via Pioneer Adoption
+    // -------------------------------------------------------------------------
+    // Node 21 boots fresh: unanchored (network_id = 0, manifest = None)
+    let mut node_21_manifest: Option<GenesisManifest> = None;
+
+    // Node 21 handshakes with federation Node 0
+    let handshake_res = verify_handshake_genesis(node_21_manifest.as_ref(), node_manifests[0].as_ref())
+        .expect("Pioneer adoption handshake must succeed");
+
+    // Node 21 adopts the remote federation manifest
+    assert_eq!(handshake_res, Some(federation_manifest.clone()));
+    node_21_manifest = handshake_res;
+
+    // Node 21 is now a fully anchored federation member!
+    assert_eq!(node_21_manifest.as_ref().unwrap().canonical_hash(), fingerprint);
+
+    // Subsequent handshakes with another federation member (e.g. Node 15) succeed as peers
+    assert_eq!(
+        verify_handshake_genesis(node_21_manifest.as_ref(), node_manifests[15].as_ref()),
+        Ok(None)
+    );
+
+    // -------------------------------------------------------------------------
+    // Phase 4: Collision Defense — Separate Independent Federation B Rejected
+    // -------------------------------------------------------------------------
+    let (signers_b, committee_b) = generate_committee(100);
+    let mut federation_b = GenesisManifest::new(1, [0x99; 32], 1_700_000_000, committee_b);
+    for sk in signers_b.iter().take(CEH_BFT_QUORUM) {
+        let (pk, sig) = sign_genesis_manifest(sk, &federation_b);
+        federation_b.add_signature(pk, sig);
+    }
+
+    // Handshake between Federation A and Federation B must fail with IncompatibleGenesisManifest
+    let reject_res = verify_handshake_genesis(node_21_manifest.as_ref(), Some(&federation_b));
+    assert_eq!(
+        reject_res,
+        Err(CehError::IncompatibleGenesisManifest {
+            local: fingerprint,
+            remote: federation_b.canonical_hash(),
+        })
+    );
+}
+
+/// Test 7: INV-1106 Cryptographic Gossip Domain Separation (Heartbeat Zero-Trust Isolation)
+///
+/// Proves that even if malicious friend nodes tunnel heartbeats across networks,
+/// honest peers strictly reject foreign heartbeats at the signature layer without growing wire size.
+#[test]
+fn test_inv_1106_heartbeat_cryptographic_domain_isolation() {
+    use humoco_sim_core::fraud::{
+        compute_heartbeat_digest, verify_heartbeat_signature_strict, IngressEnvelopeEvidence,
+    };
+    use humoco_sim_core::types::NetworkId;
+    use ed25519_dalek::Signer;
+
+    let (sk, pk) = generate_keypair(77);
+    let now_ms = 1_700_000_123u64;
+
+    // 1. Node signs heartbeat under Mainnet domain
+    let digest_mainnet = compute_heartbeat_digest(
+        NetworkId::Mainnet,
+        &pk,
+        0,
+        0,
+        now_ms,
+        5_000_000,
+        1_000,
+        0,
+        false,
+        &[0u8; 32],
+    );
+    let sig_mainnet = sk.sign(&digest_mainnet).to_bytes();
+
+    let mut hb_evidence = IngressEnvelopeEvidence::new_v2(
+        pk,
+        0,
+        0,
+        now_ms,
+        5_000_000,
+        1_000,
+        0,
+        false,
+        [0u8; 32],
+        sig_mainnet,
+    );
+
+    // 2. Honest Mainnet peer verifies successfully
+    assert!(
+        verify_heartbeat_signature_strict(NetworkId::Mainnet, &hb_evidence),
+        "Mainnet peer must accept authentic Mainnet heartbeat"
+    );
+
+    // 3. Rogue peer tunnels this heartbeat to Testnet peer
+    // Honest Testnet peer verifies with NetworkId::Testnet:
+    assert!(
+        !verify_heartbeat_signature_strict(NetworkId::Testnet, &hb_evidence),
+        "INV-1106: Testnet peer MUST strictly reject Mainnet heartbeat at signature layer!"
+    );
+
+    // 4. Counter-test: Sign under Testnet, verify on Mainnet must also fail
+    let digest_testnet = compute_heartbeat_digest(
+        NetworkId::Testnet,
+        &pk,
+        0,
+        0,
+        now_ms,
+        5_000_000,
+        1_000,
+        0,
+        false,
+        &[0u8; 32],
+    );
+    hb_evidence.signature = sk.sign(&digest_testnet).to_bytes();
+
+    assert!(
+        verify_heartbeat_signature_strict(NetworkId::Testnet, &hb_evidence),
+        "Testnet peer accepts authentic Testnet heartbeat"
+    );
+    assert!(
+        !verify_heartbeat_signature_strict(NetworkId::Mainnet, &hb_evidence),
+        "INV-1106: Mainnet peer MUST strictly reject Testnet heartbeat at signature layer!"
+    );
+}
+

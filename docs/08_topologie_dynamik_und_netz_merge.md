@@ -59,6 +59,25 @@ flowchart LR
    $$\text{SigDigest} = \text{BLAKE3}\Big(\text{len}(\text{DOMAIN\_TAG}) \parallel \text{DOMAIN\_TAG} \parallel \text{epoch\_id}_{\text{le}} \parallel \text{session\_seq}_{\text{le}} \parallel \text{flags}_{\text{le}} \parallel \text{shard\_id}_{\text{le}} \parallel \text{status\_tag} \parallel \text{payload\_digest}\Big)$$
    A small 14-node network can mathematically never produce a `FINAL` signature, as honest nodes sign exclusively with `status_tag = 0x00` (`HUMOCO_V1_APPROVE_PROV`) (SSOT: `docs/10:3.2` & `docs/04:224`).
 
+### 2.2 The Federation Activation Manifest (Network Birth Certificate & Isolation)
+
+When a network crosses $N = 20$ after 24h stability, it permanently seals its cryptographic identity via the **Federation Activation Manifest** (`GenesisManifest`):
+
+```rust
+pub struct GenesisManifest {
+    pub protocol_version: u32,
+    pub network_id: [u8; 32],
+    pub genesis_timestamp: u64,
+    pub initial_committee: [NodePubKey; 20],
+    pub genesis_signatures: Vec<(NodePubKey, [u8; 64])>, // >= 14 pioneer signatures
+}
+```
+
+* **The Network Genesis Fingerprint:** The canonical hash `canonical_hash()` serves as the immutable universe identifier. It binds TLS ALPN, QUIC session negotiation, and signature preimages (`domain_approve_final`).
+* **Incompatibility of Independent $N \ge 20$ Federations (`INV-0806`):**
+  In organic growth, nodes dock into existing large networks. If two distinct networks both independently grow to $N \ge 20$ and mint their own `GenesisManifest`, they are **mutually incompatible**. During P2P handshakes, `verify_handshake_genesis` detects `loc_hash != rem_hash` and terminates the connection with `CehError::IncompatibleGenesisManifest`. They can never merge automatically or pollute each other's `FINAL` collision registry.
+* **Island Mesh Adoption:** An embryonic island network ($N < 20$) possesses no `GenesisManifest` (`local = None`). When establishing contact with an established federation, it verifies the 14 pioneer signatures and adopts the remote manifest (`test_inv_ceh_05_genesis_pioneer_adoption`).
+
 ---
 
 ## 3. The P2P Heartbeat Merge (Topology Convergence)

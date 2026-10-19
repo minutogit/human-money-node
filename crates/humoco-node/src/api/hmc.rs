@@ -1,3 +1,28 @@
+//! # Human Money Core (HMC) DTO Adapters & Architectural Invariants
+//!
+//! ============================================================================
+//! 📜 ARCHITECTURAL INVARIANT: VOUCHER (L1) AS DEED vs. L2 BLIND LOCK REGISTRY
+//! ============================================================================
+//! 1. The Voucher file / ProofChain (Layer 1) is the SOLE legal negotiable deed /
+//!    bearer instrument ("Urkunde"). It carries monetary value, denominations,
+//!    transaction history, and cryptographic owner signatures. The customer hands
+//!    this voucher deed to the merchant/cash register at checkout.
+//! 2. Layer 2 (`human-money-node`) is EXCLUSIVELY an auxiliary, blind collision
+//!    lock registry (double-spend prevention: `parent_lock -> child_lock`).
+//! 3. L2 lock records, attestations, and quorum certificates are NOT currency,
+//!    NOT bearer bonds, and NOT the primary proof of payment; they are merely
+//!    clearance receipts ("Unbedenklichkeitsbescheinigung") proving that no
+//!    conflicting double-spend was registered in the decentralized collision registry.
+//! 4. Ephemeral Live Checkout Signal: Quorum certificates (attestation bundles) serve
+//!    exclusively as a live green-light signal at the moment of checkout ("Ware jetzt freigeben").
+//!    They have ZERO cryptographic utility for subsequent spends: an old certificate cannot prove a
+//!    voucher is unspent today (which always requires a fresh live L2 check). Downstream recipients
+//!    and L2 nodes never verify or request historical L2 certificates (DEC-055).
+//! 5. Client Persistence Boundary: The merchant only needs to persist the received
+//!    Layer-1 Voucher Deed (`ProofChain`) and the local cash-register sale association.
+//!    Hoarding, chaining, or back-filling historical quorum certificates is unnecessary data bloat.
+//! ============================================================================
+
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -102,7 +127,10 @@ pub struct L2AuthPayload {
     pub auth_signature: Option<[u8; 64]>,
 }
 
-/// Request: Anchor a voucher (genesis) or a transaction
+/// Request: Anchor a voucher genesis or transaction lock in the Layer-2 collision registry.
+///
+/// NOTE: This request merely registers a double-spend collision lock (`parent_lock -> child_lock`).
+/// The actual negotiable deed / currency carrying monetary value is the Layer-1 Voucher document itself.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct L2LockRequest {
     pub auth: L2AuthPayload,
@@ -144,7 +172,12 @@ pub struct L2LockRequest {
     pub privacy_guard: Option<String>,
 }
 
-/// Data structure for a single lock entry on Layer 2.
+/// Data structure for a single lock entry in the Layer-2 Collision Lock Registry.
+///
+/// 📜 ARCHITECTURAL INVARIANT:
+/// This entry contains NO monetary amounts, NO account balances, and NO user identities.
+/// It is purely a double-spend prevention record. The Layer-1 Voucher document (`ProofChain`)
+/// custodies the actual transactional deed, ownership state, and monetary value.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct L2LockEntry {
     pub layer2_voucher_id: String,

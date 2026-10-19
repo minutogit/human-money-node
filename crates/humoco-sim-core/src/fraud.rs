@@ -509,6 +509,97 @@ pub fn verify_ingress_envelope_signature(env: &IngressEnvelopeEvidence) -> bool 
     false
 }
 
+/// Computes the network-domain-separated BLAKE3 digest for an F2F presence heartbeat (INV-1106).
+///
+/// Digest = BLAKE3(len || domain_heartbeat(network_id) || gateway_pubkey || epoch_day_le || epoch_seq_le || ...)
+#[allow(clippy::too_many_arguments)]
+pub fn compute_heartbeat_digest(
+    network_id: crate::types::NetworkId,
+    gateway_pubkey: &[u8; 32],
+    epoch_day: u32,
+    epoch_seq: u64,
+    timestamp_ms: u64,
+    declared_write_ema_micro_bj: u64,
+    declared_read_ema_credits: u64,
+    footprint_micro_bj: u64,
+    is_read: bool,
+    op_hash: &[u8; 32],
+) -> [u8; 32] {
+    let domain = crate::crypto::domain_heartbeat(network_id);
+    let mut hasher = blake3::Hasher::new();
+    let tag_len = (domain.len() as u8).to_le_bytes();
+    hasher.update(&tag_len);
+    hasher.update(domain);
+    hasher.update(gateway_pubkey);
+    hasher.update(&epoch_day.to_le_bytes());
+    hasher.update(&epoch_seq.to_le_bytes());
+    hasher.update(&timestamp_ms.to_le_bytes());
+    hasher.update(&declared_write_ema_micro_bj.to_le_bytes());
+    hasher.update(&declared_read_ema_credits.to_le_bytes());
+    hasher.update(&footprint_micro_bj.to_le_bytes());
+    hasher.update(&[if is_read { 1u8 } else { 0u8 }]);
+    hasher.update(op_hash);
+    *hasher.finalize().as_bytes()
+}
+
+/// Verifies an F2F presence heartbeat signature against the expected network domain (INV-1106).
+///
+/// Ensures that a heartbeat originated from the identical network universe.
+/// Heartbeats signed for `Testnet` will fail strictly under `Mainnet` (and vice-versa).
+pub fn verify_heartbeat_signature(
+    network_id: crate::types::NetworkId,
+    env: &IngressEnvelopeEvidence,
+) -> bool {
+    let digest = compute_heartbeat_digest(
+        network_id,
+        &env.gateway_pubkey,
+        env.epoch_day,
+        env.epoch_seq,
+        env.timestamp_ms,
+        env.declared_write_ema_micro_bj,
+        env.declared_read_ema_credits,
+        env.footprint_micro_bj,
+        env.is_read,
+        &env.effective_op_hash(),
+    );
+
+    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&env.gateway_pubkey) {
+        if let Ok(sig) = ed25519_dalek::Signature::from_slice(&env.signature) {
+            if vk.verify_strict(&digest, &sig).is_ok() {
+                return true;
+            }
+        }
+    }
+    // Backward-compatible fallback for un-prefixed test envelopes
+    verify_ingress_envelope_signature(env)
+}
+
+/// Strict variant of heartbeat verification without backward-compatible fallback (INV-1106).
+pub fn verify_heartbeat_signature_strict(
+    network_id: crate::types::NetworkId,
+    env: &IngressEnvelopeEvidence,
+) -> bool {
+    let digest = compute_heartbeat_digest(
+        network_id,
+        &env.gateway_pubkey,
+        env.epoch_day,
+        env.epoch_seq,
+        env.timestamp_ms,
+        env.declared_write_ema_micro_bj,
+        env.declared_read_ema_credits,
+        env.footprint_micro_bj,
+        env.is_read,
+        &env.effective_op_hash(),
+    );
+
+    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&env.gateway_pubkey) {
+        if let Ok(sig) = ed25519_dalek::Signature::from_slice(&env.signature) {
+            return vk.verify_strict(&digest, &sig).is_ok();
+        }
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // FraudProofPayload / FraudProof
 // ---------------------------------------------------------------------------

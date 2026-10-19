@@ -143,7 +143,22 @@ impl LockStatus {
     }
 }
 
-/// The universal lock entry in HuMoCo Layer-2
+/// The universal lock entry in HuMoCo Layer-2.
+///
+/// ============================================================================
+/// 📜 ARCHITECTURAL INVARIANT: VOUCHER (L1) AS DEED vs. L2 BLIND LOCK REGISTRY
+/// ============================================================================
+/// 1. The Voucher (`ProofChain` on Layer 1) is the negotiable bearer instrument /
+///    deed ("Urkunde"). It carries actual monetary value, units, transaction
+///    history, and cryptographic owner signatures. The customer hands this voucher
+///    deed to the merchant/PoS terminal at checkout.
+/// 2. Layer 2 (`human-money-node`) is EXCLUSIVELY an auxiliary, blind collision
+///    lock registry (double-spend prevention: `parent_lock -> child_lock`).
+/// 3. L2 lock records, attestations, and quorum certificates are NOT currency,
+///    NOT bearer bonds, and NOT the primary proof of payment; they are merely
+///    clearance receipts ("Unbedenklichkeitsbescheinigung") proving that no
+///    conflicting double-spend was registered in the decentralized collision registry.
+/// ============================================================================
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LockRecord {
     pub id: LockId,
@@ -191,6 +206,12 @@ impl LockRecord {
 /// Shard-node attestation representation used by the simulation model.
 /// The `crypto::sign_lock_attestation*` helpers populate deterministic test signatures;
 /// a 64-byte field alone does not establish a real Ed25519 signature.
+///
+/// 📜 ARCHITECTURAL INVARIANT:
+/// Node attestations and quorum bundles are ephemeral live-checkout signals ("green light for release").
+/// They are NOT currency, NOT negotiable bearer deeds, and are NOT chained into future spend transactions.
+/// Downstream recipients verify locks via fresh live queries against the L2 registry; they do not evaluate
+/// past attestation bundles, and clients do not need to hoard historical certificates (DEC-055).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attestation {
     pub lock_id: LockId,

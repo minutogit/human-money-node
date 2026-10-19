@@ -6,7 +6,7 @@
 > and the current decision register in section 2 when resuming. Checkpoints are in section 9.
 
 Date: 2026-10-13 (Europe/Berlin)
-Last updated: 2026-10-18 (Europe/Berlin)
+Last updated: 2026-10-19 (Europe/Berlin)
 
 Status: Working interview notes, not a binding specification or an implementation plan.
 The interview was saved at the maintainer's request and subsequently resumed.
@@ -77,7 +77,36 @@ implementation alignment and sealing/source coverage/resource proofs remain open
 DEC-062 / §7.69 subsequently restores RAM-first attestation and ingress-only
 freshness, superseding DEC-029 and pre-response commit clauses of DEC-033/034.
 Earlier durable-before-response wording below is historical unless requalified.
-Numeric checkout thresholds and first-party evidence rules are retained.
+DEC-063 / §7.71 reaffirms DEC-032 without relaxation. Proposed finite bucket
+quarantine still needs a proof against later fresh conflicting spends.
+DEC-064 / §7.72 selects class2>class1>class0 with min-hash within the
+highest admissible confirmed class; losing a merge alone never proves node fraud.
+DEC-065 / §7.73 selects minimum sufficient live exclusion/evidence and own-choice
+retention, with excess full losing branches held by clients. TTL+30s purge remains.
+DEC-066 / §7.74 selects inline compact authenticated collision evidence in 409;
+no extra gateway reference cache or required retrieval round. Numeric checkout
+thresholds and first-party evidence rules are retained. DEC-067 / §7.75 rejects
+a weaker collision veto against a valid14/20 checkout; collector integration pending.
+DEC-068 / §7.76 selects bounded automatic client reconciliation with growing
+backoff and read-only status after the30s live window; no guaranteed resolution.
+DEC-069 / §7.77 selects exceptional bounded retrieval of original approvals from
+the frozen checkout committee, without new votes; exact retention/retrieval audit open.
+CP-0067 / §7.78 derives the retrieval skeleton and adds a provisional numbered-spec
+coverage map. DEC-070 / §7.79 selects exact-original-approval retention until
+root TTL+30s, reusing the own-choice lifecycle; shorter-window B is rejected.
+DEC-071 / §7.80 selects durable wallet intent/pending-output storage before
+first dispatch, distinct from node RAM-first. Merchant receipt-before-release
+ordering is answered with a content correction by DEC-072 / §7.81: durably
+store the L1 voucher and purchase journal before release; the checkout quorum
+receipt is ephemeral and need not be archived/back-filled after completed checkout.
+DEC-069 recovery concerns still-uncertain attempts; DEC-070 node own-approval
+retention is not a merchant certificate-archive requirement. Ordinary single-node
+read-safety remains a technical proof gap, not established by receipt disposability.
+DEC-073 / §7.82 rejects automatic alternate payment strictly in human-money-core/
+PoS client policy, including partial multi-voucher purchases; no node purchase logic.
+DEC-074 / §7.83 selects idempotent repeated stop signals preserving the original
+bounded drain. O4.2 now asks whether the node or only its supervisor enforces
+the elapsed-time stop limit; deadline sizing remains unmeasured.
 
 Unless explicitly evidenced otherwise, design details and implementation/verification
 of interview changes remain pending. Constraints in the direction column and the
@@ -106,7 +135,7 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-019"></a>DEC-019 | S6 | Fresh cryptographic identity | Accepted requirement/direction | A new `NodePubKey` starts as a fresh identity. No automatic inheritance of F2F friendship or incubation based on IP address, claimed operator identity, or former node presence. Direct friends must explicitly approve the new identity and its tickets undergo regular incubation. | [Recorded selection](#evidence-dec-019) |
 | <a id="dec-020"></a>DEC-020 | C4 | Network-size observations for client statistics | Accepted requirement/direction | Use multiple recipient-selected sources, refreshed in the background and cached, instead of accepting only the currently queried gateway's network-size claim. This reduces single-provider control but does not prove provider independence, globally complete discovery, or authoritative committee membership. Aggregation, disagreement handling, and freshness remain to be designed. | [Recorded selection](#evidence-dec-020) |
 | <a id="dec-021"></a>DEC-021 | C4 | Conflicting statistical observations | Accepted requirement/direction | Treat strong source disagreement as an unresolved statistical assessment and obtain/check further information, including freshness and network identity. Do not manufacture a precise confidence value by silently averaging incompatible observations. Payment policy in this situation remains undecided. Disagreement is not fraud evidence or grounds for a node ban. | [Recorded selection](#evidence-dec-021) |
-| <a id="dec-022"></a>DEC-022 | S5 | No single-source canonical takeover | Accepted requirement/direction | A conflicting lock supported only by one node must not displace a confirmed branch merely because its H_canon is smaller. Establish sufficient authenticated support in the relevant authorized committee before a state takeover. A peer may transport a valid multi-signer proof; transport-source count is distinct from signer/support count. The exact threshold, provisional merge rules, and authority/epoch transition remain undecided. Mandatory adversarial QUIC regression coverage is required. | [Recorded selection](#evidence-dec-022) |
+| <a id="dec-022"></a>DEC-022 | S5 | No single-source canonical takeover | Accepted requirement/direction | A conflicting lock supported only by one node must not displace a confirmed branch merely because its H_canon is smaller. Establish sufficient authenticated support in the relevant authorized committee before a state takeover. A peer may transport a valid multi-signer proof; transport-source count is distinct from signer/support count. DEC-064 now selects confirmed class2 priority over class1 and min-hash within class; exact membership/authority and transition proof remain open. Mandatory adversarial QUIC regression coverage is required. | [Recorded selection](#evidence-dec-022) |
 | <a id="dec-023"></a>DEC-023 | S5 | Unresolved conflicting slot | Accepted requirement/direction | If sufficient justified support cannot be established, leave the conflicting spend slot and dependent descendants unresolved rather than force a canonical takeover or manufacture quorum. Other unaffected slots/branches continue. The maintainer accepts that a genuine conflict may leave the affected voucher branch unusable; frequency is not measured. Valid late evidence can be re-evaluated, but eventual recovery is not guaranteed. | [Recorded selection](#evidence-dec-023) |
 | <a id="dec-024"></a>DEC-024 | N2 | Checkout versus background capacity | Accepted requirement/direction | Reserve capacity for checkout work and give background synchronization a separate bounded budget that still permits progress. Limit locally originated gateway work to protect inbound shard service. Numerical limits and fairness remain to be designed and measured. | [Recorded selection](#evidence-dec-024) |
 | <a id="dec-025"></a>DEC-025 | N1/N2 | Full shard-direct pool and work budget | Accepted requirement/direction | Reclaim idle shard-direct sessions first. Do not abort active RPCs merely to make capacity for new requests. If the applicable budget is fully occupied by active work, promptly refuse new work without an additional waiting queue. Count neither ordinary idle closure nor capacity refusal as a peer failure. F2F persistent sessions remain separate. Connection and concurrent-request limits are distinct; exact sizes and wire responses remain to be specified. | [Recorded selection](#evidence-dec-025) |
@@ -118,7 +147,7 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-031"></a>DEC-031 | O2 | Automatic storage recovery | Accepted requirement/direction | Resume automatically once durable storage and justified recovery of relevant lock/signing state are established, respecting operator stop/veto. The maintainer expects synchronization to restore missing locks before normal work resumes. Exact completeness/readiness evidence remains unresolved; neither a completed download nor a matching digest proves recovery of every prior individual vote. Distinguish a transient write failure with intact durable choices from irrecoverable choice loss or stale-backup rollback. | [Recorded selection](#evidence-dec-031) |
 | <a id="dec-032"></a>DEC-032 | O2 | Lost signing choices | Accepted requirement/direction | After loss or rollback of prior signing choices, withhold new binding votes under the existing identity for affected scope until signing safety is justified. Ordinary confirmed-state sync alone is insufficient. The maintainer approves this safety gate even if ordinary sync has completed; exact detection, scope and recovery remain open. | [Recorded selection](#evidence-dec-032) |
 | <a id="dec-033"></a>DEC-033 | O1 | Signing protection layout | Immutable-choice table direction retained; pre-response commit order superseded by DEC-062 | Separate immutable own choices in existing redb remains the selected layout direction. Persist related choice/lock atomically through the bounded background worker; DEC-062 removes waiting for its durable success before attestation. Layout is not an implementation or a proof of recovery of volatile issued choices after crash. | [Historical selection](#evidence-dec-033); [ordering change](#769-ram-first-attestation-restored-durability-ordering-superseded) |
-| <a id="dec-034"></a>DEC-034 | O4 | Graceful shutdown | Bounded drain selected; acknowledgment qualification updated by DEC-062 | Stop new admission, allow bounded in-flight/persistence drain, then stop within the configured deadline. Preserve durable choices and report incomplete drain honestly. DEC-062 permits earlier RAM-based approvals, so a failed drain may now leave already issued choices undurable; do not retain the superseded assertion that every binding success awaited commit. Signal/deployment settings and exact semantics remain pending. | [Historical selection](#evidence-dec-034); [RAM-first qualification](#769-ram-first-attestation-restored-durability-ordering-superseded) |
+| <a id="dec-034"></a>DEC-034 | O4 | Graceful shutdown | Bounded drain selected; acknowledgment qualification updated by DEC-062 | Stop new admission, allow bounded in-flight/persistence drain, then stop within the configured deadline. Preserve durable choices and report incomplete drain honestly. DEC-062 permits earlier RAM-based approvals, so a failed drain may now leave already issued choices undurable; do not retain the superseded assertion that every binding success awaited commit. DEC-074 selects idempotent repeated stop signals; deadline ownership, deployment sizing and exact completion semantics remain pending. | [Historical selection](#evidence-dec-034); [RAM-first qualification](#769-ram-first-attestation-restored-durability-ordering-superseded) |
 | <a id="dec-035"></a>DEC-035 | O3 | Automatic expiry processing | Accepted requirement/direction | Choose A: remove eligible expired locks and associated justified signing-safety state in bounded background chunks, using short RAM mutation sections and bounded disk work, with enough progress budget to avoid indefinite backlog. Keep verified root TTL plus 30-second grace, no signing of expired roots and no permanent expired-lock tombstones. Expiry rejection does not wait for physical deletion. Exact scheduling, safe time/retention criteria and batch sizes remain to be specified and measured. | [Recorded selection](#evidence-dec-035) |
 | <a id="dec-036"></a>DEC-036 | O5 | Deployment default | Accepted requirement/direction | Choose A: native systemd as the primary documented Linux deployment path; retain Docker/Compose as an alternative. Both must obey the same persistence, signing, shutdown and operator-sovereignty rules. Existing template settings are not validated production guarantees. | [Recorded selection](#evidence-dec-036) |
 | <a id="dec-037"></a>DEC-037 | O5 | Private operator access | Accepted requirement/direction | Choose A: dedicated local dashboard/admin endpoint, with protected control-socket authority and operator SSH forwarding for remote access. Keep operator routes separate from public client ingress and retain useful local dashboard functions. Exact UI/backend packaging, authentication and permission enforcement remain to be specified and verified. | [Recorded selection](#evidence-dec-037) |
@@ -145,10 +174,20 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-058"></a>DEC-058 | S3.4a/N3 | Quorum-backed verified digest-pull | Accepted mechanism / Q-S3-RECOVERY-BASIS-01 A; completeness proof pending | Use Spec03-style agreement among distinct justified shard peers on a state digest (14/20 in regional mode), then fetch the bound snapshot, verify lock signatures, reconstruct the committed state and durably install before readiness. Stay FLAG_NOT_READY until justified complete recovery. Designated-source trust alternative B rejected. Digest agreement and signatures do not by themselves prove preservation of omitted prior locks; source coverage, stable cuts and own-choice recovery remain obligations. | [Selection, proof boundary and live-transfer question](#765-quorum-digest-pull-selected-stable-transfer-under-write-load) |
 | <a id="dec-059"></a>DEC-059 | S3.4a.1/N3 | Fixed snapshot with bounded deltas and bucket sealing | Accepted direction / Q-S3-SYNC-WRITES-01 A; sealing semantics pending | Select fixed snapshot plus bounded deltas; use 5-minute timestamp buckets and a 30s grace after bucket end as the selected sealing parameter; immutable-state semantics remain open. Buffer current-window in-flight work without application acceptance/vote before validation/readiness/durable commit; bounds/backpressure required. DEC-061 clarifies direct targeted sync and deterministic recomputation without an extra snapshot-version or correction subsystem. Live-freshness/seal alignment, root expiry and canonical changes still need verification. | [Selection and late-bucket question](#766-fixed-snapshot-deltas-selected-bucket-sealing-and-retry-boundaries) |
 | <a id="dec-060"></a>DEC-060 | C3/N4/S3 | Exact-payload retries and three-send heuristic | Accepted maintainer refinement; bounds/integration unverified | Retry the same serialized application payload with unchanged T_0. Adopt the referenced conditional three-send heuristic (initial attempt, error retry, third background attempt) as a refinement of DEC-027's prior one-application-attempt policy. Keep the frozen member set, 800ms checkout, neutral cancellation, deduplication, bounded work and durable vote rules. Sending is neither durable acceptance nor a completeness/delivery guarantee; DEC-061 selects wallet-bound creation-time custody across failover; local schema/signature alignment and resource/cancellation details remain open. | [Maintainer instruction and limits](#766-fixed-snapshot-deltas-selected-bucket-sealing-and-retry-boundaries) |
-
 | <a id="dec-061"></a>DEC-061 | S3.4a.2/K2/C3 | Wallet-bound creation time; fresh live ingress versus historical sync | Accepted maintainer correction; code alignment/proof pending | T_0 is an explicit public wallet-created created_at_ms bound by layer2_signature, distinct from encrypted_timestamp; retain it across retries/failover. Fresh live acceptance must use this same time with the 30s gate; closed 5-minute windows seal after 30s. Recover missing old records via quorum-backed targeted sync and recompute the deterministic bucket projection. Reject Q-S3-LATE-BUCKET-01 A and B as unnecessary additional structures: no separate correction history or snapshot-version subsystem selected. Local code currently gates a gateway-envelope time and projects encrypted_timestamp; alignment, clock/commit/TTL/merge and source coverage remain open. | [Correction, conditional timing argument and code evidence](#767-withdraw-late-bucket-choice-separate-live-freshness-from-sync-repair) |
-
 | <a id="dec-062"></a>DEC-062 | O1/S3.4a.4/C2 | RAM-first attestation; asynchronous persistence; ingress-only freshness | Accepted explicit current direction; crash/seal proofs pending | Wallet T_0 fixes bucket; 30s freshness is entry-only. After reservation-first RAM collision acceptance, sign/respond in <5ms without waiting for redb commit; persistence is bounded asynchronous background work. No post-admission freshness check or variable seal-delay choice selected. Supersedes DEC-029 and pre-response durability portions of DEC-033/034; preserves identity-choice immutability and recovery gates. RAM+disk digest input includes accepted volatile entries, but does not make them durable. Fixed end+30s sealing remains intended; gate-to-insertion timing and clock proof remain open. | [Correction and changed durability contract](#769-ram-first-attestation-restored-durability-ordering-superseded) |
+| <a id="dec-063"></a>DEC-063 | O1.1/O2/N3 | Unconditional retention of lost-choice safety gate | Reaffirmed requirement / Q-O1-CRASH-RESUME-01 A; bounded-quarantine construction unproved | DEC-032 stays fully in force; ordinary quorum sync alone is insufficient for same-key signing when own issued choices are missing. B's relaxation categorically rejected. Maintainer proposes finite 5-minute-bucket+30s quarantine; closure of stale live ingress alone does not yet prove immunity to a distinct, fresh-time conflicting spend of the same output. Preserve the bounded-recovery goal and unresolved construction; do not silently auto-open the gate or claim permanent blocking is necessary. | [Answer, counterexample boundary and next merge question](#771-loss-gate-reaffirmed-bucket-quarantine-proof-and-mixed-mode-merge) |
+| <a id="dec-064"></a>DEC-064 | S5.1/K1.1 | Strict confirmation-class priority before canonical hash | Accepted policy / Q-S5-MIXED-SUPPORT-01 A | Valid class2 FINAL/Regional14 strictly outranks valid adaptive class1 PROVISIONAL; class0 partials/intents cannot displace a confirmed branch or establish a confirmed winner. Within the highest admitted confirmed class use min(H_canon). Reject mixed-class freezing B; losing causal branch becomes VOID without sanction of honest single-branch signers. Context/signature/causal checks and first-party-only fraud remain. Class priority is not a global irrevocability proof; equal-class regional conflicts still use the selected merge rule. | [Decision and VOID-retention question](#772-class-priority-selected-retention-after-void-remains-open) |
+| <a id="dec-065"></a>DEC-065 | S5.2/K1/O3 | Minimal losing-branch retention | Accepted policy / Q-S5-VOID-RETENTION-01 A | Retain the winning lock, minimum sufficient collision/exclusion evidence and immutable own signing choices while the root is usable; clients custody excess complete losing branches. Reject full losing-tree archival B as state bloat. Physically purge root-bound records at root.valid_until+30s; separate identity/fraud rules remain. Exact authenticated compact format, descendant/promotion handling and recovery sufficiency require engineering verification. | [Selection and conflict-response question](#773-minimal-retention-selected-conflict-response-payload-open) |
+| <a id="dec-066"></a>DEC-066 | C1.1/K2 | Inline compact conflict evidence | Accepted policy / Q-C1-CONFLICT-RESPONSE-01 A | Include the already available compact signed collision evidence and confirmation status directly in the 409 envelope; no full losing trees, hot-path proof retrieval or required second proof-fetch round. Reject reference-only B to reduce latency and gateway complexity. Exact signer/slot/time binding, encoding, payload limits and verification remain work; a single attestation is not a quorum certificate. | [Selection and checkout conflict-veto question](#774-inline-conflict-evidence-selected-checkout-veto-policy-open) |
+| <a id="dec-067"></a>DEC-067 | C2.1/S5 | No minority collision veto at checkout | Accepted policy / Q-C2-CONFLICT-VETO-01 A | A valid14/20 certificate from the frozen committee completes checkout despite weaker authenticated collisions. Reject conservative minority-veto B. A sufficiently supported competitor is evaluated by DEC-064; a peer may carry a full certificate, so transport-source count is not support strength. Partial-only outcomes remain unresolved without payment success or slot rollback. Exact collector/response ordering and wire defenses pending; no global-finality or fault-bound proof inferred. | [Selection, derived response rules and uncertain-payment follow-up question](#775-quorum-checkout-priority-selected-uncertain-payment-follow-up-open) |
+| <a id="dec-068"></a>DEC-068 | C3.1/C4 | Bounded automatic client reconciliation | Accepted policy / Q-C3-UNCERTAIN-FOLLOWUP-01 A | Wallet retains the original uncertain intent, performs automatic status reconciliation with growing/exponential backoff and strict attempt/traffic budget, and uses only reads after the original30s freshness window. No historical-order push state at servers; normal status routing remains INV-0310. Reject manual-only B. Example5 attempts and5s/15s/45s schedule are illustrative, not frozen parameters. Budget exhaustion/absence cannot become failure, free slot or14/20 success; sufficient read evidence and exact bounds remain open. | [Selection and proof-retrieval scope question](#776-bounded-client-reconciliation-selected-completion-evidence-retrieval-open) |
+| <a id="dec-069"></a>DEC-069 | C4.1/C4.2/K2/O1 | Read-only recovery of original checkout approvals | Accepted policy / Q-C4-COMPLETION-EVIDENCE-01 A | Wallet may recover existing approvals of the original fixed20 within its total retry/read budget, verify14 distinct eligible signatures in one original context for an unresolved checkout; DEC-072 removes mandatory certificate custody/back-fill after completion. No new lock, changed T_0, new write vote, full-tree fetch or replacement committee. Reject status-only B. Missing/insufficient approvals stay unresolved. Original-attestation retention and retrieval are not established in inspected production paths; derive exact format/availability and capacity costs. One-roundtrip cap is an example, not a frozen value or guaranteed single packet. | [Selection and technical retrieval contract](#777-original-approval-retrieval-selected-technical-contract-and-storage-gap) |
+| <a id="dec-070"></a>DEC-070 | C4.2a/O1/O3 | Root-lifetime retention of original own approvals | Accepted policy / Q-C4-APPROVAL-RETENTION-01 A | Keep exact own original approvals and required verification context until root.valid_until+30s, preferably with the already protected own-choice record and common TTL pruning. Reject shorter-window B as a second lifecycle and avoidable offline-wallet recovery loss. No full losing-tree archive or synchronous node commit is added. Actual signature/context storage costs and safe coordinated RAM/disk purge need verification; no guarantee that14 original signers remain reachable. | [Selection and wallet send-order question](#779-root-lifetime-original-approval-retention-selected-wallet-send-order-open) |
+| <a id="dec-071"></a>DEC-071 | C3.2/K2 | Durable wallet intent before network dispatch | Accepted policy / Q-C3-WALLET-SEND-DURABILITY-01 A | Durably commit the exact signed request bytes/T_0 and atomic pending state of the consumed output before the wallet first sends to a gateway. Reject client RAM-first send B: crash must not lose the only original intent while the network may have accepted it. Reuse existing wallet storage; WAL/SQLite are examples, not a selected new dependency. Preserve exact retries, read-only reconciliation after freshness and server RAM-first. Actual client durability/latency and rollback recovery need verification. | [Selection and PoS receipt-order question](#780-wallet-durable-before-send-selected-pos-receipt-order-open) |
+| <a id="dec-072"></a>DEC-072 | C2.2/K1/C4 | Durable L1 voucher/purchase, ephemeral completed-checkout certificate | Accepted corrected A / Q-C2-POS-RECEIPT-DURABILITY-01; original A content amended | Before goods release, durably store the received L1 voucher deed and its purchase-journal binding. Verify the live quorum signal during checkout; no mandatory merchant archival/back-fill of its14-signature bundle after completion, no recursive receipt chain and no treating certificates as money/current-unspent proof. Supersede §7.80 certificate-in-durable-purchase requirement, not wallet pre-send durability or node signing-safety retention. Live status is the selected post-restart interface; sufficient read-evidence semantics remain unproved. | [Correction, scope reconciliation and alternate-payment question](#781-merchant-l1-custody-selected-completed-checkout-receipts-ephemeral) |
+| <a id="dec-073"></a>DEC-073 | C3.3/K1 | No automatic substitute payment; strict client boundary | Accepted policy / Q-C3-ALTERNATE-PAYMENT-01 A with explicit scope | Wallet/PoS must not automatically issue a second different-voucher payment while the first is uncertain. Multi-voucher purchases retain completed components as partial payment and timed-out components as uncertain; changing tender for the remainder is a conscious cashier/customer decision. Reject automated replacement/refund B. This is exclusively human-money-core/PoS commercial logic: humoco-node knows no carts, purchase IDs, remaining amounts or substitute payments and gains no new API/state for them. | [Client-boundary selection and next node-operation question](#782-client-only-payment-policy-selected-repeated-node-stop-signal-question) |
+| <a id="dec-074"></a>DEC-074 | O4.1/O1 | Idempotent repeated termination signals | Accepted policy / Q-O4-SECOND-SIGNAL-01 A | Once bounded graceful shutdown starts, repeated SIGTERM/SIGINT must neither shorten nor restart/extend its original deadline. Continue eligible in-flight work and async persistence within that budget; reject second-signal early-abort B. Operator force-stop remains OS SIGKILL. Bound expiry/incomplete reporting follows DEC-034; readiness and lost-own-choice gates still apply after unclean stop. Reported few-hundred-ms drain is an unmeasured expectation. | [Signal selection, derived stop contract and deadline-enforcement question](#783-idempotent-stop-signals-selected-deadline-enforcement-boundary-open) |
 
 ### 2.2 Alternatives, refinements and superseded proposals
 
@@ -190,6 +229,30 @@ the recorded reasoning; they do not supply missing original user explanations.
 | DEC-029/033/034 → DEC-062 | Durable-before-response / relaxed local SLA superseded; RAM-first attestation and <5ms target restored. | §7.69 records explicit maintainer direction. Async worker+awaited commit was distinct from synchronous fsync in the handler; the changed response order reopens volatile-choice crash composition, not the timestamp/bucket authority. |
 | Q-S3-FRESH-COMMIT-01 | Withdrawn after correction; neither A nor B selected. | DEC-062 rejects post-entry freshness recheck and a variable sealing-delay policy. §7.68 remains the original question under the superseded durability premise. |
 
+| Q-O1-CRASH-RESUME-01 / DEC-063 | Answered A; DEC-032 fully retained and B categorically rejected. | §7.71 preserves the finite-quarantine proposal and its remaining proof gap. Do not re-ask whether to accept conflicting own signatures or infer automatic release after bucket seal. |
+
+| Q-S5-MIXED-SUPPORT-01 / DEC-064 | Answered A: strict class2 priority over class1; mixed-class freeze B rejected. | §7.72 records the small-mesh blocking/blackmail concern. Min-hash remains the same-class tie-breaker; class0 is not a payment certificate and honest losing signers are not banned. |
+
+| Q-S5-VOID-RETENTION-01 / DEC-065 | Answered A: minimum sufficient live records; full admitted losing-branch archival B rejected. | §7.73 records client custody, immutable own choices and root TTL+30s physical purge. The exact compact authenticated evidence format remains technical work; no permanent tombstones or recursive L2 receipt chain selected. |
+
+| Q-C1-CONFLICT-RESPONSE-01 / DEC-066 | Answered A: compact signed evidence directly in 409; reference-first B rejected. | §7.74 records one-response clarity, existing RAM data, client custody and stateless gateway intent. Reported 100–300ms savings, a few-hundred-byte size and one-MTU delivery are unverified estimates, not guarantees. |
+
+| Q-C2-CONFLICT-VETO-01 / DEC-067 | Answered A: valid14/20 completes; weaker authenticated collision veto B rejected. | §7.75 records BFT availability and minority-sabotage rationale. Sufficient competing certificates still use DEC-064; partial-only payment uncertainty is derived from existing DEC-009/023 rather than re-asked. |
+
+| Q-C3-UNCERTAIN-FOLLOWUP-01 / DEC-068 | Answered A: automatic bounded client reconciliation; manual-only B rejected. | §7.76 records growing backoff, strict attempt budget and read-only after30s. The selected mechanism may resolve an outcome but bounded single-node reads do not guarantee quorum evidence or deterministic resolution. |
+
+| Q-C4-COMPLETION-EVIDENCE-01 / DEC-069 | Answered A: recover existing original-committee signatures; status-only B rejected. | §7.77 records wallet custody, no new vote and strict total budget. Exact byte/context retention and read-only wire retrieval remain engineering work. No new preference question is needed to choose between original evidence and newly signed status assertions. |
+
+| Q-C4-APPROVAL-RETENTION-01 / DEC-070 | Answered A: original own approvals retained until root TTL+30s; shorter retrieval window B rejected. | §7.79 records one lifecycle, same redb-own-choice record direction, long-offline wallet recovery and physical expiry. Zero additional bytes and instantaneous cross-tier deletion are not established by this selection. |
+
+| Q-C3-WALLET-SEND-DURABILITY-01 / DEC-071 | Answered A: durable original wallet intent/pending-output state before first dispatch; RAM-first client send B rejected. | §7.80 records exact-retry custody and prevention of local phantom unspent state after ordinary crash. WAL/SQLite and sub0.5ms latency are implementation examples/estimates, not measured guarantees or mandatory dependencies. |
+
+| Q-C2-POS-RECEIPT-DURABILITY-01 / DEC-072 | Answered corrected A: durable L1 voucher plus purchase record before release; no permanent checkout-certificate duty. | §7.81 preserves the exact earlier question but supersedes its A requirement to persist the14-signature bundle. Later spending requires current registry checks; historical proof and current status are different claims. Do not infer cancellation of unresolved-attempt recovery or node own-choice rules. |
+
+| Q-C3-ALTERNATE-PAYMENT-01 / DEC-073 | Answered A with explicit client-only scope; automatic substitute/refund B rejected. | §7.82 records partial multi-voucher purchase handling and deliberate tender change. No shopping-cart, purchase-ID, substitute-payment or amount state belongs in humoco-node; return active interview focus to node operations. |
+
+| Q-O4-SECOND-SIGNAL-01 / DEC-074 | Answered A: repeated ordinary stop signals preserve the original bounded drain; early second-signal abort B rejected. | §7.83 records persistence protection and fixed deadline with SIGKILL as explicit OS escape. This does not approve unlimited drain or treat ordinary boot sync as complete lost-own-choice recovery. |
+
 ### 2.3 Open design and decision inventory
 
 These are tracked obligations, not a list of questions to ask the maintainer in
@@ -208,8 +271,30 @@ maintainer rejects both options (DEC-061 / §7.67). S3.4a.3 retains the
 wallet-time / live-gate / bucket integration audit. Q-S3-FRESH-COMMIT-01
 (§7.68) is withdrawn by DEC-062 / §7.69: no post-gate freshness recheck or
 variable seal delay; RAM-first attestation selected. Active O1.1 investigates
-issued-but-unflushed own-choice recovery as a prerequisite to signing readiness;
-no new human question pending.
+issued-but-unflushed own-choice recovery as a prerequisite to signing readiness.
+Q-O1-CRASH-RESUME-01 is answered A / DEC-063 (§7.71); relaxation rejected.
+O1.1 bounded-quarantine proof remains a technical obligation; user-directed next
+decision S5.1 / Q-S5-MIXED-SUPPORT-01 is answered A / DEC-064 (§7.72).
+S5.2 / Q-S5-VOID-RETENTION-01 is answered A / DEC-065 (§7.73): minimum
+sufficient live evidence and own choices; no full losing-tree archive.
+C1.1 / Q-C1-CONFLICT-RESPONSE-01 is answered A / DEC-066 (§7.74): inline
+compact signed evidence. C2.1 / Q-C2-CONFLICT-VETO-01 is answered A /
+DEC-067 (§7.75): no weaker collision veto against valid14/20. C3.1 /
+Q-C3-UNCERTAIN-FOLLOWUP-01 is answered A / DEC-068 (§7.76): automatic bounded
+client reconciliation. C4.1 / Q-C4-COMPLETION-EVIDENCE-01 is answered A /
+DEC-069 (§7.77): bounded retrieval of original-committee approvals. C4.2a /
+Q-C4-APPROVAL-RETENTION-01 is answered A / DEC-070 (§7.79): original own
+approvals remain fetchable until root TTL+30s. C4.2 context/storage/wire engineering
+remains pending. C3.2 / Q-C3-WALLET-SEND-DURABILITY-01 is answered A /
+DEC-071 (§7.80): wallet durable intent/pending-output commit precedes first send.
+C2.2 / Q-C2-POS-RECEIPT-DURABILITY-01 is answered with corrected A / DEC-072
+(§7.81): durable L1 voucher/purchase before release, ephemeral live certificate
+after completion. C3.3 / Q-C3-ALTERNATE-PAYMENT-01 is answered A / DEC-073
+(§7.82), strictly client-side, including partial multi-voucher purchases. Active
+O4.1 / Q-O4-SECOND-SIGNAL-01 is answered A / DEC-074 (§7.83). Active O4.2 /
+Q-O4-DEADLINE-OWNER-01 asks internal deadline enforcement with outer supervisor
+margin versus supervisor-only elapsed-time enforcement. Node RAM-first and live
+proof thresholds are not reopened; no purchase logic enters the node.
 DEC-060 refines retry policy.
 Loss of the node's own signing history remains a separate gate.
 Keep selected requirements separate from unresolved proof/parameter choices.
@@ -219,17 +304,17 @@ Keep selected requirements separate from unresolved proof/parameter choices.
 | OPEN-01 | S3.3 | One-round obligations versus redesigned completion; inherited/own records, late certificates, authenticated inclusion and partial conflicts. Conditional witness bound is not an inclusion algorithm. | Q-S3.3-01; §7.5, §7.14–7.17, §7.29 |
 | OPEN-02 | S1/S2 | DEC-053 selects qualified current-mesh regional committees. T01–T12 passed under probe-dependent P0-SIM-1; DEC-055 removes those probes, so passive selection needs revised predicates/scenario validation. DEC-056 selects three consecutive missed heartbeats; exact passive timing and enforcement remain pending. Broad recursive-trust research remains stopped. The human fault bound and live Argon/wire integration remain open. Competing regional receipts are allowed, not globally irreversible. | §7.35–7.44, §7.56–7.61; Q-S2.1-PRESENCE-01; DEC-053–055 |
 | OPEN-03 | S3/S4 | DEC-057 answers Q-S3-STATELOSS-01 A: mandatory P2P recovery gate after restart/loss; no empty-state fallback. Active S3.4a (§7.63) must establish source continuity, scoped recovery coverage and durable activation; matching empty digests do not prove recovery. Re-scope under DEC-053: regional readiness without mandatory predecessor14, durable own-history preservation, authenticated available-state/client repair and deterministic conflict convergence. Unknown remote competing evidence is an accepted later-revision risk, not proof of global absence. Old fence/inclusion/BFT/install models remain reference evidence; local persistence/install/expiry obligations still require exact predicates and wire verification. | §7.29–7.44, §7.57; DEC-039/041/043/045/046/053 |
-| OPEN-04 | C4 | Hidden-query/multiple-witness read proposal, actual evidence, authenticated random sampling, retry/missing-response semantics, accepted residual risk and goods release. | §3–5, §7.1; DEC-015/017/020/021 |
-| OPEN-05 | S5/S6 | DEC-053 selects potentially revocable regional acceptance. P0 draft0.2 specifies candidate support ordering, complete bundles, affected descendants and separate approval/observation domains. Losing a regional branch is not node fraud; executable proof/wire validation, historical context and versioned integration remain pending. Green requires a separate justified global proof; baseline schemes are empty. Q-K1-FINALITY-01 is answered. | §5.4, §7.12–7.13, §7.56–7.58; DEC-022/023/048/053/054 |
-| OPEN-06 | K2/C1 | Shared crate layout/versioning, signed fields, full identities, parent/output binding, splits, genesis/root TTL, batch behavior and all core consumers. | §2 closing clarifications, §7.3; DEC-005/006/011–014/038 |
-| OPEN-07 | C2/C3 | End-to-end targets, bounded retry counts/delays/horizon, handoff/NOT_READY feedback fields and actual shared transport backoff. DEC-060 now selects exact-payload conditional three-send retries; reconcile 800ms cancellation, detached-work bounds, quota/duplicate work, gateway failover and transport retransmissions. This is not a delivery/completeness proof. | §7.2.1/7.3, §7.33; DEC-008/009/027/042 |
+| OPEN-04 | C4 | Hidden-query/multiple-witness read proposal, actual evidence, authenticated random sampling, retry/missing-response semantics, accepted residual risk and goods release. DEC-069 selects bounded recovery of original approvals for exceptional uncertain-payment reconciliation (§7.77). C4.2 must establish exact context/read-only wire retrieval. DEC-070 selects original-approval retrieval until root TTL+30s (§7.79); exact storage/context/wire integration remains pending. DEC-072 removes post-completion merchant certificate custody; live-status interface remains selected, while single-node sufficiency is unproved. Ordinary INV-0310 routing stays. | §3–5, §7.1; DEC-015/017/020/021 |
+| OPEN-05 | S5/S6 | DEC-053 selects potentially revocable regional acceptance. DEC-064 selects the P0 class ordering. DEC-065 selects minimum sufficient retention rather than full losing-tree archival. Complete bundles, affected descendants, the exact minimal evidence set and separate approval/observation domains still need integration/verification. Losing a regional branch is not node fraud; executable proof/wire validation, historical context and versioned integration remain pending. Green requires a separate justified global proof; baseline schemes are empty. Q-K1-FINALITY-01 is answered. | §5.4, §7.12–7.13, §7.56–7.58; DEC-022/023/048/053/054 |
+| OPEN-06 | K2/C1 | Shared crate layout/versioning, signed fields, full identities, parent/output binding, splits, genesis/root TTL, batch behavior and all core consumers. DEC-066 selects inline compact conflict evidence; exact authenticated response envelope and bounds remain pending (§7.74). | §2 closing clarifications, §7.3; DEC-005/006/011–014/038 |
+| OPEN-07 | C2/C3 | DEC-067 selects no minority veto; ordered collector/response integration remains pending (§7.75). DEC-068 selects bounded automatic client follow-up; exact budgets/backoff/state transitions remain pending. DEC-071 selects wallet durable intent ordering before first dispatch; DEC-072 selects durable L1 voucher/purchase before release, with no completed-checkout certificate archive. DEC-073 rejects automatic alternate payments at the client only; partial-purchase/tender handling stays outside humoco-node (§7.82). End-to-end targets, bounded retry counts/delays/horizon, handoff/NOT_READY feedback fields and actual shared transport backoff. DEC-060 now selects exact-payload conditional three-send retries; reconcile 800ms cancellation, detached-work bounds, quota/duplicate work, gateway failover and transport retransmissions. This is not a delivery/completeness proof. | §7.2.1/7.3, §7.33; DEC-008/009/027/042 |
 | OPEN-08 | N1/N2/N4 | Session/stream/CPU/persistence admission limits, fairness, resource partitioning, exact full-budget refusal, tier lifecycle and receiver-side abuse defenses. | §7.2–7.2.1; DEC-024/025/028; existing project invariants |
 | OPEN-09 | N3/O2 | Missing independent locks, divergent partial replicas and recovery without active clients; how readiness is justified beyond complete download/matching digest. Snapshot-bound pagination, no-gap deltas, full commitment coverage and catch-up capacity remain open (§7.31–7.32). Client resubmission is assistance, not a replacement for the DEC-057 restart P2P gate. | §7.2–7.2.1, §7.31–7.32, §7.63; DEC-026/031/032/057 |
 | OPEN-10 | O1/O2 | DEC-062 permits RAM-based approval before flush; derive immutable choice/slot/context semantics, issued-but-unflushed loss detection, background durable acknowledgment, duplicate/pending operations and safe same-key resumption under DEC-032. Prior durable-before-vote model is not this crash proof. | §7.2.1/7.3; DEC-029–033 |
-| OPEN-11 | O3/O4 | Safe time and choice retention, bounded expiry scheduling, drain/handler ordering, signal escalation and measured deployment stop deadline. | §7.2.1; DEC-034/035 |
+| OPEN-11 | O3/O4 | Safe time and choice retention, bounded expiry scheduling, drain/handler ordering and measured deployment stop deadline. DEC-074 selects idempotent repeated stop signals. Active O4.2 asks daemon-internal versus supervisor-only stop deadline enforcement (§7.83); sizing, producer joins and truthful completion remain engineering work. | §7.2.1; DEC-034/035 |
 | OPEN-12 | O5/O6 | Private admin packaging/auth/socket permissions; metric-specific aggregation, bounded persistence and reliability diagnostics. | §7.2.1/7.3; DEC-002/003/036/037/040 |
 | OPEN-13 | C4/S1 | Statistical aggregation/freshness/disagreement payment policy, provider independence, ticket/voucher grinding and quantified adversary assumptions. | §5.5, §7.1/7.3; DEC-016/018/020/021/044 |
-| OPEN-14 | F1 | Complete specification/invariant/interface coverage and consolidation of contradictions before final plan; real-wire verification remains a later delivery gate. | §1, §6, §8; CP-0003 below |
+| OPEN-14 | F1 | Complete specification/invariant/interface coverage and consolidation of contradictions before final plan. §7.78 adds a provisional map of22 numbered families/24 physical spec files and113 distinct mentioned invariant IDs; this is not item-level semantic or wire-test coverage. Real-wire verification remains a later delivery gate. | §1, §6, §8; CP-0003 below |
 | OPEN-15 | K3 | Naming and scoped editorial alignment complete (DEC-049–052); ongoing autonomous maintenance, no preference questions. Protocol conflicts remain OPEN-02/03/05/06/08/09/10/14. | §7.18–7.28; glossary G-001–066 / TERM-01–13; alignment report §8 |
 
 ### 2.4 Record gaps and pending specification consolidation
@@ -6814,3 +6899,1465 @@ pending. P0's durable-vote model evidence remains historical, not validation of
 the new crash model. Only interview memory edited; no tests/benchmarks executed.
 
 Completed checkpoint: **CP-0058**.
+
+
+### 7.70 Remaining interview work and same-key crash-resume policy review
+
+Record: O1-CRASH-RESUME-QUESTION-001. Date: 2026-10-18 (Europe/Berlin).
+Checkpoint: CP-0059. Active leaf O1.1; Q-O1-CRASH-RESUME-01.
+Maintainer asks to continue and asks whether many questions remain.
+
+**Progress answer.** The current inventory has OPEN-01–14 unresolved engineering/
+coverage packages; OPEN-15 naming/alignment is complete. These are not fourteen
+questions for the maintainer and not an exhaustive coverage guarantee (F1 still
+needs actual mapping). Many package entries are technical verification or already
+selected policy awaiting implementation. The62 decision IDs also include clarified,
+qualified and superseded choices; they are not a completion percentage or62
+remaining questions. No justified fixed count of future human questions exists.
+State that candidly and avoid an arbitrary "only a few left" estimate. Technical
+work remains autonomous; WF-004 means A/B for substantive questions, not invented
+preferences for every code/proof detail.
+
+**Why this policy review is justified now.** DEC-032 previously selected same-key
+withholding when relevant own signing choices are lost, even after ordinary shard
+sync. It remains the default. DEC-062 newly permits issuance before durable commit,
+so an ordinary unclean crash can create the previously exceptional history-loss
+condition. That materially changes the operating consequences of the earlier
+durability-based design. This question makes a possible relaxation explicit;
+it does not pretend the previous loss gate was unanswered, ask to reapprove
+RAM-first response or infer a relaxation from "continue". A retains DEC-032;
+B would reopen its protection deliberately. The actual safe recovery algorithm
+remains technical work under either answer, not a threshold for the human to guess.
+
+**Evidence and limit.** §7.69 already establishes the minimal witness: a node's
+valid A approval is held by its requester, a crash erases local A before flush,
+and replicas need not possess that individual vote. Quorum equality of shared
+lock state does not, without further proof, reconstruct private prior signing
+choices. Genuine later B under the same identity can conflict with A. No new
+experiment or assumption that this necessarily yields two complete certificates
+is needed. Do not claim that successful quorum sync is useless for shared-state
+repair; it establishes a different property from complete own-vote recovery.
+The present bounded source search found no demonstrated own-choice rollback/
+unclean-loss recovery in the inspected node paths; absence of a search result is
+not a full repository audit or proof of no possible solution. No tests run here.
+
+**Exact pending question — Q-O1-CRASH-RESUME-01 (unanswered):**
+
+> Soll nach einem Absturz der normale Quorum-Sync bereits zur erneuten
+> Signierfreigabe unter derselben Identität reichen, wenn dabei möglicherweise
+> vor dem Flush abgegebene eigene Stimmen nicht rekonstruierbar sind?
+>
+> **A — Nein, die bestehende Sicherheitssperre beibehalten (Empfehlung):**
+> Solange die Sicherheit der eigenen Signierhistorie nicht begründet ist,
+> bleibt der betroffene Bereich auf FLAG_NOT_READY — auch nach erfolgreichem
+> Shard-Sync. Das schützt die bisherige Regel gegen widersprüchliche eigene
+> Stimmen, kann den Wiederanlauf aber länger oder unbestimmt blockieren.
+>
+> **B — Ja, Quorum-Sync als ausreichende Wiederanlaufbedingung zulassen:**
+> Danach darf dieselbe Identität wieder signieren. Das ermöglicht den
+> automatischen Wiederanlauf trotz ungeklärter eigener Einzelstimmen,
+> akzeptiert aber das zusätzliche Risiko widersprüchlicher eigener Signaturen
+> nach einem Absturz. Das würde die bisherige DEC-032-Garantie lockern.
+
+**Recommendation and scope.** Recommend A because DEC-057 explicitly prioritizes
+collision protection over availability and DEC-032 remains selected. This is a
+review caused by the newly changed response-order requirement, not a request
+for ritual confirmation without new context. Retaining A is not an implemented
+history-recovery solution or a guarantee of available automatic restart. B is a
+conscious weaker operating guarantee, not mathematically equivalent protection;
+code that merely synchronizes the visible shard state does not erase the witness.
+If B is selected, fraud/receipt/identity semantics and admissible crash-fault scope
+would require explicit further reconciliation; no automatic crash exemption from
+first-party evidence rules is approved here. No fresh-key shortcut, fsync on the
+checkout path, extra receipt chain or change to fixed committee/maturity follows
+from either option. If unchanged guarantees cannot yet be justified, keep the
+safety gate rather than claiming the proof exists.
+
+Next: ask the recorded A/B and await answer. Then derive the retained/changed
+recovery contract, and distinguish its open proof from selected policy and delivery.
+Only interview memory changed. No production/spec edit, model/test campaign or
+external research needed for this risk presentation. Prior decisions and withdrawn
+questions retained with their exact meanings.
+
+### CP-0059 — Explain remaining work and review crash-resume consequences of RAM-first
+
+Recorded inventory-based progress without inventing a remaining question count.
+Saved Q-O1-CRASH-RESUME-01 in O1.1: A = retain DEC-032 same-key loss gate despite
+successful ordinary shard sync; B = explicitly relax it and accept additional
+volatile-vote-loss risk. The earlier gate remains current until an explicit change;
+no answer inferred from the request to continue. The review is triggered by new
+DEC-062 response ordering, not an erased prior decision. Technical recovery proof
+and actual wire/crash verification remain pending. No production changes/tests.
+
+Completed checkpoint: **CP-0059**.
+
+
+### 7.71 Loss gate reaffirmed; bucket-quarantine proof and mixed-mode merge
+
+Record: O1-CRASH-RESUME-DECISION-002 / S5-MIXED-SUPPORT-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0060.
+User-directed active decision: S5.1. O1.1 remains a technical proof dependency.
+
+**Answer / DEC-063.** The maintainer unequivocally selects Q-O1-CRASH-RESUME-01 A:
+DEC-032 remains unrestricted; B's knowingly weaker protection against own conflicting
+signatures is categorically excluded. They emphasize permanent identity/ticket/WoT
+consequences from verified equivocation and distinguish ordinary quorum-state sync
+from recovery of a volatile individual choice. No further question about weakening
+this gate is warranted without genuinely new maintainer steering.
+
+**Bounded-quarantine proposal, faithfully retained.** The maintainer proposes that
+an earlier14/20 lock is recovered by ordinary shard sync; an isolated choice is
+bound to T_0 in a5-minute window, and after sealing at window-end+30s no colliding
+new attempt for that interval is admitted. They intend a short deterministic
+bucket-level quarantine rather than indefinite shutdown. Record the intended
+bounded-recovery goal and proposed argument; do not label it an implemented or
+proved activation predicate. Quorum recovery requires actual surviving/retrievable
+evidence and justified source coverage (DEC-057/058);14 signatures alone do not
+materialize a permanently missing data copy.
+
+**Narrow technical finding.** Expiry of live admission for an exact old T_0 does
+not imply expiry of the consumed-output collision slot. P0 §2 defines ApprovalSlot
+as(network,root,consumed_output), independent of time bucket/view. In
+`p0/evidence.rs::verify_node_equivocation`, same node and slot with different
+spend IDs establishes the modeled proof after verifying both signatures; there
+is no bucket-expiry exemption. `storage/engine.rs::HmcRamIndex::insert_or_check`
+checks the existing lookup_tag and divergent t_id for client ingress, without
+resetting that collision key in a later bucket.
+
+Witness with a live root: node K emits isolated approval A at12:04:59 and loses
+its unflushed choice in a crash. After the old bucket seals, a malicious authorized
+owner creates a *different* spend B of the same output with fresh signed
+T_0=12:10:00. This is not a retry or a gateway rewrite. B's freshness can pass and
+its bucket differs, while its ApprovalSlot remains the same. If K has forgotten A
+and approves B, a requester holding A has two incompatible node signatures.
+The existing loss gate must prevent that outcome. The witness does not prove
+that an indefinite block is unavoidable or that two complete payment receipts
+exist; it shows the proposed time-window argument alone is insufficient for the
+selected individual-choice guarantee. No new wire test executed. Keep the gate
+closed where safety is unproved; do not silently change slot/fraud semantics.
+Technical follow-up must derive a safe bounded recovery method under RAM-first
+response, rather than have the maintainer vote on whether the counterexample is
+true. No extra journal, key rotation or commit wait is selected here.
+
+**Switch / return point.** The maintainer explicitly requests the next question.
+The safety choice is now settled; the remaining O1.1 issue is technical proof,
+not another preference to elicit. Park that proof until a concrete recovery model
+can establish the activation rule; it remains a mandatory readiness/final-plan
+gate, with unsafe scope passive meanwhile. User steering moves to independent
+S5.1, where an actual product-policy choice remains. Resume O1.1 before claiming
+safe bounded restart or delivery, and on any proposed activation-rule change.
+
+**Existing solution first.** P0 draft0.2 §5.1 proposes support classes:
+Regional14=2, valid adaptive PROVISIONAL=1, owner-valid hints/partial votes=0.
+Highest admitted support class wins; within a class use min(H_canon). Its own
+text calls this a policy choice; §7.58 preserves its candidate status. Model T09
+exercises it, but passing a proposed predicate does not constitute maintainer
+selection. DEC-053 allows regional revocation; DEC-022 disallows unsupported
+single-node takeover; DEC-023 permits a genuinely unresolved affected branch.
+No arbitrary raw hash, source-count shortcut or new global green proof is allowed.
+
+**Exact pending question — Q-S5-MIXED-SUPPORT-01 (unanswered):**
+
+> Beim Zusammenführen zweier Netzteile liegen für dieselbe Vorgängerausgabe
+> zwei widersprüchliche, jeweils gültige Belege vor: einer mit14/20 regionalen
+> Stimmen, einer mit dem regulären PROVISIONAL-Quorum eines kleinen Netzteils.
+> Wie soll dieser Konflikt behandelt werden?
+>
+> **A — Der14/20-Beleg hat Vorrang (Empfehlung):** Der nur PROVISIONAL bestätigte
+> Zweig verliert, auch wenn sein H_canon kleiner ist. Zwischen Belegen derselben
+> Klasse entscheidet weiterhin min(H_canon). Das folgt dem bisherigen P0-Entwurf
+> und schützt eine14/20-Bestätigung vor Verdrängung durch schwächere Unterstützung.
+>
+> **B — Den betroffenen Konflikt vorerst offenhalten:** Unterschiedliche
+> Bestätigungsklassen entscheiden den Gewinner nicht automatisch. Die betroffene
+> Ausgabe und abhängige Zweige bleiben blockiert, bis vergleichbare gültige
+> Belege eine Entscheidung erlauben. Das vermeidet den automatischen Vorrang,
+> kann den betroffenen Gutschein aber dauerhaft unbenutzbar machen.
+
+Both candidates must first pass owner/causal/root validity and independently
+justified membership/quorum checks. A single unsupported vote cannot qualify as
+PROVISIONAL merely by labeling itself so; genuine admitted sub20 operation still
+uses its specified adaptive quorum. A selects evidence priority, not a theorem
+of global honesty. B is a conservative conflict-blocking policy, not permission
+for a weak candidate to take over or a new old-quorum authorization requirement.
+It introduces a blocking/DoS surface from genuine weak conflicting receipts;
+limits and evidence admission still apply. Obtaining comparable receipts may be
+impossible because prior signing choices remain immutable. The already accepted
+risk of losing branch descendants persists under A; B accepts affected-branch
+unavailability. Independent roots and unaffected siblings continue in either case.
+No automatic ban of honest regional losers; fraud remains personally verified.
+
+Next: ask Q-S5-MIXED-SUPPORT-01 A/B and await answer. Keep O1.1 proof gap explicit,
+then consolidate selected merge order with receipt promotion and descendants.
+Only interview memory changed; no production/spec edits, test campaign or broad
+trust research. No promise of a fixed remaining question count.
+
+### CP-0060 — Retain DEC-032 and ask about mixed-mode merge priority
+
+Recorded DEC-063 / Q-O1-CRASH-RESUME-01 A; no weaker own-signature guarantee.
+Preserved the finite bucket-quarantine proposal without claiming its proof:
+a fresh new conflicting spend can target the same output in a later bucket.
+O1.1 remains a required technical proof/readiness gate; user steering moves the
+single active decision to S5.1. Saved Q-S5-MIXED-SUPPORT-01: A = Regional14
+priority over PROVISIONAL, min-hash within class; B = leave affected mixed-class
+conflict blocked until comparable evidence. Neither selected. Existing P0/model
+policy evidence is retained as a candidate, not retroactive maintainer assent.
+No production changes or tests executed in this continuation.
+
+Completed checkpoint: **CP-0060**.
+
+
+### 7.72 Class priority selected; retention after VOID remains open
+
+Record: S5-MIXED-SUPPORT-DECISION-002 / S5-VOID-RETENTION-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0061.
+Active decision S5.2; S5.1 policy decided with implementation/proof obligations.
+
+**Answer / DEC-064.** The maintainer unequivocally selects
+Q-S5-MIXED-SUPPORT-01 A and adopts the explicit hierarchy: class2 FINAL14/20,
+class1 valid adaptive PROVISIONAL for N<20, class0 subquorums/unconfirmed intents.
+Higher class defeats lower class; use min(H_canon) only among equal highest
+admitted confirmation classes. Mixed-class blocking B is rejected because a weak
+colliding receipt could otherwise freeze a fully supported payment. This removes
+that particular freeze-by-weaker-receipt policy, not every computational/storage
+DoS risk. Receipt validity, independently justified identities/membership and
+cheap-first resource defenses remain prerequisites.
+
+Class0 must not acquire confirmed usability merely because it has the lowest
+hash when no complete quorum exists. It remains a hint/pending submission;
+unsupported singleton takeover is still prohibited. This qualification preserves
+DEC-022/023 and P0 §5.1 rather than inventing class0 merchant confirmation. A valid
+larger-class evidence must actually exist; relabeling a receipt or combining votes
+from different snapshots cannot promote it.
+
+The losing transaction's causal branch becomes VOID consistently with the chosen
+winner; unrelated roots/siblings survive. Honest nodes that signed only their
+local branch committed no personal equivocation and suffer no identity/ticket/WoT
+sanction from loss alone. OwnChoice remains protected; a node which approved the
+loser may report the winner without issuing a second conflicting approval for
+the same consumed output. Exact derived-state/atomic publication and support
+promotion remain integration work, not a claim of an existing atomic wire path.
+
+**Status terminology and guarantee boundary.** The maintainer calls class2
+FINAL/green, consistent with the existing spec label, and emphasizes protection
+against weaker provisional receipts. They explicitly retain FINAL-vs-FINAL
+min-hash selection, so this is not selection of global irreversibility or reversal
+of DEC-053. P0's REGIONAL14 label and separate reserved FINAL_GLOBAL status still
+need deliberate presentation/spec consolidation; no separate global proof is
+silently approved or new naming preference question opened. The accepted guarantee
+here is evidence-class priority under the stated BFT/membership assumptions.
+
+**Existing retention solution and unresolved scope.** P0 §5.2/5.3 separates derived
+VOID from original evidence and immutable own choices, requires minimum sufficient
+winning/excluding proof while the root is usable, and assigns portable ancestry/
+receipts to clients. VOID is not an expired-lock tombstone; genuine later support
+promotion may change a prior class1 outcome. These are why deleting every record
+associated with a loser is not automatically safe. Conversely, the blind server
+need not automatically mirror every full client branch. DEC-033 protects own
+choices, not an unbounded archive of all foreign losing payloads. No earlier
+maintainer choice between the two concrete full-payload retention policies below
+was found in the current register. Keep the minimum live exclusion requirement
+and TTL+30s rule mandatory under either option.
+
+**Exact pending question — Q-S5-VOID-RETENTION-01 (unanswered):**
+
+> Welche Daten eines unterlegenen VOID-Zweigs soll der Node bis zum Ablauf
+> der Gutschein-Wurzel weiter aufbewahren?
+>
+> **A — Nur die notwendigen Sperr- und Beweisdatensätze (Empfehlung):**
+> Der Node behält den gültigen Gewinner, die zur sicheren Ablehnung des
+> unterlegenen Zweigs nötigen Nachweise und seine eigenen Signierentscheidungen.
+> Vollständige darüber hinausgehende Verlierer-Zweige bleiben beim Client.
+> Das spart Speicher; bei späterem zusätzlichem Beweisbedarf müssen die Daten
+> erneut vom Client oder von Peers verfügbar sein.
+>
+> **B — Auch vollständige gültige Verlierer-Zweige aufbewahren:**
+> Der Node hält zusätzlich deren Lock- und Quorum-Nachweise bis zur Wurzel-TTL
+> vor. Das erleichtert spätere Reparatur und Neubewertung ohne aktive Clients,
+> benötigt aber mehr Speicher und strengere Aufnahme-/Kapazitätsgrenzen.
+
+Recommend A as the P0 minimum-sufficient-evidence direction aligned with client
+custody/KISS. This does not prove which exact minimal record set is sufficient.
+It may not evict a live exclusion or own-choice evidence just to meet a cache size;
+proof missing for a required decision means UNKNOWN/NOT_READY, not blind approval.
+B retains only admitted, unexpired evidence within explicitly bounded resources,
+not dead history or every attacker hint. At capacity, refuse/suspend safe admission
+rather than delete protected exclusions; it cannot promise unlimited archival
+service. Neither option guarantees recovery if all relevant copies disappear.
+
+Both preserve TTL expiry+30s physical purge, existing fraud/identity records under
+their applicable rules, no permanent expired-lock tombstones, no lock gossip and
+no recursive client L2 receipt chain on ordinary spend. Client retrieval in A
+means fetching specifically needed conflict/repair evidence, not forcing wallets
+to verify all historical L2 receipts on each payment. Under B, automatic repair
+still needs the separate readiness/source-context proof; retaining data alone is
+not that proof. Later class1->class2 promotion requires an actual valid new receipt,
+not an in-place status edit. Track descendant and promotion counterexamples when
+deriving the selected retention set.
+
+Next: ask Q-S5-VOID-RETENTION-01 A/B; derive exact retention/pruning and sync proof
+composition after the answer. Preserve O1.1's bounded-recovery proof and other
+parked obligations. No production/spec edits or new tests in this continuation.
+
+### CP-0061 — Select strict class hierarchy and ask about losing-branch retention
+
+Recorded DEC-064 / Q-S5-MIXED-SUPPORT-01 A and rejection of weak-receipt freezing.
+Kept verified class priority distinct from an irreversible global-finality claim;
+class0 does not establish confirmed acceptance. Honest losing signers remain
+unsanctioned. Active focus moves to S5.2 / Q-S5-VOID-RETENTION-01: A = minimum
+sufficient node exclusions/own choices plus client custody of excess full losing
+branches; B = additionally retain full admitted unexpired losing branches.
+Neither selected. TTL, bounded resources and no-extra-receipt-chain constraints
+remain. Notes/spec candidate retention checked; no production or test changes.
+
+Completed checkpoint: **CP-0061**.
+
+
+### 7.73 Minimal retention selected; conflict-response payload open
+
+Record: S5-VOID-RETENTION-DECISION-001 / C1-CONFLICT-RESPONSE-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0062.
+
+**Answer / DEC-065.** The maintainer unequivocally selects
+Q-S5-VOID-RETENTION-01 A. Retain the winner that occupies the parent/output
+collision slot, the minimum sufficient collision/exclusion evidence and the
+node's own immutable signing decisions until the applicable root expiry.
+Wallets custody the excess complete losing branches and their causal proofs;
+L2 is a blind Collision Lock Registry, not an archive of dead losing trees.
+Reject B's additional full losing-tree retention as unnecessary state bloat.
+Physically purge root-bound state at root.valid_until+30s. This does not remove
+separately governed permanent identity sanctions or add expired-lock tombstones.
+
+The maintainer proposes a compact winner-vs-loser hash record for immediate
+409 rejection. Record this as the selected compact direction, not a completed
+proof format: hashes identify payloads but independent verification must also
+bind the consumed slot, authenticated records and the claimed support class.
+Derive exact sufficient retained data autonomously; do not ask the maintainer
+to select cryptographic correctness. Preserve own choices even after a different
+canonical winner is learned. Check descendant exclusion, later genuine support
+promotion and recovery from compact records; missing required proof cannot
+justify approving a collision. These are technical obligations, not reopened
+preferences or a requirement to retain every losing subtree.
+
+**Next bounded interface tradeoff.** Retention policy does not determine what
+is included in the initial HTTP conflict response. Read-only inspection found
+`L2Verdict::Conflict { existing_lock: L2LockEntry }` in
+`crates/humoco-node/src/api/hmc.rs`; Spec06 section 5 describes a 409 collision
+response, and its sequence uses ExistingLockHash. Neither establishes a selected
+portable, class-qualified compact proof envelope. Existing response data is not
+independent evidence of a confirmed canonical winner. OPEN-06 already tracks
+output/wire details. Move the active human decision to C1.1; S5.2's selected
+policy remains decided with the proof/engineering obligations above.
+
+**Exact pending question — Q-C1-CONFLICT-RESPONSE-01 (unanswered):**
+
+> Was soll die Wallet bei einem Konflikt direkt mit `409 Conflict` erhalten?
+>
+> **A — Kompakten Nachweis direkt mitliefern (Empfehlung):**
+> Die Antwort enthält die betroffenen Lock-IDs und den bereits vorhandenen,
+> signierten Kollisionsnachweis einschließlich seines Bestätigungsstatus.
+> So kann die Wallet den Konflikt ohne zusätzliche Abfrage prüfen.
+> Es werden dafür keine vollständigen Verlierer-Bäume übertragen und keine
+> zusätzlichen Nachweise im Kassenpfad nachgeladen.
+>
+> **B — Nur Konfliktkennungen, Nachweis bei Bedarf abrufen:**
+> Die Antwort enthält zunächst nur die betroffenen Lock-IDs und eine
+> Abrufreferenz. Die Wallet lädt den Nachweis nur dann separat nach,
+> wenn sie ihn prüfen oder zur Klärung aufbewahren will.
+> Das verkleinert die erste Antwort, benötigt dafür gegebenenfalls eine
+> weitere Netzwerkanfrage.
+
+Recommendation A concerns packaging of already available bounded evidence,
+not mandatory quorum acquisition before a local collision rejection. A genuine
+local signed exclusion, a provisional receipt and a 14/20 certificate must not
+be mislabeled as equivalent. A local response authenticates only the statement
+actually proved; it does not establish remote committee membership or global
+irrevocability. B's identifiers are references, not cryptographic proof; refusal
+of goods may be conservative while unresolved evidence remains unresolved.
+Neither option authorizes node sanctions based on a 409 or new approval of an
+occupied slot. No on-demand disk/peer retrieval is added to the shard signing
+hot path by either option; any separate proof retrieval is bounded and outside
+that path. Exact envelope, size limits and retrieval authorization are later
+technical work under K2/C1/N4. Client custody, no recursive L2 receipt chain,
+no lock gossip and existing public-ingress/P2P separation remain unchanged.
+
+Next: ask the recorded A/B, then derive the bounded response/retrieval contract
+from the selected policy. Preserve the O1.1 recovery proof gate. No production,
+binding-specification changes or tests were performed in this continuation.
+
+### CP-0062 — Select minimal live retention and ask about conflict-response evidence
+
+Recorded DEC-065 / Q-S5-VOID-RETENTION-01 A; full losing-tree archival B rejected.
+Retain winner, sufficient compact exclusions and own choices until root TTL+30s;
+client custody and no expired-lock tombstones remain. Exact authenticated record
+sufficiency is pending engineering work. Active focus moves to C1.1 /
+Q-C1-CONFLICT-RESPONSE-01: A = include already available compact authenticated
+evidence with 409; B = identifiers/reference first, separate retrieval on demand.
+Neither response option selected. Read-only interface check performed; no code,
+binding-specification edits or tests.
+
+Completed checkpoint: **CP-0062**.
+
+
+### 7.74 Inline conflict evidence selected; checkout veto policy open
+
+Record: C1-CONFLICT-RESPONSE-DECISION-001 / C2-CONFLICT-VETO-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0063.
+
+**Answer / DEC-066.** The maintainer unequivocally selects
+Q-C1-CONFLICT-RESPONSE-01 A. Embed the already available compact collision
+proof directly in `L2Verdict::Conflict` / the 409 envelope: colliding lock ID,
+parent/output binding, timestamp and cryptographic attestation, with the proof's
+actual confirmation status. No full losing-tree transfer or additional proof
+retrieval on the signing hot path. The wallet/terminal can verify and retain
+the evidence offline even if the responding node later disappears. Reject B's
+reference-first response as extra latency and accidental gateway complexity;
+retain the stateless messenger boundary and client custody.
+
+**Evidence and limits.** The maintainer estimates 100–300ms avoided on mobile
+links and a few hundred bytes fitting one MTU. These are rationale/size targets,
+not measurements or transport guarantees: exact canonical/JSON/base58 encodings,
+signature count and HTTP/TLS/QUIC overhead need bounded sizing. Do not claim
+one network packet or an independently verified quorum from one signature.
+Local RAM presence of existing_lock supports avoiding an extra record lookup;
+it does not by itself establish that every required signed proof is already
+stored in every path. Derive the exact authenticated envelope and storage
+alignment without adding hidden synchronous I/O. B would not inherently force
+a stateful gateway cache (a stable content reference could be served elsewhere),
+but that engineering possibility does not reverse the explicit selection A.
+
+The current response type in `crates/humoco-node/src/api/hmc.rs` contains
+existing_lock. Targeted inspection of `collect_peer_attestations` in
+`crates/humoco-node/src/api/routes.rs` found a collision flag/payload path which
+retains the first successfully deserialized L2LockEntry separately from the
+verified positive votes. The idempotent path checks `remote_collision` before
+`cert.is_quorum_reached()`, and the general remote path likewise returns 409
+for any retained collision. This establishes a response-priority observation,
+not an audit of every rejection path. The shown collision arm does not perform
+the positive-vote verifier; audit authenticity, parent/output binding, signer
+membership and proof status separately. Invalid/unrelated claims must not be
+promoted into authenticated evidence under either pending option.
+
+**Why another question is necessary.** DEC-064 already chooses support-class
+priority for canonical merge. DEC-066 chooses response packaging. Neither
+explicitly chooses whether checkout should conservatively refuse a transaction
+when there is an authenticated weaker colliding record despite a valid current
+14/20 certificate for the submitted lock. Merchant refusal can be stricter than
+canonical winner selection without voiding that certificate. This is a real
+availability-versus-conservative-acceptance tradeoff; do not ask again whether
+one partial proof may replace a confirmed canonical winner. Move the active
+human decision to C2.1; C1.1 stays decided with envelope/verification work pending.
+
+**Exact pending question — Q-C2-CONFLICT-VETO-01 (unanswered):**
+
+> Der eingereichte Lock erreicht 14 gültige Stimmen im festgelegten
+> 20er-Komitee. Ein weiterer Shard-Knoten meldet einen tatsächlich signierten
+> kollidierenden Lock, legt dafür aber keinen gleich- oder höherwertigen
+> Quorum-Beleg vor. Soll diese schwächer belegte Kollision den Checkout stoppen?
+>
+> **A — Das gültige Quorum entscheidet (Empfehlung):**
+> Die einzelne schwächere Kollisionsmeldung hat kein Vetorecht gegen die
+> 14/20-Bestätigung. Der Checkout kann erfolgreich abschließen.
+> Ein ausreichend belegter konkurrierender Zweig wird nach der bereits
+> gewählten Klassen- und Hash-Regel behandelt.
+>
+> **B — Bei belegter Kollision vorsorglich abbrechen:**
+> Bereits der authentische kollidierende Einzel-Lock führt zu `409 Conflict`,
+> auch wenn der eingereichte Lock 14/20 erreicht. Das Terminal verweigert
+> diesen Checkout vorsorglich; die gültige Quorum-Bestätigung wird dadurch
+> nicht für ungültig erklärt. Das ist konservativer, gibt aber auch einem
+> schwächer belegten oder veralteten Konflikt eine Blockademöglichkeit.
+
+Recommend A for consistency of checkout availability with the selected 14/20
+and class-priority policy, avoiding a minority response veto. B is an explicit
+conservative service refusal, not canonical takeover or node punishment. Both
+require genuine correctly bound evidence; a bare flag, deserializable payload,
+gateway signature over an unverified claim or mismatched quorum is insufficient.
+Do not wait beyond the frozen committee/deadline or introduce ranks21–40.
+A single transport peer may carry a complete strong competing certificate;
+that case is not a weak single-vote report and remains subject to DEC-064.
+Neither option resolves the independently open authorization, membership,
+same-class merge, global-finality or lost-own-choice proof obligations.
+
+Next: ask saved A/B, then derive the ordered collector/response decision table,
+including invalid claims, partial-only outcomes, pre/post-quorum arrival and
+sufficient competing certificates. Validate in later real adversarial QUIC tests;
+none executed in this interview. No code or binding-specification edits.
+
+### CP-0063 — Select inline conflict evidence; ask about checkout minority veto
+
+Recorded DEC-066 / Q-C1-CONFLICT-RESPONSE-01 A, preserving compact RAM-backed
+inline evidence and client custody. Reference-first B rejected. Distinguish
+payload/latency targets from verified sizes, and local attestations from quorums.
+Targeted source inspection found single-collision response priority over positive
+quorum. Active C2.1 / Q-C2-CONFLICT-VETO-01: A = valid 14/20 may complete despite
+weaker authenticated collision; B = conservatively return409 even then without
+voiding the certificate. Neither selected. DEC-064 merge policy remains settled.
+No production/spec changes or tests.
+
+Completed checkpoint: **CP-0063**.
+
+
+### 7.75 Quorum checkout priority selected; uncertain-payment follow-up open
+
+Record: C2-CONFLICT-VETO-DECISION-001 / C3-UNCERTAIN-FOLLOWUP-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0064.
+
+**Answer / DEC-067.** The maintainer unequivocally selects
+Q-C2-CONFLICT-VETO-01 A: a valid14/20 certificate from the fixed committee
+completes checkout. An authenticated colliding singleton or other weaker
+support has no veto. Reject B because a minority response could sabotage the
+checkout despite sufficient valid votes, undermining the intended BFT
+availability. This is consistent with DEC-022 and DEC-064's class hierarchy.
+The maintainer treats a sufficiently supported competing branch as the basis
+for a genuine conflict decision; apply the existing class/hash winner rule,
+not automatic refusal merely because another certificate exists. An equal-class
+competitor that loses min(H_canon) does not by itself invalidate the winner.
+
+Keep the claimed six-fault tolerance conditional on the relevant fixed-view
+model, distinct identity/signature checks and existing safety/liveness premises.
+Removing the minority veto restores this availability requirement; it does not
+prove membership convergence, dynamic transition safety or an adversary bound.
+A single peer can transport14 valid signatures: classify evidence by its actual
+support, not number of connections or first-arriving flags. Receipt/slot/context
+checks and first-party-only identity sanctions remain mandatory.
+
+**Derived collector/response contract; no new preference question needed.**
+
+| Evidence available within the frozen attempt | Required direction |
+| --- | --- |
+| Valid target14/20; weaker conflicts only | Successful target checkout; no minority409 veto. |
+| Sufficient competing proof | Verify context and apply DEC-064 class priority, then same-class min-hash. If target loses, return409 with available bounded authenticated evidence under DEC-066. No automatic honest-loser node sanction. |
+| Neither target nor competitor sufficiently confirmed | Unresolved outcome; no payment success, no fabricated winner and no release/rollback of an occupied slot. DEC-009/023 already settle these properties. Use structured temporary/uncertain feedback; exact HTTP/envelope mapping remains technical work. |
+| Invalid, unrelated or incorrectly bound collision claim | Cannot establish a conflict or override a verified certificate. Apply appropriate bounded input defenses; no hearsay identity ban. |
+| Quorum impossible before800ms | Exit early with truthful evidence/outcome; no replacement members beyond the frozen20. |
+
+Quorum fast-exit and neutral cancellation remain. It cannot discover evidence
+that has not arrived: specify handling of received competing proof versus later
+shard-direct repair, without waiting indefinitely or promising global
+irreversibility. Keep partial evidence distinct from confirmed receipts and
+original immutable choices. Regression obligations include a weak collision
+before/after14 positive votes, one-peer transport of a strong competitor,
+malformed/unrelated evidence,13/7 partial split and neutral cancellation, over
+real QUIC. This table is a selected/derived contract, not executed verification.
+
+**Next actual user tradeoff.** DEC-009 selects bounded exact-payload automatic
+retries and no replacement spend after uncertain outcome; their detailed horizon
+is open. DEC-060 retains exact bytes/T_0. DEC-061/062's live gate means retries
+cannot remain fresh forever. After T_0's30s freshness window (relative to the
+accepted time basis), do not refresh the timestamp or reissue the old request
+as a new live write. Status/proof reconciliation remains possible and does not
+itself approve a new lock. Decide client follow-up behavior after the short
+automatic submission/retry phase, not a new server pending queue or relaxation
+of the freshness gate. C2.1 stays decided; activate C3.1.
+
+**Exact pending question — Q-C3-UNCERTAIN-FOLLOWUP-01 (unanswered):**
+
+> Eine Zahlung bleibt nach Checkout und kurzen automatischen Wiederholungen
+> ungeklärt. Soll die Wallet sie anschließend selbstständig weiter nachverfolgen?
+>
+> **A — Automatischer Statusabgleich mit begrenztem Budget (Empfehlung):**
+> Die Wallet bewahrt den ursprünglichen Auftrag und prüft bei verfügbarer
+> Verbindung mit zunehmenden Abständen den Status beziehungsweise vorhandene
+> Nachweise. Nach Ende der 30-Sekunden-Frischefrist erfolgen nur noch Leseabfragen.
+> Sie zeigt eine nachgewiesene Klärung automatisch an; sonst bleibt die Zahlung
+> ungeklärt. Intervalle und Gesamtlast werden begrenzt.
+>
+> **B — Nach kurzer Automatik nur auf Nutzeraktion prüfen:**
+> Die Wallet bewahrt den Auftrag ebenfalls, beendet aber die automatische
+> Nachverfolgung nach dem kurzen Wiederholungsfenster. Weitere Statusprüfungen
+> starten beim Öffnen der Zahlung oder auf ausdrückliche Nutzeraktion.
+> Das spart Hintergrundverkehr; die Klärung wird möglicherweise später sichtbar.
+>
+> Unter beiden Optionen entsteht ohne bestätigten Abschluss keine Zahlungsfreigabe
+> und kein neuer Zahlungsversuch mit verändertem T_0 für dieselbe Vorgängerausgabe.
+
+Recommend A to surface recovered outcomes without requiring the user to remember
+an interrupted checkout. Bounds must cover per-intent frequency, total client
+concurrency/traffic, offline suspension and expiry; no unlimited tight polling
+or claim of guaranteed mobile background execution. Retain uncertain outcome
+honestly when no sufficient evidence can be recovered. B trades slower automatic
+visibility for less unattended network use, preserving the same proof and
+custody requirements. Both use recipient-selected sources, keep gateway/node
+stateless messenger boundaries, and require no historical L2 receipt chain,
+notification subscription service or server-side pending-intent queue.
+Historical proof transport/verification still needs its proper sync/read contract;
+a status lookup alone must not be relabeled a14/20 completion certificate.
+No fresh success may be created for an expired root; expiry is not retroactive
+proof that an old ambiguous payment never completed.
+
+Next: ask saved A/B, then derive resource bounds and the client uncertain-state
+transition table from the selection. Keep O1.1 and source/admission proof gaps
+open. No production or binding-specification edits and no tests this turn.
+
+### CP-0064 — Select quorum checkout priority; ask about client uncertain-state follow-up
+
+Recorded DEC-067 / Q-C2-CONFLICT-VETO-01 A and rejection of minority-veto B.
+Derived target/competitor/partial/invalid collector outcomes from existing choices;
+partial-only uncertainty is not a new canonical takeover preference. Active
+C3.1 / Q-C3-UNCERTAIN-FOLLOWUP-01: A = bounded automatic client status/proof
+reconciliation after short retries; B = user-triggered checking after that phase.
+Neither selected. Live writes retain the original T_0 and its30s gate; later
+reconciliation is read-only. No code/spec changes or verification execution.
+
+Completed checkpoint: **CP-0064**.
+
+
+### 7.76 Bounded client reconciliation selected; completion evidence retrieval open
+
+Record: C3-UNCERTAIN-FOLLOWUP-DECISION-001 / C4-COMPLETION-EVIDENCE-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0065.
+
+**Answer / DEC-068.** The maintainer unequivocally selects
+Q-C3-UNCERTAIN-FOLLOWUP-01 A. Under Smart Client, Dumb Server, the wallet
+custodies the original ambiguous payment and initiates bounded automatic
+reconciliation; nodes/gateways do not maintain historical-order push connections.
+Timeout is uncertain, not proof of failure (DEC-009). Use growing/exponential
+backoff and a strict attempt budget to limit battery/network use. The suggested
+5s/15s/45s checks and maximum5 attempts are explicitly examples, not fixed protocol
+constants; delay-versus-absolute schedule, jitter, total elapsed horizon,
+persistence across app restarts and aggregate per-wallet bounds remain design
+work. Do not convert examples into selected production settings.
+
+After the original T_0's30s live-freshness window, use only read requests such
+as POST /v1/status with challenge_ds_tag, never renewed timestamps or a new
+spend to resolve uncertainty. Ordinary status uses the selected INV-0310
+1-of20 routing and protected read budget, not the write queue or an automatic
+fresh write-vote collection. Reconnect can resume a still-available campaign
+budget; it must not silently turn finite attempts into unlimited rapid retries.
+On exhausted budget without proof, stop that automatic campaign and preserve
+uncertain status, original intent and custody; do not free the consumed output,
+roll back accepted locks or mark success. Later explicit reconciliation remains
+possible. These consequences follow DEC-009 and the chosen strict budget;
+no redundant preference question on whether to invent success/failure is needed.
+
+**Correctness boundary.** The maintainer describes zero consensus load and
+deterministic clarification. Preserve the intended low-cost read-only operation,
+not a zero-resource or guaranteed-resolution theorem: requests still consume
+network/transport/crypto/rate-limit resources and may fail or reach stale peers.
+Fast RAM lookup is the target for the lookup itself, not measured end-to-end
+latency or proof that every route performs zero I/O. A finite budget and1-of20
+sampling cannot guarantee discovery of an accepted lock or recover its14/20
+certificate. No new writes can be approved for an expired root; expiry or
+absence now does not prove an earlier ambiguous payment never completed.
+
+**Targeted read-path check.** `api/hmc.rs` defaults read_quorum to1. The status
+handler in `api/routes.rs` queries HmcRamIndex and on UnknownVoucher routes to
+one top20 peer chosen from BLAKE3(challenge_ds_tag). It can return a full lock
+as Verified or construct a minimal Verified entry from an attestation with zero
+owner-signature fields. The optional read_quorum>1 path separately collects
+status attestations; no automatic historical checkout-certificate recovery was
+established. This is a bounded source observation, not a full security audit.
+Existing notes §3–5.3 already distinguish owner authorization, local possession,
+request-bound replies and quorum acceptance, including honest unconfirmed copies.
+Spec06's stochastic/random/failover wording and current deterministic implementation
+still need consolidation; repeated queries to the same fixed view/tag need not
+sample independent peers. Do not silently change INV-0310 or claim optional
+status attestation collection recovers original checkout approvals.
+
+**Next bounded user tradeoff.** Ordinary single-peer reads remain cheap. If no
+sufficient completion proof accompanies them, either permit a separate bounded
+client-driven retrieval of existing proofs in exceptional reconciliation, or
+preserve uncertainty while staying strictly status-only. Both retain the same
+proof threshold and do not add a mandatory round to a successful checkout.
+This does not ask to weaken evidence, choose algorithm names or restore recursive
+historical L2 receipt chains. Move active focus from decided C3.1 to C4.1.
+
+**Exact pending question — Q-C4-COMPLETION-EVIDENCE-01 (unanswered):**
+
+> Eine Statusantwort findet den gesuchten Lock, enthält aber keinen ausreichenden
+> Abschlussnachweis. Darf die Wallet zur Klärung zusätzliche vorhandene Nachweise
+> abrufen, oder soll die automatische Nachverfolgung strikt bei Statusabfragen bleiben?
+>
+> **A — Vorhandene Abschlussnachweise gezielt nachladen (Empfehlung):**
+> Nur im ungeklärten Ausnahmefall darf die Wallet innerhalb ihres begrenzten
+> Gesamtbudgets zusätzliche Leseabfragen veranlassen, um bereits vorhandene
+> Signier- beziehungsweise Quorum-Nachweise zu erhalten. Es entstehen keine
+> neuen Locks und keine neue Schreib-Abstimmung. Sind ausreichende Nachweise
+> nicht verfügbar, bleibt die Zahlung ungeklärt.
+>
+> **B — Ausschließlich normale 1-of-20-Statusabfragen:**
+> Die Wallet beschränkt die automatische Nachverfolgung auf den günstigen
+> Statuspfad. Liefert dieser keinen ausreichenden Abschlussnachweis, bleibt
+> die Zahlung auch bei gefundenem Lock ungeklärt. Das spart zusätzliche
+> Beweisabfragen, kann aber mehr Fälle für eine spätere Klärung offenlassen.
+
+Recommend A conditionally on deriving a justified bounded retrieval contract
+for already available evidence. One peer may already carry a complete proof;
+otherwise historical signer/context discovery and availability are open design
+obligations, not guaranteed by this preference. No request for new binding votes,
+server pending queue, proof-reference cache, mandatory new finalization round or
+full losing-tree archive is selected by A. Reusing stored evidence must preserve
+original slot/identity/context and actual support class; it cannot fabricate an
+old certificate from current nodes merely agreeing that a record exists. Any
+new fields, storage amplification, extra-return protocol or unavailable evidence
+must be reviewed before implementation, not inferred from this question. B does
+not downgrade proof requirements; it explicitly accepts more unresolved cases.
+Both retain recipient-selected sources, INV-0310 ordinary routing and total
+attempt/byte/CPU limits; multiple gateways must not multiply a campaign budget.
+The parked Q-S3.3-01 one-versus-two-payment-round question is not answered here.
+
+Next: ask saved A/B; then derive exact proof availability/retrieval and client
+state transitions under selected resource scope. Read-safety and historical
+membership/source completeness remain open; do not declare DEC-068 deterministic
+payment recovery. No production/spec edits or tests in this continuation.
+
+### CP-0065 — Select bounded automatic reconciliation; ask about exceptional proof retrieval
+
+Recorded DEC-068 / Q-C3-UNCERTAIN-FOLLOWUP-01 A; manual-only B rejected. Retained
+original intent, growing backoff, strict budget and only reads after30s. Example
+parameters remain examples. Budget exhaustion stays uncertain; single-node
+possession is not a14/20 completion proof. Targeted status-path inspection
+preserves that evidence gap. Active C4.1 / Q-C4-COMPLETION-EVIDENCE-01: A = bounded
+retrieval of existing completion evidence beyond ordinary status when needed;
+B = status-only automatic reconciliation, unresolved without sufficient proof.
+Neither selected. Ordinary1-of20 routing, no new write votes and no extra normal
+checkout round remain. No code/spec edits or tests.
+
+Completed checkpoint: **CP-0065**.
+
+
+### 7.77 Original approval retrieval selected; technical contract and storage gap
+
+Record: C4-COMPLETION-EVIDENCE-DECISION-001 / C4-ORIGINAL-APPROVAL-AUDIT-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0066.
+
+**Answer / DEC-069.** The maintainer unequivocally selects
+Q-C4-COMPLETION-EVIDENCE-01 A. The wallet custodies its causal evidence and
+quorum certificate and may collect missing already-issued approvals of the
+original frozen20-member checkout committee. Read existing attestations, not
+full trees; initiate no new lock or write-vote round and retain original T_0.
+Keep the retrieval within the existing strict retry/traffic budget. If14 valid
+approvals cannot be assembled, stop that attempt and preserve uncertain status.
+Reject status-only B because a deliberately minimal status reply must not
+artificially prevent recovery of an actually available completion certificate.
+The cited maximum one committee roundtrip is an example; no fixed production
+count, one packet, latency guarantee or complete delivery is inferred. A parallel
+fan-out to20 peers still has bounded per-peer requests/bytes/concurrency costs;
+it is not one free network operation. Retaining client evidence does not impose
+recursive historical L2 receipt-chain verification on ordinary spend (DEC-055).
+
+**Derived technical contract, not another human choice.**
+
+1. The wallet retains the original request plus its exact committee/context
+   locator and any verified partial approvals. A valid completion uses14 distinct
+   NodePubKeys from that same admitted snapshot; no current-roster substitution,
+   mixed-view assembly or double-counted ticket identities. Exact historical
+   membership admissibility remains S2/S3 work, not proved by a roster hash.
+2. Exceptional retrieval reads the original issued approval payload/signature
+   and all fields required to verify it. A freshly signed current status response
+   or observation cannot be relabeled the original checkout approval. Context
+   must distinguish approval from observation and provisional from14/20 support.
+3. Protected own-choice retention (DEC-033/065) must support the required original
+   evidence representation. The selected retrieval presupposes available original
+   approvals; choosing it does not prove that current lock records preserve them.
+   Derive a minimal representation, RAM/persistence ownership, TTL+30s handling,
+   bounded capacity/backpressure and storage-time accounting. Reuse existing
+   justified own-choice storage where sufficient rather than invent an archive.
+4. Serve only existing evidence; missing original data returns a truthful
+   unavailable/unknown result without signing a replacement or mutating the lock
+   registry. Validate bounded requests cheaply; protect read budgets and keep
+   public-client ingress distinct from learned-node shard-direct transport.
+5. Successful recovery reconstructs a verified regional14/20 receipt and updates
+   the wallet. It does not create acceptance or global irreversible finality.
+   Partial/absent/timeout responses, lost original signers or expired/pruned data
+   leave an outcome uncertain unless other sufficient evidence exists. Neither
+   expiry nor budget exhaustion retroactively proves nonpayment. DEC-053/064
+   later-merge semantics and DEC-032 lost-own-choice safety gate remain.
+
+**Bounded source findings (observed, not a repository-wide absence proof).**
+`network/transport.rs` LockVerifyRequest HMC paths create an attestation using
+`create_attestation_for_network`, serialize it and return it. The inspected status
+path likewise calls that signing helper when a matching record exists; tag-only
+lookup can return the client-signed L2LockEntry. Thus that status path is not a
+literal read of an original stored node approval. `storage/engine.rs` HmcRamIndex
+holds locks, voucher/root/TTL indices and a filter; no original-node-attestation
+field was found there, nor did the targeted storage-source attestation/own-choice
+search establish the proposed archive. `api/hmc.rs` L2LockEntry's layer2_signature
+is client authorization, not the node's checkout vote. This is a concrete
+implementation gap to audit/integrate, not a reversal of the selected architecture.
+The helper signs with domain_approve_final/prov and zeroed context arguments;
+exact membership/context binding must be checked before declaring historical
+retrieval verifiable. Preserve other chats' concurrent edits and do not implement
+these changes under interview-only authority.
+
+A further bounded field review found:
+
+| Component | Observed representation | Consequence for original-approval recovery |
+| --- | --- | --- |
+| `types.rs::LockRecord` | Lock fields/status plus a set of signer IDs; no signature bytes | A signer-ID set cannot reconstruct14 genuine node signatures. |
+| `api/dto.rs::AttestationDto` | Full signer key, parent/lock, shard, timestamp and signature; no explicit frozen-roster/context identifier | Store/transport an exact verifiable context through the shared protocol contract; do not infer original eligibility from current peers. |
+| `api/dto.rs::QuorumCertificateDto` | Status/counts/signatures/bitmap; `is_quorum_reached` checks vector length against count-based threshold | It is a threshold helper, not proof verification; deduplicate full identities, verify signature/context and exact authorized roster separately. |
+| `api/routes.rs::create_attestation_for_network` | Real Ed25519 signature over domain, parent/lock digest, shard/status; three context arguments passed as0 | Current historical view/epoch/committee binding is not established by those zero fields. |
+| Same signing helper | `timestamp_ms` is assigned to DTO metadata, not passed to the signed digest | DTO timestamp alone cannot prove when a node issued the original approval; do not transplant historical authority using editable metadata. |
+| `storage/engine.rs::DualTierEngine` | RAM indices, redb, bounded flush queue and ancillary state; no original-approval store field identified in this review | Plan explicit reuse/extension of justified own-choice storage and bounded flush operations; an existing lock entry alone is insufficient. |
+
+Minimum implementation dependency order: (1) shared signed approval/context
+contract under K2/S2/S3; (2) immutable original-approval representation and its
+RAM/async-persistence lifecycle under O1/C4.2; (3) bounded public-to-gateway and
+learned-peer retrieval messages; (4) client validation/assembly and budgeted
+uncertain-state transitions; (5) adversarial wire verification. This is a
+reviewable dependency slice, not the completed overall architecture plan or
+permission to change production. Persist-before-response is still superseded
+by DEC-062: storing an original approval in RAM is not a durability claim, and
+missing volatile data after crash remains subject to DEC-032/063.
+
+**Scope and next focus.** C4.1's policy is decided. Active C4.2 is technical
+retention/context/retrieval design; no new A/B is manufactured for consequences
+already selected. Complete a bounded data-format/storage/wire dependency review,
+then return to F1's coverage inventory and identify only genuine unresolved human
+tradeoffs. Keep original question IDs/answers, same-key crash proof, historical
+membership, source coverage and ordinary read-safety obligations open. Ordinary
+INV-0310 status routing is not silently expanded by exceptional proof retrieval.
+
+Acceptance obligations for the later implementation: real QUIC replay of original
+approvals after30s without new signing or lock mutation; exact context/signature
+verification; duplicates and mixed views rejected; strict aggregate read budget;
+missing/pruned/unavailable evidence stays uncertain; RAM-first/background flush
+and restart gates preserved. No test was run and no source/spec was changed.
+
+### CP-0066 — Select original-approval recovery; advance to technical retrieval audit
+
+Recorded DEC-069 / Q-C4-COMPLETION-EVIDENCE-01 A and rejected status-only B.
+The wallet may assemble original14/20 evidence with bounded reads, no new votes
+and no committee substitution. Current inspected paths generate attestations;
+a literal stored-original retrieval path was not established. Active C4.2 tracks
+its exact evidence/context/storage/wire contract. No pending human choice;
+continue technical work without re-asking settled safety or budget policies.
+No production/spec edits or tests.
+
+Completed checkpoint: **CP-0066**.
+
+
+### 7.78 Retrieval design skeleton, provisional coverage map and approval-retention question
+
+Record: C4-ORIGINAL-APPROVAL-AUDIT-002 / F1-COVERAGE-INDEX-001 /
+C4-APPROVAL-RETENTION-QUESTION-001. Date: 2026-10-18 (Europe/Berlin).
+Checkpoint: CP-0067. No new maintainer decision this turn; DEC-001–069 retained.
+
+**Technical progress / C4.2.** Use an exceptional read-only lookup keyed by original
+approval identity: network, shard, consumed output/parent, spend ID, confirmation
+class and the original frozen committee/context reference. Exact canonical fields
+belong in shared K2 types; this tuple is a semantic contract, not a final binary
+schema or new epoch-permission chain. The response returns stored original bytes
+plus required verification context, or a truthful missing/unavailable outcome.
+The wallet can reuse partial signatures and asks only for missing approvals, with
+one aggregate byte/attempt/concurrency budget. The gateway is a transient relay;
+it does not archive receipts, queue historical intents or initiate new binding
+votes. Authenticated learned-node shard-direct RPC remains separate from public
+client ingress. Ordinary1-of20 status routing is unchanged. Verify full identities,
+original membership/context, signature domain and exact target binding before
+counting14; later/current members cannot replace missing original voters. Neither
+an endpoint name nor an opcode is selected here; align existing wire registries
+and parsers before implementation. Retain §7.77's storage/context and crash gates.
+
+Do not bind immutable receipts to an ephemeral transport sequence: returning an
+original approval over a new authenticated QUIC session must remain possible.
+Keep transport anti-replay/session validation separate from the original signed
+approval statement. Bound complete frame sizes, pagination/response counts and
+crypto work; no peer-wide archive scan or blind attacker-length allocation.
+Read budget refusal is neutral unavailability, not identity fraud or a free slot.
+Planned acceptance cases:14 valid originals complete;13 remain uncertain;
+duplicates/mixed contexts/current-member substitutions fail; a returned original
+survives a new transport session; missing originals never cause replacement
+signing; exhausted budget stops further work; TTL rules preserve protected state.
+These are design/verification obligations, not completed implementation/tests.
+
+**Actual unresolved product/resource tradeoff.** DEC-065 requires winner,
+minimum sufficient exclusions and own signing choices until root TTL+30s.
+DEC-069 permits fetching original approvals but does not explicitly settle how
+long every exact returned approval packet must remain fetchable at its original
+signer. An immutable local choice is not automatically the complete original
+signature packet and all contextual verification data. The original-response
+retrieval lifetime therefore needs a separate explicit selection; mandatory
+signing-safety retention and acceptance of valid late client-held evidence are
+not put to a vote again. Root lifetimes can span years (Spec09 §1; existing
+maximum eleven years), so the storage/availability difference is consequential.
+
+**Exact pending question — Q-C4-APPROVAL-RETENTION-01 (unanswered):**
+
+> Wie lange soll ein Knoten die exakten eigenen Attestierungen samt notwendigem
+> Kontext zum Nachladen durch die Wallet bereithalten?
+>
+> **A — Bis zur Wurzel-TTL plus 30 Sekunden (Empfehlung):**
+> Die Originalattestierungen folgen derselben Aufbewahrungsfrist wie die ohnehin
+> geschützten eigenen Signierentscheidungen. Auch eine länger offline gewesene
+> Wallet kann vorhandene Belege später noch nachladen. Dafür bleiben die
+> Signatur- und Kontextdaten gegebenenfalls mehrere Jahre gespeichert.
+>
+> **B — Nur während eines kürzeren, fest begrenzten Nachladefensters:**
+> Danach dürfen zusätzliche Abrufdaten entfallen, soweit sie nicht für die
+> Sicherheit benötigt werden. Das spart Speicher; eine Wallet ohne vollständigen
+> Beleg kann ihre Zahlung danach möglicherweise nicht mehr automatisch klären.
+> Bereits beim Client vorhandene gültige Belege bleiben prüfbar.
+>
+> Unter beiden Optionen bleiben notwendige eigene Signierentscheidungen und
+> Kollisionsnachweise bis zur Wurzel-TTL plus 30 Sekunden erhalten.
+
+Recommend A to reuse a single root-bound lifecycle and avoid an arbitrary earlier
+retrieval cutoff. This is a recovery-availability policy, not a guarantee that
+14 original signers survive or that volatile approvals become durable. Bound
+admission and count actual retained bytes/context multiplicity under N2/O1;
+refuse unsafe capacity rather than evict live signing-safety records. B is a
+viable lower-storage service policy only for additional retrieval material that
+is genuinely unnecessary for collision/equivocation safety and admitted proof
+revalidation. It introduces an explicit limited recovery SLA; it must not reject
+a valid old client-held receipt merely because the cache window ended. The P0
+§5.3 rejection of a30-day late-receipt cutoff concerns proof admissibility; B
+cannot silently override that rule. No short-window length is selected. Exact
+storage proof and canonical context are engineering obligations under either A/B.
+
+**F1 provisional numbered-spec coverage map.** Read headings/invariant mentions
+for all current numbered documents and checked relevant storage/type sections.
+There are24 physical files in22 numbered families (00–20 plus99), including
+English/German pairs for15 and16; a literal regex inventory found113 distinct
+mentioned INV-xxxx IDs across those files. Mentions include cross-references;
+this is not113 independently defined or verified requirements, a completeness
+percentage or test coverage. Preserve both language files until canonical source
+and translation drift are checked; no binding-spec edits were authorized here.
+
+| Spec family / scope | Interview branches and remaining integration |
+| --- | --- |
+| 00 mental model | K1/K2; blind scope, client custody and KISS consolidation. |
+| 01 organic start/topology | S2/S3/S6/N1; passive admission and phase transitions. |
+| 02 lock states/conflicts | C1/S4/S5/O1; support classes, immutable choices, dependent VOID and progress. |
+| 03 routing/sharding | C2/C4/S2/S3/N2; frozen membership, ordinary reads and verified bucket recovery. |
+| 04 types/encodings | K2/C1/C4.2/S5; signed context, exact sizes and parser bounds. |
+| 05 game theory/attack matrix | S1/S2/S5/S6/N4; explicit coordinated adversary assumptions and executable counterexamples. |
+| 06 client flow | C1–C4; retry/read/recovery/409 receipt contracts and merchant release. |
+| 07 admission/WoT | S2/S6/O3; tickets, observed maturity, historical admission and corroborated time. |
+| 08 topology/merge | S2–S5/N1; phase modes, three-miss eligibility, class/hash convergence. |
+| 09 thermometer/quotas | N2/N4/O1; time-based accounting, full identities and actual storage cost. |
+| 10 wire/session | K2/N1/N4/C4.2/S5; signed domains, replay, original-proof retrieval and frame limits. |
+| 11 presence/gossip | S2.1a/N1; three missed hourly heartbeats, F2F barrier and no lock gossip. |
+| 12 RAM/TTL | C2/O1/O3/C4.2; reservation-first RAM admission, immutable originals and expiry. |
+| 13 client access tiers | N4/C1/C4/O5; cheap checks, protected read/write budgets and private versus public surfaces. |
+| 14 persistence | O1–O4/C4.2; async storage, failed flush, recovery, drain and original-proof lifecycle. |
+| 15 transport, both language files | N1/N2/N4/C2/C4.2; ephemeral sessions, neutral cancellations and separate resource caps. |
+| 16 testing, both language files | F1/S1–S6; deterministic models plus real adversarial QUIC gates, no unit-only claims. |
+| 17 telemetry | O5/O6/N1; non-authoritative diagnostic observations, no hearsay sanctions. |
+| 18 shard/percolation memo | S2/S3/N1/N2; distinguish passive eligibility, checkout and background assumptions. |
+| 19 anti-cascade memo | N1/N2/N4/S6; local dampening, bounded load and first-party sanctions. |
+| 20 operations/ecosystem | K1/K2/O4–O6; operator veto, private administration, custody/backup and protocol evolution. |
+| 99 FAQ/attack scenarios | S1–S6/C3/C4/N4; scenario-by-scenario mapping remains to be completed. |
+
+Next F1 work is exact invariant definitions/owners, endpoint+wire/control surfaces
+and scenario-to-proof/test acceptance mapping, including non-numbered operations,
+merchant and handoff documents. The old architecture audit report is a historical
+source at its named2026-10-13 revision; its old test counts and findings were not
+rerun or promoted into current verification. Existing significant clock bootstrap,
+root/shard alignment, sender-accounting, crypto context, receiver admission and
+shutdown ordering gaps map to OPEN-01–14; do not create duplicate human questions
+from technical gaps. This initial map reduces the navigation gap but does not
+close F1, C4.2, membership/source completeness or O1.1 crash safety.
+
+Next active leaf: C4.2a, ask the saved retention A/B; then use that selection to
+finish the bounded retrieval-lifecycle design and continue F1's exact coverage
+review. No production/spec changes, commit or tests this turn.
+
+### CP-0067 — Derive retrieval skeleton and ask about original-approval availability lifetime
+
+C4.2 now has a bounded read-only request/response and verification skeleton with
+explicit context/transport separation and wire-test obligations. Added provisional
+mapping of all22 numbered spec families (24 files,113 distinct mentioned IDs),
+not semantic completeness or executed verification. New pending human question
+Q-C4-APPROVAL-RETENTION-01: A = original approvals fetchable until root TTL+30s;
+B = shorter explicit retrieval window, preserving all safety-critical state and
+valid client-held late evidence. Neither selected;69 decisions remain. Active
+focus C4.2a. No production/spec edits or tests.
+
+Completed checkpoint: **CP-0067**.
+
+
+### 7.79 Root-lifetime original approval retention selected; wallet send order open
+
+Record: C4-APPROVAL-RETENTION-DECISION-001 / C3-WALLET-SEND-DURABILITY-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0068.
+
+**Answer / DEC-070.** The maintainer unequivocally selects
+Q-C4-APPROVAL-RETENTION-01 A. Retain exact own original attestations and required
+verification context until root.valid_until+30s, using the existing immutable
+own-choice record/lifecycle in redb rather than a second shorter cache timer.
+Reject B because a separate retrieval deadline complicates pruning and can leave
+a wallet that was offline for days/weeks unable to recover an otherwise available
+receipt. Wallet custody, original fixed20,14 distinct valid signatures, bounded
+read-only collection and uncertain status without sufficient evidence remain.
+Ordinary INV-0310 reads and node RAM-first/async persistence are not reopened.
+
+**Engineering qualifications.** A shared lifecycle reduces machinery; the actual
+retained64-byte signature plus contextual fields/index overhead is not literally
+zero bytes. Reuse fields where possible and account for measured RAM/disk bytes
+under N2/O1. This is not permission to discard safety data when capacity is full.
+The requested complete purge covers lock, collision, own-choice and attestation
+records at the common authentic root expiry+30s; independently governed identity
+sanctions remain separate. Preserve DEC-035 bounded background pruning and
+immediate logical expiry checks: do not claim a single instantaneous atomic
+operation across RAM and asynchronous disk. Design coherent visibility, root-group
+cleanup and crash-resumable deletion without resurrecting expired state. These
+are technical obligations, not reasons to re-ask the selected TTL. Original
+signer disappearance/data loss still prevents a guaranteed14-signature recovery.
+
+**Wallet recovery data derived from existing choices.** Preserve the exact signed
+request bytes/T_0, voucher root and consumed output, the local uncertain/outgoing
+state, available partial approvals, the original admitted committee/context and
+routing locators as they become known, plus consumed retry budget. Resolve node
+addresses by authenticated identity; stale IPs are not identity changes. A current
+roster must not substitute for the original approval context. Do not require
+unknown committee metadata before it has been received or infer an extra checkout
+preflight/finalization round. This derives what client custody needs; the exact
+client persistence point remains a separate real crash/latency tradeoff.
+
+A targeted read of adjacent `human-money-core` found request builders/verifiers
+in `src/services/l2_gateway.rs` and encrypted wallet storage with atomic file
+replacement/sync helpers in `src/storage/file_storage.rs`. Transfer APIs describe
+saving wallet state, but this inspection did not establish an exact durable
+L2-intent-before-outbound-request guarantee or a persisted original-committee
+recovery record. `tests/wallet_api/proof_persistence.rs` concerns conflict-proof
+retention, not an executed L2-send crash test. No adjacent files were changed.
+Existing storage is the preferred reuse candidate; do not invent a new journal
+or claim that the test filename proves wire/crash ordering.
+
+**Exact pending question — Q-C3-WALLET-SEND-DURABILITY-01 (unanswered):**
+
+> Soll die Wallet den ursprünglichen signierten Zahlungsauftrag dauerhaft lokal
+> sichern, bevor sie ihn erstmals an ein Gateway sendet?
+>
+> **A — Erst lokal sichern, dann senden (Empfehlung):**
+> Die Wallet speichert den exakten Auftrag mit T_0 und der betroffenen
+> Vorgängerausgabe sowie deren ausstehendem Zahlungsstatus dauerhaft, bevor
+> sie sendet. Nach einem App-Absturz kann sie denselben Auftrag wiederfinden
+> und gezielt weiter abgleichen. Der erste Versand wartet dafür auf den lokalen
+> Speichervorgang.
+>
+> **B — Erst aus dem RAM senden, parallel dauerhaft sichern:**
+> Die Wallet wartet vor dem Versand nicht auf den lokalen Speicher.
+> Das spart diese Wartezeit; bei einem Absturz im Zwischenfenster kann der
+> letzte Auftrag fehlen. Der Wiederanlauf muss dann mit möglicher erfolgter
+> Zahlung umgehen, statt die betroffene Ausgabe einfach erneut freizugeben.
+>
+> Diese Entscheidung betrifft die Wallet. Die Shard-Knoten bleiben bei der
+> bereits gewählten RAM-first-Verarbeitung mit asynchroner Persistierung.
+
+Recommend A to make exact-intent recovery survive an ordinary app/process crash,
+reusing existing client storage and atomic pending-output/intent transition.
+Count local preparation separately from the gateway800ms collection budget;
+no local latency measurement was made. This does not cover lost devices or stale
+wallet backups automatically. B explicitly trades crash recovery for earlier
+submission; it cannot weaken DEC-009 or authorize a replacement spend when an
+original payment may already exist. Derive its safe unknown/affected-output
+recovery boundary before implementation; do not assume an asynchronously written
+flag survives a crash. Both keep no node-side intent queue, no changed T_0,
+no automatic rollback and no extra checkout round. Unknown future committee
+metadata is persisted as received, rather than being invented before dispatch.
+
+Next active leaf C3.2: ask saved A/B, derive the chosen client crash/state
+transition contract and then return to C4.2 storage/context/wire and F1 exact
+coverage. O1.1 node lost-choice recovery remains a separate proof obligation.
+No code/spec changes, commits or tests in this continuation.
+
+### CP-0068 — Select one root-lifetime approval horizon and ask about wallet send durability
+
+Recorded DEC-070 / Q-C4-APPROVAL-RETENTION-01 A; shorter-window B rejected.
+Exact original own approvals follow root TTL+30s with own choices; costs and
+coherent RAM/disk pruning remain engineering work. Derived minimal wallet
+recovery data and checked adjacent client storage boundaries read-only. Active
+C3.2 / Q-C3-WALLET-SEND-DURABILITY-01: A = durable original wallet intent/pending
+output before first send; B = RAM-first client send with explicit crash recovery
+cost. Neither selected; node RAM-first is unchanged. No code/spec edits or tests.
+
+Completed checkpoint: **CP-0068**.
+
+
+### 7.80 Wallet durable-before-send selected; PoS receipt order open
+
+Record: C3-WALLET-SEND-DURABILITY-DECISION-001 / C2-POS-RECEIPT-DURABILITY-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0069.
+
+**Answer / DEC-071.** The maintainer unequivocally selects
+Q-C3-WALLET-SEND-DURABILITY-01 A. The wallet durably saves the exact signed
+outgoing bytes, unchanged T_0 and the affected output's pending state before
+first gateway dispatch. This makes ordinary app/OS crash recovery preserve the
+original intent for idempotent retries and prevents incorrectly displaying that
+output as unspent after a send-before-save crash. Reject B's client RAM-first
+send window. Client custody and no automatic rollback/replacement spend remain;
+this does not reinstate durable-before-response at shard nodes (DEC-062).
+
+The maintainer mentions WAL/SQLite as examples. Prefer existing client storage
+if it can supply the required atomic durability contract; no new storage engine
+or separate log is selected. The claimed200-byte request, sub0.5ms local write,
+50–150ms mobile RTT and100% protection are rationale/estimates, not measurements
+or unconditional guarantees against device loss, faulty storage or stale backups.
+Specify the actual application/OS-crash durability boundary and test it. No network
+or storage benchmark was run; no external time-varying latency claims are made.
+
+**Derived wallet crash contract.** Before successful local commit, no external
+dispatch is allowed. The commit atomically binds outgoing intent to pending
+output state; failure refuses dispatch. A crash after commit but before observed
+network send is recovered conservatively as pending and can resume the identical
+request while fresh. A crash after dispatch but before receipt persistence remains
+uncertain; after the original30s freshness window, only bounded read/proof recovery
+is allowed. Append original committee context and verified partial/final receipts
+as actually received, without requiring an extra preflight to learn unknown data.
+A generic transaction snapshot or generated signature alone is not proof that
+this exact pending-intent transition was durably committed. Reuse existing client
+storage and test crash cuts before commit, after commit, during dispatch and before
+response persistence. The earlier adjacent-core read does not establish those cuts.
+
+**Next bounded tradeoff: receiving merchant.** The sender retaining its intent
+does not itself preserve the merchant's verified checkout receipt or purchase
+binding. DEC-009 requires a verified completion before finally paid goods release,
+but the register has no explicit maintainer selection of whether local merchant
+receipt persistence must finish before that release. P0 §7 proposes
+ReleaseGoodsOnce requiring a durable purchase record; this is an existing design
+candidate, not new retroactive assent. §7.58 distinguishes accepted guardrails
+from exact candidate rules. Make this persistence-order tradeoff explicit once;
+keep the actual quorum/evidence requirements mandatory under either alternative.
+
+**Exact pending question — Q-C2-POS-RECEIPT-DURABILITY-01 (unanswered):**
+
+> Das PoS-Terminal hat ein gültiges Quorum-Zertifikat geprüft. Muss es den
+> Beleg und die Zuordnung zum Kauf dauerhaft lokal speichern, bevor es
+> „Bezahlt“ anzeigt und die Ware freigibt?
+>
+> **A — Erst Beleg und Kauf dauerhaft sichern, dann freigeben (Empfehlung):**
+> Das Terminal wartet auf die lokale Speicherung des geprüften Zertifikats
+> samt Kaufzuordnung. Nach einem Absturz kann es die bestätigte Zahlung
+> wiederfinden und denselben Kauf zuordnen. Die Warenfreigabe wartet dafür
+> auf diesen lokalen Speichervorgang.
+>
+> **B — Nach Prüfung sofort freigeben, im Hintergrund speichern:**
+> Das Terminal zeigt nach erfolgreicher kryptografischer Prüfung sofort
+> „Bezahlt“ an und speichert anschließend asynchron. Das spart die lokale
+> Wartezeit; bei einem Absturz im Zwischenfenster muss es den fehlenden Beleg
+> später nachladen, was bei nicht erreichbaren Signierern scheitern kann.
+>
+> Unter beiden Optionen bleibt ein gültiger Zahlungsnachweis Voraussetzung.
+> Die RAM-first-Verarbeitung der Shard-Knoten bleibt unverändert.
+
+Recommend A to preserve the merchant's local evidence/purchase binding before
+an external release signal, consistent with client custody and the existing P0
+candidate. This does not make physical handover atomic with storage: persist a
+ready-for-release transition, distinguish it from actual goods released and use
+an idempotent sale/release reference. A crash in an uncertain physical handover
+requires honest local reconciliation, not automatic duplicate release. Keep
+amount/purchase/exposure logic outside blind L2. B is a weaker merchant crash-
+recoverability choice, not acceptance without a valid quorum or waiver of fraud
+checks. If chosen, update the proposed P0 persistence predicate explicitly; do
+not silently change canonical proof validity, node persistence or receipt class.
+No guaranteed local storage latency or global irreversible-finality claim follows.
+
+Next active leaf C2.2: ask saved A/B, then derive one consistent sender/merchant
+client crash-state contract and return to C4.2/F1 integration. Pending source,
+membership, own-vote-loss and real-wire proof obligations remain. No code/spec
+changes, commits or tests this turn.
+
+### CP-0069 — Select wallet pre-send persistence and ask about merchant pre-release persistence
+
+Recorded DEC-071 / Q-C3-WALLET-SEND-DURABILITY-01 A; client RAM-first B rejected.
+Derived atomic pending-output/original-intent ordering and crash recovery cuts,
+without selecting SQLite/WAL or changing shard RAM-first. Active C2.2 /
+Q-C2-POS-RECEIPT-DURABILITY-01: A = durable verified receipt/purchase binding
+before paid display/release; B = verified-in-RAM release with async client save.
+Neither selected. Existing P0 purchase-journal proposal cited with its provenance;
+no production/spec edits or tests.
+
+Completed checkpoint: **CP-0069**.
+
+
+### 7.81 Merchant L1 custody selected; completed-checkout receipts ephemeral
+
+Record: C2-POS-RECEIPT-DURABILITY-CORRECTION-001 / C3-ALTERNATE-PAYMENT-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0070.
+
+**Answer / DEC-072: corrected A, not literal §7.80 A.** The maintainer selects
+save-before-release with an explicit change of the stored object: the received
+L1 voucher deed/ProofChain and its purchase-journal binding must be durably local
+before goods release. The14-node quorum certificate is a live checkout clearance
+signal, not the negotiable instrument and not proof of current unspent status at
+a later spend. Once checkout completes, clients/merchants need not retain or
+back-fill that historical signature bundle. Post-restart/current checks use the
+live registry through POST /v1/status. Reject the earlier proposed requirement
+that the merchant must durably archive the quorum certificate before release.
+No new renamed option or silent interpretation of a bare A: preserve the old
+question and record this explicit content correction. The async-L1-purchase-save
+alternative B was not selected.
+
+**Reconcile scope without deleting history.** DEC-055 already rejects recursive
+L2 receipt chaining. This instruction strengthens the completed-checkout client
+boundary and qualifies DEC-069's earlier certificate-custody wording: original
+approval recovery for a still-uncertain attempt is not a duty to reconstruct an
+archive for a completed purchase. DEC-070 separately selected node-side retention
+of original own approvals/context until root TTL+30s; a client forgetting a
+completed-checkout bundle does not itself instruct every node to erase protected
+own history. Keep that selection and minimum necessary collision/fraud evidence,
+DEC-032 lost-choice gate and original-byte retries. No new all-certificates archive
+at each node, receipt-return round or historical chain is implied. Revisit only
+if the maintainer explicitly changes unresolved-attempt recovery or node retention.
+
+The current on-disk AGENTS.md was re-read because another chat changed it.
+Its updated guardrail7 explicitly says completed-checkout clients/merchants need
+not hoard/chain/back-fill historical certificates, distinguishes L1 instruments
+from L2 clearance and retains live checks. Updated guardrail6 also distinguishes
+24h ticket maturity, calendar quota epochs, passive liveness and per-request
+living-mesh HRW; no committee tenure/epoch baton is selected. These concurrent
+AGENTS/source edits are preserved; no production audit is claimed by their presence.
+
+**Read-proof boundary remains technical.** An old verified receipt may prove a
+historical approval statement; it cannot prove the voucher remains unspent now.
+Equally, a single current peer returning an owner-signed lock proves possession/
+authorization, not automatically14/20 acceptance or absence of hidden conflicts.
+Existing notes §3–5.3 give the colluding-owner and honest-unconfirmed-copy witnesses.
+Thus selecting a simple live status interface does not resolve OPEN-04's evidence
+predicate. Do not pretend to prove it by vote, reintroduce mandatory historical
+certificates as the only possible solution, or silently require a read quorum
+in every INV-0310 request. Derive sufficient current-state evidence within the
+chosen model; otherwise keep uncertainty explicit. Current absence or later spend
+also cannot erase the purchase journal's previously recorded historical event.
+
+**Derived client boundary.** Sender: DEC-071 original intent/pending output durable
+before send. Receiver: verified live clearance plus durable L1 voucher/purchase
+before release. Separate purchase payment outcome, release-ready and actual goods
+handover states. A journal record is not an atomic physical handover; restart does
+not automatically release goods twice. Later resale/spend checks current output
+state, not an old certificate. Amount, purchase ID, sale status and any repayment
+policy stay in merchant/wallet clients, outside blind L2.
+
+**Next real tradeoff.** DEC-009 forbids automatic rollback/replacement spend for
+the same consumed output after a timeout. A different voucher uses a different
+slot, so both original and replacement can validly pay one purchase. L2 cannot
+deduplicate them by purchase/amount because it is blind. P0 §7 already warns
+that once-only goods release does not imply once-only debit and requires an
+explicit merchant/wallet rule before such a switch; no earlier A/B selection
+for this case was found in the current register.
+
+**Exact pending question — Q-C3-ALTERNATE-PAYMENT-01 (unanswered):**
+
+> Der erste Zahlungsversuch für einen Kauf bleibt nach einem Timeout ungeklärt.
+> Darf das Terminal automatisch eine Ersatz-Zahlung aus einem anderen Gutschein
+> anstoßen, obwohl die erste Zahlung noch erfolgreich gewesen sein könnte?
+>
+> **A — Kein automatischer zweiter Zahlungsauftrag (Empfehlung):**
+> Wallet und Terminal klären zunächst den ursprünglichen Versuch über den
+> begrenzten Statusabgleich. Ein Wechsel des Zahlungsmittels erfordert eine
+> bewusste Nutzer-/Kassiererentscheidung mit Hinweis auf das Doppelzahlungsrisiko.
+> So entsteht aus einem Timeout keine automatische zweite gültige Zahlung.
+>
+> **B — Ersatz-Zahlung mit ausdrücklicher Doppelzahlungsbehandlung zulassen:**
+> Das Terminal darf nach einer definierten Wartezeit einen anderen Gutschein
+> für denselben Kauf verwenden. Es hält beide Versuche unter derselben Kaufkennung
+> nach und erkennt einen möglichen Doppelerfolg. Für diesen Fall ist eine
+> Rückabwicklung durch Händler und Wallet vorgesehen. Das kann den Checkout
+> beschleunigen, benötigt aber zusätzliche Abgleich- und Erstattungslogik.
+
+Recommend A as the minimal default preserving uncertainty without automatic extra
+debit. A manual switch still needs honest purchase reconciliation; it is not proof
+that the original failed. B is a separately configured merchant/wallet payment
+policy, not L2 rollback, reusing T_0 on a different payload or automatic network
+refund. Any refund is a separate authorized L1 transfer under the actual owner's
+custody; receipt disposal does not make historic double success magically visible
+or recoverable. Required durable records retain original intents, purchase binding
+and both outcomes; no amounts/accounts are added to shard nodes. No specific
+waiting interval or refund implementation is selected by this question.
+
+Next active C3.3: ask saved A/B, then consolidate the client crash/uncertain-payment
+contract under DEC-072 and continue C4/F1 current-read verification. No production,
+binding-spec edits, commit or tests this turn.
+
+### CP-0070 — Correct merchant storage to L1 custody and scope completed-checkout certificate disposal
+
+Recorded DEC-072 / corrected Q-C2-POS-RECEIPT-DURABILITY-01 A: durable L1 voucher
+and purchase record precede release; no post-completion certificate hoarding or
+back-fill. Preserved unresolved-attempt recovery and node own-history retention
+as separate scopes, not silently superseded wholesale. Re-read concurrent AGENTS
+changes; recorded current-read evidence gap without imposing historical receipts.
+Active C3.3 / Q-C3-ALTERNATE-PAYMENT-01: A = no automatic new-voucher substitute
+while the first payment is uncertain; B = alternate payment with explicit dual-
+outcome/refund handling. Neither selected. No code/spec edits or tests.
+
+Completed checkpoint: **CP-0070**.
+
+
+### 7.82 Client-only payment policy selected; repeated node stop-signal question
+
+Record: C3-ALTERNATE-PAYMENT-DECISION-001 / O4-SECOND-SIGNAL-QUESTION-001.
+Date: 2026-10-18 (Europe/Berlin). Checkpoint: CP-0071.
+
+**Answer / DEC-073.** The maintainer explicitly selects
+Q-C3-ALTERNATE-PAYMENT-01 A. Automatic second payment is prohibited in wallet/
+PoS policy. For a multi-voucher purchase, preserve successful components as
+partial payment and the timed-out component's uncertain outcome. A deliberate
+customer/cashier decision changes tender for the remainder; no hidden automatic
+substitute or refund machinery follows from a timeout. Do not treat the uncertain
+component as definitively failed or assume the whole purchase was rolled back.
+
+**Explicit scope correction.** This belongs exclusively to human-money-core and
+merchant-terminal commercial logic. humoco-node is a blind registry of independent
+parent_lock -> child_lock decisions and knows no basket, purchase ID, remaining
+amount, substitute payment or refund. The prior question's client scope is now
+explicitly reaffirmed, not an instruction to implement payment orchestration in
+the node. Multi-voucher commercial grouping is not a new distributed all-or-nothing
+node batch; existing valid-prefix causal-path batch semantics remain separate.
+DEC-072 L1 custody/ephemeral completed-checkout receipt and DEC-071 exact original
+intent persistence remain. Record this client decision, then stop expanding
+commercial subquestions absent a node/interface dependency or explicit user request.
+
+**Return to node scope / O4.1.** DEC-034 already selects a bounded graceful stop:
+stop admission, drain eligible in-flight work/persistence, stop within a configured
+deadline and report incomplete drain honestly. It does not select how a second
+ordinary termination signal behaves. OPEN-11 already records signal escalation;
+this is a bounded unresolved operational tradeoff, not a new subsystem or a
+repeated question on whether shutdown may wait forever. C3.3 policy is decided;
+C4 read-safety, original-approval integration and F1 proof/coverage work remain
+pending and are revisited before the final plan or any relevant implementation.
+Broad trust research remains stopped; node same-key-loss gate remains mandatory.
+
+**Targeted source findings.** `daemon.rs` registers SIGTERM/ctrl_c and uses a
+single tokio::select! to enter cancellation. The inspected graceful tail closes
+transport, sequentially awaits listener/background handles, then cancels and
+awaits the flush worker. No explicit second-signal escalation policy or overall
+wall-clock deadline was found in that tail. `storage/engine.rs::drain_on_shutdown`
+caps batch count, which is not an elapsed-time bound if commits stall; its warnings
+and daemon stop message do not independently prove durable completion. The
+systemd unit has TimeoutStopSec=30, an existing deployment setting, not a measured
+approved drain bound. No actual stop/crash or blocked-disk experiment was run.
+Preserve existing concurrent edits; this inspection does not establish that every
+QUIC producer is tracked/joined before drain.
+
+**Exact pending question — Q-O4-SECOND-SIGNAL-01 (unanswered):**
+
+> Der Node fährt nach einem ersten SIGTERM oder Strg+C bereits geordnet herunter.
+> Wie soll er auf ein weiteres solches Beendigungssignal reagieren?
+>
+> **A — Den begrenzten geordneten Stopp fortsetzen (Empfehlung):**
+> Weitere normale Stoppsignale verkürzen oder verlängern die ursprüngliche
+> Shutdown-Deadline nicht. Bereits angenommene Arbeit wird innerhalb dieser
+> Frist weiter abgearbeitet und persistiert. Ein bewusst erzwungener sofortiger
+> Abbruch bleibt über SIGKILL möglich.
+>
+> **B — Das zweite Signal erzwingt sofortigen Abbruch:**
+> Ein zweites SIGTERM oder Strg+C beendet den Node vor Ablauf der Drain-Frist.
+> Das ist für den Betreiber bequem, kann aber noch nicht persistierte
+> RAM-Daten verwerfen und einen ungeordneten Wiederanlauf verursachen.
+
+Recommend A: idempotent stop signaling avoids accidental early destruction of
+volatile issued choices and needs no separate user-space force-stop mode. B is
+a viable explicit operator convenience policy; document the data/recovery cost.
+Both retain a finite original deadline, operator sovereignty, stopped admission
+and honest incomplete-drain reporting. Neither option promises to prevent loss
+under SIGKILL/power failure or clears DEC-032/063 on reboot. DEC-062 permits
+issued-but-unflushed approvals; ordinary14/20 sync alone is not proof all own
+choices survived. Recovery/readiness and dirty-stop detection remain engineering
+obligations. A repeated signal must not reset the deadline into an unbounded wait.
+No numeric deadline or implementation kill mechanism is selected by this question.
+
+Next: ask saved A/B; derive the chosen signal/drain ordering and supervisor
+contract, including incomplete stop, stuck storage and producer shutdown. Then
+return to node/interface coverage and consequential proof gaps. No source/spec
+edits, commits, tests or external process signaling this turn.
+
+### CP-0071 — Record client-only no-substitute policy; return to node shutdown signaling
+
+Recorded DEC-073 / Q-C3-ALTERNATE-PAYMENT-01 A with explicit human-money-core/
+PoS-only scope and partial-purchase/tender handling. No purchase logic is added
+to humoco-node. Active O4.1 / Q-O4-SECOND-SIGNAL-01: A = repeated ordinary stop
+signals preserve bounded original drain; B = second signal forces early abort.
+Neither selected. Source/systemd settings inspected read-only, with no operational
+experiments or implementation change. Other proof/coverage obligations remain.
+
+Completed checkpoint: **CP-0071**.
+
+
+### 7.83 Idempotent stop signals selected; deadline-enforcement boundary open
+
+Record: O4-SECOND-SIGNAL-DECISION-001 / O4-DEADLINE-OWNER-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0072.
+
+**Answer / DEC-074.** The maintainer explicitly selects
+Q-O4-SECOND-SIGNAL-01 A. Repeated SIGTERM/SIGINT during shutdown must not abort
+the drain or restart/extend its original deadline. Preserve pending MPSC work
+and allow eligible async redb flush within the existing finite budget; habitual
+extra Ctrl+C is not a force-stop command. Reject B's second-signal immediate abort.
+An explicit OS SIGKILL remains the operator's emergency stop. The estimated
+few hundred milliseconds for normal flush is rationale, not measured performance.
+No numeric runtime deadline or production readiness claim was selected.
+
+**Derived bounded shutdown contract, not another preference question.** On first
+stop, record one monotonic deadline, close new ingress/mutation admission and
+cancel background producers according to dependencies. Quiesce/join all producers
+that can still enqueue accepted work before closing/draining persistence; do not
+equate a listener's completion with every detached QUIC handler being joined.
+Repeated ordinary signals are idempotent. Use only the remaining original time
+budget for each wait; a fresh full timeout per handle would multiply the stop
+limit. A batch-count cap is not a wall-clock bound. Report clean stop only after
+required work has truly committed and required producers have ceased; timeout,
+commit failure or abandoned pending work reports incomplete stop, not success.
+DEC-034 already requires finite shutdown, so reaching a stuck-I/O deadline is
+not permission to extend indefinitely or silently leave the node serving votes.
+Do not re-ask that settled safety/availability policy.
+
+Under DEC-062, undrained RAM may include already issued approvals. On unclean
+restart retain DEC-057 FLAG_NOT_READY and the independent DEC-032/063 own-history
+gate. Boot sync is necessary where specified but ordinary quorum-state repair
+alone does not prove every issued individual choice was recovered. Successful
+queue send, task cancellation or a clean-exit log is not a durable commit proof.
+Dirty-stop detection, blocked sync storage and failure propagation are explicit
+engineering/verification obligations; no new journal, synchronous hot-path fsync
+or rollback is selected by this derived contract.
+
+**Evidence / unresolved enforcement owner.** The read-back daemon shutdown tail
+still awaits handles without an explicit overall timer in the inspected section;
+flush cancellation follows those waits. The systemd unit supplies TimeoutStopSec=30.
+That service setting is the current outer stop boundary, not a daemon-enforced
+or measured production guarantee. A direct CLI invocation does not inherit a
+systemd service-unit setting. DEC-036 selected systemd-first documentation while
+retaining other invocation modes; DEC-034 did not explicitly choose whether
+elapsed-time enforcement belongs inside the daemon or only in deployment.
+This is the next bounded core-versus-supervisor tradeoff. No external supervisor
+semantics beyond the shown configured boundary were tested in this turn.
+
+**Exact pending question — Q-O4-DEADLINE-OWNER-01 (unanswered):**
+
+> Wer soll die feste Shutdown-Deadline durchsetzen: der Node selbst oder
+> ausschließlich der Prozessmanager wie systemd?
+>
+> **A — Deadline im Node, Prozessmanager als äußere Absicherung (Empfehlung):**
+> Der Node begrenzt seine Shutdown-Wartezeiten selbst. Das gilt auch beim
+> direkten CLI-Start. systemd beziehungsweise der Container-Prozessmanager
+> erhält eine etwas längere äußere Stop-Frist als Absicherung.
+>
+> **B — Deadline ausschließlich im Prozessmanager:**
+> Der Node versucht den geordneten Drain; systemd beziehungsweise der
+> Container-Prozessmanager erzwingt das Ende bei Fristablauf. Das spart einen
+> eigenen Deadline-Pfad im Daemon. Beim direkten CLI-Start muss der Betreiber
+> eine entsprechende äußere Begrenzung selbst bereitstellen.
+
+Recommend A for consistent bounded behavior across supported CLI/service/container
+invocations and an explicit node outcome before the outer supervisor stop. B is
+viable with an explicit supervised-deployment contract, not a claim that standalone
+run has an intrinsic bound. Neither policy makes an in-flight blocking fsync
+instantly cancellable; runtime/worker teardown, incomplete-stop propagation and
+hard-stop fallback must be designed and tested. A timed-out future alone does not
+prove a blocking task or process terminated. Preserve supervisor margin without
+inventing a measured duration or guaranteeing persistence by timeout. Both keep
+idempotent normal signals, operator SIGKILL, safety gates and no node hot-path I/O.
+
+Planned checks: signal repetition never changes the recorded deadline; waits share
+one budget; new writes stop; accepted producers finish or yield explicit incomplete
+outcome; pending/failed/stalled commits cannot log a clean drain; outer stop margin
+is honored; direct CLI behavior matches the selected contract; reboot with lost
+choices never bypasses gates. No process signaling, tests or implementation ran.
+
+Next: ask saved A/B, derive the chosen daemon/supervisor boundary and continue
+O4/F1 acceptance mapping. Numerical budgets remain measurement tasks, not an
+arbitrary next preference question. No source/spec changes or commits this turn.
+
+### CP-0072 — Select idempotent stop signals; ask who enforces the deadline
+
+Recorded DEC-074 / Q-O4-SECOND-SIGNAL-01 A and rejected second-signal early abort.
+Derived common remaining-time budget, producer quiescence, truthful completion and
+restart gates from existing decisions. Active O4.2 / Q-O4-DEADLINE-OWNER-01: A =
+internal node deadline with outer supervisor margin; B = supervisor-only timeout
+with explicit standalone-run responsibility. Neither selected. Client date is
+2026-10-19. No code/spec edits, commits, tests or external process signals.
+
+Completed checkpoint: **CP-0072**.

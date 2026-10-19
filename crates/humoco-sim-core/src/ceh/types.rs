@@ -191,7 +191,27 @@ fn hex_prefix(bytes: &[u8; 32]) -> String {
     s
 }
 
-/// Genesis manifest defining network launch and the initial 20-node pioneer committee.
+/// # Federation Activation Manifest (Network Birth Certificate)
+///
+/// Sealed when a network matures across the $N = 20$ phase transition after 24 hours of stability.
+///
+/// ### 🏛️ Architectural Context & Domain Invariants:
+/// 1. **Phase Transition from Island to Federation ($N < 20 \to N \ge 20$):**
+///    - **Island / Embryonic Mesh ($N < 20$):** Operates on adaptive quorums with status `PROVISIONAL` (0x00).
+///      It has *no* `GenesisManifest` of its own (`local = None`). It can adopt an established federation's
+///      manifest via *Pioneer Adoption* when bridging to the global network.
+///    - **Sovereign Federation ($N \ge 20$):** Once 20 mature nodes are stable for 24h, the initial 20-node
+///      pioneer committee co-signs this manifest ($\ge 14/20$ BFT quorum).
+/// 2. **Network Genesis Fingerprint & Cryptographic Universe Isolation:**
+///    - The `canonical_hash()` of this manifest defines the immutable `NetworkGenesisFingerprint`.
+///    - This fingerprint seals the network universe: it binds TLS ALPN, QUIC session negotiation,
+///      and signature domain separators (`domain_approve_final`).
+/// 3. **Mutual Incompatibility between Distinct $N \ge 20$ Federations (Anti-Collision & Anti-Spam):**
+///    - If two separate networks grow to $N \ge 20$ independently, each signs a divergent `GenesisManifest`.
+///    - During P2P handshakes, [`verify_handshake_genesis`] enforces that divergent manifests result in
+///      an immediate hard abort (`CehError::IncompatibleGenesisManifest`).
+///    - This guarantees that two large networks can *never* silently merge or cross-contaminate each other's
+///      `FINAL` collision lock state, completely neutralizing cross-network double-spends and mass spam dumps.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GenesisManifest {
     pub protocol_version: u32,
@@ -747,13 +767,22 @@ pub fn validate_signatures_against_committee(
     Ok(())
 }
 
-/// Verifies genesis compatibility during a peer handshake.
+/// # Federation Boundary Guard (Genesis Compatibility & Island Adoption)
 ///
-/// - If both manifests are present, ensures their canonical hashes match.
-///   If they diverge, returns `Err(CehError::IncompatibleGenesisManifest)`.
-/// - If local manifest is missing (`None`, e.g. island node) and remote is present (`Some(rem)`),
-///   validates remote pioneer signatures. If valid, returns `Ok(Some(rem.clone()))`.
-/// - If local manifest is present and remote is missing, or both are missing, accepts as compatible returning `Ok(None)`.
+/// Enforces cryptographic federation boundaries during P2P handshakes:
+///
+/// 1. **Federation Collision Defense ($N \ge 20$ vs $N \ge 20$):**
+///    If both peers have an established [`GenesisManifest`] (`Some(loc)` and `Some(rem)`), their canonical
+///    hashes must be strictly identical. If they diverge, returns `Err(CehError::IncompatibleGenesisManifest)`.
+///    The handshake fails immediately and the QUIC session is closed. This prevents two independently grown
+///    federations from creating conflicting `FINAL` signatures or contaminating each other's collision registry.
+/// 2. **Island Mesh Adoption ($N < 20$ into $N \ge 20$):**
+///    If the local node is an embryonic island mesh (`local = None`), and the remote peer presents a valid
+///    federation manifest (`remote = Some(rem)`), the island node verifies the 14 pioneer signatures
+///    ([`GenesisManifest::verify_signatures`]) and adopts the remote manifest (`Ok(Some(rem.clone()))`).
+/// 3. **Island-to-Island Peering ($N < 20$ with $N < 20$):**
+///    If neither peer has crossed the $N = 20$ threshold (`local = None`, `remote = None`), they operate
+///    freely in provisional mode (`Ok(None)`).
 pub fn verify_handshake_genesis(
     local: Option<&GenesisManifest>,
     remote: Option<&GenesisManifest>,

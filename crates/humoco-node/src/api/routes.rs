@@ -1349,7 +1349,13 @@ async fn assemble_status_quorum_certificate(
     }
 }
 
-/// Handler for POST /status and POST /v1/status
+/// Handler for POST /status and POST /v1/status.
+///
+/// 📜 ARCHITECTURAL INVARIANT:
+/// Status checks are live queries against the in-RAM collision index (< 1 µs).
+/// An old quorum certificate cannot prove that a voucher is currently unspent, because a spend
+/// could have occurred at any point afterwards. Therefore, every recipient performs a fresh live status check.
+/// Clients and merchants do NOT hoard or chain historical quorum certificates; live status is the single source of truth.
 async fn query_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1544,7 +1550,13 @@ async fn query_status(
     (StatusCode::OK, Json(envelope)).into_response()
 }
 
-/// Dedicated handler for HMC L2LockRequest
+/// Dedicated handler for HMC L2LockRequest.
+///
+/// 📜 ARCHITECTURAL INVARIANT:
+/// The merchant/cash register has received the Layer-1 Voucher deed (`ProofChain`) directly from the customer.
+/// This handler merely registers the auxiliary collision lock (`parent_lock -> child_lock`) in the blind
+/// L2 Collision Lock Registry to prevent double-spends. The returned Attestation / Quorum Certificate is an
+/// auxiliary clearance receipt ("Unbedenklichkeitsbescheinigung"), NOT the money/deed itself.
 async fn submit_hmc_lock(
     state: AppState,
     headers: HeaderMap,

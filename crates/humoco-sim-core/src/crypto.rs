@@ -10,10 +10,13 @@ pub const HUMOCO_V1_APPROVE_FINAL_MAINNET: &[u8] = b"HUMOCO_V1_APPROVE_FINAL_MAI
 pub const HUMOCO_V1_APPROVE_FINAL_TESTNET: &[u8] = b"HUMOCO_V1_APPROVE_FINAL_TESTNET";
 pub const HUMOCO_V1_ATTESTATION_MAINNET: &[u8] = b"HUMOCO_V1_ATTESTATION_MAINNET";
 pub const HUMOCO_V1_ATTESTATION_TESTNET: &[u8] = b"HUMOCO_V1_ATTESTATION_TESTNET";
+pub const HUMOCO_V1_HEARTBEAT_MAINNET: &[u8] = b"HUMOCO_V1_HEARTBEAT_MAINNET";
+pub const HUMOCO_V1_HEARTBEAT_TESTNET: &[u8] = b"HUMOCO_V1_HEARTBEAT_TESTNET";
 /// Backward-compatible aliases (point to Mainnet)
 pub const DOMAIN_ATTESTATION: &[u8] = HUMOCO_V1_ATTESTATION_MAINNET;
 pub const DOMAIN_APPROVE_PROV: &[u8] = HUMOCO_V1_APPROVE_PROV_MAINNET;
 pub const DOMAIN_APPROVE_FINAL: &[u8] = HUMOCO_V1_APPROVE_FINAL_MAINNET;
+pub const DOMAIN_HEARTBEAT: &[u8] = HUMOCO_V1_HEARTBEAT_MAINNET;
 pub const DOMAIN_GENESIS: &[u8] = b"HUMOCO_V1_GENESIS";
 pub const DOMAIN_INGRESS_DECL: &[u8] = b"HUMOCO_V1_INGRESS_DECL";
 pub const DOMAIN_BRIDGE_LOCK: &[u8] = b"HUMOCO_V1_BRIDGE_LOCK";
@@ -81,6 +84,14 @@ pub fn domain_attestation(network_id: NetworkId) -> &'static [u8] {
     match network_id {
         NetworkId::Mainnet => HUMOCO_V1_ATTESTATION_MAINNET,
         NetworkId::Testnet => HUMOCO_V1_ATTESTATION_TESTNET,
+    }
+}
+
+/// Returns the domain tag for F2F presence heartbeats for the given network (INV-1106).
+pub fn domain_heartbeat(network_id: NetworkId) -> &'static [u8] {
+    match network_id {
+        NetworkId::Mainnet => HUMOCO_V1_HEARTBEAT_MAINNET,
+        NetworkId::Testnet => HUMOCO_V1_HEARTBEAT_TESTNET,
     }
 }
 

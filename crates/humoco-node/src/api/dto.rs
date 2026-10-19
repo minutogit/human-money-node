@@ -70,6 +70,16 @@ impl AttestationDto {
 }
 
 /// Assembled quorum certificate containing individual node attestations (Ed25519 signatures) from shard committee members.
+///
+/// 📜 ARCHITECTURAL INVARIANT (EPHEMERAL CHECKOUT SIGNAL vs. ZERO SPENDING UTILITY):
+/// - Ephemeral Live Checkout Signal: This certificate serves strictly as a live, real-time green light
+///   at the point of sale (PoS) to authorize immediate merchandise release.
+/// - Zero Spending Utility: This certificate has ZERO cryptographic utility for future transactions
+///   or subsequent spending. An old certificate cannot prove a voucher is currently unspent, because a double-spend
+///   could have occurred five seconds ago. Any recipient MUST perform a fresh, live query against the L2 collision registry.
+/// - No Chaining / No Storage Mandate: In accordance with DEC-055, neither downstream recipients nor the L2 nodes
+///   ever verify or require historical quorum certificates. Clients only custody the Layer-1 Voucher Deed (`ProofChain`);
+///   they do NOT need to hoard, chain, or re-fetch historical quorum certificates once the live checkout has succeeded.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuorumCertificateDto {
     pub lock_id: String,

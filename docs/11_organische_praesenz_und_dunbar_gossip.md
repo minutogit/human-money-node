@@ -291,6 +291,20 @@ Since nodes at the network edge may have minimal differences in their active nod
 
 ---
 
+### [INV-1106] Cryptographic Gossip Domain Separation (Zero-Trust Heartbeat Isolation)
+
+To ensure that malicious or modified friend nodes cannot tunnel presence gossips across incompatible network universes, every F2F heartbeat is cryptographically domain-separated:
+
+$$\text{HeartbeatDigest} = \text{BLAKE3}\Big(\text{len}(\text{DOMAIN}) \parallel \text{DOMAIN} \parallel \text{node\_pubkey} \parallel \text{epoch\_day} \parallel \text{epoch\_seq} \parallel \text{timestamp\_ms} \dots\Big)$$
+
+Where $\text{DOMAIN} = \text{domain\_heartbeat}(\text{network\_id})$:
+* **Mainnet & Unanchored Island Meshes ($N < 20$):** Use `HUMOCO_V1_HEARTBEAT_MAINNET` (`network_id = 0`). All unanchored communities share the identical base domain, allowing arbitrary sub-20 village networks (e.g. $N=5$ and $N=5$) to merge and verify heartbeats freely without barriers.
+* **Testnet:** Uses `HUMOCO_V1_HEARTBEAT_TESTNET`.
+* **Zero Wire Overhead:** Because `network_id` is incorporated strictly into the BLAKE3 signature pre-image, wire payload size is preserved without adding a single extra byte (`+0 Bytes`).
+* **Mathematically Unbreachable Barrier:** If a rogue node tunnels a heartbeat across divergent domains, honest verifying nodes evaluate the signature against their local domain. The Ed25519 signature check strictly fails and the packet is dropped immediately (`test_inv_1106_heartbeat_cryptographic_domain_isolation`).
+
+---
+
 ## 5. Summary of Key Metrics
 
 | Parameter | Value | Rationale |

@@ -36,7 +36,10 @@ pub use ceh::*;
 pub use chaos::*;
 pub use client_flow::*;
 pub use crypto::*;
-pub use fraud::{FraudProofPayload, FraudProofPillar, Heartbeat, HeartbeatSlashingSlot, SlotDetector128};
+pub use fraud::{
+    compute_heartbeat_digest, verify_heartbeat_signature, verify_heartbeat_signature_strict,
+    FraudProofPayload, FraudProofPillar, Heartbeat, HeartbeatSlashingSlot, SlotDetector128,
+};
 pub use quota::*;
 pub use resolver::*;
 pub use state_machine::*;

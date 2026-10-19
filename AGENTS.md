@@ -33,8 +33,9 @@ This document is automatically loaded on every AI agent startup in the workspace
 ## 🏛️ 1. The HuMoCo Mental Model (The 5 Pillars)
 
 1. **Pure Blind Collision Lock Registry (Blind Service) & HMC Coupling:**
+   * **The Voucher (L1) is the negotiable deed/instrument (`ProofChain`):** It carries real monetary value, units, transactions, and owner signatures. The customer hands the voucher transaction directly to the merchant/cash register at checkout.
    * Layer 2 knows neither amounts, nor currencies, nor accounts, nor real names.
-   * It is an asynchronous, cryptographic bulletin board for double-spend prevention: `parent_lock -> child_lock`.
+   * It is an asynchronous, cryptographic bulletin board for double-spend prevention: `parent_lock -> child_lock`. L2 certificates are NOT currency or bearer bonds, but auxiliary clearance receipts ("Unbedenklichkeitsbescheinigung") proving that no conflicting double-spend was registered.
    * Domain lock formats and causality rules originate from `human-money-core` (`L2LockEntry`, `L2Verdict`). `humoco-node` decouples via DTO adapters and enforces strict collision checks on the hot path.
 2. **Smart Client, Dumb Server (Client-Side Custody):**
    * The server does not store dead history. The client (wallet / PoS terminal) custodies its own causality chain (`ProofChain`) and presents it on demand.
@@ -202,7 +203,9 @@ Before writing new code for a new feature or requirement, apply this test:
      3. **Dynamic Presence (Passive Dunbar Liveness):** Peer liveness is tracked passively via hourly F2F heartbeats. If a peer misses heartbeats (e.g., 3 consecutive missed hours $\to$ `missing_count >= 3` / `is_suspended`), it is excluded from subsequent HRW snapshots. There is **NO 24-hour waiting requirement** to detect offline nodes, and **NO 24-hour committee term**.
      4. **Autonomous HRW Calculation (Living Mesh vs. "Baton Handover"):** Each node calculates shard committees on demand from its current view of active, non-suspended peers using Rendezvous Hashing (`Score = BLAKE3(HrwRoutingId || Shard_ID)`). Shard leadership is NOT handed down via predecessor epoch certificates ($C_E \to C_{E+1}$). Shards survive arbitrary partitions without liveness deadlocks.
 7. **Ban on Recursive L2 Receipt Chaining & Active Ping Storms (KISS Principle):**
-   * Recipients do NOT verify a recursive chain of historical L2 lock receipts on spend. The live collision lock registry checks the parent lock in-RAM ($< 1\,\mu\text{s}$); the voucher on Layer 1 carries ownership and causal history. The L2 receipt is purely a merchant checkout safety proof / backup insurance.
+   * **Ephemeral Live Checkout Signal:** Recipients do NOT verify a recursive chain of historical L2 lock receipts on spend. The live collision lock registry checks the parent lock in-RAM ($< 1\,\mu\text{s}$); the voucher on Layer 1 carries ownership and causal history.
+   * **Zero Spending Utility of Past Certificates:** An old Quorum Certificate proves nothing about whether a voucher is unspent *now* (since a spend could have occurred afterwards). Any recipient must perform a fresh live check.
+   * **No Client Storage Bloat:** The L2 receipt is purely a merchant checkout safety proof / green light at the instant of checkout. Clients/merchants do NOT need to hoard, chain, or back-fill historical quorum certificates once checkout is complete.
    * Network presence is strictly derived passively from hourly F2F Dunbar gossip heartbeats; active background ping storms to refresh candidate windows are forbidden.
 
 

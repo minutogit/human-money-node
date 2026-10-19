@@ -1,254 +1,108 @@
-# 07. Admission, F2F Peering & Sybil Resilience
+# 07. Admission, F2F Peering and Sybil Resilience
 
-> **Checkout committee policy (Rev. 4):** Write verification freezes a canonical committee of at most twenty distinct identities and never substitutes ranks 21–40 for unavailable votes. FINAL requires fourteen valid members of that snapshot; write collection has an 800 ms budget. Unready/non-member replies and cancelled stragglers are neutral. This policy supersedes legacy checkout replacement descriptions below; background succession requires a separate membership-continuity proof. Read policy and observation-based ticket incubation are unchanged.
+> **Status:** Normative requirements reconciled with DEC-053–089. Admission constraints are not proof of a globally identical roster, a per-shard Byzantine bound or safe committee transition. See [invariant and evidence registry](INVARIANT_REGISTRY.md).
 
+## 1. Permanent identity and renewable shard ticket
 
-> **Status:** Standard  
-> **Model:** Logic & State Graph First  
+`NodePubKey` is the permanent Ed25519 identity for TLS and F2F friendship. `HrwRoutingId` is the renewable Argon2d-based ticket used only for HRW scoring. Renewing a ticket does not create another identity, duplicate its vote or rebuild friendship edges.
 
-This document specifies the **organic admission procedure for nodes**, the **Friend-to-Friend (F2F) peering model**, **multi-homing resilience**, and protection against **sleeper botnets** and **sycophant circle attacks**. It unites universal hardware cost (Argon2d) with biological maturation and maintenance laws.
+The ticket design separates public work from uniform routing output:
 
----
+1. Compute public Argon2d work from `NodePubKey || Nonce || T0`, with the specified parameters (`m=64 MiB, t=3, p=1`). Validate the complete binding, work score and parameter set rather than accepting a claimed routing hash.
+2. Derive the uniform routing ticket with length-prefixed `DOMAIN_HRW_ROUTING_TICKET`, identity, canonical nonce/time encoding and the work result. HRW ranks its full 256-bit output; identity tie-breaking is deterministic.
 
-## 1. Universal Foundation: 2-Stage Argon2d Minting & Whitening for ALL Nodes
+Argon2d has public inputs here; password-secret timing protection is not the motivation. No statement of maximal ASIC resistance, fixed mining hours or impossible grinding follows from that choice. Parameter compatibility, work calibration and implementation verification remain required.
 
-Every node in the network solves a memory- and compute-intensive **Argon2d PoW challenge** upon creation to cryptographically bind its dynamic shard ticket `HrwRoutingId` to its permanent `NodePubKey` (Ed25519) in two stages:
+### 1.1 Work floor, admission threshold and renewal ratchet
 
-1. **Stage 1 – Work Proof ($\text{PoW\_Proof}$):**
-   $$\text{PoW\_Proof} = \text{Argon2d}\Big(m=64\,\text{MiB}, t=3, p=1\Big)\Big(\text{NodePubKey}_{\text{Ed25519}} \mathbin{\Vert} \text{Nonce} \mathbin{\Vert} T_0\Big)$$
-   * Deterministic work score calculation: $W = \text{compute\_work\_from\_hash}(\text{PoW\_Proof})$.
+The admission design uses an immutable minimum floor and a locally derived network-work threshold:
 
-2. **Stage 2 – Uniform Shard Ticket ($\text{HrwRoutingId}$ via BLAKE3 Whitening):**
-   $$\text{HrwRoutingId} = \text{BLAKE3}\Big(\text{len} \mathbin{\Vert} \text{DOMAIN\_HRW\_ROUTING\_TICKET} \mathbin{\Vert} \text{NodePubKey} \mathbin{\Vert} \text{Nonce}_{\text{LE}} \mathbin{\Vert} T0_{\text{LE}} \mathbin{\Vert} \text{PoW\_Proof}\Big)$$
-   * Full 256-bit entropy without leading zeros, providing uniform distribution across all 65,536 shards in HRW rendezvous hashing.
+`W_min_admission = max(W_min_floor, W_net_median >> 3)`.
 
-> **Semantic decoupling:** `NodePubKey` (Ed25519) = permanent identity for F2F friendship edges and TLS (lifetime). `HrwRoutingId` (Argon2d ticket) = dynamic PoW ticket exclusively for HRW sharding. Re-mining renews only the `HrwRoutingId`, never the `NodePubKey`.
+A new ticket for an existing identity must satisfy
+`W_new > max(W_active, W_pending)`.
 
-> [!NOTE]
-> **Why Argon2d instead of Argon2id?**  
-> `HrwRoutingId` tickets contain no secret passwords that must be protected against side-channel timing attacks (all inputs — `NodePubKey`, `Nonce`, `T0` — are public). **Argon2d** uses data-dependent memory accesses and thus provides the physically maximal resistance against GPU and ASIC mining clusters.
+This rejects equal/weaker replacement tickets; it does not mathematically eliminate targeted grinding. A single valid active ticket contributes one identity to HRW. New tickets are announced immediately but mature only after 24 hours of valid local observation. A self-signed old timestamp cannot backdate that observation. The previous active ticket may remain in use while a valid replacement matures; a newcomer has no active rank before maturation.
 
----
+### 1.2 Headroom and operator feedback
 
-### 1.1 The Fixed Minimum Floor (Hard Floor)
+The diagnostic ratio is `H = W_own / W_net_median`. The existing headroom guide is:
 
-Immutable in protocol code:
-* **Absolute minimum ($W_{\text{min\_floor}} \ge 1$):** A valid `HrwRoutingId` PoW requires at least the code-level minimum floor.
-* **Admission Threshold ($W_{\text{min\_admission}}$):** $W_{\text{min\_admission}} = \max(W_{\text{min\_floor}}, \; W_{\text{net\_median}} \gg 3)$ (1/8 = 12.5% of network median).
-* **Zero downward tolerance:** No peer in the network accepts an `HrwRoutingId` whose PoW lies below this threshold.
+| Ratio | Meaning |
+| --- | --- |
+| `H >= 0.25` | Healthy relative margin |
+| `0.16 < H < 0.25` | Low-headroom warning |
+| `0.125 <= H <= 0.16` | Renewal advisable |
+| `H < 0.125` | Below the relative admission threshold |
 
----
+Direct F2F feedback may signal `FLAG_POW_OUTDATED`; multi-hop invalid/outdated announcements are dropped under the admission rules. Friendship remains bound to `NodePubKey`. Work admissibility is distinct from diagnostic headroom: warnings do not create bans, automatically replace software or override operator policy. Optional mining runs with bounded low-priority resources; zero downtime is not guaranteed if an old ticket loses eligibility or new assignments still need sync.
 
-### 1.2 The Monotonicity Ratchet ($W_{\text{new}} > \max(W_{\text{active}}, W_{\text{pending}})$)
+## 2. Organic F2F entry and social peering
 
-* **Rule:** On ticket migration / re-mining on an existing `NodePubKey`, the new ticket **MUST** have a strictly higher work score than all previous (active and still incubating) tickets:
-  $$W_{\text{new}} > \max(W_{\text{active}}, W_{\text{pending}})$$
-* **Effect:** Lateral shard-hopping and downgrades are mathematically impossible.
+One verified reciprocal friend edge can introduce a newcomer into the mesh. At least three independent neighbors are recommended for resilience against one censoring bridge; this is not an additional consensus-entry threshold. One edge does not guarantee worldwide propagation or safe roster authority. A bribed friend can introduce valid work-backed Sybils; edge throttling, pacing and maturation constrain but do not prove their exclusion.
 
----
+Before adding a peer, the operator applies the five-finger checklist:
 
-### 1.3 The Headroom Metric, 4-Stage Traffic Light & F2F Direct Feedback
+1. Personal acquaintance or a verified WoT relationship.
+2. Plausible knowledge of physical region, outside the blind consensus state.
+3. Explicit reciprocal agreement and full-key configuration.
+4. Review of existing social connections and concentration risks.
+5. No bought, sold, rented or collateralized friendship slots.
 
-Each node continuously compares its own PoW value ($W_{\text{own}}$) with the decentralized network median ($W_{\text{net\_median}}$):
+These are social operating rules, not remotely provable facts about a stranger's humanity or independence. Friends bear no financial liability and are not banned for another identity's offense. Every permanent node sanction needs the offender's own verified cryptographic proof. There is no staking.
 
-$$H = \frac{W_{\text{own}}}{W_{\text{net\_median}}}$$
+Public client ingress is separate: any client may submit admitted requests. A P2P NodePubKey is public information and can never be an ingress bearer credential; ingress friend access uses random 128-bit secret tokens. Do not apply P2P peer-IP admission to public HTTP clients.
 
-```mermaid
-flowchart TD
-    subgraph Headroom-Ampel & Lifecycle
-        G["🟢 H >= 0.25 (> 1/4): 'Healthy / Normal'<br>(Standard operation, full participation)"]
-        Y["🟡 0.16 < H < 0.25 (1/6 .. 1/4): 'Warning'<br>(Dashboard warning: Low Headroom)"]
-        O["🟠 0.125 <= H <= 0.16 (1/8 .. 1/6): 'Re-Mining'<br>(Autonomous background re-mining recommended)"]
-        R["🔴 H < 0.125 (< 1/8): 'Outdated'<br>(Ticket rejected by F2F peers via FLAG_POW_OUTDATED)"]
-    end
-```
+## 3. Presence, eligibility and readiness are distinct
 
-#### F2F Direct Feedback (`FLAG_POW_OUTDATED`):
-* When a direct F2F friend ($\text{hops} = 0$) sends a heartbeat with an outdated ticket ($H < 0{,}125$), the receiving node replies with a `HeartbeatAck` containing `FLAG_POW_OUTDATED`.
-* Multi-hop forwarded gossip ($\text{hops} > 0$) with outdated PoW is silently dropped without feedback.
-* The TLS/QUIC F2F friendship connection remains 100% open and active (friendship is bound to `NodePubKey`, not the shard ticket).
+Three mechanisms must not be conflated:
 
-#### NodePubKey Invariance on Re-Mining (Friendships Remain Intact!):
-* **`NodePubKey` remains permanent:** F2F friendship edges and peering certificates refer exclusively to the immutable `NodePubKey` (Ed25519). Friends do **not need to reconnect** on re-mining!
-* **`HrwRoutingIdMigrationNotice`:** Node signs its new, stronger `HrwRoutingId` with its existing `NodePrivKey`.
-* **Zero downtime:** Re-mining runs at lowest system priority (`nice 19`, 1 CPU thread). Node continues serving transactions and quorums uninterrupted. After completion it deterministically switches to the new HRW shard after the 24h incubation wall expires.
+| Mechanism | What it controls | What it cannot establish |
+| --- | --- | --- |
+| 24-hour ticket maturation and observed admission history | Whether a new ticket can enter later HRW calculations | Committee tenure or 24-hour outage detection |
+| Passive hourly F2F heartbeat presence | Locally active/non-suspended candidates | Global network membership, a ban, or shard state completeness |
+| Per-shard safe recovery/readiness | Whether an eligible member may issue a countable vote for that shard | Authority from a guessed roster or unverified source |
 
-#### 24h Incubation Wall for Shard Tickets (Shard-Hopping Protection):
-* A new `HrwRoutingId` (initial minting or re-mining) is immediately propagated via F2F gossip so all peers can verify and cache it.
-* In HRW scoring, however, it is only counted as active after a **24h maturation period**; until then only the previous active ticket counts (for newcomers: no HRW rank).
-* Guerrilla protection: Targeted grinding for lucrative shards is futile — the PoW advantage takes effect only with delay, the network has 24h advance warning.
+Newcomer admission retains observed 24-hour maturity plus at least eight valid hourly observations in the 24-hour history. Ongoing liveness excludes a peer from subsequent HRW snapshots after three consecutive missed hourly heartbeats (`missing_count >= 3` / suspended). Do not wait 21–24 hours to exclude an offline member. The older two-heartbeat fast-reentry, universal sliding-history reentry and flap-exception descriptions conflict; exact restart/reentry and slot timing remain unresolved under DEC-056. None authorizes immediate signing because one RPC succeeded; reactivation still needs justified presence and shard readiness.
 
----
+Short RPC timeouts and normal shard-pool idle closure do not advance the hourly presence clock. No active background ping campaign refreshes candidates. Gossip forwarding is not suppressed because someone else claims a peer is bad. Ticket readiness does not bypass local shard recovery.
 
-## 2. The Organic F2F Admission Model (Friend Entry Barrier)
+### 3.1 Knowledge-count diagnostics are not authority
 
-Instead of complex numerical trust-mass calculations ($M \ge 1.0$) or bureaucratic admission lists, the system relies on a fundamental **human entry barrier**:
-
-1. **At least 1 friend (F2F edge):** A new node needs at least a single verified F2F friendship edge ($d=1$) to an existing node in the network for its heartbeats to be injected into the gossip channel.
-   > [!IMPORTANT]
-   > **Clarification: 1 friend suffices for worldwide full activation!**  
-   > * A new node requires only **1 single F2F friendship edge ($d=1$)** to be admitted to the worldwide network.
-   > * **Percolation in mesh:** The heartbeat of node $A$ is forwarded by its friend into the mesh and fans out epidemically. Every node receiving the heartbeat registers it for 24h incubation.
-   > * **Multi-homing ($d \ge 3$) is pure failure resilience:** Multiple friends protect node $A$ against censorship or failure of its single friend, but are not an entry blockade.
-   > 
-   > [!WARNING]
-   > **Censorship risk at $d=1$ (`WARN_SINGLE_EDGE_CENSORSHIP_RISK`):**  
-   > If a node has only a single F2F connection ($d=1$), that single neighbor can maliciously filter its heartbeats (selective censorship at cost 0), causing the isolated node to fall to `DORMANT` after 24h.  
-   > **Operational recommendation:** Node dashboard explicitly warns operators with $d=1$ (`WARN_SINGLE_EDGE_CENSORSHIP_RISK`) and strongly recommends **multi-homing ($d \ge 3$)** with at least 3 independent neighbors/friends.
-2. **Edge throttling as Sybil barrier:** If an attacker injects hundreds of fake nodes behind a single bridge node, the biomimetic edge budget ($R_{\text{soft}}$, see `docs/11`) stochastically throttles $> 99{,}9\%$ of unauthorized heartbeats.
-3. **Human gatekeeper:** There is no autonomous admission via pure uptime without human attachment (no over-complex Proof-of-Longevity). Every node in the network has a real human origin.
+The earlier `NodeSyncStatus` compares local known-node count to a direct-friend median. Its hysteresis estimates were:
 
-### 2.1 The "5-Finger Rule" for F2F Edges (Peering Checklist)
-
-To prevent social engineering, sycophant clusters, and unvetted cloud-botnet injection, every node operator must verify the **5-Finger Rule** before adding any peer to `[f2f].peers`:
-
-```mermaid
-flowchart LR
-    F1["1. 👤 Personal Acquaintance\n(Real-world identity known)"] --> F2["2. 📍 Physical Location\n(Geographic plausibility)"]
-    F2 --> F3["3. 🔄 Symmetry\n(Mutual agreement & config)"]
-    F3 --> F4["4. 🔍 Existing Friends Check\n(No isolated bot circles)"]
-    F4 --> F5["5. 🚫 Zero Trade / Bribes\n(Pure social trust, no money)"]
-```
-
-1. 👤 **Personal Acquaintance (1st Finger):** The node operator is known personally in the real world (or through a verified cryptographic Web-of-Trust interaction). Never peer with anonymous internet strangers.
-2. 📍 **Physical Location Knowledge (2nd Finger):** You know the approximate physical municipality or region where the node operates. This ensures topological grounding and fends off virtual cloud sybil farms.
-3. 🔄 **Symmetry & Reciprocity (3rd Finger):** Peering is strictly bidirectional. Both operators explicitly agree and register each other's `NodePubKey` and endpoint in `[f2f].peers`. Unilateral peering requests are rejected.
-4. 🔍 **Existing Friends Check (4th Finger):** Cross-examine the candidate's existing peering connections to verify that they are integrated into diverse, genuine community subgraphs rather than an isolated sycophant circle.
-5. 🚫 **Zero Trade / Bribe Policy (5th Finger):** F2F friendship slots must **never be bought, sold, rented, or bartered** for money, tokens, or collateral deposits. The network operates under Zero Financial Deposits; trust is purely social.
-
----
-
-## 3. The Node Presence State Machine (`NodePresence`)
-
-Each node locally maintains in memory a lightweight table of all known identities ($\approx 48\,\text{Byte}$ per node):
-
-```mermaid
-stateDiagram-v2
-    [*] --> IMMATURE: 1st heartbeat received (NodePubKey + HrwRoutingId Argon2d PoW verified)
-    
-    IMMATURE --> ACTIVE: First contact: 24h maturation AND >= 8 hourly heartbeats
-    IMMATURE --> [*]: No further heartbeats (Drop after 48h)
-    
-    ACTIVE --> DORMANT: No heartbeats for > 21-24h (or popcount <= 3/24)
-    
-    DORMANT --> ACTIVE: Fast Re-Entry of known node: 2 consecutive hourly heartbeats (>= 2h)
-    DORMANT --> [*]: > 60 days inactive (Purge / Reset to newcomer)
-```
-
-### 3.1 The Three Life Phases:
-
-1. **`IMMATURE` (Incubation / 24h Wall for Newcomers):**
-   - **Condition:** First contact of a never-before-seen node. It must be known in the network for at least **24 hours** and deliver at least **8 valid hourly heartbeats** ($\ge 8/24$) during that period.
-   - **Role:** **Not yet** counted in active node set $N_{\text{active}}$ and does not participate in any shard quorums.
-   - **Protection:** Prevents spontaneous botnets from immediately hijacking sharding votes.
-
-2. **`ACTIVE` (Full Consensus Node):**
-   - **Role:** Included in active node set $N_{\text{active}}$, included in HRW rendezvous ranking for shard committee selection, and serves transactions.
-   - **Interval:** Sends in discrete epoch cadence exactly **1 heartbeat per hour** ($60\,\text{minutes}$). Pillar-3 slashing penalizes multiple heartbeats within the same hourly epoch.
-  
-3. **`DORMANT` (Sleeping / Maintenance / Failure) & Fast Re-Entry:**
-   - **Failure condition:** Heartbeat counter drops to $\le 3/24$ hours (only after $\ge 21\text{--}24\,\text{hours}$ inactivity).
-   - **Effect on failure:** Node immediately drops out of $N_{\text{active}}$, so quorum votes are not blocked by dead nodes.
-   - **Fast Re-Entry for known peers (2 heartbeats = $\ge 2\,\text{hours}$):**
-      - Since the node is already known to the network (`NodePubKey` + `HrwRoutingId` Argon2d PoW and F2F edges are validated in peer store), it does **not** need to wait another 24h after returning from internet outages, router reboots, or maintenance.
-     - **2 consecutive hourly heartbeats** ($\ge 2\,\text{hours}$ continuous reachability) suffice to jump back to `ACTIVE`.
-     - **Network resilience:** During large-scale ISP disruptions or power outages, the shard network thus reconsolidates after just **2 hours**, instead of being blocked for a full working day.
-
-> [!NOTE]
-> **Architecture guarantee (Anti-flapping & Zero-HRW-thrashing on Fast Re-Entry):**  
-> 2 heartbeats mean, thanks to hourly cadence, a physical time span of **at least 2 hours**. Since going offline requires at least **21–24 hours**, a full cycle (`ACTIVE` $\to$ `DORMANT` $\to$ `ACTIVE`) always takes **at least ~24 to 26 hours**.  
-> Fast oscillation/flapping on minute or second granularity is thus excluded.  
-> **Pragmatic flap damping (edge-case protection):** Should an extremely unstable node still flip more than 2 times within 48 hours between `ACTIVE` and `DORMANT` (e.g., chronic flaky contact), it temporarily loses Fast Re-Entry rights and must satisfy the regular 8h threshold ($\ge 8/24$ heartbeats) for reactivation.
-
-### 3.2 The Knowledge & Synchronization Filter (`NodeSyncStatus`)
-
-To prevent a node with partial network knowledge (e.g., freshly joined or behind a slow edge) from computing faulty HRW shard assignments, each node hourly reconciles its view via the **median of its direct F2F friends**:
-
-$$N_{\text{median}} = \text{Median}\Big(N_{\text{peer}_1}, N_{\text{peer}_2}, \dots, N_{\text{peer}_k}\Big)$$
-
-```mermaid
-stateDiagram-v2
-    [*] --> SYNCING: Start / Gossip lag
-    
-    SYNCING --> IN_SYNC: N_local >= max(N_median - 2, ⌊0.95 * N_median⌋)
-    
-    IN_SYNC --> SYNCING: N_local < min(N_median - 3, ⌊0.90 * N_median⌋)
-```
-
-1. **Entry threshold (`SYNCING` $\to$ `IN_SYNC`):**
-   $$N_{\text{local}} \ge \max\Big(N_{\text{median}} - 2, \; \lfloor 0{,}95 \times N_{\text{median}} \rfloor\Big)$$
-   Only in state `IN_SYNC` does the node arm its shard responsibility for the worldwide $N \ge 20$ quorum.
-2. **Hysteresis fallback threshold (`IN_SYNC` $\to$ `SYNCING`):**
-   $$N_{\text{local}} < \min\Big(N_{\text{median}} - 3, \; \lfloor 0{,}90 \times N_{\text{median}} \rfloor\Big)$$
-   The combination of $90\,\%$-threshold and absolute $-3$-buffer prevents any oscillation/flapping both in global networks and in autonomous micro-villages ($N < 20$).
-3. **Behavior in `SYNCING`:**
-   * Foreign global shard requests are rejected with `503 Service Unavailable / NodeSyncing`.
-   * Local `PROVISIONAL` village locks remain unaffected, as they are served purely via the local cluster state.
-
----
-
-## 4. Retention Periods & List Management
-
-### 4.1 General Peer Table (Remote Nodes)
-* **60 days inactivity tolerance:** If a known node goes offline for days or weeks (e.g., 3 weeks summer vacation, repair), its entry remains stored for up to **60 days** in state `DORMANT`.
-* **Purge after 60 days:** After 60 days without sign of life the entry is deleted. If the node returns afterwards, it traverses the 24h `IMMATURE` phase like a newcomer.
-
-### 4.2 Direct F2F Friend List (Own Neighbor Edges)
-* **1 year tolerance:** Direct F2F peering certificates of friends remain for **1 year**.
-* **Deactivation after 1 year:** If a friend node has been continuously offline for over 1 year, it is not silently reconnected but marked as **deactivated**. Operator must **manually reactivate** the friendship edge in the node dashboard to prevent accidental reactivation of stale/abandoned devices.
-
----
-
-## 5. The Sycophant Isolation Theorem, Punishment & Equivocation Ban
-
-1. **Sycophant isolation theorem:** A cluster of thousands of bots mutually confirming each other fails at the edge throttling of the single transition node to the main network ($R_{\text{soft}}$) and the 24h incubation. They never reach $\ge 8/24$ hourly heartbeats to be admitted to $N_{\text{active}}$.
-2. **Pinpoint perpetrator slashing (No guilt by association for F2F friends):**
-   * The 3 fraud-proof pillars ([`docs/10:5.3`](docs/10_p2p_wire_format_und_session_framing.md#53-die-3-mathematischen-betrugsbeweis-säulen-in-o1-slashing-evidence)) are based on cryptographic self-incrimination by the perpetrator.
-   * **Friends bear no financial liability:** To physically exclude griefing, extortion, and chilling effects (no one peers with friends for fear of foreign hardware hacks), friends are **not** co-slashed. F2F edges are purely topological peering paths.
-3. **Stateless immediate ban (`ServerBan`):**
-   If a node signs two conflicting attestations for the same spend slot (node equivocation / Byzantine double-sign), presenting those two verified attestations (`EquivocationProof`) suffices to ban the node worldwide and permanently from all peer lists. The proof can be verified independently; enforcing the ban still requires local ban state.
-
----
-
-## 6. Node Departure (Graceful Leave, Silent Dropout & HRW Successor)
-
-In a decentralized shard network nodes depart in three ways:
-
-```mermaid
-flowchart TD
-    ExitType["Node leaves the network"] --> Case{"Cause of departure"}
-
-    %% Case A: Orderly
-    Case -->|1. Planned (maintenance / shutdown)| Graceful["🚪 Orderly departure (Graceful Exit)"]
-    Graceful --> Msg["Sends native QUIC CONNECTION_CLOSE(0x00, 'Shutdown')"]
-    Msg --> HRWShift1["Peers close socket in < 5 ms.<br>HRW rank 21 promotes to rank 20 in 0 ms!"]
-
-    %% Case B: Unplanned
-    Case -->|2. Unexpected (crash / power failure)| Crash["💥 Silent failure (Silent Dropout)"]
-    Crash --> PingMiss["QUIC Keepalive timeout (10s) or 50ms shard timeout<br>-> HRW rank 21 immediately steps in as fallback"]
-    PingMiss --> HRWShift2["After 24h without heartbeats -> Status: DORMANT<br>DORMANT node ignored in HRW."]
-
-    %% Case C: Ban
-    Case -->|3. Enforced (fraud attempt)| Banned["⚡ Malicious fraud (ServerBan)"]
-    Banned --> Slash["Double-signature proof erases node worldwide for life"]
-
-    %% Successor sync
-    HRWShift1 & HRWShift2 --> Catchup["🔄 Successor sync:<br>New rank-20 node fetches active RAM locks<br>(only valid locks valid_until > now) from remaining 19 shard peers."]
-```
-
-* **HRW successor invariance:** When a shard node fails, no lock is lost, as remaining shard nodes hold the active RAM state. Node at rank 21 deterministically promotes and synchronizes active locks in $< 5\,\text{ms}$ (`valid_until > now`).
-
----
-
-## 7. Invariants of Admission & F2F Logic
-
-1. **[INV-0701] Universal Argon2d minting & minimum floor:** No `HrwRoutingId` exists without a valid Argon2d computation bound to `NodePubKey`, `Nonce` and $T_0$ (`HrwRoutingId = Argon2d(NodePubKey || Nonce || T0)`). Every accepted PoW must satisfy at least the immutable code minimum floor $D_{\text{min\_floor}}$ ($\ge 1\,\text{h}$ server / $\ge 4\,\text{h}$ Pi).
-2. **[INV-0702] Human entry barrier:** A node is injected into the gossip network only via a verified F2F friendship edge.
-3. **[INV-0703] 24h incubation duty & 24h shard ticket wall:** A newly arrived node remains in status `IMMATURE` for at least 24 hours and requires $\ge 8$ hourly heartbeats before admission to $N_{\text{active}}$. Every new `HrwRoutingId` (initial minting or re-mining) is immediately propagated via gossip but counted as active in HRW sharding only after 24h maturation — protection against shard-hopping / guerrilla grinding.
-4. **[INV-0704] Reactivation via sliding window (`DORMANT`):** Known nodes reactivate after outages deterministically via the universal 24h bitmask hysteresis ($\ge 8/24$ hourly heartbeats). No additional flapping special states exist (KISS principle).
-5. **[INV-0705] 60-day / 1-year retention:** `DORMANT` nodes are purged after 60 days inactivity; inactive F2F friends after 1 year are deactivated for manual reactivation.
-6. **[INV-0706] Stateless immediate ban:** A cryptographic double-signature proof (`EquivocationProof` over `NodePubKey`) bans the involved `NodePubKey` for life and statelessly from further network participation (`ServerBan`); the `HrwRoutingId` is bound to it and co-banned.
-7. **[INV-0707] Seamless successor guarantee:** Departure of a node changes shard quorums deterministically via HRW ranking; successors load exclusively active locks from RAM of remaining shard nodes.
-8. **[INV-0708] Transport-native departure (Zero gossip flood):** Orderly node departures occur exclusively transport-natively via QUIC `CONNECTION_CLOSE (0x00)` to 1-hop peers. No global application gossip leave message exists, which physically excludes gossip flooding and flapping attacks.
-9. **[INV-0709] NodePubKey stability & autonomous re-mining with 24h wall:** F2F friendships and peering certificates are permanently bound to `NodePubKey` (Ed25519). Re-mining to increase security margin ($H \ge 4{,}0$) renews exclusively the `HrwRoutingId` via `HrwRoutingIdMigrationNotice` (signed with `NodePrivKey`) without rebuilding friendship edges and without downtime; the new `HrwRoutingId` is subject to the 24h incubation wall (propagated immediately, active in HRW after 24h).
-10. **[INV-0710] 5-Finger Social Peering Doctrine:** F2F peering requires strict adherence to the 5-Finger Rule (personal acquaintance, physical location knowledge, symmetry, existing friends check, zero trade/bribe policy) to preserve genuine social topology and eliminate unvetted botnet clusters.
+- Enter apparently in-sync when `N_local >= max(N_median - 2, floor(0.95 * N_median))`.
+- Fall back when `N_local < min(N_median - 3, floor(0.90 * N_median))`.
+
+These may describe diagnostic lag; equal counts can contain different identities. Neither threshold certifies a canonical roster, complete state, authorized current committee or safe activation. A global ready flag cannot substitute for shard-specific safe recovery. No telemetry warning authorizes automatic banning.
+
+## 4. Retention and local operator control
+
+Known dormant remote identities may be retained for 60 days rather than all being deleted after a 48-hour observation ring empties. After that retention expires, returning identities need the appropriate newcomer observations again. This metadata retention is separate from active-lock TTL.
+
+Configured direct friendship metadata may be retained for one year of inactivity, then deactivated for explicit operator reactivation through local administration. A private diagnostic dashboard reports conditions; it is not a public control plane. Ban evidence/identity revocation state is not an expired voucher tombstone.
+
+## 5. Departure and safe succession
+
+A planned shutdown uses transport-native QUIC `CONNECTION_CLOSE` to direct connected peers; it creates no third global leave-gossip stream. Socket closure itself does not authorize a different checkout committee. Silent failures are handled through bounded RPC collection and passive presence; shard-direct idle close is normal.
+
+The current request retains its frozen at-most-twenty committee. A later justified HRW snapshot may select a new member after presence changes; rank 21 cannot fill the current request's missing slot. The new member remains NOT_READY. The first admissible relevant request starts bounded per-shard recovery, not a sweep or payment queue.
+
+Recovery must establish authenticated source/confirmation authority, all still-active root lifetimes, a coherent snapshot plus bounded concurrent deltas, per-entry validity and durable installation. Matching empty digests from unready peers do not prove continuity. Existing partial data remains serviceable to authorized peers, but does not make its source a qualified voting witness. No universal five-millisecond recovery or guaranteed preservation from any remaining nineteen copies is claimed. Safe activation/source coverage remains a proof obligation; there is no mandatory old-committee permission chain.
+
+## 6. Invariants and explicit legacy revisions
+
+1. **[INV-0701] Universal Argon2d admission:** Validate work and canonical identity/nonce/time binding, parameters, minimum floor and routing derivation. Fixed mining-hours claims are estimates, not invariant guarantees.
+2. **[INV-0702] Social entry edge:** Gossip introduction requires a configured verified reciprocal F2F edge. One edge can suffice; it proves neither humanity nor independence of all introduced identities.
+3. **[INV-0703] Observed maturation:** New tickets remain ineligible for 24 observed hours; initial admission retains the required observed heartbeat history. This is not a committee term or liveness timeout.
+4. **[INV-0704] Passive reactivation:** Three consecutive missed hours suspend future selection. Reentry does not bypass safe shard recovery; its exact retained-history/restart predicate remains pending. Earlier 21–24h failure detection is superseded, while conflicting fast-reentry/flap sketches establish no completed rule.
+5. **[INV-0705] Metadata retention:** Keep dormant remote entries for the 60-day policy; after a year of direct-friend inactivity require operator reactivation. These periods do not prolong active voucher locks.
+6. **[INV-0706] First-party identity revocation:** Fully verified same-author incompatible signatures authorize permanent identity/ticket revocation and WoT severance. Proof verification is independent; ban enforcement retains local state. No hearsay or guilt by association.
+7. **[INV-0707] Safe successor readiness:** Later HRW selection does not imply state readiness. Require demand-driven complete justified transfer and durable activation. The previous seamless/immediate successor guarantee is withdrawn.
+8. **[INV-0708] Transport-native leave:** No global application leave gossip. A connection close affects transport lifecycle, not the frozen checkout roster.
+9. **[INV-0709] Identity-stable ticket renewal:** Renew only the ticket under the same authenticated identity and maturation rule; preserve friendship edges. Optional mining honors operator control and bounded resource budgets.
+10. **[INV-0710] Five-finger operating doctrine:** Apply the social checklist without financial deposits; do not claim it cryptographically eliminates botnets.
+
+## 7. Evidence gates
+
+Real QUIC scenarios must reject unauthorized shard peers and non-friend gossip, verify ticket binding/maturation and exercise neutral close/timeouts. Adversarial recovery must cover all-unready sources, missing old active locks and membership change during installation. Roster authority, adversary bounds and activation safety need explicit arguments. No such tests or proofs were executed by this documentation reconciliation.

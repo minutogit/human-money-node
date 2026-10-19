@@ -30,10 +30,10 @@ flowchart LR
 ```
 
 * **Semantic Blindness of the Server (Crucial Mental Model):**  
-  The server has **no access to Layer-1 state** and does not know whether a lock is backed by a real voucher worth 50 € owned by a person or by an offline, purely mathematically generated key pair (synthetic junk). To the server, every lock is merely a cryptographic 144-byte constraint (`parent_lock` $\rightarrow$ `child_lock`).
-* **Protection via Protocol Barriers Only:** The server defends against junk exclusively through **ingress quotas ($\mu\text{BJ}$)**, **144-byte RAM limits**, **TTL purging (`valid_until`)**, and **14/20 BFT quorum certificates**, never through substantive voucher validation.
+  The server has **no access to Layer-1 state** and does not know whether a lock is backed by a real voucher worth 50 € owned by a person or by an offline, purely mathematically generated key pair (synthetic junk). To the server, every lock is merely a bounded cryptographic constraint (`parent_lock` $\rightarrow$ `child_lock`).
+* **Protection via Protocol Barriers Only:** The server defends against junk exclusively through **ingress quotas ($\mu\text{BJ}$)**, **bounded record and proof sizes**, **TTL purging (`valid_until`)**, and **14/20 BFT quorum certificates**, never through substantive voucher validation.
 * **Function:** Prevents double-spending by atomically registering, for each consumed state (`parent_lock`), which new stealth lock (`child_lock`) consumed it.
-* **Lifecycle:** L2 retains the lock state exactly as long as the Voucher Root remains valid (`root.valid_until`). After expiry, the entire tree is physically purged in $O(1)$ (*Zero State Bloat*).
+* **Lifecycle:** L2 retains the lock state exactly as long as the Voucher Root remains valid (`root.valid_until`). After expiry, the entire tree is physically purged through bounded expiry buckets (*Zero State Bloat*).
 
 ---
 
@@ -71,7 +71,7 @@ sequenceDiagram
     Note over Wallet,Gateway: Case A: Checkout / Hot Path (< 1000 ms)
     Wallet->>Gateway: POST /query (L2StatusQuery for current leaf)
     Gateway-->>Wallet: L2ResponseEnvelope(L2Verdict::Verified)
-    Note over Wallet,Gateway: Quorum certificate returned immediately
+    Note over Wallet,Gateway: Ordinary read: one source; payment release: fully verified current quorum
 
     Note over Wallet,Gateway: Case B: Cold Path / Offline Sync (ADR-001)
     Wallet->>Gateway: POST /query (L2StatusQuery with 10-char Base58 Locators)
@@ -80,7 +80,7 @@ sequenceDiagram
     Gateway-->>Wallet: L2ResponseEnvelope(L2Verdict::Ok)
 ```
 
-1. **Hot Path (Checkout):** When the registry knows the current state, it returns `Verified` in $< 5\,\text{ms}$.
+1. **Hot Path (Checkout):** RAM collision lookup remains fast. A new binding node approval is released only after the bounded background worker durably commits the exact lock and immutable own choice atomically (DEC-087; [Spec 14 §4](14_node_persistenz_und_redb_speicher.md#4-asynchronous-write-path-and-durable-signature-release)). Ordinary reads do not create new write choices. Local storage time of 1–5 ms is an expectation requiring measurement; durable release is never bypassed to meet it or the 800 ms quorum-collection budget.
 2. **Cold Path (Sync):** When the registry does not know the leaf, it compares the logarithmically thinned **10-character Base58 prefixes** (`locator_prefixes`: $1, 2, 4, 8, \dots$), finds the Last Common Ancestor (`sync_point`) in $O(1)$, and requests the missing intermediate locks.
 
 ---
@@ -90,11 +90,13 @@ sequenceDiagram
 | Tier | Condition | Quorum Formula $Q(R)$ | Status | Meaning |
 | :--- | :--- | :--- | :--- | :--- |
 | **Island Network / Village** | $N_{\text{active}} < 20$ | $\left\lfloor \frac{2R}{3} \right\rfloor + 1$ | `PROVISIONAL` (Yellow, `0x00`) | Full BFT ordering within the local network; warning to checkout for large amounts |
-| **Global Shard Network** | $N_{\text{active}} \ge 20$ (stable for $\ge 24\text{h}$) | $\ge 14$ of $20$ ($70\%$) | `FINAL` (Green, `0x01`) | Global irreversibility and protection against cross-partition fraud |
-| **High Assurance** | $N_{\text{active}} \ge 100$ (stable for $\ge 24\text{h}$) | $\ge 16$ of $20$ ($80\%$) | `HIGH_ASSURANCE` (Dark Green, `0x02`) | Elevated security requirement for institutional transactions / large amounts |
+| **Global Shard Network** | $N_{\text{active}} \ge 20$ (stable for $\ge 24\text{h}$) | $\ge 14$ of $20$ ($70\%$) | `FINAL` (Green, `0x01`) | Regional 14/20 acceptance under the stated membership and recovery assumptions |
 
-> [!NOTE]
-> **Status Regime Alignment (TERM-13):** Note that authoritative project instructions (`AGENTS.md` Pillar 4) and codebase implementation (`LockStatus` in `crates/humoco-sim-core/src/types.rs`) establish a strict binary phase transition (`PROVISIONAL` vs `FINAL`) and intentionally omit `HIGH_ASSURANCE` to preserve KISS on PoS terminals and wallets. The third tier remains recorded here as an evaluated architectural proposal pending final specification consolidation.
+`PROVISIONAL` and `FINAL` are the only assurance modes. A FINAL receipt is a
+verified regional acceptance under DEC-053/054 and may be revised after a
+partition merge; it is not unconditional global irreversibility. The six-Byzantine
+bound is conditional on a justified committee. See [Spec 03](03_routing_und_sharding.md)
+and the [proof gates](ARCHITECTURE_CONSOLIDATION.md#remaining-proof-gates).
 
 * **Closed Quorum Formula:** For all $R \in [1, 20]$:
   $$Q(R) = \left\lfloor \frac{2}{3} R \right\rfloor + 1$$
@@ -105,8 +107,10 @@ sequenceDiagram
 ## 6. Collision Resolution & Layer-1 Slashing Reality
 
 1. **Live Checkout:** Atomic first-seen check on `parent_lock`. First arrival locks the parent. Second attempts are immediately rejected with `409 Conflict`.
-2. **Partition Merge:** When two offline branches that diverged meet, $\min(H_{\text{canon}})$ acts as the deterministic arbiter.
-3. **Slashing on Layer 1:**
+2. **Partition Merge:** Compare justified confirmation classes first (class2 > class1 > class0), then choose $\min(H_{\text{canon}})$ within the highest admitted confirmed class (DEC-064). An unsupported small-hash candidate cannot displace a confirmed branch. Losing a lawful regional merge alone is not node fraud.
+3. **Layer-1 Integration Boundary:** The following describes intended L1 processing, not a verified implementation or civil-liability guarantee. L2 sanctions require two genuinely incompatible original statements of the same identity/slot/purpose, with both signatures verified. A later live-state report of a lawful merged winner is not such evidence.
+
+   **L1 evidence processing:**
    - The resulting `ProofOfDoubleSpend` (two colliding signatures) is handed to Layer 1.
    - **Consequences on L1:**
      1. The affected voucher is atomically set to `VoucherStatus::Quarantined`.

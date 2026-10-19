@@ -1,156 +1,89 @@
-# 08. Topology Dynamics & Network Merge
+# 08. Topology Dynamics and Network Merge
 
-> **Status:** Standard  
-> **Model:** Logic & State Graph First  
+> **Status:** Normative requirements reconciled with DEC-053/055/064/083–089. Regional convergence policy is distinct from a proved safe dynamic-consensus transition. Evidence gaps are tracked in the [registry](INVARIANT_REGISTRY.md).
 
-This document specifies the **fractal shard dynamics** from micro-networks ($N < 20$) to the global federation ($N \ge 20$), the mathematical phase transition of the maturity indicator (`PROVISIONAL` $\rightarrow$ `FINAL`), and the flow of a **500-ms network merge** when two autonomous networks meet (e.g., Village A and Village B).
+## 1. Binary network regime
 
----
+For 65,536 shards, `R = min(20, N_active)` bounds replication. Below twenty locally active nodes, all participating nodes cover all shards and use adaptive `Q(N) = floor(2N/3) + 1` PROVISIONAL confirmation.
 
-## 1. The Fractal Shard Formula (Zero Special Cases in Code)
+| Active network | Mode | Required evidence |
+| --- | --- | --- |
+| `N = 1` | PROVISIONAL | 1/1 qualified vote |
+| `N = 3` | PROVISIONAL | 3/3 qualified votes |
+| `N = 10` | PROVISIONAL | 7/10 qualified votes |
+| `N = 19` | PROVISIONAL | 13/19 qualified votes |
+| `N >= 20`, existing 24-hour stability condition satisfied | FINAL / Regional14 | Fourteen distinct verified votes from one justified frozen twenty-member snapshot |
 
-Regardless of whether 2 phones in the forest or 1,000,000 servers worldwide are running, the same seamless mathematical formula applies for each of the 65,536 shards for replication size $R$ and required BFT quorum $Q$:
+The status names/tags remain PROVISIONAL (`0x00`) and FINAL (`0x01`) where used by the specified wire format. The former HIGH_ASSURANCE (`0x02`, sixteen signatures, `N >= 100`) tier is retired. A timeout or partial FINAL response cannot downgrade an existing twenty-member request to an adaptive minority quorum. Mode classification is bound into the authenticated purpose/context, not inferred from a count or a green UI badge.
 
-$$\text{Shard replication factor } R = \min\Big(20, \; N_{\text{active}}\Big)$$
+FINAL means regional confirmation under the current authority and safety assumptions. DEC-053 permits later deterministic revision after partition healing; there is no claim of global economic irreversibility. No assumed random attacker fraction proves a per-committee Byzantine bound.
 
-$$\text{Required quorum } Q(R) = \left\lfloor \frac{2}{3} \times R \right\rfloor + 1$$
+## 2. Distinct time and membership mechanisms
 
-```mermaid
-flowchart LR
-    subgraph Stufen["Fractal Scaling Stages"]
-        direction TB
-        S1["N = 1 node:<br>R = 1, Quorum = 1/1<br>🚦 PROVISIONAL (Yellow)"]
-        S2["N = 3 nodes (Small village):<br>R = 3, Quorum = 3/3 (Unanimous)<br>🚦 PROVISIONAL (Yellow)"]
-        S3["N = 10 nodes (Community):<br>R = 10, Quorum = 7/10 (70%)<br>🚦 PROVISIONAL (Yellow)"]
-        S4["N >= 20 nodes (Global mesh):<br>R = 20, Quorum = 14/20 (70%)<br>🚦 FINAL (Green)"]
-        S1 --> S2 --> S3 --> S4
-    end
-```
+The existing 24-hour network-stability hysteresis for FINAL is separate from:
 
----
+- The 24-hour observation/maturation wall for each new Argon2d routing ticket.
+- Calendar `epoch_day` used for wire framing and ingress accounting.
+- Passive hourly presence, with three consecutive missed heartbeats excluding candidates from later snapshots.
+- On-demand HRW calculation and the 800 ms frozen checkout collection.
 
-## 2. The Maturity Indicator Phase Transition (1-Byte Status)
+No daily committee tenure, predecessor baton certificate or active background liveness probes are introduced. Current requests do not borrow later HRW ranks. Ordinary read routing stays INV-0310 / default `read_quorum=1`.
 
-The maturity indicator is controlled via a compact **1-byte status field** (`0x00`, `0x01`, `0x02`) in the `QuorumCertificate` and in the signature preimage:
+## 3. Network domain isolation and the legacy activation manifest
 
-| Active nodes $N$ | Status byte | Status name | Quorum condition | Economic significance |
-| :--- | :--- | :--- | :--- | :--- |
-| **$N < 20$** | `0x00` | `PROVISIONAL` (Yellow) | $\text{sigs} \ge \lfloor \frac{2}{3} N \rfloor + 1$ | Local trial operation, village trade, neighborhood café |
-| **$N \ge 20$** | `0x01` | `FINAL` (Green) | $\ge 14/20$ sigs ($70\%$, after 24h hysteresis) | **Global finality & irreversibility** (supermarket, PoS) |
-| **$N \ge 100$** | `0x02` | `HIGH_ASSURANCE` (Gold) | $\ge 16/20$ sigs ($80\%$, at $N \ge 100$) | Large transactions (vehicle purchase, B2B long-distance trade) |
+Network-domain separation remains required in TLS/session admission and signed payloads: reject replay across incompatible configured domains. Heartbeat isolation is [INV-1106](11_organische_praesenz_und_dunbar_gossip.md). A mainnet/base island domain allows compatible communities to communicate under the admission rules; testnet is separate.
 
-* **Why `FINAL` only from $N \ge 20$?**  
-  In a federation with $15\%$ Byzantine nodes, the probability that HRW randomly rolls a $\ge 2/3$ majority of bad nodes into one shard is less than $10^{-6}$ ($< 0{,}0001\%$) at $R=20$. Below $N=20$ the system honestly protects merchants with status **Yellow (`PROVISIONAL`)**.
+The older Federation Activation Manifest / `GenesisManifest` describes a founding roster, signatures and a network fingerprint. Such a fingerprint may label an existing network domain, but fourteen founder signatures do not by themselves authenticate today's entire living roster, establish ongoing authority, or prove safe state transfer. A configured-domain mismatch must not be silently bypassed in the name of automatic merge. Conversely, the historical manifest narrative must not be used to claim every independently grown regional partition is permanently incompatible or cannot face a same-domain conflict.
 
-### 2.1 The 24h Hysteresis Upgrade (Client-Driven)
+The precise authenticated basis for roster/domain adoption and compatible-network activation remains unresolved. Do not replace it with arbitrary gateway rosters, statistical cutoffs, matching empty digests or mandatory permission from an unavailable predecessor committee. Existing code/test names concerning manifest adoption are observations to evaluate, not proof of those properties.
 
-To ensure provisional locks from small bootstrap networks ($N < 20$) do not remain provisional forever, the **client-driven upgrade** triggers upon reaching $N \ge 20$:
+## 4. Topology discovery and on-demand active-state recovery
 
-```mermaid
-flowchart LR
-    DorfNet["🟡 PROVISIONAL lock (Status 0x00, Village A)"] 
-    --> Gate20{"N_active >= 20 stable for 24h?<br>(24h hysteresis filter)"}
-    Gate20 -->|Yes: Phase transition| Top20ReAttest["⚡ Client-driven upgrade:<br>Wallet resubmits lock to Top-20 shard quorum"]
-    Top20ReAttest --> FinalLock["🟢 FINAL lock (Status 0x01, >= 14 sigs)"]
-```
+Compatible communities first learn identities through bounded F2F heartbeat forwarding. Topology knowledge is local and may differ; equal node counts do not prove identical members. No fixed 200/500 ms discovery/merge guarantee follows from gossip fan-out.
 
-1. **24h hysteresis against flapping:** Only when $N_{\text{active}} \ge 20$ has been held stable for at least 24 consecutive hours do honest nodes sign with `status_tag = 0x01 (FINAL)` and domain tag `HUMOCO_V1_APPROVE_FINAL`.
-2. **Cryptographic domain binding (Canonical `SigDigest`):**
-   $$\text{SigDigest} = \text{BLAKE3}\Big(\text{len}(\text{DOMAIN\_TAG}) \parallel \text{DOMAIN\_TAG} \parallel \text{epoch\_id}_{\text{le}} \parallel \text{session\_seq}_{\text{le}} \parallel \text{flags}_{\text{le}} \parallel \text{shard\_id}_{\text{le}} \parallel \text{status\_tag} \parallel \text{payload\_digest}\Big)$$
-   A small 14-node network can mathematically never produce a `FINAL` signature, as honest nodes sign exclusively with `status_tag = 0x00` (`HUMOCO_V1_APPROVE_PROV`) (SSOT: `docs/10:3.2` & `docs/04:224`).
-
-### 2.2 The Federation Activation Manifest (Network Birth Certificate & Isolation)
-
-When a network crosses $N = 20$ after 24h stability, it permanently seals its cryptographic identity via the **Federation Activation Manifest** (`GenesisManifest`):
-
-```rust
-pub struct GenesisManifest {
-    pub protocol_version: u32,
-    pub network_id: [u8; 32],
-    pub genesis_timestamp: u64,
-    pub initial_committee: [NodePubKey; 20],
-    pub genesis_signatures: Vec<(NodePubKey, [u8; 64])>, // >= 14 pioneer signatures
-}
-```
-
-* **The Network Genesis Fingerprint:** The canonical hash `canonical_hash()` serves as the immutable universe identifier. It binds TLS ALPN, QUIC session negotiation, and signature preimages (`domain_approve_final`).
-* **Incompatibility of Independent $N \ge 20$ Federations (`INV-0806`):**
-  In organic growth, nodes dock into existing large networks. If two distinct networks both independently grow to $N \ge 20$ and mint their own `GenesisManifest`, they are **mutually incompatible**. During P2P handshakes, `verify_handshake_genesis` detects `loc_hash != rem_hash` and terminates the connection with `CehError::IncompatibleGenesisManifest`. They can never merge automatically or pollute each other's `FINAL` collision registry.
-* **Island Mesh Adoption:** An embryonic island network ($N < 20$) possesses no `GenesisManifest` (`local = None`). When establishing contact with an established federation, it verifies the 14 pioneer signatures and adopts the remote manifest (`test_inv_ceh_05_genesis_pioneer_adoption`).
-
----
-
-## 3. The P2P Heartbeat Merge (Topology Convergence)
-
-When two separate networks meet (e.g., Village A with $N_A=5$ and Village B with $N_B=5$), **no cumbersome database dump between servers** takes place:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant NodeA as 🖥️ Shard Node A (Village A, N=5)
-    participant NodeB as 🖥️ Shard Node B (Village B, N=5)
-
-    Note over NodeA,NodeB: Phase 1: P2P Peering Handshake (< 100 ms)
-    NodeA->>NodeB: QUIC Connect & GossipHeartbeats(Village A)
-    NodeB->>NodeA: GossipHeartbeats(Village B)
-
-    Note over NodeA,NodeB: Phase 2: Organic Presence (< 50 ms)<br/>Both sides learn all 10 valid heartbeats in RAM within 200 ms.<br/>New common pool: N_total = 10 nodes.
-
-    Note over NodeA,NodeB: Phase 3: Zero Node-to-Node Lock Dump!<br/>No server downloads foreign lock tables (Zero spam risk!).
-```
-
-### 3.1 Asymmetric Merge Transition (Village-to-World Network)
-
-When a small village network ($N_A=5$) docks to a large federation ($N_{\text{world}}=10.000$), first contact occurs via one or more bridge edges:
-
-1. **Organic gossip flow via bridge edge:**  
-   The bridge node receives hourly heartbeats from the large network and forwards them along its dynamic edge budget ($R_{\text{soft}}$, see `docs/11`) to the village. There is **no unfiltered mass dump of node tables**.
-2. **Local village continuity (No transaction disruption):**  
-   * As long as new nodes in the village are still incubating in status `IMMATURE`, $N_{\text{local\_active}} = 5$ remains.
-   * **Local locks (`status_tag = 0x00 / PROVISIONAL` 🟡):** Transactions of local village clients (e.g., bakery) continue completely undisturbed, as the 5 village nodes hold all active village locks in RAM and satisfy the local quorum $Q(5) = 4/5$ without the outside world.
-3. **Convergence after 24 hours (Phase transition to `FINAL`):**  
-   After 24 hours the large-network nodes have delivered $\ge 8/24$ heartbeats and switch to `ACTIVE` in the village. Only now does the village network arm its $N \ge 20$ shard quorum and sign global locks with `status_tag = 0x01 (FINAL)` 🟢.
-
----
-
-## 4. Lazy History Ingestion: Protection Against Garbage Data on Merge
+Locks are never gossiped. A topology meeting does not trigger an unsolicited global database/history dump. Required collision state is nevertheless replicated through authorized shard-direct digest-first PULL; “no history dump” must never be read as “no active-lock synchronization.” L1 ownership history stays with clients.
 
 ```mermaid
 flowchart TD
-    subgraph Verboten["❌ Proactive Peer-to-Peer Lock Dump (Forbidden)"]
-        Dump["Malicious botnet wants to transfer 1,000,000 generated fake locks"]
-        Reject["L2 server: 'I do not replicate foreign locks from peers!'<br/>-> 0 Byte RAM / 0 Byte Disk / 0 Spam Impact"]
-        Dump -.-> Reject
-    end
-
-    subgraph Erlaubt["✅ Lazy Ingestion via Smart Client (Allowed)"]
-        User["Real citizen from Village B travels to Village A"]
-        User -->|Presents voucher at checkout| Terminal["Merchant checkout in Village A"]
-        Terminal -->|Wallet provides 3-link proof chain| LocalNode["Shard node in Village A"]
-        LocalNode -->|Checks causality on-the-fly in 2 ms| Accept["Lock successfully registered & confirmed!"]
-    end
+    Contact[Compatible F2F contact] --> Presence[Bounded passive topology discovery]
+    Presence --> Selection[Later justified HRW assignment]
+    Selection --> Gate[New shard remains NOT_READY]
+    Gate --> Trigger[First admissible relevant request]
+    Trigger --> Recover[One bounded job per shard: justified snapshot and deltas]
+    Recover --> Install[Verify full active-root coverage and durable install]
+    Install --> Ready[Activate only with safe current authority and state]
 ```
 
-* **Zero State Bloat:** Servers never synchronize historical or foreign lock states speculatively.
-* **Causality ProofChains** travel in the citizen's wallet and are validated only at payment time in ingress.
+Synchronization must include still-relevant locks older than 24 hours, anchored to root validity, not just a recent event window. A snapshot requires bounded catch-up for concurrent writes and a coherent install boundary. Every imported record, context and claimed support is checked before activation. Matching digests only establish agreement about supplied bytes; fourteen unready sources with empty state do not prove no prior lock existed.
 
----
+Other ready shards continue normally. An unready source may serve retained data to authorized peers without being counted as a safe state witness. No payment queue is created; clients retry the exact original intent. Source continuity, omission detection, changing assignments and safe activation remain proof and implementation obligations. Successful old signers leaving alone does not turn safely transferred locks into unconfirmed state; no historical bundle archive is required.
 
-## 5. Deterministic Conflict Resolution on Double-Spend ($\min(H_{\text{canon}})$)
+A provisional lock is not upgraded by a timer or status-bit change. A valid current quorum after safe synchronization can attest the state at the requested stronger class; the required evidence must actually be checked. The network-size hysteresis alone is insufficient.
 
-If a voucher was spent differently in two isolated networks during a partition (double-spend $A$ vs. $B$):
+## 5. Deterministic conflict handling
 
-1. As soon as both transactions arrive at a common node or merchant terminal, the decision is deterministic:
-   $$\min\Big(H_{\text{canon}}(\text{Lock}_A), \; H_{\text{canon}}(\text{Lock}_B)\Big)$$
-2. The mathematically smaller hash becomes `FINAL`, the losing branch becomes irrevocably `VOID`.
-3. The two colliding signatures form the complete fraud proof (`HUMOCO_V1_EQUIVOCATION`) for permanent P2P ban, invalidation of the mined shard ticket, and severance of all friendship edges in the Web of Trust (Zero Financial Deposits, but Identity Revocation & WoT Severance).
+Resolve only admissible authenticated state/support. DEC-064 selects:
 
----
+1. Valid class2 FINAL/Regional14 outranks valid class1 adaptive PROVISIONAL.
+2. Class0 partial votes or unconfirmed intents cannot displace a confirmed branch or establish a confirmed winner.
+3. Within the highest admissible confirmed class, choose `min(H_canon)`.
+4. Apply the causal VOID result to the losing branch, preserving required own-choice safety information through root TTL plus grace.
 
-## 6. Invariants of Topology Dynamics
+For example, a confirmed small-village lock does not override a valid class2 conflict merely because its hash is smaller. Conversely, one peer's unsupported low hash cannot replace a confirmed branch. A peer can transport many valid signatures; transport-source count is different from authenticated support.
 
-1. **[INV-0801] Fractal shard size:** Shard replication size $R$ is strictly defined by $\min(20, N_{\text{active}})$.
-2. **[INV-0802] 1-byte status minting:** Status `FINAL` (`0x01`) may be signed by nodes only when $N_{\text{active}} \ge 20$ has been held stable for at least 24 consecutive hours.
-3. **[INV-0803] Zero node-to-node lock replication:** Shard servers perform no proactive database dumps on topology merges. State synchronization occurs purely via client ingress and self-initiated digest-first PULL.
-4. **[INV-0804] Symmetric conflict resolution:** On double-spends all nodes decide deterministically via $\min(H_{\text{canon}})$.
-5. **[INV-0805] Bitmask self-proof:** A certificate counts as `FINAL` when its status is `0x01` and `signer_bitmap.count_ones() >= 14” is satisfied.
+A partition can be attacked from both sides through colluding agents or distinct connectivity. No “physical impossibility of dual ingress” is assumed. Two honest disjoint committees can each sign one branch; their later conflict is not proof that either node equivocated. Ban only an actual offender proven by two genuine incompatible signatures of that same NodePubKey in the same protected original slot. L1 fraud and owner evidence are distinct from a node-ban predicate. No honest loser is automatically slashed.
+
+Current canonical state may become B even where a node's immutable original decision was A. A purpose-separated current-state response can honestly report B; it never overwrites or licenses a contradictory original approval. Deterministic eventual convergence does not reverse goods already handed over and is not a proof of safe activation under every dynamic view.
+
+## 6. Existing topology invariants and revised semantics
+
+1. **[INV-0801] Bounded shard size:** `R = min(20, N_active)`; all sub-twenty participants cover all shards, subject to readiness.
+2. **[INV-0802] Binary status eligibility:** FINAL requires the existing stable `N >= 20` condition plus actual fourteen-of-twenty valid current context-bound evidence. It is regional/revisable; the third tier/global-irreversibility promise is retired.
+3. **[INV-0803] Controlled replication:** No unsolicited history dump or lock gossip. Required active state moves through authenticated bounded shard-direct PULL, with safe complete durable activation.
+4. **[INV-0804] Admissible class-first resolution:** Apply class2 over class1; class0 cannot establish a confirmed winner. Use min-hash within the highest admissible confirmed class. This replaces unconditional hash-only takeover and automatic honest-loser slashing.
+5. **[INV-0805] Verified quorum, not bitmap self-proof:** Status plus `count_ones >= 14` is insufficient. Verify every full identity/signature, justified frozen committee and exact purpose/target/state/challenge context. The former bitmask-only definition is explicitly withdrawn.
+6. **[INV-0806] Domain compatibility:** Existing incompatible authenticated network domains remain isolated; a founder manifest is not ongoing membership authority or a proof excluding same-domain regional conflicts. The historical absolute non-merge claim is qualified by this distinction; domain-adoption authority remains open.
+
+## 7. Evidence gates
+
+Adversarial real QUIC checks must cover conflicting same-domain regional state, wrong-domain messages, missing active locks older than 24 hours, empty unready digests, delta races and a changed assignment at install. Client tests must reject partial/mixed-class/wrong-context evidence and bitmap-only FINAL. Durable-before-release requires crash evidence. Those tests plus an explicit source/authority/activation argument are required; no execution or completeness claim is made here.

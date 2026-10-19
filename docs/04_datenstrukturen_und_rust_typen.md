@@ -1,347 +1,116 @@
-# 04. Data Structures & Rust Types (Zero-Copy)
+# 04. Canonical Data Contracts, Safe Encoding and Bounds
 
-> **Status:** Standard  
-> **Model:** Logic & State Graph First  
+> Canonical requirements; conceptual interfaces, not a frozen final shared schema
+> or a claim about currently implemented DTOs. DEC-038 selects one shared protocol
+> library with `human-money-core` domain semantics. See [Spec10](10_p2p_wire_format_und_session_framing.md).
 
-All data structures in the HuMoCo Layer-2 Collision Lock Registry are optimized for maximum performance (point-of-sale latency $< 1000\,\text{ms}$) and **zero-copy deserialization** (`rkyv` / `#[repr(C)]`).
+## 1. Data ownership and representations
 
----
+L1 owns amounts, currency, owner signatures and voucher causality. L2 owns bounded
+collision state identifying the network, root, consumed output, exact successor,
+receiver/nonce/lock identifier as applicable, and authenticated root.valid_until.
+No real names, monetary balances or application-origin whitelist enter L2. Full
+node public keys are necessary cryptographic identities; “blind” does not prohibit
+those keys or opaque output keys.
 
-## 1. Core Types of the Lock Registry
+The legacy fixed `LockEntry` budget is144 encoded bytes; its illustrative C layout
+was32-byte parent,32-byte receiver hash,8-byte validity,64-byte owner signature,
+1-byte state and7 padding bytes. It is **not** the HMC variable-nonce DTO, a quorum
+proof, an own-choice record, or the total RAM/disk cost. Do not reinterpret a Rust
+struct's memory as a network packet. Separate semantic DTOs from canonical encoded
+bytes and local storage indexes. `repr(C)` and padding do not define validation,
+endianness, authenticated fields or a portable wire format.
 
-```rust
-use rkyv::{Archive, Deserialize, Serialize};
+## 2. Signature purposes and quorum proof
 
-pub type Hash32 = [u8; 32];
-pub type PubKey32 = [u8; 32];
-pub type Sig64 = [u8; 64];
+Keep original write approval, current live-state response, sync-state evidence,
+heartbeat and fraud-report signatures distinguishable by canonical domain and
+explicit purpose/context. At a minimum a payment/live proof must bind:
 
-/// The universal lock entry (Chain of Authority UTXO)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C)]
-pub struct LockEntry {
-    /// Unique hash of the predecessor lock (genesis hash on first issuance)
-    pub parent_lock: Hash32,
-    
-    /// Ephemeral public-key hash of the new owner (stealth output)
-    pub receiver_ephemeral_pub_hash: Hash32,
-    
-    /// Expiry (TTL Unix timestamp in seconds). Lock is purged after expiry.
-    pub valid_until: u64,
-    
-    /// Signature of the previous owner over (parent_lock || receiver_ephemeral_pub_hash || valid_until)
-    pub owner_signature: Sig64,
-    
-    /// Status of the lock (0 = PROVISIONAL, 1 = FINAL, 2 = VOID)
-    pub status: u8,
-    
-    /// Alignment to 64-bit boundary (C padding)
-    pub _padding: [u8; 7],
-}
+| Field group | Required meaning |
+| --- | --- |
+| Network/version/domain | Prevent cross-network/protocol/purpose replay. |
+| Shard/root/lifetime | Authenticate routing and complete root lifetime; callers cannot shorten inherited safety retention or extend validity. |
+| Consumed slot/output and exact target | Distinguish split outputs and prevent transplant to another lock. |
+| State/status and request context | Bind the actual assertion, not only a floating record hash. Binary PROVISIONAL/FINAL, no third assurance level. |
+| Frozen committee context | Identify the same justified current top20 for all counted votes; full-key deduplication. |
+| Recipient challenge/freshness | Fresh request-bound live response, consumed only for its checkout context. |
 
-/// The quorum certificate of a shard (compact & self-proving via Ed25519 batch verification)
-#[derive(Clone, Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-pub struct QuorumCertificate {
-    /// Hash of the confirmed LockEntry
-    pub lock_hash: Hash32,
-    
-    /// Shard bucket (0..65535)
-    pub shard_id: u16,
-    
-    /// 1-byte status: 0 = PROVISIONAL (Yellow), 1 = FINAL (Green), 2 = HIGH_ASSURANCE (Blue/Gold)
-    pub status: u8,
-    
-    /// 1-byte alignment padding
-    pub _padding: u8,
-    
-    /// Bitmask of signing nodes (Top-20 HRW nodes, bits 0..19)
-    /// count_ones() >= 14 and status == 1 => Guaranteed finality
-    pub signer_bitmap: u32,
-    
-    /// Individual Ed25519 node attestations forming the quorum (exactly popcount(signer_bitmap) entries, Ed25519 batch-verifiable)
-    pub signatures: Vec<Sig64>,
-}
+A bitmap is only an index into the authenticated frozen<=20 roster. Bits0–19,
+lengths and signature counts must agree; each counted signature must verify under
+a distinct full32-byte NodePubKey authorized for this snapshot. Popcount>=14,
+short IDs, a gateway `verified` flag or a supplied roster alone do not establish
+FINAL. Current authority is a separate proof gate, not a property of this struct.
 
-/// Pillar of the mathematical fraud proof (slashing evidence)
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-pub enum FraudProofPillar {
-    ShardEquivocation      = 0x01, // Pillar 1: Double-signing for the same parent_lock
-    IngressCounterConflict = 0x02, // Pillar 2: Load counter regression / heartbeat discrepancy
-    HeartbeatSpam          = 0x03, // Pillar 3: Heartbeat spam (interval < 50 min)
-}
+The old quorum struct containing only lock_hash/shard/status/bitmap/signatures
+is incomplete for this contract. Final challenge sizing, field order, versioning,
+status/absence encoding and domain tags remain one shared K2 integration task;
+do not independently invent incompatible node/client encodings.
 
-/// The universal fraud proof (statelessly verifiable in O(1))
-#[derive(Clone, Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C, align(8))]
-pub struct FraudProofPayload {
-    /// Full NodePubKey of the node identified by the fraud evidence (32 bytes)
-    pub perpetrator_node_id: PubKey32,
-    
-    /// Fraud pillar (1..3)
-    pub proof_pillar: FraudProofPillar,
-    
-    /// 7-byte alignment padding
-    pub _padding: [u8; 7],
-    
-    /// First signed original packet (full wire format)
-    pub evidence_packet_a: Vec<u8>,
-    
-    /// Second signed original packet (full wire format)
-    pub evidence_packet_b: Vec<u8>,
-    
-    /// Optional: full NodePubKey of the discoverer / reporter
-    pub reporter_node_id: PubKey32,
-    
-    /// Signature of the reporter over (perpetrator_node_id || proof_pillar || hash(A) || hash(B))
-    pub reporter_signature: Sig64,
-}
+## 3. Safe parsing and bounded allocation
 
-/// Slot of the 128-slot direct-mapped slashing detector (exactly 112 bytes)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C, align(8))]
-pub struct HeartbeatSlashingSlot {
-    /// Full NodePubKey of the node (32 bytes)
-    pub node_id: PubKey32,
-    /// Unix timestamp of the last valid heartbeat (8 bytes)
-    pub timestamp_unix: u64,
-    /// PoW nonce of the heartbeat (8 bytes)
-    pub pow_nonce: u64,
-    /// Signature of the node over the heartbeat (64 bytes)
-    pub signature: Sig64,
-}
+Use `from_le_bytes`/`to_le_bytes`, checked slices/`try_from`, explicit discriminant
+validation, `checked_add`/`checked_mul` and structured errors. Preserve
+`#![forbid(unsafe_code)]`; no pointer casts, transmutation, bytemuck/zerocopy or
+unchecked archived-root deserialization is required. Payload encoding does not
+waive validation. See the safe header example in Spec10 §6.
 
-/// Phase 1 of PULL sync: Fingerprint request to incumbent Top-20 shard peers
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C, align(8))]
-pub struct ShardDigestRequest {
-    /// Requesting node
-    pub requester_node_id: PubKey32,
-    /// Target shard (0..65535)
-    pub shard_id: u16,
-    /// 6-byte alignment padding
-    pub _padding: [u8; 6],
-}
+Reject unsupported versions/crypto suites/flags/types and impossible lengths
+before allocating payloads. Read incrementally in bounded chunks, with bounded
+per-message and per-peer bytes/counts/work and timeouts. Never allocate directly
+from an attacker-declared wire length. Run cheap framing/rate/PoW checks before
+asymmetric signature work and durable storage reservation.
 
-/// Phase 1 of PULL sync: 32-byte fingerprint response
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C, align(8))]
-pub struct ShardDigestResponse {
-    /// Target shard (0..65535)
-    pub shard_id: u16,
-    /// 2-byte alignment padding
-    pub _padding: [u8; 2],
-    /// Number of currently active locks in the shard
-    pub lock_count: u32,
-    /// Highest valid timestamp / TTL in the shard
-    pub max_valid_until: u64,
-    /// BLAKE3 shard digest over all active locks
-    pub digest: Hash32,
-}
-
-/// Phase 2 of PULL sync: Payload stream request
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C, align(8))]
-pub struct StreamShardLocksRequest {
-    /// Target shard (0..65535)
-    pub shard_id: u16,
-    /// 6-byte alignment padding
-    pub _padding: [u8; 6],
-    /// Expected majority digest (TargetDigest D*)
-    pub expected_digest: Hash32,
-}
-
-/// PULL sync response chunk (zero-copy pagination of pure locks)
-#[derive(Clone, Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C, align(8))]
-pub struct ActiveSyncChunk {
-    /// Shard bucket
-    pub shard_id: u16,
-    /// Sequential chunk sequence number
-    pub chunk_seq: u16,
-    /// 1 if this is the last chunk of the sync, else 0
-    pub is_last_chunk: u8,
-    /// Number of valid entries in this chunk (max. 16)
-    pub entry_count: u8,
-    /// 2-byte alignment padding
-    pub _padding: [u8; 2],
-    /// Bounded array of active LockEntries (144 bytes each)
-    pub entries: [LockEntry; 16],
-}
-
-/// The cryptographic identity and admission proof of a node (Argon2d PoW)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C)]
-pub struct NodeProofOfWork {
-    /// Permanent Ed25519 public key (identity and friendship anchor)
-    pub pubkey: PubKey32,
-    /// Found 64-bit nonce
-    pub nonce: u64,
-    /// Achieved difficulty / PoW score (D_mine)
-    pub difficulty_achieved: u32,
-    /// Used Argon2d iterations (t >= 120, m=1GB fixed)
-    pub t_iterations: u16,
-    /// 2-byte alignment padding
-    pub _padding: [u8; 2],
-}
-
-/// Seamless announcement of a NodeID upgrade (re-mining with PubKey stability)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-#[repr(C)]
-pub struct NodeIDMigrationNotice {
-    /// New, stronger proof-of-work
-    pub new_pow: NodeProofOfWork,
-    /// New derived NodeID
-    pub new_node_id: Hash32,
-    /// Valid signature of the existing private key over (new_node_id || new_pow.nonce)
-    pub migration_signature: Sig64,
-}
-```
-
----
-
-## 2. Client-Gateway Wire Protocol (Layer-1 JSON Compatibility)
-
-For communication between the L1 client (`human-money-core`) and the L2 gateway, standardized JSON structures with Base58 encoding for 32/64-byte arrays are used:
+Existing limits are retained:
 
 ```rust
-use serde::{Deserialize, Serialize};
-
-/// Status query with thinned locator list (ADR-001)
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct L2StatusQuery {
-    pub auth: L2AuthPayload,
-    pub layer2_voucher_id: String,           // 64-char hex string
-    pub challenge_ds_tag: String,            // Double-spend tag to check (Base58)
-    pub locator_prefixes: Vec<String>,       // 10-char Base58 prefixes in reverse
-}
-
-/// Binding verdict of the L2 registry
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type")]
-pub enum L2Verdict {
-    Verified { lock_entry: L2LockEntry },
-    MissingLocks { sync_point: String },     // 10-char prefix of the Last Common Ancestor
-    UnknownVoucher,
-    Rejected { reason: String },
-    Ok { signature: [u8; 64] },
-}
-
-/// Signed response envelope of the L2 gateway
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct L2ResponseEnvelope {
-    pub verdict: L2Verdict,
-    pub server_signature: [u8; 64],          // Ed25519 signature of the L2 node over the verdict
-}
+pub const MAX_LOCATOR_PREFIXES: usize = 16;
+pub const MAX_BATCH_SIZE: usize = 64;
+pub const MAX_EVIDENCE_BYTES: usize = 1024; // per original evidence packet
 ```
 
----
+Locator prefixes are10 Base58 characters used for bounded cold-path search;
+ambiguous prefixes require full-ID validation before accepting causality. Counts
+alone are not sufficient aggregate byte/work bounds. Two evidence packets plus
+headers/keys/report signatures require a checked aggregate envelope cap. If the
+final context encoding cannot fit1024 bytes per evidence packet, report that
+schema conflict explicitly rather than truncate signatures or silently enlarge
+limits. No numeric buffer/time constants are invented by this consolidation.
 
-## 3. Mathematical Helper Functions
+## 4. Sync and own-choice records
 
-```rust
-/// Computes the deterministic root hash of the network (definitional genesis)
-#[inline(always)]
-pub fn calculate_genesis_root(protocol_version: u32, t0_unix_sec: u64) -> Hash32 {
-    let mut hasher = blake3::Hasher::new();
-    let tag = b"HUMOCO_V1_GENESIS";
-    hasher.update(&[(tag.len() as u8)]);
-    hasher.update(tag);
-    hasher.update(&protocol_version.to_le_bytes());
-    hasher.update(&t0_unix_sec.to_le_bytes());
-    *hasher.finalize().as_bytes()
-}
+Active-state digest/stream metadata must bind network, shard, snapshot/cursor,
+ordering, all semantic record fields including authenticated lifetime, counts and
+termination. Chunk order/duplicates/gaps/changed snapshots must be detected before
+installation. Original historical quorum bundles are excluded from shared state.
+An unready source may serve retained data without becoming a qualified witness.
+Source continuity and complete snapshot+delta coverage remain separate proof gates.
 
-/// Canonical resolver for split-brain conflicts with domain separation
-#[inline(always)]
-pub fn canonical_hash(parent: &Hash32, receiver_pub_hash: &Hash32, sig: &Sig64) -> Hash32 {
-    let mut hasher = blake3::Hasher::new();
-    let tag = b"HUMOCO_V1_CANON_RESOLVER";
-    hasher.update(&[(tag.len() as u8)]);
-    hasher.update(tag);
-    hasher.update(parent);
-    hasher.update(receiver_pub_hash);
-    hasher.update(sig);
-    *hasher.finalize().as_bytes()
-}
+Persist immutable original own decisions keyed by full identity/network/consumed
+slot/purpose and exact payload/context, atomically with the lock before release.
+Retain exact own approvals through rootTTL+30s; never overwrite them from canonical
+sync. These local safety records are not a migrated historical quorum archive.
+Fresh live responses use safely installed state and do not create a new original
+choice or disk write for each read.
 
-/// Canonical signature digest with domain separation and length prefix (SSOT)
-#[inline(always)]
-pub fn calculate_signature_digest(
-    domain_tag: &[u8],
-    epoch_id: u32,
-    session_seq: u64,
-    flags: u32,
-    shard_id: u16,
-    status_tag: u8,
-    payload_digest: &[u8; 32],
-) -> Hash32 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&(domain_tag.len() as u8).to_le_bytes());
-    hasher.update(domain_tag);
-    hasher.update(&epoch_id.to_le_bytes());
-    hasher.update(&session_seq.to_le_bytes());
-    hasher.update(&flags.to_le_bytes());
-    hasher.update(&shard_id.to_le_bytes());
-    hasher.update(&[status_tag]);
-    hasher.update(payload_digest);
-    *hasher.finalize().as_bytes()
-}
+## 5. Mathematical helpers and schema alignment
 
-/// Canonical quorum computation Q(R) = min(R, floor(2R/3) + 1)
-#[inline(always)]
-pub fn quorum(r: u16) -> u16 {
-    if r == 0 {
-        return 0;
-    }
-    std::cmp::min(r, (r * 2) / 3 + 1)
-}
+HRW shard selection, canonical hashing and signature digests use one shared
+canonical encoding. Hash domains use an explicit one-byte length prefix and the
+registered `HUMOCO_V1_*` domain before the unambiguous fields. Do not cast arbitrary
+untrusted domain lengths to u8 without bounds; protocol tags are fixed constants.
+`Q(0)=0`; for1<=N<20 use `floor(2N/3)+1`, and FINAL uses14 of 20. Full HRW scores
+and deterministic identity tie-breaking are preserved.
 
-/*
-| R | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 |
-|---|---|---|---|---|---|---|---|---|---|----|----|----|----|----|----|----|----|----|----|----|
-| Q | 1 | 2 | 3 | 3 | 4 | 5 | 5 | 6 | 7 |  7 |  8 |  9 |  9 | 10 | 11 | 11 | 12 | 13 | 13 | 14 |
-*/
+Client JSON adapters validate all decoded32/64-byte fields, Base58/hex lengths,
+list counts, total bytes and work. An L2Verdict/L2ResponseEnvelope is not paid
+unless the consumer verifies the selected full quorum proof and L1 conditions.
+Exact shared Rust types and compatibility migration remain delivery work;
+examples in old revisions are not authority to omit signed bindings.
 
-/// Shard assignment O(1)
-#[inline(always)]
-pub fn get_shard_id(genesis_hash: &Hash32) -> u16 {
-    u16::from_be_bytes([genesis_hash[0], genesis_hash[1]])
-}
+## 6. Invariants
 
-/// Deterministic exponential decay for telemetry/quotas (halving every 17 hours)
-/// Replaces complex Taylor series with O(1) bit shifts
-#[inline(always)]
-pub fn deterministic_decay(value: u64, delta_hours: u64) -> u64 {
-    let halvings = delta_hours / 17;
-    if halvings >= 64 {
-        0
-    } else {
-        value >> halvings
-    }
-}
-```
-
-/// Protocol limits & capacity bounds
-pub const MAX_LOCATOR_PREFIXES: usize = 16;       // Max. 16 logarithmically thinned 10-char prefixes in cold path (ADR-001)
-pub const MAX_BATCH_SIZE: usize = 64;             // Max. 64 locks per L2BatchLockRequest
-pub const MAX_EVIDENCE_BYTES: usize = 1024;       // Max. 1024 bytes per evidence packet in FraudProofPayload (INV-1402)
-
----
-
-## 3. Invariants of Storage Structures
-
-1. **[INV-0401] Fixed Size Without Heaps:** `LockEntry` has a fixed byte size of exactly 144 bytes and requires no heap allocation (`Vec`/`String` forbidden). Locator lists are strictly bounded to `MAX_LOCATOR_PREFIXES = 16` in the cold path, batches to `MAX_BATCH_SIZE = 64`.
-2. **[INV-0402] No Economic Data:** Neither amount, currency, nor identities exist in L2 data structures (*Blind Service*).
-3. **[INV-0403] Domain Separation:** Every cryptographic hash and signature step enforces a unique prefix (`HUMOCO_V1_*`).
-4. **[INV-1402] Bounded Fraud Evidence:** Individual evidence packets (`evidence_packet_a/b`) in `FraudProofPayload` are strictly capped at `MAX_EVIDENCE_BYTES = 1024` bytes.
+1. **[INV-0401] Fixed Legacy Record and Bounded Envelopes:** The 144-byte fixed record budget is separate from variable domain DTOs, proofs and storage overhead. Locator count<=16 and batch count<=64, plus checked byte/work limits; no unbounded wire allocation.
+2. **[INV-0402] Blind Economic Domain:** L2 stores no amounts, currencies or real identities; necessary full node keys and opaque output identifiers remain permitted.
+3. **[INV-0403] Canonical Purpose Separation:** Length-prefixed registered domains and complete field bindings distinguish signatures, networks, versions and assurance states. Verify the actual signatures.
+4. **[INV-0404] Bounded Fraud Evidence:** Each original evidence packet is<=1024 bytes and the aggregate envelope is checked before allocation. This replaces Spec04's former overloaded INV-1402; INV-1402 remains durable fraud-evidence retention in Spec14.

@@ -49,9 +49,9 @@ This document is automatically loaded on every AI agent startup in the workspace
    * Partitions and isolated networks heal deterministically and timelessly via $\min(H_{\text{canon}})$.
    * In HuMoCo there are Zero Financial Deposits, no staking, and no monetary deposits (blind L2). On equivocation (double-signing), offenders are punished atomically via irrefutable proof (`HUMOCO_V1_EQUIVOCATION`): the losing branch becomes VOID via $\min(H_{\text{canon}})$, the node identity (`NodePubKey`) is permanently banned, the mined Argon2d shard ticket (`HrwRoutingId`) is invalidated, and all F2F friendship edges in the Web-of-Trust are severed entirely (Identity Revocation & WoT Severance).
    * Dynamic network scaling (Strict binary phase transition): Sub-quorum networks ($N = 1\dots19$, Community-Mesh / Island Network) operate on adaptive provisional quorums $Q(N) = \lfloor \frac{2}{3} N \rfloor + 1$ (Status `PROVISIONAL` 🟡, all nodes validate all 65,536 shards); from $N \ge 20$ (with 24h stability hysteresis) full federated HRW sharding applies with fixed BFT quorum $14/20$ (Status `FINAL` 🟢, node workload scales to $\approx \frac{20}{N}$).
-5. **Dual-Tier Persistence (Spec 12 & 14):**
-   * **Tier 1 (RAM):** `RamIndex` with atomic first-seen collision check ($< 1\,\mu\text{s}$) for PoS latencies $< 5\,\text{ms}$.
-   * **Tier 2 (Disk):** Asynchronous batch flush into the pure-Rust ACID key-value engine `redb` via bounded Tokio MPSC queues with graceful-shutdown drain.
+5. **Dual-Tier Persistence (Spec 12 & 14) & Durable-before-Vote (DEC-029 Restoration):**
+   * **Tier 1 (RAM):** `RamIndex` with atomic first-seen collision check ($< 1\,\mu\text{s}$). RAM acceptance is pending until durable persistence acknowledges the exact lock and own signing decision.
+   * **Tier 2 (Disk):** Strict **Durable-before-Vote** (DEC-029 restored, superseding DEC-062). Atomic `redb` commit before releasing attestation signature, local vote, or response envelope to the network, with an asynchronous commit acknowledgment pipeline (< 20 ms local durable service target, requiring measurement within the 800 ms checkout collection budget). For an ordinary process crash with intact durable storage, this ordering preserves every released own decision; disk loss, rollback and copied keys require separate recovery safeguards.
 6. **Zero State Bloat & TTL:**
    * Every lock entry is bound to the validity of the Voucher Root (`root.valid_until`). After expiry plus a 30s grace period, the entry is physically purged from RAM and disk.
 
@@ -108,7 +108,7 @@ flowchart TD
    * **✍️ Write Ingress (`POST /v1/lock`):**
      - *Free Tier:* Open to everyone, protected by dynamic BLAKE3 Hashcash PoW (*Network Thermometer*).
      - *Friends Tier:* Free & PoW-exempt for friends, family, and own PoS terminals via random 128-bit secret tokens (`f2f_<hex>`).
-     - *VIP Tier:* Reserved queues & guaranteed SLAs for merchants via Byte-Years tokens.
+     - *VIP Tier:* Bounded reserved queues and measured provider service targets for merchants via Byte-Years tokens; no capacity tier weakens proof or durability.
    * **🔍 Read Ingress (`POST /v1/status`, `GET /v1/node-status`, `GET /v1/pow-challenge`):**
      - Extremely fast RAM-index lookup ($< 1\,\mu\text{s}$), no disk locking, no write-queue reservation.
      - **1-of-20 Shard Randomization (`INV-0310`):** Gateways query exactly 1 deterministically random node from the top-20 shard nodes for status requests. Read capacity scales linearly with shard size ($20 \times 50.000 = 1.000.000\,\text{Reads/day}$).
@@ -124,7 +124,7 @@ flowchart TD
 
 * **⚡ Checkout Hot-Path (PoS / Ingress) is 100% Shard-Direct RPC, 0% Gossip:**
   - Locks are created via client-to-gateway ingress (`POST /v1/lock`), verified via Shard-Direct RPC (`LockVerifyRequest` / `LockVerifyResponse`), and synchronized via Spec 03 Digest Pull (`ShardDigestRequest` / `ActiveSyncRequest`).
-  - **Locks are NEVER gossiped.** Epidemic gossip for lock records is completely eliminated to guarantee deterministic latency and zero network amplification.
+  - **Locks are NEVER gossiped.** Epidemic gossip for lock records is completely eliminated to avoid epidemic lock amplification. Checkout latency remains dependent on transport, ready quorum members and durable storage.
 
 * **📡 Strict 2-Stream Mesh Gossip:**
   - P2P Mesh Gossip across F2F edges consists **strictly of exactly two streams**:
@@ -151,12 +151,12 @@ flowchart TD
 * **Fixed Checkout Committee:** Each lock request freezes one canonical HRW snapshot of at most 20 distinct `NodePubKey` identities, including self where eligible. FINAL requires 14 distinct votes from that snapshot; no ranks 21–40 may replace unavailable members during checkout. Committee selection uses full 256-bit scores with deterministic identity tie-breaking. Read routing retains its existing policy; `N < 20` retains adaptive provisional quorums.
 * **Autonomous Living-Mesh Snapshot vs. Static Epoch Baton Handover:** Committee membership is computed autonomously and deterministically per request / routing event from the living active mesh (`select_shard_committee`). There is NO daily committee tenure, NO 24-hour baton passing, and NO static epoch assignment. Membership transitions occur naturally as nodes become active or dormant in the local mesh view.
 * **Bounded Write Collection:** Checkout signature collection uses an 800 ms budget and fails immediately when the remaining eligible members cannot supply the required quorum. `FLAG_NOT_READY`, `FLAG_NOT_IN_SHARD`, and cancellations after quorum completion are neutral outcomes, never peer failures. Statistical score thresholds and Bloom filters do not establish certificate membership. This policy prevents signer-pool expansion; it does not prove globally identical membership views or safe dynamic committee transitions.
-* **Internal Node Processing Time ($< 5\,\text{ms}$):** Pure RAM collision check and local attestation must stay $< 5\,\text{ms}$ to prevent local server queuing under high load.
+* **Internal Node Durable SLA ($< 20\,\text{ms}$):** Sub-microsecond RAM collision check followed by atomic durable `redb` commit before releasing attestation signature, local vote, or response envelope (Durable-before-Vote / DEC-029 restoration, superseding DEC-062). Local processing finishes in $< 20\,\text{ms}$, well within the 800 ms checkout collection budget.
 * **End-to-End Checkout Latency ($500\,\text{ms} \dots 1.500\,\text{ms}$):** For the customer at the checkout, up to 1–2 seconds is fully ergonomic and standard in payment processing. Shard verification timeouts may be relaxed to $1.000\,\text{ms}$.
 * **Quorum Fast-Exit ($14/20$) & No Cascading Death Spiral on the Checkout Path:**
   - As soon as $14$ shard signatures are present, the gateway immediately sends `200 OK` to the PoS terminal and cleanly aborts stragglers (`join_set.abort_all()`).
   - Aborted tasks due to fulfilled quorum must **never** be counted as peer failures (`record_failure`).
-  - On the checkout path (gateway $\rightarrow$ shard) there is **no Cascading Death Spiral**: shard nodes do not communicate with each other during checkout, and the gateway creates no load cascades on timeout ($\Delta \text{Load} \le 0$ is guaranteed).
+  - On the checkout path (gateway $\rightarrow$ shard) there is **no Cascading Death Spiral**: shard nodes do not communicate with each other during checkout, and the gateway does not expand the signer pool or trigger unbounded extra work on timeout. Exact client retries remain separately bounded.
 
 ---
 
@@ -217,14 +217,15 @@ Before writing new code for a new feature or requirement, apply this test:
 
 ## 🚨 4. The 11 Iron-Clad Programming Rules
 
-### 1. ⚡ No I/O & No Mutex on the Hot Path:
-* On the PoS lock path (`POST /v1/lock`), never write to disk synchronously.
-* RAM collision checks use atomic in-memory CAS operations ($< 1\,\mu\text{s}$). Disk writes are batched asynchronously via bounded MPSC channels.
+### 1. ⚡ No Blocking I/O or RAM Guards Across Persistence:
+* On the PoS lock path (`POST /v1/lock`), never perform unmanaged blocking disk I/O on the request/runtime thread. Use the bounded asynchronous persistence worker and await its exact durable commit acknowledgment before releasing any binding signature, including idempotent responses and gateway self votes (**Durable-before-Vote / DEC-029 restoration**, superseding DEC-062, < 20ms local durable SLA, well within the 800ms checkout collection budget).
+* RAM collision checks use atomic in-memory CAS operations ($< 1\,\mu\text{s}$). Reserve queue capacity before mutation. The worker atomically persists the lock and immutable own signing decision; enqueued or RAM-resident state alone never authorizes signature release. No RAM guard is held while awaiting persistence.
+* Ordinary process crashes with intact committed storage need no root-risk markers, bucket quarantine or automatic identity replacement: before commit no binding signature has escaped; after commit the own decision is recoverable. Storage loss/rollback and failed recovery are separate failures and never justify signing without safe state.
 * **Background decoupling:** Background engines (TTL pruning, DB compaction) must never hold locks on the `RamIndex` during a synchronous `fsync` or write operation.
 
 ### 2. 🕰️ No Unsanitized OS System Time on the Consensus Path:
 * Never use `std::time::SystemTime::now()` naively for consensus or ingress decisions.
-* Time windows are validated strictly relative to `root.valid_until` and the decentralized median time derived from F2F neighbors (`P2pClock` / `SimTime` / Spec 07 / INV-1202).
+* Time windows are validated strictly relative to `root.valid_until` and the decentralized median time derived from F2F neighbors (`P2pClock` / `SimTime` / Spec 07; INV-1202 instead names atomic collision insertion).
 
 ### 3. 🎯 Strict Idempotency & 409 Collision Semantics:
 * Identical lock (`lock_id` equal) on the same parent $\rightarrow$ `200 OK` (Verified).
@@ -242,7 +243,7 @@ Before writing new code for a new feature or requirement, apply this test:
   hasher.update(&(domain_tag.len() as u8).to_le_bytes());
   hasher.update(domain_tag);
   ```
-  This fully prevents preimage collisions and class swapping.
+  This makes the domain encoding unambiguous. Complete signed-field binding and actual verification remain necessary; domain tags alone are not a protocol-security proof.
 
 ### 6. 🤖 Subagent Principle for Context Conservation:
 * Larger refactorings, module implementations, and test runs are delegated to specialized subagents.
@@ -312,7 +313,7 @@ human-money-node/
 │       │   └── cli.rs       # CLI commands: init, keygen, run, status, peers, quota
 │       └── tests/           # Storage, network, API, control & E2E cluster tests
 │
-├── docs/                    # 21 binding specifications (00 to 20, 99)
+├── docs/                    # Numbered specification families 00–20 and 99; see INVARIANT_REGISTRY.md
 └── prompts/                 # 17 specialized AI audit prompts (mutation testing, security, etc.)
 ```
 

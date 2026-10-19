@@ -77,29 +77,17 @@ flowchart TD
 ### 3.2 Direct Co-Shard QUIC Connections (Data Plane)
 * **Responsibility Peering:** Each node computes, based on its $N_{\text{active}}$ list, the shards for which it ranks in the Top-20 ($S \in \text{ResponsibleShards}$).
 * **Point-to-Point Communication:** To other nodes of the same shard it establishes direct, encrypted **QUIC sessions (mutual TLS Ed25519)** to replicate locks in $< 50\,\text{ms}$ and to reconcile active RAM locks during network merges.
-* **Security Gate:** An incoming co-shard connection attempt is accepted only if:
-  1. The `NodeID` of the counterpart exists in the local active node set $N_{\text{active}}$ (proven Argon2d PoW $\ge D_{\text{min\_floor}}$ + heartbeat hysteresis), and
-  2. The counterpart indeed belongs to the Top-20 nodes of that shard according to HRW.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant NodeA as 🖥️ Shard Node A (Shard 42)
-    participant NodeB as 🖥️ Shard Node B (Shard 42)
-
-    Note over NodeA,NodeB: 1. Co-Shard Direct QUIC Handshake (Data Plane)
-    NodeB->>NodeA: QUIC Connect (Mutual TLS via Ed25519 PubKey)
-    NodeA->>NodeA: Check: Is NodeB in local N_active & in Top-20(Shard 42)?
-    
-    alt Not in N_active or not a shard partner
-        NodeA-->>NodeB: CloseConnection(UnauthorizedShardPeer)
-    else Authorized Co-Shard Partner
-        NodeA-->>NodeB: Accept(Stream 0: DATA_PLANE)
-        Note over NodeA,NodeB: 2. Ephemeral RAM Sync (Only valid locks valid_until > now)
-        NodeB->>NodeA: SyncActiveLocks(Shard 42)
-        NodeA-->>NodeB: Stream(ActiveLocks)
-    end
-```
+* **Security Gate:** Authenticate the peer's full `NodePubKey` and require it to
+  have been learned through the F2F mesh (`known_network_nodes`). Unknown internal
+  peers are refused. This transport gate permits learned gateways to query shards
+  even when they are not members of the queried committee. It does not grant gossip
+  rights or count a vote; voting additionally requires current responsibility and
+  safe per-shard readiness. Sync may serve retained data without authorizing the
+  source as a current witness. Membership/source justification remains a separate
+  proof gate.
+* F2F sessions are persistent. Shard-direct sessions use the bounded ephemeral
+  LRU lifecycle in [Spec 15](15_p2p_transport_and_connection_management.md);
+  normal idle closure is neutral and is not absence evidence.
 
 ### 3.3 The Bootstrap Discovery Path (`[discovery].bootstrap_gateways`)
 
@@ -114,7 +102,7 @@ bootstrap_gateways = [
 ```
 
 #### Standardized Exception to [INV-0103] & Security Bounds:
-1. **Read-Only Peer Exchange (PEX):** Queries to bootstrap gateways are strictly limited to fetching public shard endpoints via `GET /peers` and reading median network time.
+1. **Read-Only Discovery:** Fetch only explicitly advertised public HTTP gateway endpoints through the bounded public directory (DEC-078). Private peer inventories, metrics and topology remain operator-only. An advertisement grants neither F2F nor shard-RPC access; cached fallback belongs exclusively to clients (DEC-079). Exact directory paths are an interface delivery task.
 2. **Zero Gossip Privileges:** Bootstrap discovery connections **NEVER** grant F2F gossip rights. The node does **not** forward heartbeats or topology rumors across bootstrap discovery channels.
 3. **Zero Consensus / Voting Rights:** Bootstrap gateways have **no voting or quorum privileges** on behalf of the local node.
 4. **Ephemeral Transition:** As soon as the node establishes genuine F2F peering edges (`[f2f].peers`), bootstrap discovery connections are decommissioned or relegated to fallback state.
@@ -125,7 +113,7 @@ bootstrap_gateways = [
 
 1. **[INV-0101] Keyless Root:** No instance in the network possesses a private key that could authorize or manipulate the genesis root.
 2. **[INV-0102] Symmetric Handshake:** A node at $N=1$ behaves protocol-identically to a node in a 10,000-node cluster.
-3. **[INV-0103] Strict F2F Gossip Peering:** Persistent P2P gossip and topology connections may be established exclusively along verified F2F friendship edges (eclipse immunity).
-4. **[INV-0104] Authorized Co-Shard Connections:** Direct data-plane connections between shard quorum nodes are permissible only between nodes that are both qualified in $N_{\text{active}}$ and lie within the HRW quorum for the same shard.
-5. **[INV-0105] Throttling via F2F Edges & PoW:** New peers cannot flood the network with mass Sybil instances, since each identity requires at least the Argon2d minimum floor $D_{\text{min\_floor}}$ ($\ge 1\,\text{h}$ server / $\ge 4\,\text{h}$ Raspberry Pi) and is bound to F2F edges.
+3. **[INV-0103] Strict F2F Gossip Peering:** Persistent P2P gossip and topology connections may be established exclusively along verified F2F friendship edges (an admission boundary, not an unconditional eclipse-immunity proof).
+4. **[INV-0104] Authorized Co-Shard Connections:** Internal shard-direct connections require authenticated learned peers; request authorization, data-source qualification and current committee voting eligibility are separate checks. A learned gateway need not vote in the queried shard.
+5. **[INV-0105] Throttling via F2F Edges & PoW:** New peers must satisfy verified Argon2d work and F2F admission. Work and topology impose costs; hardware-time estimates are not a proven bound on coordinated Sybil identities.
 6. **[INV-0106] Bounded Bootstrap Discovery Exception:** Connections to `bootstrap_gateways` serve strictly as read-only PEX discovery endpoints; they never bridge the F2F gossip barrier or grant consensus voting rights.

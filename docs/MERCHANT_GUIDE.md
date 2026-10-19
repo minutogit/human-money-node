@@ -16,12 +16,12 @@ HuMoCo Layer-2 is an asynchronous, cryptographic **Collision Lock Registry**. It
 flowchart LR
     Customer["📱 Customer (App / Card)<br>Signs voucher transfer offline<br>(No internet required!)"]
     -->|NFC / QR Handover| POS["🏪 Merchant PoS Terminal<br>Verifies lock & releases goods"]
-    -->|Hot-Path Ingress (< 5ms)| Node["⚙️ Local Node / Gateway<br>14/20 Shard Attestations"]
+    -->|Hot-Path Ingress (< 20ms Durable)| Node["⚙️ Local Node / Gateway<br>14/20 Shard Attestations"]
 ```
 
 ### Key Merchant Advantages:
 * **Zero Transaction Fees:** No percentage-based interchange fees (0.00% base fees).
-* **Instant Finality:** Hot-path processing takes $< 5\,\text{ms}$ on local nodes, with end-to-end checkout confirmed in $500\text{--}1,000\,\text{ms}$.
+* **Instant Finality:** Hot-path processing takes $< 20\,\text{ms}$ (durable commit before vote) on local nodes, with end-to-end checkout confirmed in $500\text{--}1,000\,\text{ms}$.
 * **Offline-Tolerant Handover:** The customer needs no internet connection at the cashier counter; transfer intent is signed locally and handed over via NFC, BLE, or QR code.
 * **Sovereignty & Anti-Censorship:** No third party can freeze merchant accounts, reverse settled transactions, or block checkout terminals.
 
@@ -126,7 +126,7 @@ HuMoCo's ingress architecture guarantees that **a merchant can NEVER be locked o
 flowchart TD
     Req["🛒 PoS Checkout Lock Request"] --> P1{"Priority 1: Local Node\nhttp://127.0.0.1:8080"}
     
-    P1 -- "Success (< 5ms)" --> Done["✅ Payment Verified"]
+    P1 -- "Success (< 20ms Durable)" --> Done["✅ Payment Verified"]
     P1 -- "Timeout / Offline" --> P2{"Priority 2: External Gateway A (VIP)\nhttps://gw1.example.com"}
     
     P2 -- "Success (< 50ms)" --> Done

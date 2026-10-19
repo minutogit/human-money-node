@@ -1,167 +1,122 @@
-# 13. Client Ingress, 3-Tier Access Control & Dynamic Botnet Protection
+# 13. Client Ingress, Access Tiers and Stateless Load Protection
 
-> **Status:** Standard  
-> **Model:** Logic & State Graph First  
+> **Status:** Selected requirements; implementation and executed evidence are tracked separately.
+>
+> **Authority:** English repository specification. See [invariant registry](INVARIANT_REGISTRY.md), [consolidation](ARCHITECTURE_CONSOLIDATION.md) and Spec 16 acceptance gates.
 
-This document specifies the **Client Ingress and Access Model** of a Layer-2 shard node. It defines the **3-tier access categorization** (VIP/Merchant, F2F/Friends, Anonymous Public Fallback), the **privacy-preserving local client registry**, and the **stateless, dynamically scaling BLAKE3 Hashcash brake (Cheap-Checks-First)** for complete neutralization of botnet and Sybil flooding without server-side memory exhaustion.
+Public HTTP ingress serves wallets and PoS clients. Its VIP, Friends and Free tiers control resource admission, not consensus authority. Public clients need no P2P friendship. Internal QUIC F2F gossip and learned-peer shard RPC are separate interfaces; a full node uses shard RPC directly, never another node's public HTTP API as a client to gain ingress privileges.
 
----
+## 1. Checkout responsibilities and timing
 
-## 1. The Economic Reality at the Point-of-Sale (PoS)
-
-In the practice of a value-transfer and checkout system, a fundamental asymmetry of economic incentives exists:
-
-```mermaid
-flowchart LR
-    subgraph POS_Handshake["Point-of-Sale (Shop / Checkout)"]
-        direction TB
-        Customer["📱 Customer (Smartphone)<br>Signs transfer intent via NFC / BLE / QR<br>(Requires neither server nor internet!)"]
-        -->|Local handover| Merchant["🏪 Merchant (PoS Terminal)<br>Bears the double-spend risk &<br>has professional Node SLA access"]
-    end
-
-    Merchant -->|Tier 1: VIP Data-Plane (< 50ms)| CollisionLockRegistry["⚡ HuMoCo Layer-2 Collision Lock Registry<br>(Delivers atomically binding lock certificate)"]
-```
-
-1. **The customer only hands over the intent:** The payer signs the transfer to the merchant's ephemeral key offline. At the PoS the payer requires no network access of their own.
-2. **The merchant executes the lock:** The merchant releases goods or services only once the Collision Lock Registry confirms that the predecessor voucher was unlocked. The merchant therefore books a reliable Node provider or operates its own Node.
-3. **The anonymous path is an emergency / citizen channel:** Fully unregistered accesses without acquaintance or contract serve private P2P transactions or as a barrier-free emergency access.
-
----
-
-## 2. The 3-Tier Ingress Model
-
-Each Layer-2 Node strictly partitions incoming client traffic into three classes:
-
-```mermaid
-flowchart TD
-    Incoming["Incoming Lock Request (REST / HTTP)"] --> Identify{"Authentication / Token present?"}
-
-    Identify -- "AccountTag in DB (Tier 1: VIP)" --> VIP["🚀 Tier 1: VIP / Merchant SLA<br>• Reserved 70-80% CPU & bandwidth<br>• 0 PoW, latency < 50ms (PoS-Ready)"]
-
-    Identify -- "AccountTag in DB (Tier 2: Friend)" --> Friend["🤝 Tier 2: F2F / Friends & Community<br>• Shared neighborhood quota<br>• 0 PoW, latency < 100ms"]
-
-    Identify -- "No token (Tier 3: Anonymous)" --> PublicTier["🛡️ Tier 3: Anonymous Public Fallback<br>• No registration required<br>• Stateless BLAKE3 Hashcash (10-min window)<br>• Dynamic difficulty via HTTP 429 load pushback"]
-```
-
-### Overview of Ingress Tier Properties
-
-| Tier | Target Group | Identification / Registration | PoW Requirement | Latency Target | Quota Accounting |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Tier 1: VIP / Merchant SLA** | Merchants, PoS terminals, commercial providers | `AccountTag` (Hashed Token in Node DB) | **0 PoW** | $< 50\,\text{ms}$ | Booked quota ($\mu\text{BJ}$) |
-| **Tier 2: F2F / Friends** | Friends, family, neighborhood | `AccountTag` (Hashed Token in Node DB) | **0 PoW** | $< 100\,\text{ms}$ | F2F free quota ($M \le 1.0$) |
-| **Tier 3: Anonymous Public** | Unknown clients, P2P emergency | **None** (Entirely stateless) | **BLAKE3 Hashcash** (`pow.rs`) | $< 0{,}1\,\mu\text{s}$ check | Dynamic daily base quota |
-
----
-
-## 3. The Privacy-Preserving Local Client Registry
-
-For Tier 1 and Tier 2, the Node maintains a local registry. To maximally protect user privacy, the server stores **neither plain names, IP addresses nor raw public keys**.
-
-### 3.1 Blind Account Tagging
-A client registers with the Node using a blind token:
-
-$$\text{AccountTag} = \text{BLAKE3}(\text{"HUMOCO\_V1\_ACCOUNT\_TAG"} \parallel \text{Client\_PubKey} \parallel \text{Node\_Secret\_Salt})$$
-
-* The Node only knows the 32-byte `AccountTag`.
-* The client authenticates in the QUIC handshake by presenting a fast Ed25519 signature over a one-time session nonce.
-
-### 3.2 Rust Data Structure for the Ingress Registry
-
-```rust
-use std::sync::atomic::{AtomicU64, AtomicU32};
-
-/// 32-byte blind client identifier
-pub type AccountTag = [u8; 32];
-
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AccessTier {
-    VipMerchant = 1,
-    FriendCommunity = 2,
-}
-
-/// Local client/friend entry in Node memory
-#[repr(C, align(8))]
-pub struct IngressAccount {
-    /// 32-byte blind hash of the account
-    pub tag: AccountTag,
-    /// Access tier
-    pub tier: AccessTier,
-    pub _padding: [u8; 7],
-    /// Valid until (Unix timestamp seconds)
-    pub valid_until: u64,
-    /// Remaining quota budget in micro Byte-Years (µBJ)
-    pub remaining_micro_bj: AtomicU64,
-    /// Maximum allowed locks per minute (rate limit)
-    pub max_locks_per_min: AtomicU32,
-    /// Locks consumed in current time window
-    pub current_locks_window: AtomicU32,
-}
-```
-
----
-
-## 4. Tier 3: Stateless BLAKE3 Hashcash (Cheap-Checks-First)
-
-For fully unregistered requests, the Node uses a **stateless, time-windowed BLAKE3 client puzzle** ([`pow.rs`](crates/humoco-node/src/ingress/pow.rs)).
-
-### 4.1 Why Stateless BLAKE3 Hashcash (Iron Rule 9)?
-Memory-hard algorithms (Argon2) require allocating memory pools on the server during verification. Under extreme DoS attacks, thousands of forged nonces would force the server into expensive memory-verification bottlenecks.
-* **Stateless BLAKE3 Hashcash** allows the server to verify any submitted solution in **$< 0{,}1\,\mu\text{s}$ with exactly 1 hash computation** and **$0\,\text{bytes}$ memory allocation**.
-* The server stores no issued challenges in RAM (`issued_challenges` is forbidden).
-* Challenges are deterministically bound to the 10-minute epoch window (`slot = now_sec / 600`) and the `parent_lock`:
-
-$$\text{Challenge} = \text{BLAKE3}(\text{len} \parallel \text{"HUMOCO\_V1\_POW\_STATELESS"} \parallel \text{parent\_lock} \parallel \text{epoch\_slot})$$
-
-The client finds a `nonce` such that:
-$$\text{LeadingZeros}\left(\text{BLAKE3}(\text{len} \parallel \text{"HUMOCO\_POW\_SOLUTION"} \parallel \text{Challenge} \parallel \text{nonce})\right) \ge \text{Difficulty}$$
-
-### 4.2 Dynamic Difficulty Scaling & HTTP 429 Pushback
-
-The Node continuously measures its local ingress queue utilization and scales difficulty dynamically:
+The payer supplies the signed L1 transfer to the recipient, for example by NFC, BLE or QR. The merchant/recipient obtains and fully verifies the current L2 checkout proof before releasing goods; a successful HTTP flag, matching single lock or cheap status result is insufficient. L1 carries the voucher, transaction and causal history. Clients do not recursively archive historical L2 quorum bundles.
 
 ```mermaid
 flowchart LR
-    Load0["🟢 Normal operation (Queue < 50%)<br>Difficulty: default (e.g. 8 bits, < 50ms client)"] --> Load1["🟡 Elevated load (Queue 50-80%)<br>Difficulty: default + 4 (12 bits, ~1-2s client)"]
-    Load1 --> Load2["🔴 Massive attack (Queue > 80%)<br>Difficulty: default + 8 (16 bits, ~10-30s client)"]
+    Payer["Payer: signed L1 transfer"] -->|Local handover| Merchant["PoS: preserve intent and verify current proof"]
+    Merchant -->|Public HTTP client ingress| Gateway["Gateway: bounded admission and frozen committee collection"]
+    Gateway -->|Learned-peer shard RPC| Shards["Current shard participants: safely ready state and durable release"]
+    Shards -->|Verified current quorum proof| Merchant
 ```
 
-* **Adaptive Load Feedback (HTTP 429):** If difficulty is insufficient under load, the server responds with `HTTP 429 Too Many Requests` and header `X-Required-Difficulty: <N>`.
-* **$\Delta\text{Load} \le 0$ Invariant:** Computational load is pushed entirely back to the client; the server remains in idle.
+FINAL needs 14 distinct valid current members of one frozen committee of at most 20; no rank21 replacement. Collection has an 800 ms budget and may fail earlier when quorum becomes impossible. Local durable processing targets <20 ms; it is not a measured promise or end-to-end checkout SLA. Resource isolation reduces interference but cannot guarantee latency under arbitrary load, disk stalls or network failure.
 
-### 4.3 Server Protection Cascade & Atomic Replay Guard
+## 2. Three client access tiers
 
 ```mermaid
 flowchart TD
-    Incoming["Incoming unregistered lock request (REST)"] --> Step1["1. Validate JSON / Wire format & Parent Lock<br>Duration: < 1 µs"]
-    Step1 --> Step2["2. Compute Stateless Challenge & 1x BLAKE3 Hash<br>Duration: < 0.1 µs ⚡ (Zero RAM allocation)"]
-    Step2 -- "Difficulty not met" --> Drop1["🛑 HTTP 429 Too Many Requests (X-Required-Difficulty)"]
-    Step2 -- "Difficulty met" --> Step3["3. Atomic Replay Guard (seen_solutions)<br>O(1) deduplication in active 10-min window"]
-    Step3 -- "Nonce already seen" --> Drop2["🛑 HTTP 409 Conflict (Replay detected)"]
-    Step3 -- "Valid new solution" --> Step4["4. Process Lock in RAM Index (< 1 µs)"]
+    Request["Bounded HTTP lock request"] --> Auth{"Valid client credential?"}
+    Auth -->|VIP secret| VIP["VIP: reserved bounded client budget, no PoW"]
+    Auth -->|Random friend secret| Friend["Friends: bounded community quota, no PoW"]
+    Auth -->|No valid credential| Free["Free: stateless BLAKE3 work and local quota"]
+    VIP --> Admission["Cheap checks, quota and capacity admission"]
+    Friend --> Admission
+    Free --> Admission
+    Admission --> Durable["Reserve, RAM collision check, exact durable acknowledgment, binding release"]
 ```
 
-1. **Stage 1: Stateless Validation ($< 1\,\mu\text{s}$):** Deterministic challenge regeneration without DB access.
-2. **Stage 2: Cheap 1-Hash Verification ($< 0{,}1\,\mu\text{s}$):** Single BLAKE3 hash filters millions of illegitimate packets instantly.
-3. **Stage 3: Atomic Replay Guard ($O(1)$):** Deduplicates used nonces within the active 10-minute epoch window.
-4. **Complete Tier-1 Data-Plane Isolation ([INV-1301]):** Shard consensus and Tier-1 merchant ingress run on dedicated worker channels. Public spam cannot affect merchant checkouts.
+| Tier | Intended clients | Credential | Work and accounting |
+| --- | --- | --- | --- |
+| VIP / merchant | PoS terminals and contracted clients | Private client bearer/API credential with local hashed account record | No PoW; booked Byte-Years/request quota and bounded reserved capacity. |
+| Friends / community | Friends, family and own PoS terminals | Independently generated random 128-bit secret, represented as `f2f_<hex>` | No PoW; bounded free/community quota. |
+| Free / public | Any client without registration | None required | Stateless BLAKE3 Hashcash, physical-time rate limiting and capacity feedback. |
 
----
+The term client Friends grants no QUIC gossip right. NodePubKey, HRW ticket, IP address, learned peer status or P2P trust list is never an ingress bearer token. Friend secrets must not be derived from publicly gossiped keys. Client credentials are revocable locally without changing node identity or consensus membership.
 
-### 4.4 Reciprocal Gateway Ingress Throttling upon Shard Inactivity
+Exact reservations are configured and measured, not guaranteed 70–80% CPU or <50/<100 ms tier latencies. Protect internal inbound shard service and bounded recovery progress in addition to the client-tier budgets; client priority never consumes unlimited internal capacity.
 
-To prevent lazy gateway nodes from earning ingress fees from end clients without participating in shard quorums themselves:
-* **Reciprocal Peer Reputation (Tit-for-Tat):** Shard nodes measure the collaboration of directly connected gateways on their shard responsibilities via the 4-byte bitmask feedback.
-* **Automatic Exclusion of Free-Riders:** Gateways that refuse work in their own shard responsibilities (`missing_count >= 3`) suffer local suspension at the direct peering edges. Their ingress streams are throttled (`429 QuotaExhausted`).
-* **Market Cleanup:** Clients of the throttled gateway experience timeouts and automatically migrate to fully cooperating gateways within $< 200\,\text{ms}$.
+## 3. Private local client registry
 
----
+The registry stores a blinded/hashed account tag, access tier, credential validity and bounded accounting/rate-limit counters. It does not require names, persistent IP-address histories or raw public identity keys for billing. Account tags are pseudonymous local accounting identifiers, not a zero-knowledge proof or anonymity against traffic analysis. Credential hashing uses canonical length-prefixed domain separation and secret input; exact encoding belongs to the shared schema, not a new public-key handshake invented here.
 
-## 5. Invariants of the Ingress and Protection Model
+For an ingress friend, authenticate the private random bearer credential through the HTTP client API, not a node-to-node QUIC identity signature. Keep raw secrets out of metrics and logs. VIP provisioning, quota topups and revocation use the private local control boundary; monetary billing belongs to external periphery.
 
-1. **[INV-1301] VIP Data-Plane Isolation:** Overload or botnet attacks on Tier 3 (Anonymous) must never impair the latency and bandwidth of Tier 1 (VIP / Merchant).
-2. **[INV-1302] Zero-Knowledge Account Tagging:** The local registry stores exclusively hashed account tags (`BLAKE3(PubKey || Salt)`), no plaintext identities or persistent IP addresses.
-3. **[INV-1303] Stateless Tier-3 Challenges:** Generation and verification of Tier-3 PoW puzzles requires no persistent storage on the server ($O(1)$ memory overhead).
-4. **[INV-1304] Asymmetric Cost Barrier:** The cost of verifying a BLAKE3 Hashcash solution on the server is exactly 1 hash ($< 0{,}1\,\mu\text{s}$); the cost for mass attacks scales exponentially with $2^{\text{Difficulty}}$ for the attacker.
-5. **[INV-1305] Autonomous Emergency Brake:** Each Node operator can locally raise the PoW difficulty for Tier 3 without network consensus or temporarily throttle anonymous ingress under extreme flooding.
-6. **[INV-1306] Reciprocal Ingress Prioritization:** Gateway ingress into foreign shards is tied to continuous reciprocity; inactive nodes are deprioritized at the peering edges via local suspension (`missing_count >= 3`).
+A registry entry may carry these fields without introducing new consensus state:
+
+| Field | Purpose |
+| --- | --- |
+| 32-byte account tag | Local hashed credential/account lookup. |
+| Access tier and validity bound | Local authorization; independent of shard authority. |
+| Remaining micro Byte-Years | Root-derived storage-time accounting. |
+| Request-rate/burst counters | Bounded admission with physical-time decay. |
+
+Quota comparisons do not prove peer fraud or alter passive heartbeat presence. All registry, dashboard and metric aliases remain operator-private (DEC-077); public gateway advertisements disclose only their intended discovery data.
+
+## 4. Free tier: direct stateless BLAKE3 Hashcash
+
+Ticket mining uses Argon2d in its separate lifecycle. Public request filtering uses BLAKE3 to avoid forcing expensive asymmetric or memory-hard verification on every untrusted input.
+
+For the accepted ten-minute time window, use the canonical puzzle from AGENTS.md:
+
+```text
+epoch_slot = justified_now_sec / 600
+h = BLAKE3(len(domain) || "HUMOCO_V1_POW_STATELESS" || parent_lock || epoch_slot || nonce)
+accept_work iff LeadingZeros(h) >= required_difficulty
+```
+
+`len(domain)` is the canonical one-byte domain-length prefix; integers and fixed fields use the shared checked canonical encoding. Do not add a second `HUMOCO_POW_SOLUTION` hash domain or a stored server challenge. Time validation follows the justified clock/window policy; exact admitted adjacent windows must match that policy, not unsanitized OS time.
+
+The server recomputes work directly. It stores neither `issued_challenges` nor a mandatory `seen_solutions` table. Work verification is constant bounded work for bounded inputs; expected client search grows approximately as `2^difficulty`. The former sub-microsecond cost figures are measurement targets/examples, not executed evidence. Server processing has nonzero costs even under attack.
+
+### 4.1 Adaptive difficulty and feedback
+
+Local load may raise difficulty. If work is insufficient, return `429 Too Many Requests` with `X-Required-Difficulty: <N>` under the interface contract. Preserve these historical illustrative configuration bands without implying fixed solve times or a newly selected deployment default:
+
+| Local queue load | Illustrative difficulty |
+| --- | --- |
+| Below 50% | Baseline, for example 8 bits. |
+| 50%–80% | Baseline +4 bits, for example 12. |
+| Above 80% | Baseline +8 bits, for example 16. |
+
+Actual policy/configuration and client performance require measurement. Difficulty pushes additional search to clients; it does not imply the server remains idle or immune to botnets.
+
+Run bounded framing/schema checks, cheap token/work/rate/quota checks and capacity admission before costly asymmetric operations. A valid puzzle grants no exemption from root/lock validation, queue limits or signature verification.
+
+### 4.2 Retry semantics and durable release
+
+An identical retried lock remains idempotent: same lock on the same parent yields the existing success result after its exact durable state is established; a conflicting lock yields 409. A repeated nonce by itself must not turn an identical valid retry into a 409. Rate limits, accepted time windows and current difficulty still apply to admission. The receiver challenge for a live-state proof is a separate replay-defense purpose and remains mandatory for that proof.
+
+Reserve bounded asynchronous disk capacity before RAM mutation. Coalesce identical in-flight work with bounded waiters and total operation budgets; no pending RAM entry or cached signature permits early release. The worker atomically persists the exact lock and own immutable signing decision; await its durable acknowledgment without a RAM guard or unmanaged blocking disk I/O on the runtime/request thread. This includes idempotent replies, status paths that could expose a pending binding approval and gateway self votes. Ordinary read traffic does not commit per query.
+
+Timeout does not roll back a completed lock or establish nonpayment. Preserve committed state and permit exact retries to discover it. Limit batching by time, count and bytes and bound shutdown/drain waits. Ordinary process crash with intact committed storage is covered by durable-before-release; storage loss, stale restore, corruption and unknown rollback remain separately gated. No root-risk markers or automatic identity replacement are introduced.
+
+## 5. Internal reciprocity, pacing and presence
+
+Internal shard requests have their own learned-peer authorization, quotas and protected budgets. Local sender pacing can respect capacity feedback and bound retries without treating refusal as personal misconduct. Ordinary NOT_READY, capacity refusal, normal ephemeral QUIC idle closure and quorum-completion cancellations are neutral. No lower-ranked committee member replaces a refused vote during checkout.
+
+Passive presence suspension follows three consecutive missed hourly F2F heartbeats under its specified timing rules. It is not triggered by HTTP quota comparisons, signing percentages or short shard timeouts. Only verified first-party equivocation authorizes automatic permanent identity sanctions. Pacing does not establish a fault bound or guarantee client migration in <200 ms.
+
+## 6. Canonical ingress invariants
+
+INV-1301–1306 retain their identifiers with these explicit qualifications. INV-1302 means privacy only; Spec 19's former sender-pacing reuse is the legacy alias identified in the registry and now references INV-1307.
+
+1. **[INV-1301] Bounded VIP isolation:** Reserve bounded client service budgets and reject overload promptly. Validate isolation under declared workloads; no universal latency guarantee is implied.
+2. **[INV-1302] Private local account tagging:** Use local hashed/pseudonymous account records without required plaintext identities, persistent client IP histories or public node keys as bearer secrets. It is not a cryptographic zero-knowledge claim.
+3. **[INV-1303] Stateless Free-tier work:** Derive and verify the direct canonical time-window puzzle without issued-challenge state or a mandatory used-solution table.
+4. **[INV-1304] Asymmetric work barrier:** One canonical bounded BLAKE3 puzzle verification versus expected exponential client search; actual performance must be measured.
+5. **[INV-1305] Autonomous emergency brake:** Operators may locally raise public-work difficulty and bound anonymous ingress; capacity feedback neither grants consensus authority nor authorizes bans.
+6. **[INV-1306] Scoped reciprocal service:** Local internal-service pacing respects actual protocol authorization and capacity limits. Client tokens and P2P identity remain distinct; passive heartbeat presence is not derived from checkout misses or quota refusals.
+7. **[INV-1307] Bounded sender pacing and protected internal budgets:** Bound outgoing offered work/retries and protect separately bounded inbound shard-service and sync/recovery budgets from public client/read load. Quota-zone observations remain local diagnostics/backoff, without fraud inference, presence change or identity sanction.
+
+## 7. Acceptance boundary
+
+Require real receiver-side adversarial QUIC checks for internal quotas/admission and malformed traffic, relevant HTTP tier/secret/PoW/overload/retry checks, actual recipient verification of current proofs and real daemon crash/release tests. Every route/alias for private diagnostics needs exposure checks. Spec 16 defines the evidence record; test names and simulations alone establish none of these protections. Authority, source completeness, activation and rollback-recovery arguments remain separate open gates.

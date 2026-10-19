@@ -11,6 +11,8 @@ Last updated: 2026-10-19 (Europe/Berlin)
 Status: Working interview notes, not a binding specification or an implementation plan.
 The interview was saved at the maintainer's request and subsequently resumed.
 No protocol changes have been implemented as part of this interview.
+DEC-087 / CP-0089 explicitly authorizes specification changes for durable-before-
+release; those normative documents are updated, while production code remains unchanged.
 
 ## 1. Purpose and interview position
 
@@ -130,6 +132,34 @@ pending. Safe recovery, own-history and actual verifier implementation remain op
 CP-0084 / §7.95 consolidates the LRC-002 request/signature/collector contract and
 finds an ungated status-signing path. No new decision is selected; C4.3b remains
 active on the authority/readiness premises rather than historical archives.
+DEC-084 / §7.97 explicitly accepts all five presented DETAIL-BATCH-002 items
+(DB2-01–08). C4.3b requirements are selected; membership, coverage and crash
+premises remain open. At maintainer direction the active focus moves to S3.4a.5
+in block2: recovery scheduling for newly assigned shards (§7.98).
+DEC-085 / §7.99 subsequently selects demand-triggered recovery (A); advance
+preparation B is rejected as the default. S3.4a.5 scheduling is decided; its
+derived bounded recovery contract (DETAIL-BATCH-003) awaits sign-off. Safe
+source coverage/activation and same-key own-choice recovery remain unproved.
+Update CP-0088: DEC-086 accepts DETAIL-BATCH-003 in full (§7.100). At maintainer
+direction block3 / O1.1 is active on the own-choice loss problem (§7.101);
+block2 requirements are selected, not a completed source/activation safety proof.
+Current ordering update DEC-087 / §7.102: restore atomic durable lock+own-choice
+commit before binding signature release; DEC-062's early release is superseded.
+Q-O1-ROOT-RISK-MARKER-01 is withdrawn, neither A/B. No root markers, ordinary
+crash quarantine or identity abandonment. Block3 ordinary process-crash ordering
+is decided; implementation/crash verification and actual storage-loss/rollback
+boundaries remain distinct. Active block4 / N2.1: bounded commit-pipeline details.
+Update CP-0090: DEC-088 accepts DB4-01–05 in full (§7.104). Block4 requirements
+are selected; block5 / F1.1 is active on specification/interface/scenario
+reconciliation (§7.105). The refreshed inventory is25 files in22 numbered
+families,115 distinct mentioned invariant IDs, not a completeness/test claim.
+
+Update CP-0091: DEC-089 accepts DB5-01–05 in full (§7.106), authorizing focused
+specification consolidation and a per-rule acceptance map. Q-F1-CONSOLIDATION-
+DETAILS-01 is answered yes. No further human choice is pending. Documentary
+consolidation is active; material authority/source/activation, merge, clock and
+actual storage-loss proof gates remain open. No production edits/tests/commits
+are authorized by this approval.
 
 Unless explicitly evidenced otherwise, design details and implementation/verification
 of interview changes remain pending. Constraints in the direction column and the
@@ -165,12 +195,12 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-026"></a>DEC-026 | N3/O2 | Recovery signing readiness | Accepted requirement/direction | After state loss or new shard assignment, withhold write votes for the affected shard until justified state recovery is established. Unaffected ready shards continue. The exact recovery evidence remains open. | [Recorded selection](#evidence-dec-026) |
 | <a id="dec-027"></a>DEC-027 | C2 | Checkout availability and dispatch | Accepted requirement/direction | NOT_READY supplies no vote, like a timeout; neither proves deceit or authorizes permanent bans. For each admitted checkout request, attempt all remote members of the frozen committee in parallel without an additional checkout-specific offline suppression/backoff mechanism. The original one-application-attempt rule is refined by the explicitly selected conditional three-send heuristic DEC-060 (§7.66); scheduling/resource/cancellation semantics remain to be justified. Preserve resource admission, 800 ms collection deadline, quorum/impossibility exits, and no lower-rank replacements. This supersedes the earlier checkout-backoff proposal. Existing shared transport delays require later review. | [Recorded selection](#evidence-dec-027) |
 | <a id="dec-028"></a>DEC-028 | N2 | Possible checkout failure suppression | Deferred optimization; no mechanism selected | Keep a minimal suppression mechanism as an optional later optimization. Compare actual resource costs and effects on protected inbound shard service and bounded background-sync progress before choosing it. No specific algorithm, thresholds, or implementation is approved. | [Recorded selection](#evidence-dec-028) |
-| <a id="dec-029"></a>DEC-029 | O1 | Durable signing before response | Superseded response ordering / local SLA by DEC-062 | Historical selection required release only after durable storage of the exact choice, through the bounded asynchronous worker, and removed the rigid <5ms target. DEC-062 now explicitly selects RAM acceptance/attestation before flush and restores the <5ms SLA. Preserve the original rationale and 800ms collection budget; crash/own-choice loss remains a proof obligation, not solved by this reversal. | [Historical selection](#evidence-dec-029); [superseding directive](#769-ram-first-attestation-restored-durability-ordering-superseded) |
+| <a id="dec-029"></a>DEC-029 | O1 | Durable signing before response | Restored release ordering by DEC-087; DEC-062 interlude historical | Exact lock and immutable own decision must durably commit through the bounded worker before binding signature release. DEC-062 temporarily reversed this; DEC-087 restores the ordering without blocking I/O in the handler or a fixed disk-latency guarantee. | [Original selection](#evidence-dec-029); [current directive](#7102-durable-before-release-restored-root-marker-question-withdrawn) |
 | <a id="dec-030"></a>DEC-030 | O1/O2 | Persistent storage failure | Accepted requirement/direction | Keep the process available for diagnosis/local administration, but disable new signing decisions dependent on a store with persistent commit failure. All dependent shards are affected when the store is shared. Do not promote undurable RAM entries through reads. On P2P return existing NOT_READY: no vote and normal attainable-quorum handling, without relying on the claimed cause or treating it as fraud evidence. Preserve the approved all-member checkout dispatch without extra offline suppression. | [Recorded selection](#evidence-dec-030) |
 | <a id="dec-031"></a>DEC-031 | O2 | Automatic storage recovery | Accepted requirement/direction | Resume automatically once durable storage and justified recovery of relevant lock/signing state are established, respecting operator stop/veto. The maintainer expects synchronization to restore missing locks before normal work resumes. Exact completeness/readiness evidence remains unresolved; neither a completed download nor a matching digest proves recovery of every prior individual vote. Distinguish a transient write failure with intact durable choices from irrecoverable choice loss or stale-backup rollback. | [Recorded selection](#evidence-dec-031) |
 | <a id="dec-032"></a>DEC-032 | O2 | Lost signing choices | Accepted requirement/direction | After loss or rollback of prior signing choices, withhold new binding votes under the existing identity for affected scope until signing safety is justified. Ordinary confirmed-state sync alone is insufficient. The maintainer approves this safety gate even if ordinary sync has completed; exact detection, scope and recovery remain open. | [Recorded selection](#evidence-dec-032) |
-| <a id="dec-033"></a>DEC-033 | O1 | Signing protection layout | Immutable-choice table direction retained; pre-response commit order superseded by DEC-062 | Separate immutable own choices in existing redb remains the selected layout direction. Persist related choice/lock atomically through the bounded background worker; DEC-062 removes waiting for its durable success before attestation. Layout is not an implementation or a proof of recovery of volatile issued choices after crash. | [Historical selection](#evidence-dec-033); [ordering change](#769-ram-first-attestation-restored-durability-ordering-superseded) |
-| <a id="dec-034"></a>DEC-034 | O4 | Graceful shutdown | Bounded drain selected; acknowledgment qualification updated by DEC-062 | Stop new admission, allow bounded in-flight/persistence drain, then stop within the configured deadline. Preserve durable choices and report incomplete drain honestly. DEC-062 permits earlier RAM-based approvals, so a failed drain may now leave already issued choices undurable; do not retain the superseded assertion that every binding success awaited commit. DEC-074 selects idempotent repeated stop signals; DEC-075 selects internal deadline enforcement plus outer supervisor fallback; DEC-076 selects verified default CLI completion/DB release; deployment sizing, producer ordering and implementation verification remain pending. | [Historical selection](#evidence-dec-034); [RAM-first qualification](#769-ram-first-attestation-restored-durability-ordering-superseded) |
+| <a id="dec-033"></a>DEC-033 | O1 | Signing protection layout | Accepted; pre-release commit restored by DEC-087 | Separate immutable own choices in existing redb; atomically commit the exact lock+choice through the bounded worker and acknowledge before signature release. DEC-062 release-before-flush is historical. Layout and all signing-site integration/verification remain pending. | [Original selection](#evidence-dec-033); DEC-087 / §7.102 |
+| <a id="dec-034"></a>DEC-034 | O4 | Graceful shutdown | Accepted bounded drain; durable release restored by DEC-087 | Stop admission and drain within the original finite deadline. Every released original vote now requires prior atomic durable commit; admitted but uncommitted work may remain uncertain. DEC-074/075/076 signal/deadline/CLI policies remain; producer ordering, sizing and verification pending. | [Original selection](#evidence-dec-034); DEC-087 / §7.102 |
 | <a id="dec-035"></a>DEC-035 | O3 | Automatic expiry processing | Accepted requirement/direction | Choose A: remove eligible expired locks and associated justified signing-safety state in bounded background chunks, using short RAM mutation sections and bounded disk work, with enough progress budget to avoid indefinite backlog. Keep verified root TTL plus 30-second grace, no signing of expired roots and no permanent expired-lock tombstones. Expiry rejection does not wait for physical deletion. Exact scheduling, safe time/retention criteria and batch sizes remain to be specified and measured. | [Recorded selection](#evidence-dec-035) |
 | <a id="dec-036"></a>DEC-036 | O5 | Deployment default | Accepted requirement/direction | Choose A: native systemd as the primary documented Linux deployment path; retain Docker/Compose as an alternative. Both must obey the same persistence, signing, shutdown and operator-sovereignty rules. Existing template settings are not validated production guarantees. | [Recorded selection](#evidence-dec-036) |
 | <a id="dec-037"></a>DEC-037 | O5 | Private operator access | Accepted requirement/direction | Choose A: dedicated local dashboard/admin endpoint, with protected control-socket authority and operator SSH forwarding for remote access. Keep operator routes separate from public client ingress and retain useful local dashboard functions. Exact UI/backend packaging, authentication and permission enforcement remain to be specified and verified. | [Recorded selection](#evidence-dec-037) |
@@ -198,8 +228,8 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-059"></a>DEC-059 | S3.4a.1/N3 | Fixed snapshot with bounded deltas and bucket sealing | Accepted direction / Q-S3-SYNC-WRITES-01 A; sealing semantics pending | Select fixed snapshot plus bounded deltas; use 5-minute timestamp buckets and a 30s grace after bucket end as the selected sealing parameter; immutable-state semantics remain open. Buffer current-window in-flight work without application acceptance/vote before validation/readiness/durable commit; bounds/backpressure required. DEC-061 clarifies direct targeted sync and deterministic recomputation without an extra snapshot-version or correction subsystem. Live-freshness/seal alignment, root expiry and canonical changes still need verification. | [Selection and late-bucket question](#766-fixed-snapshot-deltas-selected-bucket-sealing-and-retry-boundaries) |
 | <a id="dec-060"></a>DEC-060 | C3/N4/S3 | Exact-payload retries and three-send heuristic | Accepted maintainer refinement; bounds/integration unverified | Retry the same serialized application payload with unchanged T_0. Adopt the referenced conditional three-send heuristic (initial attempt, error retry, third background attempt) as a refinement of DEC-027's prior one-application-attempt policy. Keep the frozen member set, 800ms checkout, neutral cancellation, deduplication, bounded work and durable vote rules. Sending is neither durable acceptance nor a completeness/delivery guarantee; DEC-061 selects wallet-bound creation-time custody across failover; local schema/signature alignment and resource/cancellation details remain open. | [Maintainer instruction and limits](#766-fixed-snapshot-deltas-selected-bucket-sealing-and-retry-boundaries) |
 | <a id="dec-061"></a>DEC-061 | S3.4a.2/K2/C3 | Wallet-bound creation time; fresh live ingress versus historical sync | Accepted maintainer correction; code alignment/proof pending | T_0 is an explicit public wallet-created created_at_ms bound by layer2_signature, distinct from encrypted_timestamp; retain it across retries/failover. Fresh live acceptance must use this same time with the 30s gate; closed 5-minute windows seal after 30s. Recover missing old records via quorum-backed targeted sync and recompute the deterministic bucket projection. Reject Q-S3-LATE-BUCKET-01 A and B as unnecessary additional structures: no separate correction history or snapshot-version subsystem selected. Local code currently gates a gateway-envelope time and projects encrypted_timestamp; alignment, clock/commit/TTL/merge and source coverage remain open. | [Correction, conditional timing argument and code evidence](#767-withdraw-late-bucket-choice-separate-live-freshness-from-sync-repair) |
-| <a id="dec-062"></a>DEC-062 | O1/S3.4a.4/C2 | RAM-first attestation; asynchronous persistence; ingress-only freshness | Accepted explicit current direction; crash/seal proofs pending | Wallet T_0 fixes bucket; 30s freshness is entry-only. After reservation-first RAM collision acceptance, sign/respond in <5ms without waiting for redb commit; persistence is bounded asynchronous background work. No post-admission freshness check or variable seal-delay choice selected. Supersedes DEC-029 and pre-response durability portions of DEC-033/034; preserves identity-choice immutability and recovery gates. RAM+disk digest input includes accepted volatile entries, but does not make them durable. Fixed end+30s sealing remains intended; gate-to-insertion timing and clock proof remain open. | [Correction and changed durability contract](#769-ram-first-attestation-restored-durability-ordering-superseded) |
-| <a id="dec-063"></a>DEC-063 | O1.1/O2/N3 | Unconditional retention of lost-choice safety gate | Reaffirmed requirement / Q-O1-CRASH-RESUME-01 A; bounded-quarantine construction unproved | DEC-032 stays fully in force; ordinary quorum sync alone is insufficient for same-key signing when own issued choices are missing. B's relaxation categorically rejected. Maintainer proposes finite 5-minute-bucket+30s quarantine; closure of stale live ingress alone does not yet prove immunity to a distinct, fresh-time conflicting spend of the same output. Preserve the bounded-recovery goal and unresolved construction; do not silently auto-open the gate or claim permanent blocking is necessary. | [Answer, counterexample boundary and next merge question](#771-loss-gate-reaffirmed-bucket-quarantine-proof-and-mixed-mode-merge) |
+| <a id="dec-062"></a>DEC-062 | O1/S3.4a.4/C2 | RAM-first response; entry-only freshness and nominal seal | Signature-release ordering superseded by DEC-087; other selections retained | Historical RAM attestation before flush is replaced by atomic durable lock+own-choice commit before release. Retain reservation-first RAM collision handling, bounded async persistence, wallet T_0 entry-only freshness and nominal fixed bucket seal. No renewed wallet-freshness check or variable seal policy is selected. Local disk latency is measured, never grounds to bypass durability. | [Historical directive](#769-ram-first-attestation-restored-durability-ordering-superseded); DEC-087 / §7.102 |
+| <a id="dec-063"></a>DEC-063 | O1.1/O2/N3 | Lost-choice safety gate | Safety retained; ordinary crash construction superseded by DEC-087 | Actual lost/rolled-back signing history never authorizes unsafe same-key votes. Durable-before-Release eliminates issued-but-uncommitted choices for ordinary crashes with intact storage, so no root-risk marker, bucket quarantine or identity abandonment is required for that case. Actual storage loss/rollback is separate; implementation/crash proof pending. | [Original reaffirmation and bucket witness](#771-loss-gate-reaffirmed-bucket-quarantine-proof-and-mixed-mode-merge); DEC-087 / §7.102 |
 | <a id="dec-064"></a>DEC-064 | S5.1/K1.1 | Strict confirmation-class priority before canonical hash | Accepted policy / Q-S5-MIXED-SUPPORT-01 A | Valid class2 FINAL/Regional14 strictly outranks valid adaptive class1 PROVISIONAL; class0 partials/intents cannot displace a confirmed branch or establish a confirmed winner. Within the highest admitted confirmed class use min(H_canon). Reject mixed-class freezing B; losing causal branch becomes VOID without sanction of honest single-branch signers. Context/signature/causal checks and first-party-only fraud remain. Class priority is not a global irrevocability proof; equal-class regional conflicts still use the selected merge rule. | [Decision and VOID-retention question](#772-class-priority-selected-retention-after-void-remains-open) |
 | <a id="dec-065"></a>DEC-065 | S5.2/K1/O3 | Minimal losing-branch retention | Accepted policy / Q-S5-VOID-RETENTION-01 A | Retain the winning lock, minimum sufficient collision/exclusion evidence and immutable own signing choices while the root is usable; clients custody excess complete losing branches. Reject full losing-tree archival B as state bloat. Physically purge root-bound records at root.valid_until+30s; separate identity/fraud rules remain. Exact authenticated compact format, descendant/promotion handling and recovery sufficiency require engineering verification. | [Selection and conflict-response question](#773-minimal-retention-selected-conflict-response-payload-open) |
 | <a id="dec-066"></a>DEC-066 | C1.1/K2 | Inline compact conflict evidence | Accepted policy / Q-C1-CONFLICT-RESPONSE-01 A | Include the already available compact signed collision evidence and confirmation status directly in the 409 envelope; no full losing trees, hot-path proof retrieval or required second proof-fetch round. Reject reference-only B to reduce latency and gateway complexity. Exact signer/slot/time binding, encoding, payload limits and verification remain work; a single attestation is not a quorum certificate. | [Selection and checkout conflict-veto question](#774-inline-conflict-evidence-selected-checkout-veto-policy-open) |
@@ -227,6 +257,17 @@ open-item register below are part of each record, not optional caveats.
 | <a id="dec-082"></a>DEC-082 | C4/K2/C3/O5 | Confirm derived implementation batch | Explicitly accepted / DETAIL-BATCH-001 DB1-01–06 | Maintainer explicitly confirms all six previously derived directions as requirements for later implementation: distinguish found from confirmed, validate real distinct qualified signatures, preserve uncertainty/original intent, advertise actual public HTTP endpoints, scope provider credentials and isolate every private diagnostic alias. This is requirement acceptance, not source-change authorization, completed design or test evidence. | [Confirmation and conditional live-read verification contract](#791-confirmed-detail-batch-and-live-read-verification-contract) |
 
 | <a id="dec-083"></a>DEC-083 | C4.3b/C4.3c/S3/K1 | Current shard-state quorum, no inherited historical certificate archive | Explicit correction / Q-C4-ACTIVE-PROOF-CONTINUITY-01 withdrawn; neither A nor B | L1 holds the transaction/deed; L2 holds the live parent->child collision barrier. Qualified current shard nodes answer and attest their safely synchronized state, with14/20 live evidence for FINAL release. Do not carry historical signature bundles through successive shard generations or require old signers/certificates for current clearance. Their absence alone cannot make a recovered lock unconfirmed. Keep owner validation, safe state-transfer/readiness, full-key current-quorum verification and separate own-choice/crash safeguards; no claim these are implemented/proved. | [Correction and replacement live-state contract](#793-current-state-authority-selected-historical-proof-archive-premise-withdrawn) |
+
+| <a id="dec-084"></a>DEC-084 | C4.3b/K2/S3 | Live-state verification implementation requirements | Explicitly accepted / Q-C4-DETAIL-BATCH-002-APPROVAL-01 yes | Accept all five §7.96 items / DB2-01–08: separate read/write purposes, exact target/context and recipient challenge, full-key current frozen14/20 verification, safe synchronization/authority at each signing site including self, shared verifier and enforced payment-release gate. No historical archives. Requirements selected, not an authority/coverage/crash proof or implemented/tested delivery. Maintainer requests moving to block2. | [Answer and branch transition](#797-live-state-detail-package-accepted-move-to-state-transfer) |
+
+| <a id="dec-085"></a>DEC-085 | S3.4a.5/N3/N2 | Demand-triggered recovery of newly assigned shards | Explicitly accepted A / Q-S3-RECOVERY-TRIGGER-01 | Newly assigned shards remain NOT_READY; the first admissible relevant request triggers bounded background recovery. No advance sweep of every new assignment, synchronous handler sync or pending-payment queue. Unaffected ready shards continue; clients use existing exact-intent retries. Quorum headroom is conditional on14 actual timely qualified votes, not an800ms availability guarantee. Source continuity, full-root snapshot/delta coverage, safe install, scoped readiness and own-choice gates remain separate obligations. | [Answer, qualification and derived detail package](#799-demand-triggered-recovery-selected-bounded-contract-for-sign-off) |
+
+| <a id="dec-086"></a>DEC-086 | S3.4a.5a/N2/N3/O2 | Bounded demand-driven shard recovery requirements | Explicitly accepted / Q-S3-DEMAND-RECOVERY-DETAILS-01 yes | Accept DB3-01–05: one bounded/coalesced active recovery job per shard, isolated fail-closed readiness, complete relevant live-root coverage with checked durable install, safe failure/stale-completion handling, and bounded retained-state serving while countable votes remain stopped. No pending-payment queue or historical quorum archive. Requirements selected; source continuity, activation, latency/isolation measurements and adversarial verification remain pending. Maintainer requests block3. | [Answer and move to own-choice recovery](#7100-demand-recovery-package-accepted-move-to-own-choice-recovery) |
+
+| <a id="dec-087"></a>DEC-087 | O1/O1.1/O2/C2/N2 | Durable-before-Release restored | Explicit maintainer correction; neither Q-O1-ROOT-RISK-MARKER-01 A/B | Atomically and durably commit exact lock+immutable own decision to redb before a binding signature leaves the node or counts as a local vote. RAM signature computation and bounded background persistence remain; await exact commit acknowledgment without RAM guards. Restores DEC-029 ordering and supersedes DEC-062's pre-commit release only. No root-risk markers, ordinary-crash bucket quarantine or identity abandonment. User authorizes specification alignment; code/crash tests remain pending.1–5ms is unmeasured,800ms unchanged. | [Directive, two crash cases and spec alignment](#7102-durable-before-release-restored-root-marker-question-withdrawn) |
+
+| <a id="dec-088"></a>DEC-088 | N2.1/O4/O5/F1 | Bounded durable-pipeline operations | Explicitly accepted / Q-N2-DURABLE-PIPELINE-DETAILS-01 yes | Accept DB4-01–05: age/count/byte-bounded batching, coalesced identical pending operations with bounded waiters, honest late-commit/cancellation handling, protected inbound shard and bounded sync budgets, finite failure/shutdown behavior and private diagnostics. No rollback of committed locks or early signatures. Numerical tuning, resource isolation and800ms performance require measurements; no universal disk-latency guarantee. Maintainer requests block5. | [Answer and final-reconciliation transition](#7104-durable-pipeline-operations-accepted-move-to-final-reconciliation) |
+| <a id="dec-089"></a>DEC-089 | F1.1 | Specification cleanup and acceptance mapping | Accepted requirement/documentary scope | Accept DB5-01–05: remove stale archive/early-release/expanded-electorate/unsafe-parser claims; canonical English references, unique invariant meanings and real-interface/crash acceptance mapping. Authority/source/activation and other material proof gates remain open; no production edits, commits or test campaign. | [Explicit full approval](#evidence-dec-089), §7.106 |
 
 ### 2.2 Alternatives, refinements and superseded proposals
 
@@ -310,6 +351,16 @@ the recorded reasoning; they do not supply missing original user explanations.
 
 | Q-C4-ACTIVE-PROOF-CONTINUITY-01 / DEC-083 | Withdrawn after explicit correction; neither A nor B selected. | §7.93 rejects the assumed need to reconstruct/archive original-quorum signatures for current clearance. Selected contract is a fresh quorum of current qualified shard-state assertions after safe sync, without weakening full-turnover serviceability. Historical §7.92 is retained as rejected reasoning, not an active storage obligation. |
 
+| Q-C4-DETAIL-BATCH-002-APPROVAL-01 / DEC-084 | Explicitly accepted in full; no alternative newly rejected. | §7.97 records all five presented items/eight DB2 mappings and maintainer rationale: ephemeral live proof, canonical HRW14/20, sync readiness and Zero Trust. Selection does not establish their safety premises or authorize production changes. |
+
+| Q-S3-RECOVERY-TRIGGER-01 / DEC-085 | Answered A; advance preparation of all new assignments B rejected as the default. | §7.99 records KISS/resource conservation, fail-closed readiness and smart-client retry rationale. Existing maintenance of already active shards remains; no measured bandwidth/latency or guaranteed quorum availability is inferred. |
+
+| Q-S3-DEMAND-RECOVERY-DETAILS-01 / DEC-086 | Explicitly accepted in full; no new alternative rejected. | §7.100 records the five-item DB3 package, request-coalescing/resource rationale, per-shard isolation, full-root coverage and data-serving/signing separation. No source-coverage proof or measured zero-latency-isolation guarantee follows from sign-off. |
+
+| Q-O1-ROOT-RISK-MARKER-01 / DEC-087 | Withdrawn; neither A nor B selected. | §7.102 rejects the early-release premise by restoring atomic durable-before-release. The root-marker and broad ordinary-crash refusal alternatives are unnecessary for that crash window. Earlier §7.101 remains historical analysis under superseded DEC-062 ordering. |
+
+| Q-N2-DURABLE-PIPELINE-DETAILS-01 / DEC-088 | Explicitly accepted in full; no new alternative rejected. | §7.104 records coalescing/DoS, causal retention, backpressure and private-diagnostic rationale. Bounded scheduling does not itself bound physical commit latency or prove isolation under shared-resource exhaustion. |
+
 ### 2.3 Open design and decision inventory
 
 These are tracked obligations, not a list of questions to ask the maintainer in
@@ -375,6 +426,12 @@ original-proof prerequisites in LRC-001. §7.95 consolidates its verifier/collec
 contract, records status signing without the write-path readiness gate, and
 separates replay resistance from coverage/authority proof. Active C4.3b continues
 on those premises; no human question is pending.
+Current update CP-0090: DEC-084–088 select the named requirements of blocks1–4.
+DEC-087's durable-before-release remains current; root-marker/archive questions
+stay withdrawn. Proof/delivery obligations are separate. By maintainer direction
+block5 / F1.1 is active on the specification/interface/failure-scenario review.
+§7.105 refreshes inventory and specific conflicts; DETAIL-BATCH-005 awaits
+sign-off under Q-F1-CONSOLIDATION-DETAILS-01. This is not final design closure.
 DEC-060 refines retry policy.
 Loss of the node's own signing history remains a separate gate.
 Keep selected requirements separate from unresolved proof/parameter choices.
@@ -390,11 +447,11 @@ Keep selected requirements separate from unresolved proof/parameter choices.
 | OPEN-07 | C2/C3 | DEC-067 selects no minority veto; ordered collector/response integration remains pending (§7.75). DEC-068 selects bounded automatic client follow-up; exact budgets/backoff/state transitions remain pending. DEC-071 selects wallet durable intent ordering before first dispatch; DEC-072 selects durable L1 voucher/purchase before release, with no completed-checkout certificate archive. DEC-073 rejects automatic alternate payments at the client only; partial-purchase/tender handling stays outside humoco-node (§7.82). End-to-end targets, bounded retry counts/delays/horizon, handoff/NOT_READY feedback fields and actual shared transport backoff. DEC-060 now selects exact-payload conditional three-send retries; reconcile 800ms cancellation, detached-work bounds, quota/duplicate work, gateway failover and transport retransmissions. This is not a delivery/completeness proof. | §7.2.1/7.3, §7.33; DEC-008/009/027/042 |
 | OPEN-08 | N1/N2/N4 | Session/stream/CPU/persistence admission limits, fairness, resource partitioning, exact full-budget refusal, tier lifecycle and receiver-side abuse defenses. | §7.2–7.2.1; DEC-024/025/028; existing project invariants |
 | OPEN-09 | N3/O2 | Missing independent locks, divergent partial replicas and recovery without active clients; how readiness is justified beyond complete download/matching digest. Snapshot-bound pagination, no-gap deltas, full commitment coverage and catch-up capacity remain open (§7.31–7.32). Client resubmission is assistance, not a replacement for the DEC-057 restart P2P gate. | §7.2–7.2.1, §7.31–7.32, §7.63; DEC-026/031/032/057 |
-| OPEN-10 | O1/O2 | DEC-062 permits RAM-based approval before flush; derive immutable choice/slot/context semantics, issued-but-unflushed loss detection, background durable acknowledgment, duplicate/pending operations and safe same-key resumption under DEC-032. Prior durable-before-vote model is not this crash proof. | §7.2.1/7.3; DEC-029–033 |
+| OPEN-10 | O1/O2 | DEC-087 closes the ordinary issued-but-unflushed loss window by atomic durable-before-release. Implement exact own-choice storage/acknowledgments and prove idempotent, self-vote, read, cancellation and shutdown paths cannot bypass the gate. Actual storage loss/rollback and duplicate-key operation remain separate safety boundaries. | §7.102; DEC-029/032/033/087; Specs12/14 |
 | OPEN-11 | O3/O4 | Safe time and choice retention, bounded expiry scheduling, drain/handler ordering and measured deployment stop deadline. DEC-074 selects idempotent repeated stop signals. DEC-075 selects an internal deadline with outer supervisor margin. DEC-076 selects verified stop completion/process exit/DB release for CLI exit0. O4 policies are selected; sizing, producer joins, clean-result transport and teardown remain engineering/validation work (§7.85). | §7.2.1; DEC-034/035 |
 | OPEN-12 | O5/O6 | Private admin packaging/auth/socket permissions; operator-only metrics selected by DEC-077, exact public/private endpoint enforcement and bounded diagnostic cost pending. DEC-078 selects additional public HTTP-gateway discovery using passive mesh knowledge; advertisement/authentication/bounds remain pending. DEC-079 selects bounded cached fallback strictly on the client (§7.88). Gateway policies are selected; exact listener/admission/metadata delivery remains pending. Internal topology is not a public directory. Metric aggregation and persistence remain engineering work. | §7.2.1/7.3; DEC-002/003/036/037/040/077 |
 | OPEN-13 | C4/S1 | Statistical aggregation/freshness/disagreement payment policy, provider independence, ticket/voucher grinding and quantified adversary assumptions. | §5.5, §7.1/7.3; DEC-016/018/020/021/044 |
-| OPEN-14 | F1 | Complete specification/invariant/interface coverage and consolidation of contradictions before final plan. §7.78 adds a provisional map of22 numbered families/24 physical spec files and113 distinct mentioned invariant IDs; this is not item-level semantic or wire-test coverage. Real-wire verification remains a later delivery gate. | §1, §6, §8; CP-0003 below |
+| OPEN-14 | F1/F1.1 | §7.105 refreshes25 numbered spec files/22 families/115 mentioned IDs, with family/interface/failure mappings and concrete contradictions. Invariant-ID collisions and stale references must be resolved; detailed per-assertion semantics/implementation/executed-wire evidence remains incomplete. Pending DB5 consolidation sign-off; no final plan or completeness claim. | §7.78 historical inventory; §7.105 current inventory/conflicts; GAP-07 |
 | OPEN-15 | K3 | Naming and scoped editorial alignment complete (DEC-049–052); ongoing autonomous maintenance, no preference questions. Protocol conflicts remain OPEN-02/03/05/06/08/09/10/14. | §7.18–7.28; glossary G-001–066 / TERM-01–13; alignment report §8 |
 
 ### 2.4 Record gaps and pending specification consolidation
@@ -405,13 +462,7 @@ Keep selected requirements separate from unresolved proof/parameter choices.
   this review cannot prove that no earlier decision was ever omitted. Do not invent
   missing alternatives, exact dates or affirmative answers. Ask only if a concrete
   missing detail affects the current design, not to replay every settled choice.
-- **GAP-02 — Durability/latency consolidation:** DEC-062 / §7.69 restores RAM-first
-  attestation, asynchronous persistence and the <5ms SLA, superseding DEC-029 and
-  pre-response commit clauses in DEC-033/034. AGENTS.md Rule1 remains applicable.
-  P0 draft0.2 §4.1 and the model still assume durable-before-vote: do not report
-  their prior results as verification of the new failure model. Atomic own-choice
-  retention, issued-but-unflushed loss, same-key recovery and crash tests remain
-  OPEN-10. Earlier durability-selection records stay historical.
+- **GAP-02 — Durable release integration:** DEC-087 / §7.102 restores atomic durable lock+own-choice commit before binding signature release, superseding DEC-062's release-before-flush ordering. Specs12/14 and related flow/terminology/AGENTS text are aligned at CP-0089. Production still requires per-operation acknowledgments, own-choice persistence, all-path gates and real crash/wire verification. P0's durable-before-vote assumption is compatible in ordering, not proof of production implementation or unrelated authority/transfer premises. Hardware1–5ms is an unmeasured expectation.
 - **GAP-03 — Conflict/finality consolidation:** DEC-053 now selects potentially
   revocable regional receipts and removes the mandatory old14 handoff. Retarget
   strict CEH/global-FINAL wording and client statuses accordingly. DEC-022/023 reject unsupported takeover;
@@ -430,6 +481,14 @@ Keep selected requirements separate from unresolved proof/parameter choices.
   observations, not current executed verification. Interview-selected changes have
   not been implemented/tested here. Do not mark branches delivered or derive a
   completion percentage from the register. Full coverage is still OPEN-14.
+
+- **GAP-07 — Specification authority and invariant namespace:** §7.105 records
+  duplicate15/16 language files, complementary03 documents, reused identifiers
+  (INV-1402/1302/1501/1502) and INV-1101/1102 references without located definitions
+  in the numbered-spec corpus. Establish one meaning/owner and traceable aliases
+  rather than silently renumbering or treating an ID match as semantic coverage.
+  Current counts25 files/22 families/115 mentions supersede CP-0067's census only,
+  not its historical provenance or the unclosed proof/delivery obligations.
 
 ### 2.5 Inherited constraints and workflow records
 
@@ -9727,6 +9786,7 @@ agrees with DEC-083. Do not infer recovery correctness from concurrent comments.
 Confirmation status at CP-0085: presented as a five-item summary in §7.96;
 maintainer batch sign-off is pending under WF-006. Existing underlying decisions
 remain accepted; this elaboration is not yet an explicitly accepted batch.
+Update CP-0086: explicitly accepted in full as DEC-084 (§7.97).
 
 | Item | Problem | Derived integration contract / owner |
 | --- | --- | --- |
@@ -9891,3 +9951,734 @@ without promising a question count or implying complete security proof.83 decisi
 retained. Active C4.3b awaits batch sign-off; no new architecture selection inferred.
 
 Completed checkpoint: **CP-0085**.
+
+
+### 7.97 Live-state detail package accepted; move to state transfer
+
+Record: DETAIL-BATCH-002-ACCEPTED-001 / DEC-084.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0086.
+Question: Q-C4-DETAIL-BATCH-002-APPROVAL-01 (§7.96), answered yes in full.
+
+**Maintainer answer.** Explicitly approves the five-item package for later
+implementation. Gives these reasons: read/write domain separation and the
+recipient challenge fit the ephemeral checkout clearance model; canonical
+HRW14/20 with distinct qualified identities prevents threshold dilution;
+synchronization checks before signing prevent answers based on missed locks;
+the recipient verifies the full mathematical evidence under Zero Trust.
+No historical quorum archive is introduced. The maintainer considers block1's
+requirements properly delimited and requests the next topic.
+
+**Decision / limits.** DEC-084 accepts §7.96 items1–5, mapped to DB2-01–08 in
+§7.95. No further approval of that package is needed. Its selection does not
+prove that roster authority or safe sync is already established; those predicates
+remain prerequisites to the claimed protection. Source inspection/testing and
+implementation delivery remain separate. All earlier no-archive, own-choice,
+cheap-read, fixed14/20 and regional-revision guardrails remain.
+
+**Branch transition.** C4.3b is decided for its named live-state requirements;
+proof/delivery remains pending, dependent on S2/S3/O1.1/K2. By explicit user
+direction block2 becomes active: safe state transfer/activation at shard changes.
+S3.4a.5 below addresses a concrete recovery coverage/scheduling boundary; the
+general source-continuity proof is not declared closed by this scheduling choice.
+
+### 7.98 Newly assigned shard recovery: demand trigger versus advance preparation
+
+Record: S3-RECOVERY-COVERAGE-AUDIT-002 / S3-RECOVERY-TRIGGER-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0086.
+Active node: S3.4a.5 (block2); dependent on S3.4a/DEC-057–062 and DEC-084.
+
+**Settled prerequisites, not new choices.** Use qualified quorum-backed
+digest-pull, fixed snapshot plus bounded deltas, full live-root coverage and
+safe installation before signing. Unknown state is not proven empty. Unaffected
+ready shards continue; no node-side queue of pending payments, mandatory
+predecessor permission, signature archives, extra gossip or replacement checkout
+members. The open scheduling choice does not weaken any of these requirements.
+
+**Static source evidence at node HEAD174e9f5.** Working tree was clean when
+inspection started; previous interview records were committed externally, not
+by this interview. daemon.rs SHA-256 prefix1a1affc9bf744d61, manager.rs
+ab71ab959b7c56ad. No tests/exploits executed.
+- run_shard_digest_pull_sync builds candidate_shards from shard0, local RAM/disk
+  locks and get_active_shards, then filters those candidates for local committee
+  responsibility (daemon.rs 958–993). This is not an enumeration of every newly
+  assigned shard. known_active_shards starts empty and is a local set updated by
+  register_active_shard (manager.rs 399–413); the inspected transport call site
+  registers on a shard-digest request. It is not an authenticated complete shard
+  inventory or a guarantee of remote active-state discovery.
+- all_converged starts true and is updated only for the resulting responsible
+  shard loop (996 onward); success sets one shared readiness flag (1294 onward).
+  A potentially assigned shard missing from the candidate set is not checked by
+  that loop. This is a concrete scope gap, not proof of an executed double spend.
+- Existing no-peer and empty/bootstrap branches can also set ready without the
+  selected coverage proof (847–955); import results are discarded in the shown
+  loops. These reproduce §7.63's known gates to repair rather than justify a new
+  vote on whether incomplete recovery may sign.
+- The differing-bucket optimization examines a recent24h range and can mark the
+  pull successful when those buckets match (1174–1221). A still-live lock may be
+  older than24h; this optimization alone cannot justify complete live-root
+  recovery. This is a static scope finding consistent with the older full-root
+  obligation; no new TTL or bucket policy is selected.
+
+**Bounded witness and repair boundary.** A node newly qualifies for shard S,
+but has no local record or inventory entry for S. Existing replicas hold live
+lock A there. A scan derived only from the node's known records can omit S.
+Neither all checked shards matching nor an empty unchecked local slot establishes
+that S is ready. A sound design must keep S unready until the same justified
+per-shard transfer/installation predicate passes. This default-deny boundary can
+be combined with either scheduling option below; eager scanning is not the only
+safe repair. Absence from a local activity list never proves an unused shard.
+
+**Scope of the actual tradeoff.** When should the node *start* recovering state
+for a shard newly assigned by its living-mesh HRW view? This affects background
+work and first-request availability, not the required recovery proof. Existing
+§7.65 selected snapshot+deltas, not this trigger. Spec03 §3.1's successor/rank
+lifecycle is explicitly a background proposal; its on-demand wording does not
+settle this question for the selected current top20 protocol. Its invitation,
+24h QUIC-uptime and historical-certificate clauses require F1 reconciliation,
+not silent adoption. Passive presence rules remain unchanged in either option.
+
+**Exact pending question — Q-S3-RECOVERY-TRIGGER-01 (unanswered).**
+
+> Wann soll ein Knoten den sicheren Zustandsabgleich für neu übernommene
+> Shards beginnen?
+>
+> **A — Gezielt beim ersten Bedarf (Empfehlung):** Ein neu übernommener Shard
+> bleibt zunächst nicht signierbereit. Die erste zulässige Anfrage für diesen
+> Shard stößt den begrenzten Hintergrundabgleich an; bis zu dessen sicherem
+> Abschluss antwortet der Knoten mit NOT_READY. Bereits bereite Shards arbeiten
+> weiter. Das spart Abgleiche ungenutzter Shards, kann aber die erste Zahlung
+> verzögern, wenn nicht genügend andere bereite Quorum-Mitglieder antworten.
+>
+> **B — Alle eigenen neuen Zuständigkeiten im Voraus vorbereiten:** Der Knoten
+> ermittelt seine neu übernommenen Shards unabhängig von Anfragen und gleicht
+> sie mit begrenztem Hintergrundbudget ab. Jeder Shard wird einzeln erst nach
+> sicherem Abschluss signierbereit. Das kann Wartezeit beim ersten Zugriff
+> vermeiden, erzeugt aber zusätzliche Zustandsprüfungen auch für ungenutzte
+> Shards. Eine vorbereitete Zuständigkeit ist keine Verfügbarkeitsgarantie.
+
+**Recommendation and assumptions.** Recommend A for KISS, bounded pull on actual
+demand and the already accepted temporary affected-scope unavailability. There
+are65536 possible shard IDs; an eager implementation must account for the full
+assigned subset, which can include every shard at N20. No measured cost or
+latency advantage is claimed. B is viable when advance availability is worth
+the extra bounded inventory/transfer scheduling. Efficient authenticated inventory
+batching could reduce B's overhead but is not assumed already implemented.
+Neither option adds standby replicas outside the assigned committee.
+
+A means no synchronous sync or retained payment queue in the <5ms handler:
+admit/deduplicate a bounded per-shard recovery trigger, return NOT_READY, and
+let existing client exact-intent retries apply. Flooded/duplicate triggers cannot
+create unbounded jobs or evade per-shard authority/resource checks. Existing
+background maintenance for already active shards is not removed. Under both
+options, loss/relevant invalidation closes readiness; unknown assigned scopes
+stay unready, and no completed scan globally authorizes unchecked shards.
+
+**Proof/delivery obligations retained.** Neither A nor B establishes source
+continuity, a no-gap concurrent transfer endpoint, current authority or safe
+own-choice recovery. Define the source/state-survival premise and transfer
+acceptance, preserve active exclusions across full turnover, validate full-root
+coverage rather than only24h, check every import and durable install, and test
+automatic per-shard activation/refusal over real QUIC. Request timing, bounded
+job admission, restart/cancellation, unrelated-ready-shard service and no false
+quorum/capacity penalties require verification. Scheduling selection alone must
+not be called safe turnover. No production/spec changes or tests this turn.
+
+**Next action.** Ask the saved A/B; neither selected. Record the answer and
+derive its bounded per-shard recovery contract before continuing the source/
+coverage proof. Any routine new detail package remains subject to WF-006 sign-off.
+
+### CP-0086 — Accept live-proof requirements; ask recovery scheduling tradeoff
+
+Recorded DEC-084: all five DB2 summary items/eight detailed mappings accepted,
+with explicit maintainer rationale and separate proof/delivery gates. Block1
+requirements selected; block2 active at S3.4a.5. Static inspection at174e9f5
+records candidate-shard inventory and recent24h coverage gaps without claiming
+an executed attack. Saved Q-S3-RECOVERY-TRIGGER-01: A demand-triggered (recommended)
+versus B advance preparation of all newly assigned shards. Both remain fail-closed
+per shard and retain the same unresolved source/transfer/crash safety premises.
+Only interview documents changed; no tests, code/spec edits or commits.
+
+Completed checkpoint: **CP-0086**.
+
+
+### 7.99 Demand-triggered recovery selected; bounded contract for sign-off
+
+Record: S3-RECOVERY-TRIGGER-DECISION-001 / DEC-085 / DETAIL-BATCH-003.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0087.
+Question: Q-S3-RECOVERY-TRIGGER-01 (§7.98), explicitly answered A.
+
+**Maintainer answer and rationale.** Selects targeted recovery on first demand.
+The65536-shard namespace motivates avoiding advance synchronization of unused
+assignments. Newly assigned shards must stay NOT_READY until cryptographically
+verified digest-pull is complete and installed. No payment queue is added;
+existing DEC-042/060 client retries apply. The maintainer expects synchronized
+committee members to absorb individual NOT_READY responses within the800ms
+checkout budget. Record this as an availability expectation, qualified below,
+not a guaranteed timing/property claim. No production work is authorized.
+
+**Selection and limits.** DEC-085 selects §7.98 A and rejects B's sweep of all
+new assignments as the default. Existing bounded maintenance of already active
+shards remains. S3.4a.5 is decided for scheduling; safe source/state continuity,
+full-root coverage, stable snapshot+deltas, checked imports/durable install,
+current authority and same-key own-history recovery remain proof obligations.
+Only nodes actually assigned by the justified current view may trigger this
+path; unready status does not expand a frozen checkout committee. N<20 retains
+its adaptive provisional regime, not a newly imposed14-peer recovery threshold.
+
+**Quorum qualification (arithmetic, not an executed test).** FINAL needs14
+actual timely valid votes from its frozen20. At most six total members may fail
+to contribute; NOT_READY consumes the same headroom as silence, failure or
+withheld Byzantine votes. It is not an additional six-member allowance on top
+of the six-Byzantine target. For example, six silent Byzantine members plus one
+honest syncing member leave at most13 votes. Such a request must remain
+unconfirmed;800ms bounds collection and does not guarantee an Internet response
+or safe sync completion. Cancellation and NOT_READY remain neutral, without
+rank21 replacements, blame or reduced FINAL thresholds. This qualification
+does not reopen the selected A or DEC-027/044/060 policies.
+
+**DETAIL-BATCH-003 — proposed engineering consequences for explicit sign-off.**
+These derive from DEC-024/025/026/032/042/057–062/084/085 and preserve the
+chosen no-archive model. They are not yet accepted as a batch under WF-006.
+They elaborate how recovery must fail safely; they are not a completed source-
+coverage algorithm. No new source inspection or test result is claimed here;
+§7.98's dated static evidence remains the basis.
+Update CP-0088: the maintainer explicitly accepts DB3-01–05 as DEC-086 (§7.100).
+
+| Item | Problem | Proposed derived solution |
+| --- | --- | --- |
+| DB3-01 | Many first/repeated requests could start duplicate or unbounded sync work. | Admit only authorized relevant demand for an actually assigned shard; coalesce requests into at most one active recovery job per shard, with bounded total jobs/concurrency and bounded retry/backoff. Do not store payment requests for later execution. Full capacity keeps the shard NOT_READY; decline new recovery admission without an extra waiting queue. Cheap request/resource checks precede expensive work. |
+| DB3-02 | A shared node-ready flag could release an unchecked shard or stop unrelated ready shards. | Keep readiness scoped to the affected shard and justified recovery basis. Unknown/new assignments are unready by default. Eligible requests can trigger recovery, but no new write vote or countable live-state vote is issued there before safe activation. Unaffected ready shards continue. Ordinary lookup may still expose honestly qualified data, never quorum-backed success by itself; do not change default read_quorum1 routing. |
+| DB3-03 | A finished download or matching recent buckets could omit an older live lock or hide a failed import. | Cover the complete relevant active state through authentic root lifetime, including locks older than24h; bind the selected snapshot and gap-free bounded deltas to a justified source/context. Check record/root/canonical integrity, every import result, the installed commitment/coverage and successful durable installation before activation. No historical node-signature bundles are transferred. Source continuity remains a separate premise to prove, not a flag set after hash equality. |
+| DB3-04 | A timeout, cancellation, failed install or stale recovery attempt could accidentally publish readiness. | Keep the affected scope unready on failed/invalidated recovery; a stale completion cannot authorize a new assignment/loss situation. Preserve protected existing exclusions and own choices through failed work. Retry only with bounded background work; no automatic empty-state reset or release merely because a timer/bucket closed. A crash cannot reuse an unverified readiness result; DEC-032/063's lost-own-choice gate remains independent. |
+| DB3-05 | Blocking all service while unready could prevent peers from recovering, while waiting in the payment handler breaks the hot-path boundary. | Return NOT_READY promptly for countable write/live-state votes while recovery runs. Separately allow bounded authenticated retained-state serving for learned-peer recovery; an unready data source is not automatically an authoritative quorum witness. The client retains/retries the original intent through existing policy. No synchronous sync/disk wait, queued payment, fresh replacement spend, false peer penalty or expanded checkout committee is introduced. |
+
+Exact job limits, representations and safe per-shard activation/invalidation
+conditions require engineering/proof. The table selects no new correction log,
+snapshot-version subsystem, committee epoch, active presence probes or old-group
+permission. Per-shard readiness records are operational gates; their existence
+alone proves none of the prerequisites they track.
+
+**Planned verification, not executed.** Real QUIC/daemon cases must prove:
+duplicate and over-capacity demand cannot amplify recovery jobs; unchecked and
+recovering shards issue no countable votes while independent ready shards work;
+live locks older than24h survive; omitted pages/deltas, rejected imports and failed
+commits never activate; cancelled/stale completions cannot reopen the gate;
+retained data remains available for justified simultaneous recovery; and quorum
+shortfall is truthful. Verify automatic transitions and bounded retries, not only
+fixtures that manually flip a ready flag. The own-choice crash witness of §7.71
+remains a distinct acceptance obligation.
+
+**Pending question — Q-S3-DEMAND-RECOVERY-DETAILS-01.** Exact German wording:
+
+> Gibst du diese fünf Punkte für den bedarfsgesteuerten Zustandsabgleich als
+> Anforderungspaket für die spätere Umsetzung frei?
+
+Clear assent accepts DB3-01–05 as a batch of future requirements, not a safety
+proof, implemented behavior or authorization for source/specification changes.
+No answer has arrived. Next: await sign-off, then continue S3.4a's source/state
+coverage and safe activation argument without re-asking the recovery trigger or
+historical-certificate question. Active S3.4a.5a; source/own-history dependencies
+remain open. Only interview notes/state changed; no tests, code/spec edits or
+commits this turn.
+
+### CP-0087 — Select demand-triggered recovery and present its bounded contract
+
+Recorded DEC-085 / Q-S3-RECOVERY-TRIGGER-01 A, rejecting default advance sweep B.
+Qualified quorum headroom with the13-vote witness rather than preserving an800ms
+availability guarantee. Saved five-item DETAIL-BATCH-003 and its exact pending
+sign-off question Q-S3-DEMAND-RECOVERY-DETAILS-01. S3.4a.5 scheduling decided;
+S3.4a.5a batch sign-off active. Source continuity/coverage/activation and O1.1
+remain unproved.85 decisions indexed; only interview documents changed.
+
+Completed checkpoint: **CP-0087**.
+
+
+### 7.100 Demand recovery package accepted; move to own-choice recovery
+
+Record: DETAIL-BATCH-003-ACCEPTED-001 / DEC-086.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0088.
+Question Q-S3-DEMAND-RECOVERY-DETAILS-01 (§7.99): answered yes in full.
+
+**Maintainer answer.** Explicitly accepts all five items for later implementation.
+Reasons: one coalesced active job per shard resists request amplification without
+server payment queues; per-shard readiness isolates new unready assignments;
+full root.valid_until coverage avoids a24h-only recovery gap; bounded retained-
+state serving permits cooperation while no countable vote is issued before
+verified installation; no historical quorum archive is created. The maintainer
+calls block2 specified and asks to proceed to the next work block.
+
+**Decision / limits.** DEC-086 accepts DB3-01–05. Blocks1/2 are selected at the
+requirement level. Source-state completeness, safe concurrent activation and
+actual receiver/consumer behavior remain proof/delivery obligations. Unaffected
+shards must remain serviceable; zero measurable latency impact from shared
+resources is an untested objective, not a guarantee established by scoped flags.
+No repeated sign-off, old-certificate archive, production/spec change or test
+authorization follows from this answer.
+
+**Branch transition.** S3.4a.5a is decided for DB3; S3 source/activation gates
+remain unresolved dependencies. At explicit user direction move the sole active
+focus to block3 / O1.1: same-key signing after issued-but-unflushed own-choice
+loss. DEC-032/063's protection and DEC-062's RAM-first response remain settled;
+do not re-ask whether ordinary quorum sync or bucket expiry should waive them.
+
+### 7.101 Own-choice crash-loss containment: root risk markers versus broad refusal
+
+**Superseded premise (DEC-087 / §7.102):** The maintainer restores durable-before-
+release. Neither proposed A nor B was selected. No root-marker implementation or
+ordinary-crash quarantine follows from this historical record.
+
+Record: O1-LOSS-CONTAINMENT-ANALYSIS-001 / O1-ROOT-RISK-MARKER-QUESTION-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0088.
+Active node: O1.1.1 (block3). Both options below remain unselected.
+
+**Existing problem, not a renewed safety-gate choice.** A genuine isolated
+approval A can leave the node before its asynchronous own-choice flush. A crash
+then loses A locally while its requester retains it. Ordinary shared-state sync
+need not recover that individual decision. A later fresh B of the same output
+can conflict with A even after A's timestamp bucket closes (§7.71). The selected
+same-key gate must prevent signing B. A clean shutdown with a justified complete
+drain, ordinary process crash with intact storage, unknown storage rollback,
+and lost/copied signing state are different cases; do not infer one from another.
+
+**Targeted static evidence, not an executed proof/test.** Node HEAD174e9f5.
+storage/engine.rs SHA-256 prefix a07bee11117dbb82, storage/db.rs 2447dedcdf1d339e;
+sim-core p0/evidence.rs 25987a8af21f8980, p0/state.rs b6ace992a0a3f77a.
+The node reserves queue capacity, mutates HMC RAM and enqueues PutHmcLock
+(engine.rs 772–849); the inspected redb table declarations/open initialization
+(db.rs 57–114) do not establish identity-bound crash-risk/own-choice coverage.
+A bounded search found no root-risk-marker lifecycle in these paths, not proof
+of whole-repository absence. P0 Slot is(network,root,output) and its equivocation
+verifier compares same node/slot plus differing spend IDs (evidence.rs 7–18,
+246–253). The P0 Signer inserts its modeled durable choice before returning
+Approval in commit; crash only clears pending (state.rs 389–450). Its results
+do not verify the DEC-062 issued-before-flush failure model.
+
+**Candidate A — conservative durable risk scope, not lost-signature recovery.**
+Before this identity can issue its first original approval for a canonical
+root R, durably record “this identity may have signed for R,” bound to the
+network/root identity and authenticated root lifetime. Reuse existing redb/
+bounded background persistence. No foreign approvals or quorum bundles are
+stored. Until successful preparation, return NOT_READY without approving the
+payment; client retry uses the existing path. Once prepared, individual original
+approvals stay RAM-first with async own-choice flush and no per-lock disk wait.
+
+After an ordinary process crash, treat previously marked roots conservatively
+as potentially affected unless complete own-choice safety is separately justified.
+Under the assumptions below, an unmarked root cannot have received an earlier
+original approval from this identity. It may undergo normal shard/root preparation
+and new signing while affected roots remain gated. Root-wide containment can
+block innocent outputs within a marked root; it is deliberately conservative.
+The marker does not identify which output was signed or reconstruct its choice.
+This is a candidate operational safety record, not a monetary reservation,
+consensus epoch, extra checkout quorum phase or historical receipt archive.
+
+**Local conditional argument and limits.** Assume a known-safe starting identity/
+own-history state, one authorized signer instance, complete durable marker storage
+without rollback/loss and enforcement at every original-approval site. The event
+order is marker durable -> possible signature release -> async exact-choice flush.
+A crash before marker durability permits no released signature. A crash after
+marker durability may create a false-positive risk root, but not an unmarked
+root with a released signature. Thus marker absence can delimit unaffected roots
+under those assumptions. Presence alone never authorizes another vote. This
+argument is logical analysis of the proposed order, not implementation or testing.
+
+It does not establish whole-root own-history recovery or a short quarantine for
+marked roots. Unknown rollback/disk loss or duplicate signer/key use invalidates
+the marker-absence premise; affected scope then remains broad/unknown. An old
+identity with earlier unmarked approvals cannot be migrated into “unmarked means
+safe” by creating an empty table. Establish a safe initial boundary or retain
+the existing loss gate. A record in the same rolled-back database cannot itself
+prove that no rollback occurred. Never clear a risk record merely because a flush
+tick ran; exact safe clearing/checkpoint rules require proof. Required own choices
+and root-bound risk metadata follow authenticated TTL+30s retention, with no
+permanent expired-lock tombstones. Proper root validation prevents invented TTLs.
+
+**Actual tradeoff.** Extra coarse durable metadata can narrow crash impact while
+retaining RAM-first individual votes. It introduces a one-time root preparation
+boundary: if the record was not prepared, that node must refuse the initial
+attempt pending background commit. If enough committee members need preparation,
+the first payment attempt for a root can lack quorum and need a client retry.
+No <5ms disk-commit or800ms success promise is made. Initial preparation is a
+new admission cost to decide explicitly, not a silent restoration of DEC-029's
+per-vote commit wait. Existing-root prepared votes retain DEC-062 ordering.
+
+Alternative B adds no coarse root-risk mechanism. It retains exact own-choice
+records/flush and the same loss gate, but cannot use an absent coarse marker
+to prove other roots untouched. After unclean loss it must conservatively gate
+every scope whose safety cannot be justified, potentially the whole identity's
+new original signing. It may resume when actual safety is established; no short
+bucket timeout or automatic key replacement is promised. Storage/admin/data
+service can continue under their actual gates. B is simpler at ordinary admission
+but accepts potentially much broader refusal after a crash. Neither option
+authorizes an unsafe vote, changes fraud slots or solves catastrophic rollback.
+
+**Exact pending question — Q-O1-ROOT-RISK-MARKER-01 (unanswered).**
+
+> Wie sollen wir die möglichen Folgen verlorener eigener Einzelstimmen nach
+> einem Prozessabsturz eingrenzen?
+>
+> **A — Dauerhaften Schutzvermerk je Gutschein-Wurzel vorbereiten (Empfehlung):**
+> Vor der ersten eigenen Schreibfreigabe für eine Wurzel wird ein kleiner
+> Schutzvermerk im Hintergrund dauerhaft gespeichert. Bis dahin gibt dieser
+> Knoten NOT_READY zurück; danach bleiben die einzelnen Freigaben RAM-first.
+> Nach einem Absturz können bei nachweislich intaktem Vermerkbestand unberührte
+> Wurzeln weiterbearbeitet werden. Möglicherweise betroffene Wurzeln bleiben
+> gesperrt, bis ihre eigene Signiersicherheit geklärt ist. Das benötigt
+> zusätzliche Metadaten und kann die erste Zahlung für eine Wurzel verzögern.
+>
+> **B — Keine zusätzlichen Schutzvermerke einführen:**
+> Die bisherige asynchrone Speicherung der Einzelentscheidungen bleibt.
+> Nach einem Absturz werden neue eigene Schreibfreigaben für jeden nicht
+> nachweislich sicheren Bereich verweigert; das kann bei unbekanntem Umfang
+> die ganze Identität betreffen. Das hält die normale Aufnahme einfacher,
+> kann den Wiederanlauf aber deutlich breiter oder unbestimmt blockieren.
+
+Recommend A for limiting ordinary intact-storage process-crash impact without
+weakening DEC-032/063 or making each approval wait for disk. Recommendation is
+conditional on the explicit preparation cost and proof assumptions above, not
+a proven short recovery algorithm. B is a viable stricter refusal policy with
+less added metadata. Neither is selected. This question does not ask again
+whether lost choices may be ignored or historical quorum bundles archived.
+
+**Next action / validation.** Await A/B. If A, derive bounded root preparation,
+checked complete marker loading, signing-site coverage, crash windows, concurrent
+admission and safe retention/clearing; subject routine details to WF-006 sign-off.
+If B, specify conservative loss detection/scope and honest refusal/return criteria.
+Both retain the unresolved marked-scope recovery/rollback proof. Real QUIC/daemon
+crash tests must preserve an externally received pre-flush A and reject a fresh
+conflicting B in a later bucket; test unmarked/marked scope, failed marker commit,
+stale backup, shared-key misuse assumptions, concurrent first touches and TTL
+purge. These are planned, not executed. Only interview memory changed; no code/
+specification edits, commits or test campaign.
+
+### CP-0088 — Accept recovery details; expose own-choice loss containment tradeoff
+
+Recorded DEC-086 accepting DB3-01–05 and user-directed move to block3. Block2
+requirements selected, safety/delivery gates retained. Active O1.1.1 investigates
+same-key volatile-choice loss under unchanged DEC-032/062/063. Saved conditional
+root-marker construction and Q-O1-ROOT-RISK-MARKER-01: A coarse durable root
+preparation (recommended, with initial NOT_READY/metadata costs), B no new marker
+and potentially broad refusal. Neither selected; no claim of recovered lost
+choices, short quarantine or rollback immunity.86 decisions indexed.
+
+Completed checkpoint: **CP-0088**.
+
+
+### 7.102 Durable-before-Release restored; root-marker question withdrawn
+
+Record: O1-DURABLE-RELEASE-DIRECTIVE-001 / DEC-087.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0089.
+Q-O1-ROOT-RISK-MARKER-01 is withdrawn: neither A nor B selected.
+
+**Explicit maintainer directive.** Rejects the proposed split between root-risk
+markers and identity refusal. A binding signature may leave the node only after
+its lock and own signing decision atomically and durably commit to redb; signature
+computation itself stays in RAM. Restores DEC-029's ordering, rejects root markers,
+ordinary-crash quarantine and identity abandonment, prioritizes safety/KISS over
+release of undurable RAM state, and explicitly authorizes corresponding changes
+to the specification before moving to block4. The cited local1–5ms write time
+is an expectation, not measured evidence or a bound that overrides durability.
+
+**Reconciliation.** DEC-087 supersedes DEC-062's response-before-flush and no-disk-
+wait requirement. Retain DEC-062's distinct wallet T_0, entry-only freshness,
+reservation-first RAM handling, bounded background persistence and nominal fixed
+bucket sealing. No new wallet-freshness recheck, variable seal, checkout round,
+predecessor permission or historical certificate archive is selected. Asynchronous
+worker I/O plus an awaited durable acknowledgment is the implementation direction;
+blocking redb/fsync on a runtime handler or RAM guard across I/O is still forbidden.
+Restore DEC-033's exact immutable own-choice transaction and DEC-034's guarantee
+that released votes are durable; admitted but unreleased work can remain uncertain.
+
+**Ordinary process-crash argument.** With atomic durable commits, complete own-
+choice restoration and enforced release gates at every original signing site:
+
+- Before commit, no binding signature escaped, so a lost pending choice has no
+  externally held node signature that could be paired with a later conflicting one.
+- After commit, the exact lock/own choice survives an ordinary process crash with
+  intact committed storage, including a lost response. Restore that choice and
+  reject conflicting signing; exact retries are idempotent.
+
+This closes the previously constructed issued-but-uncommitted choice window at
+the design-contract level. No special finite bucket quarantine, per-root risk
+marker or automatic identity abandonment is needed. It is not an executed crash
+test or proof that existing source paths already obey the order. Actual storage
+loss/rollback/corruption, unsafe key duplication and shard-state completeness are
+separate boundaries; they never become permission to fabricate safe restored state.
+
+**Authorized specification alignment completed.**
+
+- Specs12/14: reserve-first pending RAM state, atomic lock+own-choice durable
+  transaction, operation-specific acknowledgment, no release on uncertain failure,
+  idempotent/self/read bypass prevention, restart/retention and planned crash tests.
+  Added INV-1405/1406; retained existing IDs with deliberately updated semantics
+  for INV-1201/1205/1401/1404. Conceptual table/message layouts are not production code.
+- Specs00/03 routing/03 status/06/10: related release wording and sequence/flow
+  diagrams now show the durable barrier. Older receipt-chain and other unrelated
+  finality/authority gaps remain F1; this focused edit does not certify those specs.
+- AGENTS.md and glossary: align the local RAM versus durable-release distinction,
+  async worker awaiting, own choices, ordinary crash scope and latency expectations.
+
+The user's explicit authorization supersedes the prior interview-only/no-spec-edit
+limit for these changes. It does not authorize production changes, commits or a
+large test campaign. Existing source inspection still shows enqueue-before-response
+and no demonstrated production own-choice acknowledgment; implementation is pending.
+
+**Remaining delivery gates.** Implement exact transaction/ack ordering on QUIC,
+HTTP, duplicates, gateway self votes and countable live-state reads. Prove no
+signature bytes escape pre-commit, restore exact decisions after crash, handle
+unknown commits/cancellation/shutdown without unsafe release or rollback, and
+measure storage/queue/tail latency under representative load. Network defenses
+require real adversarial QUIC and actual crash transitions. None executed here.
+P0's pre-release durable-choice assumption is compatible in ordering, not proof
+of these source integrations or unrelated membership/transfer properties.
+
+**Branch transition.** O1.1/1.1.1 is decided for the ordinary-crash construction;
+root-marker proposals are discarded. Implementation/testing remains open, with
+actual loss/rollback in O2. By user direction move the sole active focus to
+block4 / N2.1: bounded wait/resource behavior around the durable worker.
+
+### 7.103 Bounded durable pipeline: derived operational details for sign-off
+
+Record: DETAIL-BATCH-004 / N2-DURABLE-PIPELINE-CONTRACT-001.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0089.
+Active node: N2.1 (block4). No new important A/B choice is ready; DEC-087's
+durability rule is already accepted and does not require renewed approval.
+Update CP-0090: the maintainer accepts DB4-01–05 in full as DEC-088 (§7.104).
+
+**Evidence basis.** Prior dated static inspection at174e9f5 and the current
+bounded source search in storage/engine.rs show a bounded batch worker and
+retry/drain machinery; queueing operations does not supply a per-operation
+durable acknowledgment to the handler. Existing semaphores/admission intent
+do not prove appropriate service partitioning or bound end-to-end wait. No
+production behavior changed and no tests/benchmarks were run. Use existing
+batching/budgets before adding another scheduler or persistence service.
+
+**DETAIL-BATCH-004 — proposed derived requirements.**
+
+| Item | Problem | Proposed solution |
+| --- | --- | --- |
+| DB4-01 | Waiting for a batch to fill can consume the reply budget at low load; a huge batch can monopolize commits. | Bound batch age, operation count and serialized bytes. Flush by a bounded time even if a batch is not full. Measure queue+commit tail latency within the existing800ms collector; numerical settings follow measurement, not an asserted1–5ms guarantee. Never release before commit to meet a deadline. |
+| DB4-02 | Retries can multiply waiters or obtain an early signature from a pending RAM cache entry. | Coalesce identical admitted operations onto the same exact pending result, bound both admitted operations and response waiters, and apply reservation-first backpressure before mutation. A duplicate waits asynchronously or receives an honest bounded refusal/uncertain result; it never bypasses the durable-release gate. |
+| DB4-03 | A gateway timeout/cancellation can be mistaken for a failed lock and trigger rollback or unbounded detached work. | Bound response waiting by the request/deadline, preserve any committed lock/choice, and leave unconfirmed outcomes uncertain. Persistence remains within its existing bounded worker/drain budget. Exact original retries reconcile a late commit; no alternate spend, rollback or unbounded response/retry task is created. |
+| DB4-04 | Ingress, reads or repair work can exhaust resources needed for receiving shard requests and safe recovery. | Enforce separately bounded work/concurrency budgets with reserved inbound shard service and bounded recovery progress. Reject over-capacity work promptly; reads do not reserve write capacity or perform a disk commit per query. NOT_READY/capacity and quorum-cancelled work remain neutral, without bans or lower-rank replacement. Exact partition sizes require measurement. |
+| DB4-05 | A slow/stuck disk or shutdown can leave waits hanging and make performance claims unverifiable. | Keep the accepted finite shutdown deadline and commit-error signing gate; acknowledge only exact successful transactions and report incomplete/uncertain work honestly. Observe queue wait, commit latency and admission/failure counts through bounded private operator metrics. Measure these paths and exercise real QUIC/crash/slow-storage cases; no public diagnostic exporter or in-memory live-log buffer is introduced. |
+
+These operational details do not re-open selected durability, shutdown, all-member
+dispatch, retries, private diagnostics or capacity-refusal policies. They expose
+their composition around the awaited commit. They are proposed as a batch under
+WF-006, not yet explicit maintainer acceptance or delivered safeguards.
+
+**Pending question — Q-N2-DURABLE-PIPELINE-DETAILS-01.** Exact German wording:
+
+> Gibst du diese fünf Betriebsdetails für den dauerhaften Schreibpfad als
+> Anforderungspaket für die spätere Umsetzung frei?
+
+No answer has arrived. After sign-off, continue block4's remaining timing/resource/
+operation obligations and then F1 reconciliation. Do not call the source-state
+continuity or unknown rollback gaps solved merely because block3's ordinary
+crash ordering is selected. No commits, production edits or test campaign.
+
+### CP-0089 — Restore durable-before-release; align specifications and move to block4
+
+Recorded DEC-087, withdrawing Q-O1-ROOT-RISK-MARKER-01 without choosing A/B.
+Restored atomic durable lock+own-choice commit before release; kept distinct
+entry-only freshness/bucket policies. Updated authorized specs12/14 and related
+flow/AGENTS/glossary text, preserving historical interview decisions. Ordinary
+process-crash contract resolved; production acknowledgment/own-choice integration
+and real crash/wire tests pending. Active N2.1/block4 awaits five-item DB4 sign-off
+under Q-N2-DURABLE-PIPELINE-DETAILS-01.87 decisions; no code changes or commits.
+
+Completed checkpoint: **CP-0089**.
+
+
+### 7.104 Durable-pipeline operations accepted; move to final reconciliation
+
+Record: DETAIL-BATCH-004-ACCEPTED-001 / DEC-088.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0090.
+Q-N2-DURABLE-PIPELINE-DETAILS-01 (§7.103): explicitly answered yes in full.
+
+**Maintainer answer.** Accepts all five operational details for later implementation.
+Reasons: time/size-bounded batching avoids waiting for a full batch, coalescing
+limits repeated disk work, committed state is not rolled back after timeout,
+inbound shard/sync service is protected from public ingress pressure, and honest
+errors/private metrics never permit premature signatures. Calls block4 complete
+and requests the next work block. This selects requirements, not measured latency:
+bounded batch scheduling avoids intentional indefinite queueing but cannot force
+a slow/failing disk to complete within800ms. DB4 already requires measuring the
+complete queue/commit/tail path and refusing unsafe success.
+
+**Decision / transition.** DEC-088 accepts DB4-01–05. N2.1/block4 requirement
+selection is decided; implementation, sizes, isolation and wire/load verification
+remain pending. Durable-before-release, no payment queues/automatic rollback,
+neutral unavailable outcomes and private diagnostics remain. The sole active
+focus moves to block5 / F1.1: reconcile actual specs, invariant meanings, interfaces
+and failure scenarios before a final prioritized plan. No production changes,
+specification edits, commits or test campaign are authorized by this answer.
+
+### 7.105 Specification reconciliation: refreshed census, concrete conflicts and evidence gates
+
+Record: F1-COVERAGE-RECONCILIATION-002 / DETAIL-BATCH-005.
+Date: 2026-10-19 (Europe/Berlin). Checkpoint: CP-0090.
+Active node: F1.1 (block5). DEC-001–088 retained.
+
+**Inspection scope and evidence limit.** Read-only scan of numbered docs, their
+headings/invariant statements, selected surrounding flows and a representative
+wire test; no execution. Node HEAD174e9f5 with concurrent working edits in source,
+tests and documents, all preserved. No claim that earlier source gaps still
+exist unchanged while another implementation is in progress. Source findings
+retain their dated snapshots; current production needs an independent verification.
+Document SHA-256 prefixes at inspection:06 dc98d7ab03ef4ff2;08 300bec1736ccd42f;
+10 1b38b00059e23882; English15 b80fc9b6b118ea1c; English16 898cb01e71de08fa.
+
+**Refreshed lexical inventory, not a security score.** The numbered corpus now
+contains25 physical files in22 families (00–20 plus99), with115 distinct
+mentioned INV-xxxx IDs. The extra03 status/sync file and INV-1405/1406 account
+for the change from the historical24-file/113-ID census. Families15/16 each
+have English/German copies; the two03 files cover complementary topics. A
+simple numbered-bullet matcher finds104 distinct definition candidates; manual
+follow-up locates9 more in headings/backticks/tables. INV-1101/1102 are referenced
+from Spec05 without a located definition in the numbered corpus. Regex counts
+alone cannot identify semantic duplicates, omitted rules or test coverage.
+
+**Family -> interface/obligation -> failure/evidence map.** This updates §7.78's
+topic inventory with concrete verification boundaries. Each row still requires
+item-level definition, implementation and executed-evidence links; no row means
+all its rules are verified or that an observed conflict is its only gap.
+
+| Family / physical files | Principal interface and selected obligations | Failure scenario / remaining acceptance boundary |
+| --- | --- | --- |
+| 00 | L1/L2 boundary, payment result semantics; DEC-053/072/080/083 | A local/regional14 receipt is not unconditional global irreversibility; no third assurance status. |
+| 01 | Bootstrap discovery, TLS/F2F and learned-peer admission | Discovery grants no vote/gossip privilege; validate source authority without inventing a global anchor. |
+| 02 | Lock state/409, merge class and own-choice independence | Weak competitor cannot displace a confirmed branch; lawful canonical change is not node fraud; retained choices survive. |
+| 03 routing + status/sync | Frozen14/20, cheap read1, live proof, snapshot/deltas, demand readiness | Missing shard/old live record, incomplete or incompatible sources, caller-invented committee; no historical bundles/rank21 substitution. |
+| 04 | Shared canonical encodings, full keys, proof kinds and bounded DTOs | Wrong output/network/purpose, short-ID substitution, unsafe parsing or unbounded allocation. Exact final wire schema remains K2. |
+| 05 | Attack matrix and fault/cost assumptions | Six Byzantine nodes is a conditional target; timing/probability and isolated-subnet claims need evidence; total quorum misses share headroom. |
+| 06 | Wallet/gateway/core release, retries, L1 purchase custody | Found/ConfirmLocal is not paid; stale proof/retry transplant rejected; no recursive receipt chain. |
+| 07 | Ticket admission/maturation and node lifecycle | Ticket24h is separate from passive three-miss presence; transport failure/identity change does not grant replacement votes. |
+| 08 | Regional views, phase stability and class-first merge | Old founder-manifest/global-finality text must be reconciled; preserve actual network-domain isolation, not an invented universal bootstrap solution. |
+| 09 | Physical-time quotas, accounting and read budgets | Spam must not accelerate EMA decay; verify exact wire quota refusal and root-derived storage accounting. |
+| 10 | QUIC framing, domains,0-RTT, stream authorization | Malformed lengths, replay, unauthorized peers and changed purpose; no unsafe transmutation or early write signature. |
+| 11 | Hourly F2F presence and dissemination | Three missed heartbeats versus checkout misses; no new gossip stream or hearsay/telemetry-derived ban. Timing/re-entry proof still open. |
+| 12 | RAM collision/pending/duplicate/TTL API | Queue refusal leaves RAM untouched; pending duplicate/status cannot bypass durable release; root TTL+30s purge. |
+| 13 | Public Free/Friends/VIP and ingress admission | Client ingress remains permissionless; random friend secrets differ from public node keys; flood must not exhaust protected budgets. |
+| 14 | Worker transaction/ack, restart and own-choice tables | Crash on each commit/release edge, exact durable choice restoration, failed/unknown commit and actual rollback boundary. |
+| 15, English/German | Connection/stream lifecycle and request collection | Persistent F2F versus ephemeral shard sessions; no rank21/50ms replacement or peer penalty for normal idle/quorum cancellation. |
+| 16, English/German | Model/simulation and actual network validation | Simulation cannot replace real receiver-side QUIC rejection, automatic recovery, daemon crashes or consumer release checks. |
+| 17 | Private operator metrics/topology/dashboard | Every alias/subroute private; observations cannot ban peers or authorize committee exclusion. |
+| 18 | Quorum/percolation memo, local reliability | Heuristic/probability figures are not fault bounds or exact membership; no checkout-miss gossip or rank21 substitution. |
+| 19 | Local dampening/ingress pacing/cascade arguments | Keep local diagnostics separate from presence/admission; resolve reused IDs and stale skip-and-replace rule. |
+| 20 | IPC/admin, process stop, discovery and operations | Verified process/DB release, private diagnostics, public HTTP-only directory, client-only cached fallback; unsafe stale-backup restore stays gated. |
+| 99 | Consolidated attack/FAQ claims | Scenario assertions must inherit current selected rules and proof limits; historical rationale is not normative evidence. |
+
+**Concrete consolidation findings (static text, not executed exploits).**
+- F1-C01: Spec06 line106 appends a quorum certificate to ProofChain; INV-0604
+  line377 binds causality to a preceding quorum certificate. INV-0601 line374
+  still describes signature generation before async persistence. These conflict
+  with DEC-055/072/083/087 despite the recently added scoped release paragraph.
+- F1-C02: Specs00:93–97,03:256,04:53,08:39–40 and99:454 retain third-tier or
+  global-finality wording. Binary mode and DEC-053 regional revision are settled;
+  repairing those claims must not invent a new consensus guarantee or status.
+- F1-C03: English15:123–132 retains10s active shard pings,50ms/25ms hedging,
+  rank21 substitution and immediate leave promotion. Specs05/07/11/18/19/99
+  repeat variants. These conflict with frozen checkout membership, passive
+  presence, neutral cancellation and distinct F2F/shard connection lifecycles.
+- F1-C04: Spec08:77–80 binds federation compatibility to a founder-signed
+  GenesisManifest. This older construction cannot silently authorize or prevent
+  DEC-053 same-network regional healing. Exact shared network identity/admission
+  remains a proof/design dependency; mainnet/testnet/domain separation is retained.
+- F1-C05: Spec10:533 uses an unsafe pointer cast for WireHeader; Spec04/12
+  retain rkyv zero-copy assumptions. Replace obsolete normative examples with
+  checked safe parsing, while preserving real size/domain/bounds requirements.
+- F1-C06: INV-1402 labels evidence-size bounds in04:347 but durable evidence
+  retention in14:148. INV-1302 labels account privacy in13:163 and pacing in19:67;
+  INV-1501 labels0-RTT writes in15:139 and missing-count dampening in18 §6;
+  INV-1502 labels data priority in15:140 and rank21 replacement in19:68.
+  These are semantic collisions, unlike simple bilingual aliases. INV-1101/1102
+  lack located definitions in the scanned corpus; do not invent them from names.
+- F1-C07: Spec16 §§1–2 makes in-memory simulation the exclusive P2P validation
+  route. AGENTS.md Rule11 instead requires real adversarial QUIC. The inspected
+  phase5_pull_sync_and_readiness.rs wire test manually switches the readiness
+  flag (149–151); it checks refusal but is not proof of automatic complete recovery.
+  Other existing/concurrent tests were not audited or run; no absence claim.
+- F1-C08: Spec17's metrics/topology endpoints need explicit operator-only authority
+  consistent with DEC-037/077; route names alone do not establish exposure. Other
+  concurrent endpoint edits are not verified by this interview.
+
+**Unclosed design/proof edges, not new preference questions.** A justified
+current membership basis despite subjective views (S2), safe source continuity
+and complete concurrent transfer during turnover (S3), correct class/own-choice
+merge composition (S5), entry-gate/insertion/seal clock composition, and actual
+storage-loss/rollback recovery remain explicit. Digest agreement by incomplete
+new replicas is not source continuity. An 8+6+6 distribution of independent
+confirmed locks may contain no14 identical whole-state digest (§7.2.1); the
+selected transfer must account for it rather than wait for nonexistent equality.
+No old signer archive or predecessor veto is proposed as a shortcut. DEC-087
+solves the ordinary pre-flush issued-choice window, not these other premises.
+Broad trust research remains stopped. F1 and the final buildable plan stay open.
+
+**DETAIL-BATCH-005 — proposed consolidation and acceptance package.**
+
+| Item | Problem | Proposed solution / scope |
+| --- | --- | --- |
+| DB5-01 | Legacy client/sync texts require historical L2 chains or miss the durable barrier. | Align with L1 custody, ephemeral current live proof, no inherited bundle archive and atomic durable-before-release, including idempotent/status/self paths. Preserve separate own-choice retention. |
+| DB5-02 | Documents retain third-tier/global-finality promises, rank21 replacement and conflated presence/timeout rules. | Align binary mode, conditional regional semantics, frozen14/20, three missed hourly heartbeats and distinct F2F/shard lifecycles; retain first-party-only sanctions. Leave unresolved authority/source proofs explicitly unresolved. |
+| DB5-03 | Normative wire examples use unsafe parsing and incomplete authentication/bounds. | Use safe checked standard-library parsing and bounded allocation; consistently state full-key, purpose/target/context/challenge verification and cheap-checks-first admission. Exact schema/code integration remains a delivery task. |
+| DB5-04 | Duplicate files, overloaded invariant IDs and missing definitions make traceability ambiguous. | Establish one authoritative meaning/location per rule with explicit references/legacy aliases; use English canonical15/16 texts and retain German paths as clear references rather than independent rules. Keep the complementary03 topics explicit. Do not silently renumber or erase unresolved meanings. |
+| DB5-05 | Test names, counts or simulations can be mistaken for proved server/client protection. | Map each final rule to affected interfaces, concrete positive/adversarial scenario, expected outcome and evidence status. Require real QUIC plus relevant HTTP/core-consumer/crash checks; mark planned versus executed explicitly and keep diagnostics private. No simulation-only sign-off or completeness percentage. |
+
+This is proposed normative/documentary consolidation of selected requirements
+and a verification mapping, not a production rewrite, executed proof or new
+consensus mechanism. It does not restart settled interviews or close the edges
+above by relabeling them. No new substantive A/B is ready.
+
+**Pending question — Q-F1-CONSOLIDATION-DETAILS-01.** Exact German wording:
+
+> Gibst du dieses Bereinigungs- und Prüfkriterienpaket für den abschließenden
+> Spezifikationsabgleich frei?
+
+No answer. Clear assent selects DB5-01–05 and authorizes their focused
+specification/documentation consolidation and acceptance mapping, preserving
+unresolved proof gates. It does not authorize production code, commits or a
+large test campaign. After assent, reconcile current concurrent files before
+editing and update the per-rule/interface/scenario map. A final prioritized plan
+requires remaining material design gaps resolved or explicitly scoped; no premature
+final plan is issued now. This turn edits only the two interview memory files.
+
+### CP-0090 — Accept durable operations; enter specification and evidence reconciliation
+
+Recorded DEC-088 accepting DB4-01–05 and user-directed move to block5/F1.1.
+Refreshed census to25 files/22 families/115 mentioned IDs, with family/interface/
+failure mapping, eight concrete text-conflict groups and invariant namespace gaps.
+Preserved concurrent implementation/spec edits without claiming current source
+verification. Saved DB5-01–05 / pending Q-F1-CONSOLIDATION-DETAILS-01. Proof gaps
+remain distinct from selected requirements and pending delivery; no final-plan
+or security-completeness claim.88 decisions; only interview notes/state changed.
+
+Completed checkpoint: **CP-0090**.
+
+
+<a id="evidence-dec-089"></a>
+### 7.106 DEC-089 — Accept the specification reconciliation package
+
+Node: F1.1 / block5. Question: Q-F1-CONSOLIDATION-DETAILS-01 (§7.105).
+Date: 2026-10-19. State: **accepted**. The maintainer explicitly approves the
+complete cleanup and acceptance package, confirms all five requirement blocks,
+and asks for consolidation and the final overall result. This selects DB5-01–05;
+no A/B alternative was posed or inferred. Rationale: L1 custody/ephemeral live
+proof/durable release, frozen14/20, safe parsing, unambiguous English references,
+and real QUIC/HTTP/crash evidence rather than simulation-only claims.
+
+Scope: edit normative/project documentation and the two interview memories;
+preserve concurrent implementation work without changing or claiming to verify
+it. No production changes, commits or large test campaign. Final documentary
+output may close the consolidation task, but cannot close an unproved mechanism.
+The material proof gates recorded in §7.105 remain; broad trust research remains
+stopped and Q-S3.3-01 remains parked/unanswered.
+
+### CP-0091 — Record full consolidation approval
+
+Recorded DEC-089 and answered Q-F1-CONSOLIDATION-DETAILS-01. Focus: perform the
+approved specification consolidation and interface/scenario/invariant mapping.
+No human question pending.89 decisions. Delivery and proof gates remain separate.
+
+Completed checkpoint: **CP-0091**.

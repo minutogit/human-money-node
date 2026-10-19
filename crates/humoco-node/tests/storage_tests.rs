@@ -640,4 +640,73 @@ fn test_system_audit_events_storage_and_pruning() {
     assert_eq!(after_reopen.last().unwrap().id, 120);
 }
 
+#[tokio::test]
+async fn test_durable_before_vote_crash_durability() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test_crash_durability.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, worker_handle) = DualTierEngine::new(Arc::clone(&storage));
+
+    let parent_bytes = [0x42u8; 32];
+    let tag = hex::encode(parent_bytes);
+    let entry = humoco_node::api::hmc::L2LockEntry {
+        t_id: [0x42; 32],
+        layer2_voucher_id: "voucher_crash".to_string(),
+        sender_ephemeral_pub: [0x42; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x42; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 1000,
+        created_at_ms: 1000,
+        deletable_at: Some("2000000000000".to_string()),
+        privacy_guard: None,
+    };
+
+    // Ingress using durable method (DEC-029 restoration)
+    let (verdict, is_new) = engine
+        .ingress_hmc_lock_durable(
+            tag.clone(),
+            entry.clone(),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(1000),
+            Some("Free"),
+            Some(10),
+            Some("voucher_crash".to_string()),
+        )
+        .await;
+
+    assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+    assert!(is_new);
+
+    // Now simulate an abrupt crash without graceful shutdown drain:
+    // Drop the engine and abort the worker immediately (simulating SIGKILL / sudden power loss)
+    worker_handle.abort();
+    let _ = worker_handle.await;
+    drop(engine);
+    drop(storage);
+
+    // Reopen database directly from disk
+    let reopened_storage = Arc::new(RedbStorage::open(&db_path).expect("failed to reopen redb"));
+
+    // Check that entry is durably persisted on disk in TABLE_HMC_LOCKS
+    let disk_entry = reopened_storage.get_hmc_lock(&tag).expect("disk read failed");
+    assert!(disk_entry.is_some(), "Lock MUST be durably present on disk before vote/verdict");
+    assert_eq!(disk_entry.unwrap().t_id, [0x42; 32]);
+
+    // Re-instantiate a fresh DualTierEngine and verify recovery from disk
+    let (new_engine, _new_worker) = DualTierEngine::new(Arc::clone(&reopened_storage));
+    let _ = new_engine.recover_from_disk(SimTime(1000)).await.expect("recovery failed");
+
+    // Verify the lock is in the RAM index and voucher lineage is recovered
+    let insp = new_engine.inspect_lock(&parent_bytes).await;
+    assert!(insp.is_some());
+    assert_eq!(insp.unwrap().lock_id_hex, hex::encode([0x42; 32]));
+
+    let lin = new_engine.get_voucher_lineage("voucher_crash").await;
+    assert!(lin.is_some());
+    assert_eq!(lin.unwrap().voucher_id, "voucher_crash");
+}
+
 

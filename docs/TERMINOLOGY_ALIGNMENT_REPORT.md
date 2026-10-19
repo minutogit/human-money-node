@@ -187,7 +187,7 @@ The following material conflicts and design gaps are documented and tracked rath
    - *Status:* High Assurance is qualified as omitted in code and glossary; spec cleanup pending final architectural consolidation.
 3. **Durable-Before-Vote versus Sub-5ms In-RAM Checkout SLA (TERM-11 / DEC-029 / DEC-033):**
    - *Conflict:* The original specification states an asynchronous flush pipeline with pure in-RAM collision checks and a $< 5\,\text{ms}$ local processing target. Interview DEC-029 requires durable persistence acknowledgement before emitting binding shard votes to prevent double-signing across crashes.
-   - *Status:* Pending consolidation of database flush latency, write-queue durability contracts, and checkout budgets.
+   - *Status:* Resolved by DEC-029 restoration: strict Durable-before-Vote / Durable-before-Release implemented. Local durable SLA is $< 20\,\text{ms}$ (asynchronous redb commit acknowledgment via bounded MPSC queue and group commit), well within the 800ms checkout collection budget.
 4. **Client Authorization Naming & Proof Formats (G-021 / Naming Review):**
    - *Status:* Candidates “Lock-Signatur” (individual signature) versus “Freigabenachweis” (combined key revelation and signature) remain unselected pending maintainer decision. Existing code identifiers (`layer2_signature`, `auth_signature`) remain unchanged.
 5. **Shard Handoff & Old-Write Cutoff Mechanism (G-051, G-052 / Interview Branch S3):**
@@ -277,9 +277,7 @@ snapshot. Each new finding names the affected object and its evidence.
   using DEC-022/023, justified support and S2/S3/S5. In particular, the initial
   shorthand “DEC-023 means conflicting slots remain unresolved” is incomplete;
   the actual recorded support gates and limits govern, not that shorthand.
-- **TERM-11:** consolidate DEC-029/033 durable-choice release with AGENTS rules 1/10
-  and Specs 12/14, specifying failure/acknowledgement/retention semantics before
-  implementation. Queue capacity, RAM insertion and durable success stay distinct.
+- **TERM-11:** Resolved via DEC-029 restoration. Replaced artificial sub-5ms in-RAM vote emission with strict Durable-before-Vote (< 20ms local durable SLA). Enqueued redb write operations await persistence worker acknowledgment before emitting votes or returning success.
 - **TERM-03/04/06:** justify committee authority and safe state transfer/old-write
   closure/successor activation; ordinary sync, a digest, mature ticket or a frozen
   local list alone does not establish them. Q-S3.3-01 remains unanswered.
@@ -324,7 +322,7 @@ snapshot. Each new finding names the affected object and its evidence.
 | TERM-08 | Individual attestations distinguished from threshold shares; simulation/production distinction corrected. |
 | TERM-09 | Registry/client-history definition corrected; legitimate stateless operations retained. |
 | TERM-10 | Substantive FINAL/VOID conflict unresolved; no policy rewritten. |
-| TERM-11 | Separate latency budgets and persistence stages; durability/SLA consolidation open. |
+| TERM-11 | Resolved via DEC-029 Durable-before-Vote (< 20ms local durable SLA). |
 | TERM-12 | Free-rider/shard-RPC and island range corrections retained; merge policy open under TERM-10. |
 | TERM-13 | Binary/High-Assurance conflict documented; no new status adopted. |
 

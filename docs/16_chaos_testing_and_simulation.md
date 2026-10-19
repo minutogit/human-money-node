@@ -1,162 +1,98 @@
-# 16. Chaos Testing & Deterministic BFT Simulation
+# 16. Chaos Testing, Deterministic Models and Acceptance Gates
 
-> **Status:** Informative (Testing & Validation)  
-> **Model:** Logic & State Graph First  
+> **Status:** Selected requirements and verification criteria; not a completed security proof or test report.
+>
+> **Authority:** This English file is canonical for Spec 16. The former German path redirects here.
+>
+> **Basis:** Architecture interview DEC-053–058, DEC-064–065, DEC-070, DEC-074–088 and the accepted DB5 consolidation package. Newer explicit decisions supersede historical simulation claims.
 
-This document specifies the **deterministic simulation and chaos testing framework** for the HuMoCo Layer-2 Collision Lock Registry. According to Guiding Filter 3 (*Fractal Invariance*) and Guiding Filter 5 (*Physics Beats Protocol*) all consensus, routing and equivocation logic must be verified without real hardware clusters in 100% deterministic in-memory simulations under extreme network disruptions.
+This specification defines how the Collision Lock Registry's requirements must be challenged at their actual enforcement boundaries. Deterministic models explore schedules and produce reproducible counterexamples. Real QUIC tests must demonstrate receiver-side admission and rejection; relevant HTTP and shared-library/consumer tests must demonstrate payment acceptance behavior; actual daemon-process tests must demonstrate persistence and lifecycle behavior. None of these layers replaces the others.
 
----
+L1 carries the transaction, voucher and causal history. L2 transfers active `parent_lock -> child_lock` state and supplies a fresh, verified live-state proof from currently justified shard participants. These gates require neither inherited historical quorum-signature archives nor permission from departed committee members. Immutable own signing decisions remain separately protected until the applicable root lifetime plus grace expires.
 
-## 1. Philosophy & Test Design: No Flaky Tests
+## 1. Evidence vocabulary and reproducibility
 
-Traditional integration tests with real socket connections and real time (`tokio::time::sleep`) are unreliable, slow and not reproducible.
+Every rule-to-evidence record must distinguish these independent statuses:
 
-HuMoCo uses **deterministic simulation** (e.g. via `madsim`) for all P2P and BFT tests:
+| Status | Required record | What it establishes |
+| --- | --- | --- |
+| Selected requirement | Decision or authoritative rule and scope | Intended behavior; no claim of proof or delivery. |
+| Design/proof | Algorithm, assumptions, failure model and argument or counterexample | Conditional reasoning; a model result is limited to the model. |
+| Implemented | Inspected source revision and actual enforcement path | Code exists at that revision; no claim it was executed successfully. |
+| Executed and verified | Exact revision, command, environment, scenario, assertions and result artifact | Observed behavior for those executions; not universal correctness. |
 
-```mermaid
-flowchart TD
-    subgraph SimEngine["🎮 Deterministic Virtual Runtime (madsim)"]
-        Seed["🎲 Random Seed (e.g. SEED = 0xDEADBEEF)"] --> Clock["⏱️ Virtual Time (Nanosecond Control)"]
-        Clock --> NetLayer["🌐 Virtual In-Memory QUIC Network"]
-    end
+A test filename, test count, passing simulation, manually set readiness flag or unexecuted example does not advance another status. Concurrent working-tree edits require their own inspection. This consolidation executes no tests and marks no listed gate as passed.
 
-    subgraph Nodes["🖥️ Simulated Layer-2 Cluster (1,000 Nodes)"]
-        NetLayer --> Node1["Node 1 (Honest)"]
-        NetLayer --> Node2["Node 2 (Byzantine)"]
-        NetLayer --> NodeN["Node 1000 (Sybil Cluster)"]
-    end
+Use fixed seeds, explicit schedules and controlled clocks in models. Record partition topology, admitted identities, clock assumptions, persistence behavior and adversary capabilities. Retain failing seeds/traces and minimize counterexamples. Do not claim a particular simulator is integrated merely because it could implement this model.
 
-    Nodes --> FailureInj["💥 Failure Injector (Chaos Monkey)"]
-    FailureInj -->|Packet Drop / Network Split / Latency Jitter| NetLayer
+Real-network tests should use explicit synchronization and bounded deadlines, and report timeouts as failures with diagnostics. Test actual authenticated QUIC connections against the receiving shard server, including bypass of the HTTP gateway. Crash tests require a real daemon process and independently observed wire/storage outcomes; dropping a mock handle is insufficient. Performance measurements must state hardware, filesystem/durability settings, workload and load profile.
 
-    FailureInj --> Asserts["✅ Deterministic Invariant Check"]
-```
+## 2. Canonical meanings of INV-1601–INV-1605
 
-* **Bit-Identical Reproducibility:** If a race condition occurs at seed `0x42` after 10,000 virtual seconds, exactly this fault can be debugged bit-exactly on any developer machine by entering the same seed.
-* **Time-Lapse Execution:** 24 hours of network operation with 100,000 transactions are computed in the simulator in a few seconds of CPU time.
+These identifiers remain stable. This section replaces the stronger legacy descriptions in both former language copies; historical references inherit the qualifications here. No new numbering or independent German definitions are introduced.
 
----
+### INV-1601 — Conditional regional partition healing
 
-## 2. The 4 Core Test Matrices
+After reconnection, admitted conflicting active state is resolved by the selected confirmation-class hierarchy: higher valid class wins; `min(H_canon)` applies only within the highest valid equal class. Unsupported singleton state does not become confirmed merely through a low hash. Unrelated roots remain unaffected; losing causal branches are handled by the selected minimum sufficient live-exclusion rules.
 
-### Matrix 1: Partition Healing & Deterministic Merge ($\min(H_{\text{canon}})$)
+Exercise multiple regional views, message orderings, delayed competing support and full membership turnover. Establish convergence only under explicitly justified membership, source completeness, time and eventual communication assumptions. Regional FINAL may later be revised by valid competing regional evidence (DEC-053); it is not unconditional global irreversibility. There is no universal O(1) healing deadline. Safe source continuity and activation during turnover remain proof gates, not consequences of deterministic hashing alone.
 
-* **Scenario:** A shard of 100 nodes is split by a submarine cable cut into two halves ($A$ with 60 nodes, $B$ with 40 nodes). Both halves process local locks independently for 12 hours.
-* **Test Procedure:**
-  1. Partitioning of the virtual network at time $t = 100\,\text{s}$.
-  2. Generation of 5,000 disjoint locks in half $A$ and 3,000 locks in half $B$.
-  3. Restoration of the network connection at time $t = 43,300\,\text{s}$.
-* **Expected Invariant (`INV-1601`):**  
-  Without manual intervention or master key, all 100 nodes converge deterministically on the canonical state via $\min(H_{\text{canon}})$ within an $O(1)$ time window. No data is lost, except in the case of double spends (equivocation).
+### INV-1602 — Verified first-party fraud, without framing
 
----
+Permanent identity/ticket/Web-of-Trust sanctions require two genuine, cryptographically verified conflicting own approvals of the same node for the same defined signing slot/context. A client submitting two conflicting spends is not by itself proof that either node equivocated. A forged proof, wrong key, mismatched context or unverified hearsay cannot authorize a ban.
 
-### Matrix 2: Equivocation Slashing & Double-Spend Detection
+An honest signer of a losing regional branch may later report the canonical live state without that report becoming a second original write approval. Verify purpose separation and immutable own-choice protection. Locks and receipts are not added to gossip; only the existing F2F presence and verified equivocation-proof streams are used. No probabilistic receipt-cache collision or unsupported three-minute fraud-discovery promise is a success criterion.
 
-* **Scenario:** A malicious client or a colluding gateway attempts to issue the same `parent_lock` simultaneously to two different shard nodes (*double spend*).
-* **Test Procedure:**
-  1. Client $C$ signs `LockEntry_1` (predecessor $P$) to node $N_1$ in shard $S_1$.
-  2. Client $C$ signs `LockEntry_2` (predecessor $P$, recipient ephemeral key differing) to node $N_2$ in shard $S_2$.
-  3. Stochastic receipt gossip ($p = 0{,}02\,\%$) disseminates the receipts through the P2P swarm.
-* **Expected Invariant (`INV-1602`):**  
-  Within statistical bounds ($< 3\,\text{minutes}$) the two proofs collide in at least one peer cache. An irrefutable `SignedEquivocationProof` is automatically generated, which leads to immediate permanent P2P ban, shard-ticket loss and WoT exclusion of the offender (Zero Financial Deposits / No Staking, but Identity Revocation & WoT Severance).
+### INV-1603 — Admission defenses under explicit adversary assumptions
 
-```mermaid
-flowchart LR
-    MaliciousClient["🦹 Malicious Client C"] -->|Lock 1 (Parent P)| Node1["Shard Node N1"]
-    MaliciousClient -->|Lock 2 (Parent P)| Node2["Shard Node N2"]
+Exercise isolated Sybil circles, bridge saturation, colluding admitted friends, ticket grinding and topology churn. Ticket work uses Argon2d and its 24-hour maturation rule; passive presence uses the selected three missed hourly heartbeats, not a committee tenure. F2F gossip authorization and learned-peer shard authorization remain separate from permissionless public client ingress. A public node key never becomes an ingress friend bearer secret.
 
-    Node1 -->|Gossip Receipt p=0.02%| PeerCache["🔍 Random Peer Cache"]
-    Node2 -->|Gossip Receipt p=0.02%| PeerCache
+Report which identities can be admitted under the tested assumptions and how limits behave. Neither simulation nor operator belief proves at most six Byzantine members in every subjective committee. Do not assert that all bots always remain immature, that a particular heartbeat-drop percentage is universal, or that circular friendships alone establish a global fault bound. The authority/admission justification remains separately unresolved.
 
-    PeerCache -->|Collision!| SlashingProof["🔴 SignedEquivocationProof<br>(Permanent Ban & WoT Exclusion)"]
-```
+### INV-1604 — Bounded resources and measured service isolation
 
----
+Under declared public ingress, read and authenticated shard/sync floods, verify bounded buffers, concurrency, batch size/bytes/wait, retries, in-flight coalescing and waiting consumers. Verify cheap admission filters before expensive work and reservation before RAM mutation. Read traffic does not reserve write capacity or commit per query; inbound shard service and recovery have protected bounded budgets.
 
-### Matrix 3: Sybil & Sycophant Circle Isolation
+Measure latency and progress under stated conditions. The 800 ms collection budget is a limit, not a success guarantee; NOT_READY, unavailable and Byzantine members all consume the same six noncontributor slots. Local durable and checkout latency targets require measurements. No finite server promises universal latency under arbitrary load or arbitrary disk stalls. Private bounded diagnostics may explain refusals but never cause bans or authorize committee membership changes.
 
-* **Scenario:** An attacker computes 500 Argon2id identities on a server farm and has them mutually vouch for each other in a circular graph (*botnet island* / Broom Topology), attached via a single bridge node.
-* **Test Procedure:**
-  1. The simulator injects 500 synthetic nodes into the gossip network via 1 bridge edge.
-  2. The botnet sends heartbeats and attempts to claim ingress priority.
-* **Expected Invariant (`INV-1603`):**  
-  Stochastic edge throttling ($R_{\text{soft}}$) discards $> 99{,}9\%$ of bot heartbeats at the bridge edge. No bot reaches $\ge 8/24$ heartbeats over 24 hours. All 500 bots remain at `IMMATURE` and never contribute to $N_{\text{active}}$.
+### INV-1605 — Complete, justified state transfer before readiness
 
----
+A new or recovering shard remains NOT_READY until its relevant active state is safely validated, durably installed and activated. Check the full authenticated root lifetime through `root.valid_until + 30s`, including locks older than 24 hours, snapshot coverage, bounded concurrent deltas, owner/root/canonical integrity and atomic publication. A matching digest verifies the bytes represented by that digest; it does not establish that the sources contain every required lock.
 
-### Matrix 4: Ingress Flooding & Rate Limiting (Tier 1 vs. Tier 3)
+Include an 8+6+6 distribution of independently confirmed locks across replicas: there may be no 14 identical whole-state digests. Include incomplete or circularly readied new replicas agreeing on an empty/partial digest. The algorithm must justify coverage or remain NOT_READY; it must not wait for nonexistent equality, accept missing records or use new replicas' agreement as proof of source continuity. Honest incomplete replicas may serve bounded retained data without becoming authoritative ready witnesses. Exact source/activation proof remains open; this specification selects no replacement consensus or historical-signature archive.
 
-* **Scenario:** A botnet sends 100,000 unvouchered requests/second to a shard node (Tier 3), while simultaneously a merchant at the checkout (Tier 1) requests a lock.
-* **Test Procedure:**
-  1. Flooding of node $N$'s socket with anonymous Tier-3 traffic.
-  2. Activation of continuous slew-rate limiters & Argon2id memory-hard challenges for Tier 3.
-  3. Injection of a genuine merchant request with valid `AccountTag` (Tier 1).
-* **Expected Invariant (`INV-1604`):**  
-  The Tier-1 merchant request is processed through the isolated VIP/priority quota pipeline in $< 50\,\text{ms}$. The Tier-3 traffic backs up at the attacker's memory-hard Argon2id hurdles without exceeding the server node's RAM or CPU limits.
+## 3. Interface and adversarial scenario matrix
 
----
+All rows below are required acceptance scenarios, not claims that named tests already satisfy them. Positive controls and the stated negative behavior must both be observed. Each row needs its own evidence record from Section 1.
 
-### Matrix 5: Digest-First PULL-Sync & Anti-Entropy Convergence
+| Gate / relevant rule | Enforcement boundary | Concrete positive and adversarial scenarios | Required observation |
+| --- | --- | --- | --- |
+| Frozen committee / live proof (DEC-084) | Real QUIC collector, HTTP gateway and actual shared verifier/recipient | Valid 14 distinct current members from one frozen <=20 snapshot; then duplicates, full-key substitution, rank21, different shard/network/lock/state/snapshot or mixed contexts; 13 valid votes plus invalid extras. | Verify every signature and full identity. Only justified current members for one compatible statement count; FINAL needs 14. No threshold lowering, pool expansion or success field accepted without the full verified proof. Membership justification remains an explicit design premise. |
+| Purpose, challenge and replay (DEC-083/084) | Real QUIC response and recipient verifier | Fresh receiver challenge succeeds; replay an earlier challenge or transplant a live response as original write approval, or reverse the purposes. | Separate authenticated purposes bind exact target/state/request/context and challenge. Stale/mismatched proofs never release payment or authorize a conflicting write. Normal cheap status stays `read_quorum=1` / INV-0310 and is not promoted to payment proof. |
+| Demand readiness (DEC-085/086; INV-1605) | Receiving shard over real QUIC and automatic recovery | First authorized demand for an assigned shard; repeated requests; another ready shard; unauthorized/unassigned triggers; failed transfer and stale completion. | At most one bounded job per shard, bounded overall admission/retries, prompt NOT_READY until safe installation, no node-side payment queue. Unrelated ready shards continue. Readiness is rechecked immediately before every countable signature, including self/live-state paths. |
+| Transfer integrity and coverage (INV-1601/1605) | Real peer transfer, persistent installation and signer | Valid full-lifetime snapshot plus deltas; forged/truncated records, missing shard, >24h unexpired lock, root expiry, competing classes, 8+6+6 distribution, incomplete agreeing sources and turnover during installation. | Reject malformed/unjustified imports, preserve required live exclusions and own choices, install durably before activation. Cryptographic byte integrity alone never licenses completeness/readiness. Demonstrate coverage under explicit source assumptions or retain NOT_READY. |
+| Durable-before-release (DEC-087) | Actual daemon, worker transaction, receiving peer and restart | Stop/kill before commit, after commit before release and after release; delay/fail commit; duplicate pending/idempotent request; gateway self vote and status path. | No binding signature/vote/envelope escapes before exact atomic durable lock+own-choice acknowledgment. Signature calculation may occur in RAM. Restart with intact committed storage recovers the choice and refuses conflicting approval. No RAM guard is held during await; no synchronous handler disk I/O. |
+| Unknown storage loss/rollback | Actual daemon recovery and signing gate | Missing/corrupt storage, stale restored database, failed recovery or unknown commit acknowledgment. | An ordinary crash with intact commits differs from rollback. Unsafe/unknown state cannot authorize new signatures. Do not claim durable ordering alone reconstructs lost storage; rollback recovery remains a separate design/proof gate. |
+| Timeout, batching and repeated work (DEC-088; INV-1604) | Real QUIC/HTTP plus worker/storage observation | Single request below batch size; full bytes/count; retry flood; timeout followed by delayed commit; saturated queues and stalled disk. | Bounded time/count/bytes and waiters, coalesced identical work, prompt capacity rejection. No automatic reversal of completed commits, no early RAM-cached signature and no interpretation of timeout as proof of nonpayment. Identical retry discovers committed result safely. |
+| Frame and quota defenses (INV-1604) | Real authenticated QUIC at receiving shard, independently of gateway | Oversized/truncated/overflowing lengths, slow partial frames, unsupported flags, malformed proof, replay, over-quota learned peer and flood. | Exact specified wire refusal/drop, bounded incremental allocation, safe checked parsing and cheap checks before costly crypto. HTTP-only rejection or in-memory quota tests do not establish server protection. Assertions include queue/RAM/state side effects, not just an error string. |
+| Tier boundaries and admission (INV-1603) | Real QUIC handshake/streams and public HTTP | Friend presence, non-friend gossip, learned shard RPC, unknown peer, public client without P2P friendship and leaked public node key as token. | F2F barrier and learned-peer enforcement hold internally; public client access remains permissionless subject to its own admission rules. No public-key PoW bypass, hearsay sanction or extra gossip stream. |
+| Merge and fraud (INV-1601/1602) | Model plus real QUIC receiving merge/fraud paths and verifier | Higher-class vs lower-class, equal-class competing regions, forged double-sign proof, genuine same-slot equivocation, honest postmerge state report. | Class-first then equal-class min-hash; only verified personal fraud sanctions the signer. Branch loss, timeout, NOT_READY or quorum cancellation alone never sanctions identity. Own original choice remains immutable. |
+| Operator privacy (DEC-077; INV-1701) | Real HTTP listeners, routing aliases/subroutes and local control boundary | Public requests to every metrics/topology/dashboard alias, alternate listener and nested route; authorized private access. | Private diagnostics remain private at every alias. Public gateway discovery provides its intended HTTP directory only; cached fallback stays in the client. Telemetry cannot ban peers or provide voting authority. |
+| Stop and database release (DEC-074–076/088) | Actual CLI/control command, daemon process, OS and database reopen | Clean stop, repeated signals, saturated flush queue, blocked worker and internal deadline with longer supervisor fallback. | Original drain/deadline is preserved, no undurable release, truthful clean/forced result. Default CLI completion establishes actual process exit and released database lock by reopening it from an independent process, not merely receipt of a shutdown request. |
 
-* **Scenario:** 100 shard nodes process 5,000 locks under stochastic packet loss ($15\%$) and temporary jitter. A new shard node $N_{\text{new}}$ joins the shard (cold start) and performs a Digest-First PULL-Sync.
-* **Test Procedure:**
-  1. Cluster generates 5,000 valid locks under chaos jitter. Individual replicas miss up to $5\%$ of locks (in-flight difference).
-  2. $N_{\text{new}}$ sends parallel `GetShardDigest` to all 20 incumbent shard peers.
-  3. $N_{\text{new}}$ forms a cluster and determines the quorum digest $D^*$ ($\ge 14$ votes).
-  4. Injection of 500 forged lock entries by a Byzantine peer during the stream request.
-* **Expected Invariant (`INV-1605`):**  
-  The stream delivered by the malicious peer fails to match the confirmed $D^*$ hash and is immediately rejected in $< 1\,\mu\text{s}$ (zero-garbage integrity). $N_{\text{new}}$ pulls the stream from the next honest quorum peer, validates $D^*$ and converges bit-identically to the correct shard state.
+These scenarios do not require recursively collecting retired signers' signatures. They do require full live-proof verification and separate persistence of this node's own decisions. Exact wire schemas, safe current authority, transfer coverage, clock/seal composition and rollback recovery cannot be closed merely by writing this matrix.
 
+## 4. Existing inspection candidates and acceptance records
 
----
+The following paths existed at consolidation and are **inspection candidates only**. Their names do not prove assertions, automation, coverage, implementation correctness or successful execution:
 
-## 3. Rust Test Skeleton (`tests/simulation/`)
+- `crates/humoco-node/tests/quorum_assembly_tests.rs`, `status_reconciliation_tests.rs`, `anti_self_slashing_wire_tests.rs`: committee, state-evidence and fraud candidates.
+- `crates/humoco-node/tests/phase5_pull_sync_and_readiness.rs`, `created_at_bucket_decoupling_tests.rs`, `subquorum_canonical_merge_tests.rs`: recovery, lifetime and merge candidates. A manually toggled readiness flag establishes refusal behavior at most; automatic safe recovery needs its own test.
+- `crates/humoco-node/tests/phase11_wire_level_adversarial_tests.rs`, `chaos_wire_http_fuzz.rs`, `phase4_net_time_and_quotas.rs`, `f2f_gossip_and_shard_rpc_tests.rs`: receiver-side parser, quota and authorization candidates.
+- `crates/humoco-node/tests/storage_tests.rs`, `control_tests.rs`, `cluster_e2e_tests.rs`, `api_tests.rs`: durability, lifecycle, HTTP and consumer candidates; inspect whether they use actual daemon processes and observe release ordering.
 
-An exemplary test in the Rust test suite repository looks as follows:
+Inspect source and actual assertions before assigning any gate. Shared-library recipient verification and real process-crash coverage may need additional tests; no absence or completion claim is inferred from this list. Preserve useful deterministic/core models as complementary evidence.
 
-```rust
-#[cfg(test)]
-mod chaos_tests {
-    use crate::core::FixedQ64_64;
-    use crate::network::SimulatedNetwork;
+For each final rule, record its canonical definition or explicit legacy alias, affected interface and source revision, selected requirement, proof assumptions/open edges, exact test scenario and expected wire/result/state effects, then executed command/result/artifact when available. Associate counterexamples with the rule they refute. A family-level test name or percentage must not replace item-level evidence. Diagnostic artifacts and measurement endpoints obey the private operator boundary.
 
-    #[madsim::test]
-    async fn test_sybil_sycophant_isolation() {
-        let handle = madsim::runtime::Handle::current();
-        let sim_net = SimulatedNetwork::new(0xDEADBEEF_u64);
-
-        // 1. Create 10 honest nodes
-        let honest_nodes = sim_net.spawn_honest_cluster(10).await;
-        
-        // 2. Create 500 sycophant bot nodes with circular vouching
-        let bot_nodes = sim_net.spawn_sycophant_cluster(500).await;
-
-        // 3. Simulate 1 hour of P2P gossip
-        sim_net.advance_time_secs(3600).await;
-
-        // 4. Check invariant: All bots MUST have M_eff == 0.0
-        for bot_id in bot_nodes {
-            let m_eff = sim_net.get_effective_trust_mass(&bot_id).await;
-            assert_eq!(
-                m_eff,
-                FixedQ64_64::ZERO,
-                "Sycophant bot {:?} broke WoT isolation!",
-                bot_id
-            );
-        }
-    }
-}
-```
-
----
-
-## 4. Summary of Test Invariants
-
-| Invariant | Name | Goal | Success Criterion |
-| :--- | :--- | :--- | :--- |
-| **`INV-1601`** | Partition Healing | Deterministic Merge | Identical root hash $\min(H_{\text{canon}})$ after reconnect |
-| **`INV-1602`** | Double-Spend Detection | Equivocation Slashing | Proof generation & L1 penalty $< 3\,\text{minutes}$ |
-| **`INV-1603`** | Sycophant Isolation | Botnet Protection | Effective Trust Mass $M_{\text{eff}} == 0.0$ for unvouchered circles |
-| **`INV-1604`** | Ingress Tiering | Point-of-Sale Latency Guarantee | Tier-1 latency $< 50\,\text{ms}$ even under $100\times$ Tier-3 flooding |
-| **`INV-1605`** | Multi-Replica PULL-Sync | Zero-Garbage & Completeness | $100\%$ convergence of 14/20 locks, 0 unconfirmed entries in RAM |
+Acceptance requires the relevant design/proof gates as well as implemented and executed evidence. The architecture interview's selections establish requirements; this consolidation does not declare the entire design verified or production delivered.

@@ -1,143 +1,183 @@
-# 15. P2P Transport & Connection Management
+# 15. P2P Transport and Connection Management
 
-> **Checkout committee policy (Rev. 4):** Write verification freezes a canonical committee of at most twenty distinct identities and never substitutes ranks 21–40 for unavailable votes. FINAL requires fourteen valid members of that snapshot; write collection has an 800 ms budget. Unready/non-member replies and cancelled stragglers are neutral. This policy supersedes legacy checkout replacement descriptions below; background succession requires a separate membership-continuity proof. Read policy and observation-based ticket incubation are unchanged.
+> **Status:** Canonical English transport requirements, consolidated from the
+> accepted architecture interview packages DB2–DB5 and DEC-083–088.
+> Requirements describe the target contract; this edit does not establish current
+> implementation, measured latency or executed security evidence.
 
+This specification covers internal node-to-node QUIC transport. Public wallet
+and Point-of-Sale HTTP ingress is a separate boundary. Membership and routing
+are specified in [Spec 03](03_routing_und_sharding.md), framing in
+[Spec 10](10_p2p_wire_format_und_session_framing.md), persistence in
+[Spec 14](14_node_persistenz_und_redb_speicher.md), and passive presence in
+[Spec 11](11_organische_praesenz_und_dunbar_gossip.md).
 
-> **Status:** Standard  
-> **Model:** Logic & State Graph First  
+## 1. Identity, authorization and separate connection roles
 
-> [!TIP]
-> **💡 Idea List / Future Thought (SLA Evaluation: Active QUIC Teardown vs. Silent Work Refusal):**  
-> A clean, explicit teardown of a QUIC connection with an active disconnect signal (`CONNECTION_CLOSE` / `DRAINING` e.g. due to maintenance, reboot or regular shutdown) must systemically be evaluated as **far more benign / non-critical** than a node that actively maintains a QUIC session (pings/keepalives are flowing) but silently ignores submitted shard read/write requests or requests for node attestations.
-> * **Honest Failure (Clean Close):** "I am offline / under maintenance" $\to$ Immediate, clean failover of neighbors, 0% fraud suspicion.  
-> * **Silent Refusal (Silent Zombie / Lazy Peer):** The connection is physically up, but the substantive work in the shard is refused $\to$ Suspicion of malicious free-riding, griefing or sabotage. This is an important building block for future SLA metrics and automatic social slashing / edge severance by direct F2F friends.
+Internal P2P uses QUIC over UDP with TLS 1.3 authentication bound to the permanent
+Ed25519 `NodePubKey`. The separately mined `HrwRoutingId` is used for HRW routing;
+a valid connection or routing ticket alone does not establish committee authority.
+Full authenticated identities must be used, not short IDs, IPs or Bloom matches.
 
-This document specifies the **P2P transport layer** and **connection management** for the HuMoCo Layer-2 Collision Lock Registry. It defines the native **QUIC connection architecture** (via `quinn` / `iroh-net`), **stream multiplexing to prevent control-plane starvation**, the **0-RTT whitelist security architecture**, and the **asynchronous Tokio actor pipeline**.
+| Connection role | Authorization | Lifecycle and permitted work |
+| --- | --- | --- |
+| F2F | Direct configured friendship | Persistent sessions may use transport keep-alive; heartbeat and verified equivocation-proof gossip only between direct friends. |
+| Shard-direct | Peer previously learned through authorized F2F presence into `known_network_nodes` | Ephemeral bounded LRU pool, 128–256 sockets, 15-second idle timeout, no keep-alive; authorized lock/status/sync RPC. |
+| Public client ingress | Free/Friends/VIP admission in Spec 13 | HTTP clients need no P2P friendship; a public node key is never an ingress secret. |
 
----
+Unauthorized shard-direct peers are rejected on the internal P2P boundary;
+non-friend gossip is discarded even if the sender has shard-direct permission.
+Locks are never gossiped. QUIC stream separation removes stream-level ordered
+blocking between different streams, but does not eliminate shared CPU, socket,
+congestion or bandwidth contention.
 
-## 1. Transport Fundamentals: Native QUIC via UDP
+## 2. Bounded streams and protected work budgets
 
-To deterministically guarantee Point-of-Sale latency $< 1000\,\text{ms}$ (typically $< 50\,\text{ms}$), the HuMoCo Layer-2 exclusively uses **QUIC over UDP** (RFC 9000).
+Stream classes describe scheduling roles, not fixed QUIC stream numbers or new
+gossip protocols. F2F mesh gossip has exactly two semantic streams: hourly
+presence and verified equivocation proofs. The other classes below are direct
+RPC/control work.
 
-```mermaid
-flowchart LR
-    subgraph QUIC_Stack["HuMoCo QUIC Transport Stack"]
-        direction TB
-        L7["L7: Zero-Copy WireHeader (32B) + rkyv Payload"]
-        L6["L6: Mutual TLS 1.3 (Ed25519 Node-Identity Certs)"]
-        L4["L4: QUIC Stream Multiplexing & Flow Control (quinn / iroh)"]
-        L3["L3: UDP Datagrams (IPv4 & IPv6 Dual-Stack)"]
-        L7 --> L6 --> L4 --> L3
-    end
-```
+| Work class | Scheduling requirement | Admission and overload behavior |
+| --- | --- | --- |
+| Lock/status shard RPC | Protected data-plane capacity ahead of ordinary gossip/control | Bound concurrent streams, tasks, bytes, per-peer work and waiters; refuse promptly when full. |
+| Snapshot/delta sync | Protected bounded background progress | Bound transfer size, chunks, concurrent shards, retries and CPU; at most one active recovery per shard. |
+| Presence gossip | Lower-priority, bounded | F2F-only, hourly cadence and fan-out under Spec 11; no lock records or missing-signer accusations. |
+| Equivocation evidence | Priority within a finite verification budget | Bound frames, queue and CPU even for urgent traffic; verify offender signatures before sanctions. |
+| Direct connection control | Bounded | No active background shard-ping storm, gossip privilege escalation or unbounded retry loop. |
 
-### Core Transport Properties:
-1. **No Head-of-Line Blocking:** Packet loss on a gossip stream never blocks parallel transaction locks on the data-plane stream.
-2. **Mutual TLS 1.3 & Argon2d Shard Tickets:** Each node authenticates the connection with its Ed25519 `NodePubKey`. The separate `HrwRoutingId` shard ticket is derived from Argon2d work and BLAKE3 whitening, subject to the admission and incubation rules in [Spec 07](07_admission_und_wot_buergschaften.md). A routing ticket is not the permanent node identity.
-3. **Connection Migration:** Mobile wallets and PoS terminals can seamlessly switch between Wi-Fi, LTE and 5G without dropping the QUIC session.
+Public ingress must not consume the reserved capacity needed to serve incoming
+shard RPC and advance repair. Priority is not permission to starve recovery or
+bypass admission. No stream class has an unbounded queue. Exact queue/batch sizes
+and scheduling parameters require measurement and receiver-side verification.
 
----
+Run cheap length, type, authorization, quota and time-window checks before
+expensive cryptography. Incrementally read bounded chunks; an untrusted length
+must never directly determine a frame allocation. Wire parsing uses checked safe
+standard-library methods under `#![forbid(unsafe_code)]`.
 
-## 2. QUIC Stream Multiplexing & Anti-Starvation
+## 3. Frozen checkout collection and separate live-state evidence
 
-As identified in the threat analysis, byzantine-overloaded nodes tend to silently discard data-plane traffic during network floods. To physically prevent this, each peer connection is divided into **4 isolated stream classes**:
+A write request freezes one canonical HRW snapshot of at most 20 distinct
+`NodePubKey` identities, including self when eligible, using full 256-bit scores
+and deterministic identity tie-breaking. FINAL requires 14 verified distinct
+votes from that snapshot. Collection uses an 800 ms budget; dispatch is bounded
+by that committee, without rank-21 replacement or a 50 ms/25 ms hedge policy.
+Fail early once the remaining eligible members cannot supply the required quorum.
+After a valid quorum, cancel outstanding collection tasks neutrally.
 
-```mermaid
-flowchart TD
-    subgraph MultiStream["QUIC Connection (Node A <--> Node B)"]
-        direction TB
-        S0["⚡ Stream 0: DATA_PLANE_STREAM (Bidirectional, High Priority)<br>• LockRequest & LockResponse (144B)<br>• Dedicated Tokio High-Priority Channel"]
-        
-        S1["📡 Stream 1: DUNBAR_GOSSIP_STREAM (Unidirectional, Bulk)<br>• NodePresence (16B) & Receipts (p=0.02%)<br>• Throttled via bio-mimetic RED Dropping"]
-        
-        S2["🚨 Stream 2: FRAUD_ALERT_STREAM (Bidirectional, Urgent Out-of-Band)<br>• 21B HUMOCO_V1_EQUIVOCATION Proofs<br>• Highest System Priority (Immediate Interruption)"]
-        
-        S3["🤝 Stream 3: NODE_CONTROL_STREAM (Bidirectional, Low Priority)<br>• F2F Peering Handshake, NodeID Migration & Status Probes"]
-    end
-```
+`NOT_READY`, `NOT_IN_SHARD`, capacity refusal, cancellation after quorum, normal
+idle eviction and clean connection close do not establish misconduct. Do not
+count them as peer failures. All unavailable votes share the six-member headroom;
+six silent members plus one unready member leave only 13 possible votes. The
+budget bounds waiting, not success, disk latency or Internet delivery.
 
-### Prioritization and Flow-Control Matrix
+Ordinary status retains `read_quorum=1` / INV-0310. A single matching lock or a
+gateway success flag is insufficient for payment release. Current live-state
+clearance requires a fully verified current 14/20 proof under DEC-084. Verify
+every signature, full identity, distinctness, justified current authority and
+agreement on the exact request/state context. Bind the response to the network,
+shard, target lock, state and a fresh recipient challenge; reject replays and
+mixed contexts.
 
-| Stream ID | Name | Direction | Priority | Tokio Buffer | Behavior on Overload |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Stream 0** | `DataPlane` | Bidirectional | **HIGH** | Bounded (10,000) | Backpressure to ingress |
-| **Stream 1** | `DunbarGossip` | Unidirectional | **LOW** | Bounded (1,000) | Bio-mimetic RED drop |
-| **Stream 2** | `FraudAlert` | Bidirectional | **URGENT** | Unbounded | Immediate processing |
-| **Stream 3** | `NodeControl` | Bidirectional | **NORMAL** | Bounded (500) | Cooldown & Retry |
+A live-state response has a distinct authenticated signature purpose from an
+original write approval. It attests safely installed current state; it neither
+reissues a historical write choice nor requires bundles signed by retired nodes.
+Check per-shard synchronization readiness and current responsibility immediately
+before every countable state signature, including self responses. Pending RAM
+state cannot bypass durable installation through an idempotent or status path.
+The final encoding, domain tags, authority justification and safe activation
+proof remain delivery/design obligations; TLS authentication alone proves none
+of them. A local frozen snapshot does not prove globally identical views or
+unconditional global irreversibility (DEC-053).
 
----
+## 4. Persistence and non-blocking response release
 
-## 3. QUIC 0-RTT Whitelist & Replay Protection
+For an original binding write approval, reserve bounded persistence capacity
+before RAM mutation. The RAM collision check is followed by an asynchronous
+worker that atomically commits the exact lock and immutable own signing decision
+in `redb`. Release the attestation, idempotent approval, response envelope or
+gateway self vote only after its exact successful durable commit acknowledgment
+(DEC-087, restoring DEC-029 and superseding DEC-062's early release).
 
-QUIC 0-RTT (Early Data) saves a full network round-trip ($\approx 40\text{--}60\,\text{ms}$ on mobile), but harbors the risk of replay attacks.
+Signature calculation may happen in RAM; enqueue success or a computed signature
+never authorizes release. Await persistence without RAM guards or blocking disk
+I/O on the request/runtime thread. Expensive CPU work uses bounded dedicated
+workers. Coalesce identical in-flight operations without unbounded waiters; a
+pending cache entry is not a durable vote. Bound batches by time, entries and
+bytes, including under single-request load.
 
-```mermaid
-flowchart TD
-    Request["Incoming QUIC Early Data Request (0-RTT)"] --> CheckType{"Message type in Safe 0-RTT Whitelist?"}
+Timeout does not roll back an already committed lock. An unknown outcome remains
+unresolved and an identical retry may observe the commit. A failed or missing
+commit acknowledgment never permits a binding approval. An ordinary process
+crash with intact committed storage is addressed by this ordering; actual
+storage loss, rollback and failed recovery remain separate safety gates. Local
+commit latency targets require measurement, not assumptions about a 1–5 ms disk.
 
-    CheckType -- "Yes (Idempotent Read)" --> CheckSeq{"session_seq in Sliding Window W=4096?"}
-    CheckSeq -- "New" --> ExecuteRead["⚡ Immediate Response (Latency < 10ms)"]
-    CheckSeq -- "Replay detected" --> DropRead["🛑 Silent Drop & Increment Metric Counter"]
+## 5. 0-RTT, replay and lifecycle
 
-    CheckType -- "No (State Write / Lock / PoW)" --> RejectWrite["❌ REJECT: Err(WireError::ZeroRttForbiddenForWrites)<br>Enforces 1-RTT Handshake!"]
-```
+State-changing lock requests are forbidden in QUIC 0-RTT. Other early-data
+eligibility is controlled exclusively by the whitelist and validation rules in
+[Spec 10](10_p2p_wire_format_und_session_framing.md). A nominal read must not
+bypass state-changing admission, trigger unlimited recovery or amplify work.
+No local duplicate filter makes TLS early data globally non-replayable across
+restarts, sessions or replicas.
 
-### 3.1 The 0-RTT Whitelist Table (Single Source of Truth: docs/10)
+The bounded session-sequence replay window (4096 positions where specified by
+Spec 10) applies within its authenticated scope. Validate that scope and sequence
+bounds; duplicate/old frames cannot mutate locks or obtain a new write approval.
+Recipient challenges and purpose/context verification protect live proof reuse
+at a separate layer; a transport sequence is not a replacement for them.
 
-| Message Type | 0-RTT Allowed? | Rationale |
-| :--- | :---: | :--- |
-| `StatusQuery` / Ping | ✅ **YES** | Idempotent, returns pure RAM status without side effects |
-| `LatencyProbe` / `ShardMapPing` | ✅ **YES** | Pure latency and topology snapshots |
-| `ActiveSyncRequest` | ✅ **YES** | **Idempotent PULL Sync:** Requests quorated active locks; 0 state mutation |
-| `LockVerifyRequest` / Init | ❌ **NO** | **State change: 1-RTT TLS 1.3 strictly enforced** |
-| `EquivocationProof` / `FraudAlert` | ❌ **NO** | **Slashing Trigger:** Requires 1-RTT Nonce binding for replay protection |
-| `Argon2id PoW Submission` | ❌ **NO** | One-shot protection against PoW replays |
+Persistent F2F keep-alive maintains a transport session; it is not network-wide
+presence evidence. HRW presence comes passively from hourly F2F heartbeats,
+with suspension after three consecutive missed hourly heartbeats (DEC-056).
+Request timeouts, private latency metrics and idle socket eviction must not
+be substituted for those presence observations. The 24-hour ticket maturation
+wall and phase-stability hysteresis are separate from presence and committee
+terms. There is no daily committee baton handover.
 
-### 3.2 Anti-Replay & QUIC Delegation
-Since QUIC (RFC 9000) and TLS 1.3 natively provide packet ordering, stream multiplexing and replay protection at the transport layer, the application-level `session_seq` in the `WireHeader` (docs/10) serves for intra-stream causality checking. For 0-RTT Early Data, a volatile sliding window ($W = 4096$) protects against interceptable replay floods before the handshake.
+Clean QUIC close and idle expiration release transport resources; neither
+changes a frozen checkout committee nor supplies an extra vote. Graceful daemon
+shutdown stops admission, drains bounded accepted persistence work within its
+deadline, and closes sessions according to the lifecycle contract. No timeout
+or teardown accusation is gossiped. Diagnostic observations remain private and
+non-authoritative under INV-1701; bans require verified first-party evidence.
 
----
+## 6. Canonical transport invariants
 
-## 4. Asynchronous Tokio Actor Pipeline
+1. **[INV-1501] Zero 0-RTT Writes:** No state-changing lock request is accepted
+   as early data; writes require the completed 1-RTT authentication boundary.
+2. **[INV-1502] Data-Plane Priority:** Protect bounded shard data-plane service
+   ahead of ordinary gossip/control while preserving bounded repair progress.
+3. **[INV-1503] Non-Blocking Network Threads:** Expensive cryptography and disk
+   work use bounded workers; network tasks do not perform blocking heavy work.
+4. **[INV-1504] Transport Replay Defense:** Enforce the authenticated bounded
+   sequence/replay window and early-data whitelist of Spec 10. A volatile bitmap
+   does not establish universal replay immunity or replace application freshness.
+5. **[INV-1505] Transport-Native Teardown:** Close/idle/error handling reclaims
+   connection resources without failure gossip, checkout replacement or invented
+   presence/identity sanctions.
 
-To protect Tokio worker threads from blocking due to computationally intensive cryptography (Argon2id, Ed25519 batch verification), I/O is strictly separated from CPU work:
+These meanings own INV-1501–1505. Historical uses of INV-1501 for missing-count
+control in Spec 18 and INV-1502 for skip-and-replace in Spec 19 are withdrawn,
+not aliases authorizing those obsolete rules. Diagnostics refer to INV-1701;
+checkout membership refers to Spec 03.
 
-```mermaid
-flowchart LR
-    Socket["QUIC Socket (UDP)"] -->|Async I/O| TokioIO["Tokio Network Worker"]
-    TokioIO -->|Bounded MPSC| CryptoPool["Dedicated Rayon / Blocking Threadpool<br>(Ed25519 & Argon2id Verification)"]
-    CryptoPool -->|Validated Lock| Engine["LockStorageEngine (RAM Index < 1µs)"]
-    Engine -->|Response Frame| TokioIO
-```
+## 7. Required evidence (not executed by this consolidation)
 
-* **Network I/O:** Runs on non-blocking Tokio event loops.
-* **CPU Pool:** Verification runs in a fixed Rayon/blocking pool with a fixed core count.
-* **Bounded Channels:** Prevent uncontrolled growth of RAM under DDoS attacks.
+| Rule/interface | Positive and adversarial scenario | Required result |
+| --- | --- | --- |
+| P2P authorization | Real QUIC friend, learned non-friend and unknown peer; unauthorized gossip/RPC | Correctly scoped acceptance/refusal; HTTP ingress remains independent. |
+| INV-1501 / 1504 | Real QUIC early lock, replayed/old/out-of-window frames and valid allowed read | No early write or replay mutation; bounded resource use and correct read behavior. |
+| INV-1502 / 1503 | Flood gossip, sync, urgent proof and public ingress while honest shard requests run | Receiver-side caps/refusal; protected service and repair progress; no unbounded CPU queue. |
+| Checkout collection | 14 valid members; duplicate/out-of-snapshot votes; six silent plus one unready; cancelled stragglers | Exact membership threshold; bounded failure when impossible; no peer-failure accounting for neutral results. |
+| Durable release | Process crash before commit, after commit before send, and after send; idempotent/self/status paths | No binding write signature before exact commit; committed own choice recovered; no pending-state shortcut. |
+| Current live proof | Wrong purpose/target/challenge/context, stale authority, one unready signer, changed sync generation | No payment clearance from invalid/incomplete proof; readiness rechecked before countable signatures. |
+| INV-1505 / lifecycle | Idle pool churn, graceful close, deadline and repeat stop signals | Bounded sockets/drain, normal cleanup neutral, no replacement votes or hearsay. |
 
----
-
-## 5. Keep-Alive, Ping Intervals & Connection Lifecycle
-
-1. **P2P Inter-Node Keep-Alive (Shard Peers):**
-   * Shard partners and direct gossip neighbors send a native QUIC `PING` frame (or `ShardMapPing 0x0005`) every **10 seconds**.
-   * The QUIC `max_idle_timeout` is configured to **30 seconds**. If a peer does not respond within 30 seconds, the connection is considered terminated.
-2. **Hot-Path Shard Failure Detection ($50\,\text{ms}$):**
-   * In the transaction path (PoS/Gateway $\rightarrow$ Top-20 Shard Nodes) an aggressive shard request timeout of **$50\,\text{ms}$** applies (with redundant hedged requests after $25\,\text{ms}$).
-   * If a shard node does not respond within this window, it is skipped for the current transaction and HRW rank 21 steps in in $0\,\text{ms}$.
-3. **Client / PoS NAT Keep-Alive:**
-   * Mobile wallets and PoS terminals send a tiny `Ping` frame every **20 to 25 seconds** to keep stateful NAT routers and mobile firewalls open (`max_idle_timeout = 60s`).
-4. **Ordered Node Exit (Graceful Leave via `CONNECTION_CLOSE`):**
-   * On node termination (`SIGTERM`/`SIGINT`) `quinn` immediately sends a QUIC `CONNECTION_CLOSE (ErrorCode::NoError = 0x00)` frame to all active 1-hop peers.
-   * The receiver closes the session within $< 5\,\text{ms}$ without waiting; shard partners immediately remove the node and bind rank 21.
-5. **Session Resumption:** After connection drops, clients use TLS 1.3 session tickets to reconnect in a single round-trip (1-RTT or 0-RTT for read operations).
-
----
-
-## 6. Transport Invariants
-
-1. **[INV-1501] Zero 0-RTT Writes:** No shard node may accept a state-changing `LockRequest` via QUIC 0-RTT; write operations require 1-RTT without exception.
-2. **[INV-1502] Data-Plane Priority:** The `DATA_PLANE_STREAM` is strictly processed before gossip and control streams in the local task queue.
-3. **[INV-1503] Non-Blocking Network Threads:** Computationally intensive crypto operations (Argon2id, bulk signatures) must never be executed directly on Tokio I/O threads.
-4. **[INV-1504] Replay Immunity:** Incoming 0-RTT messages are deduplicated in $O(1)$ via the 4096-bit sliding-window bitmap.
-5. **[INV-1505] Transport-Native Connection Teardown:** Node exits and timeout detections are handled purely at the transport layer (QUIC frames & $50\,\text{ms}$ request timeouts); no application gossip overhead.
+Real QUIC tests must exercise receiving server behavior; relevant HTTP/client
+verification and process-crash checks are separate requirements. No source/test
+name or simulation supplies executed evidence here. Safe source continuity,
+complete transfer under concurrent writes, current authority and activation
+remain explicit proof gates; historical quorum archives are not a remedy.

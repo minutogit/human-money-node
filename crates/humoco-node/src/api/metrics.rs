@@ -132,7 +132,7 @@ impl NodeMetrics {
         }
     }
 
-    /// Records local In-RAM collision check & attestation latency (< 1µs - 5ms SLA).
+    /// Records local collision check & durable commit latency (< 20ms durable SLA).
     pub fn record_local_latency(&self, duration: Duration) {
         self.local_latency.record(duration);
     }
@@ -261,7 +261,7 @@ impl NodeMetrics {
             min_ms: self.local_latency.min_ms(),
             max_ms: self.local_latency.max_ms(),
             sample_count: count,
-            sla_compliant: count == 0 || avg < 5.0,
+            sla_compliant: count == 0 || avg < 20.0,
         }
     }
 

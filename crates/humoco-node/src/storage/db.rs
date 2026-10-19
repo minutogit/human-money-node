@@ -35,6 +35,9 @@ pub enum StorageError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Durable commit failed: {0}")]
+    DurableCommitFailed(String),
 }
 
 impl From<redb::TransactionError> for StorageError {

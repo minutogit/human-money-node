@@ -319,7 +319,7 @@ async fn submit_lock(
 }
 
 /// ARCHITECTURAL INVARIANT / AUDIT NOTE (Spec 03, 11, Rule 1):
-/// - Hot-Path & Read Ingress (< 1µs RAM, < 5ms Node SLA):
+/// - Hot-Path Durable Ingress (< 20ms Durable Node SLA) & Read Ingress (< 1µs RAM):
 ///   Read requests (status queries) query a deterministic or uniform-random shard node
 ///   from the Top-20 active set. They NEVER hold disk write locks or trigger P2P gossip.
 /// - Sync Limits: Max 10,000 items per sync response with strictly validated net_time_ms.
@@ -2038,7 +2038,7 @@ async fn submit_hmc_lock(
         let start_local = std::time::Instant::now();
         let (local_verdict, local_is_new) = state
             .engine
-            .ingress_hmc_lock_with_metadata(
+            .ingress_hmc_lock_durable(
                 lookup_tag.clone(),
                 entry.clone(),
                 IngressOrigin::ClientApi,
@@ -2394,7 +2394,7 @@ async fn submit_hmc_chain_lock_inner(
         let start_local = std::time::Instant::now();
         let (local_verdict, local_is_new) = state
             .engine
-            .ingress_hmc_chain_lock_with_tier(
+            .ingress_hmc_chain_lock_durable_with_tier(
                 chain_req.clone(),
                 IngressOrigin::ClientApi,
                 Some(now_ms),

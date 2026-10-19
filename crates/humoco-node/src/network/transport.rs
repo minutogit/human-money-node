@@ -733,7 +733,7 @@ impl RequestHandler for NodeRequestHandler {
                                     hop.created_at_ms = now_ms;
                                 }
                             }
-                            let (verdict, _is_new) = engine.ingress_hmc_chain_lock(chain_req.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
+                            let (verdict, _is_new) = engine.ingress_hmc_chain_lock_durable(chain_req.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
                             match verdict {
                                 crate::api::hmc::L2Verdict::Conflict { existing_lock } => {
                                     // True double-spend: report colliding lock payload so the
@@ -812,7 +812,7 @@ impl RequestHandler for NodeRequestHandler {
                             }
                             // INV-1202: validate the ingress time window at the shard with
                             // the current network time (never blindly trust gateway time).
-                            let (verdict, _is_new) = engine.ingress_hmc_lock_with_origin(lookup_tag.clone(), entry.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
+                            let (verdict, _is_new) = engine.ingress_hmc_lock_durable(lookup_tag.clone(), entry.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms), None, None, None).await;
 
                             match verdict {
                                 crate::api::hmc::L2Verdict::Conflict { existing_lock } => {

@@ -1,367 +1,101 @@
 # 06. Dumb Server / Smart Client Lock Flow
 
-> **Status:** Standard  
-> **Model:** Logic & State Graph First  
+> **Status:** Normative requirements reconciled with DEC-072/080–089. Described behavior is a contract for implementation and verification, not a claim that every production path satisfies it.
 
-This document specifies the complete flow of a transaction at the Point-of-Sale (PoS). It formalizes the principle **"Smart Client, Dumb Server"**: the L2 server stores no histories and only checks $O(1)$ collisions; the proof chain (*ProofChain*) is fully custodied by the client (*Client-Side Custody*).
+## 1. Custody and responsibilities
 
----
+L1 carries the voucher deed, transaction, values, ownership and causal `ProofChain`. The buyer passes the signed L1 transaction to the recipient locally by QR/NFC/BLE or another channel. The recipient validates L1 ownership and causality and durably retains its purchase state. L2 stores the active collision barrier `parent_lock -> child_lock`, not balances, amounts, real identities or a global transaction history.
 
-## 1. The Core Paradigm: Asymmetry of Data Custody
+Node original signing decisions are retained separately for safety until `root.valid_until + 30s`. This does not create a recursive L2 receipt chain, merchant certificate-custody duty or inherited historical quorum-bundle archive. Current qualified nodes attest their safely synchronized live state even if the original signers departed.
 
-```mermaid
-flowchart LR
-    subgraph DumbServer["Dumb Server (L2 Shard)"]
-        direction TB
-        RAM["RAM collision filter (First-Seen)<br>Stores only active lock hashes until TTL"]
-        NoHistory["❌ No balances<br>❌ No transaction history<br>❌ No user identities"]
-    end
+The recipient handles online ingress; the buyer need not have mobile connectivity. An offline transfer remains pending. Neither a valid owner signature nor a gateway's success flag establishes current payment safety.
 
-    subgraph SmartClient["Smart Client (Wallet)"]
-        direction TB
-        Custody["Client-Side Custody<br>Stores own UTXO proof chain"]
-        ProofGen["Generates cryptographic proof<br>(Genesis -> Lock_1 -> Lock_n)"]
-    end
-
-    SmartClient -->|Submits ProofChain on spend| DumbServer
-    DumbServer -->|Validates chain on-the-fly & confirms| SmartClient
-```
-
-### 1.1 Role Distribution & Economic Incentives in Practice
-
-In real economic scenarios there is a natural asymmetry in risk profile between the parties involved:
-
-1. **Merchant-driven ingress (merchant bears failure risk):**
-   * The merchant hands over physical goods or services. Once the customer leaves the store, the merchant bears the full risk of a subsequent double-spend.
-   * **Consequence:** The **merchant (recipient)** has the primary economic incentive to establish the connection to the L2 Collision Lock Registry, query status (`L2StatusQuery`), and irreversibly lock the transaction (`L2LockRequest`).
-2. **Zero-connectivity client experience (pure proximity transfer):**
-   * The **buyer (customer)** requires **no internet connection** at checkout (no mobile data, no roaming, no Wi-Fi).
-   * The customer hands the signed transaction locally via **NFC, Bluetooth Low Energy (BLE) or QR code** to the merchant's checkout terminal.
-   * The checkout terminal (stable fiber, LTE, or Wi-Fi link) handles locking in the shard quorum in $< 50\,\text{ms}$ (total PoS budget $< 1000\,\text{ms}$) in the background.
-3. **P2P offline grace (private trade / flea market):**
-   * For direct transfers between private individuals without internet access (e.g., at a flea market) the recipient wallet shows status `UNKNOWN (Offline-Pending ⚪)`.
-   * The transaction is cryptographically valid but not yet anchored in the Collision Lock Registry.
-   * As soon as either party regains internet connectivity, the wallet automatically resubmits the lock via `L2LockRequest`.
-4. **Idempotency on concurrent submission:**
-   * If buyer and merchant accidentally submit the same lock simultaneously, this causes no collision: the server recognizes the identical signatures/hashes and acknowledges the lock idempotently with `200 OK`.
-
----
-
-## 2. The Point-of-Sale (PoS) Transaction and Sequence Graph
-
-The entire payment process is divided into **three logical phases**:
-1. **Local PoS handshake** (buyer $\leftrightarrow$ merchant, offline-capable via QR/NFC/BLE)
-2. **Network locking (Hot Path)** (merchant $\rightarrow$ gateway $\rightarrow$ shard quorum)
-3. **Certificate & release** (merchant receives cryptographic quorum certificate and releases goods)
+## 2. Checkout contract
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor Customer as 📱 Buyer (Wallet)
-    actor Merchant as 🏪 Merchant (Terminal / Checkout)
-    participant Gateway as 🚪 Ingress Gateway (Any Peer)
-    participant Shard as ⚡ Top-20 Shard Quorum (HRW)
-
-    %% Phase 1: PoS Handshake
-    Note over Customer,Merchant: Phase 1: Local PoS handshake (< 150 ms)
-    Merchant->>Customer: PayRequest(InvoiceID, EphemeralPubKey_Merchant)
-    Customer->>Customer: Construct LockEntry(Parent_Lock, EphemeralPubKey_Merchant, TTL)
-    Customer->>Customer: Sign with previous owner key
-    Customer->>Merchant: TransferIntent(LockEntry, ProofChain)
-
-    %% Phase 2: Ingress & Network Locking
-    Note over Merchant,Gateway: Phase 2: Ingress & Shard Routing (< 150 ms)
-    Merchant->>Merchant: Local validation of ProofChain (signature integrity)
-    Merchant->>Gateway: SubmitLock(LockEntry, ProofChain)
-    Gateway->>Gateway: Check ingress endorsement / PoW (DDoS protection)
-    Gateway->>Gateway: Compute Shard_ID = u16::from_be_bytes(H_genesis[0..1])
-
-    %% Phase 3: Hot-Path Shard Quorum
-    Note over Gateway,Shard: Phase 3: Hot-Path Shard Quorum Broadcast (< 350 ms)
-    par Parallel QUIC Broadcast to Top-20 Shard Nodes
-        Gateway->>Shard: LockVerifyRequest(LockEntry, ParentCertificate)
+    actor Buyer
+    actor Recipient
+    participant Gateway
+    participant Shard as Frozen current shard committee
+    participant Disk as Bounded persistence worker
+    Buyer->>Recipient: Signed L1 transaction and causal proof
+    Recipient->>Recipient: Validate ownership and retain exact intent
+    Recipient->>Gateway: Authorized lock request
+    Gateway->>Gateway: Cheap admission checks; freeze justified HRW snapshot
+    Gateway->>Shard: Direct lock RPC; same exact request context
+    Shard->>Shard: Validate root, authorization, membership and per-shard readiness
+    Shard->>Shard: Reserve persistence capacity before atomic RAM collision decision
+    alt New or pending original approval
+        Shard->>Disk: Exact lock plus immutable own choice
+        Disk-->>Shard: Exact atomic durable commit acknowledgment
+        Shard-->>Gateway: Release original approval only after commit
+    else Conflicting lock
+        Shard-->>Gateway: Conflict and bounded available authenticated evidence
+    else Not ready or no capacity
+        Shard-->>Gateway: Neutral rejection; no vote
     end
-    
-    Shard->>Shard: 1. Validate parent-lock certificate<br>2. Atomic First-Seen Test-and-Set in RAM
-    
-    alt Hash already present (collision)
-        Shard-->>Gateway: Reject(Conflict_409, ExistingLockHash)
-        Gateway-->>Merchant: 409 Conflict (🔴 ABORT: double-spend detected)
-        Merchant-->>Customer: Payment rejected
-    else Hash new (successfully locked)
-        Shard-->>Gateway: AttestationSignature(Ed25519 Attestation / Vote)
-    end
-
-    %% Phase 4: Quorum Assembly & Goods
-    Note over Gateway,Merchant: Phase 4: Quorum assembly & PoS release (< 200 ms)
-    Gateway->>Gateway: Collect Ed25519 signatures (at least Q(R) signatures)
-    alt N_active >= 20 (>=24h stable) and sigs >= 14
-        Gateway-->>Merchant: 200 OK (QuorumCertificate, Status=FINAL (🟢))
-    else N_active < 20 or hysteresis active (<24h)
-        Gateway-->>Merchant: 200 OK (QuorumCertificate, Status=PROVISIONAL (🟡))
-    end
-    Merchant->>Merchant: Batch-verify QuorumCertificate (Ed25519)
-    Merchant->>Customer: PaymentReceipt (goods released)
-    Customer->>Customer: Append QuorumCertificate to own local ProofChain
+    Gateway->>Gateway: Collect distinct qualified votes, at most 800 ms
+    Gateway-->>Recipient: Complete evidence or honest unresolved/failure result
+    Recipient->>Recipient: Verify full proof and exact target before payment release
 ```
 
----
+All binding original responses, including identical-lock idempotent responses, cached responses and gateway self votes, require the exact durable lock and own-choice acknowledgment. Signature computation may happen in RAM; bytes cannot leave the node before commit. Release RAM guards before awaiting the worker. A completed commit survives requester timeout or cancellation; do not roll it back automatically. Pending/unknown outcomes remain unresolved and the client retries the exact intent (same parent, child and original request context).
 
-## 3. The ProofChain & Lazy Ingestion
+Coalesce identical in-flight operations with bounded waiters; bound batch bytes, count, age and global work. An admissible request can trigger bounded recovery, but the server never stores a queue of pending payments. No write 0-RTT or unbounded synchronous history/sync work belongs in this flow.
 
-So the server does not need to load history, the client supplies the mathematical origin proof with every spend.
+## 3. Lookup, current clearance and original approval are different
 
-```mermaid
-flowchart TD
-    subgraph ProofChain["ProofChain of the Smart Client"]
-        Genesis["Genesis certificate (T0 Root)"] --> Lock1["Lock 1 (First transfer)<br>QuorumCertificate 1"]
-        Lock1 --> Lock2["Lock 2 (Second transfer)<br>QuorumCertificate 2"]
-        Lock2 --> CurrentLock["New lock candidate (PoS spend)<br>Signed with key of Lock 2"]
-    end
+| Observation | What it establishes | Payment action |
+| --- | --- | --- |
+| Ordinary `read_quorum=1` / INV-0310 lookup finds the expected owner-signed lock | One node reports a matching entry; client authorization may be genuine. | Request and verify strong current evidence; do not release goods on the match alone. |
+| Lookup finds a different valid lock | Evidence of a conflicting intent/state requiring validation and resolution. | Stop release; validate context and confirmation class. A single report cannot authorize arbitrary canonical takeover. |
+| Lookup reports no entry or unknown root | The queried node reports absence; it may be unready or incomplete. | No proof of unspentness. Supply valid root/authorization where required, or submit the exact intended lock; require a successful quorum. |
+| Fully verified current live-state quorum | Qualified current nodes agree on the exact target/state and fresh recipient challenge under one authorized snapshot. | Release only for the expected acceptable state and valid L1 purchase. |
+| Timeout or partial quorum | Outcome is uncertain, possibly with durable side effects. | Retry/reconcile the original intent within client budget; never reinterpret a FINAL minority as PROVISIONAL. |
 
-    subgraph Verification["O(1) Verification Steps of the Shard"]
-        V1["1. Check chain links (hash pointers)"]
-        V2["2. Check quorum certificate of Lock 2"]
-        V3["3. Check owner signature on new lock"]
-        V4["4. First-Seen check in RAM index on parent_lock"]
-    end
+Ordinary reads retain the cheap one-of-top-twenty policy. Setting `read_quorum >= 14` is a request, not proof. Read selection/failover does not alter the write committee or authorize bans from failed observations.
 
-    ProofChain --> Verification
-```
+Live-state attestations use a purpose distinct from original write approvals. Bind the network, shard, full target/root, exact reported state, status/class, committee/request context and fresh unpredictable recipient challenge in a canonical authenticated payload. Reject wrong purpose, changed target, duplicate identities, challenge reuse and mixed snapshots. An old write approval cannot substitute for a fresh challenged report; a later valid current-state report does not rewrite the node's immutable original choice.
 
-* **No DB lookup for legacy data:** The shard node does not need to search its disk for old blocks. It checks the chain signatures on the fly in RAM (duration: $< 3\,\text{ms}$).
-* **Compactness:** The wallet custodies the gapless chain (`Voucher.transactions`).
+At every countable live-signing site, including self, recheck current authority and safely installed relevant state. No new durable write is required merely to repeat a read of already durable state, but pending RAM state cannot be dressed up as durable clearance. Clock/slot/seal validity and atomic observation boundaries still need their specified proof and implementation.
 
-### 3.1 The 3 Elementary Protocol Cases (Read & Write Flow)
+## 4. Exact quorum verification
 
-**Authorization terminology:** `layer2_signature` is the client request authorization
-signature (German: Lock-Signatur). Client authorization evidence (Freigabenachweis)
-also includes the disclosed key and its checked binding to the predecessor output.
-This evidence is distinct from node attestations and their assembled quorum
-certificate. The genesis case has its own authorization rules.
+The verifier needs independently justified committee authority, not a gateway-supplied arbitrary roster. Validate identities, Argon2d tickets and observed maturation; rank distinct full `NodePubKey` identities by full 256-bit HRW scores with deterministic identity tie-breaking. Ticket validity and social attachment alone do not establish a globally complete roster or at most six adversaries.
 
-Due to information asymmetry (customer only queries predecessor `challenge_ds_tag` without revealing own `t_id` in advance) and mathematical unforgeability of `layer2_signature`, the client-server interaction divides into **three elementary, deterministic cases**.
+Freeze at most twenty members for the request, including self only if eligible. FINAL requires a justified twenty-member snapshot and fourteen distinct valid signatures. All signatures must verify against full keys and exactly the same purpose, target/state, freshness/challenge and confirmation context. A bitmap indexes that authenticated snapshot; `count_ones`, Bloom filters, statistical score cutoffs and a gateway envelope cannot establish membership or quorum validity. The exact new live-state schema and roster-provenance mechanism remain implementation/proof work.
 
-> [!NOTE]
-> **Gateway-side read routing (`docs/03:INV-0310`):**  
-> The gateway does not rigidly forward `L2StatusQuery` to rank 1, but stochastically selects an active, non-suspended node uniformly at random from the shard's Top-20. If it does not respond within $100\,\text{ms}$, it increments its failure counter (`record_missing()`) and the gateway switches via fast failover immediately to an alternative shard node ($< 100\,\text{ms}$ client latency).
+At fourteen valid FINAL votes cancel stragglers neutrally. Fail at 800 ms or sooner if eligible remaining members cannot meet quorum. Do not substitute later HRW ranks. NOT_READY, NOT_IN_SHARD, capacity rejection and cancellation after success are neutral. Six missing members include all causes combined; this is no promise that an additional synchronizing node will fit the headroom.
 
-```mermaid
-flowchart TD
-    Start["📱 Checkout / Wallet receives voucher<br>(Knows own t_id and predecessor challenge_ds_tag)"] --> Step1["Step 1: Read request (L2StatusQuery)<br>Asks: 'Which lock sits on challenge_ds_tag?'"]
-    
-    Step1 --> ServerResp{"Response of L2 Registry (L2Verdict)"}
-    
-    %% Case 1
-    ServerResp -->|Case 1: Lock found & t_id matches| Case1["🟢 Case 1: Already secured (Happy Path)<br>• Server returns LockEntry with valid user signature<br>• Server t_id == Local t_id<br>➡️ Result: Transaction is verified secured!"]
-    
-    %% Case 2
-    ServerResp -->|Case 2: Lock found, but t_id is DIFFERENT!| Case2["🔴 Case 2: Double-spend proven!<br>• Server returns genuine LockEntry with foreign t_id<br>• User signature proves: issuer spent elsewhere!<br>➡️ Result: Checkout aborts & quarantines voucher."]
-    
-    %% Case 3
-    ServerResp -->|Case 3: Tag still free / unknown| Case3["🟡 Case 3: Not yet locked (new issuance)<br>• Server reports: No lock on this tag (or MissingLocks)<br>• Optional 2-server cross-check (Hedged Query)<br>• Checkout now sends new lock (L2LockRequest)<br>• Shard executes atomic First-Seen in RAM<br>➡️ Result: Lock is registered & QuorumCertificate issued."]
-```
+For `N < 20`, adaptive PROVISIONAL uses `floor(2N/3) + 1` of the participating local identities. The transition to FINAL retains the 24-hour network stability condition. This is separate from ticket maturation and hourly presence. There is no HIGH_ASSURANCE tier. Regional FINAL can be revised by an admissible merge; it does not prove global irreversibility.
 
-#### Case 1: Voucher Already Secured Online (`Verified` - Match)
-* **Situation:** Customer pays with a transaction previously locked online in L2.
-* **Flow:**
-  1. Checkout sends `L2StatusQuery(challenge_ds_tag)`.
-  2. Server responds with `L2Verdict::Verified { lock_entry }`.
-  3. Checkout validates:
-     - Is `layer2_signature` in `lock_entry` valid? $\rightarrow$ **Yes** (server cannot forge signature).
-     - Does `lock_entry.t_id` match local `t_id`? $\rightarrow$ **Yes, identical!**
-* **Result:** Goods released immediately (status: green).
+## 5. Causality, splits and bounded reconciliation
 
-#### Case 2: Fraud Attempt / Double-Spend Detected (`Verified` - Mismatch)
-* **Situation:** A fraudster previously spent the same voucher elsewhere; that foreign lock already sits on L2.
-* **Flow:**
-  1. Checkout sends `L2StatusQuery(challenge_ds_tag)`.
-  2. Server responds with `L2Verdict::Verified { lock_entry }`.
-  3. Checkout validates:
-     - Is `layer2_signature` valid? $\rightarrow$ **Yes** (proof of authorized foreign spend by fraudster).
-     - Does `lock_entry.t_id` match local `t_id`? $\rightarrow$ **No, mismatch!**
-* **Result:** Transaction immediately rejected, checkout raises alarm, voucher moved to quarantine (status: red).
+Genesis registration validates the signed L1 root and establishes `root.valid_until`; successor locks inherit that anchor. A client cannot set a longer successor TTL. Unknown origin rejects the successor rather than inventing authority. Owner authorization and disclosed-key/predecessor-output binding are distinct from node attestations.
 
-#### Case 3: First-Time Registration / Fresh Issuance (`Unknown` / `MissingLocks`)
-* **Situation:** Voucher was created offline, forwarded, or a new payment lock is to be set. No active lock exists on this `challenge_ds_tag` in the registry.
+If an offline L1 chain has missing required lock steps, the client may provide bounded authorized catch-up material. Verify each relevant link and imported state; do not infer final clearance from the final leaf alone. Locator-prefix responses are hints, not authenticated proof of completeness. There is no recursive predecessor L2 certificate requirement.
 
-```mermaid
-flowchart TD
-    Start3["🟡 Case 3: Tag is free / unknown"] --> SubCases{"Which concrete situation applies?"}
+For a split, the transaction consumes the parent output and creates independent child identifiers. Later spends of child A and child B use different `parent_lock` keys and do not collide with each other. L1 validates split ownership and values; L2 remains blind. Causal VOID handling follows the confirmation-class resolver; do not forget the original own choice when current canonical state changes.
 
-    SubCases -->|Sub-case 3A| Case3A["🌱 Sub-case 3A: Brand-new voucher (Genesis Init)<br>• Voucher not yet known globally on L2<br>• Server returns 'UnknownVoucher'<br>➡️ Client uploads Genesis lock with deletable_at"]
-    SubCases -->|Sub-case 3B| Case3B["⚡ Sub-case 3B: Normal successor lock (Live PoS)<br>• Server already knows direct predecessor<br>• Server reports: ds_tag free<br>➡️ Checkout submits 1 single LockRequest (1-RTT)"]
-    SubCases -->|Sub-case 3C| Case3C["🎒 Sub-case 3C: Catch up offline chain (Batch Sync)<br>• Voucher was forwarded offline across multiple hops<br>• Server reports 'MissingLocks { sync_point: Tx_1 }'<br>➡️ Client uploads compact batch [Tx_2, Tx_3, Tx_4]"]
-    SubCases -->|Sub-case 3D| Case3D["⏱️ Sub-case 3D: Race condition at checkout (Contention)<br>• Parallel conflicting locks arrive simultaneously<br>• Top-20 shard nodes process atomically First-Seen in RAM<br>➡️ Either one branch wins with >= 14 votes or 409 Conflict"]
-```
+If two competing locks split the twenty votes 10:10, neither is FINAL and neither checkout releases goods. A later merge uses valid class2 over class1 over unconfirmed class0; within the highest admissible confirmed class compare `H_canon`. A matching single lock or a smaller unsupported hash cannot displace a confirmed branch. Honest single-branch signers are not sanctioned for losing.
 
-##### Sub-case 3A: Genesis Registration (Fresh Voucher)
-* **Flow:**
-  1. `L2StatusQuery` returns `UnknownVoucher`.
-  2. Client sends `L2LockRequest` with `is_genesis: true`, `ds_tag: None` and expiry `deletable_at` (`root.valid_until`).
-  3. Server validates issuer signature and initializes root timer for subsequent `ExpiredVoucherPurge`.
+## 6. Readiness, retries and latency boundaries
 
-##### Sub-case 3B: Normal 1-Step Transfer at PoS (Standard Live Payment)
-* **Flow:**
-  1. `L2StatusQuery(challenge_ds_tag)` returns: *"No lock on this tag present"*.
-  2. Checkout sends exactly **one** `L2LockRequest` with the new transaction.
-  3. The 20 shard nodes execute their atomic First-Seen in RAM ($< 1\,\mu\text{s}$) and send signed attestations (votes).
-  4. Checkout receives the assembled `QuorumCertificate` (duration: $< 50\,\text{ms}$).
+New/unknown shard responsibility is NOT_READY until complete justified state transfer and durable install. The first admissible relevant request starts at most one bounded background recovery job per shard. Cover all still-relevant active roots, including locks older than 24 hours, plus bounded concurrent deltas. Empty digests from unready peers do not establish safe history. Other independently ready shards continue; retained partial data can still be served under P2P authorization without becoming a countable vote.
 
-##### Sub-case 3C: Catch Up Offline Chain (Batch Reconciliation)
-* **Flow:**
-  1. Voucher was forwarded offline multiple times (Buyer A $\rightarrow$ B $\rightarrow$ C $\rightarrow$ D).
-  2. `L2StatusQuery` contains `locator_prefixes` (breadcrumbs).
-  3. Server reports: `MissingLocks { sync_point: "Hash_of_A" }`.
-  4. Wallet of D forms an `L2BatchLockRequest` with missing chain links `[Lock_B, Lock_C, Lock_D]`.
-  5. Server checks chain links on the fly in RAM ($< 2\,\text{ms}$) and locks final leaf `Lock_D`.
+The 800 ms collection budget, local durable SLA target and ergonomic 0.5–1.5 second checkout range describe targets/limits, not measured end-to-end guarantees. Disk latency, batching, RTT, recovery and client retries affect availability. A presumed 1–5 ms redb commit is unmeasured and never permits early release. Public gateway discovery is allowed; stale cached gateway fallback belongs solely to the client. Metrics/dashboard stay private.
 
-##### Sub-case 3D: Parallel Contending Locks (Hot-Path Race Condition)
-* **Flow:**
-  1. A malicious actor submits two different successors for the same `challenge_ds_tag` at two checkouts in the same second.
-  2. Top-20 shard nodes process both requests atomically via First-Seen in RAM.
-  3. **Resolution:**
-     * *Clear winner:* One lock reaches $\ge 14$ votes $\rightarrow$ `FINAL (Green)`. The losing branch receives `409 Conflict`.
-     * *Split (e.g., 10:10):* Neither lock reaches 14 votes $\rightarrow$ No final quorum. Both checkouts refuse to release goods.
-  4. **Hedged 2-server check:** To guard against briefly desynchronized single nodes, the wallet can send requests in parallel to two nodes (`FLAG_HEDGED`).
+## 7. Existing lock-flow invariants
 
-### 3.2 Voucher Splits (DAG) & Independence of Child Branches
+These identifiers retain their topics; obsolete historical-receipt and release-before-commit wording is explicitly replaced:
 
-When a voucher is split (e.g., payment + change), the linear history branches into a directed acyclic graph (DAG).
+1. **[INV-0601] Bounded active-state retention:** Keep active locks and required own-choice/verification context until root TTL plus grace; discard unnecessary supplied L1 history. No recursive receipts or inherited old quorum bundles. Every original vote follows atomic durable commit.
+2. **[INV-0602] Atomic First-Seen:** Reserve bounded persistence capacity before atomic per-parent collision handling. Concurrency cannot authorize incompatible original decisions; RAM acceptance is pending until exact durable acknowledgment.
+3. **[INV-0603] Recipient safety:** The recipient validates L1 custody and full required quorum evidence before release. Buyer connectivity or a gateway boolean is not the safety predicate.
+4. **[INV-0604] Authenticated causality:** Validate owner authorization against the exact predecessor output and root; the former mandatory preceding L2 QuorumCertificate chain is withdrawn by DEC-072/083.
+5. **[INV-0605] Exact quorum verification:** Require justified snapshot authority, distinct full eligible identities, all signatures and exact purpose/target/state/request/challenge context. Cardinality/bitmap/statistics alone are insufficient.
 
-```mermaid
-flowchart TD
-    subgraph Root["Root / Genesis"]
-        Gen["Genesis lock (init)<br>t_id: G_0 | L2 Voucher ID"]
-    end
+## 8. Evidence still required
 
-    subgraph SplitTx["Split Transaction (Change)"]
-        Split["Transaction S_1 (Split Anchor)<br>ds_tag: G_0<br>Locked in L2 Registry"]
-    end
-
-    subgraph Branches["2 Independent Successor Leaves (UTXOs)"]
-        ChildA["Branch A (Payment)<br>t_id: Tx_A (ds_tag for next spend)"]
-        ChildB["Branch B (Change)<br>t_id: Tx_B (ds_tag for next spend)"]
-    end
-
-    subgraph Spends["Parallel, Independent Spend"]
-        SpendA["Spend A: Lock(ds_tag = Tx_A)"]
-        SpendB["Spend B: Lock(ds_tag = Tx_B)"]
-    end
-
-    Gen --> Split
-    Split --> ChildA
-    Split --> ChildB
-    ChildA --> SpendA
-    ChildB --> SpendB
-```
-
-* **Atomic independence in L2 registry:**
-  1. The split itself locks predecessor `G_0` with transaction ID `S_1`.
-  2. The two resulting child branches have distinct hashes `Tx_A` and `Tx_B`.
-  3. If branches A and B are later spent simultaneously by different owners, they address **two completely distinct keys in the L2 registry (`parent_lock = Tx_A` vs. `parent_lock = Tx_B`)**.
-  4. There is **no mutual blocking**: Both branches are locked in parallel in $O(1)$ in RAM and receive their own quorum certificate.
-* **Efficient reconciliation via locator prefixes:**
-  If a branch was forwarded offline multiple times, the wallet sends `locator_prefixes` on next online check (`L2StatusQuery`). The L2 node finds the common split node (`S_1`) in nanoseconds and reports `MissingLocks { sync_point: S_1 }`, so only missing intermediate steps of the respective branch need to be uploaded.
-
----
-
-## 4. Point-of-Sale Latency Budget (Target: $< 1000\,\text{ms}$)
-
-The system is strictly designed for sub-second response times at the checkout terminal:
-
-| Step | Action | Transport / Algorithm | Maximum Latency Budget |
-| :--- | :--- | :--- | :--- |
-| **1. PoS Transfer** | Terminal $\leftrightarrow$ Phone | NFC / BLE / QR (Zero Roundtrip) | $\le 150\,\text{ms}$ |
-| **2. Gateway Ingress** | Merchant $\rightarrow$ Gateway Node | QUIC 0-RTT Stream | $\le 100\,\text{ms}$ |
-| **3. Ingress Check** | Gateway checks WoT voucher | Local cache lookup | $\le 10\,\text{ms}$ |
-| **4. Shard Broadcast** | Gateway $\rightarrow$ 20 Shard Nodes | QUIC UDP parallel | $\le 150\,\text{ms}$ |
-| **5. Atomic RAM Lock** | Shard node Test-and-Set | Lockless atomic concurrent map | $\le 5\,\text{ms}$ |
-| **6. Quorum Response** | Shard Nodes $\rightarrow$ Gateway | Individual Ed25519 node attestations | $\le 150\,\text{ms}$ |
-| **7. Certificate Assembly** | Gateway assembles certificate | Bitmask & Ed25519 signatures | $\le 20\,\text{ms}$ |
-| **8. PoS Confirmation** | Gateway $\rightarrow$ Merchant Terminal | QUIC Stream Response | $\le 100\,\text{ms}$ |
-| **Buffer** | Jitter & packet loss | QUIC Loss Recovery | $\le 200\,\text{ms}$ |
-| **TOTAL** | **Complete PoS finality** | **Status: FINAL (🟢)** | **$\approx 885\,\text{ms} < 1000\,\text{ms}$** |
-
----
-
-## 5. Error and Conflict Handling at PoS
-
-```mermaid
-stateDiagram-v2
-    direction TB
-
-    [*] --> IngressValidation
-
-    state IngressValidation {
-        [*] --> CheckFormat
-        CheckFormat --> CheckVoucherQuota: Format Valid
-        CheckVoucherQuota --> ReadyForBroadcast: Quota OK
-        CheckVoucherQuota --> DropSpam: Quota Exhausted
-        CheckFormat --> RejectMalformed: Format Invalid
-    }
-
-    DropSpam --> [*]: Silent Drop / Backoff
-    RejectMalformed --> [*]: 400 Bad Request
-
-    ReadyForBroadcast --> QuorumCollecting
-
-    state QuorumCollecting {
-        [*] --> WaitSignatures
-        WaitSignatures --> QuorumReached: >= 14 of 20 signatures (N >= 20)
-        WaitSignatures --> QuorumTimeout: Timeout after 600 ms
-        WaitSignatures --> ConflictDetected: >= 1 collision report
-    }
-
-    ConflictDetected --> DoubleSpendAbort: 409 Conflict
-    DoubleSpendAbort --> [*]: 🔴 Checkout raises alarm (double spend)
-
-    QuorumTimeout --> FallbackProvisional: < 14 but >= Q(R) signatures
-    QuorumTimeout --> NetworkError: No response
-
-    FallbackProvisional --> [*]: 🟡 PROVISIONAL (small-amount decision)
-    QuorumReached --> [*]: 🟢 FINAL (release goods immediately)
-    NetworkError --> [*]: 504 Gateway Timeout (Retry)
-```
-
----
-
----
-
-
-## 6. Zero-Trust Quorum Verification for Smart Clients (Minimal Effort, Maximum Benefit)
-
-### 6.1 Motivation & Primary Attack Vector (The "Potemkin Village" / Fake-Committee Problem)
-When a client (e.g., smartphone or checkout terminal) receives a `QuorumCertificate` via an ingress gateway, the fundamental security question arises:
-> **"How does the client know that the supplied signatures originate from the genuine, authorized shard nodes and not from 14 fake identities invented by a malicious gateway in a millisecond in RAM?"**
-
-An attacker could spin up 14 own key pairs (or 14 own servers), issue a formally valid quorum, and make the checkout believe the lock is anchored in the Collision Lock Registry — while the voucher never actually reached the genuine shard.
-
-### 6.2 Exact Verification Against an Authenticated Committee Snapshot
-
-The caller supplies an independently authenticated committee snapshot to certificate verification. The verifier cannot reconstruct the true top twenty from the certificate's signers or from a Bloom filter. Snapshot provenance is a precondition; a gateway-provided arbitrary roster is not an authority.
-
-Canonical selection ranks distinct full public keys by their full 256-bit HRW ticket scores, with deterministic identity tie-breaking. FINAL uses exactly twenty authorized members and requires at least fourteen distinct valid signers. Provisional operation retains `Q(N) = floor(2N/3) + 1` for `N < 20`.
-
-Every signer must match a member's full `NodePubKey` and active ticket. Duplicate identities and votes for an unexpected network, shard, parent, lock, or status are rejected. Ed25519 approvals use the existing length-prefixed protocol domains and the attestation payload digest binding parent and lock. Statistical rank-25/rank-50 thresholds and the former rank-40 horizon no longer establish quorum validity.
-
-The gateway captures one snapshot per request, including its local member where eligible. Local and remote votes satisfy the same readiness and collision constraints. Bitmap positions refer to that snapshot; no unavailable member may be replaced by a later rank. At fourteen valid FINAL votes the gateway cancels stragglers without peer penalties; write collection fails with HTTP 503 after its 800 ms budget or earlier when quorum is impossible.
-
-This hardening prevents expansion of a selected signer pool. It does not prove that partitioned nodes discover identical committees or that changes between committees preserve historical decisions. Those properties require a separate admission/transition design. The existing local-observation incubation rule is unchanged; self-signed ticket timestamps cannot shorten it.
-
-### 6.3 QuorumCertificate Wire Layout (Compact < 1 KB)
-The quorum certificate uses a 32-bit signer bitmap and individual Ed25519 node attestations:
-$$\big( \text{lock\_hash} \,[32\,\text{B}], \; \text{shard\_id} \,[2\,\text{B}], \; \text{status} \,[1\,\text{B}], \; \text{signer\_bitmap} \,[4\,\text{B}], \; \text{signatures} \,[\text{popcount} \times 64\,\text{B}] \big)$$
-* **At 14 individual node attestations:** $32 + 2 + 1 + 1 + 4 + (14 \times 64) = \mathbf{936\,\text{Byte}}$.
-* **Network guarantee:** Fits entirely in a single unfragmented UDP/QUIC packet ($\le 1.472\,\text{Byte}$ standard MTU).
-* **Zero-overhead NodeID resolution:** NodeIDs and public keys need not be transmitted in the packet; the client deterministically reconstructs the 14 public keys from the bits set in `signer_bitmap` via the shard's HRW ranking.
-
----
-
-## 7. Invariants of the Lock Flow
-
-1. **[INV-0601] Zero history retention:** After generating the quorum certificate, the shard node stores **only** the `StoredLock` (192 bytes) in RAM and persists it asynchronously to `TABLE_ACTIVE_LOCKS`. The supplied `ProofChain` is discarded immediately after validation.
-2. **[INV-0602] Atomic First-Seen:** Setting the lock entry in a shard node's RAM is performed via atomic Compare-and-Swap (CAS) operations on `parent_lock`. There is no time window for race conditions.
-3. **[INV-0603] Merchant-centric safety:** Final confirmation always goes primarily to the merchant/recipient. The buyer cannot prevent release of goods by blocking own internet connectivity.
-4. **[INV-0604] Unforgeable causality:** A `LockEntry` is valid only if its `parent_lock` matches bit-exactly the target hash of the preceding `QuorumCertificate` in the `ProofChain`.
-5. **[INV-0605] Exact quorum verification:** A smart client accepts a certificate only against an independently authenticated committee snapshot, with the required number of distinct authorized public keys and valid context-bound Ed25519 approvals. A Bloom filter, score quantile, signer count, or bitmap alone is not a committee authorization proof.
+Real QUIC tests must exercise conflicting concurrent writes, wrong members, duplicate signers, neutral stragglers, unready sources and blocked durable acknowledgments. HTTP/client tests must show that one matching entry, false success flags, replayed challenges and partial/mixed-context quorums never authorize payment. Crash tests must cover all original-signature release sites, including idempotent/cache/self paths. Current authority, transfer completeness and safe dynamic activation need explicit arguments plus adversarial checks; this document does not claim they have been proved or executed.

@@ -1,168 +1,112 @@
-# 17. Topologie-Telemetrie & Social-Defense-Layer
+# 17. Private Topology Telemetry and Operator Diagnostics
 
-> **Checkout committee policy (Rev. 4):** Write verification freezes a canonical committee of at most twenty distinct identities and never substitutes ranks 21–40 for unavailable votes. FINAL requires fourteen valid members of that snapshot; write collection has an 800 ms budget. Unready/non-member replies and cancelled stragglers are neutral. This policy supersedes legacy checkout replacement descriptions below; background succession requires a separate membership-continuity proof. Read policy and observation-based ticket incubation are unchanged.
+> **Status:** Operational requirements; implementation and executed evidence remain separately tracked.
+>
+> **Principle:** Telemetry informs human operators; it never becomes voting authority or automatic evidence of misconduct. See [invariant registry](INVARIANT_REGISTRY.md), [consolidation](ARCHITECTURE_CONSOLIDATION.md) and Spec 16.
 
+This document describes the operator's local topology view, compact dashboard and diagnostic warnings. Metrics, topology and dashboard data remain private under DEC-077. Public gateway discovery is a separate intentionally public HTTP directory/advertisement function; it does not expose diagnostic graphs, metric histories, friend lists, account data or the control plane.
 
-> **Status:** Informativ (Operations & Tooling)  
-> **Modell:** Logic & State Graph First  
-> **Credo:** *"Telemetrie dient der menschlichen Transparenz und sozialen Hygiene – nicht automatischen Maschinen-Banns."*
+## 1. Observations and authority
 
-Dieses Dokument spezifiziert die **Topologie-Telemetrie**, das **Diagnose-Dashboard** sowie den **Social-Defense-Layer** für Knotenbetreiber. Es definiert, wie Betreiber anomale Netzwerkstrukturen (z. B. Botnetz-Besen) erkennen, wie legitime Multi-Node-Setups geschützt bleiben und wie sich das Netzwerk bei menschlichen Kündigungen (`REVOKE`) organisch selbst heilt.
+A local observation can explain overload, clock disagreement, topology concentration or poor service. It cannot prove a remote node lied, establish a global network view or authorize a cryptographic ban. Permanent identity/ticket/Web-of-Trust sanctions require verified first-party equivocation evidence under the fraud protocol; telemetry does not create an L1 tombstone.
 
----
+Operators retain the choice to maintain or revoke their own F2F relationships. A human's local edge revocation is not a globally authoritative accusation. No diagnostic metric automatically changes HRW membership, freezes funds, broadcasts hearsay or counts as a committee vote.
 
-## 1. Philosophie: Telemetrie als Entscheidungs-Hilfe für Menschen
+## 2. Legitimate multiple-node operation and topology concentration
 
-In einem zensurresistenten, dezentralen Netzwerk gibt es keine zentrale Polizei und kein weltweites Schiedsgericht. Betrüger mit mathematisch beweisbaren Doppel-Signaturen (Equivocation) werden zwar sofort automatisch per L1-Tombstone getilgt – doch subtile Angriffe (wie das Einschleusen von Schein-Identitäten über Brücken) erfordern **menschliche Wachsamkeit**.
-
-* **Hinweise statt Willkür-Banns:** Die lokale Telemetrie liefert **Diagnose-Hinweise und Metriken**. Sie fällt keine automatischen Bann-Urteile über menschliche Freundschaften.
-* **Menschliche Souveränität:** Der Betreiber entscheidet selbst, ob er eine Kante aufrechterhält, den Nachbarn kontaktiert oder die Verbindung trennt.
-
----
-
-## 2. Differenzierung: Legitime Multi-Nodes vs. Bösartige Bot-Besen
-
-Ein zentraler Grundsatz lautet: **Ein Betreiber darf mehrere Knoten betreiben (z. B. als Kalt-Reserve oder für spätere Ingress-Dienste), ohne dafür bestraft oder gebannt zu werden.**
+One operator may run multiple nodes, including cold reserves, subject to ordinary ticket admission, maturation and service rules. Independent connections improve practical resilience. A node is neither malicious solely because it shares an operator nor cryptographically safe solely because it has three edges.
 
 ```mermaid
 flowchart TD
-    subgraph Legit["✅ Legitimer Multi-Node-Betreiber (10 Nodes)"]
-        direction TB
-        Owner["Betreiber (z. B. Rechenzentrum / Händlerverbund)"]
-        N1["Node 1"] <--> P1["Nachbar A"]
-        N2["Node 2"] <--> P2["Nachbar B"]
-        N3["Node 3"] <--> P3["Nachbar C"]
-        N1 <--> N2 <--> N3
-        NoteLegit["• Investiert 10x 1-3h Argon2id-PoW<br>• Etabliert unabhängige Kanten ins Mesh (Multi-Homing)<br>• Ergebnis: Alle Nodes erfüllen 24h-Bitmasken-Präsenz (>= 8/24) und werden ACTIVE!"]
+    subgraph Multi["Legitimate multiple-node operation"]
+        N1["Node 1"] <--> A["Independent neighbor A"]
+        N2["Node 2"] <--> B["Independent neighbor B"]
+        N3["Reserve / node 3"] <--> C["Independent neighbor C"]
+        N1 <--> N2
     end
-
-    subgraph Botnet["❌ Bösartiger Botnetz-Angriff ('Besen'-Muster)"]
-        direction TB
-        BadBridge["1 Bridge-Node (Freund)"]
-        B1["Bot 1"] -.-> BadBridge
-        B2["Bot 2"] -.-> BadBridge
-        B3["Bot 3"] -.-> BadBridge
-        B500["... 500 Bots"] -.-> BadBridge
-        BadBridge --> Honest["Ehrlicher Nachbar-Node"]
-        NoteBot["• Alle Bots kommen über 1 einzigen Flaschenhals<br>• Null Querverbindungen ins restliche Mesh<br>• Ergebnis: Dunbar-RED drosselt stochastisch zu >99,9%!"]
+    subgraph Concentration["Concentrated topology: operator warning"]
+        B1["Many learned identities"] --> Bridge["Single bridge"]
+        Bridge --> Local["Local node"]
     end
 ```
 
-### Der spieltheoretische Anreiz für Multi-Node-Betreiber:
-1. **Kein Bann für Reserve-Nodes:** Betreibt ein Händler 10 Nodes auf Vorrat, ist das vollkommen legitim.
-2. **Eigenanreiz zur Vernetzung (Multi-Homing):** Um seine Nodes zensurresistent und stabil mit dem Weltnetz zu verbinden, vernetzt der Betreiber seine 10 Nodes mit mehreren unabhängigen Nachbarn im Ort (*Multi-Homing*), statt sie über einen einzigen Flaschenhals laufen zu lassen.
+A concentrated bridge can censor or disconnect a local view and deserves investigation. Neither a >99.9% drop claim nor “all bots remain immature” is established by the diagram. Ticket mining is Argon2d with its 24-hour incubation; it is distinct from passive presence. Admission assumptions and bounds on coordinated adversaries remain separate design/proof obligations.
 
----
-
-## 3. Die Verhungerungs-Kaskade (Social Defense)
-
-Erkennt ein Betreiber im Dashboard, dass ein Nachbar als toxischer Flaschenhals agiert oder unkooperativ ist, trennt er die Kante. Der Ausschluss erfolgt rein biologisch:
+## 3. Local revocation, presence and cleanup
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant Op as 👤 Betreiber
-    participant Node as 🖥️ Lokaler Node
-    participant Net as 🌐 Globales Mesh (HRW)
-    
-    Op->>Node: Kante trennen: REVOKE(Peer_X)
-    Node->>Node: Schließe QUIC-Session zu Peer_X
-    Note over Node,Net: 1. Keine Heartbeats von Peer_X mehr über diese Kante
-    Note over Net: 2. Hysterese de-aktiviert Peer_X nach 21-24h (is_active = false)
-    Note over Net: 3. Nach 48h ohne Heartbeats: Restlose physische Tilgung aus RAM!
+    participant Operator
+    participant Local as Local node
+    participant View as Other nodes' independent views
+    Operator->>Local: Revoke local F2F edge
+    Local->>Local: Close session and stop forwarding over this edge
+    Note over Local,View: Other paths may continue to carry authentic presence
+    Note over View: Three consecutive missed hourly heartbeats govern passive suspension
+    Note over View: No global ban follows from a local revocation
 ```
 
----
+A node isolated from all authentic heartbeat paths is suspended in each local view according to the selected three consecutive missed hourly heartbeat rule. Exact timing depends on the heartbeat schedule and specified window handling. Ticket 24-hour maturation and phase stability hysteresis do not impose 8–16h or 21–24h offline detection. Transport idle closure, shard RPC timeouts, NOT_READY and quorum-cancelled work do not substitute for missed heartbeat evidence.
 
-## 4. Telemetrie-Schnittstellen & Metriken
+Bounded stale peer-metadata cleanup is an operational lifecycle concern; it must not erase protected live lock state or own signing decisions. A historical 48-hour peer-cache cleanup example is not an active-lock expiry rule or a proven global removal deadline. Root-bound lock/own-choice expiry remains `root.valid_until + 30s` under justified time and safe retention rules.
 
-Jeder Knoten stellt zwei leichtgewichtige Diagnose-Schnittstellen bereit:
+## 4. Private interfaces and bounded metrics
 
-### 4.1 Prometheus-Metriken (`/metrics`)
+Expose diagnostics through the private local operator boundary, for example the UNIX control socket `/tmp/humoco.sock` or an explicitly protected local administrative listener. Private access must apply to **every alias, nested route, alternate listener and dashboard asset**, including `/metrics`, topology paths and any renamed versions. P2P friendship does not automatically authorize dashboard access. Route names, obscurity or a UI hiding a link do not establish privacy.
 
-| Metrik | Typ | Beschreibung |
-| :--- | :--- | :--- |
-| `humoco_active_nodes_total` | Gauge | Aktuell bekannte aktive Knoten im weltweiten HRW-Pool ($N_{\text{aktiv}}$). |
-| `humoco_peer_connections` | Gauge | Anzahl aktiver, direkter F2F- und Co-Shard QUIC-Sessions. |
-| `humoco_edge_inbound_rate{peer="id"}` | Counter | Eintreffende Heartbeats pro Minute je Nachbarkante. |
-| `humoco_edge_red_drop_rate{peer="id"}` | Counter | Durch Dunbar-RED verworfene Pakete auf überlasteten Kanten. |
-| `humoco_immature_nodes` | Gauge | Neu gesehene Identitäten in der 24h-Inkubationsphase. |
+The dashboard remains a compact offline diagnostic window (<128 KiB), without remote runtime dependencies, unbounded histories, web log buffers, live stderr streaming, terminal emulation, browser backup controls or manual TTL-prune buttons. Logs belong to OS stdout/stderr and `systemd`/`journalctl`; backups belong to scripts/cron through local control. Metric history uses bounded retention/cardinality and aggregation. Do not expose raw client secrets or per-client identity histories.
 
-### 4.2 Topologie-Graph Endpunkt (`/api/v1/topology.json`)
-Gibt die lokale Nachbarschafts-Struktur für Visualisierungs-Tools (z. B. integriertes Web-UI oder Cytoscape) im JSON-Graph-Format aus:
+### 4.1 Example local metric vocabulary
+
+These are useful diagnostic names, not claims every exporter or label is implemented:
+
+| Metric | Type | Local meaning |
+| --- | --- | --- |
+| `humoco_active_nodes_total` | Gauge | Active identities in this node's learned view; not globally counted truth. |
+| `humoco_peer_connections` | Gauge | Direct F2F and ephemeral shard sessions, with lifecycles distinguishable. |
+| `humoco_edge_inbound_rate` | Bounded counter/rate | Received heartbeat volume by retained local edge, with cardinality limits. |
+| `humoco_edge_red_drop_rate` | Bounded counter/rate | Observed local overloaded-edge drops; not proof that a remote peer is malicious. |
+| `humoco_immature_nodes` | Gauge | Locally known tickets within incubation; independent of offline detection. |
+| `humoco_pos_latency_seconds` | Histogram | Measured checkout or local processing stage, explicitly labeled by its meaning. |
+| Durable queue/commit indicators | Bounded gauges/histograms | Pending work, commit latency, failures and incomplete drain; no early signature permission. |
+
+### 4.2 Private topology output
+
+A local JSON graph may contain the node's identity, known edges and advisory messages. Example warnings:
+
 ```json
 {
-  "local_node": "ed25519_pubkey_abc...",
-  "active_peers_count": 14,
+  "scope": "private_local_view",
   "warnings": [
-    {
-      "peer": "ed25519_pubkey_xyz...",
-      "level": "WARN_SINGLE_BRIDGE_BOTNET",
-      "message": "Peer tunnels 85 unverified identities via single edge. Ingress throttled via Dunbar-RED."
-    },
-    {
-      "peer": "ed25519_pubkey_local...",
-      "level": "WARN_SINGLE_EDGE_CENSORSHIP_RISK",
-      "message": "Node has only 1 verified F2F edge (deg=1). High risk of partition and single-edge censorship. Please peer with >= 2-3 nodes."
-    },
-    {
-      "peer": "ed25519_pubkey_local...",
-      "level": "WARN_LOCAL_CLOCK_SKEW",
-      "message": "Local system clock diverges by > 45s from neighbor median. High risk of gossip dropping. Triggers auto NTP resync."
-    }
+    {"level": "WARN_TOPOLOGY_CONCENTRATION", "message": "Many identities currently arrive over one bridge; inspect independent paths."},
+    {"level": "WARN_SINGLE_EDGE_CENSORSHIP_RISK", "message": "Only one F2F edge is available; additional independent paths may improve resilience."},
+    {"level": "WARN_LOCAL_CLOCK_SKEW", "message": "Local clock differs from the neighbor median; inspect time configuration."}
   ]
 }
 ```
 
-### 4.3 Ingress-Transparenz & Bürgen-Frühwarnung (Plausibilitäts-Check)
+A clock warning does not automatically adjust OS time, override P2pClock validation or punish a peer. Exact clock acceptance and bounded correction are separate protocol rules.
 
-Wenn ein neuer Knoten dem Netzwerk beitritt, kann er theoretisch sofort das tägliche Ingress-Kontingent für Gutscheine einspeisen (ca. 333 Fünf-Jahres-Gutscheine pro Tag).
+### 4.3 Ingress and neighbor diagnostics
 
-Um Missbrauch durch böswillige neue Knoten sozial abzufangen, überwacht das Dashboard den **Ingress-Volumenverbrauch** direkter Nachbarn:
+An optional local warning near 80% of a new neighbor's daily budget may prompt inspection of a legitimate merchant event versus unexpected load. The threshold is a diagnostic example, not an automatic denial, ban or declaration that a certain voucher count is suspicious. Derive displayed counts from the actual authenticated root lifetimes and accounting policy; do not invent fixed 333-voucher capacity.
 
-* **Plausibilitäts-Schwelle ($\ge 80\,\%$ Tageslimit am Tag 1):**  
-  Schöpft ein neu aufgenommener Nachbar innerhalb der ersten 24 Stunden über $80\,\%$ seines täglichen Ingress-Budgets für Langzeit-Gutscheine aus, erhalten die bürgenden Freunde eine gelbe Dashboard-Meldung:
-  ```text
-  [INFO / AUDIT] Peer 'Neuer-Nachbar-Nord' beansprucht 88% seines Tages-Ingress (295 Langzeit-Gutscheine eingespeist).
-                 -> Bitte Plausibilität im lokalen Umfeld prüfen (z. B. legitime Händler-Aktion vs. Spam).
-  ```
-* **Menschliche Handlungsoption:**  
-  * Handelt es sich um eine legitime Vereinsgründung oder Kassen-Initialisierung $\rightarrow$ Alles in Ordnung.
-  * Reagiert der Nachbar nicht oder handelt es sich um unplausiblen Müll $\rightarrow$ Kündigung der Kante per `REVOKE`.
+Quota comparisons (including Spec 09's 75%/125% zones) support bounded local sender backoff only. They never change passive presence `missing_count`, declare fraud or supply voting authority. Observations remain private; no reputation-rumor gossip or public pillory is added.
 
-### 4.4 Shard-Aktivitäts-Diagnose & Betreiber-Frühwarnung
+### 4.4 Local shard-service diagnostics
 
-Die Messung der Shard-Beteiligung dient primär der lokalen Ausfallsicherheit und Selbstdiagnose des Knotenbetreibers.
+An optional warning such as `WARN_LOCAL_SHARD_PERFORMANCE_DEGRADED` can report a low observed service ratio (for example 42%) and suggest checking I/O queues, CPU, network loss and sync-readiness. There is no invented “peering credits expire” penalty. A diagnostic threshold such as 80% must be labeled with measurement window/denominator and does not establish protocol misconduct.
 
-#### 1. Lokale Betreiber-Selbstdiagnose (Eigener Knoten)
-Erkennt der lokale Node-Daemon über die internen Zähler und Quorum-Bitmasken, dass er für seinen zugewiesenen Shard unzureichend viele Signaturen geliefert hat ($< 80\,\%$ der Locks mitsigniert):
-* **Lokale Dashboard- / Log-Warnung für den Administrator:**
-  ```json
-  {
-    "level": "WARN_LOCAL_SHARD_PERFORMANCE_DEGRADED",
-    "message": "Lokale Shard-Validierungsquote liegt bei nur 42% (hohe Latenz, I/O-Stau oder Paketverlust). P2P-Peering-Credits drohen zu verfallen!"
-  }
-  ```
-* **Nutzen:** Ein ehrlicher Administrator wird sofort alarmiert, wenn seine Hardware überlastet ist, ein Router-Problem vorliegt oder Threads blockieren, noch bevor eigene Kunden unter Abbrüchen und Failover-Abwanderungen leiden.
+Frozen checkout membership remains at most 20 distinct identities and FINAL requires 14 verified voices. No rank21 replacement, automatic signing-percentage exclusion or guaranteed successful checkout follows from diagnostics. NOT_READY, capacity refusal and cancelled stragglers are neutral; all missing votes consume the existing quorum headroom.
 
-#### 2. Nachbarschafts-Audit für F2F-Freunde (Optional)
-Sollte ein Betreiber aggregierte Aktivitätsstatistiken im lokalen Web-UI für verbundene Freunde teilen:
-* **Optionale Dashboard-Meldung:**
-  ```json
-  {
-    "peer": "ed25519_pubkey_lazy...",
-    "level": "INFO_NEIGHBOR_SHARD_ACTIVITY",
-    "message": "Peer participated in 0/150 locks in assigned Shard 42 over the last 24h."
-  }
-  ```
-* **Hinweis:** Da Schmarotzer durch lokale Bitmask-Isolation (HRW-Rang 21 Nachrücken) und P2P-Ratio-Credit-Drosselung bereits automatisch an Wirksamkeit verlieren, ist ein manuelles Eingreifen der Freunde nicht für die Kern-Sicherheit nötig.
+## 5. Canonical telemetry invariants
 
----
+1. **[INV-1701] Non-authoritative telemetry:** Diagnostic observations inform human operators only. They never automatically ban, slash, authorize committee membership or override protocol admission/presence. Verified first-party fraud is a separate enforcement path.
+2. **[INV-1702] Legitimate multiple-node operation:** Multiple nodes per operator are allowed under ordinary admission/ticket rules. Independent edges support resilience, but neither common ownership nor a three-edge count determines cryptographic honesty/security.
+3. **[INV-1703] Local revocation and passive presence:** Local edge removal affects that edge; three consecutive missed hourly heartbeats govern suspension in each local view. No automatic global sanction or fixed 8–16h/24h removal guarantee follows.
+4. **[INV-1704] Private ingress transparency:** Bounded private indicators expose observed direct-neighbor load for operator diagnosis, without public blame, fraud inference or identity/presence penalties.
+5. **[INV-1705] Private shard-service transparency:** Bounded private self-diagnostics reveal service degradation and durable-processing delays. They never replace quorum proof, reduce its threshold or authorize early signatures.
 
-## 5. Invarianten der Topologie-Telemetrie
+## 6. Evidence boundary
 
-1. **[INV-1701] Nicht-autoritäre Telemetrie:** Telemetrie-Auswertungen und Dashboard-Warnungen dienen ausschließlich als Entscheidungshilfe für menschliche Betreiber und dürfen keine automatischen, willkürlichen Netzausschlüsse verhängen.
-2. **[INV-1702] Schutz vernetzter Multi-Node-Cluster:** Mehrere Knoten desselben Betreibers sind vollumfänglich zulässig, sofern sie den regulären Argon2id-PoW erbringen und über $\ge 3$ Kanten unabhängig im Mesh verankert sind.
-3. **[INV-1703] Deterministische Verhungerung:** Das Trennen von Kanten durch menschliche Betreiber führt ohne zentrale Abstimmung zur automatischen Deaktivierung (8–16h) und physischen RAM-Tilgung (48h) des isolierten Knotens.
-4. **[INV-1704] Ingress-Transparenz:** Knotenbetreiber erhalten transparente Telemetrie-Hinweise über das Ingress-Auslastungsverhalten ihrer direkt angebundenen Nachbarn, um anomales Volumen frühzeitig zu erkennen.
-5. **[INV-1705] Shard-Aktivitäts-Transparenz:** Das System stellt dem Betreiber präzise Selbstdiagnose-Warnungen (`WARN_LOCAL_SHARD_PERFORMANCE_DEGRADED`) bereit, wenn die lokale Shard-Validierungsleistung abfällt.
+Verify private exposure across all routes/aliases/listeners with actual HTTP/control tests and verify that diagnostic values cannot feed identity sanctions or membership decisions. Test genuine fraud separately over real QUIC. Validate passive presence against authentic hourly heartbeats, not manually manufactured checkout failures. Measure bounded history/cardinality and private dashboard size. This consolidation states acceptance requirements; it runs none of these tests and closes no admission or transition safety proof.

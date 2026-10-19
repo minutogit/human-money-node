@@ -378,7 +378,7 @@ impl HmcRamIndex {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum FlushOp {
     PutLock {
         lock: LockRecord,
@@ -387,6 +387,11 @@ pub enum FlushOp {
     PutHmcLock {
         lookup_tag: String,
         entry: Box<L2LockEntry>,
+    },
+    PutHmcLockDurable {
+        lookup_tag: String,
+        entry: Box<L2LockEntry>,
+        ack_sender: tokio::sync::oneshot::Sender<Result<(), StorageError>>,
     },
     Prune {
         now_sec: u64,
@@ -779,6 +784,37 @@ impl DualTierEngine {
         byte_years: Option<u64>,
         voucher_id: Option<String>,
     ) -> (L2Verdict, bool) {
+        self.ingress_hmc_lock_internal(lookup_tag, entry, origin, now_ms, tier, byte_years, voucher_id, false).await
+    }
+
+    /// Ingress an HMC lock entry on the hot path with strict "Durable-before-Vote" (DEC-029 restoration).
+    /// Awaits durable redb commit before returning success (< 20ms local durable SLA).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ingress_hmc_lock_durable(
+        &self,
+        lookup_tag: String,
+        entry: L2LockEntry,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+        tier: Option<&str>,
+        byte_years: Option<u64>,
+        voucher_id: Option<String>,
+    ) -> (L2Verdict, bool) {
+        self.ingress_hmc_lock_internal(lookup_tag, entry, origin, now_ms, tier, byte_years, voucher_id, true).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn ingress_hmc_lock_internal(
+        &self,
+        lookup_tag: String,
+        entry: L2LockEntry,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+        tier: Option<&str>,
+        byte_years: Option<u64>,
+        voucher_id: Option<String>,
+        durable: bool,
+    ) -> (L2Verdict, bool) {
         // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
         let permit = match self.tx.try_reserve() {
             Ok(p) => p,
@@ -842,10 +878,44 @@ impl DualTierEngine {
         }
 
         if is_new {
-            permit.send(FlushOp::PutHmcLock {
-                lookup_tag: lookup_tag.clone(),
-                entry: Box::new(entry.clone()),
-            });
+            if durable {
+                let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                permit.send(FlushOp::PutHmcLockDurable {
+                    lookup_tag: lookup_tag.clone(),
+                    entry: Box::new(entry.clone()),
+                    ack_sender: ack_tx,
+                });
+                match ack_rx.await {
+                    Ok(Ok(())) => {},
+                    Ok(Err(err)) => {
+                        error!("Durable commit failed for lock {}: {} - reverting RAM state", lookup_tag, err);
+                        let mut hmc = self.hmc_ram.write().await;
+                        hmc.locks.remove(&lookup_tag);
+                        return (
+                            L2Verdict::Rejected {
+                                reason: format!("Storage persistence failure: {}", err),
+                            },
+                            false,
+                        );
+                    }
+                    Err(_) => {
+                        error!("Persistence worker dropped acknowledgment channel for lock {} - reverting RAM state", lookup_tag);
+                        let mut hmc = self.hmc_ram.write().await;
+                        hmc.locks.remove(&lookup_tag);
+                        return (
+                            L2Verdict::Rejected {
+                                reason: "Storage persistence worker terminated".into(),
+                            },
+                            false,
+                        );
+                    }
+                }
+            } else {
+                permit.send(FlushOp::PutHmcLock {
+                    lookup_tag: lookup_tag.clone(),
+                    entry: Box::new(entry.clone()),
+                });
+            }
         }
 
         // Push lightweight summary to zero-contention recent locks ringbuffer (< 1µs hot-path impact)
@@ -980,6 +1050,44 @@ impl DualTierEngine {
         tier: Option<&str>,
         byte_years: Option<u64>,
     ) -> (L2Verdict, bool) {
+        self.ingress_hmc_chain_lock_internal(chain_req, origin, now_ms, tier, byte_years, false).await
+    }
+
+    /// Atomares Ketten-Locking with strict Durable-before-Vote (DEC-029 restoration).
+    pub async fn ingress_hmc_chain_lock_durable_with_tier(
+        &self,
+        chain_req: crate::api::hmc::L2ChainLockRequest,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+        tier: Option<&str>,
+        byte_years: Option<u64>,
+    ) -> (L2Verdict, bool) {
+        self.ingress_hmc_chain_lock_internal(chain_req, origin, now_ms, tier, byte_years, true).await
+    }
+
+    /// Atomares Ketten-Locking with strict Durable-before-Vote (DEC-029 restoration).
+    pub async fn ingress_hmc_chain_lock_durable(
+        &self,
+        chain_req: crate::api::hmc::L2ChainLockRequest,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+    ) -> (L2Verdict, bool) {
+        let default_tier = match origin {
+            IngressOrigin::ClientApi => "Free",
+            IngressOrigin::PartitionSync => "P2P-Sync",
+        };
+        self.ingress_hmc_chain_lock_durable_with_tier(chain_req, origin, now_ms, Some(default_tier), Some(0)).await
+    }
+
+    async fn ingress_hmc_chain_lock_internal(
+        &self,
+        chain_req: crate::api::hmc::L2ChainLockRequest,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+        tier: Option<&str>,
+        byte_years: Option<u64>,
+        durable: bool,
+    ) -> (L2Verdict, bool) {
         // Causality gate (Spec 06 INV-0604): cryptographic chaining first.
         if let Err(reason) = Self::verify_chain_causality(&chain_req) {
             return (L2Verdict::Rejected { reason }, false);
@@ -987,7 +1095,7 @@ impl DualTierEngine {
 
         // Atomic collision check + insertion under single write lock
         // We do reservation-first after determining which hops are truly new.
-        let (verdict, is_new, _ops_to_flush) = {
+        let (verdict, is_new, ack_rx_opt, inserted_tags) = {
             let mut hmc = self.hmc_ram.write().await;
 
             // First pass: gather lookup_tags and detect collisions / idempotent replays
@@ -1061,7 +1169,7 @@ impl DualTierEngine {
 
             if let Some(existing) = conflict_entry {
                 // Rollback: zero state changes
-                (L2Verdict::Conflict { existing_lock: existing }, false, Vec::<FlushOp>::new())
+                (L2Verdict::Conflict { existing_lock: existing }, false, None, Vec::new())
             } else {
                 // No collisions – validate ingress window & voucher roots for new entries before mutation
                 // Determine if any new entry would fail due to unknown root or window violation
@@ -1112,11 +1220,11 @@ impl DualTierEngine {
                     }
                 }
                 if let Some(reason) = window_violation {
-                    (L2Verdict::Rejected { reason }, false, Vec::<FlushOp>::new())
+                    (L2Verdict::Rejected { reason }, false, None, Vec::new())
                 } else if new_entries.is_empty() {
                     // All hops were idempotent replays
                     let terminal = terminal_entry_opt.unwrap();
-                    (L2Verdict::Verified { lock_entry: terminal }, false, Vec::<FlushOp>::new())
+                    (L2Verdict::Verified { lock_entry: terminal }, false, None, Vec::new())
                 } else {
                     // Reservation-First: ensure queue capacity for all new entries
                     let needed = new_entries.len();
@@ -1143,11 +1251,15 @@ impl DualTierEngine {
                                 reason: "Persistence queue congested (backpressure)".into(),
                             },
                             false,
-                            Vec::<FlushOp>::new(),
+                            None,
+                            Vec::new(),
                         )
                     } else {
                         // Atomically insert all new hops and dispatch flush operations
-                        for (permit, (tag, entry, hop_is_genesis)) in permits.into_iter().zip(new_entries.into_iter()) {
+                        let mut ack_rx_opt = None;
+                        let mut inserted_tags = Vec::new();
+                        let new_entries_count = new_entries.len();
+                        for (idx, (permit, (tag, entry, hop_is_genesis))) in permits.into_iter().zip(new_entries.into_iter()).enumerate() {
                             let root_valid = hmc.voucher_roots.get(&entry.layer2_voucher_id).copied();
                             let valid_until_ms = entry
                                 .deletable_at
@@ -1179,17 +1291,60 @@ impl DualTierEngine {
 
                             let entry_box = Box::new(entry);
                             hmc.locks.insert(tag.clone(), (*entry_box).clone());
-                            permit.send(FlushOp::PutHmcLock {
-                                lookup_tag: tag,
-                                entry: entry_box,
-                            });
+                            inserted_tags.push(tag.clone());
+                            if durable && idx == new_entries_count - 1 {
+                                let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                                permit.send(FlushOp::PutHmcLockDurable {
+                                    lookup_tag: tag,
+                                    entry: entry_box,
+                                    ack_sender: ack_tx,
+                                });
+                                ack_rx_opt = Some(ack_rx);
+                            } else {
+                                permit.send(FlushOp::PutHmcLock {
+                                    lookup_tag: tag,
+                                    entry: entry_box,
+                                });
+                            }
                         }
                         let terminal = terminal_entry_opt.unwrap();
-                        (L2Verdict::Verified { lock_entry: terminal }, true, Vec::<FlushOp>::new())
+                        (L2Verdict::Verified { lock_entry: terminal }, true, ack_rx_opt, inserted_tags)
                     }
                 }
             }
         };
+
+        if let Some(rx) = ack_rx_opt {
+            match rx.await {
+                Ok(Ok(())) => {},
+                Ok(Err(err)) => {
+                    error!("Durable commit failed for chain: {} - reverting RAM state", err);
+                    let mut hmc = self.hmc_ram.write().await;
+                    for tag in &inserted_tags {
+                        hmc.locks.remove(tag);
+                    }
+                    return (
+                        L2Verdict::Rejected {
+                            reason: format!("Storage persistence failure: {}", err),
+                        },
+                        false,
+                    );
+                }
+                Err(_) => {
+                    error!("Persistence worker dropped acknowledgment for chain - reverting RAM state");
+                    let mut hmc = self.hmc_ram.write().await;
+                    for tag in &inserted_tags {
+                        hmc.locks.remove(tag);
+                    }
+                    return (
+                        L2Verdict::Rejected {
+                            reason: "Storage persistence worker terminated".into(),
+                        },
+                        false,
+                    );
+                }
+            }
+        }
 
         // Recent buffer update for terminal
         let recent_status = match &verdict {
@@ -1687,8 +1842,20 @@ impl DualTierEngine {
                     op = rx.recv() => {
                         match op {
                             Some(op) => {
+                                let mut has_durable = matches!(op, FlushOp::PutHmcLockDurable { .. });
                                 batch.push(op);
-                                if batch.len() >= FLUSH_BATCH_SIZE {
+                                while batch.len() < FLUSH_BATCH_SIZE {
+                                    match rx.try_recv() {
+                                        Ok(next_op) => {
+                                            if matches!(next_op, FlushOp::PutHmcLockDurable { .. }) {
+                                                has_durable = true;
+                                            }
+                                            batch.push(next_op);
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                                if has_durable || batch.len() >= FLUSH_BATCH_SIZE {
                                     let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
                                     Self::commit_batch(to_flush, &db, &stats).await;
                                 }
@@ -1805,6 +1972,16 @@ impl DualTierEngine {
         if drained_batches >= MAX_SHUTDOWN_DRAIN_BATCHES {
             warn!("Shutdown drain hit batch cap; remainder stays RAM-authoritative and counted via flush_errors_total");
             stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for op in batch.drain(..) {
+                if let FlushOp::PutHmcLockDurable { ack_sender, .. } = op {
+                    let _ = ack_sender.send(Err(StorageError::DurableCommitFailed("Shutdown drain cap reached".into())));
+                }
+            }
+            while let Ok(op) = rx.try_recv() {
+                if let FlushOp::PutHmcLockDurable { ack_sender, .. } = op {
+                    let _ = ack_sender.send(Err(StorageError::DurableCommitFailed("Shutdown drain cap reached".into())));
+                }
+            }
         }
     }
 
@@ -1825,7 +2002,7 @@ impl DualTierEngine {
 
         // Categorize (drains the input vector exactly once, preserving FIFO within type).
         let mut locks: Vec<(LockRecord, u64)> = Vec::new();
-        let mut hmc: Vec<(String, Box<L2LockEntry>)> = Vec::new();
+        let mut hmc: Vec<(String, Box<L2LockEntry>, Option<tokio::sync::oneshot::Sender<Result<(), StorageError>>>)> = Vec::new();
         let mut evidences: Vec<([u8; 32], Vec<u8>)> = Vec::new();
         let mut quotas: Vec<([u8; 32], u64)> = Vec::new();
         let mut bans: Vec<([u8; 32], u64)> = Vec::new();
@@ -1833,7 +2010,10 @@ impl DualTierEngine {
         for op in batch.drain(..) {
             match op {
                 FlushOp::PutLock { lock, root_valid_until } => locks.push((lock, root_valid_until)),
-                FlushOp::PutHmcLock { lookup_tag, entry } => hmc.push((lookup_tag, entry)),
+                FlushOp::PutHmcLock { lookup_tag, entry } => hmc.push((lookup_tag, entry, None)),
+                FlushOp::PutHmcLockDurable { lookup_tag, entry, ack_sender } => {
+                    hmc.push((lookup_tag, entry, Some(ack_sender)));
+                }
                 FlushOp::PutEvidence { hash, raw } => evidences.push((hash, raw)),
                 FlushOp::SetQuota { account_tag, byte_years } => quotas.push((account_tag, byte_years)),
                 FlushOp::BanNode { node_key, timestamp_ms } => bans.push((node_key, timestamp_ms)),
@@ -1856,22 +2036,29 @@ impl DualTierEngine {
 
         // Pre-serialize HMC entries + resolve voucher roots.
         let mut batch_roots: HashMap<String, u64> = HashMap::new();
-        for (_, entry) in &hmc {
+        for (_, entry, _) in &hmc {
             if let Some(v) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
                 batch_roots.entry(entry.layer2_voucher_id.clone()).or_insert(v);
             }
         }
         // Keep owned HMC payloads alive across the retry loop.
         let mut hmc_owned: Vec<(String, Box<L2LockEntry>, Vec<u8>, u64)> = Vec::with_capacity(hmc.len());
-        for (tag, entry) in &hmc {
+        let mut ack_senders: Vec<tokio::sync::oneshot::Sender<Result<(), StorageError>>> = Vec::new();
+        for (tag, entry, ack_opt) in hmc {
             let bytes = match serde_json::to_vec(entry.as_ref()) {
                 Ok(b) => b,
                 Err(e) => {
                     permanent_errors += 1;
                     error!("Dropping unserializable HMC lock {} (permanent): {}", tag, e);
+                    if let Some(ack) = ack_opt {
+                        let _ = ack.send(Err(StorageError::JsonSerialization(e)));
+                    }
                     continue;
                 }
             };
+            if let Some(ack) = ack_opt {
+                ack_senders.push(ack);
+            }
             let valid_until_ms = match entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
                 Some(v) => v,
                 None => {
@@ -1885,7 +2072,7 @@ impl DualTierEngine {
                     }
                 }
             };
-            hmc_owned.push((tag.clone(), entry.clone(), bytes, valid_until_ms));
+            hmc_owned.push((tag, entry, bytes, valid_until_ms));
         }
 
         // Borrowed views into the owned rows (built once, reused across retries).
@@ -1915,11 +2102,18 @@ impl DualTierEngine {
                     if permanent_errors > 0 {
                         error!("Flush batch committed with {} permanent serialization drops (counted)", permanent_errors);
                     }
+                    for ack in ack_senders {
+                        let _ = ack.send(Ok(()));
+                    }
                     return FlushOutcome { ops_committed, attempts, failed: permanent_errors > 0 };
                 }
                 Err(e) => {
                     if attempts >= MAX_FLUSH_RETRIES {
                         error!("Flush batch commit failed after {} attempts: {} ({} ops uncommitted)", attempts, e, ops_committed);
+                        let err_msg = format!("Commit failed after {} attempts: {}", attempts, e);
+                        for ack in ack_senders {
+                            let _ = ack.send(Err(StorageError::DurableCommitFailed(err_msg.clone())));
+                        }
                         return FlushOutcome { ops_committed, attempts, failed: true };
                     }
                     warn!("Flush batch commit attempt {}/{} failed: {} — retrying", attempts, MAX_FLUSH_RETRIES, e);

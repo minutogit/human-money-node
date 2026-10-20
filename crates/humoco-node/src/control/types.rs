@@ -109,6 +109,8 @@ impl From<crate::storage::recent::LockInspection> for LockInspectionDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "payload")]
 pub enum ControlResponse {
+    /// Request accepted; completion is independently verified against this process instance.
+    ShutdownAccepted { identity: super::lifecycle::ShutdownIdentity },
     Status {
         node_id: String,
         #[serde(default)]

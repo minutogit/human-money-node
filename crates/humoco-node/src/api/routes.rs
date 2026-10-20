@@ -196,7 +196,8 @@ impl AppState {
     }
 }
 
-pub fn build_router(state: AppState) -> Router {
+/// Public permissionless client ingress. Operator diagnostics have a separate listener.
+pub fn public_router(state: AppState) -> Router {
     let sync_router = Router::new()
         .route("/v1/sync", post(sync_locks))
         .layer(DefaultBodyLimit::max(1024 * 1024));
@@ -209,11 +210,22 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/status", post(query_status))
         .merge(sync_router)
         .route("/v1/pow-challenge", get(get_pow_challenge))
-        .route("/health", get(get_node_status))
         .route("/healthz", get(health_ok))
+        .route("/v1/node-status", get(public_node_status))
+        .route("/v1/verify-current", post(crate::api::live::verify_current))
+        .route("/v1/gateways", get(public_gateways))
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+/// Private operator endpoints; bind only to the configured local operator listener.
+pub fn build_operator_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(get_node_status))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
-        .route("/v1/node-status", get(get_node_status))
         .route("/peers", get(get_peers))
         .route("/api/v1/network/peers", get(get_peers))
         .route("/dashboard", get(crate::api::dashboard::render_dashboard))
@@ -232,13 +244,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/dashboard/admin/peers/:addr/reset", post(crate::api::dashboard::admin_reset_peer))
         .route("/dashboard/admin/peers/:addr/ping", post(crate::api::dashboard::admin_ping_peer))
         .route("/dashboard/history", get(get_dashboard_history))
+        .route("/dashboard/history/hourly", get(private_hourly_history))
         .route("/dashboard/events", get(get_dashboard_events))
         .route("/metrics", get(crate::api::metrics::prometheus_metrics))
         .layer(DefaultBodyLimit::max(64 * 1024))
-        .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn(crate::api::operator_boundary::enforce_operator_browser_boundary))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
+
+/// Compatibility entry point for public ingress.
+pub fn build_router(state: AppState) -> Router { public_router(state) }
 
 #[derive(serde::Deserialize)]
 struct HistoryQuery {
@@ -293,19 +309,7 @@ async fn submit_lock(
     body_bytes: bytes::Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
-    if state.transport.as_ref().map(|t| !t.is_sync_ready()).unwrap_or(false) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "NodeNotReady".into(),
-                message: "503 Service Unavailable: Node is in boot-sync recovery phase".into(),
-                challenge: None,
-                difficulty: None,
-                expires_at: None,
-            }),
-        )
-            .into_response();
-    }
+
     match serde_json::from_slice::<IngressLockPayload>(&body_bytes) {
         Ok(IngressLockPayload::Chain(chain_req)) => {
             return submit_hmc_chain_lock_inner(state, headers, chain_req, start).await;
@@ -645,33 +649,6 @@ fn compute_committee_bitmap(committee: &[humoco_sim_core::types::CommitteeMember
     })
 }
 
-/// Checks that every signature occupies exactly one of the twenty
-/// canonical committee positions.
-fn verify_signer_bitmap_consistency(signatures: &[AttestationDto], bitmap: u32) -> bool {
-    if signatures.is_empty() {
-        return bitmap == 0;
-    }
-    if bitmap == 0 {
-        tracing::warn!(
-            signers = signatures.len(),
-            "Signer bitmap is empty despite collected signatures"
-        );
-        return false;
-    }
-    let ones = bitmap.count_ones() as usize;
-    if ones > signatures.len() {
-        tracing::warn!(
-            ones,
-            signers = signatures.len(),
-            bitmap,
-            "Signer bitmap sets more bits than collected signatures"
-        );
-        return false;
-    }
-    if ones != signatures.len() || bitmap >> 20 != 0 { return false; }
-    true
-}
-
 /// Verifies a peer attestation's cryptographic fields and HRW binding.
 ///
 /// # Architectural Invariant: Pillar 3 — Cryptographic Identity Trumps Network Topology
@@ -830,6 +807,7 @@ struct PeerAttestationQuery<'a> {
 }
 
 enum PeerQueryError {
+    LocalCapacity,
     QuotaExceeded,
     NotInShard,
     Collision(Vec<u8>),
@@ -837,11 +815,18 @@ enum PeerQueryError {
 }
 
 enum PeerQueryResult {
+    LocalCapacity,
     Success(AttestationDto, Option<[u8; 32]>),
     QuotaExceeded,
     NotInShard,
     Collision(Vec<u8>),
     Failure,
+}
+
+impl From<crate::error::NodeError> for PeerQueryError {
+    fn from(error: crate::error::NodeError) -> Self {
+        if error.is_local_capacity() { Self::LocalCapacity } else { Self::Generic }
+    }
 }
 
 /// Collects only the immutable write committee in parallel, with an 800ms
@@ -887,7 +872,7 @@ async fn collect_peer_attestations(
                 let exp_resp = query.resp_msg_type as u16;
                 join_set.spawn(async move {
                     let query_peer = async {
-                        let conn = t.connect_peer(addr).await.map_err(|_| PeerQueryError::Generic)?;
+                        let conn = t.connect_peer(addr).await.map_err(PeerQueryError::from)?;
                         // Pillar 3: capture the actual TLS certificate key of the
                         // queried peer so the attestation signer can be bound to it.
                         let tls_pubkey = crate::network::tls::extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
@@ -899,22 +884,21 @@ async fn collect_peer_attestations(
                         // Falls der 1. Versuch fehlschlägt, erfolgt ein 2. synchroner Retry mit identischem Payload (T_0)
                         let (resp_header, resp_payload) = match res {
                             Ok(pair) => pair,
+                            Err(error) if error.is_local_capacity() => return Err(PeerQueryError::LocalCapacity),
                             Err(_) if is_write => {
                                 // 2. Versuch: Sofortiger Retry mit bitgenau identischem Byte-Paket
                                 let retry_res = t.send_request(&conn, &h, &p).await;
                                 match retry_res {
                                     Ok(pair) => pair,
+                                    Err(error) if error.is_local_capacity() => return Err(PeerQueryError::LocalCapacity),
                                     Err(_) => {
                                         // 3. Versuch: Asynchroner Fire-and-Forget Versand ohne Warten auf ACK,
                                         // um UDP-Paketverlust auf 0.0001% (1 zu 1.000.000) zu drücken.
-                                        let t_bg = t.clone();
-                                        let h_bg = h;
-                                        let p_bg = p.clone();
-                                        tokio::spawn(async move {
-                                            if let Ok(bg_conn) = t_bg.connect_peer(addr).await {
-                                                let _ = t_bg.send_request(&bg_conn, &h_bg, &p_bg).await;
-                                            }
-                                        });
+                                        // The final identical attempt belongs to this bounded
+                                        // collector task and is cancelled on quorum/deadline.
+                                        if let Err(error) = t.send_request(&conn, &h, &p).await {
+                                            return Err(error.into());
+                                        }
                                         return Err(PeerQueryError::Generic);
                                     }
                                 }
@@ -949,6 +933,7 @@ async fn collect_peer_attestations(
                     };
                     match query_peer.await {
                         Ok((att, tls_pubkey)) => (nid, addr, rank_idx, PeerQueryResult::Success(att, tls_pubkey)),
+                        Err(PeerQueryError::LocalCapacity) => (nid, addr, rank_idx, PeerQueryResult::LocalCapacity),
                         Err(PeerQueryError::QuotaExceeded) => (nid, addr, rank_idx, PeerQueryResult::QuotaExceeded),
                         Err(PeerQueryError::NotInShard) => (nid, addr, rank_idx, PeerQueryResult::NotInShard),
                         Err(PeerQueryError::Collision(payload)) => (nid, addr, rank_idx, PeerQueryResult::Collision(payload)),
@@ -1022,6 +1007,12 @@ async fn collect_peer_attestations(
                         in_flight.clear(); // Aborted stragglers must NEVER be counted as peer failures (AGENTS.md / INV-1501)
                         break;
                     }
+                }
+                Ok((_nid, _addr, rank_idx, PeerQueryResult::LocalCapacity)) => {
+                    in_flight.remove(&rank_idx);
+                    // Our own full socket budget says nothing about this peer.
+                    // Do not expand a read search while local admission is full.
+                    candidate_idx = query.candidate_nodes.len();
                 }
                 Ok((_nid, _addr, rank_idx, PeerQueryResult::NotInShard)) => {
                     in_flight.remove(&rank_idx);
@@ -1163,24 +1154,26 @@ pub async fn assemble_quorum_certificate_with_override(
     let mut collected_signatures = Vec::new();
     // A local signature requires the same authoritative, accepted RAM lock
     // as remote shard work. Membership alone is insufficient.
-    let sync_ready = state.transport.as_ref().map(|t| t.is_sync_ready()).unwrap_or(true);
+    let sync_ready = state.readiness_manager.is_shard_ready(shard_id);
     if sync_ready && committee.iter().any(|member| member.node_pubkey == self_pubkey) {
-        let mut local_accepted = state.engine.get_ram_lock(&parent_lock).await
-            .map(|entry| entry.parent_lock == parent_lock && entry.id == lock_id).unwrap_or(false);
-        if let Some(payload) = record_payload.as_deref() {
-            if let Ok(crate::network::framing::LockWirePayload::Hmc { req, .. }) = bincode::deserialize(payload) {
-                let tag = if req.is_genesis { Some(bs58::encode(req.transaction_hash).into_string()) } else { req.ds_tag.clone() };
-                if let Some(tag) = tag {
-                    if *blake3::hash(tag.as_bytes()).as_bytes() == parent_lock
-                        && state.engine.get_hmc_ram_lock(&tag).await.map(|entry| entry.t_id == lock_id).unwrap_or(false)
-                    {
-                        local_accepted = true;
+        let attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, target_status, now_ms, state.network_id);
+        if let Ok(bytes) = bincode::serialize(&attestation) {
+            let mut retained = None;
+            if let Some(payload) = record_payload.as_deref() {
+                if let Ok(crate::network::framing::LockWirePayload::Hmc { req, .. }) = bincode::deserialize(payload) {
+                    let tag = if req.is_genesis { Some(bs58::encode(req.transaction_hash).into_string()) } else { req.ds_tag.clone() };
+                    if let Some(tag) = tag {
+                        if *blake3::hash(tag.as_bytes()).as_bytes() == parent_lock {
+                            if let Some(entry) = state.engine.get_hmc_ram_lock(&tag).await.filter(|e| e.t_id == lock_id) {
+                                retained = state.engine.persist_original_approval(tag, entry, self_pubkey, bytes.clone(), target_status, now_ms).await.ok();
+                            }
+                        }
                     }
                 }
+            } else if let Some(record) = state.engine.get_ram_lock(&parent_lock).await.filter(|r| r.id == lock_id) {
+                retained = state.engine.persist_original_record_approval(record.clone(), record.valid_until, self_pubkey, bytes, target_status, now_ms).await.ok();
             }
-        }
-        if local_accepted {
-            collected_signatures.push(create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, target_status, now_ms, state.network_id));
+            if let Some(att) = retained.and_then(|bytes| AttestationDto::from_wire_bytes(&bytes)) { collected_signatures.push(att); }
         }
     }
     let candidates: Vec<_> = remote.iter().map(|(member, addr)| (member.hrw_routing_id, *addr)).collect();
@@ -1211,160 +1204,6 @@ pub async fn assemble_quorum_certificate_with_override(
     (cert, collision)
 }
 
-/// Assembles a quorum certificate for a status query by collecting signatures from active shard nodes
-/// or creating a local standalone certificate when in village/bootstrap mode (N=1) or no peers are available.
-/// Adaptive quorum logic caps the requested read_quorum by active_nodes_count.
-async fn assemble_status_quorum_certificate(
-    state: &AppState,
-    lock_id: [u8; 32],
-    parent_lock: [u8; 32],
-    shard_id: u16,
-    now_ms: u64,
-    read_quorum: u8,
-) -> QuorumCertificateDto {
-    let mut collected_signatures = Vec::new();
-    let self_hrw = *state.identity.hrw_routing_id();
-
-    if let Some(peer_mgr) = &state.peer_manager {
-        let active_nodes = peer_mgr.active_hrw_nodes().await;
-        if !active_nodes.is_empty() {
-            let total_active = active_nodes.len() + 1;
-            let required_q = (read_quorum as usize).min(total_active).max(1);
-            let target_status: u8 = if required_q >= 20 || (total_active >= 20 && required_q >= 14) { 1 } else { 0 };
-
-            // Read eligibility retains its existing presence policy; ranking
-            // and bitmap share the same canonical committee snapshot.
-            let self_pubkey = *state.identity.node_pubkey();
-            let mut members = vec![humoco_sim_core::types::CommitteeMember {
-                node_pubkey: self_pubkey, hrw_routing_id: self_hrw,
-            }];
-            let mut endpoints = std::collections::HashMap::new();
-            for (hrw, addr) in &active_nodes {
-                if let Some(pk) = peer_mgr.get_pubkey_by_hrw_routing_id(hrw).await {
-                    if pk != self_pubkey {
-                        members.push(humoco_sim_core::types::CommitteeMember { node_pubkey: pk, hrw_routing_id: *hrw });
-                        endpoints.insert(pk, *addr);
-                    }
-                }
-            }
-            let committee = humoco_sim_core::types::select_shard_committee(shard_id, &members);
-            let should_include_self = committee.iter().any(|member| member.node_pubkey == self_pubkey);
-
-            let local_attestation = create_attestation_for_network(
-                &state.identity,
-                lock_id,
-                parent_lock,
-                shard_id,
-                target_status,
-                now_ms,
-                state.network_id,
-            );
-            if should_include_self {
-                collected_signatures.push(local_attestation);
-            }
-
-            let candidate_nodes: Vec<_> = committee.iter().filter_map(|member|
-                endpoints.get(&member.node_pubkey).map(|addr| (member.hrw_routing_id, *addr))).collect();
-
-            if collected_signatures.len() < required_q {
-                if let Some(transport) = &state.transport {
-                    let declared_read_ema = state.tier_controller.current_read_ema_credits();
-                    let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-                    let sender_pubkey = *state.identity.node_pubkey();
-                    // Epoch-bound envelope (Phase 1 P0); read path carries no
-                    // epoch state so it binds epoch (0, 0).
-                    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-                        &sender_pubkey,
-                        0,
-                        0,
-                        now_ms,
-                        declared_write_ema,
-                        declared_read_ema,
-                        0,
-                        true,
-                        &lock_id,
-                    );
-                    let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-                    let status_query = crate::network::framing::StatusQueryPayload {
-                        lock_id,
-                        parent_lock,
-                        shard_id,
-                        sender_pubkey,
-                        declared_write_ema_micro_bj: declared_write_ema,
-                        current_read_ema_credits: declared_read_ema,
-                        timestamp_ms: now_ms,
-                        sender_signature,
-                    };
-                    let payload = bincode::serialize(&status_query).unwrap_or_default();
-                    let my_load = state.tier_controller.rolling_24h_read_average();
-                    let quota_limit = (5.0 * state.tier_controller.effective_read_ncb() as f64).round() as u64;
-                    let _ = collect_peer_attestations(
-                        PeerAttestationQuery {
-                            transport,
-                            peer_mgr,
-                            candidate_nodes: &candidate_nodes,
-                            expected_members: None, parent_lock,
-                            msg_type: humoco_sim_core::wire::MsgType::StatusQuery,
-                            resp_msg_type: humoco_sim_core::wire::MsgType::StatusResponse,
-                            payload: &payload,
-                            target_status,
-                            lock_id,
-                            shard_id,
-                            required_q,
-                            shard_query_depth: state.shard_query_depth,
-                            my_load,
-                            quota_limit,
-                            network_id: state.network_id,
-                        },
-                        &mut collected_signatures,
-                    ).await;
-                }
-            }
-
-            let status = if collected_signatures.len() >= required_q && target_status == 1 {
-                1
-            } else {
-                0
-            };
-
-            let signer_bitmap = compute_committee_bitmap(&committee, &collected_signatures);
-            verify_signer_bitmap_consistency(&collected_signatures, signer_bitmap);
-
-            QuorumCertificateDto {
-                lock_id: hex::encode(lock_id),
-                shard_id,
-                status,
-                active_nodes_count: total_active,
-                signer_count: collected_signatures.len(),
-                signatures: collected_signatures,
-                signer_bitmap,
-            }
-        } else {
-            let local_attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, 0, now_ms, state.network_id);
-            QuorumCertificateDto {
-                lock_id: hex::encode(lock_id),
-                shard_id,
-                status: 0,
-                active_nodes_count: 1,
-                signer_count: 1,
-                signatures: vec![local_attestation],
-                signer_bitmap: 1,
-            }
-        }
-    } else {
-        let local_attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, 0, now_ms, state.network_id);
-        QuorumCertificateDto {
-            lock_id: hex::encode(lock_id),
-            shard_id,
-            status: 0,
-            active_nodes_count: 1,
-            signer_count: 1,
-            signatures: vec![local_attestation],
-            signer_bitmap: 1,
-        }
-    }
-}
-
 /// Handler for POST /status and POST /v1/status.
 ///
 /// 📜 ARCHITECTURAL INVARIANT:
@@ -1381,6 +1220,11 @@ async fn query_status(
     headers: HeaderMap,
     Json(payload): Json<L2StatusQuery>,
 ) -> Response {
+    if payload.read_quorum > 1 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "RecipientChallengeRequired", "verification_endpoint": "/v1/verify-current"
+        }))).into_response();
+    }
     state.metrics.record_read();
     let now_ms = state.net_time_ms();
     let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
@@ -1523,49 +1367,8 @@ async fn query_status(
         }
     }
 
-    let quorum_certificate = if payload.read_quorum > 1 {
-        let shard_id = if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id).await {
-            sid
-        } else {
-            humoco_sim_core::types::voucher_shard_id(&payload.layer2_voucher_id)
-        };
-        match &verdict {
-            L2Verdict::Verified { lock_entry } => {
-                let parent_lock = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
-                let lock_id = lock_entry.t_id;
-                let is_valid = lock_entry
-                    .deletable_at
-                    .as_deref()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|del| del >= now_ms)
-                    .unwrap_or(true);
-                if is_valid {
-                    Some(assemble_status_quorum_certificate(&state, lock_id, parent_lock, shard_id, now_ms, payload.read_quorum).await)
-                } else {
-                    None
-                }
-            }
-            L2Verdict::Conflict { existing_lock } => {
-                let parent_lock = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
-                let lock_id = existing_lock.t_id;
-                let is_valid = existing_lock
-                    .deletable_at
-                    .as_deref()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|del| del >= now_ms)
-                    .unwrap_or(true);
-                if is_valid {
-                    Some(assemble_status_quorum_certificate(&state, lock_id, parent_lock, shard_id, now_ms, payload.read_quorum).await)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
+    // Legacy lookup never manufactures a write approval as fresh read evidence.
+    let quorum_certificate = None;
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
     (StatusCode::OK, Json(envelope)).into_response()
 }
@@ -1752,28 +1555,7 @@ async fn submit_hmc_lock(
     };
 
     if state.transport.is_some() && is_responsible && !state.readiness_manager.is_shard_ready(shard_id) {
-        if state.readiness_manager.try_trigger_demand_sync(shard_id) {
-            if let (Some(transport), Some(pm)) = (state.transport.clone(), state.peer_manager.clone()) {
-                let engine = state.engine.clone();
-                let storage = state.storage.clone();
-                let identity = state.identity.clone();
-                let rm = state.readiness_manager.clone();
-                tokio::spawn(async move {
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    let _ = crate::daemon::sync_single_shard(
-                        shard_id,
-                        &transport,
-                        &pm,
-                        &engine,
-                        &storage,
-                        &identity,
-                        &rm,
-                        &cancel,
-                    )
-                    .await;
-                });
-            }
-        }
+        state.readiness_manager.request_sync(shard_id);
         let envelope = wrap_and_sign_verdict(
             &state.identity,
             L2Verdict::Rejected {
@@ -1917,7 +1699,7 @@ async fn submit_hmc_lock(
                 state.metrics.record_local_latency(std::time::Duration::from_micros(1));
 
                 // Remote double-spend evidence overrides idempotent fast-path.
-                if let Some(existing_lock) = remote_collision {
+                if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached()) {
                     let verdict = L2Verdict::Conflict { existing_lock };
                     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
                     state.metrics.record_rejected_conflict_409();
@@ -2141,7 +1923,7 @@ async fn submit_hmc_lock(
             }
         };
         // Remote genuine conflict overrides local Verified (split-brain).
-        if let Some(existing_lock) = remote_collision {
+        if let Some(existing_lock) = remote_collision.filter(|_| !q_cert.as_ref().map(|c| c.is_quorum_reached()).unwrap_or(false)) {
             (L2Verdict::Conflict { existing_lock }, false, q_cert)
         } else {
             (local_verdict, local_is_new, q_cert)
@@ -2189,7 +1971,7 @@ async fn submit_hmc_lock(
         let (cert, remote_collision) = assemble_quorum_certificate_with_override(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload, req_q_override).await;
         state.metrics.record_quorum_latency(start_quorum.elapsed());
         // FLAG_COLLISION_DETECTED from any shard proves double-spend: 409.
-        if let Some(existing_lock) = remote_collision {
+        if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached()) {
             let verdict = L2Verdict::Conflict { existing_lock };
             (verdict, false, Some(cert))
         } else {
@@ -2221,14 +2003,16 @@ async fn submit_hmc_lock(
         }
     }
 
-    // 6. Wrap and sign response envelope with appropriate HTTP status
+    // A rejected durable write is never an HTTP success or an idempotent replay.
     let status = match &verdict {
         L2Verdict::Conflict { .. } => {
             state.metrics.record_rejected_conflict_409();
             StatusCode::CONFLICT
         }
-        _ if is_new => StatusCode::CREATED,
-        _ => StatusCode::OK,
+        L2Verdict::Rejected { reason } => write_rejection_status(reason),
+        L2Verdict::Verified { .. } if is_new => StatusCode::CREATED,
+        L2Verdict::Verified { .. } => StatusCode::OK,
+        _ => StatusCode::BAD_REQUEST,
     };
     state.metrics.record_e2e_latency(start.elapsed());
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
@@ -2260,19 +2044,7 @@ async fn submit_hmc_chain_lock_inner(
     mut chain_req: L2ChainLockRequest,
     start: std::time::Instant,
 ) -> Response {
-    if state.transport.as_ref().map(|t| !t.is_sync_ready()).unwrap_or(false) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "NodeNotReady".into(),
-                message: "503 Service Unavailable: Node is in boot-sync recovery phase".into(),
-                challenge: None,
-                difficulty: None,
-                expires_at: None,
-            }),
-        )
-            .into_response();
-    }
+
     state.metrics.record_write();
     if chain_req.chain.is_empty() {
         let envelope = wrap_and_sign_verdict(
@@ -2433,28 +2205,7 @@ async fn submit_hmc_chain_lock_inner(
     };
 
     if state.transport.is_some() && is_responsible && !state.readiness_manager.is_shard_ready(shard_id) {
-        if state.readiness_manager.try_trigger_demand_sync(shard_id) {
-            if let (Some(transport), Some(pm)) = (state.transport.clone(), state.peer_manager.clone()) {
-                let engine = state.engine.clone();
-                let storage = state.storage.clone();
-                let identity = state.identity.clone();
-                let rm = state.readiness_manager.clone();
-                tokio::spawn(async move {
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    let _ = crate::daemon::sync_single_shard(
-                        shard_id,
-                        &transport,
-                        &pm,
-                        &engine,
-                        &storage,
-                        &identity,
-                        &rm,
-                        &cancel,
-                    )
-                    .await;
-                });
-            }
-        }
+        state.readiness_manager.request_sync(shard_id);
         let envelope = wrap_and_sign_verdict(
             &state.identity,
             L2Verdict::Rejected {
@@ -2533,7 +2284,7 @@ async fn submit_hmc_chain_lock_inner(
             }
             _ => (None, None),
         };
-        if let Some(existing_lock) = remote_collision {
+        if let Some(existing_lock) = remote_collision.filter(|_| !q_cert.as_ref().map(|c| c.is_quorum_reached()).unwrap_or(false)) {
             (L2Verdict::Conflict { existing_lock }, false, q_cert)
         } else {
             (local_verdict, local_is_new, q_cert)
@@ -2589,7 +2340,7 @@ async fn submit_hmc_chain_lock_inner(
         )
         .await;
         state.metrics.record_quorum_latency(start_quorum.elapsed());
-        if let Some(existing_lock) = remote_collision {
+        if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached()) {
             let verdict = L2Verdict::Conflict { existing_lock };
             (verdict, false, Some(cert))
         } else {
@@ -2617,17 +2368,10 @@ async fn submit_hmc_chain_lock_inner(
             state.metrics.record_rejected_conflict_409();
             StatusCode::CONFLICT
         }
-        L2Verdict::Rejected { reason } if reason.contains("backpressure") || reason.contains("congested") => {
-            state.metrics.record_rejected_capacity_429();
-            StatusCode::TOO_MANY_REQUESTS
-        }
-        L2Verdict::Rejected { .. } => {
-            state.metrics.record_rejected_bad_pow_400();
-            StatusCode::BAD_REQUEST
-        }
+        L2Verdict::Rejected { reason } => write_rejection_status(reason),
         L2Verdict::Verified { .. } if is_new => StatusCode::CREATED,
         L2Verdict::Verified { .. } => StatusCode::OK,
-        _ => StatusCode::OK,
+        _ => StatusCode::BAD_REQUEST,
     };
     state.metrics.record_e2e_latency(start.elapsed());
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
@@ -2675,5 +2419,79 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<serde_
                 "sync_ok": sync_ok
             })),
         )
+    }
+}
+
+/// Minimal public service metadata; topology and operator metrics remain private.
+async fn public_node_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"service":"humoco-node", "protocol_version":1}))
+}
+
+/// Explicit HTTP advertisements only; cached-address fallback belongs to clients.
+async fn public_gateways(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({"gateways": state.config.discovery.public_gateway_urls}))
+}
+
+async fn private_hourly_history(State(state): State<AppState>) -> Json<Vec<super::history_retention::HourSummary>> { Json(state.history_sampler.hourly.query()) }
+
+#[cfg(test)]
+mod local_capacity_collector_tests {
+    use super::*;
+    use crate::network::transport::DefaultRequestHandler;
+
+    #[tokio::test]
+    async fn exhausted_256_slot_admission_is_neutral_for_write_and_read_collectors() {
+        let identity = NodeIdentity::generate();
+        let peer = NodeIdentity::generate();
+        let addr: std::net::SocketAddr = "127.0.0.1:9909".parse().unwrap();
+        let manager = Arc::new(crate::network::PeerManager::new(Vec::new()));
+        manager.learn_node_from_gossip(*peer.node_pubkey(), addr, 0, None).await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let transport = crate::network::QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(), &identity, manager.clone(),
+            Arc::new(DefaultRequestHandler), cancel.clone(),
+        ).unwrap();
+        // Exercise the production 256-slot semaphore, not a string-classifier mock.
+        let occupied = transport.reserve_all_outbound_shard_slots_for_test();
+        assert!(matches!(transport.connect_peer(addr).await,
+            Err(crate::error::NodeError::LocalCapacity(_))));
+        assert!(matches!(transport.connect_peer_unchecked(addr).await,
+            Err(crate::error::NodeError::LocalCapacity(_))));
+        assert!(manager.get_peer(&addr).await.is_none());
+        let candidates = [(*peer.node_pubkey(), addr)];
+        for (msg_type, resp_msg_type) in [
+            (humoco_sim_core::wire::MsgType::LockVerifyRequest, humoco_sim_core::wire::MsgType::LockVerifyResponse),
+            (humoco_sim_core::wire::MsgType::StatusQuery, humoco_sim_core::wire::MsgType::StatusResponse),
+        ] {
+            let mut signatures = Vec::new();
+            let conflict = collect_peer_attestations(PeerAttestationQuery {
+                transport: &transport, peer_mgr: &manager, candidate_nodes: &candidates,
+                expected_members: None, parent_lock: [1; 32], msg_type, resp_msg_type,
+                payload: &[], target_status: 1, lock_id: [2; 32], shard_id: 3,
+                required_q: 1, shard_query_depth: 0, my_load: 0, quota_limit: 1,
+                network_id: humoco_sim_core::types::NetworkId::Mainnet,
+            }, &mut signatures).await;
+            assert!(conflict.is_none());
+            assert!(signatures.is_empty());
+            assert!(manager.get_peer(&addr).await.is_none(),
+                "Local backpressure must not create a peer failure/malus record");
+        }
+        drop(occupied);
+        cancel.cancel();
+        transport.close();
+        transport.drain_tasks().await;
+    }
+}
+
+/// Translates existing engine rejection reasons without turning uncertain durable work into success.
+fn write_rejection_status(reason: &str) -> StatusCode {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("backpressure") || reason.contains("congested") {
+        StatusCode::TOO_MANY_REQUESTS
+    } else if reason.contains("durable") || reason.contains("storage signing")
+        || reason.contains("worker unavailable") || reason.contains("chain deadline") {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::BAD_REQUEST
     }
 }

@@ -28,9 +28,9 @@ pub const HRW_INCUBATION_DURATION: Duration = Duration::from_secs(HRW_INCUBATION
 
 /// Presence freshness window for phase-transition counting (Spec 08/11 Phase 9 P1).
 /// A gossip-learned node counts toward `N_active` only while its last heartbeat
-/// is fresh. Hourly heartbeats with jitter mean a 2h window tolerates one
-/// missed heartbeat without flapping, while stale ghosts stop inflating N.
-pub const PRESENCE_FRESHNESS_SECS: u64 = 2 * 60 * 60;
+/// is fresh. Three consecutive missing hourly heartbeats exclude the identity from
+/// future snapshots. RPC failures do not change this passive presence clock.
+pub const PRESENCE_FRESHNESS_SECS: u64 = 3 * 60 * 60;
 pub const PRESENCE_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(PRESENCE_FRESHNESS_SECS);
 
 /// 24h merge/quota moratorium after a partition merge (Spec 09 INV-0908 / Spec 08 INV-0802).
@@ -281,6 +281,8 @@ impl HeartbeatDedupCache {
     }
 }
 
+type LocalTicketObservation = Arc<std::sync::Mutex<Option<([u8; 32], [u8; 32], Instant)>>>;
+
 #[derive(Clone, Debug)]
 pub struct PeerManager {
     peers: Arc<RwLock<HashMap<SocketAddr, PeerInfo>>>,
@@ -309,6 +311,7 @@ pub struct PeerManager {
     /// (prevents gossip amplification loops) + echo protection basis.
     seen_fraud_proofs: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
     known_active_shards: Arc<RwLock<std::collections::BTreeSet<u16>>>,
+    local_ticket_observation: LocalTicketObservation,
 }
 
 impl PeerManager {
@@ -396,6 +399,7 @@ impl PeerManager {
             recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(16))),
             seen_heartbeats: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(10_000))),
             seen_fraud_proofs: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(1024))),
+            local_ticket_observation: Arc::new(std::sync::Mutex::new(None)),
             known_active_shards: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
         }
     }
@@ -854,6 +858,16 @@ impl PeerManager {
         let mut peers = self.peers.write().await;
         if let Some(peer) = peers.get_mut(addr) {
             peer.clear_connection_preserve_malus();
+        }
+    }
+
+    /// Clears only the exact session that ended, preserving a replacement and malus.
+    pub async fn note_connection_closed(&self, addr: &SocketAddr, stable_id: usize) {
+        let mut peers = self.peers.write().await;
+        if let Some(peer) = peers.get_mut(addr) {
+            if peer.connection.as_ref().is_some_and(|conn| conn.stable_id() == stable_id) {
+                peer.clear_connection_preserve_malus();
+            }
         }
     }
 
@@ -1693,24 +1707,14 @@ impl PeerManager {
     /// Cryptographic identity (verified remote_node_id) is primarily used for authorization.
     /// F2F check strictly on NodePubKey, HRW only for sharding scoring.
     ///
-    /// Phase 8 (Spec 15/19 Tit-for-Tat): peers under LOCAL temporary work
-    /// suspension (`missing_count >= 3`, rank-21 replacement active) are
-    /// refused here. The caller must answer with `FLAG_PEER_SUSPENDED`.
-    /// Permanent equivocation bans (`is_banned`) are refused as well.
+    /// Local RPC reliability diagnostics do not revoke identity authorization.
+    /// Permanent verified equivocation bans are refused.
     pub async fn can_authorize_direct_rpc(&self, remote_addr: &SocketAddr, remote_node_id: Option<&[u8; 32]>) -> bool {
         if let Some(node_id) = remote_node_id {
             if self.is_banned(node_id).await {
                 return false;
             }
-            if self.is_peer_suspended_by_id(node_id).await
-                || self.is_peer_suspended_by_addr(remote_addr).await
-            {
-                return false;
-            }
             return self.is_known_node(node_id).await;
-        }
-        if self.is_peer_suspended_by_addr(remote_addr).await {
-            return false;
         }
         self.is_f2f_addr(remote_addr).await || self.is_known_addr(remote_addr).await
     }
@@ -1883,109 +1887,24 @@ impl PeerManager {
             .collect()
     }
 
-    /// Returns a list of (NodeId, SocketAddr) for all peers and known network nodes that are not suspended.
-    /// Skips immature entries (only mature shard tickets count) and stale presence ghosts.
-    ///
-    /// Phase 10: snapshot `peers` and `known` sequentially, never nested.
+    /// Mature, passively present admitted identities. RPC malus is diagnostic.
     pub async fn active_known_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
-        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool)> = {
-            let peers = self.peers.read().await;
-            peers
-                .values()
-                .map(|p| (p.node_id, p.addr, p.is_suspended()))
-                .collect()
-        };
-        let known_snapshot: Vec<([u8; 32], KnownNodeInfo)> = {
-            let known = self.known_network_nodes.read().await;
-            known.iter().map(|(k, v)| (*k, v.clone())).collect()
-        };
-        // Suspension lookup by addr from the peer snapshot (no lock held).
-        let is_suspended_by_addr = |addr: &SocketAddr| -> bool {
-            peer_snapshot
-                .iter()
-                .find(|(_, a, _)| a == addr)
-                .map(|(_, _, s)| *s)
-                .unwrap_or(false)
-        };
-        let mut result = Vec::new();
-        for (nid_opt, addr, suspended) in &peer_snapshot {
-            if !suspended {
-                if let Some(nid) = nid_opt {
-                    result.push((*nid, *addr));
-                }
-            }
-        }
-        for (nid, kinfo) in &known_snapshot {
-            if kinfo.is_immature() {
-                continue;
-            }
-            if !kinfo.is_presence_fresh() {
-                continue;
-            }
-            if !result.iter().any(|(id, _)| id == nid)
-                && !is_suspended_by_addr(&kinfo.addr) {
-                    result.push((*nid, kinfo.addr));
-            }
-        }
-        result
+        let known = self.known_network_nodes.read().await.clone();
+        let banned = self.banned_nodes.read().await.clone();
+        known.into_iter().filter(|(pk, info)| info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk))
+            .map(|(pk, info)| (pk, info.addr)).collect()
     }
 
-    /// HRW-aware variant: returns list of (hrw_routing_id, SocketAddr) for eligible nodes.
-    ///
-    /// Phase 10: snapshot `peers` and `known` sequentially, never nested.
+    /// HRW tickets of the same qualified identity set used for committee selection.
     pub async fn active_hrw_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
-        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool, PeerConnectionType)> = {
-            let peers = self.peers.read().await;
-            peers
-                .values()
-                .map(|p| (p.node_id, p.addr, p.is_suspended(), p.conn_type))
-                .collect()
-        };
-        let known_snapshot: Vec<([u8; 32], KnownNodeInfo)> = {
-            let known = self.known_network_nodes.read().await;
-            known.iter().map(|(k, v)| (*k, v.clone())).collect()
-        };
-        let known_map: HashMap<[u8; 32], KnownNodeInfo> =
-            known_snapshot.into_iter().collect();
-        let f2f_snapshot: HashSet<[u8; 32]> = {
-            let friends = self.f2f_friends.read().await;
-            friends.keys().copied().collect()
-        };
-        let is_suspended_by_addr = |addr: &SocketAddr| -> bool {
-            peer_snapshot
-                .iter()
-                .find(|(_, a, _, _)| a == addr)
-                .map(|(_, _, s, _)| *s)
-                .unwrap_or(false)
-        };
-        let mut result = Vec::new();
-        for (nid_opt, addr, suspended, conn_type) in &peer_snapshot {
-            if !suspended {
-                if let Some(nid) = nid_opt {
-                    let is_f2f = f2f_snapshot.contains(nid) || *conn_type == PeerConnectionType::FriendToFriend;
-                    if !is_f2f {
-                        if let Some(k) = known_map.get(nid) {
-                            if k.is_immature() || !k.is_presence_fresh() {
-                                continue;
-                            }
-                        }
-                    }
-                    let hrw = known_map.get(nid).map(|k| k.hrw_routing_id).unwrap_or(*nid);
-                    result.push((hrw, *addr));
-                }
-            }
-        }
-        for (nid, kinfo) in known_map.iter() {
-            if kinfo.is_immature() || !kinfo.is_presence_fresh() {
-                continue;
-            }
-            if !result.iter().any(|(_, addr)| addr == &kinfo.addr)
-                && !is_suspended_by_addr(&kinfo.addr) {
-                    result.push((kinfo.hrw_routing_id, kinfo.addr));
-            }
-            let _ = nid;
-        }
-        result
+        let known = self.known_network_nodes.read().await.clone();
+        let banned = self.banned_nodes.read().await.clone();
+        known.into_iter().filter(|(pk, info)| info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk))
+            .map(|(_, info)| (info.hrw_routing_id, info.addr)).collect()
+    }
+
+    fn local_ticket_is_mature(&self) -> bool {
+        self.local_ticket_observation.lock().map(|value| value.as_ref().is_some_and(|(_, _, since)| since.elapsed() >= HRW_INCUBATION_DURATION)).unwrap_or(false)
     }
 
     /// Local ticket view for write authorization. Reachability and suspension
@@ -1999,25 +1918,29 @@ impl PeerManager {
     ) -> (Vec<humoco_sim_core::types::CommitteeMember>, Vec<(humoco_sim_core::types::CommitteeMember, SocketAddr)>, usize) {
         use humoco_sim_core::types::{CommitteeMember, select_shard_committee};
         let known = self.known_network_nodes.read().await.clone();
-        let peers = self.peers.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
         let mut endpoints = HashMap::new();
         for (pk, info) in &known {
-            if *pk != self_pubkey && !info.is_immature() && !banned.contains(pk) {
+            if *pk != self_pubkey && info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk) {
                 endpoints.insert(*pk, (info.hrw_routing_id, info.addr));
             }
         }
-        for peer in peers.values() {
-            if let Some(pk) = peer.node_id {
-                if pk != self_pubkey && !banned.contains(&pk) && !known.contains_key(&pk) {
-                    endpoints.insert(pk, (pk, peer.addr));
-                }
-            }
-        }
+        // A transport connection authenticates identity, not a mined mature ticket.
+        // Never synthesize a routing ticket from an unknown peer's public key.
         let mut members: Vec<_> = endpoints.iter().map(|(pk, (hrw, _))| CommitteeMember {
             node_pubkey: *pk, hrw_routing_id: *hrw,
         }).collect();
-        members.push(CommitteeMember { node_pubkey: self_pubkey, hrw_routing_id: self_hrw });
+        let self_mature = if let Some(info) = known.get(&self_pubkey) {
+            info.hrw_routing_id == self_hrw && info.is_hrw_eligible()
+        } else if let Ok(mut observation) = self.local_ticket_observation.lock() {
+            match *observation {
+                Some((pk, hrw, since)) if pk == self_pubkey && hrw == self_hrw => since.elapsed() >= HRW_INCUBATION_DURATION,
+                _ => { *observation = Some((self_pubkey, self_hrw, Instant::now())); false }
+            }
+        } else { false };
+        if self_mature && !banned.contains(&self_pubkey) {
+            members.push(CommitteeMember { node_pubkey: self_pubkey, hrw_routing_id: self_hrw });
+        }
         let total = members.len();
         let committee = select_shard_committee(shard_id, &members);
         let remote = committee.iter().filter_map(|member| endpoints.get(&member.node_pubkey)
@@ -2161,158 +2084,25 @@ impl PeerManager {
         (write_median, read_median)
     }
 
-    /// Returns the estimated total count of active nodes in the network (peers + known nodes + self).
-    /// Skips immature entries (only mature shard tickets count) and stale presence ghosts.
-    /// Strictly coupled to 24h shard-ticket incubation + fresh presence (Spec 08 Phase 9 P1):
-    /// Immature or stale node entries must never trigger N >= 20 prematurely.
+    /// Best-effort nonblocking size using mature passive presence, never RPC malus.
     pub fn active_nodes_count(&self) -> usize {
-        let mut count = 1; // Always include self (INV: local node is active)
-        if let Ok(peers) = self.peers.try_read() {
-            let mut unique_nodes = HashSet::new();
-            let known_snapshot: HashMap<[u8; 32], KnownNodeInfo> = {
-                self.known_network_nodes
-                    .try_read()
-                    .map(|known| known.iter().map(|(k, v)| (*k, v.clone())).collect())
-                    .unwrap_or_default()
-            };
-            let f2f_snapshot: HashSet<[u8; 32]> = {
-                self.f2f_friends
-                    .try_read()
-                    .map(|friends| friends.keys().copied().collect())
-                    .unwrap_or_default()
-            };
-            for p in peers.values() {
-                if !p.is_suspended() {
-                    if let Some(nid) = p.node_id {
-                        let is_f2f = f2f_snapshot.contains(&nid) || p.conn_type == PeerConnectionType::FriendToFriend;
-                        if !is_f2f {
-                            if let Some(k) = known_snapshot.get(&nid) {
-                                if k.is_immature() || !k.is_presence_fresh() {
-                                    continue;
-                                }
-                            }
-                        }
-                        unique_nodes.insert(nid);
-                    }
-                }
-            }
-            for (&nid, kinfo) in known_snapshot.iter() {
-                if kinfo.is_immature() {
-                    continue;
-                }
-                if !kinfo.is_presence_fresh() {
-                    continue;
-                }
-                let is_suspended = peers.get(&kinfo.addr).map(|p| p.is_suspended()).unwrap_or(false);
-                if !is_suspended {
-                    unique_nodes.insert(nid);
-                }
-            }
-            count += unique_nodes.len();
-        }
-        count
+        let Ok(known) = self.known_network_nodes.try_read() else { return 0; };
+        let Ok(banned) = self.banned_nodes.try_read() else { return 0; };
+        let remote_count = known.iter().filter(|(pk, info)| info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(*pk)).count();
+        remote_count + usize::from(self.local_ticket_is_mature())
     }
 
-    /// Async accurate mature network size (mature + presence-fresh + non-suspended + self).
-    /// Used by the daemon phase-transition monitor (Spec 08 INV-0802).
-    ///
-    /// Phase 10: sequential snapshots, never nested.
+    /// Same eligibility policy as the frozen committee; connectivity is not a ticket.
     pub async fn mature_network_size(&self) -> usize {
-        let mut unique_nodes = HashSet::new();
-        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool, PeerConnectionType)> = {
-            let peers = self.peers.read().await;
-            peers
-                .values()
-                .map(|p| (p.node_id, p.addr, p.is_suspended(), p.conn_type))
-                .collect()
-        };
-        let known_snapshot: HashMap<[u8; 32], KnownNodeInfo> = {
-            let known = self.known_network_nodes.read().await;
-            known.iter().map(|(k, v)| (*k, v.clone())).collect()
-        };
-        let f2f_snapshot: HashSet<[u8; 32]> = {
-            let friends = self.f2f_friends.read().await;
-            friends.keys().copied().collect()
-        };
-        for (nid_opt, _, suspended, conn_type) in &peer_snapshot {
-            if !suspended {
-                if let Some(nid) = nid_opt {
-                    let is_f2f = f2f_snapshot.contains(nid) || *conn_type == PeerConnectionType::FriendToFriend;
-                    if !is_f2f {
-                        if let Some(k) = known_snapshot.get(nid) {
-                            if k.is_immature() || !k.is_presence_fresh() {
-                                continue;
-                            }
-                        }
-                    }
-                    unique_nodes.insert(*nid);
-                }
-            }
-        }
-        let suspended_by_addr = |addr: &SocketAddr| -> bool {
-            peer_snapshot
-                .iter()
-                .find(|(_, a, _, _)| a == addr)
-                .map(|(_, _, s, _)| *s)
-                .unwrap_or(false)
-        };
-        for (&nid, kinfo) in known_snapshot.iter() {
-            if kinfo.is_immature() || !kinfo.is_presence_fresh() {
-                continue;
-            }
-            if !suspended_by_addr(&kinfo.addr) {
-                unique_nodes.insert(nid);
-            }
-        }
-        unique_nodes.len() + 1
+        self.active_known_nodes().await.len() + usize::from(self.local_ticket_is_mature())
     }
 
-    /// Total network size including IMMATURE nodes with fresh presence (for merge detection).
-    /// A village docking to the world mesh learns dozens of immature nodes at once;
-    /// the quota thermometer must reseed immediately, not 24h later (Spec 09 INV-0908).
-    ///
-    /// Phase 10: sequential snapshots, never nested.
+    /// Diagnostic merge detection includes immature identities with fresh gossip.
+    /// Anonymous socket addresses are not additional cryptographic identities.
     pub async fn total_network_size(&self) -> usize {
-        let mut unique_nodes = HashSet::new();
-        let peer_snapshot: Vec<(Option<[u8; 32]>, SocketAddr, bool)> = {
-            let peers = self.peers.read().await;
-            peers
-                .values()
-                .map(|p| (p.node_id, p.addr, p.is_suspended()))
-                .collect()
-        };
-        for (nid_opt, addr, suspended) in &peer_snapshot {
-            if !suspended {
-                if let Some(nid) = nid_opt {
-                    unique_nodes.insert(*nid);
-                } else {
-                    // Anonymous but connected endpoint still proves network presence.
-                    // Use address bytes as stable pseudo-identity without trusting them for HRW.
-                    let mut pseudo = [0u8; 32];
-                    let s = addr.to_string();
-                    let h = blake3::hash(s.as_bytes());
-                    pseudo.copy_from_slice(h.as_bytes());
-                    unique_nodes.insert(pseudo);
-                }
-            }
-        }
-        let suspended_by_addr = |addr: &SocketAddr| -> bool {
-            peer_snapshot
-                .iter()
-                .find(|(_, a, _)| a == addr)
-                .map(|(_, _, s)| *s)
-                .unwrap_or(false)
-        };
-        let known = self.known_network_nodes.read().await;
-        for (&nid, kinfo) in known.iter() {
-            if !kinfo.is_presence_fresh() {
-                continue;
-            }
-            if !suspended_by_addr(&kinfo.addr) {
-                unique_nodes.insert(nid);
-            }
-        }
-        unique_nodes.len() + 1
+        let known = self.known_network_nodes.read().await.clone();
+        let banned = self.banned_nodes.read().await.clone();
+        known.iter().filter(|(pk, info)| info.is_presence_fresh() && !banned.contains(*pk)).count() + 1
     }
 
     /// Pure merge-jump predicate (Spec 09 INV-0908): abrupt growth detection.
@@ -2359,13 +2149,9 @@ impl PeerManager {
     }
 
     /// 24h finality hysteresis: FINAL status only if network has been stable with >=20 mature nodes for 24h.
-    /// Strictly coupled to mature nodes only (24h incubation + fresh presence + local sync-readiness).
-    /// Immature nodes, stale ghosts, and un-synced local state reset the timer and never trigger FINAL early.
+    /// Tracks mature, passively present membership. Each signature independently
+    /// requires its own safely installed shard state, never a global sync bit.
     pub fn is_network_stable_ge20_for_24h(&self, now_ms: u64) -> bool {
-        if !self.is_local_sync_ready() {
-            self.ge20_first_reached_ms.store(0, Ordering::Relaxed);
-            return false;
-        }
         if self.active_nodes_count() >= 20 {
             let start = self.ge20_first_reached_ms.load(Ordering::Relaxed);
             if start == 0 {
@@ -2515,14 +2301,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn direct_friend_without_gossip_remains_a_read_and_sync_target() {
+    async fn direct_friend_without_ticket_is_a_sync_source_not_a_committee_member() {
         let addr = SocketAddr::from(([127, 0, 0, 1], 9901));
         let manager = PeerManager::new(Vec::new());
         let pk = [42; 32];
         manager.register_f2f_friend(pk, Some(addr)).await;
         assert!(manager.known_network_nodes.read().await.is_empty());
         assert_eq!(manager.get_pubkey_by_hrw_routing_id(&pk).await, Some(pk));
-        assert_eq!(manager.get_top_n_shards_for_lock(17, 20).await, vec![(pk, addr)]);
+        assert!(manager.shard_sync_addrs().await.contains(&addr));
+        assert!(manager.get_top_n_shards_for_lock(17, 20).await.is_empty());
         assert_eq!(manager.get_pubkey_by_hrw_routing_id(&[43; 32]).await, None);
     }
 
@@ -2555,7 +2342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handshake_preserves_malus_and_suspension_refuses_rpc() {
+    async fn test_handshake_preserves_diagnostic_malus_without_revoking_rpc() {
         let addr: SocketAddr = "127.0.0.1:9098".parse().unwrap();
         let manager = PeerManager::new(vec![addr]);
         let nid = [9u8; 32];
@@ -2571,12 +2358,12 @@ mod tests {
         assert!(manager.is_peer_suspended_by_addr(&addr).await);
         assert!(manager.is_peer_suspended_by_id(&nid).await);
 
-        // Suspended peers are refused on Shard-Direct RPC (FLAG_PEER_SUSPENDED)
-        assert!(!manager.can_authorize_direct_rpc(&addr, Some(&nid)).await);
+        // RPC failure scores are diagnostic and never revoke admitted service.
+        assert!(manager.can_authorize_direct_rpc(&addr, Some(&nid)).await);
 
-        // Handshake does not lift the suspension
+        // Handshake does not lift diagnostic suspension or revoke authorization.
         manager.record_success(addr, Some(nid), None).await;
-        assert!(!manager.can_authorize_direct_rpc(&addr, Some(&nid)).await);
+        assert!(manager.can_authorize_direct_rpc(&addr, Some(&nid)).await);
 
         // Genuine shard work rehabilitates step by step (3 -> 2, Degrading)
         manager.record_shard_work(addr).await;

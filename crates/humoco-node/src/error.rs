@@ -31,6 +31,10 @@ pub enum NodeError {
     #[error("Storage error: {0}")]
     Storage(#[from] crate::storage::StorageError),
 
+    /// Local admission/backpressure is not a remote peer failure.
+    #[error("Local capacity exhausted: {0}")]
+    LocalCapacity(&'static str),
+
     #[error("Network error: {0}")]
     Network(String),
 
@@ -54,4 +58,8 @@ pub enum NodeError {
 
     #[error("Quinn read to end error: {0}")]
     QuinnReadToEnd(#[from] quinn::ReadToEndError),
+}
+
+impl NodeError {
+    pub fn is_local_capacity(&self) -> bool { matches!(self, Self::LocalCapacity(_)) || crate::network::pool::is_pool_rotation_error(self) }
 }

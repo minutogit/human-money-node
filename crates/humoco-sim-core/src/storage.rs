@@ -155,6 +155,27 @@ impl RamIndex {
 
         before - self.map.len()
     }
+    /// Examines at most `limit` expiry-index entries per pass.
+    /// The current second remains pending until every entry in it is certainly expired.
+    pub fn prune_expired_bounded(&mut self, now: SimTime, limit: usize) -> usize {
+        let mut pruned = 0;
+        for _ in 0..limit {
+            let Some((&bucket, _)) = self.ttl_buckets.first_key_value() else { break; };
+            if now.0 <= bucket.saturating_add(1).saturating_mul(1000) { break; }
+            let parent = self.ttl_buckets.get_mut(&bucket).and_then(Vec::pop);
+            if self.ttl_buckets.get(&bucket).is_some_and(Vec::is_empty) {
+                self.ttl_buckets.remove(&bucket);
+            }
+            if let Some(parent) = parent {
+                if self.root_valid.get(&parent).is_some_and(|rv| should_prune(now, *rv)) {
+                    self.map.remove(&parent);
+                    self.root_valid.remove(&parent);
+                    pruned += 1;
+                }
+            }
+        }
+        pruned
+    }
     /// Measure First-Seen latency (<1ms for test, actual <1us)
     pub fn bench_first_seen_latency(&mut self, samples: usize) -> std::time::Duration {
         let start = Instant::now();

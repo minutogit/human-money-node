@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tempfile::tempdir;
@@ -41,7 +42,7 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
         let peer_ident = NodeIdentity::generate();
         // Use arbitrary non-listening loopback ports to simulate complete DoS drop / timeout
         let addr: SocketAddr = format!("127.0.0.1:{}", 19800 + i).parse().unwrap();
-        let node_id = *peer_ident.node_id();
+        let node_id = *peer_ident.node_pubkey();
         shard_addrs.push(addr);
         shard_pubkeys.push(node_id);
         shard_entries.push((Some(node_id), addr));
@@ -50,6 +51,10 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
     // Configure all 20 as known F2F peers so they are eligible as active HRW nodes
     let peer_mgr = Arc::new(PeerManager::with_f2f(shard_entries, shard_pubkeys.clone()));
 
+    for (key, addr) in shard_pubkeys.iter().zip(&shard_addrs) {
+        peer_mgr.learn_node_from_gossip_with_hrw(*key, *key, *addr, 0, None).await;
+        peer_mgr.set_first_seen_for_test(key, Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    }
     let active_nodes = peer_mgr.active_hrw_nodes().await;
     assert_eq!(active_nodes.len(), 20, "Must have 20 eligible shard candidates");
 

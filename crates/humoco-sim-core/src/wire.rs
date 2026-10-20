@@ -83,6 +83,8 @@ impl WireHeader {
 pub enum MsgType {
     StatusQuery = 0x0001,
     StatusResponse = 0x0002,
+    LiveStateRequest = 0x0040,
+    LiveStateResponse = 0x0041,
     LatencyProbe = 0x0003,
     LatencyProbeAck = 0x0004,
     LockVerifyRequest = 0x0101,

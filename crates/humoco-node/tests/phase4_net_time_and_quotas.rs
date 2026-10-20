@@ -1,4 +1,6 @@
-//! # Phase 4 Integration Tests
+//! # Phase 4 clock/quota handler integration tests
+//! Direct handler calls exercise authentication context and exact wire flags.
+//! Real QUIC receiver coverage is maintained in the transport integration suites.
 //!
 //! Verifies:
 //! 1. P2P Network-Adjusted Time (`net_time_ms`):
@@ -109,6 +111,20 @@ fn test_phase4_network_clock_clamping_and_monotonicity() {
     );
 }
 
+/// Fixture membership is explicit and mature; this is no transfer/activation proof.
+async fn admit_mature_local(pm: &humoco_node::network::PeerManager, identity: &humoco_node::identity::NodeIdentity) {
+    pm.learn_node_from_gossip_with_hrw(*identity.node_pubkey(), *identity.hrw_routing_id(),
+        "127.0.0.1:9999".parse().unwrap(), 0, None).await;
+    pm.set_first_seen_for_test(identity.node_pubkey(),
+        std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600)).await;
+}
+
+fn isolated_ready() -> Arc<humoco_node::daemon::ShardReadinessManager> {
+    let ready = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    for shard in 0..=u16::MAX { ready.mark_shard_ready(shard); }
+    ready
+}
+
 #[tokio::test]
 async fn test_phase4_peer_manager_clock_integration() {
     let friend_pubkey = [0x42u8; 32];
@@ -206,10 +222,11 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
 
     let pm_shard = Arc::new(PeerManager::with_f2f(
         Vec::new(),
-        vec![*identity_client.node_id()],
+        vec![*identity_client.node_pubkey()],
     ));
-    pm_shard.learn_node_from_gossip(*identity_client.node_id(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
+    pm_shard.learn_node_from_gossip(*identity_client.node_pubkey(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
 
+    admit_mature_local(&pm_shard, &identity_shard).await;
     let handler_shard = Arc::new(
         NodeRequestHandler::with_peer_manager(
             engine.clone(),
@@ -217,21 +234,21 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
             identity_shard.clone(),
             pm_shard.clone(),
         )
-        .with_tier_controller(tier_controller.clone()),
+        .with_tier_controller(tier_controller.clone()).with_readiness_manager(isolated_ready()),
     );
 
     // 1. Send LockVerifyRequest with declared write load exceeding 5.0 * ncb_eff
     let declared_write_ema = 15_000_000_000_000u64; // >> 4_800_000 daily rate
     let hmc_req = humoco_node::api::hmc::L2LockRequest {
         auth: humoco_node::api::hmc::L2AuthPayload {
-            ephemeral_pubkey: *identity_client.node_id(),
+            ephemeral_pubkey: *identity_client.node_pubkey(),
             auth_signature: None,
         },
         layer2_voucher_id: "test_voucher".into(),
         ds_tag: None,
         transaction_hash: [1; 32],
         is_genesis: true,
-        sender_ephemeral_pub: *identity_client.node_id(),
+        sender_ephemeral_pub: *identity_client.node_pubkey(),
         receiver_ephemeral_pub_hash: None,
         change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
@@ -253,7 +270,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         current_anl_24h: declared_write_ema,
         declared_write_ema_micro_bj: declared_write_ema,
         declared_read_ema_credits: 0,
-        sender_pubkey: *identity_client.node_id(),
+        sender_pubkey: *identity_client.node_pubkey(),
         sender_signature: [0; 64],
         timestamp_ms: 1000,
     }).unwrap();
@@ -266,7 +283,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         hmc_payload.len() as u32,
     );
 
-    let (resp_header, resp_payload) = handler_shard.handle(req_header, hmc_payload).await.expect("handle");
+    let (resp_header, resp_payload) = handler_shard.handle_authenticated(req_header, hmc_payload, Some(*identity_client.node_pubkey())).await.expect("handle");
     assert_eq!(resp_header.msg_type, MsgType::LockVerifyResponse as u16);
     assert_eq!(resp_header.flags & FLAG_QUOTA_EXCEEDED, FLAG_QUOTA_EXCEEDED, "Shard must return FLAG_QUOTA_EXCEEDED when write load > 5x limit");
     assert!(resp_payload.is_empty(), "Payload must be empty on quota rejection");
@@ -276,7 +293,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         lock_id: [0x77; 32],
         parent_lock: [0x88; 32],
         shard_id: 42,
-        sender_pubkey: *identity_client.node_id(),
+        sender_pubkey: *identity_client.node_pubkey(),
         declared_write_ema_micro_bj: 0,
         current_read_ema_credits: 500_000, // declared daily rate = 500_000 * 0.693 = 346_573 > 250_000
         timestamp_ms: 1000,
@@ -290,7 +307,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         0,
         status_payload.len() as u32,
     );
-    let (status_resp_header, status_resp_payload) = handler_shard.handle(status_req_header, status_payload).await.expect("handle status query");
+    let (status_resp_header, status_resp_payload) = handler_shard.handle_authenticated(status_req_header, status_payload, Some(*identity_client.node_pubkey())).await.expect("handle status query");
     assert_eq!(status_resp_header.msg_type, MsgType::StatusResponse as u16);
     assert_eq!(status_resp_header.flags & FLAG_QUOTA_EXCEEDED, FLAG_QUOTA_EXCEEDED, "Shard must return FLAG_QUOTA_EXCEEDED when read load > 5x limit");
     assert!(status_resp_payload.is_empty(), "Payload must be empty on read quota rejection");
@@ -328,17 +345,18 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
 
     let pm_shard = Arc::new(PeerManager::with_f2f(
         Vec::new(),
-        vec![*identity_client.node_id()],
+        vec![*identity_client.node_pubkey()],
     ));
-    pm_shard.learn_node_from_gossip(*identity_client.node_id(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
+    pm_shard.learn_node_from_gossip(*identity_client.node_pubkey(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
 
+    admit_mature_local(&pm_shard, &identity_shard).await;
     let handler_shard = Arc::new(
         NodeRequestHandler::with_peer_manager(
             engine.clone(),
             storage.clone(),
             identity_shard.clone(),
             pm_shard.clone(),
-        ),
+        ).with_readiness_manager(isolated_ready()),
     );
 
     // 1. Initial Heartbeat anchors write EMA at 10_000_000 (epoch-bound, 30s freshness)
@@ -372,7 +390,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     };
     let hb_payload = bincode::serialize(&hb_wire).unwrap();
     let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, hb_payload.len() as u32);
-    handler_shard.handle_unidirectional(hb_hdr, hb_payload).await.expect("handle hb");
+    handler_shard.handle_unidirectional_authenticated(hb_hdr, hb_payload, Some(*identity_client.node_pubkey())).await.expect("handle hb");
 
     // Verify evidence anchored in KnownNodeInfo
     let ev = pm_shard.get_node_write_evidence(identity_client.node_pubkey()).await;
@@ -387,14 +405,14 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     let fraudulent_write_ema = 1_000_000u64;
     let hmc_req = humoco_node::api::hmc::L2LockRequest {
         auth: humoco_node::api::hmc::L2AuthPayload {
-            ephemeral_pubkey: *identity_client.node_id(),
+            ephemeral_pubkey: *identity_client.node_pubkey(),
             auth_signature: None,
         },
         layer2_voucher_id: "fraud_voucher".into(),
         ds_tag: None,
         transaction_hash: [2; 32],
         is_genesis: true,
-        sender_ephemeral_pub: *identity_client.node_id(),
+        sender_ephemeral_pub: *identity_client.node_pubkey(),
         receiver_ephemeral_pub_hash: None,
         change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
@@ -440,7 +458,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     let lock_payload = bincode::serialize(&lock_wire).unwrap();
     let lock_hdr = WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 0, lock_payload.len() as u32);
 
-    let (resp_hdr, _) = handler_shard.handle(lock_hdr, lock_payload).await.expect("handle lock");
+    let (resp_hdr, _) = handler_shard.handle_authenticated(lock_hdr, lock_payload, Some(*identity_client.node_pubkey())).await.expect("handle lock");
     assert_eq!(resp_hdr.msg_type, MsgType::LockVerifyResponse as u16);
     let expected_flags = FLAG_QUOTA_EXCEEDED | FLAG_PEER_SUSPENDED | FLAG_QUOTA_FRAUD;
     assert_eq!(resp_hdr.flags & expected_flags, expected_flags, "Must return FLAG_QUOTA_EXCEEDED | FLAG_PEER_SUSPENDED | FLAG_QUOTA_FRAUD");
@@ -475,33 +493,35 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     // Node A setup
     let pm_a = Arc::new(PeerManager::with_f2f(
         Vec::new(),
-        vec![*identity_g.node_id()],
+        vec![*identity_g.node_pubkey()],
     ));
-    pm_a.learn_node_from_gossip(*identity_g.node_id(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
+    pm_a.learn_node_from_gossip(*identity_g.node_pubkey(), "127.0.0.1:9001".parse().unwrap(), 0, None).await;
+    admit_mature_local(&pm_a, &identity_a).await;
     let handler_a = Arc::new(
         NodeRequestHandler::with_peer_manager(
             engine_a.clone(),
             storage_a.clone(),
             identity_a.clone(),
             pm_a.clone(),
-        ),
+        ).with_readiness_manager(isolated_ready()),
     );
 
     // Node B setup with fraud proof listener
     let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel(16);
     let pm_b = Arc::new(PeerManager::with_f2f(
         Vec::new(),
-        vec![*identity_a.node_id()],
+        vec![*identity_a.node_pubkey()],
     ));
     pm_b.set_fraud_proof_tx(fraud_tx).await;
-    pm_b.learn_node_from_gossip(*identity_a.node_id(), "127.0.0.1:9002".parse().unwrap(), 0, None).await;
+    pm_b.learn_node_from_gossip(*identity_a.node_pubkey(), "127.0.0.1:9002".parse().unwrap(), 0, None).await;
+    admit_mature_local(&pm_b, &identity_b).await;
     let handler_b = Arc::new(
         NodeRequestHandler::with_peer_manager(
             engine_b.clone(),
             storage_b.clone(),
             identity_b.clone(),
             pm_b.clone(),
-        ),
+        ).with_readiness_manager(isolated_ready()),
     );
 
     // 1. Gateway G interacts with Shard Node A with high load (10_000_000 micro BJ)
@@ -509,14 +529,14 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     let high_write_ema = 10_000_000u64;
     let hmc_req_a = humoco_node::api::hmc::L2LockRequest {
         auth: humoco_node::api::hmc::L2AuthPayload {
-            ephemeral_pubkey: *identity_g.node_id(),
+            ephemeral_pubkey: *identity_g.node_pubkey(),
             auth_signature: None,
         },
         layer2_voucher_id: "voucher_high_load".into(),
         ds_tag: None,
         transaction_hash: [10; 32],
         is_genesis: true,
-        sender_ephemeral_pub: *identity_g.node_id(),
+        sender_ephemeral_pub: *identity_g.node_pubkey(),
         receiver_ephemeral_pub_hash: None,
         change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
@@ -560,7 +580,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     };
     let lock_payload_a = bincode::serialize(&lock_wire_a).unwrap();
     let lock_hdr_a = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, lock_payload_a.len() as u32);
-    let (resp_hdr_a, _) = handler_a.handle(lock_hdr_a, lock_payload_a).await.expect("handle lock A");
+    let (resp_hdr_a, _) = handler_a.handle_authenticated(lock_hdr_a, lock_payload_a, Some(*identity_g.node_pubkey())).await.expect("handle lock A");
     assert_eq!(resp_hdr_a.msg_type, MsgType::LockVerifyResponse as u16);
 
     // Node A records evidence and samples it
@@ -586,7 +606,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     };
     let hb_payload = bincode::serialize(&hb_wire).unwrap();
     let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, hb_payload.len() as u32);
-    handler_b.handle_unidirectional(hb_hdr, hb_payload).await.expect("handle hb at B");
+    handler_b.handle_unidirectional_authenticated(hb_hdr, hb_payload, Some(*identity_a.node_pubkey())).await.expect("handle hb at B");
 
     // Node B receives the Heartbeat, verifies piggyback, and stores in KnownNodeInfo
     let ev_at_b = pm_b.get_node_write_evidence(identity_g.node_pubkey()).await;
@@ -598,14 +618,14 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     let fraudulent_low_ema = 100_000u64;
     let hmc_req_b = humoco_node::api::hmc::L2LockRequest {
         auth: humoco_node::api::hmc::L2AuthPayload {
-            ephemeral_pubkey: *identity_g.node_id(),
+            ephemeral_pubkey: *identity_g.node_pubkey(),
             auth_signature: None,
         },
         layer2_voucher_id: "voucher_low_load".into(),
         ds_tag: None,
         transaction_hash: [20; 32],
         is_genesis: true,
-        sender_ephemeral_pub: *identity_g.node_id(),
+        sender_ephemeral_pub: *identity_g.node_pubkey(),
         receiver_ephemeral_pub_hash: None,
         change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
@@ -647,7 +667,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     };
     let lock_payload_b = bincode::serialize(&lock_wire_b).unwrap();
     let lock_hdr_b = WireHeader::new(MsgType::LockVerifyRequest as u16, 3, 0, 0, lock_payload_b.len() as u32);
-    let (resp_hdr_b, _) = handler_b.handle(lock_hdr_b, lock_payload_b).await.expect("handle lock B");
+    let (resp_hdr_b, _) = handler_b.handle_authenticated(lock_hdr_b, lock_payload_b, Some(*identity_g.node_pubkey())).await.expect("handle lock B");
 
     // Node B detects under-reporting against piggybacked evidence and rejects with FLAG_QUOTA_FRAUD
     assert_eq!(resp_hdr_b.msg_type, MsgType::LockVerifyResponse as u16);

@@ -40,6 +40,27 @@ use humoco_sim_core::wire::{MsgType, WireHeader};
 // Helpers
 // ---------------------------------------------------------------------------
 
+
+/// Explicit isolated fixture premises: mature tickets and installed shard state.
+/// These transport/collector tests do not prove bootstrap or recovery completeness.
+fn prepared_readiness() -> Arc<humoco_node::daemon::ShardReadinessManager> {
+    let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    for shard in 0..=u16::MAX { readiness.mark_shard_ready(shard); }
+    readiness
+}
+
+async fn prepare_mature_fixture(pm: &PeerManager, local: &NodeIdentity) {
+    for peer in pm.list_peers().await {
+        if let Some(key) = peer.node_id {
+            let ticket = pm.get_hrw_routing_id(&key).await.unwrap_or(key);
+            pm.learn_node_from_gossip_with_hrw(key, ticket, peer.addr, 0, None).await;
+            pm.set_first_seen_for_test(&key, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+        }
+    }
+    pm.learn_node_from_gossip_with_hrw(*local.node_pubkey(), *local.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
+    pm.set_first_seen_for_test(local.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+}
+
 fn test_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -70,7 +91,7 @@ fn make_hmc_genesis(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: test_now_ms(),
         deletable_at: Some(valid_until_ms.to_string()),
         privacy_guard: None,
     };
@@ -131,6 +152,7 @@ async fn test_phase11a_quorum_gating_wire_returns_503_never_200_201() {
         pm.register_f2f_friend(nid, Some(fake_addr(59901 + i as u16))).await;
     }
     // N = 1 + 6 = 7 => Q(7) = floor(14/3)+1 = 5. Self alone can never reach it.
+    prepare_mature_fixture(&pm, &gateway_id).await;
     let total = pm.active_nodes_count();
     assert_eq!(total, 7, "gateway must see N=7 active nodes");
     let (required_q, is_final) = required_quorum(total);
@@ -254,6 +276,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
             )
             .await;
         }
+        prepare_mature_fixture(&pm, &identity).await;
         assert_eq!(pm.active_nodes_count(), 20);
         force_stable_ge20(&pm).await;
 
@@ -264,7 +287,8 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
                 identity.clone(),
                 pm.clone(),
             )
-            .with_sync_ready(Arc::new(AtomicBool::new(true))),
+            .with_sync_ready(Arc::new(AtomicBool::new(true)))
+            .with_readiness_manager(prepared_readiness()),
         );
         let transport = QuicTransport::bind_with_options(
             "127.0.0.1:0".parse().expect("addr"),
@@ -297,6 +321,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
             .register_f2f_friend(fake_pubkey(90_000 + i), Some(fake_addr((59101 + i) as u16)))
             .await;
     }
+    prepare_mature_fixture(&pm_gw, &gateway_id).await;
     assert_eq!(pm_gw.active_nodes_count(), 20);
     force_stable_ge20(&pm_gw).await;
 
@@ -806,7 +831,8 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
             server_id.clone(),
             pm_server.clone(),
         )
-        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+        .with_sync_ready(Arc::new(AtomicBool::new(true)))
+            .with_readiness_manager(prepared_readiness()),
     );
     let server = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().expect("addr"),
@@ -919,8 +945,8 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
     }
     assert_eq!(
         pm.active_nodes_count(),
-        101,
-        "100 mature + self; 5 immature excluded"
+        100,
+        "100 mature; unobserved self and 5 immature excluded"
     );
     let (q100, is_final_100) = required_quorum(101);
     assert_eq!(q100, 14);
@@ -1011,6 +1037,7 @@ static COMMITTEE_WIRE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::co
 // A shared, complete roster is deliberately supplied here. These tests prove
 // request-scoped committee enforcement, not distributed membership agreement.
 struct ObservedShardHandler {
+    available: Arc<AtomicBool>,
     inner: Arc<NodeRequestHandler>,
     identity: NodeIdentity,
     attack: Arc<std::sync::atomic::AtomicU8>,
@@ -1028,6 +1055,7 @@ impl humoco_node::network::RequestHandler for ObservedShardHandler {
     ) -> humoco_node::network::BoxFuture<Result<(WireHeader, Vec<u8>), humoco_node::NodeError>>
     {
         let inner = self.inner.clone();
+        let available = self.available.load(Ordering::SeqCst);
         let identity = self.identity.clone();
         let attack = self.attack.load(Ordering::SeqCst);
         let forged = self.forged.clone();
@@ -1040,6 +1068,9 @@ impl humoco_node::network::RequestHandler for ObservedShardHandler {
         Box::pin(async move {
             if delay > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            if header.msg_type == MsgType::LockVerifyRequest as u16 && !available {
+                return Ok((WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_NOT_READY, 0), Vec::new()));
             }
             let (mut response, bytes) = humoco_node::network::RequestHandler::handle_authenticated(
                 &*inner, header, payload, peer,
@@ -1160,9 +1191,11 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
                 identity.clone(),
                 pm.clone(),
             )
-            .with_sync_ready(ready.clone()),
+            .with_sync_ready(ready.clone())
+            .with_readiness_manager(prepared_readiness()),
         );
         let handler = Arc::new(ObservedShardHandler {
+            available: ready.clone(),
             inner,
             identity: identity.clone(),
             attack: attack.clone(),
@@ -1219,6 +1252,7 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
                 .register_f2f_friend(*other.identity.node_pubkey(), Some(addr))
                 .await;
         }
+        prepare_mature_fixture(&node.pm, &node.identity).await;
         force_stable_ge20(&node.pm).await;
     }
     // Choose a real voucher route whose HRW committee includes/excludes self.

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use humoco_sim_core::types::{ClusterResult, ShardDigestResponse, SimTime};
+use humoco_sim_core::types::SimTime;
 use rand::Rng;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -25,53 +25,123 @@ pub enum ShardStatus {
     Ready,
 }
 
+const MAX_ACTIVE_SHARD_SYNCS: usize = 32;
+
+/// Readiness is scoped to a shard, never inferred from a successful TCP/QUIC transfer.
+/// One state lock avoids lock-order inversions between request and completion.
 pub struct ShardReadinessManager {
-    shard_states: std::sync::RwLock<std::collections::HashMap<u16, ShardStatus>>,
-    active_sync_tasks: std::sync::Mutex<std::collections::HashSet<u16>>,
+    shard_states: std::sync::Mutex<std::collections::HashMap<u16, ShardStatus>>,
+    sync_tx: tokio::sync::mpsc::Sender<u16>,
+    sync_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<u16>>>,
+    storage_healthy: std::sync::atomic::AtomicBool,
+    cancel: CancellationToken,
 }
 
 impl ShardReadinessManager {
-    pub fn new() -> Self {
+    pub fn new() -> Self { Self::with_cancel_token(CancellationToken::new()) }
+
+    pub fn with_cancel_token(cancel: CancellationToken) -> Self {
+        let (sync_tx, sync_rx) = tokio::sync::mpsc::channel(MAX_ACTIVE_SHARD_SYNCS);
         Self {
-            shard_states: std::sync::RwLock::new(std::collections::HashMap::new()),
-            active_sync_tasks: std::sync::Mutex::new(std::collections::HashSet::new()),
+            shard_states: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sync_tx, sync_rx: std::sync::Mutex::new(Some(sync_rx)),
+            storage_healthy: std::sync::atomic::AtomicBool::new(true), cancel,
         }
     }
 
     pub fn is_shard_ready(&self, shard_id: u16) -> bool {
-        let lock = self.shard_states.read().unwrap();
-        matches!(lock.get(&shard_id), Some(ShardStatus::Ready))
+        !self.cancel.is_cancelled()
+            && self.storage_healthy.load(std::sync::atomic::Ordering::Acquire)
+            && self.shard_states.lock().map(|s| matches!(s.get(&shard_id), Some(ShardStatus::Ready))).unwrap_or(false)
     }
 
-    pub fn try_trigger_demand_sync(&self, shard_id: u16) -> bool {
-        let mut active = self.active_sync_tasks.lock().unwrap();
-        if active.contains(&shard_id) {
-            return false;
-        }
-        active.insert(shard_id);
-        let mut states = self.shard_states.write().unwrap();
+    /// Admission is nonblocking, bounded across distinct shards and deduplicated.
+    pub fn request_sync(&self, shard_id: u16) -> bool {
+        if self.cancel.is_cancelled() || !self.storage_healthy.load(std::sync::atomic::Ordering::Acquire) { return false; }
+        let Ok(mut states) = self.shard_states.lock() else { return false; };
+        if matches!(states.get(&shard_id), Some(ShardStatus::Syncing | ShardStatus::Ready))
+            || states.values().filter(|s| **s == ShardStatus::Syncing).count() >= MAX_ACTIVE_SHARD_SYNCS { return false; }
+        if self.sync_tx.try_send(shard_id).is_err() { return false; }
         states.insert(shard_id, ShardStatus::Syncing);
         true
     }
 
+    pub fn try_trigger_demand_sync(&self, shard_id: u16) -> bool { self.request_sync(shard_id) }
+
+    fn take_sync_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<u16>> {
+        self.sync_rx.lock().ok()?.take()
+    }
+
+    pub fn cancellation_token(&self) -> CancellationToken { self.cancel.clone() }
+
+    pub fn set_storage_healthy(&self, healthy: bool) {
+        self.storage_healthy.store(healthy, std::sync::atomic::Ordering::Release);
+        if !healthy {
+            if let Ok(mut states) = self.shard_states.lock() { states.clear(); }
+        }
+    }
+
+    pub fn invalidate_shard(&self, shard_id: u16) {
+        if let Ok(mut states) = self.shard_states.lock() { states.remove(&shard_id); }
+    }
+
     pub fn mark_shard_ready(&self, shard_id: u16) {
-        let mut states = self.shard_states.write().unwrap();
-        states.insert(shard_id, ShardStatus::Ready);
-        let mut active = self.active_sync_tasks.lock().unwrap();
-        active.remove(&shard_id);
+        if self.cancel.is_cancelled() || !self.storage_healthy.load(std::sync::atomic::Ordering::Acquire) { return; }
+        if let Ok(mut states) = self.shard_states.lock() { states.insert(shard_id, ShardStatus::Ready); }
     }
 
     pub fn mark_sync_failed(&self, shard_id: u16) {
-        let mut states = self.shard_states.write().unwrap();
-        states.insert(shard_id, ShardStatus::Uninitialized);
-        let mut active = self.active_sync_tasks.lock().unwrap();
-        active.remove(&shard_id);
+        if let Ok(mut states) = self.shard_states.lock() { states.remove(&shard_id); }
     }
 }
 
 impl Default for ShardReadinessManager {
-    fn default() -> Self {
-        Self::new()
+    fn default() -> Self { Self::new() }
+}
+
+/// Owns cancellation and task registrations even if startup returns before the
+/// normal teardown block. No database handle or listener outlives a clean exit.
+#[derive(Default)]
+struct RunCleanup {
+    producers: parking_lot::Mutex<Vec<tokio::task::AbortHandle>>,
+    transports: parking_lot::Mutex<Vec<crate::network::QuicTransport>>,
+    flush: parking_lot::Mutex<Option<(CancellationToken, tokio::task::AbortHandle)>>,
+    quota_failed: parking_lot::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+}
+
+impl RunCleanup {
+    fn producer<T>(&self, handle: &tokio::task::JoinHandle<T>) {
+        self.producers.lock().push(handle.abort_handle());
+    }
+
+    async fn finish(&self) -> bool {
+        let transports = std::mem::take(&mut *self.transports.lock());
+        for transport in &transports { transport.close(); }
+        for transport in &transports { transport.drain_tasks().await; }
+        // Drop handler-owned TierController senders before awaiting its FIFO worker.
+        drop(transports);
+        // Producers may still be completing an acknowledged request. Persistence
+        // stays alive until every producer has actually released its resources.
+        let producers = self.producers.lock().clone();
+        while producers.iter().any(|handle| !handle.is_finished()) {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        let flush = self.flush.lock().clone();
+        if let Some((cancel, handle)) = flush {
+            cancel.cancel();
+            while !handle.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        }
+        self.transports.lock().clear();
+        self.producers.lock().clear();
+        self.flush.lock().take();
+        !self.quota_failed.lock().as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    fn abort_producers(&self) {
+        for transport in self.transports.lock().iter() { transport.close(); }
+        for producer in self.producers.lock().iter() { producer.abort(); }
     }
 }
 
@@ -146,6 +216,44 @@ impl NodeDaemon {
 
     /// Runs the node daemon, initializing subsystems and waiting for shutdown signal.
     pub async fn run(&self) -> Result<(), NodeError> {
+        self.config.validate_network_boundaries()?;
+        let lifecycle = Arc::new(crate::control::lifecycle::ShutdownLifecycle::new(&self.config.control_socket_path())?);
+        let cleanup = Arc::new(RunCleanup::default());
+        let timeout = std::time::Duration::from_secs(self.config.network.shutdown_timeout_secs);
+        let mut stop_deadline = None;
+        let mut result = {
+            let run = self.run_inner(lifecycle.clone(), cleanup.clone());
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => result,
+                _ = self.cancel_token.cancelled() => {
+                    let deadline = tokio::time::Instant::now() + timeout;
+                    stop_deadline = Some(deadline);
+                    tokio::time::timeout_at(deadline, &mut run).await
+                        .unwrap_or_else(|_| Err(NodeError::Daemon("internal shutdown deadline exceeded; teardown incomplete".into())))
+                }
+            }
+        }; // Drop the startup/run future before waiting for its registered tasks.
+        self.cancel_token.cancel();
+        let deadline = stop_deadline.unwrap_or_else(|| tokio::time::Instant::now() + timeout);
+        let completion = tokio::time::timeout_at(deadline, cleanup.finish()).await;
+        if matches!(completion, Ok(false)) {
+            result = Err(NodeError::Daemon("VIP quota persistence failed during run or drain".into()));
+        }
+        if completion.is_err() {
+            cleanup.abort_producers();
+            // A blocking filesystem operation cannot be killed or reported as
+            // drained. Finish the ordered cleanup asynchronously, while the
+            // caller receives an honest bounded incomplete result.
+            let remaining_cleanup = cleanup.clone();
+            tokio::spawn(async move { remaining_cleanup.finish().await; });
+            result = Err(NodeError::Daemon("internal shutdown deadline exceeded; resources may still be draining".into()));
+        }
+        lifecycle.complete(result.is_ok())?;
+        result
+    }
+
+    async fn run_inner(&self, lifecycle: Arc<crate::control::lifecycle::ShutdownLifecycle>, cleanup: Arc<RunCleanup>) -> Result<(), NodeError> {
         info!(
             node_id = %self.identity.node_id_hex(),
             public_key = %self.identity.public_key_hex(),
@@ -182,6 +290,7 @@ impl NodeDaemon {
             storage.clone(),
             flush_cancel_token.clone(),
         );
+        *cleanup.flush.lock() = Some((flush_cancel_token.clone(), flush_handle.abort_handle()));
         // Cold-boot recovery: Load all records into RAM index without premature pruning.
         // Unverified host SystemTime must not be trusted before P2P median synchronization (Spec 07 / INV-1203).
         let _ = engine.recover_from_disk(humoco_sim_core::types::SimTime(0)).await;
@@ -189,6 +298,8 @@ impl NodeDaemon {
         // Initialize PoW Engine and 3-Tier Access Controller
         let pow_engine = std::sync::Arc::new(crate::ingress::PowEngine::new(*self.identity.node_id(), 8));
         let tier_controller = std::sync::Arc::new(crate::ingress::TierController::new(storage.clone(), pow_engine.clone()));
+        cleanup.producers.lock().push(tier_controller.quota_worker_abort_handle());
+        *cleanup.quota_failed.lock() = Some(tier_controller.quota_worker_failure_handle());
         for peer in &self.config.f2f.peers {
             tier_controller.register_f2f_peer(peer);
         }
@@ -199,7 +310,7 @@ impl NodeDaemon {
         // Initialize QUIC P2P PeerManager with F2F friends, resolved endpoints, and known peers
         let (configured_entries, trusted_pubkeys) = self.config.f2f.parse_peers();
         let configured_peers = crate::config::F2fConfig::resolve_peer_endpoints(&configured_entries).await;
-        let initial_sync_ready = configured_peers.is_empty();
+        let initial_sync_ready = false;
         let dns_peers: Vec<crate::config::PeerConfigEntry> = configured_entries
             .into_iter()
             .filter(|e| e.is_hostname())
@@ -251,6 +362,7 @@ impl NodeDaemon {
                 }
             }
         });
+        cleanup.producer(&dns_re_resolve_handle);
 
         // Background hourly malus decay ticker (Spec 19: Autonome Peer-Heilung)
         let decay_pm = peer_manager.clone();
@@ -268,11 +380,12 @@ impl NodeDaemon {
                 }
             }
         });
+        cleanup.producer(&malus_decay_handle);
 
         info!("Initializing QUIC P2P transport...");
 
         let is_sync_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(initial_sync_ready));
-        let readiness_manager = std::sync::Arc::new(ShardReadinessManager::new());
+        let readiness_manager = std::sync::Arc::new(ShardReadinessManager::with_cancel_token(self.cancel_token.clone()));
 
         let handler = std::sync::Arc::new(
             crate::network::NodeRequestHandler::with_peer_manager(
@@ -283,20 +396,24 @@ impl NodeDaemon {
             )
             .with_tier_controller(tier_controller.clone())
             .with_sync_ready(is_sync_ready.clone())
+            .with_readiness_manager(readiness_manager.clone())
             .with_network_id(self.config.network.network_id),
         );
-        let mut transport = crate::network::QuicTransport::bind_with_options(
+        let mut transport = crate::network::QuicTransport::bind_with_options_for_network(
             self.config.network.p2p_listen_addr,
             &self.identity,
             peer_manager.clone(),
             handler,
             self.cancel_token.clone(),
+            self.config.network.network_id,
         )?;
         transport.set_sync_ready_handle(is_sync_ready.clone());
         transport.set_sync_ready(initial_sync_ready);
 
         let p2p_bound_addr = transport.local_addr()?;
+        cleanup.transports.lock().push(transport.clone());
         let accept_handle = transport.spawn_accept_loop();
+        cleanup.producer(&accept_handle);
         info!(
             bound_addr = ?p2p_bound_addr,
             "QUIC P2P transport running."
@@ -360,6 +477,7 @@ impl NodeDaemon {
                 }
             }
         });
+        cleanup.producer(&thermometer_handle);
 
         // 1. F2F Heartbeat-Emitter (hourly with jitter, signed payload)
         let hb_pm = peer_manager.clone();
@@ -435,6 +553,7 @@ impl NodeDaemon {
                 }
             }
         });
+        cleanup.producer(&heartbeat_handle);
 
         // 2. TTL-Pruning-Ticker (every 30 seconds, Zero State Bloat, Spec 11: net_time_ms)
         let prune_engine = engine.clone();
@@ -495,6 +614,7 @@ impl NodeDaemon {
                 }
             }
         });
+        cleanup.producer(&ttl_prune_handle);
 
         // 3.5 Operator alerts (Telegram & webhook) with 15-minute hysteresis and interval
         let alert_config = self.config.alerts.clone();
@@ -550,6 +670,7 @@ impl NodeDaemon {
                 }
             }
         });
+        cleanup.producer(&alert_handle);
 
         // 3. Non-blocking recurring shard digest pull sync and bootstrap
         let sync_pm = peer_manager.clone();
@@ -558,101 +679,35 @@ impl NodeDaemon {
         let sync_storage = storage.clone();
         let sync_cancel = self.cancel_token.clone();
         let sync_identity = self.identity.clone();
-        let sync_ready_flag = is_sync_ready.clone();
         let sync_readiness_mgr = readiness_manager.clone();
         let shard_sync_handle = tokio::spawn(async move {
-            let sync_notify = sync_pm.sync_notifier();
-            let is_syncing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-            // Small initial delay to let accept loop and initial peer connections settle
-            let initial_delay_ms = if is_simulation || initial_sync_ready { 10 } else { 50 };
-            tokio::select! {
-                _ = sync_cancel.cancelled() => return,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(initial_delay_ms)) => {}
-            }
-            if !sync_cancel.is_cancelled() {
-                if let Err(e) = run_shard_digest_pull_sync(
-                    &sync_transport,
-                    &sync_pm,
-                    &sync_engine,
-                    &sync_storage,
-                    &sync_identity,
-                    &sync_ready_flag,
-                    &sync_readiness_mgr,
-                    &sync_cancel,
-                )
-                .await
-                {
-                    debug!(error=%e, "Initial shard sync finished with note");
-                }
-            }
-
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            interval.tick().await; // consume initial tick
-
-            let mut sync_tasks = tokio::task::JoinSet::new();
-
+            let Some(mut requests) = sync_readiness_mgr.take_sync_receiver() else { return; };
+            let mut jobs = tokio::task::JoinSet::new();
             loop {
-                // Drain any completed sync tasks to prevent task handle accumulation
-                while sync_tasks.try_join_next().is_some() {}
-
                 tokio::select! {
-                    _ = sync_cancel.cancelled() => {
-                        info!("Shard sync motor shutting down - aborting in-flight sync tasks");
-                        sync_tasks.abort_all();
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        if !is_syncing.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                            let transport = sync_transport.clone();
-                            let pm = sync_pm.clone();
-                            let eng = sync_engine.clone();
-                            let stor = sync_storage.clone();
-                            let cancel = sync_cancel.clone();
-                            let ident = sync_identity.clone();
-                            let ready_flag = sync_ready_flag.clone();
-                            let rm = sync_readiness_mgr.clone();
-                            let syncing_flag = is_syncing.clone();
-                            sync_tasks.spawn(async move {
-                                let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &ident, &ready_flag, &rm, &cancel).await;
-                                syncing_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                            });
-                        }
-                    }
-                    _ = sync_notify.notified() => {
-                        // Debounce window (5s) to coalesce rapid bursts of peer events and prevent thundering herd
-                        tokio::select! {
-                            _ = sync_cancel.cancelled() => {
-                                sync_tasks.abort_all();
-                                break;
-                            }
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                        }
-                        if sync_cancel.is_cancelled() {
-                            sync_tasks.abort_all();
-                            break;
-                        }
-                        if !is_syncing.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                            let transport = sync_transport.clone();
-                            let pm = sync_pm.clone();
-                            let eng = sync_engine.clone();
-                            let stor = sync_storage.clone();
-                            let cancel = sync_cancel.clone();
-                            let ident = sync_identity.clone();
-                            let ready_flag = sync_ready_flag.clone();
-                            let rm = sync_readiness_mgr.clone();
-                            let syncing_flag = is_syncing.clone();
-                            sync_tasks.spawn(async move {
-                                let _ = run_shard_digest_pull_sync(&transport, &pm, &eng, &stor, &ident, &ready_flag, &rm, &cancel).await;
-                                syncing_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                            });
-                        }
+                    _ = sync_cancel.cancelled() => { jobs.abort_all(); while jobs.join_next().await.is_some() {} break; }
+                    Some(_) = jobs.join_next(), if !jobs.is_empty() => {}
+                    request = requests.recv(), if jobs.len() < MAX_ACTIVE_SHARD_SYNCS => {
+                        let Some(shard_id) = request else { break; };
+                        let transport = sync_transport.clone();
+                        let pm = sync_pm.clone();
+                        let eng = sync_engine.clone();
+                        let stor = sync_storage.clone();
+                        let ident = sync_identity.clone();
+                        let rm = sync_readiness_mgr.clone();
+                        let cancel = sync_cancel.child_token();
+                        jobs.spawn(async move {
+                            let result = tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                sync_single_shard(shard_id, &transport, &pm, &eng, &stor, &ident, &rm, &cancel),
+                            ).await;
+                            if !matches!(result, Ok(Ok(true))) { rm.mark_sync_failed(shard_id); }
+                        });
                     }
                 }
             }
         });
-
+        cleanup.producer(&shard_sync_handle);
         // Initialize Admin Token Manager
         let admin_token_mgr = Arc::new(
             crate::api::AdminTokenManager::load_or_create(&self.config.storage.data_dir, false)
@@ -674,9 +729,13 @@ impl NodeDaemon {
             Some(peer_manager.clone()),
             self.cancel_token.clone(),
         );
+        cleanup.producer(&stats_handle);
 
         // Initialize History Sampler & Security Event Log (Phase 2 & Phase 5)
         let history_sampler = Arc::new(crate::api::HistorySampler::default());
+        if let Err(error) = history_sampler.hourly.load(&self.config.storage.data_dir.join("metrics-hourly.json")) {
+            warn!(%error, "Private hourly history unavailable; starting a fresh bounded history");
+        }
         let event_log = Arc::new(crate::api::EventLog::default());
 
         // Load existing audit events on startup (Phase 5)
@@ -696,13 +755,20 @@ impl NodeDaemon {
         let (audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<crate::api::events::EventItem>(100);
         event_log.set_persister(audit_tx);
         let persister_storage = storage.clone();
-        tokio::spawn(async move {
-            while let Some(event) = audit_rx.recv().await {
+        let persister_cancel = self.cancel_token.clone();
+        let audit_handle = tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    _ = persister_cancel.cancelled() => { audit_rx.close(); audit_rx.recv().await },
+                    event = audit_rx.recv() => event,
+                };
+                let Some(event) = event else { break; };
                 if let Err(err) = persister_storage.insert_audit_event(&event) {
                     warn!("Failed to persist audit event #{}: {}", event.id, err);
                 }
             }
         });
+        cleanup.producer(&audit_handle);
 
         event_log.record(
             crate::api::EventKind::System,
@@ -745,7 +811,12 @@ impl NodeDaemon {
             sample_interval,
             self.cancel_token.clone(),
         );
+        cleanup.producer(&history_handle);
 
+        let operator_handle = crate::api::operator::spawn_operator_listener(
+            app_state.clone(), self.config.network.operator_listen_addr, self.cancel_token.clone(),
+        ).await?;
+        if let Some(handle) = &operator_handle { cleanup.producer(handle); }
         let app = crate::api::build_router(app_state);
 
         let rpc_listener = tokio::net::TcpListener::bind(self.config.network.rpc_listen_addr)
@@ -769,11 +840,13 @@ impl NodeDaemon {
         let rpc_server = axum::serve(rpc_listener, app).with_graceful_shutdown(async move {
             cancel_for_http.cancelled().await;
         });
+        let cancel_on_http_failure = self.cancel_token.clone();
         let rpc_handle = tokio::spawn(async move {
-            if let Err(err) = rpc_server.await {
-                tracing::error!(error = %err, "REST API HTTP server encountered an error");
-            }
+            let result = rpc_server.await.map_err(NodeError::Io);
+            if result.is_err() { cancel_on_http_failure.cancel(); }
+            result
         });
+        cleanup.producer(&rpc_handle);
 
         // Initialize Control Socket Server
         let socket_path = self.config.control_socket_path();
@@ -786,12 +859,15 @@ impl NodeDaemon {
             self.config.storage.data_dir.clone(),
             self.cancel_token.clone(),
         )
-        .with_tier_controller(tier_controller.clone());
+        .with_tier_controller(tier_controller.clone())
+        .with_shutdown_lifecycle(lifecycle);
+        let cancel_on_control_failure = self.cancel_token.clone();
         let control_handle = tokio::spawn(async move {
-            if let Err(err) = control_server.run().await {
-                tracing::error!(error = %err, "Control socket server encountered an error");
-            }
+            let result = control_server.run().await;
+            if result.is_err() { cancel_on_control_failure.cancel(); }
+            result
         });
+        cleanup.producer(&control_handle);
 
         // Wait for cancellation token, Ctrl+C (SIGINT), or SIGTERM (Unix)
         #[cfg(unix)]
@@ -845,270 +921,35 @@ impl NodeDaemon {
 
         info!("Shutting down HuMoCo node daemon gracefully...");
         transport.close();
-        let _ = accept_handle.await;
-        let _ = rpc_handle.await;
-        let _ = control_handle.await;
-        let _ = heartbeat_handle.await;
-        let _ = ttl_prune_handle.await;
-        let _ = shard_sync_handle.await;
-        let _ = thermometer_handle.await;
-        let _ = malus_decay_handle.await;
-        let _ = dns_re_resolve_handle.await;
-        let _ = alert_handle.await;
-        let _ = stats_handle.await;
-        let _ = history_handle.await;
-        // Cancel the flush worker only after all listeners have finished in-flight requests,
-        // ensuring the flush worker drains remaining operations before shutdown completes.
+        transport.drain_tasks().await;
+        let mut teardown_error = None;
+        for handle in [accept_handle, heartbeat_handle,
+            ttl_prune_handle, shard_sync_handle, thermometer_handle, malus_decay_handle,
+            dns_re_resolve_handle, alert_handle, stats_handle, history_handle, audit_handle] {
+            if let Err(error) = handle.await { teardown_error = Some(error.to_string()); }
+        }
+        for handle in [Some(rpc_handle), Some(control_handle), operator_handle].into_iter().flatten() {
+            match handle.await {
+                Ok(Ok(())) => {},
+                Ok(Err(error)) => teardown_error = Some(error.to_string()),
+                Err(error) => teardown_error = Some(error.to_string()),
+            }
+        }
         flush_cancel_token.cancel();
-        let _ = flush_handle.await;
+        if let Err(error) = flush_handle.await { teardown_error = Some(error.to_string()); }
+        if engine.stats.flush_errors_total.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            teardown_error = Some("persistence failure or incomplete drain recorded".into());
+        }
+        if let Some(error) = teardown_error { return Err(NodeError::Daemon(format!("unclean teardown: {error}"))); }
         info!("HuMoCo node daemon stopped.");
         Ok(())
     }
 }
 
-/// # Architectural Invariant: BFT Shard Digest Pull vs. Random Storage Polling (Spec 03 & KISS)
-///
-/// Non-blocking shard digest and bootstrap pull-sync. In small networks (N < 20) or when
-/// the local node is empty, pulls active locks directly from candidate peers. In sharded
-/// networks (N >= 20), queries known shard peers for `ShardDigestRequest` and pulls data
-/// via `ActiveSyncRequest` on divergence.
-///
-/// The shard digest is compact comparison information over the sorted active-lock
-/// projection defined by `humoco_sim_core::crypto::compute_shard_digest_at`.
-/// Equal digests compare that projection under collision resistance; they do not
-/// prove full record equality, justified membership, preservation of every binding
-/// vote, old-write closure or safe successor activation.
-///
-/// ### Objective Lock State & Living-Mesh Authority (KISS Principle)
-///
-/// When new shard nodes join or catch up via shard sync, they adopt the objective
-/// lock state (`parent_lock`, `receiver_pub`, `nonce`, `id`) into their local RAM index
-/// and redb storage. Once synchronized, the node acts as a fully authoritative,
-/// living shard instance: it answers subsequent status queries and participates in
-/// hot-path collision detection directly using its own active key.
-///
-/// Shard synchronization strictly transfers objective double-spend collision records
-/// (`LockRecordDto`), completely omitting historical node attestations or stale 896-byte
-/// quorum signature bundles from past or departed nodes.
-///
-/// The periodic 60s ticker and event-driven `sync_notifier` with 5s debounce
-/// schedule pull attempts without continuous random probing of storage keys.
-/// This describes the existing synchronization mechanism, not a completed proof
-/// of membership continuity or recovery signing readiness.
-#[allow(clippy::too_many_arguments)]
-async fn run_shard_digest_pull_sync(
-    transport: &crate::network::QuicTransport,
-    peer_manager: &crate::network::PeerManager,
-    engine: &crate::storage::DualTierEngine,
-    storage: &std::sync::Arc<crate::storage::RedbStorage>,
-    identity: &crate::identity::NodeIdentity,
-    is_sync_ready: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    readiness_manager: &std::sync::Arc<ShardReadinessManager>,
-    cancel_token: &CancellationToken,
-) -> Result<(), NodeError> {
-    // Gather candidates
-    let candidate_addrs = peer_manager.shard_sync_addrs().await;
-    if candidate_addrs.is_empty() {
-        debug!("Shard digest sync: no known shard peers, skipping and marking ready");
-        is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-        transport.set_sync_ready(true);
-        peer_manager.set_local_sync_ready(true);
-        readiness_manager.mark_shard_ready(0);
-        return Ok(());
-    }
-    let total_known = candidate_addrs.len() + 1; // include self
-    let now_ms = peer_manager.net_time_ms();
-
-    let local_valid_locks = storage.all_valid_locks(now_ms).unwrap_or_default();
-    let local_valid_hmc = storage.all_valid_hmc_locks(now_ms).unwrap_or_default();
-    let ram_locks_count = engine.ram.read().await.len();
-    let hmc_ram_count = engine.hmc_ram.read().await.locks.len();
-    let is_local_empty = local_valid_locks.is_empty()
-        && local_valid_hmc.is_empty()
-        && ram_locks_count == 0
-        && hmc_ram_count == 0;
-
-    let mut seq: u64 = 1;
-
-    // Bootstrap / Small Network Sync (N < 20 or empty node):
-    // In small networks or cold boot, directly pull active locks from available peers (R = N)
-    if total_known < 20 || is_local_empty {
-        debug!(total_known, is_local_empty, "Performing active sync pull across candidate peers (bootstrap / N < 20 mode)");
-        for addr in &candidate_addrs {
-            if cancel_token.is_cancelled() {
-                return Ok(());
-            }
-            let conn = match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                transport.connect_peer(*addr),
-            )
-            .await
-            {
-                Ok(Ok(c)) => c,
-                Ok(Err(e)) => {
-                    debug!(peer=%addr, error=%e, "Bootstrap ActiveSync: connect failed");
-                    continue;
-                }
-                Err(_) => {
-                    debug!(peer=%addr, "Bootstrap ActiveSync: connect timeout");
-                    continue;
-                }
-            };
-
-            let mut cursor: u64 = 0;
-            let limit: usize = 500;
-            loop {
-                if cancel_token.is_cancelled() {
-                    return Ok(());
-                }
-                let page_res = match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    transport.request_active_sync_page(&conn, seq, cursor, limit),
-                )
-                .await
-                {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) => {
-                        debug!(peer=%addr, error=%e, "Bootstrap ActiveSync page failed");
-                        break;
-                    }
-                    Err(_) => {
-                        debug!(peer=%addr, "Bootstrap ActiveSync page timeout");
-                        break;
-                    }
-                };
-                debug!(
-                    peer = %addr,
-                    locks_count = page_res.payload.locks.len(),
-                    hmc_count = page_res.payload.hmc_locks.len(),
-                    has_more = page_res.has_more,
-                    "Bootstrap ActiveSync page received"
-                );
-                seq = seq.wrapping_add(1);
-                let now_ms2 = peer_manager.net_time_ms();
-
-                for (rec, root_valid) in page_res.payload.locks {
-                    if cancel_token.is_cancelled() { break; }
-                    let _ = engine
-                        .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
-                        .await;
-                }
-                for (tag, entry) in page_res.payload.hmc_locks {
-                    if cancel_token.is_cancelled() { break; }
-                    let _ = engine
-                        .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
-                        .await;
-                }
-
-                if !page_res.has_more {
-                    break;
-                }
-                if let Some(next) = page_res.next_cursor {
-                    if next <= cursor {
-                        break;
-                    }
-                    cursor = next;
-                } else {
-                    cursor += limit as u64;
-                }
-            }
-        }
-        info!("Bootstrap active sync pull completed");
-        is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-        transport.set_sync_ready(true);
-        peer_manager.set_local_sync_ready(true);
-        readiness_manager.mark_shard_ready(0);
-        return Ok(());
-    }
-
-    // Dominant Quorum Shard Digest Sync (N >= 20):
-    // Collect all candidate shard IDs (local entries, registered active shards, and shard 0)
-    let mut candidate_shards: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
-    candidate_shards.insert(0);
-
-    for (rec, _) in &local_valid_locks {
-        let sid = u16::from_be_bytes([rec.parent_lock[0], rec.parent_lock[1]]);
-        candidate_shards.insert(sid);
-    }
-    for (rec, _) in engine.ram.read().await.all_locks() {
-        let sid = u16::from_be_bytes([rec.parent_lock[0], rec.parent_lock[1]]);
-        candidate_shards.insert(sid);
-    }
-
-    for (tag, _) in &local_valid_hmc {
-        let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-        let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
-        candidate_shards.insert(sid);
-    }
-    for tag in engine.hmc_ram.read().await.locks.keys() {
-        let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-        let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
-        candidate_shards.insert(sid);
-    }
-
-    for sid in peer_manager.get_active_shards().await {
-        candidate_shards.insert(sid);
-    }
-
-    // Filter to shards where local node is in the Top-20 responsible nodes:
-    let mut responsible_shards: Vec<u16> = Vec::new();
-    for sid in candidate_shards {
-        if peer_manager.is_local_committee_member(*identity.node_pubkey(), *identity.hrw_routing_id(), sid).await {
-            responsible_shards.push(sid);
-        }
-    }
-
-    // # Architectural Invariant: Spec 03, Deterministic Digest Pull-Sync
-    //
-    // `is_sync_ready` is set ONLY after proven shard-sync convergence (all
-    // responsible shards matched the dominant quorum digest, or the divergent
-    // pull completed). A premature `true` would open the PoS hot path on stale
-    // state. `all_converged` starts true and flips to false on any empty peer
-    // set, insufficient quorum, or failed pull page — readiness stays `false`
-    // until the next ticker run converges.
-    let mut all_converged = true;
-    for shard_id in responsible_shards {
-        if cancel_token.is_cancelled() {
-            return Ok(());
-        }
-        match sync_single_shard(
-            shard_id,
-            transport,
-            peer_manager,
-            engine,
-            storage,
-            identity,
-            readiness_manager,
-            cancel_token,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                all_converged = false;
-            }
-            Err(e) => {
-                debug!(shard_id, error = %e, "Shard sync returned error");
-                all_converged = false;
-            }
-        }
-    }
-
-    if all_converged {
-        is_sync_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-        transport.set_sync_ready(true);
-        peer_manager.set_local_sync_ready(true);
-        info!("Shard digest pull-sync completed (converged)");
-    } else {
-        info!("Shard digest pull-sync incomplete: convergence pending, is_sync_ready stays false");
-    }
-    Ok(())
-}
-
-/// Synchronizes a single shard on-demand or during scheduled convergence.
-/// Evaluates dominant digest clusters among Top-20 HRW responsible peers,
-/// pulls divergent bucket ranges (with extended TTL scan range), and marks
-/// the shard ready upon successful convergence.
+/// Repairs active state from the frozen current full-key committee on demand.
+/// Matching digests and completed transfers do not prove source coverage or a
+/// stable no-gap cut: activation stays fail-closed until those prerequisites
+/// have a justified protocol. No historical quorum archive is required.
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_single_shard(
     shard_id: u16,
@@ -1116,23 +957,21 @@ pub async fn sync_single_shard(
     peer_manager: &crate::network::PeerManager,
     engine: &crate::storage::DualTierEngine,
     storage: &std::sync::Arc<crate::storage::RedbStorage>,
-    _identity: &crate::identity::NodeIdentity,
+    identity: &crate::identity::NodeIdentity,
     readiness_manager: &std::sync::Arc<ShardReadinessManager>,
     cancel_token: &CancellationToken,
 ) -> Result<bool, NodeError> {
     let candidate_addrs = peer_manager.shard_sync_addrs().await;
     if candidate_addrs.is_empty() {
-        debug!(shard_id, "Shard digest sync: no known shard peers, skipping and marking ready");
-        readiness_manager.mark_shard_ready(shard_id);
-        return Ok(true);
+        debug!(shard_id, "Shard recovery has no sources; readiness remains closed");
+        readiness_manager.mark_sync_failed(shard_id);
+        return Ok(false);
     }
-    let total_known = candidate_addrs.len() + 1; // include self
     let now_ms = peer_manager.net_time_ms();
 
     // Compute local digest strictly for this shard_id
     let mut locks: Vec<humoco_sim_core::types::LockRecord> = storage
-        .all_valid_locks(now_ms)
-        .unwrap_or_default()
+        .all_valid_locks(now_ms)?
         .into_iter()
         .map(|(rec, _)| rec)
         .collect();
@@ -1141,7 +980,7 @@ pub async fn sync_single_shard(
             locks.push(rec);
         }
     }
-    let mut hmc_locks_all = storage.all_valid_hmc_locks(now_ms).unwrap_or_default();
+    let mut hmc_locks_all = storage.all_valid_hmc_locks(now_ms)?;
     for (tag, entry) in &engine.hmc_ram.read().await.locks {
         if !hmc_locks_all.iter().any(|(t, _)| t == tag) {
             hmc_locks_all.push((tag.clone(), entry.clone()));
@@ -1185,29 +1024,15 @@ pub async fn sync_single_shard(
         SimTime(now_ms),
     );
 
-    // Targeted Co-Shard Sync: query only Top-20 HRW responsible peers for this shard
-    let top_peers = peer_manager.get_top_n_shards_for_lock(shard_id, 20).await;
-    let query_addrs: Vec<SocketAddr> = if !top_peers.is_empty() {
-        let mut addrs: Vec<SocketAddr> = top_peers
-            .into_iter()
-            .map(|(_, addr)| addr)
-            .collect();
-        if let Ok(local_addr) = transport.local_addr() {
-            addrs.retain(|a| a != &local_addr);
-        }
-        if addrs.is_empty() {
-            candidate_addrs.clone()
-        } else {
-            addrs
-        }
-    } else {
-        candidate_addrs.clone()
-    };
-
-    let mut peer_digests: Vec<([u8; 32], SocketAddr, u64)> = Vec::new();
+    // One frozen full-key committee; unavailable members are never replaced.
+    let (committee, remote, total_known) = peer_manager.shard_committee(
+        *identity.node_pubkey(), *identity.hrw_routing_id(), shard_id,
+    ).await;
+    let mut peer_digests: Vec<([u8; 32], [u8; 32], SocketAddr)> = Vec::new();
+    let mut seen_identities = std::collections::HashSet::new();
     let mut seq: u64 = 1;
 
-    for addr in &query_addrs {
+    for (member, addr) in &remote {
         if cancel_token.is_cancelled() {
             readiness_manager.mark_sync_failed(shard_id);
             return Ok(false);
@@ -1229,14 +1054,18 @@ pub async fn sync_single_shard(
             }
         };
 
+        let Some((_, verifying_key)) = crate::network::tls::extract_peer_identity_from_connection(&conn) else { continue; };
+        let authenticated_key = verifying_key.to_bytes();
+        if authenticated_key != member.node_pubkey || !seen_identities.insert(authenticated_key) { continue; }
+
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
             transport.request_shard_digest(&conn, shard_id, seq),
         )
         .await
         {
-            Ok(Ok((digest, count))) => {
-                peer_digests.push((digest, *addr, count));
+            Ok(Ok((digest, _count))) => {
+                peer_digests.push((authenticated_key, digest, *addr));
             }
             Ok(Err(e)) => {
                 debug!(peer=%addr, error=%e, "Shard digest request failed");
@@ -1253,58 +1082,29 @@ pub async fn sync_single_shard(
         return Ok(false);
     }
 
-    let responses: Vec<ShardDigestResponse> = peer_digests
-        .iter()
-        .enumerate()
-        .map(|(idx, (digest, _addr, count))| ShardDigestResponse {
-            peer_id: idx as u16,
-            digest: *digest,
-            lock_count: *count as u32,
-        })
-        .collect();
-    let cluster = humoco_sim_core::types::evaluate_digest_clusters(&responses, total_known);
-    let (dominant_digest, dominant_addrs) = match cluster {
-        ClusterResult::DominantQuorum { digest, peers: qpeers, .. } => {
-            let addrs: Vec<SocketAddr> = qpeers
-                .iter()
-                .filter_map(|pid| {
-                    let idx = *pid as usize;
-                    peer_digests.get(idx).map(|(_, addr, _)| *addr)
-                })
-                .collect();
-            (digest, addrs)
+    let (needed, _) = humoco_sim_core::types::required_quorum(total_known);
+    let mut groups: std::collections::HashMap<[u8; 32], Vec<SocketAddr>> = std::collections::HashMap::new();
+    for (key, digest, addr) in peer_digests {
+        if committee.iter().any(|member| member.node_pubkey == key) {
+            groups.entry(digest).or_default().push(addr);
         }
-        ClusterResult::InsufficientQuorum { max_votes, backoff_ms } => {
-            debug!(shard_id, max_votes, backoff_ms, "Shard digest sync: insufficient quorum, backing off");
-            readiness_manager.mark_sync_failed(shard_id);
-            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-            return Ok(false);
-        }
+    }
+    let Some((dominant_digest, dominant_addrs)) = groups.into_iter().find(|(_, addresses)| addresses.len() >= needed && needed > 0) else {
+        readiness_manager.mark_sync_failed(shard_id);
+        return Ok(false);
     };
 
     if dominant_digest == local_digest {
         debug!(shard_id, "Shard digest sync: converged via dominant quorum, no pull needed");
-        readiness_manager.mark_shard_ready(shard_id);
-        return Ok(true);
+        debug!(shard_id, "Matching digest does not establish source continuity; remaining unready");
+        readiness_manager.mark_sync_failed(shard_id);
+        return Ok(false);
     }
 
     info!(shard_id, divergent = dominant_addrs.len(), "Shard digest divergence detected via evaluate_digest_clusters, pulling bucketted active sync");
 
     // 5-Minuten Bucket Shard Sync (docs/PLAN_BUCKETED_SHARD_SYNC.md & DEC-085/DEC-086):
     let mut shard_pull_ok = false;
-    let curr_bucket = humoco_sim_core::types::timestamp_to_bucket_id(now_ms.saturating_add(30_000));
-    let horizon_oldest_ms = now_ms.saturating_sub(365 * 86_400_000);
-    let oldest_lock_ts = locks
-        .iter()
-        .map(|l| l.created_at.0)
-        .filter(|&t| t > 0)
-        .min()
-        .unwrap_or(now_ms);
-    let earliest_active_ms = oldest_lock_ts
-        .min(now_ms.saturating_sub(86_400_000))
-        .max(horizon_oldest_ms);
-    let start_bucket = humoco_sim_core::types::timestamp_to_bucket_id(earliest_active_ms);
-    let bucket_count = (curr_bucket.saturating_sub(start_bucket) + 1).min(u16::MAX as u64) as u16;
 
     for addr in dominant_addrs {
         if cancel_token.is_cancelled() {
@@ -1318,37 +1118,9 @@ pub async fn sync_single_shard(
             }
         };
 
-        // Versuche zunächst den zielgerichteten Bucket-Range Sync
-        let bucket_range_res = transport
-            .request_shard_bucket_range(&conn, shard_id, start_bucket, bucket_count, seq)
-            .await;
-        seq = seq.wrapping_add(1);
-
-        let divergent_buckets: Option<Vec<u64>> = match bucket_range_res {
-            Ok(resp) => {
-                let mut diffs = Vec::new();
-                for peer_b in resp.buckets {
-                    let local_b_digest = humoco_sim_core::crypto::compute_shard_bucket_digest(shard_id, peer_b.bucket_id, &locks);
-                    if local_b_digest != peer_b.digest {
-                        diffs.push(peer_b.bucket_id);
-                    }
-                }
-                Some(diffs)
-            }
-            Err(e) => {
-                debug!(peer=%addr, error=%e, "ShardBucketRangeRequest failed, falling back to full shard sync");
-                None
-            }
-        };
-
-        let buckets_to_sync: Vec<Option<u64>> = match divergent_buckets {
-            Some(diffs) if !diffs.is_empty() => diffs.into_iter().map(Some).collect(),
-            Some(_) => {
-                shard_pull_ok = true;
-                break;
-            }
-            None => vec![None], // Fallback auf Gesamtabgleich
-        };
+        // Full active-state transfer covers unknown old roots; local creation-time
+        // heuristics cannot bound a remote voucher's remaining validity.
+        let buckets_to_sync = [None];
 
         let mut peer_pull_ok = true;
         for target_b in buckets_to_sync {
@@ -1379,28 +1151,26 @@ pub async fn sync_single_shard(
 
                 for (rec, root_valid) in page_res.payload.locks {
                     if cancel_token.is_cancelled() { break; }
-                    let _ = engine
-                        .ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync)
-                        .await;
+                    if engine.ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync).await.is_err() {
+                        peer_pull_ok = false;
+                        break;
+                    }
                 }
                 for (tag, entry) in page_res.payload.hmc_locks {
                     if cancel_token.is_cancelled() { break; }
-                    let _ = engine
-                        .ingress_hmc_lock_with_origin(tag, entry, IngressOrigin::PartitionSync, None)
-                        .await;
-                }
-
-                if !page_res.has_more {
-                    break;
-                }
-                if let Some(next) = page_res.next_cursor {
-                    if next <= cursor {
+                    let (verdict, _) = engine.ingress_hmc_lock_durable(tag, entry, IngressOrigin::PartitionSync, None, None, None, None).await;
+                    if !matches!(verdict, crate::api::hmc::L2Verdict::Verified { .. }) {
+                        peer_pull_ok = false;
                         break;
                     }
-                    cursor = next;
-                } else {
-                    cursor += limit as u64;
                 }
+
+                if !peer_pull_ok || cancel_token.is_cancelled() { peer_pull_ok = false; break; }
+                if !page_res.has_more { break; }
+                if let Some(next) = page_res.next_cursor {
+                    if next <= cursor { peer_pull_ok = false; break; }
+                    cursor = next;
+                } else { peer_pull_ok = false; break; }
             }
             if !peer_pull_ok {
                 break;
@@ -1414,12 +1184,10 @@ pub async fn sync_single_shard(
     }
 
     if shard_pull_ok {
-        readiness_manager.mark_shard_ready(shard_id);
-        Ok(true)
-    } else {
-        readiness_manager.mark_sync_failed(shard_id);
-        Ok(false)
+        debug!(shard_id, "Transferred active state; stable-cut/source coverage proof still required before activation");
     }
+    readiness_manager.mark_sync_failed(shard_id);
+    Ok(false)
 }
 
 #[cfg(test)]

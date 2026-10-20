@@ -98,7 +98,7 @@ impl QuorumCertificateDto {
     /// This helper does not verify signatures, distinct identities or membership.
     pub fn is_quorum_reached(&self) -> bool {
         let (required_q, _) = humoco_sim_core::types::required_quorum(self.active_nodes_count);
-        self.signatures.len() >= required_q
+        self.active_nodes_count > 0 && self.signatures.len() >= required_q
     }
 
     pub fn required_quorum(&self) -> usize {

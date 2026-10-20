@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Spec 15 / Spec 19: 3-phase lifecycle (Connected -> Degrading -> Suspended).
 /// From 2 failures (debounced): Degrading (early warning).
-/// From 3 failures (INV-1501 / AGENTS.md): Suspended (rank-21 replacement jumps in 0ms).
+/// From 3 failures: local diagnostic suspension; never committee replacement.
 pub const FAILURE_THRESHOLD_DEGRADING: u32 = 2;
 pub const FAILURE_THRESHOLD_SUSPENDED: u32 = 3;
 pub const FAILURE_DEBOUNCE_SECS: u64 = 60;

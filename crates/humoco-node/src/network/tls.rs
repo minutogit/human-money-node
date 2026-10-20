@@ -258,7 +258,7 @@ pub fn build_quinn_server_config_with_network(
             .try_into()
             .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
     ));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.keep_alive_interval(None);
     server_config.transport_config(Arc::new(transport_config));
 
     Ok(server_config)
@@ -272,6 +272,21 @@ pub fn build_quinn_client_config_with_identity(
         identity,
         humoco_sim_core::types::NetworkId::default(),
     )
+}
+
+/// Friend edges alone send keep-alives. The authenticated peer must be an
+/// explicitly configured F2F friend before this configuration is selected.
+pub fn build_quinn_friend_client_config(
+    identity: &NodeIdentity,
+    network_id: humoco_sim_core::types::NetworkId,
+) -> Result<quinn::ClientConfig, NodeError> {
+    let mut config = build_quinn_client_config_with_identity_and_network(identity, network_id)?;
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
+        .try_into().map_err(|error| NodeError::Tls(format!("Invalid idle timeout: {error}")))?));
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    config.transport_config(Arc::new(transport));
+    Ok(config)
 }
 
 /// Builds a Quinn ClientConfig with identity for a specific network.
@@ -302,7 +317,7 @@ pub fn build_quinn_client_config_with_identity_and_network(
             .try_into()
             .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
     ));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.keep_alive_interval(None);
     client_config.transport_config(Arc::new(transport_config));
 
     Ok(client_config)
@@ -346,7 +361,7 @@ pub fn build_quinn_client_config_with_network(
             .try_into()
             .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
     ));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.keep_alive_interval(None);
     client_config.transport_config(Arc::new(transport_config));
 
     Ok(client_config)

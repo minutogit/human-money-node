@@ -2,6 +2,7 @@ pub mod clock;
 pub mod framing;
 pub mod manager;
 pub mod peer;
+pub mod pool;
 pub mod tls;
 pub mod transport;
 

@@ -18,7 +18,6 @@ use crate::identity::NodeIdentity;
 use crate::network::framing::{checked_payload_len, read_frame, write_frame};
 use crate::network::manager::PeerManager;
 use crate::network::tls::{
-    build_quinn_client_config_with_identity, build_quinn_server_config,
     extract_peer_identity_from_connection,
 };
 
@@ -205,6 +204,7 @@ pub struct NodeRequestHandler {
     pub peer_manager: Option<Arc<crate::network::PeerManager>>,
     pub tier_controller: Option<Arc<crate::ingress::TierController>>,
     pub is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
+    pub readiness_manager: Arc<crate::daemon::ShardReadinessManager>,
     pub network_id: humoco_sim_core::types::NetworkId,
 }
 
@@ -221,6 +221,7 @@ impl NodeRequestHandler {
             peer_manager: None,
             tier_controller: None,
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            readiness_manager: Arc::new(crate::daemon::ShardReadinessManager::new()),
             network_id: humoco_sim_core::types::NetworkId::default(),
         }
     }
@@ -238,6 +239,7 @@ impl NodeRequestHandler {
             peer_manager: Some(peer_manager),
             tier_controller: None,
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            readiness_manager: Arc::new(crate::daemon::ShardReadinessManager::new()),
             network_id: humoco_sim_core::types::NetworkId::default(),
         }
     }
@@ -249,6 +251,11 @@ impl NodeRequestHandler {
 
     pub fn with_sync_ready(mut self, ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.is_sync_ready = ready;
+        self
+    }
+
+    pub fn with_readiness_manager(mut self, manager: Arc<crate::daemon::ShardReadinessManager>) -> Self {
+        self.readiness_manager = manager;
         self
     }
 
@@ -278,8 +285,8 @@ impl RequestHandler for NodeRequestHandler {
         let identity = self.identity.clone();
         let peer_manager = self.peer_manager.clone();
         let tier_controller = self.tier_controller.clone();
-        let is_sync_ready = self.is_sync_ready.clone();
         let network_id = self.network_id;
+        let readiness_manager = self.readiness_manager.clone();
         Box::pin(async move {
             let msg_type = header.msg_type;
 
@@ -354,18 +361,20 @@ impl RequestHandler for NodeRequestHandler {
                 let resp_header = WireHeader::new(MsgType::EquivocationAck as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
                 return Ok((resp_header, Vec::new()));
             }
+            if msg_type == MsgType::LiveStateRequest as u16 {
+                let vote = if payload.len() <= 8192 && peer_identity.is_some() {
+                    if let Ok(context) = serde_json::from_slice::<humoco_proto::live::LiveStateContext>(&payload) {
+                        crate::api::live::sign_current_state(&engine, &identity, peer_manager.as_ref(), &readiness_manager, network_id, &context).await
+                    } else { None }
+                } else { None };
+                let (flags, bytes) = match vote.and_then(|v| bincode::serialize(&v).ok()) {
+                    Some(bytes) => (0, bytes),
+                    None => (humoco_sim_core::wire::FLAG_NOT_READY, Vec::new()),
+                };
+                return Ok((WireHeader::new(MsgType::LiveStateResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, flags, checked_payload_len(bytes.len())?), bytes));
+            }
             if msg_type == MsgType::LockVerifyRequest as u16 {
-                if !is_sync_ready.load(std::sync::atomic::Ordering::SeqCst) {
-                    warn!("LockVerifyRequest rejected: node is booting and initial sync is not ready");
-                    let resp_header = WireHeader::new(
-                        MsgType::LockVerifyResponse as u16,
-                        header.session_seq.wrapping_add(1),
-                        header.epoch_id,
-                        humoco_sim_core::wire::FLAG_NOT_READY,
-                        0,
-                    );
-                    return Ok((resp_header, Vec::new()));
-                }
+
 
                 let now_ms = peer_manager
                     .as_ref()
@@ -642,6 +651,10 @@ impl RequestHandler for NodeRequestHandler {
                     return Ok((resp_header, Vec::new()));
                 }
 
+                if !readiness_manager.is_shard_ready(shard_id) {
+                    readiness_manager.request_sync(shard_id);
+                    return Ok((WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_NOT_READY, 0), Vec::new()));
+                }
                 if let Some(pm) = peer_manager.as_ref() {
                     if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
                         if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
@@ -769,7 +782,12 @@ impl RequestHandler for NodeRequestHandler {
                                         now_ms,
                                         network_id,
                                     );
-                                    let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                                    let candidate = bincode::serialize(&attestation).unwrap_or_default();
+                                    let retained = engine.persist_original_approval(lookup_tag.clone(), crate::api::hmc::L2LockEntry::from(last_hop), *identity.node_pubkey(), candidate, final_status, now_ms).await;
+                                    let resp_bytes = match retained {
+                                        Ok(bytes) => bytes,
+                                        Err(_) => return Ok((WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_NOT_READY, 0), Vec::new())),
+                                    };
                                     let payload_len = checked_payload_len(resp_bytes.len())?;
                                     let resp_header = WireHeader::new(
                                         MsgType::LockVerifyResponse as u16,
@@ -841,7 +859,12 @@ impl RequestHandler for NodeRequestHandler {
                                         now_ms,
                                         network_id,
                                     );
-                                    let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                                    let candidate = bincode::serialize(&attestation).unwrap_or_default();
+                                    let retained = engine.persist_original_approval(lookup_tag.clone(), entry.clone(), *identity.node_pubkey(), candidate, final_status, now_ms).await;
+                                    let resp_bytes = match retained {
+                                        Ok(bytes) => bytes,
+                                        Err(_) => return Ok((WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_NOT_READY, 0), Vec::new())),
+                                    };
                                     let payload_len = checked_payload_len(resp_bytes.len())?;
                                     let resp_header = WireHeader::new(
                                         MsgType::LockVerifyResponse as u16,
@@ -1643,12 +1666,15 @@ impl RequestHandler for NodeRequestHandler {
 #[derive(Clone)]
 pub struct QuicTransport {
     endpoint: quinn::Endpoint,
+    network_id: humoco_sim_core::types::NetworkId,
     identity: NodeIdentity,
     peer_manager: Arc<PeerManager>,
     handler: Arc<dyn RequestHandler>,
     cancel_token: CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
     stream_semaphore: Arc<Semaphore>,
     connection_semaphore: Arc<Semaphore>,
+    shard_pool: crate::network::pool::ShardConnectionPool,
     is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1695,8 +1721,17 @@ impl QuicTransport {
         handler: Arc<dyn RequestHandler>,
         cancel_token: CancellationToken,
     ) -> Result<Self, NodeError> {
-        let server_config = build_quinn_server_config(identity)?;
-        let client_config = build_quinn_client_config_with_identity(identity)?;
+        Self::bind_with_options_for_network(addr, identity, peer_manager, handler, cancel_token, humoco_sim_core::types::NetworkId::Mainnet)
+    }
+
+    /// Binds transport with the exact network TLS domain and role-specific keepalive.
+    pub fn bind_with_options_for_network(
+        addr: SocketAddr, identity: &NodeIdentity, peer_manager: Arc<PeerManager>,
+        handler: Arc<dyn RequestHandler>, cancel_token: CancellationToken,
+        network_id: humoco_sim_core::types::NetworkId,
+    ) -> Result<Self, NodeError> {
+        let server_config = crate::network::tls::build_quinn_server_config_with_network(identity, network_id)?;
+        let client_config = crate::network::tls::build_quinn_client_config_with_identity_and_network(identity, network_id)?;
 
         let mut endpoint = quinn::Endpoint::server(server_config, addr).map_err(|e| {
             NodeError::Network(format!("Failed to bind QUIC endpoint on {}: {}", addr, e))
@@ -1707,24 +1742,26 @@ impl QuicTransport {
 
         let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel::<crate::network::manager::FraudProofForwardMsg>(100);
         let pm_for_channel = peer_manager.clone();
-        tokio::spawn(async move {
+        let tasks = tokio_util::task::TaskTracker::new();
+        tasks.spawn(async move {
             pm_for_channel.set_fraud_proof_tx(fraud_tx).await;
         });
 
         let transport = Self {
-            endpoint,
+            endpoint, network_id, tasks: tasks.clone(),
             identity: identity.clone(),
             peer_manager,
             handler,
             cancel_token: cancel_token.clone(),
             stream_semaphore: Arc::new(Semaphore::new(STREAM_CONCURRENCY_LIMIT)),
             connection_semaphore: Arc::new(Semaphore::new(CONNECTION_CONCURRENCY_LIMIT)),
+            shard_pool: crate::network::pool::ShardConnectionPool::new(),
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
 
         let transport_for_broadcast = transport.clone();
         let cancel = cancel_token.clone();
-        tokio::spawn(async move {
+        transport.tasks.spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
@@ -1736,6 +1773,12 @@ impl QuicTransport {
         });
 
         Ok(transport)
+    }
+
+    /// Waits for all tracked QUIC producers and handlers after ingress cancellation.
+    pub async fn drain_tasks(&self) {
+        self.tasks.close();
+        self.tasks.wait().await;
     }
 
     /// Returns the local bound socket address.
@@ -1765,9 +1808,15 @@ impl QuicTransport {
         &self.cancel_token
     }
 
+    /// Occupies the actual local admission budget without creating 256 sockets.
+    #[cfg(test)]
+    pub(crate) fn reserve_all_outbound_shard_slots_for_test(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.shard_pool.occupy_all()
+    }
+
     /// Connects to a remote peer address via QUIC, reusing existing open connection if present.
     /// Iron rule / F2F: Permits direct connections only to F2F friends or nodes learned via F2F gossip.
-    pub async fn connect_peer(&self, addr: SocketAddr) -> Result<quinn::Connection, NodeError> {
+    pub async fn connect_peer(&self, addr: SocketAddr) -> Result<crate::network::pool::PeerConnectionLease, NodeError> {
         if !self.peer_manager.can_authorize_direct_rpc(&addr, None).await {
             return Err(NodeError::Network(format!(
                 "Direct connection to {} refused: peer is neither an F2F friend nor known via F2F gossip",
@@ -1776,7 +1825,7 @@ impl QuicTransport {
         }
 
         if let Some(conn) = self.peer_manager.get_connection(&addr).await {
-            return Ok(conn);
+            return self.shard_pool.lease(conn);
         }
 
         // Apply exponential backoff with jitter if reconnecting to a failed or suspended peer (Spec 15 / INV-1502)
@@ -1784,10 +1833,14 @@ impl QuicTransport {
             tokio::time::sleep(backoff).await;
         }
 
-        let connecting = self
-            .endpoint
-            .connect(addr, "localhost")
-            .map_err(NodeError::QuinnConnect)?;
+        // Reserve before dialing; only unleased idle sessions may be displaced.
+        let shard_slot = if self.peer_manager.is_f2f_addr(&addr).await { None } else {
+            Some(self.shard_pool.reserve()?)
+        };
+        let connecting = if self.peer_manager.is_f2f_addr(&addr).await {
+            let config = crate::network::tls::build_quinn_friend_client_config(&self.identity, self.network_id)?;
+            self.endpoint.connect_with(config, addr, "localhost")
+        } else { self.endpoint.connect(addr, "localhost") }.map_err(NodeError::QuinnConnect)?;
 
         let connection = connecting.await.map_err(NodeError::QuinnConnection)?;
         let remote_node_id = extract_peer_identity_from_connection(&connection).map(|(nid, _)| nid);
@@ -1801,6 +1854,11 @@ impl QuicTransport {
             self.peer_manager.register_verifying_key(nid, vk).await;
         }
 
+        // Pin before publishing the connection for reuse by concurrent callers.
+        let lease = match shard_slot {
+            Some(reservation) => reservation.commit(connection.clone()),
+            None => self.shard_pool.lease(connection.clone())?,
+        };
         self.peer_manager
             .record_success(addr, remote_node_id, Some(connection.clone()))
             .await;
@@ -1811,23 +1869,27 @@ impl QuicTransport {
         let cancel_token = self.cancel_token.clone();
         let stream_semaphore = self.stream_semaphore.clone();
         let transport = self.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             Self::handle_connection(conn_clone, handler, peer_manager, cancel_token, remote_node_id, stream_semaphore, transport).await;
         });
 
-        Ok(connection)
+        Ok(lease)
     }
 
     /// Explicit/unchecked connection to a peer address (useful for bootstrap / friend registration).
-    pub async fn connect_peer_unchecked(&self, addr: SocketAddr) -> Result<quinn::Connection, NodeError> {
+    pub async fn connect_peer_unchecked(&self, addr: SocketAddr) -> Result<crate::network::pool::PeerConnectionLease, NodeError> {
         if let Some(conn) = self.peer_manager.get_connection(&addr).await {
-            return Ok(conn);
+            return self.shard_pool.lease(conn);
         }
 
-        let connecting = self
-            .endpoint
-            .connect(addr, "localhost")
-            .map_err(NodeError::QuinnConnect)?;
+        // Reserve before dialing; only unleased idle sessions may be displaced.
+        let shard_slot = if self.peer_manager.is_f2f_addr(&addr).await { None } else {
+            Some(self.shard_pool.reserve()?)
+        };
+        let connecting = if self.peer_manager.is_f2f_addr(&addr).await {
+            let config = crate::network::tls::build_quinn_friend_client_config(&self.identity, self.network_id)?;
+            self.endpoint.connect_with(config, addr, "localhost")
+        } else { self.endpoint.connect(addr, "localhost") }.map_err(NodeError::QuinnConnect)?;
 
         let connection = connecting.await.map_err(NodeError::QuinnConnection)?;
         let remote_node_id = extract_peer_identity_from_connection(&connection).map(|(nid, _)| nid);
@@ -1841,6 +1903,11 @@ impl QuicTransport {
             self.peer_manager.register_verifying_key(nid, vk).await;
         }
 
+        // Pin before publishing the connection for reuse by concurrent callers.
+        let lease = match shard_slot {
+            Some(reservation) => reservation.commit(connection.clone()),
+            None => self.shard_pool.lease(connection.clone())?,
+        };
         self.peer_manager
             .record_success(addr, remote_node_id, Some(connection.clone()))
             .await;
@@ -1851,11 +1918,11 @@ impl QuicTransport {
         let cancel_token = self.cancel_token.clone();
         let stream_semaphore = self.stream_semaphore.clone();
         let transport = self.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             Self::handle_connection(conn_clone, handler, peer_manager, cancel_token, remote_node_id, stream_semaphore, transport).await;
         });
 
-        Ok(connection)
+        Ok(lease)
     }
 
     /// Sends a bi-directional request frame and awaits the response frame.
@@ -1994,7 +2061,7 @@ impl QuicTransport {
             let transport = self.clone();
             let hdr = header;
             let pld = payload.clone();
-            tokio::spawn(async move {
+            self.tasks.spawn(async move {
                 let _ = transport.send_unidirectional_to_peer(target, &hdr, &pld).await;
             });
         }
@@ -2067,7 +2134,7 @@ impl QuicTransport {
             }
             let transport = self.clone();
             let payload = payload.clone();
-            tokio::spawn(async move {
+            self.tasks.spawn(async move {
                 let _ = transport.send_unidirectional_to_peer(addr, &header, &payload).await;
             });
         }
@@ -2187,7 +2254,7 @@ impl QuicTransport {
     /// Spawns the incoming connection accept loop in the background.
     pub fn spawn_accept_loop(&self) -> tokio::task::JoinHandle<()> {
         let transport = self.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             transport.run_accept_loop().await;
         })
     }
@@ -2225,7 +2292,7 @@ impl QuicTransport {
                             };
 
                             let transport = self.clone();
-                            tokio::spawn(async move {
+                            self.tasks.spawn(async move {
                                 let _permit = permit;
                                 match incoming_conn.await {
                                     Ok(conn) => {
@@ -2299,10 +2366,14 @@ impl QuicTransport {
                     }
                     match bi_res {
                         Ok((mut send, mut recv)) => {
+                            let lease = match transport.shard_pool.lease(conn.clone()) {
+                                Ok(lease) => lease, Err(_) => continue,
+                            };
                             let h = handler.clone();
                             let pm = peer_manager.clone();
                             let sem = stream_semaphore.clone();
-                            tokio::spawn(async move {
+                            transport.tasks.spawn(async move {
+                                let _lease = lease;
                                 let _permit = match sem.try_acquire_owned() {
                                     Ok(p) => p,
                                     Err(_) => {
@@ -2321,7 +2392,8 @@ impl QuicTransport {
                                             || header.msg_type == MsgType::StatusQuery as u16
                                             || header.msg_type == MsgType::ActiveSyncRequest as u16
                                             || header.msg_type == MsgType::ShardDigestRequest as u16
-                                            || header.msg_type == MsgType::ShardBucketRangeRequest as u16;
+                                            || header.msg_type == MsgType::ShardBucketRangeRequest as u16
+                                            || header.msg_type == MsgType::LiveStateRequest as u16;
 
                                         if is_restricted_rpc
                                             && !pm.can_authorize_direct_rpc(&remote_addr, remote_node_id.as_ref()).await
@@ -2335,7 +2407,7 @@ impl QuicTransport {
                                             // Phase 8 (Spec 15/19 Tit-for-Tat): locally suspended
                                             // or permanently banned peers are refused with
                                             // FLAG_PEER_SUSPENDED so the gateway applies
-                                            // rank-21 replacement; unknown peers get a plain
+                                            // no checkout committee replacement is allowed; unknown peers get a plain
                                             // unauthorized response without any malus effect.
                                             let suspended_or_banned = if let Some(nid) = remote_node_id {
                                                 pm.is_banned(&nid).await
@@ -2389,7 +2461,7 @@ impl QuicTransport {
                             // or Tier-2 15s idle timeout = NORMAL state of the
                             // ephemeral LRU pool). This is NEVER a peer failure:
                             // clear the handle, preserve the Tit-for-Tat malus.
-                            peer_manager.note_idle_close(&remote_addr).await;
+                            peer_manager.note_connection_closed(&remote_addr, conn.stable_id()).await;
                             break;
                         },
                     }
@@ -2397,12 +2469,16 @@ impl QuicTransport {
                 uni_res = conn.accept_uni() => {
                     match uni_res {
                         Ok(mut recv) => {
+                            let lease = match transport.shard_pool.lease(conn.clone()) {
+                                Ok(lease) => lease, Err(_) => continue,
+                            };
                             let h = handler.clone();
                             let pm = peer_manager.clone();
                             let sem = stream_semaphore.clone();
                             let conn_clone = conn.clone();
                             let transport_clone = transport.clone();
-                            tokio::spawn(async move {
+                            transport.tasks.spawn(async move {
+                                let _lease = lease;
                                 let _permit = match sem.try_acquire_owned() {
                                     Ok(p) => p,
                                     Err(_) => {
@@ -2606,7 +2682,7 @@ impl QuicTransport {
                             // Phase 8 (Spec 15/19, TODO-ARCH-02): see bi-stream
                             // branch above — session end / Tier-2 15s idle timeout
                             // is normal and NEVER calls `record_failure`.
-                            peer_manager.note_idle_close(&remote_addr).await;
+                            peer_manager.note_connection_closed(&remote_addr, conn.stable_id()).await;
                             break;
                         },
                     }

@@ -38,6 +38,7 @@ pub struct HistoryPoint {
 pub struct HistorySampler {
     buffer: Arc<RwLock<VecDeque<HistoryPoint>>>,
     capacity: usize,
+    pub hourly: Arc<super::history_retention::HourlyHistory>,
 }
 
 impl Default for HistorySampler {
@@ -51,13 +52,15 @@ impl HistorySampler {
     pub fn new(capacity: usize) -> Self {
         Self {
             buffer: Arc::new(RwLock::new(VecDeque::with_capacity(capacity.min(HISTORY_CAPACITY)))),
-            capacity,
+            capacity: capacity.min(HISTORY_CAPACITY),
+            hourly: Arc::new(super::history_retention::HourlyHistory::default()),
         }
     }
 
     /// Records a new sample point into the ring buffer.
     /// If capacity is exceeded, the oldest point is dropped.
     pub fn record(&self, point: HistoryPoint) {
+        if self.capacity == 0 { return; }
         let mut guard = self.buffer.write();
         if guard.len() >= self.capacity {
             guard.pop_front();
@@ -156,11 +159,22 @@ impl HistorySampler {
                             pow_diff,
                         };
 
+                        let persist = self.hourly.record(point.clone());
                         self.record(point);
+                        if persist { self.persist_hourly().await; }
                     }
                 }
             }
+            self.persist_hourly().await;
         })
+    }
+
+    async fn persist_hourly(&self) {
+        let hourly = self.hourly.clone();
+        match tokio::task::spawn_blocking(move || hourly.persist()).await {
+            Ok(Ok(())) => {},
+            other => tracing::warn!(?other, "Private hourly history could not be persisted"),
+        }
     }
 }
 

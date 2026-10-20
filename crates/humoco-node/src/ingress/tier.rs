@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use parking_lot::RwLock as PlRwLock;
 use thiserror::Error;
@@ -110,6 +110,8 @@ pub struct TierController {
     current_epoch_day_cached: Arc<AtomicU64>,
     last_thermometer_day: Arc<AtomicU64>,
     vip_persist_tx: tokio::sync::mpsc::Sender<VipQuotaPersistOp>,
+    vip_persist_worker: tokio::task::AbortHandle,
+    vip_persist_failed: Arc<AtomicBool>,
 }
 
 impl TierController {
@@ -120,14 +122,17 @@ impl TierController {
     pub fn new(storage: Arc<RedbStorage>, pow_engine: Arc<PowEngine>) -> Self {
         let (vip_persist_tx, mut vip_persist_rx) = tokio::sync::mpsc::channel::<VipQuotaPersistOp>(1_024);
         let persist_storage = storage.clone();
-        tokio::spawn(async move {
+        let vip_persist_failed = Arc::new(AtomicBool::new(false));
+        let worker_failed = vip_persist_failed.clone();
+        let worker = tokio::spawn(async move {
             while let Some(op) = vip_persist_rx.recv().await {
                 let storage = persist_storage.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     storage.set_quota(&op.account_tag, op.remaining)
                 }).await;
-                if let Err(e) = res {
-                    tracing::warn!("FIFO VIP quota persist join error: {:?}", e);
+                if !matches!(res, Ok(Ok(()))) {
+                    worker_failed.store(true, Ordering::Release);
+                    tracing::warn!(?res, "FIFO VIP quota persistence failed");
                 }
             }
         });
@@ -150,7 +155,20 @@ impl TierController {
             current_epoch_day_cached: Arc::new(AtomicU64::new(0)),
             last_thermometer_day: Arc::new(AtomicU64::new(0)),
             vip_persist_tx,
+            vip_persist_worker: worker.abort_handle(),
+            vip_persist_failed,
         }
+    }
+
+    /// Registers natural FIFO quota-worker completion with daemon teardown.
+    /// All controller senders must be dropped before waiting for this handle.
+    pub fn quota_worker_abort_handle(&self) -> tokio::task::AbortHandle {
+        self.vip_persist_worker.clone()
+    }
+
+    /// Local persistence failure evidence for truthful daemon completion, never peer punishment.
+    pub fn quota_worker_failure_handle(&self) -> Arc<AtomicBool> {
+        self.vip_persist_failed.clone()
     }
 
     /// Increments and returns the next epoch_seq for Spec 10 Signed Ingress Envelopes.

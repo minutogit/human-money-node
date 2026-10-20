@@ -9,13 +9,10 @@
 //! 2. When a wallet queries `POST /v1/status` on an output that was already spent:
 //!    - Node returns `L2Verdict::Verified { lock_entry }` carrying the child transaction hash (`t_id`).
 //!    - This cryptographically proves to the wallet that the output is spent and supplies the spend proof.
-//! 3. When `read_quorum = 14` is requested:
-//!    - Gateway fans out `StatusQuery` to the Top-20 shard committee.
-//!    - Collects at least 14 attestations.
-//!    - Attaches a valid BFT `QuorumCertificateDto` with `status = 1` (FINAL) and `signer_count >= 14`.
+//! 3. Explicit recipient-challenged current-state proofs use real, distinct,
+//!    mature full-key committees over QUIC and enforce the full14 threshold.
+//!    Fixture-installed readiness does not establish production recovery safety.
 
-use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
@@ -25,7 +22,6 @@ use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
-use humoco_node::api::dto::QuorumCertificateDto;
 use humoco_node::api::hmc::{
     calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest, L2ResponseEnvelope,
     L2StatusQuery, L2Verdict,
@@ -41,14 +37,6 @@ fn test_now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn fake_pubkey(seed: u64) -> [u8; 32] {
-    *blake3::hash(&seed.to_le_bytes()).as_bytes()
-}
-
-fn fake_addr(port: u16) -> SocketAddr {
-    format!("127.0.0.1:{port}").parse().expect("valid addr")
 }
 
 async fn force_stable_ge20(pm: &PeerManager) {
@@ -267,249 +255,92 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
 }
 
 #[tokio::test]
-async fn test_status_query_read_quorum_14_collects_bft_certificate() {
+async fn test_current_state_quorum_requires_real_fourteen_distinct_live_votes() {
+    use humoco_node::daemon::ShardReadinessManager;
+    use humoco_proto::live::{LiveStateContext, LiveStateProof, verify_live_state_proof};
+    use std::time::{Duration, Instant};
     const NUM_SHARDS: usize = 20;
-
-    let gateway_id = NodeIdentity::generate();
-    let gw_cancel = CancellationToken::new();
-
-    let pm_gw = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
-    let dummy_storage = Arc::new(
-        RedbStorage::open(&tempdir().expect("gw tempdir").path().join("gw_status.redb"))
-            .expect("open redb"),
-    );
-    let (engine_gw, _worker_gw) = DualTierEngine::new(dummy_storage.clone());
-
-    let gw_handler = Arc::new(
-        NodeRequestHandler::with_peer_manager(
-            engine_gw.clone(),
-            dummy_storage.clone(),
-            gateway_id.clone(),
-            pm_gw.clone(),
-        )
-        .with_sync_ready(Arc::new(AtomicBool::new(true))),
-    );
-
-    let gw_transport = QuicTransport::bind_with_options(
-        "127.0.0.1:0".parse().expect("addr"),
-        &gateway_id,
-        pm_gw.clone(),
-        gw_handler,
-        gw_cancel.clone(),
-    )
-    .expect("bind gateway transport");
-    gw_transport.set_sync_ready(true);
-    gw_transport.spawn_accept_loop();
-
     struct Shard {
-        identity: NodeIdentity,
-        addr: SocketAddr,
-        transport: Arc<QuicTransport>,
-        cancel: CancellationToken,
-        engine: DualTierEngine,
+        id: NodeIdentity, pm: Arc<PeerManager>, transport: QuicTransport,
+        engine: DualTierEngine, ready: Arc<ShardReadinessManager>,
     }
-
-    let mut shards: Vec<Shard> = Vec::new();
-
-    for s in 0..NUM_SHARDS {
-        let tmp = tempdir().expect("shard tempdir");
-        let storage = Arc::new(
-            RedbStorage::open(&tmp.path().join(format!("status_shard{s}.redb")))
-                .expect("open shard redb"),
-        );
-        std::mem::forget(tmp);
-        let (engine, _worker) = DualTierEngine::new(storage.clone());
-        let identity = NodeIdentity::generate();
-        let cancel = CancellationToken::new();
-        let pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
-
-        // Shard sees gateway as F2F friend
-        pm.register_f2f_friend(
-            *gateway_id.node_pubkey(),
-            Some("127.0.0.1:1".parse().expect("addr")),
-        )
-        .await;
-
-        for i in 0u64..18 {
-            pm.register_f2f_friend(
-                fake_pubkey(80_000 + (s as u64) * 100 + i),
-                Some(fake_addr((56001 + i) as u16)),
-            )
-            .await;
+    let temp = tempdir().unwrap();
+    let cancel = CancellationToken::new();
+    let gateway = NodeIdentity::generate();
+    let gateway_pm = Arc::new(PeerManager::new(Vec::new()));
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("gateway.redb")).unwrap());
+    let (gateway_engine, _worker) = DualTierEngine::new(storage.clone());
+    let gateway_transport = QuicTransport::bind_with_options("127.0.0.1:0".parse().unwrap(), &gateway, gateway_pm.clone(), Arc::new(humoco_node::network::DefaultRequestHandler), cancel.clone()).unwrap();
+    let gateway_addr = gateway_transport.local_addr().unwrap();
+    let mut shards = Vec::new();
+    for index in 0..NUM_SHARDS {
+        let disk = Arc::new(RedbStorage::open(&temp.path().join(format!("shard{index}.redb"))).unwrap());
+        let (engine, _worker) = DualTierEngine::new(disk.clone());
+        let id = NodeIdentity::generate();
+        let pm = Arc::new(PeerManager::new(Vec::new()));
+        let ready = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
+        let handler = Arc::new(NodeRequestHandler::with_peer_manager(engine.clone(), disk, id.clone(), pm.clone()).with_readiness_manager(ready.clone()));
+        let transport = QuicTransport::bind_with_options("127.0.0.1:0".parse().unwrap(), &id, pm.clone(), handler, cancel.clone()).unwrap();
+        pm.register_f2f_friend(*gateway.node_pubkey(), Some(gateway_addr)).await;
+        gateway_pm.register_f2f_friend(*id.node_pubkey(), Some(transport.local_addr().unwrap())).await;
+        shards.push(Shard {id, pm, transport, engine, ready});
+    }
+    // Every observer receives the same authenticated full-key/ticket fixture.
+    // Explicit maturity/readiness below is test setup, never a recovery proof.
+    let mut roster: Vec<_> = shards.iter().map(|sh| (sh.id.clone(), sh.transport.local_addr().unwrap())).collect();
+    roster.push((gateway.clone(), gateway_addr));
+    for pm in std::iter::once(gateway_pm.clone()).chain(shards.iter().map(|sh| sh.pm.clone())) {
+        for (id, addr) in &roster {
+            pm.learn_node_from_gossip_with_hrw(*id.node_pubkey(), *id.hrw_routing_id(), *addr, 0, None).await;
+            pm.set_first_seen_for_test(id.node_pubkey(), Instant::now() - Duration::from_secs(25*3600)).await;
         }
-        assert_eq!(pm.active_nodes_count(), 20);
         force_stable_ge20(&pm).await;
-
-        let handler = Arc::new(
-            NodeRequestHandler::with_peer_manager(
-                engine.clone(),
-                storage.clone(),
-                identity.clone(),
-                pm.clone(),
-            )
-            .with_sync_ready(Arc::new(AtomicBool::new(true))),
-        );
-
-        let transport = Arc::new(
-            QuicTransport::bind_with_options(
-                "127.0.0.1:0".parse().expect("addr"),
-                &identity,
-                pm.clone(),
-                handler,
-                cancel.clone(),
-            )
-            .expect("bind shard transport"),
-        );
-        transport.set_sync_ready(true);
-        let addr = transport.local_addr().expect("shard local addr");
-        transport.spawn_accept_loop();
-
-        shards.push(Shard {
-            identity,
-            addr,
-            transport,
-            cancel,
-            engine,
-        });
     }
-
-    // Gateway registers all 20 shards as F2F friends and preconnects
-    let gw_addr = gw_transport.local_addr().expect("gw addr");
-    for sh in &shards {
-        pm_gw
-            .register_f2f_friend(*sh.identity.node_pubkey(), Some(sh.addr))
-            .await;
-        sh.transport
-            .peer_manager()
-            .register_f2f_friend(*gateway_id.node_pubkey(), Some(gw_addr))
-            .await;
-        gw_transport
-            .connect_peer(sh.addr)
-            .await
-            .expect("preconnect shard");
-    }
-    assert!(pm_gw.active_nodes_count() >= 20);
-    force_stable_ge20(&pm_gw).await;
-
-    // Pick a spent lock and populate on all 20 shards
-    let sender_key = SigningKey::from_bytes(&[77u8; 32]);
-    let now = test_now_ms();
-
-    // Select a lock whose shard committee consists of the 20 shards
-    let mut counter = 0u64;
-    let (_target_shard_id, genesis_req) = loop {
-        counter += 1;
-        let req = make_hmc_genesis(&format!("status_bft_{counter}"), now + 1_000_000, &sender_key);
-        let tag = bs58::encode(&req.transaction_hash).into_string();
-        let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-        let sid = humoco_sim_core::types::extract_shard_id(&p_bytes);
-        let (comm, rem, _) = pm_gw
-            .shard_committee(*gateway_id.node_pubkey(), *gateway_id.hrw_routing_id(), sid)
-            .await;
-        if rem.len() == 20 && !comm.iter().any(|m| m.node_pubkey == *gateway_id.node_pubkey()) {
-            break (sid, req);
+    let owner = SigningKey::from_bytes(&[77;32]);
+    let now = gateway_pm.net_time_ms();
+    let mut selected = None;
+    for index in 0..1000 {
+        let req = make_hmc_genesis(&format!("live_status_{index}"), now + 1_000_000, &owner);
+        let tag = bs58::encode(req.transaction_hash).into_string();
+        let sid = humoco_sim_core::types::extract_shard_id(blake3::hash(tag.as_bytes()).as_bytes());
+        let (committee, _, _) = gateway_pm.shard_committee(*gateway.node_pubkey(), *gateway.hrw_routing_id(), sid).await;
+        if !committee.iter().any(|member| member.node_pubkey == *gateway.node_pubkey()) {
+            selected = Some((sid, req, committee.iter().map(|member| member.node_pubkey).collect::<Vec<_>>())); break;
         }
-    };
-
-    let voucher_id = genesis_req.layer2_voucher_id.clone();
-    let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
-
-    let parent_spent = format!("spent_parent_bft_{counter}");
-    let child_tx_hash = *blake3::hash(b"child_spend_tx_payload_bft").as_bytes();
-    let spend_req = make_hmc_spend(&voucher_id, &parent_spent, child_tx_hash, now + 800_000, &sender_key);
-    let spend_entry = L2LockEntry::from(&spend_req);
-
-    // Anchor genesis and spend lock on all 20 shards
-    for sh in &shards {
-        let _ = sh.engine
-            .ingress_hmc_lock(genesis_tag.clone(), L2LockEntry::from(&genesis_req))
-            .await;
-        let _ = sh.engine
-            .ingress_hmc_lock(parent_spent.clone(), spend_entry.clone())
-            .await;
     }
-
-    // Also populate on gateway so gateway local lookup finds the lock
-    let _ = engine_gw
-        .ingress_hmc_lock(genesis_tag.clone(), L2LockEntry::from(&genesis_req))
-        .await;
-    let _ = engine_gw
-        .ingress_hmc_lock(parent_spent.clone(), spend_entry.clone())
-        .await;
-
-    let pow = Arc::new(PowEngine::new(*gateway_id.node_id(), 1));
-    let tc = Arc::new(TierController::new(dummy_storage.clone(), pow.clone()));
-    tc.register_f2f_peer("status_test_token");
-    let mut state = AppState::new(
-        engine_gw.clone(),
-        dummy_storage,
-        gateway_id.clone(),
-        tc,
-        pow,
-    );
-    state.peer_manager = Some(pm_gw);
-    state.transport = Some(gw_transport.clone());
+    let (shard_id, genesis, committee) = selected.expect("find committee excluding gateway");
+    let genesis_tag = bs58::encode(genesis.transaction_hash).into_string();
+    let anchor = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    let root = now + 1_000_000;
+    let spend = make_hmc_spend(&genesis.layer2_voucher_id, "spent-parent", [91;32], now + 800_000, &owner);
+    let entry = L2LockEntry::from(&spend);
+    for shard in &shards {
+        let (verdict, _) = shard.engine.ingress_hmc_lock_durable(genesis_tag.clone(), L2LockEntry::from(&genesis), humoco_node::storage::IngressOrigin::PartitionSync, Some(now), None, None, Some(genesis.layer2_voucher_id.clone())).await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+        let (verdict, _) = shard.engine.ingress_hmc_lock_durable("spent-parent".into(), entry.clone(), humoco_node::storage::IngressOrigin::PartitionSync, Some(now), None, None, Some(genesis.layer2_voucher_id.clone())).await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+        shard.engine.record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor).await;
+        shard.ready.mark_shard_ready(shard_id);
+        shard.transport.spawn_accept_loop();
+    }
+    gateway_transport.spawn_accept_loop();
+    let pow = Arc::new(PowEngine::new(*gateway.node_id(), 1));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let mut state = AppState::new(gateway_engine, storage, gateway, tiers, pow);
+    state.peer_manager = Some(gateway_pm); state.transport = Some(gateway_transport.clone());
     let app = build_router(state);
-
-    // Submit POST /v1/status requesting read_quorum: 14
-    let query = make_status_query(&voucher_id, &parent_spent, Vec::new(), 14);
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/status")
-        .header("content-type", "application/json")
-        .header("x-peer-token", "status_test_token")
-        .body(axum::body::Body::from(serde_json::to_vec(&query).unwrap()))
-        .unwrap();
-
-    let resp = app.oneshot(req).await.expect("oneshot /v1/status");
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).unwrap();
-
-    // Verify Verdict
-    match env.verdict {
-        L2Verdict::Verified { lock_entry } => {
-            assert_eq!(lock_entry.t_id, child_tx_hash);
-        }
-        other => panic!("Expected Verified, got {:?}", other),
-    }
-
-    // Verify Quorum Certificate
-    let cert: QuorumCertificateDto = env
-        .quorum_certificate
-        .expect("Response must attach QuorumCertificateDto for read_quorum = 14");
-
-    assert!(
-        cert.is_quorum_reached(),
-        "Quorum must be reached: {}/{}",
-        cert.signatures.len(),
-        cert.required_quorum()
-    );
-    assert_eq!(
-        cert.status, 1,
-        "Status certificate must be FINAL (1) when 14 signatures are gathered in N>=20 cluster"
-    );
-    assert!(
-        cert.signer_count >= 14,
-        "Signer count must be at least 14, got {}",
-        cert.signer_count
-    );
-    assert!(
-        cert.signatures.len() >= 14,
-        "Signatures len must be at least 14, got {}",
-        cert.signatures.len()
-    );
-    assert!(
-        cert.signer_bitmap.count_ones() >= 14,
-        "Signer bitmap must have at least 14 bits set, got {}",
-        cert.signer_bitmap.count_ones()
-    );
-
-    // Cleanup
-    gw_cancel.cancel();
-    gw_transport.close();
-    for sh in shards {
-        sh.cancel.cancel();
-        sh.transport.close();
-    }
+    let context = LiveStateContext {version:1,network:0,shard_id,voucher_id:genesis.layer2_voucher_id.clone(),lookup_tag:"spent-parent".into(),parent_lock:*blake3::hash(b"spent-parent").as_bytes(),child_lock:entry.t_id,root_valid_until:root,state_digest:*blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes(),recipient_nonce:[71;32],committee};
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/verify-current").header("content-type","application/json").body(axum::body::Body::from(serde_json::to_vec(&context).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+    verify_live_state_proof(&proof, &context).expect("real 14/20 current proof");
+    assert_eq!(proof.votes.len(),14);
+    // Seven unavailable shards make FINAL impossible; the endpoint never lowers 14.
+    for shard in shards.iter().take(7) {shard.ready.invalidate_shard(shard_id);}
+    let mut next=context.clone(); next.recipient_nonce=[72;32];
+    let response = app.oneshot(Request::builder().method("POST").uri("/v1/verify-current").header("content-type","application/json").body(axum::body::Body::from(serde_json::to_vec(&next).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+    assert!(verify_live_state_proof(&proof,&next).is_err(),"old nonce cannot satisfy next checkout");
+    cancel.cancel();gateway_transport.close();for shard in shards {shard.transport.close();}
 }

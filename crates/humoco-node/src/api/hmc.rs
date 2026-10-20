@@ -241,7 +241,7 @@ pub struct L2StatusQuery {
     pub read_quorum: u8,
 }
 
-/// Atomares Ketten-Locking: Batch of HMC locks that must be committed or rejected atomically.
+/// Ordered chain registration: a durable valid prefix survives an invalid suffix.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct L2ChainLockRequest {
     pub auth: L2AuthPayload,

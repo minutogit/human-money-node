@@ -68,6 +68,9 @@ pub struct TierSharesConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DiscoveryConfig {
+    /// Explicit client HTTP endpoints published by this node, never inferred from P2P ports.
+    #[serde(default)]
+    pub public_gateway_urls: Vec<String>,
     #[serde(default)]
     pub bootstrap_gateways: Vec<String>,
 }
@@ -134,6 +137,12 @@ impl fmt::Debug for AlertConfig {
 pub struct NetworkConfig {
     pub p2p_listen_addr: SocketAddr,
     pub rpc_listen_addr: SocketAddr,
+    /// Optional loopback-only operator listener; disabled unless explicitly configured.
+    #[serde(default)]
+    pub operator_listen_addr: Option<SocketAddr>,
+    /// Absolute internal shutdown budget; supervisors must allow a longer fallback.
+    #[serde(default = "default_shutdown_timeout_secs")]
+    pub shutdown_timeout_secs: u64,
     #[serde(default)]
     pub advertised_addr: Option<SocketAddr>,
     #[serde(default)]
@@ -147,6 +156,8 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub fast_ticker_interval_secs: Option<u64>,
 }
+
+fn default_shutdown_timeout_secs() -> u64 { 10 }
 
 fn default_shard_query_depth() -> usize {
     3
@@ -338,6 +349,8 @@ impl Default for NetworkConfig {
             rpc_listen_addr: DEFAULT_RPC_LISTEN_ADDR
                 .parse()
                 .expect("Valid default RPC socket address"),
+            operator_listen_addr: None,
+            shutdown_timeout_secs: default_shutdown_timeout_secs(),
             advertised_addr: None,
             control_socket: None,
             network_id: humoco_sim_core::types::NetworkId::default(),
@@ -376,6 +389,32 @@ impl Default for QuotasConfig {
 }
 
 impl NodeConfig {
+    /// Validates private/public listener separation and finite public advertisements.
+    pub fn validate_network_boundaries(&self) -> Result<(), NodeError> {
+        if let Some(addr) = self.network.operator_listen_addr {
+            if !addr.ip().is_loopback() {
+                return Err(NodeError::Daemon("operator_listen_addr must be loopback; use SSH forwarding for remote access".into()));
+            }
+            if addr.port() != 0 && addr == self.network.rpc_listen_addr {
+                return Err(NodeError::Daemon("operator and public listeners must be separate".into()));
+            }
+        }
+        if !(1..=300).contains(&self.network.shutdown_timeout_secs) {
+            return Err(NodeError::Daemon("shutdown_timeout_secs must be between 1 and 300".into()));
+        }
+        if self.discovery.public_gateway_urls.len() > 16 {
+            return Err(NodeError::Daemon("at most 16 public HTTP gateway advertisements are allowed".into()));
+        }
+        for raw in &self.discovery.public_gateway_urls {
+            let url = reqwest::Url::parse(raw).map_err(|_| NodeError::Daemon("invalid public HTTP gateway URL".into()))?;
+            if raw.len() > 2048 || !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+                || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+                return Err(NodeError::Daemon("gateway URL must be bounded HTTP(S) without credentials, query or fragment".into()));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the default HuMoCo base directory (`~/.humoco` or `.humoco` if home dir cannot be resolved).
     pub fn default_humoco_dir() -> PathBuf {
         directories::BaseDirs::new()
@@ -404,6 +443,7 @@ impl NodeConfig {
             source: err,
         })?;
         let config: NodeConfig = toml::from_str(&content)?;
+        config.validate_network_boundaries()?;
         Ok(config)
     }
 
@@ -457,6 +497,11 @@ p2p_listen_addr = "{}"
 # RPC Listen address for client ingress / REST API (default: 127.0.0.1:8080)
 rpc_listen_addr = "{}"
 
+# Private diagnostics; disabled by default. Remote access uses SSH forwarding.
+# operator_listen_addr = "127.0.0.1:9091"
+# Internal shutdown budget; configure supervisor timeout above this value.
+shutdown_timeout_secs = 10
+
 [storage]
 # Directory where local database and state are stored
 data_dir = "{}"
@@ -481,6 +526,8 @@ default_byte_years = {}
 
 [discovery]
 # List of bootstrap gateways for initial discovery and client fallback
+# Explicit public HTTP(S) endpoints; never inferred from a P2P/QUIC address.
+public_gateway_urls = []
 bootstrap_gateways = [
     # "https://gateway1.humoco.org",
 ]

@@ -5,8 +5,11 @@ pub mod events;
 pub mod health;
 pub mod history;
 pub mod hmc;
+pub mod live;
 pub mod keys;
 pub mod metrics;
+pub mod operator;
+pub mod operator_boundary;
 pub mod qr;
 pub mod routes;
 pub mod system_stats;
@@ -38,3 +41,5 @@ pub use metrics::prometheus_metrics;
 pub use routes::{build_router, AppState};
 pub use system_stats::{SparklinesDto, SystemStatsCollector, SystemStatsDto};
 
+
+pub mod history_retention;

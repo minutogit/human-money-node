@@ -59,27 +59,24 @@ impl ControlClient {
     }
 
     pub async fn shutdown(&self, timeout_secs: u64) -> Result<(), NodeError> {
-        match self.send_request(ControlRequest::Shutdown).await? {
-            ControlResponse::Ok => {
-                if timeout_secs > 0 {
-                    let start = std::time::Instant::now();
-                    let max_wait = std::time::Duration::from_secs(timeout_secs);
-                    while self.socket_path.exists() && start.elapsed() < max_wait {
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                    if self.socket_path.exists() {
-                        return Err(NodeError::Daemon(format!(
-                            "Timed out after {}s waiting for daemon to terminate",
-                            timeout_secs
-                        )));
-                    }
-                }
-                Ok(())
+        let budget = std::time::Duration::from_secs(timeout_secs.max(1));
+        let deadline = tokio::time::Instant::now() + budget;
+        let response = tokio::time::timeout_at(deadline, self.send_request(ControlRequest::Shutdown)).await
+            .map_err(|_| NodeError::Daemon("stop request timed out".into()))??;
+        let identity = match response {
+            ControlResponse::ShutdownAccepted { identity } => identity,
+            ControlResponse::Error { message } => return Err(NodeError::Daemon(message)),
+            _ => return Err(NodeError::Daemon("stop accepted without verifiable process completion identity".into())),
+        };
+        loop {
+            if super::lifecycle::completed_cleanly(&identity, &self.socket_path)? {
+                let _ = std::fs::remove_file(&identity.completion_path);
+                return Ok(());
             }
-            ControlResponse::Error { message } => Err(NodeError::Daemon(message)),
-            _ => Err(NodeError::Daemon(
-                "Unexpected response variant from control server".into(),
-            )),
+            if tokio::time::Instant::now() >= deadline {
+                return Err(NodeError::Daemon(format!("Timed out after {timeout_secs}s waiting for clean process termination")));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
 

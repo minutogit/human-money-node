@@ -30,6 +30,12 @@ impl Xor64 {
     fn bytes(&mut self, n: usize) -> Vec<u8> { (0..n).map(|_| self.next() as u8).collect() }
 }
 
+/// Explicit test-only readiness for a fresh, isolated registry with no peers.
+/// This does not model activation after transfer or dynamic committee changes.
+fn isolated_ready(state: &AppState) {
+    for shard in 0..=u16::MAX { state.readiness_manager.mark_shard_ready(shard); }
+}
+
 fn setup_app() -> axum::Router {
     let temp = tempdir().unwrap();
     // Leak tempdir path so DB persists for test duration – we keep handle in memory via Box::leak
@@ -41,6 +47,7 @@ fn setup_app() -> axum::Router {
     let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine, storage, identity, tier, pow);
+    isolated_ready(&state);
     build_router(state)
 }
 
@@ -54,6 +61,7 @@ fn setup_app_with_tier() -> (axum::Router, Arc<TierController>, Arc<PowEngine>) 
     let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine, storage, identity.clone(), tier.clone(), pow.clone());
+    isolated_ready(&state);
     (build_router(state), tier, pow)
 }
 
@@ -301,6 +309,7 @@ async fn test_chaos_ingress_quota_exhaustion_under_flood() {
     // Hydrate cache so in-memory matches disk (avoids async race where cache reloads stale disk)
     tier.hydrate_vip_quota(&tag).unwrap();
     let state = AppState::new(engine, storage.clone(), identity, tier.clone(), pow.clone());
+    isolated_ready(&state);
     let app = build_router(state);
 
     // 5-year lock = 960 BY >500 -> 429 immediately

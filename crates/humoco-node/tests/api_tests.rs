@@ -11,6 +11,7 @@ use tower::ServiceExt;
 use humoco_node::{
     api::{
         build_router,
+        routes::build_operator_router,
         hmc::{
             calculate_l2_payload_hash, L2AuthPayload, L2LockRequest, L2ResponseEnvelope, L2Verdict,
         },
@@ -22,7 +23,14 @@ use humoco_node::{
     storage::{DualTierEngine, RedbStorage},
 };
 
-fn setup_test_app() -> (axum::Router, Arc<RedbStorage>, NodeIdentity, Arc<TierController>, Arc<PowEngine>) {
+/// Explicit component-test island fixture. Its predeclared empty namespace is
+/// installed by the test; this does not exercise or prove production recovery.
+fn isolated_ready_state(state: AppState) -> AppState {
+    for shard in 0..=u16::MAX { state.readiness_manager.mark_shard_ready(shard); }
+    state
+}
+
+fn setup_test_app_pair() -> (axum::Router, axum::Router, Arc<RedbStorage>, NodeIdentity, Arc<TierController>, Arc<PowEngine>) {
     let temp = tempdir().expect("tempdir");
     let db_path = temp.path().join("test_api.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
@@ -39,8 +47,26 @@ fn setup_test_app() -> (axum::Router, Arc<RedbStorage>, NodeIdentity, Arc<TierCo
         pow_engine.clone(),
     );
 
+    let state = isolated_ready_state(state);
+    let operator = build_operator_router(state.clone());
     let router = build_router(state);
-    (router, storage, identity, tier_controller, pow_engine)
+    (router, operator, storage, identity, tier_controller, pow_engine)
+}
+
+fn setup_test_app() -> (axum::Router, Arc<RedbStorage>, NodeIdentity, Arc<TierController>, Arc<PowEngine>) {
+    let (public, _operator, storage, identity, tiers, pow) = setup_test_app_pair();
+    (public, storage, identity, tiers, pow)
+}
+
+fn setup_test_operator_app() -> (axum::Router, Arc<RedbStorage>, NodeIdentity, Arc<TierController>, Arc<PowEngine>) {
+    let temp = tempdir().expect("tempdir");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("operator.redb")).expect("redb"));
+    let (engine, _flush) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let state = AppState::new(engine, storage.clone(), identity.clone(), tiers.clone(), pow.clone());
+    (build_operator_router(state), storage, identity, tiers, pow)
 }
 
 fn test_now_ms() -> u64 {
@@ -329,8 +355,9 @@ async fn test_api_vip_tier_quota_deduction() {
         .await
         .unwrap();
 
-    assert_eq!(res.status(), StatusCode::CREATED);
+    let actual_status = res.status();
     let submit_resp: L2ResponseEnvelope = response_json(res).await;
+    assert_eq!(actual_status, StatusCode::CREATED, "first-write verdict: {submit_resp:?}");
     assert!(matches!(submit_resp.verdict, L2Verdict::Verified { .. }));
 
     // Quota should now be deducted in-memory atomically (<1µs, no fsync stall): 1000 - 192 = 808
@@ -371,7 +398,7 @@ async fn test_api_vip_tier_quota_deduction() {
 
 #[tokio::test]
 async fn test_api_status_and_sync() {
-    let (app, _storage, identity, tier_controller, _) = setup_test_app();
+    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("sync_peer");
 
     // 1. Check health / status endpoint
@@ -380,7 +407,7 @@ async fn test_api_status_and_sync() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/health")
+                .uri("/v1/node-status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -388,9 +415,9 @@ async fn test_api_status_and_sync() {
         .unwrap();
 
     assert_eq!(res_health.status(), StatusCode::OK);
-    let status_dto: NodeStatusResponse = response_json(res_health).await;
-    assert_eq!(status_dto.status, "ok");
-    assert_eq!(status_dto.node_id, identity.node_id_hex());
+    let status_dto: serde_json::Value = response_json(res_health).await;
+    assert_eq!(status_dto["service"], "humoco-node");
+    assert!(status_dto.get("node_id").is_none());
 
     // 2. Submit a lock
     let parent_lock = "12".repeat(32);
@@ -412,7 +439,9 @@ async fn test_api_status_and_sync() {
         )
         .await
         .unwrap();
-    assert_eq!(res_sub.status(), StatusCode::CREATED);
+    let actual_status = res_sub.status();
+    let submit: L2ResponseEnvelope = response_json(res_sub).await;
+    assert_eq!(actual_status, StatusCode::CREATED, "first-write verdict: {submit:?}");
 
     // 3. Call sync without locator -> lock is returned
     let sync_req = SyncRequest {
@@ -893,7 +922,7 @@ async fn test_banned_node_ingress_403_rejection() {
         tier_controller.clone(),
         pow_engine.clone(),
     );
-    let app = build_router(state);
+    let app = build_router(isolated_ready_state(state));
 
     // 1. Submit HMC lock from banned ephemeral key
     let now = test_now_ms();
@@ -959,7 +988,9 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
 
-    let handler = NodeRequestHandler::new(engine.clone(), storage.clone(), identity.clone());
+    let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    for shard in 0..=u16::MAX { readiness.mark_shard_ready(shard); }
+    let handler = NodeRequestHandler::new(engine.clone(), storage.clone(), identity.clone()).with_readiness_manager(readiness);
 
     // 1a. Legacy tuple / Sim bypass must be hard-rejected (Phase 1 P0).
     let now_ms = std::time::SystemTime::now()
@@ -1368,25 +1399,21 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
 
     let self_hrw = *identity.hrw_routing_id();
-    let self_score = humoco_sim_core::client_flow::compute_hrw_score_f64(&self_hrw, shard_id);
+    let self_score = humoco_sim_core::types::hrw_score_for_routing(&self_hrw, shard_id);
 
     // Register 25 known peers that have a strictly HIGHER score than self for this shard
     // so that self's rank is > 20 (specifically rank 26).
     let mut found = 0;
-    let mut counter = 0u64;
     while found < 25 {
-        let mut candidate_id = [0u8; 32];
-        candidate_id[0..8].copy_from_slice(&counter.to_le_bytes());
-        let candidate_hash = *blake3::hash(&candidate_id).as_bytes();
-        let score = humoco_sim_core::client_flow::compute_hrw_score_f64(&candidate_hash, shard_id);
+        let candidate = NodeIdentity::generate();
+        let score = humoco_sim_core::types::hrw_score_for_routing(candidate.hrw_routing_id(), shard_id);
         if score > self_score {
             let addr = format!("127.0.0.1:{}", 15000 + found).parse().unwrap();
-            peer_mgr.learn_node_from_gossip(candidate_hash, addr, 1, None).await;
+            peer_mgr.learn_node_from_gossip_with_hrw(*candidate.node_pubkey(), *candidate.hrw_routing_id(), addr, 1, None).await;
             // Mature the node so it counts in active_known_nodes (24h incubation filter)
-            peer_mgr.set_first_seen_for_test(&candidate_hash, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+            peer_mgr.set_first_seen_for_test(candidate.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
             found += 1;
         }
-        counter += 1;
     }
 
     let active_nodes = peer_mgr.active_known_nodes().await;
@@ -1411,7 +1438,7 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     state.peer_manager = Some(peer_mgr);
     state.transport = Some(transport);
 
-    let app = build_router(state);
+    let app = build_router(isolated_ready_state(state));
 
     let res = app
         .oneshot(
@@ -1433,9 +1460,9 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     assert!(resp.quorum_certificate.is_some());
     let qc = resp.quorum_certificate.unwrap();
 
-    let self_node_u16 = identity.node_id_u16();
+    let self_node_pubkey = *identity.node_pubkey();
     // Gateway's own attestation must NOT be present in QuorumCertificate because its rank is > 20!
-    let self_attestation_present = qc.signatures.iter().any(|s| s.node_id == self_node_u16);
+    let self_attestation_present = qc.signatures.iter().any(|s| s.node_pubkey_bytes() == Some(self_node_pubkey));
     assert!(!self_attestation_present, "Gateway with HRW rank > 20 must NOT attest itself into the QuorumCertificate");
 
     // Task 1: Stateless gateway must NOT write foreign shard lock to local engine or redb!
@@ -1549,7 +1576,7 @@ async fn test_api_pow_adaptive_backpressure_and_stateless_hashcash() {
 
 #[tokio::test]
 async fn test_dashboard_endpoint_rendering_and_airgap() {
-    let (app, _storage, _identity, _, _) = setup_test_app();
+    let (app, _storage, _identity, _, _) = setup_test_operator_app();
 
     let res = app
         .clone()
@@ -1719,7 +1746,7 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
 
 #[tokio::test]
 async fn test_healthcheck_split_live_and_ready() {
-    let (app, _storage, _identity, _, _) = setup_test_app();
+    let (public, app, _storage, _identity, _, _) = setup_test_app_pair();
 
     // 1. GET /health/live returns 200 OK {"status": "alive"}
     let res_live = app
@@ -1776,7 +1803,7 @@ async fn test_healthcheck_split_live_and_ready() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/v1/node-status")
+                .uri("/health")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1785,7 +1812,7 @@ async fn test_healthcheck_split_live_and_ready() {
     assert_eq!(res_status.status(), StatusCode::OK);
 
     // 4. GET /healthz returns 200 OK {"status": "ok"}
-    let res_healthz = app
+    let res_healthz = public
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1802,7 +1829,7 @@ async fn test_healthcheck_split_live_and_ready() {
 
 #[tokio::test]
 async fn test_prometheus_metrics_expansion() {
-    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
+    let (app, operator, _storage, _identity, tier_controller, _) = setup_test_app_pair();
     tier_controller.register_f2f_peer("metrics_peer_token");
 
     // Submit a valid lock to increment pos_latency_count
@@ -1826,7 +1853,7 @@ async fn test_prometheus_metrics_expansion() {
     assert_eq!(res.status(), StatusCode::CREATED);
 
     // Query /metrics
-    let res_metrics = app
+    let res_metrics = operator
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1863,7 +1890,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
     use rand::RngCore;
     use ed25519_dalek::{Signer, SigningKey};
 
-    let (app, _storage, identity, tier_controller, _) = setup_test_app();
+    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("read_quorum_test_token");
 
     let mut rng = OsRng;
@@ -2013,113 +2040,11 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         )
         .await
         .unwrap();
-    assert_eq!(res_q3.status(), StatusCode::OK);
-    let env_q3: L2ResponseEnvelope = response_json(res_q3).await;
-    assert!(env_q3.quorum_certificate.is_some(), "read_quorum > 1 must include quorum_certificate");
-    let qc = env_q3.quorum_certificate.unwrap();
-    assert_eq!(qc.active_nodes_count, 1, "Village mode must cap active_nodes_count to 1");
-    assert_eq!(qc.signer_count, 1);
-    assert_eq!(qc.signatures.len(), 1);
-    assert_eq!(qc.status, 0);
-    assert_eq!(qc.signer_bitmap, 1);
+    assert_eq!(res_q3.status(), StatusCode::BAD_REQUEST);
+    let rejection: serde_json::Value = response_json(res_q3).await;
+    assert_eq!(rejection["error"], "RecipientChallengeRequired");
+    assert_eq!(rejection["verification_endpoint"], "/v1/verify-current");
 
-    // Verify attestation cryptographic signature (parent_lock-bound, Phase 1 P0)
-    let att = &qc.signatures[0];
-    let sig_bytes = hex::decode(&att.signature).unwrap();
-    let ed_sig = ed25519_dalek::Signature::from_slice(&sig_bytes).unwrap();
-    let parent_bytes = {
-        let v = hex::decode(&att.parent_lock).unwrap();
-        let mut a = [0u8; 32];
-        a.copy_from_slice(&v);
-        a
-    };
-    let payload_digest =
-        humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_bytes, &t_id_bytes);
-    let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
-        humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
-        0,
-        0,
-        0,
-        qc.shard_id,
-        0,
-        &payload_digest,
-    );
-    assert!(identity.verifying_key().verify_strict(&sig_digest, &ed_sig).is_ok());
-
-    // 4. Multi-node adaptive quorum test with PeerManager
-    let peer_mgr = Arc::new(humoco_node::network::PeerManager::new(vec![]));
-
-    let temp2 = tempdir().expect("tempdir");
-    let db_path2 = temp2.path().join("test_read_quorum_peers.redb");
-    let storage2 = Arc::new(RedbStorage::open(&db_path2).expect("open redb"));
-    let (engine2, _flush2) = DualTierEngine::new(storage2.clone());
-    let pow2 = Arc::new(PowEngine::new(*identity.node_id(), 8));
-    let tc2 = Arc::new(TierController::new(storage2.clone(), pow2.clone()));
-    tc2.register_f2f_peer("token_multi");
-
-    let mut state_multi = AppState::new(
-        engine2,
-        storage2.clone(),
-        identity.clone(),
-        tc2.clone(),
-        pow2.clone(),
-    );
-    state_multi.peer_manager = Some(peer_mgr.clone());
-    let app_multi = build_router(state_multi);
-
-    // Anchor genesis on app before peer expansion (reaches provisional quorum 1/1)
-    let res_gen2 = app_multi
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .header("X-Peer-Token", "token_multi")
-                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_gen2.status(), StatusCode::CREATED);
-
-    // Populate peer_mgr with 4 mature peers so active_nodes_count = 5
-    for i in 0..4u64 {
-        let dummy_id = *blake3::hash(&i.to_le_bytes()).as_bytes();
-        let addr = format!("127.0.0.1:{}", 17000 + i).parse().unwrap();
-        peer_mgr.learn_node_from_gossip(dummy_id, addr, 1, None).await;
-        peer_mgr.set_first_seen_for_test(&dummy_id, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
-    }
-
-    // Query status with read_quorum: 2
-    let query_multi = L2StatusQuery {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: sender_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: voucher_id.clone(),
-        challenge_ds_tag: t_id_bs58.clone(),
-        locator_prefixes: vec![],
-        read_quorum: 2,
-    };
-    let res_multi = app_multi
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/status")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&query_multi).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_multi.status(), StatusCode::OK);
-    let env_multi: L2ResponseEnvelope = response_json(res_multi).await;
-    assert!(env_multi.quorum_certificate.is_some());
-    let qc_multi = env_multi.quorum_certificate.unwrap();
-    assert_eq!(qc_multi.active_nodes_count, 5); // 4 peers + self
-    assert!(!qc_multi.signatures.is_empty());
-    assert_ne!(qc_multi.signer_bitmap, 0);
 }
 
 #[tokio::test]
@@ -2360,7 +2285,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         _ => panic!("Expected Conflict verdict"),
     }
 
-    // 6. Query status by leap_ds_tag with read_quorum: 3 (village mode -> adaptive quorum 1)
+    // 6. Query status by leap_ds_tag with read_quorum: 1 (village mode -> adaptive quorum 1)
     let query_by_tag = L2StatusQuery {
         auth: L2AuthPayload {
             ephemeral_pubkey: leap_pub,
@@ -2369,7 +2294,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         layer2_voucher_id: voucher_id.clone(),
         challenge_ds_tag: leap_ds_tag.clone(),
         locator_prefixes: vec![],
-        read_quorum: 3,
+        read_quorum: 1,
     };
     let res_qtag = app
         .clone()
@@ -2385,10 +2310,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         .unwrap();
     assert_eq!(res_qtag.status(), StatusCode::OK);
     let env_qtag: L2ResponseEnvelope = response_json(res_qtag).await;
-    assert!(env_qtag.quorum_certificate.is_some());
-    let qc_tag = env_qtag.quorum_certificate.unwrap();
-    assert_eq!(qc_tag.active_nodes_count, 1);
-    assert_eq!(qc_tag.signer_count, 1);
+    assert!(env_qtag.quorum_certificate.is_none(), "ordinary lookup is not a payment proof");
     match env_qtag.verdict {
         L2Verdict::Verified { lock_entry } => {
             assert_eq!(lock_entry.t_id, leap_t_id);
@@ -2430,7 +2352,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
 
 #[tokio::test]
 async fn test_api_pex_peers_and_node_status_network() {
-    let (app, _storage, _identity, _tier_controller, _pm) = setup_test_app();
+    let (app, _storage, _identity, _tier_controller, _pm) = setup_test_operator_app();
 
     // 1. GET /v1/node-status must contain network field
     let res_status = app
@@ -2438,7 +2360,7 @@ async fn test_api_pex_peers_and_node_status_network() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/v1/node-status")
+                .uri("/health")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2719,7 +2641,7 @@ async fn test_checkout_case_5_exponential_overlap_deduplication() {
 }
 
 #[tokio::test]
-async fn test_checkout_case_6_intermediate_hop_double_spend_rollback() {
+async fn test_checkout_case_6_intermediate_conflict_preserves_valid_prefix() {
     use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
     let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("checkout_peer6");
@@ -2736,17 +2658,25 @@ async fn test_checkout_case_6_intermediate_hop_double_spend_rollback() {
     let chain_init = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k_gen.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), hop_a.clone()] };
     let res_init = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer6").body(Body::from(serde_json::to_vec(&chain_init).unwrap())).unwrap()).await.unwrap();
     assert_eq!(res_init.status(), StatusCode::CREATED);
+    // Install a genuinely new valid prefix before reaching the conflicting step.
+    let prefix_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    let prefix_tag = format!("valid_prefix_{}", test_now_ms());
+    let prefix = make_follow_hmc_req(&voucher_id, prefix_tag.clone(), &prefix_key, 15, None, None);
     // Now attempt chain with intermediate double-spend: genesis (idempotent) + hop_b conflicting on SAME tag_spend as hop_a (different t_id) + hop_c following hop_b
     let hop_b = make_follow_hmc_req(&voucher_id, tag_spend.clone(), &k_b, 25, None, None);
     assert_ne!(hop_b.transaction_hash, hop_a.transaction_hash);
     let tag_c = format!("ds_tag_c_{}", test_now_ms());
     let hop_c = make_follow_hmc_req(&voucher_id, tag_c.clone(), &k_c, 30, None, None);
-    let chain_conflict = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k_gen.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), hop_b.clone(), hop_c.clone()] };
+    let chain_conflict = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k_gen.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), prefix.clone(), hop_b.clone(), hop_c.clone()] };
     let res_conf = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer6").body(Body::from(serde_json::to_vec(&chain_conflict).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res_conf.status(), StatusCode::CONFLICT, "intermediate double-spend must yield 409 and rollback");
+    assert_eq!(res_conf.status(), StatusCode::CONFLICT, "intermediate double-spend must yield 409 without terminal acceptance");
     let env_conf: L2ResponseEnvelope = response_json(res_conf).await;
     match env_conf.verdict { L2Verdict::Conflict { existing_lock } => assert_eq!(existing_lock.t_id, hop_a.transaction_hash), _ => panic!("expected Conflict with existing hop_a") };
-    // Verify hop_c was NOT inserted (rollback) – query by its tag should be Unknown/Missing
+    let prefix_query = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload {ephemeral_pubkey:prefix_key.verifying_key().to_bytes(),auth_signature:None}, layer2_voucher_id:voucher_id.clone(), challenge_ds_tag:prefix_tag, locator_prefixes:vec![],read_quorum:1 };
+    let prefix_response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&prefix_query).unwrap())).unwrap()).await.unwrap();
+    let retained: L2ResponseEnvelope = response_json(prefix_response).await;
+    assert!(matches!(retained.verdict, L2Verdict::Verified {lock_entry} if lock_entry.t_id == prefix.transaction_hash), "a later conflict must preserve the new valid prefix");
+    // Verify hop_c was NOT inserted (stop at first conflict) – query by its tag should be Unknown/Missing
     let q_c = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: k_c.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: tag_c, locator_prefixes: vec![], read_quorum: 1 };
     let res_qc = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q_c).unwrap())).unwrap()).await.unwrap();
     let _env_qc: L2ResponseEnvelope = response_json(res_qc).await;
@@ -2756,7 +2686,7 @@ async fn test_checkout_case_6_intermediate_hop_double_spend_rollback() {
     let q_c2 = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: k_c.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: bs58::encode(&hop_c.transaction_hash).into_string(), locator_prefixes: vec![], read_quorum: 1 };
     let res_qc2 = app.oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q_c2).unwrap())).unwrap()).await.unwrap();
     let env_qc2: L2ResponseEnvelope = response_json(res_qc2).await;
-    match env_qc2.verdict { L2Verdict::MissingLocks { .. } | L2Verdict::UnknownVoucher => {}, L2Verdict::Verified { .. } => panic!("hop_c should not have been inserted after rollback"), _ => {} };
+    match env_qc2.verdict { L2Verdict::MissingLocks { .. } | L2Verdict::UnknownVoucher => {}, L2Verdict::Verified { .. } => panic!("hop_c must not be inserted beyond the conflicting step"), _ => {} };
 }
 
 #[tokio::test]
@@ -2906,13 +2836,13 @@ async fn test_max_11_years_ttl_ingress_boundary_enforcement() {
 
 #[tokio::test]
 async fn test_node_status_and_metrics_telemetry_gauges() {
-    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_app();
+    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_operator_app();
 
     // 1. Check /v1/node-status returns free_tier_enabled: true
     let res_status = app.clone().oneshot(
         Request::builder()
             .method("GET")
-            .uri("/v1/node-status")
+            .uri("/health")
             .body(Body::empty())
             .unwrap(),
     ).await.unwrap();
@@ -2986,7 +2916,7 @@ async fn test_admin_verify_token_endpoint() {
     );
     state = state.with_auth(auth);
 
-    let app = build_router(state.clone());
+    let app = build_operator_router(state.clone());
 
     // 1. Without Authorization header -> 401
     let res = app.clone().oneshot(
@@ -3061,7 +2991,7 @@ async fn test_admin_verify_token_rate_limiting() {
     );
     state = state.with_auth(auth).with_event_log(event_log.clone());
 
-    let app = build_router(state);
+    let app = build_operator_router(state);
 
     // 5 consecutive failed attempts
     for _ in 0..5 {
@@ -3116,7 +3046,7 @@ async fn test_admin_friends_mutation() {
     state.peer_manager = Some(peer_manager.clone());
     state = state.with_auth(auth);
 
-    let app = build_router(state.clone());
+    let app = build_operator_router(state.clone());
 
     let test_friend_key = [7u8; 32];
     let test_friend_hex = hex::encode(test_friend_key);
@@ -3222,7 +3152,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     state.peer_manager = Some(peer_manager.clone());
     state = state.with_auth(auth).with_event_log(event_log.clone());
 
-    let app = build_router(state);
+    let app = build_operator_router(state);
 
     let test_peer_key = [9u8; 32];
     let test_peer_hex = hex::encode(test_peer_key);
@@ -3369,7 +3299,7 @@ async fn test_admin_quota_mutation() {
     );
     state = state.with_auth(auth);
 
-    let app = build_router(state.clone());
+    let app = build_operator_router(state.clone());
 
     let test_account_tag = [42u8; 32];
     let test_tag_hex = hex::encode(test_account_tag);
@@ -3935,7 +3865,7 @@ fn test_qa_dashboard_status_badges_and_quorum_display() {
 
 #[tokio::test]
 async fn test_qa_dashboard_history_and_events_endpoints_structure() {
-    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_app();
+    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_operator_app();
 
     // 1. GET /dashboard/history with various windows
     for window in &["30m", "1h", "6h", "24h", "all"] {
@@ -3995,7 +3925,7 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
     state.peer_manager = Some(peer_manager.clone());
     state = state.with_auth(auth).with_event_log(event_log.clone());
 
-    let app = build_router(state);
+    let app = build_operator_router(state);
 
     let test_peer = [7u8; 32];
     let test_peer_hex = hex::encode(test_peer);
@@ -4186,7 +4116,7 @@ async fn test_admin_peer_reset_and_ping_endpoints() {
     state.peer_manager = Some(peer_manager.clone());
     state = state.with_auth(auth).with_event_log(event_log.clone());
 
-    let app = build_router(state);
+    let app = build_operator_router(state);
 
     let test_addr: std::net::SocketAddr = "127.0.0.1:9095".parse().unwrap();
     let unknown_addr = "127.0.0.1:9999";
@@ -4364,7 +4294,7 @@ async fn test_event_log_persister_and_populate() {
 
 #[tokio::test]
 async fn test_dashboard_sre_monitoring_and_conflict_deep_link() {
-    let (app, _, _, _, _) = setup_test_app();
+    let (app, _, _, _, _) = setup_test_operator_app();
 
     let res = app
         .oneshot(
@@ -4399,7 +4329,7 @@ async fn test_dashboard_sre_monitoring_and_conflict_deep_link() {
 
 #[tokio::test]
 async fn test_dashboard_etag_and_304_not_modified() {
-    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_app();
+    let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_operator_app();
 
     // 1. Initial GET /dashboard/data -> 200 OK with ETag header
     let res = app
@@ -4474,3 +4404,65 @@ async fn test_dashboard_etag_and_304_not_modified() {
 }
 
 
+
+/// An immature observer has no eligible committee, even with a valid owner request.
+/// An empty signature vector must never satisfy a fabricated zero-of-zero quorum.
+#[tokio::test]
+async fn test_empty_immature_committee_never_confirms_zero_of_zero() {
+    let temp = tempdir().expect("temporary state");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("immature.redb")).expect("redb"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pm = Arc::new(humoco_node::network::PeerManager::new(Vec::new()));
+    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    tiers.register_f2f_peer("authorized_immature_test_client");
+    let owner = SigningKey::from_bytes(&[92;32]);
+    let request = make_test_hmc_genesis("empty-committee-valid-owner", test_now_ms() + 600_000, &owner);
+    assert!(humoco_node::api::hmc::verify_l2_lock_signature(&request));
+    let tag = bs58::encode(request.transaction_hash).into_string();
+    let shard_id = humoco_sim_core::types::extract_shard_id(blake3::hash(tag.as_bytes()).as_bytes());
+    let (committee, _, active) = pm.shard_committee(*identity.node_pubkey(), *identity.hrw_routing_id(), shard_id).await;
+    assert_eq!(active, 0);
+    assert!(committee.is_empty());
+    let mut state = AppState::new(engine, storage.clone(), identity, tiers, pow);
+    state.peer_manager = Some(pm);
+    // No readiness or ticket maturity is manufactured for this negative fixture.
+    let response = build_router(state).oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", "authorized_immature_test_client").body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let envelope: L2ResponseEnvelope = response_json(response).await;
+    if let Some(certificate) = envelope.quorum_certificate {
+        assert_eq!(certificate.active_nodes_count, 0);
+        assert!(certificate.signatures.is_empty());
+        assert!(!certificate.is_quorum_reached());
+        assert_eq!(certificate.status, 0);
+    }
+    assert!(storage.get_hmc_lock(&tag).unwrap().is_none(), "an ineligible gateway must not act as a shard writer");
+}
+
+#[tokio::test]
+async fn test_storage_failure_never_returns_success_for_single_or_chain_ingress() {
+    let temp = tempdir().unwrap();
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("failed-signing.redb")).unwrap());
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    tiers.register_f2f_peer("storage_fault_test");
+    let state = isolated_ready_state(AppState::new(engine.clone(), storage, identity, tiers, pow));
+    // Fault injection affects storage health, not owner validity or shard readiness.
+    engine.stats.signing_failed.store(true, std::sync::atomic::Ordering::Release);
+    let app = build_router(state);
+    let owner = SigningKey::from_bytes(&[93;32]);
+    let request = make_test_hmc_genesis("failed-store-valid-owner", test_now_ms()+600_000, &owner);
+    let chain = humoco_node::api::L2ChainLockRequest {auth:request.auth.clone(),layer2_voucher_id:request.layer2_voucher_id.clone(),chain:vec![request.clone()]};
+    for (route, bytes) in [("/v1/lock",serde_json::to_vec(&request).unwrap()),("/v1/lock/chain",serde_json::to_vec(&chain).unwrap())] {
+        let response = app.clone().oneshot(Request::builder().method("POST").uri(route).header("content-type","application/json").header("x-peer-token","storage_fault_test").body(Body::from(bytes)).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE,"{route}");
+        let envelope: L2ResponseEnvelope = response_json(response).await;
+        assert!(matches!(envelope.verdict,L2Verdict::Rejected {..}));
+        assert!(envelope.quorum_certificate.is_none());
+    }
+    let tag=bs58::encode(request.transaction_hash).into_string();
+    assert!(engine.get_hmc_ram_lock(&tag).await.is_none());
+}

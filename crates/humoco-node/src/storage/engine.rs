@@ -34,6 +34,9 @@ pub struct HmcRamIndex {
     pub valid_until: HashMap<String, u64>,
     /// Bucket-Index: bucket_sec (valid_until_ms + 30s) / 1000 -> Vec<lookup_tag>
     pub ttl_buckets: BTreeMap<u64, Vec<String>>,
+    /// Exact local entry versions acknowledged by durable persistence. Derived
+    /// RAM metadata only: never synced, archived or used as an original choice.
+    pub(crate) durable_entries: HashMap<String, ([u8; 32], u64)>,
     /// Cuckoo pre-filter for fast negative lookups
     pub filter: SpentLockFilter,
 }
@@ -60,6 +63,23 @@ impl HmcRamIndex {
         Self::default()
     }
 
+    /// True only for the exact current entry and immutable root that committed.
+    pub fn is_entry_durable(&self, tag: &str, entry: &L2LockEntry, root: u64) -> bool {
+        self.locks.get(tag).is_some_and(|current| current == entry)
+            && self.voucher_roots.get(&entry.layer2_voucher_id).copied() == Some(root)
+            && serde_json::to_vec(entry).ok().is_some_and(|bytes|
+                self.durable_entries.get(tag) == Some(&(*blake3::hash(&bytes).as_bytes(), root)))
+    }
+
+    /// A late acknowledgment can never authorize a different RAM version.
+    fn mark_exact_durable(&mut self, tag: &str, entry: &L2LockEntry, root: u64) {
+        if self.locks.get(tag).is_none_or(|current| current != entry)
+            || self.voucher_roots.get(&entry.layer2_voucher_id).copied() != Some(root) { return; }
+        if let Ok(bytes) = serde_json::to_vec(entry) {
+            self.durable_entries.insert(tag.to_string(), (*blake3::hash(&bytes).as_bytes(), root));
+        }
+    }
+
     pub fn insert_or_check(
         &mut self,
         lookup_tag: String,
@@ -81,7 +101,9 @@ impl HmcRamIndex {
         let valid_until_ms = if is_genesis {
             match entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
                 Some(v) => {
-                    self.voucher_roots.insert(entry.layer2_voucher_id.clone(), v);
+                    if root_valid.is_some_and(|root| root != v) {
+                        return (L2Verdict::Rejected { reason: "Genesis cannot change the immutable root lifetime".into() }, false);
+                    }
                     v
                 }
                 None => {
@@ -94,7 +116,7 @@ impl HmcRamIndex {
                 }
             }
         } else {
-            let root_v = match root_valid {
+            match root_valid {
                 Some(v) => v,
                 None => {
                     return (
@@ -104,12 +126,7 @@ impl HmcRamIndex {
                         false,
                     );
                 }
-            };
-            entry
-                .deletable_at
-                .as_deref()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(root_v)
+            }
         };
 
         // HMC ingress window enforcement for client ingress (INV-1202):
@@ -182,6 +199,7 @@ impl HmcRamIndex {
                         .entry(entry.layer2_voucher_id.clone())
                         .or_default()
                         .insert(lookup_tag.clone());
+                    self.durable_entries.remove(&lookup_tag);
                     self.locks.insert(lookup_tag.clone(), entry.clone());
                     self.filter.add(&lookup_tag);
                     (L2Verdict::Verified { lock_entry: entry }, true)
@@ -209,6 +227,7 @@ impl HmcRamIndex {
                 .entry(entry.layer2_voucher_id.clone())
                 .or_default()
                 .insert(lookup_tag.clone());
+            self.durable_entries.remove(&lookup_tag);
             self.locks.insert(lookup_tag.clone(), entry.clone());
             self.filter.add(&lookup_tag);
             (L2Verdict::Verified { lock_entry: entry }, true)
@@ -269,6 +288,7 @@ impl HmcRamIndex {
             .entry(entry.layer2_voucher_id.clone())
             .or_default()
             .insert(lookup_tag.clone());
+        self.durable_entries.remove(&lookup_tag);
         self.locks.insert(lookup_tag.clone(), entry);
         self.filter.add(&lookup_tag);
     }
@@ -296,12 +316,17 @@ impl HmcRamIndex {
         let expired_bucket_keys: Vec<u64> = self
             .ttl_buckets
             .range(..=max_expired_sec)
+            .take(256)
             .map(|(b, _)| *b)
             .collect();
 
+        let mut remaining_budget = 256usize;
         for bucket in expired_bucket_keys {
-            if let Some(tags) = self.ttl_buckets.remove(&bucket) {
-                let mut remaining_tags: Vec<String> = Vec::new();
+            if remaining_budget == 0 { break; }
+            if let Some(mut tags) = self.ttl_buckets.remove(&bucket) {
+                let split = tags.len().min(remaining_budget);
+                let mut remaining_tags = tags.split_off(split);
+                remaining_budget -= split;
                 for tag in tags {
                     if let Some(vu) = self.valid_until.get(&tag) {
                         if should_prune(now, SimTime(*vu)) {
@@ -315,6 +340,7 @@ impl HmcRamIndex {
                                     }
                                 }
                             }
+                            self.durable_entries.remove(&tag);
                             self.valid_until.remove(&tag);
                             self.filter.delete(&tag);
                         } else {
@@ -380,6 +406,16 @@ impl HmcRamIndex {
 
 #[derive(Debug)]
 pub enum FlushOp {
+    OriginalHmcApproval {
+        tag: String, entry: Box<L2LockEntry>, node: [u8; 32], approval: Vec<u8>,
+        class: u8, root: u64, complete: tokio::sync::watch::Sender<Option<Result<Vec<u8>, String>>>,
+        health: Arc<PersistenceStats>,
+    },
+    OriginalRecordApproval {
+        record: Box<LockRecord>, node: [u8; 32], approval: Vec<u8>,
+        class: u8, root: u64, complete: tokio::sync::watch::Sender<Option<Result<Vec<u8>, String>>>,
+        health: Arc<PersistenceStats>,
+    },
     PutLock {
         lock: LockRecord,
         root_valid_until: u64,
@@ -419,6 +455,17 @@ pub enum FlushOp {
 ///   `spawn_blocking` commit inline, guaranteeing strict commit order and making
 ///   graceful-shutdown drain deterministic (no untracked `tokio::spawn` jobs).
 pub const FLUSH_BATCH_SIZE: usize = 100;
+/// Finite wait for a commit; expiry never rolls a late commit back.
+pub const DURABLE_ACK_TIMEOUT_MS: u64 = 750;
+const MAX_PENDING_APPROVALS: usize = 256;
+const MAX_APPROVAL_WAITERS: usize = 32;
+const MAX_BATCH_BYTES: usize = 1_048_576;
+type ApprovalCompletion = tokio::sync::watch::Receiver<Option<Result<Vec<u8>, String>>>;
+#[derive(Clone)]
+struct PendingOriginalApproval {
+    receiver: ApprovalCompletion,
+    waiters: Arc<tokio::sync::Semaphore>,
+}
 pub const FLUSH_INTERVAL_MS: u64 = 50;
 pub const MAX_FLUSH_RETRIES: u32 = 3;
 pub const RETRY_BACKOFF_MS: u64 = 10;
@@ -441,6 +488,7 @@ pub struct PersistenceStats {
     pub flush_batches_total: std::sync::atomic::AtomicU64,
     pub flush_errors_total: std::sync::atomic::AtomicU64,
     pub flush_ops_total: std::sync::atomic::AtomicU64,
+    pub signing_failed: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -455,6 +503,7 @@ pub struct DualTierEngine {
     pub stats: Arc<PersistenceStats>,
     /// Previous pruning anchor timestamp in ms for detecting forward clock jumps (local NTP warp protection)
     pub last_prune_anchor: Arc<std::sync::atomic::AtomicU64>,
+    pending_approvals: Arc<parking_lot::Mutex<HashMap<[u8; 32], PendingOriginalApproval>>>,
 }
 
 impl DualTierEngine {
@@ -494,6 +543,7 @@ impl DualTierEngine {
                 recent_locks,
                 stats,
                 last_prune_anchor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             },
             handle,
         )
@@ -525,7 +575,105 @@ impl DualTierEngine {
             recent_locks,
             stats,
             last_prune_anchor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Storage faults are a local signing gate, never peer fraud evidence.
+    pub fn is_signing_healthy(&self) -> bool {
+        !self.stats.signing_failed.load(std::sync::atomic::Ordering::Acquire)
+            && !self.tx.is_closed()
+    }
+
+    /// Explicit alias for readiness consumers.
+    pub fn is_signing_storage_healthy(&self) -> bool { self.is_signing_healthy() }
+
+    async fn wait_original_approval(
+        &self, key: [u8; 32], make_op: impl FnOnce(tokio::sync::watch::Sender<Option<Result<Vec<u8>, String>>>) -> FlushOp,
+    ) -> Result<Vec<u8>, StorageError> {
+        if !self.is_signing_healthy() {
+            return Err(StorageError::DurableCommitFailed("Signing disabled after storage failure".into()));
+        }
+        let (mut rx, _waiter) = {
+            let mut pending = self.pending_approvals.lock();
+            pending.retain(|_, entry| entry.receiver.borrow().is_none() && entry.receiver.has_changed().is_ok());
+            if let Some(existing) = pending.get(&key) {
+                let waiter = existing.waiters.clone().try_acquire_owned()
+                    .map_err(|_| StorageError::DurableCommitFailed("Too many approval waiters".into()))?;
+                (existing.receiver.clone(), waiter)
+            } else {
+                if pending.len() >= MAX_PENDING_APPROVALS {
+                    return Err(StorageError::DurableCommitFailed("Approval capacity exhausted".into()));
+                }
+                let permit = self.tx.try_reserve().map_err(|_| StorageError::DurableCommitFailed("Persistence queue unavailable".into()))?;
+                let (complete, receiver) = tokio::sync::watch::channel(None);
+                permit.send(make_op(complete));
+                let waiters = Arc::new(tokio::sync::Semaphore::new(MAX_APPROVAL_WAITERS));
+                let waiter = waiters.clone().try_acquire_owned()
+                    .map_err(|_| StorageError::DurableCommitFailed("Approval waiter unavailable".into()))?;
+                pending.insert(key, PendingOriginalApproval { receiver: receiver.clone(), waiters });
+                (receiver, waiter)
+            }
+        };
+        let wait = async {
+            loop {
+                if let Some(result) = rx.borrow().clone() {
+                    return result.map_err(StorageError::DurableCommitFailed);
+                }
+                rx.changed().await.map_err(|_| StorageError::DurableCommitFailed("Persistence worker stopped".into()))?;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_millis(DURABLE_ACK_TIMEOUT_MS), wait).await
+            .map_err(|_| StorageError::DurableCommitFailed("Commit acknowledgment timed out; operation remains pending".into()))?
+    }
+
+    /// Durably protects an original HMC approval before it may leave this node.
+    /// Live-state observations use their separate signature purpose and readiness gate.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_original_approval(
+        &self, tag: String, entry: L2LockEntry, node: [u8; 32],
+        approval: Vec<u8>, class: u8, now_ms: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        if approval.is_empty() || approval.len() > 16_384 || class > 1 {
+            return Err(StorageError::DurableCommitFailed("Invalid approval size or class".into()));
+        }
+        let root = {
+            let ram = self.hmc_ram.read().await;
+            if ram.locks.get(&tag).is_none_or(|lock| lock.t_id != entry.t_id) {
+                return Err(StorageError::OwnChoiceConflict);
+            }
+            ram.voucher_roots.get(&entry.layer2_voucher_id).copied()
+                .or_else(|| ram.valid_until.get(&tag).copied())
+                .ok_or_else(|| StorageError::DurableCommitFailed("Unknown root lifetime".into()))?
+        };
+        if root <= now_ms { return Err(StorageError::DurableCommitFailed("Expired root".into())); }
+        let key = *blake3::hash(&bincode::serialize(&("original-hmc", &node, &tag, &entry.t_id, class))?).as_bytes();
+        let committed_tag = tag.clone();
+        let committed_entry = entry.clone();
+        let result = self.wait_original_approval(key, |complete| FlushOp::OriginalHmcApproval {
+            tag, entry: Box::new(entry), node, approval, class, root, complete, health: self.stats.clone(),
+        }).await?;
+        self.hmc_ram.write().await.mark_exact_durable(&committed_tag, &committed_entry, root);
+        Ok(result)
+    }
+
+    /// Pure L2 equivalent; same node/parent slot and immutable child rule.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_original_record_approval(
+        &self, record: LockRecord, root_valid_until: SimTime, node: [u8; 32],
+        approval: Vec<u8>, class: u8, now_ms: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        if root_valid_until.0 <= now_ms || approval.is_empty() || approval.len() > 16_384 || class > 1 {
+            return Err(StorageError::DurableCommitFailed("Invalid or expired approval context".into()));
+        }
+        {
+            let ram = self.ram.read().await;
+            if ram.get(&record.parent_lock).is_none_or(|lock| lock.id != record.id) { return Err(StorageError::OwnChoiceConflict); }
+        }
+        let key = *blake3::hash(&bincode::serialize(&("original-record", &node, &record.parent_lock, &record.id, class))?).as_bytes();
+        self.wait_original_approval(key, |complete| FlushOp::OriginalRecordApproval {
+            record: Box::new(record), node, approval, class, root: root_valid_until.0, complete, health: self.stats.clone(),
+        }).await
     }
 
     /// Sets the peer manager reference so that node bans propagate immediately to peer connections.
@@ -627,6 +775,8 @@ impl DualTierEngine {
         root_valid_until: SimTime,
         origin: IngressOrigin,
     ) -> Result<IngressVerdictLow, IngressVerdictLow> {
+        if !self.is_signing_healthy() { return Err(IngressVerdictLow::RejectedCapacity); }
+
         // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
         let permit = match self.tx.try_reserve() {
             Ok(p) => p,
@@ -815,6 +965,9 @@ impl DualTierEngine {
         voucher_id: Option<String>,
         durable: bool,
     ) -> (L2Verdict, bool) {
+        if !self.is_signing_healthy() {
+            return (L2Verdict::Rejected { reason: "Storage signing unavailable".into() }, false);
+        }
         // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
         let permit = match self.tx.try_reserve() {
             Ok(p) => p,
@@ -877,7 +1030,11 @@ impl DualTierEngine {
             }
         }
 
-        if is_new {
+        let accepted_root = {
+            let ram = self.hmc_ram.read().await;
+            ram.voucher_roots.get(&entry.layer2_voucher_id).copied()
+        };
+        if is_new || (durable && matches!(verdict, L2Verdict::Verified { .. })) {
             if durable {
                 let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                 permit.send(FlushOp::PutHmcLockDurable {
@@ -885,30 +1042,13 @@ impl DualTierEngine {
                     entry: Box::new(entry.clone()),
                     ack_sender: ack_tx,
                 });
-                match ack_rx.await {
-                    Ok(Ok(())) => {},
-                    Ok(Err(err)) => {
-                        error!("Durable commit failed for lock {}: {} - reverting RAM state", lookup_tag, err);
-                        let mut hmc = self.hmc_ram.write().await;
-                        hmc.locks.remove(&lookup_tag);
-                        return (
-                            L2Verdict::Rejected {
-                                reason: format!("Storage persistence failure: {}", err),
-                            },
-                            false,
-                        );
-                    }
-                    Err(_) => {
-                        error!("Persistence worker dropped acknowledgment channel for lock {} - reverting RAM state", lookup_tag);
-                        let mut hmc = self.hmc_ram.write().await;
-                        hmc.locks.remove(&lookup_tag);
-                        return (
-                            L2Verdict::Rejected {
-                                reason: "Storage persistence worker terminated".into(),
-                            },
-                            false,
-                        );
-                    }
+                match tokio::time::timeout(std::time::Duration::from_millis(DURABLE_ACK_TIMEOUT_MS), ack_rx).await {
+                    Ok(Ok(Ok(()))) => {
+                        if let Some(root) = accepted_root {
+                            self.hmc_ram.write().await.mark_exact_durable(&lookup_tag, &entry, root);
+                        }
+                    },
+                    _ => return (L2Verdict::Rejected { reason: "Durable commit unavailable; state remains pending".into() }, false),
                 }
             } else {
                 permit.send(FlushOp::PutHmcLock {
@@ -949,14 +1089,9 @@ impl DualTierEngine {
         (verdict, is_new)
     }
 
-    /// Atomic chain locking: Validates all hops in `chain_req` before any mutation.
-    /// - Signature verification per hop
-    /// - Timestamp monotonicity
-    /// - Cuckoo + RAM collision check (deduplication via identical t_id)
-    ///
-    /// On collision: no state changes, returns Conflict with existing entry.
-    ///
-    /// On success: atomically inserts all new hops, enqueues FlushOps, returns Verified with terminal hop.
+    /// Replays a validated chain in order. A later invalid or conflicting hop
+    /// never rolls back the durably accepted prefix. Only complete success
+    /// returns the terminal Verified verdict.
     pub async fn ingress_hmc_chain_lock(
         &self,
         chain_req: crate::api::hmc::L2ChainLockRequest,
@@ -1036,12 +1171,12 @@ impl DualTierEngine {
             // §3.2, distinct tags) are both accepted here; same-tag diverging
             // `t_id` inside one batch is a causal double-spend and is
             // reported downstream as `Conflict` with the earlier hop as
-            // evidence (atomic rollback, no state change).
+            // evidence; the durable valid prefix is retained.
         }
         Ok(())
     }
 
-    /// Atomares Ketten-Locking with explicit tier and byte_years metadata for recent locks buffer.
+    /// Ordered prefix-preserving registration with tier and byte-years metadata.
     pub async fn ingress_hmc_chain_lock_with_tier(
         &self,
         chain_req: crate::api::hmc::L2ChainLockRequest,
@@ -1053,7 +1188,7 @@ impl DualTierEngine {
         self.ingress_hmc_chain_lock_internal(chain_req, origin, now_ms, tier, byte_years, false).await
     }
 
-    /// Atomares Ketten-Locking with strict Durable-before-Vote (DEC-029 restoration).
+    /// Ordered prefix-preserving registration with Durable-before-Vote (DEC-029).
     pub async fn ingress_hmc_chain_lock_durable_with_tier(
         &self,
         chain_req: crate::api::hmc::L2ChainLockRequest,
@@ -1065,7 +1200,7 @@ impl DualTierEngine {
         self.ingress_hmc_chain_lock_internal(chain_req, origin, now_ms, tier, byte_years, true).await
     }
 
-    /// Atomares Ketten-Locking with strict Durable-before-Vote (DEC-029 restoration).
+    /// Ordered prefix-preserving registration with Durable-before-Vote (DEC-029).
     pub async fn ingress_hmc_chain_lock_durable(
         &self,
         chain_req: crate::api::hmc::L2ChainLockRequest,
@@ -1088,301 +1223,50 @@ impl DualTierEngine {
         byte_years: Option<u64>,
         durable: bool,
     ) -> (L2Verdict, bool) {
-        // Causality gate (Spec 06 INV-0604): cryptographic chaining first.
-        if let Err(reason) = Self::verify_chain_causality(&chain_req) {
-            return (L2Verdict::Rejected { reason }, false);
+        if !self.is_signing_healthy() {
+            return (L2Verdict::Rejected { reason: "Storage signing unavailable".into() }, false);
         }
-
-        // Atomic collision check + insertion under single write lock
-        // We do reservation-first after determining which hops are truly new.
-        let (verdict, is_new, ack_rx_opt, inserted_tags) = {
-            let mut hmc = self.hmc_ram.write().await;
-
-            // First pass: gather lookup_tags and detect collisions / idempotent replays
-            use std::collections::HashMap;
-            let mut seen_in_batch: HashMap<String, [u8; 32]> = HashMap::new();
-            // (tag, entry, is_genesis): genesis flag is required so follow-up locks
-            // can never initialize the immutable voucher root TTL (Rule 10).
-            let mut new_entries: Vec<(String, L2LockEntry, bool)> = Vec::new();
-            let mut terminal_entry_opt: Option<L2LockEntry> = None;
-            let mut conflict_entry: Option<L2LockEntry> = None;
-
-            for hop in &chain_req.chain {
-                let lookup_tag = if hop.is_genesis {
-                    bs58::encode(&hop.transaction_hash).into_string()
-                } else {
-                    hop.ds_tag.clone().unwrap_or_default()
-                };
-
-                let entry = L2LockEntry::from(hop);
-                let hop_is_genesis = hop.is_genesis;
-
-                // Intra-batch duplicate detection
-                if let Some(prev_tid) = seen_in_batch.get(&lookup_tag) {
-                    if *prev_tid != entry.t_id {
-                        // Intra-batch double-spend -> conflict with first entry of this tag in batch
-                        // For deterministic verdict, return the first stored entry as existing
-                        if let Some(existing) = hmc.locks.get(&lookup_tag) {
-                            conflict_entry = Some(existing.clone());
-                        } else {
-                            // No existing in RAM, conflict is within batch itself => report the earlier entry
-                            // Construct a synthetic existing lock from earlier hop
-                            let earlier = new_entries
-                                .iter()
-                                .find(|(t, _, _)| t == &lookup_tag)
-                                .map(|(_, e, _)| e.clone())
-                                .unwrap_or(entry.clone());
-                            conflict_entry = Some(earlier);
-                        }
-                        break;
-                    } else {
-                        // Same t_id duplicate within chain -> idempotent skip
-                        // Keep terminal as this entry's existing counterpart
-                        if let Some(existing) = hmc.locks.get(&lookup_tag) {
-                            terminal_entry_opt = Some(existing.clone());
-                        } else {
-                            // duplicate within batch but not yet in RAM -> it's the same new entry, skip adding again
-                            terminal_entry_opt = Some(entry.clone());
-                        }
-                        continue;
-                    }
-                }
-                seen_in_batch.insert(lookup_tag.clone(), entry.t_id);
-
-                // Cuckoo fast negative check + RAM canonical check
-                // Note: filter false positives are ok – we still check RAM
-                // If filter says not contains, we still need RAM check (filter is probabilistic)
-                if let Some(existing) = hmc.locks.get(&lookup_tag) {
-                    if existing.t_id == entry.t_id {
-                        // Idempotent replay (already in RAM)
-                        terminal_entry_opt = Some(existing.clone());
-                        continue;
-                    } else {
-                        conflict_entry = Some(existing.clone());
-                        break;
-                    }
-                }
-                // Not in RAM -> prepare for insertion
-                new_entries.push((lookup_tag.clone(), entry.clone(), hop_is_genesis));
-                terminal_entry_opt = Some(entry);
-            }
-
-            if let Some(existing) = conflict_entry {
-                // Rollback: zero state changes
-                (L2Verdict::Conflict { existing_lock: existing }, false, None, Vec::new())
-            } else {
-                // No collisions – validate ingress window & voucher roots for new entries before mutation
-                // Determine if any new entry would fail due to unknown root or window violation
-                // We need to simulate sequential insertion to handle chain-local genesis root.
-                // Only genesis hops may initialize the immutable root TTL (Rule 10).
-                let mut chain_genesis_roots: std::collections::HashMap<&str, u64> = std::collections::HashMap::with_capacity(2);
-                let mut window_violation: Option<String> = None;
-                for (_tag, entry, hop_is_genesis) in &new_entries {
-                    let root_valid = chain_genesis_roots.get(entry.layer2_voucher_id.as_str()).copied()
-                        .or_else(|| hmc.voucher_roots.get(&entry.layer2_voucher_id).copied());
-                    if root_valid.is_none() && !hop_is_genesis {
-                        window_violation = Some("Unknown voucher root: genesis lock must be anchored first".into());
-                        break;
-                    }
-                    let valid_until_ms = match entry
-                        .deletable_at
-                        .as_deref()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .or(root_valid)
-                    {
-                        Some(v) => v,
-                        None => {
-                            window_violation = Some("Missing deletable_at and unknown voucher root".into());
-                            break;
-                        }
-                    };
-                    if origin == IngressOrigin::ClientApi {
-                        if let (Some(root_v), Some(now)) = (root_valid, now_ms) {
-                            if !ingress_time_window_valid(
-                                SimTime(now),
-                                SimTime(valid_until_ms),
-                                SimTime(root_v),
-                            ) {
-                                window_violation = Some(
-                                    "Invalid ingress time window: now + 30s < valid_until <= root.valid_until violated".into(),
-                                );
-                                break;
-                            }
-                        } else if root_valid.is_none() && entry.deletable_at.is_none() {
-                            window_violation = Some("Missing deletable_at and unknown voucher root".into());
-                            break;
-                        }
-                    }
-                    // Only genesis initializes the immutable root TTL for
-                    // subsequent hops in the same chain (Rule 10).
-                    if *hop_is_genesis {
-                        chain_genesis_roots.entry(entry.layer2_voucher_id.as_str()).or_insert(valid_until_ms);
-                    }
-                }
-                if let Some(reason) = window_violation {
-                    (L2Verdict::Rejected { reason }, false, None, Vec::new())
-                } else if new_entries.is_empty() {
-                    // All hops were idempotent replays
-                    let terminal = terminal_entry_opt.unwrap();
-                    (L2Verdict::Verified { lock_entry: terminal }, false, None, Vec::new())
-                } else {
-                    // Reservation-First: ensure queue capacity for all new entries
-                    let needed = new_entries.len();
-                    let mut permits = Vec::with_capacity(needed);
-                    let mut capacity_exceeded = false;
-                    for _ in 0..needed {
-                        match self.tx.try_reserve() {
-                            Ok(p) => permits.push(p),
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                capacity_exceeded = true;
-                                break;
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                capacity_exceeded = true;
-                                break;
-                            }
-                        }
-                    }
-                    if capacity_exceeded {
-                        // Drop any reserved permits
-                        drop(permits);
-                        (
-                            L2Verdict::Rejected {
-                                reason: "Persistence queue congested (backpressure)".into(),
-                            },
-                            false,
-                            None,
-                            Vec::new(),
-                        )
-                    } else {
-                        // Atomically insert all new hops and dispatch flush operations
-                        let mut ack_rx_opt = None;
-                        let mut inserted_tags = Vec::new();
-                        let new_entries_count = new_entries.len();
-                        for (idx, (permit, (tag, entry, hop_is_genesis))) in permits.into_iter().zip(new_entries.into_iter()).enumerate() {
-                            let root_valid = hmc.voucher_roots.get(&entry.layer2_voucher_id).copied();
-                            let valid_until_ms = entry
-                                .deletable_at
-                                .as_deref()
-                                .and_then(|s| s.parse::<u64>().ok())
-                                .or(root_valid)
-                                .unwrap_or(0);
-                            let prune_threshold_ms = valid_until_ms.saturating_add(30_000);
-                            let bucket_sec = prune_threshold_ms / 1_000;
-                            hmc.ttl_buckets.entry(bucket_sec).or_default().push(tag.clone());
-                            hmc.valid_until.insert(tag.clone(), valid_until_ms);
-                            // Only the genesis lock sets the immutable root TTL.
-                            if hop_is_genesis {
-                                hmc.voucher_roots
-                                    .entry(entry.layer2_voucher_id.clone())
-                                    .or_insert(valid_until_ms);
-                            }
-                            if hop_is_genesis && entry.deletable_at.is_some() {
-                                let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-                                hmc.voucher_genesis_parents
-                                    .entry(entry.layer2_voucher_id.clone())
-                                    .or_insert(p_bytes);
-                            }
-                            hmc.vouchers
-                                .entry(entry.layer2_voucher_id.clone())
-                                .or_default()
-                                .insert(tag.clone());
-                            hmc.filter.add(&tag);
-
-                            let entry_box = Box::new(entry);
-                            hmc.locks.insert(tag.clone(), (*entry_box).clone());
-                            inserted_tags.push(tag.clone());
-                            if durable && idx == new_entries_count - 1 {
-                                let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                                permit.send(FlushOp::PutHmcLockDurable {
-                                    lookup_tag: tag,
-                                    entry: entry_box,
-                                    ack_sender: ack_tx,
-                                });
-                                ack_rx_opt = Some(ack_rx);
-                            } else {
-                                permit.send(FlushOp::PutHmcLock {
-                                    lookup_tag: tag,
-                                    entry: entry_box,
-                                });
-                            }
-                        }
-                        let terminal = terminal_entry_opt.unwrap();
-                        (L2Verdict::Verified { lock_entry: terminal }, true, ack_rx_opt, inserted_tags)
-                    }
-                }
-            }
-        };
-
-        if let Some(rx) = ack_rx_opt {
-            match rx.await {
-                Ok(Ok(())) => {},
-                Ok(Err(err)) => {
-                    error!("Durable commit failed for chain: {} - reverting RAM state", err);
-                    let mut hmc = self.hmc_ram.write().await;
-                    for tag in &inserted_tags {
-                        hmc.locks.remove(tag);
-                    }
-                    return (
-                        L2Verdict::Rejected {
-                            reason: format!("Storage persistence failure: {}", err),
-                        },
-                        false,
-                    );
-                }
-                Err(_) => {
-                    error!("Persistence worker dropped acknowledgment for chain - reverting RAM state");
-                    let mut hmc = self.hmc_ram.write().await;
-                    for tag in &inserted_tags {
-                        hmc.locks.remove(tag);
-                    }
-                    return (
-                        L2Verdict::Rejected {
-                            reason: "Storage persistence worker terminated".into(),
-                        },
-                        false,
-                    );
-                }
-            }
+        if chain_req.chain.is_empty() || chain_req.chain.len() > 256 {
+            return (L2Verdict::Rejected { reason: "Chain length must be between 1 and 256".into() }, false);
         }
-
-        // Recent buffer update for terminal
-        let recent_status = match &verdict {
-            L2Verdict::Verified { .. } => RecentLockStatus::Verified,
-            L2Verdict::Conflict { .. } => RecentLockStatus::Conflict,
-            _ => RecentLockStatus::Conflict,
-        };
-        if let L2Verdict::Verified { lock_entry } = &verdict {
-            let tag = if chain_req.chain.last().map(|h| h.is_genesis).unwrap_or(false) {
-                bs58::encode(&chain_req.chain.last().unwrap().transaction_hash).into_string()
-            } else {
-                chain_req
-                    .chain
-                    .last()
-                    .and_then(|h| h.ds_tag.clone())
-                    .unwrap_or_default()
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(DURABLE_ACK_TIMEOUT_MS);
+        let mut terminal = None;
+        let mut changed = false;
+        for (index, hop) in chain_req.chain.iter().enumerate() {
+            // Validate only the next step; a malformed suffix cannot erase a
+            // valid prefix already installed by earlier steps.
+            if hop.layer2_voucher_id != chain_req.layer2_voucher_id {
+                return (L2Verdict::Rejected { reason: format!("Voucher mismatch at chain step {index}; accepted prefix retained") }, changed);
+            }
+            if index > 0 && hop.encrypted_timestamp <= chain_req.chain[index - 1].encrypted_timestamp {
+                return (L2Verdict::Rejected { reason: format!("Timestamp monotonicity violated at chain step {index}; accepted prefix retained") }, changed);
+            }
+            let single = crate::api::hmc::L2ChainLockRequest {
+                auth: chain_req.auth.clone(), layer2_voucher_id: chain_req.layer2_voucher_id.clone(), chain: vec![hop.clone()],
             };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let default_origin_tier = match origin {
-                IngressOrigin::ClientApi => "Free",
-                IngressOrigin::PartitionSync => "P2P-Sync",
+            if let Err(reason) = Self::verify_chain_causality(&single) {
+                return (L2Verdict::Rejected { reason: format!("{reason} at chain step {index}; accepted prefix retained") }, changed);
+            }
+            let tag = if hop.is_genesis { bs58::encode(hop.transaction_hash).into_string() }
+                else { hop.ds_tag.clone().unwrap_or_default() };
+            let entry = L2LockEntry::from(hop);
+            let result = tokio::time::timeout_at(deadline, self.ingress_hmc_lock_internal(
+                tag, entry, origin, now_ms, tier, byte_years, Some(chain_req.layer2_voucher_id.clone()), durable,
+            )).await;
+            let (verdict, is_new) = match result {
+                Ok(value) => value,
+                Err(_) => return (L2Verdict::Rejected { reason: format!("Chain deadline at step {index}; accepted progress retained") }, changed),
             };
-            let tier_str = tier.unwrap_or(default_origin_tier).to_string();
-            self.recent_locks.write().push(RecentLockSummary {
-                parent_lock_hex: tag,
-                child_lock_hex: hex::encode(lock_entry.t_id),
-                timestamp_ms: now,
-                status: recent_status,
-                tier: tier_str,
-                byte_years: byte_years.unwrap_or(0),
-                voucher_id: Some(chain_req.layer2_voucher_id.clone()),
-            });
+            changed |= is_new;
+            match verdict {
+                L2Verdict::Verified { lock_entry } => terminal = Some(lock_entry),
+                failure => return (failure, changed),
+            }
         }
-
-        (verdict, is_new)
+        match terminal {
+            Some(lock_entry) => (L2Verdict::Verified { lock_entry }, changed),
+            None => (L2Verdict::Rejected { reason: "Empty chain".into() }, false),
+        }
     }
 
     /// Returns the most recent lock summaries from the zero-contention ringbuffer.
@@ -1842,12 +1726,12 @@ impl DualTierEngine {
                     op = rx.recv() => {
                         match op {
                             Some(op) => {
-                                let mut has_durable = matches!(op, FlushOp::PutHmcLockDurable { .. });
+                                let mut has_durable = matches!(op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. });
                                 batch.push(op);
                                 while batch.len() < FLUSH_BATCH_SIZE {
                                     match rx.try_recv() {
                                         Ok(next_op) => {
-                                            if matches!(next_op, FlushOp::PutHmcLockDurable { .. }) {
+                                            if matches!(next_op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. }) {
                                                 has_durable = true;
                                             }
                                             batch.push(next_op);
@@ -1899,6 +1783,7 @@ impl DualTierEngine {
                 stats.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 stats.flush_ops_total.fetch_add(op_count as u64, std::sync::atomic::Ordering::Relaxed);
                 if o.failed {
+                    stats.signing_failed.store(true, std::sync::atomic::Ordering::Release);
                     stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     error!(
                         ops = op_count,
@@ -1914,6 +1799,7 @@ impl DualTierEngine {
                 }
             }
             Err(e) => {
+                stats.signing_failed.store(true, std::sync::atomic::Ordering::Release);
                 stats.flush_batches_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 stats.flush_errors_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 error!("flush_batch blocking task panicked/cancelled: {:?} ({} ops uncommitted, RAM authoritative)", e, op_count);
@@ -1998,6 +1884,58 @@ impl DualTierEngine {
         if batch.is_empty() {
             return FlushOutcome { ops_committed: 0, attempts: 0, failed: false };
         }
+        // Serialized payload size bounds each worker transaction in addition
+        // to operation count. Queue/body limits bound individual input records.
+        let mut bytes = 0usize;
+        let split = batch.iter().enumerate().find_map(|(index, op)| {
+            let size = match op {
+                FlushOp::PutHmcLock { lookup_tag, entry } | FlushOp::PutHmcLockDurable { lookup_tag, entry, .. } =>
+                    lookup_tag.len().saturating_add(serde_json::to_vec(entry).map_or(MAX_BATCH_BYTES, |b| b.len())),
+                FlushOp::OriginalHmcApproval { tag, entry, approval, .. } => tag.len().saturating_add(approval.len()).saturating_add(serde_json::to_vec(entry).map_or(MAX_BATCH_BYTES, |b| b.len())),
+                FlushOp::OriginalRecordApproval { approval, .. } => 256usize.saturating_add(approval.len()),
+                FlushOp::PutEvidence { raw, .. } => raw.len().saturating_add(32),
+                _ => 256,
+            };
+            bytes = bytes.saturating_add(size);
+            (index > 0 && bytes > MAX_BATCH_BYTES).then_some(index)
+        });
+        if let Some(index) = split {
+            let mut tail = batch.split_off(index);
+            let a = Self::flush_batch(batch, db);
+            let b = Self::flush_batch(&mut tail, db);
+            return FlushOutcome { ops_committed: a.ops_committed + b.ops_committed,
+                attempts: a.attempts + b.attempts, failed: a.failed || b.failed };
+        }
+        // Original decisions form transaction barriers. Process preceding writes
+        // first, then atomically persist lock+choice, preserving worker FIFO.
+        if let Some(index) = batch.iter().position(|op| matches!(op,
+            FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. })) {
+            let mut tail = batch.split_off(index);
+            let before = Self::flush_batch(batch, db);
+            let op = tail.remove(0);
+            let (result, complete, health) = match op {
+                FlushOp::OriginalHmcApproval { tag, entry, node, approval, class, root, complete, health } => {
+                    let result = if before.failed || health.signing_failed.load(std::sync::atomic::Ordering::Acquire) {
+                        Err(StorageError::DurableCommitFailed("Store signing unavailable".into()))
+                    } else { db.commit_original_approval(&tag, &entry, &node, &approval, class, root) };
+                    (result, complete, health)
+                }
+                FlushOp::OriginalRecordApproval { record, node, approval, class, root, complete, health } => {
+                    let result = if before.failed || health.signing_failed.load(std::sync::atomic::Ordering::Acquire) {
+                        Err(StorageError::DurableCommitFailed("Store signing unavailable".into()))
+                    } else { db.commit_original_record_approval(&record, root, &node, &approval, class) };
+                    (result, complete, health)
+                }
+                _ => return FlushOutcome { ops_committed: before.ops_committed, attempts: before.attempts, failed: true },
+            };
+            let committed = usize::from(result.is_ok());
+            let failed = result.as_ref().err().is_some_and(|error| !matches!(error, StorageError::OwnChoiceConflict));
+            if failed { health.signing_failed.store(true, std::sync::atomic::Ordering::Release); }
+            let _ = complete.send(Some(result.map_err(|e| e.to_string())));
+            let after = Self::flush_batch(&mut tail, db);
+            return FlushOutcome { ops_committed: before.ops_committed + committed + after.ops_committed,
+                attempts: before.attempts + 1 + after.attempts, failed: before.failed || failed || after.failed };
+        }
         let ops_committed = batch.len();
 
 type HmcFlushItem = (
@@ -2015,6 +1953,9 @@ type HmcFlushItem = (
         let mut prunes: Vec<u64> = Vec::new();
         for op in batch.drain(..) {
             match op {
+                FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. } => {
+                    return FlushOutcome { ops_committed: 0, attempts: 0, failed: true };
+                }
                 FlushOp::PutLock { lock, root_valid_until } => locks.push((lock, root_valid_until)),
                 FlushOp::PutHmcLock { lookup_tag, entry } => hmc.push((lookup_tag, entry, None)),
                 FlushOp::PutHmcLockDurable { lookup_tag, entry, ack_sender } => {
@@ -2194,7 +2135,10 @@ type HmcFlushItem = (
                     continue;
                 }
             }
-            hmc_ram.insert_recovered(tag, entry);
+            hmc_ram.insert_recovered(tag.clone(), entry.clone());
+            if let Some(root) = hmc_ram.voucher_roots.get(&entry.layer2_voucher_id).copied() {
+                hmc_ram.mark_exact_durable(&tag, &entry, root);
+            }
         }
 
         Ok(count)
@@ -2228,7 +2172,7 @@ type HmcFlushItem = (
 
         let ram_pruned = {
             let mut ram = self.ram.write().await;
-            ram.prune_expired(now)
+            ram.prune_expired_bounded(now, 256)
         };
 
         let hmc_pruned = {
@@ -2236,8 +2180,110 @@ type HmcFlushItem = (
             hmc_ram.prune_expired(now)
         };
 
-        let (disk_pruned, disk_hmc_pruned) = self.db.prune_expired_buckets(now.0 / 1_000)?;
+        let db = self.db.clone();
+        let (disk_pruned, disk_hmc_pruned) = tokio::task::spawn_blocking(move || db.prune_expired_buckets(now.0 / 1_000)).await
+            .map_err(|error| StorageError::DurableCommitFailed(format!("Prune worker failed: {error}")))??;
         self.last_prune_anchor.store(now.0, std::sync::atomic::Ordering::Relaxed);
         Ok(ram_pruned + hmc_pruned + disk_pruned.len() + disk_hmc_pruned)
+    }
+}
+
+#[cfg(test)]
+mod exact_hmc_durability_tests {
+    use super::*;
+
+    fn entry(child: u8) -> L2LockEntry {
+        L2LockEntry {
+            layer2_voucher_id: "exact-durability".into(), t_id: [child; 32],
+            sender_ephemeral_pub: [7; 32], receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None, layer2_signature: [0; 64], trap_r: None,
+            trap_s: None, encrypted_timestamp: 1, created_at_ms: 1_000,
+            deletable_at: Some("50000".into()), privacy_guard: None,
+        }
+    }
+
+    #[test]
+    fn ram_only_import_is_not_a_durable_receipt_and_late_ack_cannot_mark_replacement() {
+        let mut index = HmcRamIndex::new();
+        let a = entry(1);
+        let mut b = entry(2);
+        b.deletable_at = None;
+        let tag = bs58::encode(a.t_id).into_string();
+        index.insert_recovered(tag.clone(), a.clone());
+        assert!(!index.is_entry_durable(&tag, &a, 50_000));
+        index.mark_exact_durable(&tag, &a, 50_000);
+        assert!(index.is_entry_durable(&tag, &a, 50_000));
+        index.insert_recovered(tag.clone(), b.clone());
+        assert!(!index.is_entry_durable(&tag, &b, 50_000));
+        assert!(!index.durable_entries.contains_key(&tag));
+        index.mark_exact_durable(&tag, &a, 50_000);
+        assert!(!index.durable_entries.contains_key(&tag));
+        index.mark_exact_durable(&tag, &b, 50_000);
+        assert!(index.is_entry_durable(&tag, &b, 50_000));
+        index.voucher_roots.insert(b.layer2_voucher_id.clone(), 60_000);
+        assert!(!index.is_entry_durable(&tag, &b, 60_000));
+    }
+
+    #[tokio::test]
+    async fn exact_ack_and_disk_recovery_mark_current_version_and_expiry_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(RedbStorage::open(&dir.path().join("durability.redb")).unwrap());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
+        let a = entry(1);
+        let tag = bs58::encode(a.t_id).into_string();
+        let (verdict, _) = engine.ingress_hmc_lock_durable(tag.clone(), a.clone(),
+            IngressOrigin::ClientApi, Some(1_000), None, None, None).await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+        assert!(engine.hmc_ram.read().await.is_entry_durable(&tag, &a, 50_000));
+        cancel.cancel();
+        worker.await.unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (recovered, worker) = DualTierEngine::new_with_token(db, cancel.clone());
+        recovered.recover_from_disk(SimTime(2_000)).await.unwrap();
+        assert!(recovered.hmc_ram.read().await.is_entry_durable(&tag, &a, 50_000));
+        recovered.prune_expired(SimTime(80_001)).await.unwrap();
+        let ram = recovered.hmc_ram.read().await;
+        assert!(!ram.locks.contains_key(&tag));
+        assert!(!ram.durable_entries.contains_key(&tag));
+        drop(ram);
+        cancel.cancel();
+        worker.await.unwrap();
+    }
+
+    #[test]
+    fn rejected_original_choice_does_not_increment_committed_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RedbStorage::open(&dir.path().join("conflict-stat.redb")).unwrap();
+        let a = LockRecord::new([1; 32], [2; 32], vec![1], SimTime(1_000), SimTime(50_000));
+        let b = LockRecord::new([1; 32], [3; 32], vec![1], SimTime(1_000), SimTime(50_000));
+        db.commit_original_record_approval(&a, 50_000, &[8; 32], b"first", 0).unwrap();
+        let (complete, result) = tokio::sync::watch::channel(None);
+        let health = Arc::new(PersistenceStats::default());
+        let mut batch = vec![FlushOp::OriginalRecordApproval {
+            record: Box::new(b), node: [8; 32], approval: b"conflicting".to_vec(),
+            class: 0, root: 50_000, complete, health: health.clone(),
+        }];
+        let outcome = DualTierEngine::flush_batch(&mut batch, &db);
+        assert_eq!(outcome.ops_committed, 0);
+        assert!(!outcome.failed, "Rejected choice is not a storage I/O failure");
+        assert!(result.borrow().as_ref().unwrap().is_err());
+        assert!(!health.signing_failed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn original_commit_also_marks_exact_hmc_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(RedbStorage::open(&dir.path().join("original-mark.redb")).unwrap());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (engine, worker) = DualTierEngine::new_with_token(db, cancel.clone());
+        let a = entry(1);
+        let tag = bs58::encode(a.t_id).into_string();
+        engine.hmc_ram.write().await.insert_recovered(tag.clone(), a.clone());
+        assert!(!engine.hmc_ram.read().await.is_entry_durable(&tag, &a, 50_000));
+        engine.persist_original_approval(tag.clone(), a.clone(), [8; 32], b"original".to_vec(), 0, 1_000).await.unwrap();
+        assert!(engine.hmc_ram.read().await.is_entry_durable(&tag, &a, 50_000));
+        cancel.cancel();
+        worker.await.unwrap();
     }
 }

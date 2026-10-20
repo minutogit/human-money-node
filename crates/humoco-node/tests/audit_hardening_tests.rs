@@ -78,8 +78,8 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
     assert!(!peer_mgr.is_local_sync_ready());
     peer_mgr.set_local_sync_ready(true);
 
-    // Initially, only self is active (1 node < 20)
-    assert_eq!(peer_mgr.active_nodes_count(), 1);
+    // An unobserved/immature local ticket contributes no eligible identity.
+    assert_eq!(peer_mgr.active_nodes_count(), 0);
     assert!(!peer_mgr.is_network_stable_ge20_for_24h(now_ms));
 
     // Add 25 nodes, but keep them IMMATURE (< 24h incubation)
@@ -90,7 +90,7 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
     }
 
     // Immature nodes MUST NOT be counted in active_nodes_count
-    assert_eq!(peer_mgr.active_nodes_count(), 1);
+    assert_eq!(peer_mgr.active_nodes_count(), 0);
     assert!(!peer_mgr.is_network_stable_ge20_for_24h(now_ms));
 
     // Mature 20 of the nodes (>24h incubation)
@@ -104,8 +104,8 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
             .await;
     }
 
-    // Now active count is 20 + 1 (self) = 21 >= 20
-    assert_eq!(peer_mgr.active_nodes_count(), 21);
+    // Twenty explicitly mature remote identities reach the FINAL-size regime.
+    assert_eq!(peer_mgr.active_nodes_count(), 20);
 
     // At t0: Hysteresis window just started -> NOT stable yet!
     assert!(
@@ -122,15 +122,11 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
         "INV-0802 verletzt: Nach 24h ununterbrochener N>=20 Stabilität muss FINAL freigegeben werden!"
     );
 
-    // If active nodes drop below 20 (e.g. suspension), hysteresis MUST reset!
-    let base_instant = std::time::Instant::now();
+    // Only stale passive presence excludes identities; RPC malus is diagnostic.
     for i in 0..5u64 {
-        let addr = format!("127.0.0.1:{}", 20000 + i).parse().unwrap();
-        for step in 0..3 {
-            peer_mgr
-                .record_failure_at(addr, base_instant + std::time::Duration::from_secs(step * 65))
-                .await;
-        }
+        let dummy_id = *blake3::hash(&i.to_le_bytes()).as_bytes();
+        peer_mgr.set_last_seen_for_test(&dummy_id,
+            std::time::Instant::now() - std::time::Duration::from_secs(3 * 3600 + 1)).await;
     }
 
     // Active count is now 16 < 20
@@ -156,7 +152,7 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
     // Anchor root
     engine.hmc_ram.write().await.voucher_roots.insert(voucher_id.clone(), root_valid);
 
-    // 1. Entry with invalid time window: valid_until <= now + 30s (e.g. only 10s in future)
+    // 1. Root expiry within 30 seconds is rejected; child TTL cannot override it.
     let invalid_entry = L2LockEntry {
         layer2_voucher_id: voucher_id.clone(),
         t_id: [0x11; 32],
@@ -177,7 +173,7 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
             "tag_invalid".into(),
             invalid_entry,
             IngressOrigin::ClientApi,
-            Some(now_ms),
+            Some(root_valid - 10_000),
         )
         .await;
 
@@ -187,7 +183,7 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
         "INV-1202 verletzt: Lock mit valid_until < now + 30s muss auf ClientApi abgewiesen werden!"
     );
 
-    // 2. Entry with valid time window: now + 60s in future
+    // 2. Valid root lifetime wins over arbitrary successor TTL metadata.
     let valid_entry = L2LockEntry {
         layer2_voucher_id: voucher_id.clone(),
         t_id: [0x22; 32],

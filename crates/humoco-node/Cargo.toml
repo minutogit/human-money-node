@@ -17,7 +17,7 @@ path = "src/bin/cluster_sim.rs"
 humoco-sim-core = { path = "../humoco-sim-core" }
 humoco-proto = { path = "../../../humoco-proto" }
 tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "macros", "signal", "net", "io-util", "sync", "time", "fs"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = { version = "4.5", path = "../clap_complete" }
 serde = { version = "1.0", features = ["derive"] }

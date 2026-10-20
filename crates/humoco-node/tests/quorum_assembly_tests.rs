@@ -36,6 +36,27 @@ use humoco_node::ingress::{PowEngine, TierController};
 use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 
+
+/// Explicit isolated fixture premises: mature tickets and installed shard state.
+/// These transport/collector tests do not prove bootstrap or recovery completeness.
+fn prepared_readiness() -> Arc<humoco_node::daemon::ShardReadinessManager> {
+    let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    for shard in 0..=u16::MAX { readiness.mark_shard_ready(shard); }
+    readiness
+}
+
+async fn prepare_mature_fixture(pm: &PeerManager, local: &NodeIdentity) {
+    for peer in pm.list_peers().await {
+        if let Some(key) = peer.node_id {
+            let ticket = pm.get_hrw_routing_id(&key).await.unwrap_or(key);
+            pm.learn_node_from_gossip_with_hrw(key, ticket, peer.addr, 0, None).await;
+            pm.set_first_seen_for_test(&key, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+        }
+    }
+    pm.learn_node_from_gossip_with_hrw(*local.node_pubkey(), *local.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
+    pm.set_first_seen_for_test(local.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+}
+
 fn test_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -86,7 +107,7 @@ fn make_hmc_genesis(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: test_now_ms(),
         deletable_at: Some(valid_until_ms.to_string()),
         privacy_guard: None,
     };
@@ -152,6 +173,7 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
             )
             .await;
         }
+        prepare_mature_fixture(&pm, &identity).await;
         assert_eq!(pm.active_nodes_count(), 20);
         force_stable_ge20(&pm).await;
 
@@ -162,7 +184,8 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
                 identity.clone(),
                 pm.clone(),
             )
-            .with_sync_ready(Arc::new(AtomicBool::new(true))),
+            .with_sync_ready(Arc::new(AtomicBool::new(true)))
+            .with_readiness_manager(prepared_readiness()),
         );
 
         let transport = QuicTransport::bind_with_options(
@@ -196,6 +219,7 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
             .await;
     }
     // Total active on gateway: 20 shards + self = 21 >= 20
+    prepare_mature_fixture(&pm_gw, &gateway_id).await;
     assert!(pm_gw.active_nodes_count() >= 20);
     force_stable_ge20(&pm_gw).await;
 

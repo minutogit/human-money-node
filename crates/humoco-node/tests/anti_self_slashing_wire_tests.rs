@@ -7,7 +7,8 @@
 //! 2. When colliding Lock B is sent for the same parent P (with diverging t_id), the shard
 //!    node returns `FLAG_COLLISION_DETECTED` with the existing lock payload and
 //!    **NEVER returns or signs an attestation for Lock B**.
-//! 3. This mathematically proves that a shard node cannot be tricked into self-equivocation.
+//! 3. This checks refusal of this conflicting request after one durable original approval;
+//!    fixture readiness does not establish safe recovery or the general Byzantine bound.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -124,6 +125,10 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         )
         .await;
 
+    // Explicit single-member fixture readiness and mature ticket; this is not recovery evidence.
+    let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    shard_pm.learn_node_from_gossip_with_hrw(*shard_identity.node_pubkey(), *shard_identity.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
+    shard_pm.set_first_seen_for_test(shard_identity.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
     let handler = Arc::new(
         NodeRequestHandler::with_peer_manager(
             engine.clone(),
@@ -131,7 +136,8 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
             shard_identity.clone(),
             shard_pm.clone(),
         )
-        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+        .with_sync_ready(Arc::new(AtomicBool::new(true)))
+        .with_readiness_manager(readiness.clone()),
     );
 
     let shard_transport = QuicTransport::bind_with_options(
@@ -188,6 +194,10 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
     let now = test_now_ms();
     let genesis_req = make_hmc_genesis("anti_slash_genesis", now + 1_000_000, &sender_key);
     let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
+    let parent = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    let shard = humoco_sim_core::types::extract_shard_id(&parent);
+    engine.record_hmc_voucher_genesis_parent(&genesis_req.layer2_voucher_id, parent).await;
+    readiness.mark_shard_ready(shard);
 
     let (v_gen, is_new_gen) = engine
         .ingress_hmc_lock(genesis_tag.clone(), L2LockEntry::from(&genesis_req))

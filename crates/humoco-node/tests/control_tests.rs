@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use humoco_node::{
-    api::{build_router, AppState},
+    api::AppState,
     control::{parse_account_tag, ControlClient, ControlResponse, ControlServer},
     identity::NodeIdentity,
     ingress::{PowEngine, TierController},
@@ -126,7 +126,7 @@ async fn test_control_socket_status_and_peers() {
     assert_eq!(peers_after.len(), 1);
 
     // 3. Shutdown
-    client.shutdown(5).await.expect("shutdown");
+    assert!(matches!(client.send_request(humoco_node::ControlRequest::Shutdown).await.expect("shutdown acceptance"), ControlResponse::Ok));
     let server_res = server_handle.await.expect("server handle join");
     assert!(server_res.is_ok());
 
@@ -188,7 +188,7 @@ async fn test_control_quota_topup_and_get() {
     assert_eq!(stored_quota, 15_500);
 
     // Shutdown
-    client.shutdown(5).await.expect("shutdown");
+    assert!(matches!(client.send_request(humoco_node::ControlRequest::Shutdown).await.expect("shutdown acceptance"), ControlResponse::Ok));
     let _ = server_handle.await;
 }
 
@@ -234,7 +234,7 @@ async fn test_prometheus_metrics_endpoint() {
     );
     app_state.peer_manager = Some(peer_manager);
 
-    let router = build_router(app_state);
+    let router = humoco_node::api::routes::build_operator_router(app_state);
 
     let req = Request::builder()
         .method("GET")
@@ -429,6 +429,6 @@ async fn test_control_extensions_batch3() {
     assert_eq!(root_valid, 500_000);
 
     // Shutdown
-    client.shutdown(5).await.expect("shutdown");
+    assert!(matches!(client.send_request(humoco_node::ControlRequest::Shutdown).await.expect("shutdown acceptance"), ControlResponse::Ok));
     let _ = server_handle.await;
 }

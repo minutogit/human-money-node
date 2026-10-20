@@ -23,6 +23,7 @@ struct ControlState {
     start_time: std::time::Instant,
     cancel_token: CancellationToken,
     tier_controller: Option<Arc<crate::ingress::TierController>>,
+    lifecycle: Option<Arc<super::lifecycle::ShutdownLifecycle>>,
 }
 
 pub struct ControlServer {
@@ -51,8 +52,15 @@ impl ControlServer {
                 start_time: std::time::Instant::now(),
                 cancel_token,
                 tier_controller: None,
+                lifecycle: None,
             },
         }
+    }
+
+    /// Installs the identity of the daemon owning the entire storage lifecycle.
+    pub fn with_shutdown_lifecycle(mut self, lifecycle: Arc<super::lifecycle::ShutdownLifecycle>) -> Self {
+        self.state.lifecycle = Some(lifecycle);
+        self
     }
 
     pub fn with_tier_controller(mut self, tier_controller: Arc<crate::ingress::TierController>) -> Self {
@@ -91,11 +99,7 @@ impl ControlServer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = std::fs::metadata(&self.socket_path) {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o600);
-                let _ = std::fs::set_permissions(&self.socket_path, perms);
-            }
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))?;
         }
 
         info!(
@@ -105,8 +109,10 @@ impl ControlServer {
 
         let cancel = self.state.cancel_token.clone();
 
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                _ = connections.join_next(), if !connections.is_empty() => {}
                 _ = cancel.cancelled() => {
                     info!("Control RPC server stopping on cancellation signal");
                     break;
@@ -115,7 +121,8 @@ impl ControlServer {
                     match accept_res {
                         Ok((stream, _)) => {
                             let state = self.state.clone();
-                            tokio::spawn(async move {
+                            if connections.len() >= 64 { continue; }
+                            connections.spawn(async move {
                                 if let Err(err) = Self::handle_connection(stream, state).await {
                                     debug!(error = %err, "Control connection closed or failed");
                                 }
@@ -129,6 +136,8 @@ impl ControlServer {
             }
         }
 
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
         // Cleanup socket file on exit
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
@@ -331,7 +340,10 @@ impl ControlServer {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         cancel.cancel();
                     });
-                    ControlResponse::Ok
+                    match &state.lifecycle {
+                        Some(lifecycle) => ControlResponse::ShutdownAccepted { identity: lifecycle.identity.clone() },
+                        None => ControlResponse::Ok,
+                    }
                 }
                 ControlRequest::RemovePeer { peer_str } => {
                     match parse_peer_string(&peer_str) {

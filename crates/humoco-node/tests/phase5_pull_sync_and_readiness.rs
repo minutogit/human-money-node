@@ -29,6 +29,9 @@ async fn test_boot_readiness_barrier_wire_flag() {
         vec![*server_id.node_id()],
     ));
 
+    let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    pm_server.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
+    pm_server.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
     let is_sync_ready = Arc::new(AtomicBool::new(false));
 
     let handler = Arc::new(
@@ -38,7 +41,8 @@ async fn test_boot_readiness_barrier_wire_flag() {
             server_id.clone(),
             pm_server.clone(),
         )
-        .with_sync_ready(is_sync_ready.clone()),
+        .with_sync_ready(is_sync_ready.clone())
+        .with_readiness_manager(readiness.clone()),
     );
 
     let mut server_transport = QuicTransport::bind_with_options(
@@ -90,7 +94,7 @@ async fn test_boot_readiness_barrier_wire_flag() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: now_ms,
         deletable_at: Some(root_valid_until.to_string()),
         privacy_guard: None,
     };
@@ -146,6 +150,9 @@ async fn test_boot_readiness_barrier_wire_flag() {
         "Expected FLAG_NOT_READY on wire when node is recovering"
     );
 
+    // An isolated prepared-state fixture, not a recovery-completeness proof.
+    let tag = bs58::encode(&[0x55u8; 32]).into_string();
+    readiness.mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag)));
     // 2. Now transition is_sync_ready to true
     is_sync_ready.store(true, Ordering::SeqCst);
     server_transport.set_sync_ready(true);
@@ -375,7 +382,7 @@ async fn test_boot_readiness_barrier_http_api_503() {
         pow_engine,
     );
     state.transport = Some(server_transport.clone());
-    let router = build_router(state);
+    let router = build_router(state.clone()).merge(humoco_node::api::routes::build_operator_router(state));
 
     // 1. While not ready, /health/ready MUST return 503 Service Unavailable
     let req_health = Request::builder()
@@ -394,7 +401,7 @@ async fn test_boot_readiness_barrier_http_api_503() {
         .body(Body::from("{}"))
         .unwrap();
     let resp_lock = router.clone().oneshot(req_lock).await.unwrap();
-    assert_eq!(resp_lock.status(), StatusCode::SERVICE_UNAVAILABLE, "POST /v1/lock must return 503 during boot recovery");
+    assert_eq!(resp_lock.status(), StatusCode::BAD_REQUEST, "Malformed input is rejected before a shard-specific recovery decision");
 
     // 3. Set is_sync_ready to true
     is_sync_ready.store(true, Ordering::SeqCst);
@@ -464,6 +471,8 @@ async fn test_per_shard_readiness_demand_sync_503() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("test_f2f_token");
 
+    pm.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
+    pm.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
     let readiness_manager = Arc::new(ShardReadinessManager::new());
     let mut state = AppState::new(
         engine,
@@ -542,7 +551,7 @@ async fn test_per_shard_readiness_demand_sync_503() {
     // 3. Demand sync was triggered, so try_trigger_demand_sync returns false (already active)
     assert!(!readiness_manager.try_trigger_demand_sync(shard_id));
 
-    // 4. Mark shard ready upon convergence
+    // 4. Install explicit isolated readiness fixture; no recovery-convergence claim
     readiness_manager.mark_shard_ready(shard_id);
     assert!(readiness_manager.is_shard_ready(shard_id));
 
@@ -560,4 +569,195 @@ async fn test_per_shard_readiness_demand_sync_503() {
         "Expected CREATED or OK once shard is ready, got {}",
         resp2.status()
     );
+}
+
+#[tokio::test]
+async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness() {
+    let temp = tempdir().expect("tempdir");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("barrier.redb")).expect("open redb"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+
+    let server_id = NodeIdentity::generate();
+    let client_id = NodeIdentity::generate();
+    let cancel = CancellationToken::new();
+
+    let pm_server = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*client_id.node_id()],
+    ));
+    let pm_client = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*server_id.node_id()],
+    ));
+
+    let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    pm_server.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
+    pm_server.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    // Conditional fixture: a fully mature 20-member local view. This proves
+    // gate separation only, not independent authority or recovery coverage.
+    for seed in 1..20u8 {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
+        pm_server.learn_node_from_gossip_with_hrw(key, key, format!("127.0.0.1:{}", 32000 + u16::from(seed)).parse().unwrap(), 0, None).await;
+        pm_server.set_first_seen_for_test(&key, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    }
+    let stable_now = pm_server.net_time_ms();
+    pm_server.set_ge20_anchor_for_test(stable_now.saturating_sub(86_400_001));
+    pm_server.set_local_sync_ready(false);
+    assert!(pm_server.is_network_stable_ge20_for_24h(stable_now));
+    let is_sync_ready = Arc::new(AtomicBool::new(false));
+
+    let handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            server_id.clone(),
+            pm_server.clone(),
+        )
+        .with_sync_ready(is_sync_ready.clone())
+        .with_readiness_manager(readiness.clone()),
+    );
+
+    let mut server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm_server.clone(),
+        handler,
+        cancel.clone(),
+    )
+    .expect("server bind");
+    server_transport.set_sync_ready_handle(is_sync_ready.clone());
+    let server_addr = server_transport.local_addr().expect("local addr");
+    server_transport.spawn_accept_loop();
+
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        pm_client.clone(),
+        Arc::new(DefaultRequestHandler),
+        CancellationToken::new(),
+    )
+    .expect("client bind");
+    let client_addr = client_transport.local_addr().expect("client addr");
+    client_transport.spawn_accept_loop();
+
+    pm_server.register_f2f_friend(*client_id.node_id(), Some(client_addr)).await;
+    pm_client.register_f2f_friend(*server_id.node_id(), Some(server_addr)).await;
+
+    let conn = client_transport
+        .connect_peer(server_addr)
+        .await
+        .expect("connect");
+
+    let now_ms = pm_server.net_time_ms();
+    let root_valid_until = now_ms + 600_000;
+    let mut hmc_req = humoco_node::api::hmc::L2LockRequest {
+        auth: humoco_node::api::hmc::L2AuthPayload {
+            ephemeral_pubkey: *client_id.node_pubkey(),
+            auth_signature: None,
+        },
+        layer2_voucher_id: "barrier_test_voucher".into(),
+        ds_tag: None,
+        transaction_hash: [0x55; 32],
+        is_genesis: true,
+        sender_ephemeral_pub: *client_id.node_pubkey(),
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms: now_ms,
+        deletable_at: Some(root_valid_until.to_string()),
+        privacy_guard: None,
+    };
+    {
+        use ed25519_dalek::Signer;
+        let payload_hash = humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req);
+        hmc_req.layer2_signature = client_id.signing_key().sign(&payload_hash).to_bytes();
+    }
+    let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        client_id.node_pubkey(),
+        0,
+        0,
+        now_ms,
+        0,
+        0,
+        footprint,
+        false,
+        &entry.t_id,
+    );
+    use ed25519_dalek::Signer;
+    let sig = client_id.signing_key().sign(&digest).to_bytes();
+    let wire = humoco_node::network::framing::LockWirePayload::Hmc {
+        req: hmc_req,
+        chain: None,
+        root_valid_until,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *client_id.node_pubkey(),
+        sender_signature: sig,
+        timestamp_ms: now_ms,
+    };
+    let raw_payload = bincode::serialize(&wire).unwrap();
+
+    // 1. When is_sync_ready is false, LockVerifyRequest MUST return FLAG_NOT_READY
+    let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, raw_payload.len() as u32);
+    let (resp_hdr, _) = client_transport.send_request(&conn, &header, &raw_payload).await.expect("send request");
+
+    assert_eq!(
+        resp_hdr.msg_type,
+        MsgType::LockVerifyResponse as u16,
+        "Expected LockVerifyResponse"
+    );
+    assert_ne!(
+        resp_hdr.flags & FLAG_NOT_READY,
+        0,
+        "Expected FLAG_NOT_READY on wire when node is recovering"
+    );
+
+    // An isolated prepared-state fixture, not a recovery-completeness proof.
+    let tag = bs58::encode(&[0x55u8; 32]).into_string();
+    readiness.mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag)));
+    // 2. Now transition is_sync_ready to true
+    // Global readiness intentionally remains false; only this shard is ready.
+
+    let header2 = WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 1, raw_payload.len() as u32);
+    let (resp_hdr2, resp_payload2) = client_transport.send_request(&conn, &header2, &raw_payload).await.expect("send request after ready");
+
+    assert_eq!(
+        resp_hdr2.flags & FLAG_NOT_READY,
+        0,
+        "FLAG_NOT_READY must be cleared once recovery completes"
+    );
+    assert!(!resp_payload2.is_empty(), "Expected attestation payload on successful lock verify");
+    let attestation = humoco_node::api::dto::AttestationDto::from_wire_bytes(&resp_payload2).expect("original approval");
+    let parent: [u8; 32] = hex::decode(&attestation.parent_lock).unwrap().try_into().unwrap();
+    let lock: [u8; 32] = hex::decode(&attestation.lock_id).unwrap().try_into().unwrap();
+    let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent, &lock);
+    let final_digest = humoco_sim_core::crypto::compute_sig_digest(humoco_sim_core::crypto::domain_approve_final(humoco_sim_core::types::NetworkId::Mainnet), 0, 0, 0, attestation.shard_id, 1, &payload);
+    let bytes: [u8; 64] = hex::decode(&attestation.signature).unwrap().try_into().unwrap();
+    server_id.verifying_key().verify_strict(&final_digest, &ed25519_dalek::Signature::from_bytes(&bytes)).expect("ready shard signs FINAL domain despite global false");
+    assert!(!is_sync_ready.load(Ordering::SeqCst));
+    let mut neighbouring_wire = wire;
+    if let humoco_node::network::framing::LockWirePayload::Hmc { req, sender_signature, .. } = &mut neighbouring_wire {
+        req.transaction_hash = [0x56; 32];
+        req.layer2_voucher_id.push_str("_neighbouring_unready_root");
+        req.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req)).to_bytes();
+        let entry = humoco_node::api::hmc::L2LockEntry::from(&*req);
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(client_id.node_pubkey(), 0, 0, now_ms, 0, 0, footprint, false, &entry.t_id);
+        *sender_signature = client_id.signing_key().sign(&digest).to_bytes();
+    }
+    let raw = bincode::serialize(&neighbouring_wire).unwrap();
+    let next_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 3, 0, 1, raw.len() as u32);
+    let (next_response, next_bytes) = client_transport.send_request(&conn, &next_header, &raw).await.expect("neighboring shard request");
+    assert_ne!(next_response.flags & FLAG_NOT_READY, 0, "stable network status does not authorize another unready shard");
+    assert!(next_bytes.is_empty());
+
 }

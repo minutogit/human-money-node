@@ -30,6 +30,12 @@ fn now_secs() -> u64 {
     test_now_ms() / 1000
 }
 
+/// Explicit test-only readiness for a fresh, isolated registry with no peers.
+/// This does not model activation after transfer or dynamic committee changes.
+fn isolated_ready(state: &AppState) {
+    for shard in 0..=u16::MAX { state.readiness_manager.mark_shard_ready(shard); }
+}
+
 fn setup_with_lifecycle(lifecycle: LifecycleConfig) -> axum::Router {
     let temp = tempdir().expect("tempdir");
     let db_path = temp.path().join("test_dual.redb");
@@ -50,6 +56,7 @@ fn setup_with_lifecycle(lifecycle: LifecycleConfig) -> axum::Router {
     )
     .with_lifecycle(lifecycle);
 
+    isolated_ready(&state);
     build_router(state)
 }
 

@@ -36,6 +36,9 @@ pub enum StorageError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("Own signing decision conflicts with retained history") ]
+    OwnChoiceConflict,
+
     #[error("Durable commit failed: {0}")]
     DurableCommitFailed(String),
 }
@@ -69,6 +72,18 @@ pub const TABLE_HMC_TTL_INDEX: TableDefinition<(u64, &str), ()> = TableDefinitio
 pub const TABLE_BANNED_NODES: TableDefinition<&[u8; 32], u64> = TableDefinition::new("banned_nodes");
 pub const TABLE_SYSTEM_AUDIT_EVENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("system_audit_events");
 
+/// Node-local original signing protection. Never included in shard synchronization.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OwnSigningChoice {
+    pub child: [u8; 32],
+    pub valid_until_ms: u64,
+    /// First exact original approval in each binary confirmation class.
+    pub approvals: [Option<Vec<u8>>; 2],
+}
+
+pub const TABLE_OWN_CHOICES: TableDefinition<&str, &[u8]> = TableDefinition::new("own_signing_choices");
+pub const TABLE_OWN_CHOICE_TTL: TableDefinition<(u64, &str), ()> = TableDefinition::new("own_signing_choice_ttl");
+
 #[derive(Clone)]
 pub struct RedbStorage {
     db: Arc<Database>,
@@ -92,6 +107,8 @@ impl RedbStorage {
         // Initialize tables in a write transaction
         let write_txn = db.begin_write()?;
         {
+            let _ = write_txn.open_table(TABLE_OWN_CHOICES)?;
+            let _ = write_txn.open_table(TABLE_OWN_CHOICE_TTL)?;
             let _ = write_txn.open_table(TABLE_LOCKS)?;
             let _ = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
             let _ = write_txn.open_table(TABLE_TTL_INDEX)?;
@@ -109,6 +126,97 @@ impl RedbStorage {
             db: Arc::new(db),
             path: path.to_path_buf(),
         })
+    }
+
+    /// Atomically commits the exact collision entry and immutable own choice.
+    /// The slot spans time buckets and provisional/final promotion. A canonical
+    /// merge can replace a lock, but it can never rewrite this private choice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_original_approval(
+        &self, tag: &str, entry: &crate::api::hmc::L2LockEntry,
+        node: &[u8; 32], approval: &[u8], class: u8, valid_until_ms: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        if class > 1 || approval.is_empty() || approval.len() > 16_384 || valid_until_ms == 0 {
+            return Err(StorageError::DurableCommitFailed("Invalid original approval context".into()));
+        }
+        let slot = format!("{}:{}", hex::encode(node), tag);
+        let mut txn = self.db.begin_write()?;
+        txn.set_durability(redb::Durability::Immediate);
+        let retained = {
+            let mut choices = txn.open_table(TABLE_OWN_CHOICES)?;
+            let previous = choices.get(slot.as_str())?
+                .map(|v| serde_json::from_slice::<OwnSigningChoice>(v.value()))
+                .transpose()?;
+            let mut choice = previous.unwrap_or(OwnSigningChoice {
+                child: entry.t_id, valid_until_ms, approvals: [None, None],
+            });
+            if choice.child != entry.t_id || choice.valid_until_ms != valid_until_ms {
+                return Err(StorageError::OwnChoiceConflict);
+            }
+            let mut locks = txn.open_table(TABLE_HMC_LOCKS)?;
+            if let Some(old) = locks.get(tag)? {
+                let old: crate::api::hmc::L2LockEntry = serde_json::from_slice(old.value())?;
+                if old.t_id != entry.t_id { return Err(StorageError::OwnChoiceConflict); }
+            }
+            choice.approvals[usize::from(class)].get_or_insert_with(|| approval.to_vec());
+            let bytes = serde_json::to_vec(&choice)?;
+            choices.insert(slot.as_str(), bytes.as_slice())?;
+            let lock_bytes = serde_json::to_vec(entry)?;
+            locks.insert(tag, lock_bytes.as_slice())?;
+            txn.open_table(TABLE_HMC_VOUCHER_INDEX)?.insert((entry.layer2_voucher_id.as_str(), tag), ())?;
+            let expires_sec = valid_until_ms.saturating_add(30_999) / 1_000;
+            txn.open_table(TABLE_HMC_TTL_INDEX)?.insert(&(expires_sec, tag), ())?;
+            txn.open_table(TABLE_OWN_CHOICE_TTL)?.insert(&(expires_sec, slot.as_str()), ())?;
+            choice.approvals[usize::from(class)].clone().ok_or_else(|| StorageError::DurableCommitFailed("Missing retained approval".into()))?
+        };
+        txn.commit()?;
+        Ok(retained)
+    }
+
+    /// Pure collision-record variant of the same private durable decision gate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_original_record_approval(
+        &self, record: &LockRecord, root_valid_until_ms: u64, node: &[u8; 32],
+        approval: &[u8], class: u8,
+    ) -> Result<Vec<u8>, StorageError> {
+        if class > 1 || approval.is_empty() || approval.len() > 16_384 || root_valid_until_ms == 0 {
+            return Err(StorageError::DurableCommitFailed("Invalid original approval context".into()));
+        }
+        let tag = hex::encode(record.parent_lock);
+        let slot = format!("{}:{}", hex::encode(node), tag);
+        let mut txn = self.db.begin_write()?;
+        txn.set_durability(redb::Durability::Immediate);
+        let retained = {
+            let mut choices = txn.open_table(TABLE_OWN_CHOICES)?;
+            let mut choice = choices.get(slot.as_str())?
+                .map(|v| serde_json::from_slice::<OwnSigningChoice>(v.value())).transpose()?
+                .unwrap_or(OwnSigningChoice { child: record.id, valid_until_ms: root_valid_until_ms, approvals: [None, None] });
+            if choice.child != record.id || choice.valid_until_ms != root_valid_until_ms { return Err(StorageError::OwnChoiceConflict); }
+            let mut locks = txn.open_table(TABLE_LOCKS)?;
+            if let Some(old) = locks.get(&record.parent_lock)? {
+                let (old, _): (LockRecord, u64) = bincode::deserialize(old.value())?;
+                if old.id != record.id { return Err(StorageError::OwnChoiceConflict); }
+            }
+            choice.approvals[usize::from(class)].get_or_insert_with(|| approval.to_vec());
+            let bytes = serde_json::to_vec(&choice)?;
+            choices.insert(slot.as_str(), bytes.as_slice())?;
+            let bytes = bincode::serialize(&(record, root_valid_until_ms))?;
+            locks.insert(&record.parent_lock, bytes.as_slice())?;
+            let expires_sec = root_valid_until_ms.saturating_add(30_999) / 1_000;
+            txn.open_table(TABLE_TTL_INDEX)?.insert(&(expires_sec, &record.parent_lock), ())?;
+            txn.open_table(TABLE_OWN_CHOICE_TTL)?.insert(&(expires_sec, slot.as_str()), ())?;
+            choice.approvals[usize::from(class)].clone().ok_or_else(|| StorageError::DurableCommitFailed("Missing retained approval".into()))?
+        };
+        txn.commit()?;
+        Ok(retained)
+    }
+
+    /// Reads retained local approvals for recovery; never a source of remote authority.
+    pub fn own_signing_choice(&self, node: &[u8; 32], tag: &str) -> Result<Option<OwnSigningChoice>, StorageError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(TABLE_OWN_CHOICES)?;
+        let slot = format!("{}:{}", hex::encode(node), tag);
+        table.get(slot.as_str())?.map(|v| serde_json::from_slice(v.value()).map_err(StorageError::from)).transpose()
     }
 
     /// Returns database storage statistics: (active_locks, db_size_bytes, page_allocations).
@@ -194,7 +302,8 @@ impl RedbStorage {
             // Range up to now_sec inclusive
             let max_key = (now_sec, &[0xFFu8; 32]);
             let expired_entries: Vec<(u64, [u8; 32])> = table_ttl
-                .range(..(max_key.0 + 1, &[0x00u8; 32]))?
+                .range(..(max_key.0.saturating_add(1), &[0x00u8; 32]))?
+                .take(256)
                 .map(|item| {
                     let (k_guard, _) = item?;
                     let (sec, parent) = k_guard.value();
@@ -218,10 +327,10 @@ impl RedbStorage {
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
 
             let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
-                .iter()?
-                .filter_map(|res| res.ok().map(|(k, _)| (k.value().0, k.value().1.to_string())))
-                .filter(|(sec, _)| *sec <= now_sec)
-                .collect();
+                .range(..(now_sec.saturating_add(1), ""))?
+                .take(256)
+                .map(|row| row.map(|(k, _)| (k.value().0, k.value().1.to_string())))
+                .collect::<Result<Vec<_>, _>>()?;
 
             for (sec, tag) in expired_hmc_entries {
                 table_hmc_ttl.remove(&(sec, tag.as_str()))?;
@@ -234,6 +343,7 @@ impl RedbStorage {
                 pruned_hmc_count += 1;
             }
         }
+        Self::prune_own_choices(&write_txn, now_sec)?;
         write_txn.commit()?;
         Ok((pruned, pruned_hmc_count))
     }
@@ -535,15 +645,30 @@ impl RedbStorage {
         Ok(())
     }
 
+    fn prune_own_choices(txn: &redb::WriteTransaction, now_sec: u64) -> Result<(), StorageError> {
+        let mut ttl = txn.open_table(TABLE_OWN_CHOICE_TTL)?;
+        let expired = ttl.range(..(now_sec, ""))?.take(256)
+            .map(|row| row.map(|(key, _)| (key.value().0, key.value().1.to_string())))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut choices = txn.open_table(TABLE_OWN_CHOICES)?;
+        for (sec, slot) in expired {
+            choices.remove(slot.as_str())?;
+            ttl.remove(&(sec, slot.as_str()))?;
+        }
+        Ok(())
+    }
+
     /// Prunes expired buckets inside an already-open write transaction.
     fn prune_expired_in_txn(
         write_txn: &redb::WriteTransaction,
         now_sec: u64,
     ) -> Result<(), StorageError> {
+        Self::prune_own_choices(write_txn, now_sec)?;
         let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
         let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
         let expired_entries: Vec<(u64, [u8; 32])> = table_ttl
             .range(..(now_sec.saturating_add(1), &[0x00u8; 32]))?
+            .take(256)
             .map(|item| {
                 let (k_guard, _) = item?;
                 let (sec, parent) = k_guard.value();
@@ -565,10 +690,10 @@ impl RedbStorage {
         let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
         let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
         let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
-            .iter()?
-            .filter_map(|res| res.ok().map(|(k, _)| (k.value().0, k.value().1.to_string())))
-            .filter(|(sec, _)| *sec <= now_sec)
-            .collect();
+            .range(..(now_sec.saturating_add(1), ""))?
+            .take(256)
+            .map(|row| row.map(|(k, _)| (k.value().0, k.value().1.to_string())))
+            .collect::<Result<Vec<_>, _>>()?;
         for (sec, tag) in expired_hmc_entries {
             table_hmc_ttl.remove(&(sec, tag.as_str()))?;
             if let Some(guard) = table_hmc.get(tag.as_str())? {
@@ -774,6 +899,21 @@ impl RedbStorage {
             for item in src_banned.iter()? {
                 let (k, v) = item?;
                 dst_banned.insert(k.value(), v.value())?;
+            }
+
+            // Private own decisions are part of a consistent operator backup,
+            // never of peer state synchronization.
+            let own = read_txn.open_table(TABLE_OWN_CHOICES)?;
+            let mut own_dst = write_txn.open_table(TABLE_OWN_CHOICES)?;
+            for row in own.iter()? {
+                let (key, value) = row?;
+                own_dst.insert(key.value(), value.value())?;
+            }
+            let own_ttl = read_txn.open_table(TABLE_OWN_CHOICE_TTL)?;
+            let mut own_ttl_dst = write_txn.open_table(TABLE_OWN_CHOICE_TTL)?;
+            for row in own_ttl.iter()? {
+                let (key, _) = row?;
+                own_ttl_dst.insert(key.value(), ())?;
             }
 
             // 9. TABLE_SYSTEM_AUDIT_EVENTS

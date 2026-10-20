@@ -2,9 +2,9 @@
 
 > **Credo:** *"In decentralization there is no trust, only mathematical proofs."*  
 > **Doctrine:** *"Subtraction before Construction – Perfection is achieved when there is nothing left to remove."*  
-> **Status:** Phases 0–6 production-ready and implemented (`crates/humoco-sim-core` & `crates/humoco-node`).
+> **Status:** Production-ready consensus core & daemon (`crates/humoco-sim-core` & `crates/humoco-node`).
 
-This document is automatically loaded on every AI agent startup in the workspace. It defines the immutable **Mental Model**, the **Codebase Structure**, the **subjective local node perspective**, the **KISS Extension Filter**, and the **iron-clad programming rules** for all future coding, refactoring, and bug-fixing tasks.
+This document is automatically loaded on every AI agent startup in the workspace. It defines the immutable **Mental Model**, the **2-Tier Network Architecture**, the **Anti-Hallucination Filters**, and the **iron-clad programming rules**.
 
 ---
 
@@ -17,7 +17,7 @@ This document is automatically loaded on every AI agent startup in the workspace
 
 * **Canonical term mapping:** For user terminology, the dictionary [`docs/TRANSLATION_GLOSSARY.md`](docs/TRANSLATION_GLOSSARY.md) applies strictly:
   * *Sperrregister* $\rightarrow$ `Collision Lock Registry` / `humoco-node` (asynchronous double-spend registry)
-  * *Kassenpfad / Hot-Path* $\rightarrow$ `PoS Hot-Path / Checkout Path` (in-RAM filtering $< 1\,\mu\text{s}$, latency $< 5\,\text{ms}$)
+  * *Kassenpfad / Hot-Path* $\rightarrow$ `PoS Hot-Path / Checkout Path` (in-RAM filtering $< 1\,\mu\text{s}$, durable commit $< 20\,\text{ms}$)
   * *Gutschein-Wurzel* $\rightarrow$ `Voucher Root Anchor` (`root.valid_until` as TTL anchor)
   * *Dorf-Merge* $\rightarrow$ `Village Merge / Mesh Merge` (deterministic convergence via $\min(H_{\text{canon}})$)
   * *Knoten-Souveränität* $\rightarrow$ `Node Sovereignty` (no auto-update, absolute operator veto)
@@ -29,259 +29,123 @@ This document is automatically loaded on every AI agent startup in the workspace
 
 ---
 
-
 ## 🏛️ 1. The HuMoCo Mental Model (The 5 Pillars)
 
 1. **Pure Blind Collision Lock Registry (Blind Service) & HMC Coupling:**
-   * **The Voucher (L1) is the negotiable deed/instrument (`ProofChain`):** It carries real monetary value, units, transactions, and owner signatures. The customer hands the voucher transaction directly to the merchant/cash register at checkout.
-   * Layer 2 knows neither amounts, nor currencies, nor accounts, nor real names.
-   * It is an asynchronous, cryptographic bulletin board for double-spend prevention: `parent_lock -> child_lock`. L2 certificates are NOT currency or bearer bonds, but auxiliary clearance receipts ("Unbedenklichkeitsbescheinigung") proving that no conflicting double-spend was registered.
-   * Domain lock formats and causality rules originate from `human-money-core` (`L2LockEntry`, `L2Verdict`). `humoco-node` decouples via DTO adapters and enforces strict collision checks on the hot path.
+   * **The Voucher (L1) is the negotiable instrument (`ProofChain`):** It carries real monetary value, units, transactions, and owner signatures (`human-money-core`).
+   * **Layer 2 is 100% BLIND:** It knows neither amounts, nor currencies, nor accounts, nor user identities. It is an asynchronous cryptographic bulletin board for double-spend prevention: `parent_lock -> child_lock`. L2 certificates are NOT currency, but auxiliary clearance receipts ("Unbedenklichkeitsbescheinigung").
+   * Domain lock formats originate from `human-money-core` (`L2LockEntry`, `L2Verdict`). `humoco-node` decouples via DTO adapters and enforces strict collision checks on the hot path.
 2. **Smart Client, Dumb Server (Client-Side Custody):**
-   * The server does not store dead history. The client (wallet / PoS terminal) custodies its own causality chain (`ProofChain`) and presents it on demand.
+   * The server does not store dead history or transaction logs. The client (wallet / PoS terminal) custodies its own causality chain (`ProofChain`) and presents it on demand.
    * On the hot path the server only checks the atomic collision on `parent_lock` in the RAM index ($< 1\,\mu\text{s}$).
-3. **Cryptographic Identity (NodePubKey) Trumps Network Topology & Sharding Tickets (HrwRoutingId):**
-   * IP addresses and ports are ephemeral, untrusted, and dynamic (NAT, mobile networks, ephemeral ports).
-   * The permanent identity anchor for F2F friendship edges and TLS is the **NodePubKey (Ed25519 Public Key)** — immutable and bound to the node for its lifetime.
-   * The dynamic **HrwRoutingId (Argon2d Shard Ticket)** `HrwRoutingId = Argon2d(NodePubKey || Nonce || T0)` is used exclusively for HRW scoring (`Score = BLAKE3(HrwRoutingId || Shard_ID)`); it is semantically decoupled from the NodePubKey and replaceable via re-mining.
-   * **24h Incubation Wall for Shard Tickets:** A new HrwRoutingId is gossiped immediately but only counted as active in HRW after a 24h maturation period — protection against shard-hopping / guerrilla attacks (targeted grinding for lucrative shards). *Note:* This 24h maturation applies strictly to cryptographic ticket mining maturity; it must NOT be confused with committee terms, calendar epochs, or liveness timeouts.
-4. **Physics Trumps Negotiation:**
-   * Partitions and isolated networks resolve admitted conflicts by justified confirmation class first (class2 > class1 > class0), then $\min(H_{\text{canon}})$ within the highest admissible confirmed class (DEC-064). FINAL is regional/revisable (DEC-053); deterministic selection alone does not prove source completeness or safe activation.
-   * In HuMoCo there are Zero Financial Deposits, no staking, and no monetary deposits (blind L2). On equivocation (double-signing), offenders are punished atomically via irrefutable proof (`HUMOCO_V1_EQUIVOCATION`): the losing branch becomes VOID via $\min(H_{\text{canon}})$, the node identity (`NodePubKey`) is permanently banned, the mined Argon2d shard ticket (`HrwRoutingId`) is invalidated, and all F2F friendship edges in the Web-of-Trust are severed entirely (Identity Revocation & WoT Severance).
-   * Dynamic network scaling (Strict binary phase transition): Sub-quorum networks ($N = 1\dots19$, Community-Mesh / Island Network) operate on adaptive provisional quorums $Q(N) = \lfloor \frac{2}{3} N \rfloor + 1$ (Status `PROVISIONAL` 🟡, all nodes validate all 65,536 shards); from $N \ge 20$ (with 24h stability hysteresis) full federated HRW sharding applies with fixed BFT quorum $14/20$ (Status `FINAL` 🟢, node workload scales to $\approx \frac{20}{N}$).
-5. **Dual-Tier Persistence (Spec 12 & 14) & Durable-before-Vote (DEC-029 Restoration):**
-   * **Tier 1 (RAM):** `RamIndex` with atomic first-seen collision check ($< 1\,\mu\text{s}$). RAM acceptance is pending until durable persistence acknowledges the exact lock and own signing decision.
-   * **Tier 2 (Disk):** Strict **Durable-before-Vote** (DEC-029 restored, superseding DEC-062). Atomic `redb` commit before releasing attestation signature, local vote, or response envelope to the network, with an asynchronous commit acknowledgment pipeline (< 20 ms local durable service target, requiring measurement within the 800 ms checkout collection budget). For an ordinary process crash with intact durable storage, this ordering preserves every released own decision; disk loss, rollback and copied keys require separate recovery safeguards.
+3. **Cryptographic Identity (NodePubKey) vs. Sharding Tickets (HrwRoutingId):**
+   * IP addresses and ports are ephemeral, untrusted, and dynamic.
+   * Permanent identity anchor for F2F friendship edges and TLS is the **NodePubKey (Ed25519 Public Key)** — immutable and bound to the node for its lifetime.
+   * Dynamic **HrwRoutingId (Argon2d Shard Ticket)** `HrwRoutingId = Argon2d(NodePubKey || Nonce || T0)` is used exclusively for HRW scoring (`Score = BLAKE3(HrwRoutingId || Shard_ID)`); it is semantically decoupled and replaceable via re-mining.
+   * **24h Incubation Wall for Shard Tickets:** A new HrwRoutingId is gossiped immediately but only counted as active in HRW after a 24h maturation period (prevents shard-hopping / opportunistic grinding).
+4. **Physics Trumps Negotiation & Deterministic Convergence:**
+   * Partitions and split-brain networks resolve admitted conflicts by justified confirmation class first (class2 > class1 > class0), then $\min(H_{\text{canon}})$ within the highest admissible confirmed class (DEC-064). FINAL is regional/revisable (DEC-053).
+   * **Zero Financial Deposits / No Staking:** On equivocation (double-signing), offenders are punished atomically via irrefutable proof (`HUMOCO_V1_EQUIVOCATION`): the losing branch becomes VOID via $\min(H_{\text{canon}})$, the node identity (`NodePubKey`) is permanently banned, the mined Argon2d shard ticket (`HrwRoutingId`) is invalidated, and all F2F friendship edges in the Web-of-Trust are severed entirely.
+   * **Dynamic Network Scaling:** Sub-quorum networks ($N = 1\dots19$, Island Mesh) operate on adaptive provisional quorums $Q(N) = \lfloor \frac{2}{3} N \rfloor + 1$ (Status `PROVISIONAL` 🟡, all nodes validate all 65,536 shards); from $N \ge 20$ (with 24h stability hysteresis) full federated HRW sharding applies with fixed BFT quorum $14/20$ (Status `FINAL` 🟢).
+5. **Dual-Tier Persistence & Strict Durable-before-Vote (DEC-029):**
+   * **Tier 1 (RAM):** `RamIndex` with atomic first-seen collision check ($< 1\,\mu\text{s}$).
+   * **Tier 2 (Disk):** Strict **Durable-before-Vote** (DEC-029). Atomic `redb` commit before releasing attestation signature, local vote, or response envelope (< 20 ms local durable SLA, within the 800 ms checkout budget). RAM acceptance is pending until durable storage acknowledges commit.
 6. **Zero State Bloat & TTL:**
-   * Every lock entry is bound to the validity of the Voucher Root (`root.valid_until`). After expiry plus a 30s grace period, the entry is physically purged from RAM and disk.
+   * Every lock entry is bound to the validity of the Voucher Root (`root.valid_until`). After expiry plus a 30s grace period, the entry is physically purged from RAM and disk. Permanent tombstones are strictly forbidden.
 
 ---
 
-## 🔭 2. Local Node Perspective, 2-Tier Network & First-Party Evidence (Spec 11, 15, 19)
+## 🌐 2. The 2-Tier Network Architecture & Subjective Local Autonomy
 
-In distributed systems, global coordination and hearsay lead to cascading network failures (Cascading Death Spirals). For every agent, the following applies strictly:
+### Tier 1: Public Client Ingress (REST / HTTP Port 8080)
+* **Open & Stateless:** Public IPs directly embedded in apps. Gateways are interchangeable, stateless messengers.
+* **✍️ Write Ingress (`POST /v1/lock`):**
+  - *Free Tier:* Open to everyone, protected by dynamic stateless BLAKE3 Hashcash PoW (*Network Thermometer*).
+  - *Friends Tier:* Free & PoW-exempt for own PoS terminals / friends via random 128-bit secret tokens (`f2f_<hex>`). **The node's `NodePubKey` must NEVER be accepted as an ingress token!**
+  - *VIP Tier:* Bounded reserved queues and measured service targets via Byte-Years tokens.
+* **🔍 Read Ingress (`POST /v1/status`, `GET /v1/node-status`, `GET /v1/pow-challenge`):**
+  - Extremely fast RAM-index lookup ($< 1\,\mu\text{s}$), no disk locks, no write-queue reservation.
+  - **1-of-20 Shard Randomization (`INV-0310`):** Gateways query exactly 1 deterministically random node from the top-20 shard nodes. Read traffic scales linearly with shard size. Protected by token-bucket rate limits against read DDoS.
+* On Tier 1 *every* client is welcome; P2P ban lists or F2F rules do **not** apply here.
 
-```mermaid
-flowchart TD
-    subgraph DeathSpiral["❌ Forbidden: Global Hearsay Cascades"]
-        direction TB
-        A1["Node A reports: 'Node B not responding!'"] --> B1["Global hearsay gossip / slashing rumors"]
-        B1 --> C1["Nodes ban each other / load explodes"]
-        C1 --> Collapse["💥 Network collapse / partition"]
-    end
+### Tier 2: Internal Node P2P Mesh (QUIC Port 9090)
+* **Tier 1 (F2F Gossip Tier):** Heartbeats and topology gossip run **exclusively** via direct F2F friends (`f2f.trusted_pubkeys`). Unknown gossip packets are silently discarded.
+* **Tier 2 (Shard-Direct Tier):** Shard RPC connections (lock verification, sync) may **only** be established to/from peers previously learned via F2F gossip (`known_network_nodes`). Unknown IPs are hard-rejected (`ConnectionRefused`).
+* **Strict 2-Stream Mesh Gossip:** P2P Gossip across F2F edges consists **strictly of exactly two streams**:
+  1. *Hourly Heartbeat / Presence Gossip (Spec 11):* 1 packet/hour, $\text{TTL} = 16$, Dunbar fan-out $k = \min(d, \lceil\sqrt{d}\rceil + 1)$. Used for presence discovery, topological awareness, and median clock synchronization.
+  2. *Equivocation Proofs (Spec 10):* Cryptographic first-party fraud evidence (`FRAUD_EQUIVOCATION`) forwarded with priority.
+* **⚡ Lock Gossip Prohibition:** **Locks are NEVER gossiped across the mesh.** Checkout hot-path is 100% Shard-Direct RPC, 0% Gossip.
+* **Connection Pooling ($N \ge 5.000$):** F2F connections hold persistent QUIC sessions with keep-alive. Shard-direct connections run as an ephemeral LRU pool (128–256 sockets) with 15s idle timeout without keep-alive. Idle closes are normal, never peer failures.
 
-    subgraph StableLocal["✅ Mandatory: Subjective Local Dampening & Reflexive Circuit Breaker"]
-        direction TB
-        A2["Node A registers timeout for Node B"] --> B2["Activity-locked Tit-for-Tat (+2 / -2) with local backoff"]
-        B2 --> C2["If Network Stress >= 40%: Reflexive Circuit Breaker flips to (+1 / -2)"]
-        C2 --> Heal["Forgiveness dominance (E[Δ] < 0 up to 66.7% fail) -> Homeostasis around 40%"]
-    end
-```
-
-### 🌐 The Two Separate Network Tiers: Client Ingress (Public) vs. Node P2P (Internal)
-
-```mermaid
-flowchart TD
-    subgraph Aussenwelt["🌍 Tier 1: Client Ingress (PUBLIC WORLD - Known IPs in Apps)"]
-        direction TB
-        subgraph WriteIngress["✍️ Write Ingress (Lock Creation)"]
-            App1["📱 Wallet / App (Free Tier)"] -->|"POST /v1/lock + BLAKE3 PoW\n(protection against botnet spam)"| GW["🌐 Public Gateway\n(REST / HTTP / WebSocket)"]
-            App2["🛒 PoS Terminal / Merchant (VIP Tier)"] -->|"POST /v1/lock + Quota Token\n(SLA / priority / reserved queue)"| GW
-        end
-        subgraph ReadIngress["🔍 Read Ingress (Verification & Status)"]
-            App3["📱 Wallet / PoS Terminal (read traffic)"] -->|"POST /v1/status (lock status)\nGET /v1/node-status (latency)\nGET /v1/pow-challenge"| GW
-        end
-    end
-
-    subgraph Innenwelt["🛡️ Tier 2: Node P2P Mesh (INTERNAL NODE WORLD - QUIC Port 9090)"]
-        direction LR
-        GW -->|"Shard RPC (LockVerify, Bi-Stream)\nONLY to learned shards"| Shard1["Node A (Shard)"]
-        Shard1 <-->|"F2F Gossip (Heartbeat, Uni-Stream)\nONLY between F2F friends"| Shard2["Node B (Friend)"]
-    end
-
-    Aussenwelt ==>|"Terminated at gateway (stateless messenger)"| Innenwelt
-```
-
-1. **Tier 1 – Public Client Ingress (Apps, PoS terminals -> Gateways):**
-   * **Visibility:** Public IPs and hostnames, directly embedded in wallets and apps.
-   * **Statelessness & Hydra Resilience:** Gateways are interchangeable messengers without their own shard state. If a public IP fails (ISP block, hoster termination), apps seamlessly rotate to the next gateway.
-   * **✍️ Write Ingress (`POST /v1/lock`):**
-     - *Free Tier:* Open to everyone, protected by dynamic BLAKE3 Hashcash PoW (*Network Thermometer*).
-     - *Friends Tier:* Free & PoW-exempt for friends, family, and own PoS terminals via random 128-bit secret tokens (`f2f_<hex>`).
-     - *VIP Tier:* Bounded reserved queues and measured provider service targets for merchants via Byte-Years tokens; no capacity tier weakens proof or durability.
-   * **🔍 Read Ingress (`POST /v1/status`, `GET /v1/node-status`, `GET /v1/pow-challenge`):**
-     - Extremely fast RAM-index lookup ($< 1\,\mu\text{s}$), no disk locking, no write-queue reservation.
-     - **1-of-20 Shard Randomization (`INV-0310`):** Gateways query exactly 1 deterministically random node from the top-20 shard nodes for status requests. Read capacity scales linearly with shard size ($20 \times 50.000 = 1.000.000\,\text{Reads/day}$).
-     - Protected by token-bucket rate limiting against read DDoS; read spam must never block write queues.
-   * **Important:** On Tier 1 *every* client is welcome. P2P ban lists or F2F friendship rules do **not** apply here!
-
-2. **Tier 2 – Internal Node P2P Mesh (Gateway <-> Shards <-> F2F):**
-   * **Tier 1 (F2F Gossip):** Heartbeats and topology gossip run **exclusively** via direct F2F friends (`f2f.trusted_pubkeys`).
-   * **Tier 2 (Shard-Direct):** Shard RPC connections (lock verification, sync) may **only** be established to/from peers previously learned via F2F gossip (`known_network_nodes`).
-   * **P2P Rejection:** Unknown IP addresses on the P2P QUIC port (9090) are hard-rejected (`ConnectionRefused`). This applies **exclusively** to the internal P2P network, never to client ingress!
-
-### 🌐 The Internal 2-Tier P2P Model (Gossip Barrier vs. Shard-Direct):
-
-* **⚡ Checkout Hot-Path (PoS / Ingress) is 100% Shard-Direct RPC, 0% Gossip:**
-  - Locks are created via client-to-gateway ingress (`POST /v1/lock`), verified via Shard-Direct RPC (`LockVerifyRequest` / `LockVerifyResponse`), and synchronized via Spec 03 Digest Pull (`ShardDigestRequest` / `ActiveSyncRequest`).
-  - **Locks are NEVER gossiped.** Epidemic gossip for lock records is completely eliminated to avoid epidemic lock amplification. Checkout latency remains dependent on transport, ready quorum members and durable storage.
-
-* **📡 Strict 2-Stream Mesh Gossip:**
-  - P2P Mesh Gossip across F2F edges consists **strictly of exactly two streams**:
-    1. **Hourly Heartbeat / Presence Gossip (Spec 11):** 1 packet per hour, $\text{TTL} = 16$, Dunbar fan-out $k = \min(d, \lceil\sqrt{d}\rceil + 1)$. Used exclusively for presence discovery, topological awareness, and median clock synchronization.
-    2. **Equivocation Proofs (Spec 10):** Cryptographic first-party fraud evidence (`FRAUD_EQUIVOCATION`) forwarded with priority to isolate and ban double-signing offenders immediately.
-
-1. **Tier 1 – F2F Gossip Tier (`f2f_friends`):**
-   * Heartbeats and gossip announcements may **exclusively** be received and forwarded via direct F2F friendship connections (`f2f.trusted_pubkeys` / `f2f.peers`).
-   * There is **no** open gossip to the rest of the network. A node never floods rumors or heartbeats to arbitrary network nodes.
-   * **Gossip Barrier:** Incoming gossip from non-friends is silently discarded (`can_accept_gossip() == false`).
-
-2. **Tier 2 – Shard-Direct Tier (`known_network_nodes`):**
-   * Nodes (e.g. gateways or shard nodes) must establish direct P2P connections for verifications (`LockVerifyRequest`) or syncs.
-   * **Authorization rule:** A node may establish or accept a direct P2P connection to another node **only if** that node is in its managed list of nodes (`known_network_nodes`) previously learned via F2F gossip heartbeats.
-   * Unknown IP addresses or unlearned nodes on the P2P QUIC port are hard-rejected (`ConnectionRefused` / `401/403 unauthorized`).
-   * **Connection Pooling & Lifecycle ($N \ge 5.000$):** Only Tier-1 F2F connections hold persistent QUIC sessions with keep-alive. Tier-2 shard-direct connections run as an ephemeral LRU pool (128–256 sockets) with a 15s idle timeout without keep-alive. Automatic idle close is the normal state and must never be counted as a peer failure.
-
-### The 3 Golden Rules of Local Autonomy:
-1. **Purely Subjective View:** Each node judges *only* its direct edges (`my_peers.get(peer).on_miss()`). There is no network gossip about "bad peers".
-2. **First-Party Evidence Doctrine:** A node is banned or slashed network-wide **only** when irrefutable cryptographic self-proof by the offender exists (`EquivocationProof` with two genuine signatures of the same node for the same slot). Hearsay is forbidden.
-3. **Non-Authoritative Telemetry (`INV-1701`):** Telemetry warnings serve the human operator for diagnosis only. No telemetry value ever triggers an automatic ban (`triggers_auto_ban() == false`).
-
-### 🛒 PoS Checkout Latency vs. Internal Node SLA & Quorum Fast-Exit:
-* **Fixed Checkout Committee:** Each lock request freezes one canonical HRW snapshot of at most 20 distinct `NodePubKey` identities, including self where eligible. FINAL requires 14 distinct votes from that snapshot; no ranks 21–40 may replace unavailable members during checkout. Committee selection uses full 256-bit scores with deterministic identity tie-breaking. Read routing retains its existing policy; `N < 20` retains adaptive provisional quorums.
-* **Autonomous Living-Mesh Snapshot vs. Static Epoch Baton Handover:** Committee membership is computed autonomously and deterministically per request / routing event from the living active mesh (`select_shard_committee`). There is NO daily committee tenure, NO 24-hour baton passing, and NO static epoch assignment. Membership transitions occur naturally as nodes become active or dormant in the local mesh view.
-* **Bounded Write Collection:** Checkout signature collection uses an 800 ms budget and fails immediately when the remaining eligible members cannot supply the required quorum. `FLAG_NOT_READY`, `FLAG_NOT_IN_SHARD`, and cancellations after quorum completion are neutral outcomes, never peer failures. Statistical score thresholds and Bloom filters do not establish certificate membership. This policy prevents signer-pool expansion; it does not prove globally identical membership views or safe dynamic committee transitions.
-* **Internal Node Durable SLA ($< 20\,\text{ms}$):** Sub-microsecond RAM collision check followed by atomic durable `redb` commit before releasing attestation signature, local vote, or response envelope (Durable-before-Vote / DEC-029 restoration, superseding DEC-062). Local processing finishes in $< 20\,\text{ms}$, well within the 800 ms checkout collection budget.
-* **End-to-End Checkout Latency ($500\,\text{ms} \dots 1.500\,\text{ms}$):** For the customer at the checkout, up to 1–2 seconds is fully ergonomic and standard in payment processing. Shard verification timeouts may be relaxed to $1.000\,\text{ms}$.
-* **Quorum Fast-Exit ($14/20$) & No Cascading Death Spiral on the Checkout Path:**
-  - As soon as $14$ shard signatures are present, the gateway immediately sends `200 OK` to the PoS terminal and cleanly aborts stragglers (`join_set.abort_all()`).
-  - Aborted tasks due to fulfilled quorum must **never** be counted as peer failures (`record_failure`).
-  - On the checkout path (gateway $\rightarrow$ shard) there is **no Cascading Death Spiral**: shard nodes do not communicate with each other during checkout, and the gateway does not expand the signer pool or trigger unbounded extra work on timeout. Exact client retries remain separately bounded.
+### The 3 Golden Rules of Local Autonomy (Spec 11, 15, 19):
+1. **Purely Subjective View:** Each node judges *only* its direct edges (`my_peers.get(peer).on_miss()`). There is no network gossip about "bad peers" (prevents Cascading Death Spirals).
+2. **First-Party Evidence Doctrine:** A node is banned or slashed network-wide **only** upon irrefutable cryptographic self-proof (`EquivocationProof` with two genuine Ed25519 signatures of the same node for the same slot). Hearsay is forbidden.
+3. **Non-Authoritative Telemetry (`INV-1701`):** Telemetry warnings and health probes serve the human operator for diagnosis only. No telemetry metric ever triggers an automated ban (`triggers_auto_ban() == false`).
 
 ---
 
-## 🪓 3. KISS & The 3-Stage Extension Filter ("Less Is More")
+## 🛒 3. PoS Checkout Path, SLA & Quorum Fast-Exit
 
-Before writing new code for a new feature or requirement, apply this test:
+* **Fixed Checkout Committee:** Each lock request freezes one canonical HRW snapshot of at most 20 distinct `NodePubKey` identities, including self where eligible. FINAL requires 14 distinct votes from that snapshot; no ranks 21–40 may replace unavailable members during checkout. Committee selection uses full 256-bit scores with deterministic identity tie-breaking.
+* **Autonomous Living-Mesh Snapshot:** Committee membership is computed autonomously and deterministically per request from the living active mesh (`select_shard_committee`). There is NO daily committee tenure, NO 24-hour baton passing, and NO static epoch assignment.
+* **Bounded Write Collection:** Signature collection uses an **800 ms budget** and fails immediately when remaining eligible members cannot supply quorum. `FLAG_NOT_READY`, `FLAG_NOT_IN_SHARD`, and cancellations after quorum completion are neutral outcomes, never peer failures.
+* **Internal Node Durable SLA ($< 20\,\text{ms}$):** Sub-microsecond RAM collision check followed by atomic durable `redb` commit before releasing attestation signature, local vote, or response envelope (Durable-before-Vote / DEC-029). Local processing finishes in $< 20\,\text{ms}$.
+* **Quorum Fast-Exit ($14/20$):** As soon as 14 shard signatures are present, the gateway sends `200 OK` to the PoS terminal and cleanly aborts stragglers (`join_set.abort_all()`). Aborted tasks are neutral and must never be counted as peer failures.
 
-1. **Stage 1 – Is the problem already solved mathematically?**
-   * *Example High Availability (Cluster):* Do we need Raft/Paxos? **No.** Multiple nodes participate as normal peers in HRW sharding; the smart client uses multi-homing with fallback IPs.
-   * *Example Disaster Recovery:* Do we need cluster backups? **No.** Shard replication ($R=3\dots20$) and digest-pull sync recover lost state after restart in $< 500\,\text{ms}$ from peers.
-   * *Example Customer Billing:* Do we need billing in the consensus core? **No.** The node stays cryptographically blind; billing happens via Byte-Years token buckets via the control socket.
-2. **Stage 2 – Does the server need to know at all?**
-   * If the client (PoS terminal / wallet) can provide or custodies the proof (`ProofChain`), the server must not be burdened with it.
-3. **Stage 3 – Separation of Consensus Core and Periphery:**
+---
+
+## 🚫 4. Explicit Negative Guard-Rails (Anti-Hallucination Filters)
+
+1. **Zero Financial Deposits / No Staking on Layer 2:** Layer 2 knows no monetary stakes, collateral deposits, or financial bonding. Penalties are purely cryptographic: permanent `NodePubKey` ban, Argon2d ticket invalidation, branch voiding via $\min(H_{\text{canon}})$, and complete Web-of-Trust severance.
+2. **Safe Standard Library (`from_le_bytes`) over Unsafe Crates:** Wire header & binary parsing strictly uses safe standard library methods (`from_le_bytes`, `to_le_bytes`, `try_from`, `checked_*`). External transmutation crates (`bytemuck`, `zerocopy`) and unsafe code are forbidden (`#![forbid(unsafe_code)]`).
+3. **Ban on 'Dual-Role Ingress':** P2P mesh edges (`f2f_friends`, QUIC port 9090) are purely node-to-node infrastructure. A node's `NodePubKey` must NEVER be registered or accepted as an ingress bearer token on HTTP port 8080. Client friend tokens are strictly random 128-bit secrets (`f2f_<hex>`).
+4. **The 4-Fold Epoch Disambiguation (Preventing Agent Hallucinations):**
+   * *1. 24h Argon2d Incubation Wall:* Newly mined `HrwRoutingId` shard tickets mature for 24h before being active in HRW ranking (anti-shard-hopping delay for *tickets*, NOT a committee term or liveness delay).
+   * *2. Calendar `epoch_day`:* Deterministic calendar integer slot $\lfloor (t_{\text{unix}} - T_0) / 86400 \rfloor$ used strictly for quota accounting, Byte-Years, and EMA decay. Has zero connection to shard committees or consensus tenures!
+   * *3. Dynamic Dunbar Presence:* Peer liveness is tracked passively via hourly heartbeats (e.g. 3 missed hours $\to$ `is_suspended`). There is NO 24-hour waiting requirement to detect offline nodes!
+   * *4. Autonomous HRW Living Mesh:* Nodes calculate shard committees on demand from active non-suspended peers. Shard leadership is NOT handed down via predecessor epoch certificates ($C_E \to C_{E+1}$, DEC-053/DEC-055).
+5. **Ban on Recursive L2 Receipt Chaining & Past Signature Hoarding:**
+   * The lock entry `parent_lock -> child_lock` is the physical double-spend barrier. Once synchronized, conflicts fail immediately (`409 Conflict`), independent of which specific nodes attested to it in the past.
+   * Shard sync (`compute_shard_digest_at`) synchronizes strictly the objective state (`parent_lock`, `receiver_pub`, `nonce`, `id`), never legacy signatures or historical 896-byte quorum bundles of retired nodes.
+   * Old Quorum Certificates have zero spending utility on L2; recipients perform a fresh live check. Clients do not hoard or chain past certificates.
+6. **Separation of Consensus Core and Periphery:**
    * Consensus core (`humoco-node`) = QUIC + RAM index + redb + ingress.
-   * Administration, billing & dashboards attach externally via the local control socket (`/tmp/humoco.sock`).
-
-### 🚫 Explicit Negative Guard-Rails (Anti-Hallucination Filter):
-1. **Zero Financial Deposits / No Staking on Layer 2:**
-   * Layer 2 knows no monetary stakes, collateral deposits, or financial liability/bonding for friends or endorsed peers.
-   * Equivocation penalties operate purely cryptographically: permanent `NodePubKey` ban, Argon2d shard-ticket invalidation, branch voiding via $\min(H_{\text{canon}})$, and complete Web-of-Trust severance.
-2. **Safe Standard Library (`from_le_bytes`) over Unsafe Crates:**
-   * Wire header & binary parsing strictly uses safe standard library methods (`from_le_bytes`, `to_le_bytes`, `try_from`, `checked_*`).
-   * No external transmutation crates (`bytemuck`, `zerocopy`) are needed; `#![forbid(unsafe_code)]` is strictly preserved.
-3. **Non-Authoritative Telemetry (`INV-1701`):**
-   * Telemetry, latency measurements, and health probes are purely diagnostic for human operators and dashboards.
-   * No telemetry metric or latency value may ever trigger an automated peer ban or network slashing (`triggers_auto_ban() == false`).
-4. **Strict Decoupling of P2P Node Friends (Port 9090) vs. Client Ingress Friends (Port 8080) / Ban on 'Dual-Role Ingress':**
-   * P2P mesh edges (`f2f_friends`, QUIC port 9090) are purely node-to-node infrastructure for gossip and topology awareness. They have zero connection to client ingress.
-   * Full nodes participate in shard RPC directly and never submit locks as clients via another node's HTTP port 8080.
-   * A node's public key (`NodePubKey`) must NEVER be registered or accepted as an ingress bearer token (prevents unauthorized PoW bypass by third parties who learn the public key via gossip). Client friend tokens are strictly random 128-bit secrets (`f2f_<hex>`).
-5. **KISS Dashboard Boundary & Anti-Bloat Guardrail:**
-   * The web dashboard is a strictly private operator diagnostic window (< 128 KiB); metrics, topology and all aliases/subroutes remain private (DEC-077). Explicit public HTTP gateway advertisements/directories are separate (DEC-078), and cached-address fallback belongs exclusively to clients (DEC-079).
-   * It is NOT an operating system terminal: Live tracing/stderr logs belong to `systemd` / `journalctl` / OS stdout, NOT in in-memory web log buffers.
-   * It is NOT a backup orchestrator: Hot backups run via `cron` / scripts through the local UNIX control socket (`/tmp/humoco.sock`), NOT via manual browser clicks.
-   * TTL pruning is strictly automatic (Spec 12/14); manual "prune now" buttons are prohibited placebos.
-   * No cosmetic gimmicks: No pulsing dots, no vim-like keyboard navigation traps. Pure substance only.
-6. **Ban on Mandatory Predecessor Epoch Baton Chaining (Liveness Deadlock Anti-Pattern) & The 4-Fold Epoch Disambiguation:**
-   * Requiring the previous epoch's 20 members to sign off on the next epoch's 20 members (as historically explored in CEH predecessor chaining) is strictly rejected as an architectural dead end (DEC-053 / DEC-055). If $> f$ members disappear or a network partition occurs, it permanently kills the shard and paralyzes ~88.5% of shards globally.
-   * Shard membership derives autonomously from the living active mesh via HRW, with deterministic $\min(H_{\text{canon}})$ merge upon reconnect.
-   * **⚠️ The 4-Fold Disambiguation (Preventing Agent Hallucinations):**
-     1. **24h Argon2d Incubation Wall (Ticket Maturation):** Newly mined `HrwRoutingId` shard tickets must mature for 24 hours before being counted as active in HRW ranking. This exists solely to prevent shard-hopping / opportunistic grinding attacks. It is an immutable cryptographic delay for *tickets*, NOT a committee term or liveness delay.
-     2. **Calendar `epoch_day` (Wire Framing & Rate Limiting):** A deterministic, purely calendar-based integer slot $\text{epoch\_day} = \lfloor (t_{\text{unix}} - T_0) / 86400 \rfloor$ used strictly for Ingress quota accounting, Byte-Years accumulation, and sliding-window Network Thermometer EMA decay. It has **zero** semantic connection to shard committee formation, committee elections, or consensus tenures!
-     3. **Dynamic Presence (Passive Dunbar Liveness):** Peer liveness is tracked passively via hourly F2F heartbeats. If a peer misses heartbeats (e.g., 3 consecutive missed hours $\to$ `missing_count >= 3` / `is_suspended`), it is excluded from subsequent HRW snapshots. There is **NO 24-hour waiting requirement** to detect offline nodes, and **NO 24-hour committee term**.
-     4. **Autonomous HRW Calculation (Living Mesh vs. "Baton Handover"):** Each node calculates shard committees on demand from its current view of active, non-suspended peers using Rendezvous Hashing (`Score = BLAKE3(HrwRoutingId || Shard_ID)`). Shard leadership is NOT handed down via predecessor epoch certificates ($C_E \to C_{E+1}$). Shards survive arbitrary partitions without liveness deadlocks.
-7. **Ban on Recursive L2 Receipt Chaining & Active Ping Storms (KISS Principle):**
-   * **Ephemeral Live Checkout Signal:** Recipients do NOT verify a recursive chain of historical L2 lock receipts on spend. The live collision lock registry checks the parent lock in-RAM ($< 1\,\mu\text{s}$); the voucher on Layer 1 carries ownership and causal history.
-   * **Zero Spending Utility of Past Certificates:** An old Quorum Certificate proves nothing about whether a voucher is unspent *now* (since a spend could have occurred afterwards). Any recipient must perform a fresh live check.
-   * **No Client Storage Bloat:** The L2 receipt is purely a merchant checkout safety proof / green light at the instant of checkout. Clients/merchants do NOT need to hoard, chain, or back-fill historical quorum certificates once checkout is complete.
-   * Network presence is strictly derived passively from hourly F2F Dunbar gossip heartbeats; active background ping storms to refresh candidate windows are forbidden.
-8. **Ban on Historical Signature Hoarding & Objective Lock State Doctrine (KISS Principle):**
-   * **Physical Double-Spend Barrier:** The lock entry `parent_lock -> child_lock` in the shard collision registry is the physical barrier against double-spends. Once a lock is synchronized, any conflicting double-spend attempt immediately fails on atomic in-RAM / storage collision check (`409 Conflict`) — completely independent of which specific nodes attested to it months ago.
-   * **Objective State Synchronization:** Shard sync (`compute_shard_digest_at`) synchronizes strictly the objective state (`parent_lock`, `receiver_pub`, `nonce`, `id`), never legacy signatures or historical 896-byte quorum bundles of retired or departed nodes.
-   * **Living-Mesh Attestation:** Status queries are answered and signed on demand by the *currently* authoritative shard nodes based on their synchronized live state (Living Mesh vs. stale ghost-node signatures).
-
+   * Administration, hot backups, and dashboards attach externally via the local UNIX control socket (`/tmp/humoco.sock`). The web dashboard is a strictly private operator diagnostic window (< 128 KiB), NOT an operating system terminal or backup orchestrator.
 
 ---
 
-## 🚨 4. The 11 Iron-Clad Programming Rules
+## 🚨 5. The 7 Iron-Clad Engineering Rules
 
-### 1. ⚡ No Blocking I/O or RAM Guards Across Persistence:
-* On the PoS lock path (`POST /v1/lock`), never perform unmanaged blocking disk I/O on the request/runtime thread. Use the bounded asynchronous persistence worker and await its exact durable commit acknowledgment before releasing any binding signature, including idempotent responses and gateway self votes (**Durable-before-Vote / DEC-029 restoration**, superseding DEC-062, < 20ms local durable SLA, well within the 800ms checkout collection budget).
-* RAM collision checks use atomic in-memory CAS operations ($< 1\,\mu\text{s}$). Reserve queue capacity before mutation. The worker atomically persists the lock and immutable own signing decision; enqueued or RAM-resident state alone never authorizes signature release. No RAM guard is held while awaiting persistence.
-* Ordinary process crashes with intact committed storage need no root-risk markers, bucket quarantine or automatic identity replacement: before commit no binding signature has escaped; after commit the own decision is recoverable. Storage loss/rollback and failed recovery are separate failures and never justify signing without safe state.
-* **Background decoupling:** Background engines (TTL pruning, DB compaction) must never hold locks on the `RamIndex` during a synchronous `fsync` or write operation.
-
-### 2. 🕰️ No Unsanitized OS System Time on the Consensus Path:
-* Never use `std::time::SystemTime::now()` naively for consensus or ingress decisions.
-* Time windows are validated strictly relative to `root.valid_until` and the decentralized median time derived from F2F neighbors (`P2pClock` / `SimTime` / Spec 07; INV-1202 instead names atomic collision insertion).
-
-### 3. 🎯 Strict Idempotency & 409 Collision Semantics:
-* Identical lock (`lock_id` equal) on the same parent $\rightarrow$ `200 OK` (Verified).
-* Diverging lock on the same parent $\rightarrow$ `409 Conflict` (double-spend detected).
-* New lock $\rightarrow$ `201 Created` with signed `Attestation`.
-
-### 4. 🛡️ Panic Freedom in Libraries (No unwrap / expect):
-* Never use `.unwrap()` or `.expect()` on external network or API input.
-* No unchecked `.partial_cmp().unwrap()` calls on floating-point numbers (use `total_cmp` or safe fallbacks).
-* Every error must be propagated cleanly via structured error types (`NodeError`) as `Result<T, E>`.
-
-### 5. 🔐 Length-Prefixed BLAKE3 Domain Separation:
-* Every hash in the protocol uses canonical domain tags with length prefix from `humoco-sim-core::crypto`:
-  ```rust
-  hasher.update(&(domain_tag.len() as u8).to_le_bytes());
-  hasher.update(domain_tag);
-  ```
-  This makes the domain encoding unambiguous. Complete signed-field binding and actual verification remain necessary; domain tags alone are not a protocol-security proof.
-
-### 6. 🤖 Subagent Principle for Context Conservation:
-* Larger refactorings, module implementations, and test runs are delegated to specialized subagents.
-* The main agent keeps the bird's-eye view, monitors invariants, and verifies overall results.
-
-### 7. 🛡️ Strict Separation of F2F Gossip and Shard-Direct RPC (Internal P2P):
-* **Scope:** These rules apply **exclusively** to the internal P2P QUIC network (port 9090). The public client ingress (REST port 8080 for write and read traffic) is open/permissionless and never rejects clients due to unknown IPs!
-* Gossip (heartbeats, announcements) may **exclusively** be received and forwarded via direct F2F friends.
-* Direct shard RPC connections (lock verification, sync) may **only** be established to/from peers previously learned via F2F gossip (`known_network_nodes`).
-* Unauthorized foreign gossip packets are discarded; unauthorized shard-direct RPCs are rejected (`unauthorized`).
-
-### 8. 🛡️ First-Party Evidence & Anti-Framing:
-* A node must never be banned or slashed based on mere claims, hearsay, or gossip.
-* Slashing requires irrefutable proof (`EquivocationProof`): Two genuine Ed25519 signatures of the same node on two divergent payloads for the same slot. Both signatures must be cryptographically verified before any penalty or slashing is triggered.
-
-### 9. 🌊 Streaming Frame Allocation & Cheap-Checks-First:
-* Never allocate frame buffers blindly based on untrusted header lengths (`Vec::with_capacity(wire_len)` is forbidden). Buffers grow incrementally with bounded chunks to fend off OOM attacks.
-* Always run cheap filters (stateless BLAKE3 Hashcash, token bucket, quota limits) **before** expensive asymmetric operations (Ed25519 signature verification/generation, disk lookup).
-* **Stateless Time-Window Hashcash (KISS):** The server stores no PoW challenges in RAM (`issued_challenges` is forbidden). PoW is derived directly from `BLAKE3(len || "HUMOCO_V1_POW_STATELESS" || parent_lock || epoch_slot || nonce)` with a 10-minute time window (0 ms pre-latency).
-* **Time-Based Instead of Event-Based Dampening:** Moving averages (EMA) for rate limiting and load measurement must never decay per transaction/event, but strictly as a function of physically elapsed time $\Delta t_{\text{sec}}$. This prevents high-frequency spammers from artificially accelerating their own dampening.
-* **Adaptive Load Feedback (HTTP 429):** If PoW difficulty is insufficient under load, the gateway responds with `HTTP 429 Too Many Requests` and header `X-Required-Difficulty: <N>`. Computational load is dynamically pushed back to the client ($\Delta \text{Load} \le 0$).
-
-### 10. 🧱 Quota Integrity, Origin-Lock Mandate & Reservation-First:
-* **Origin lock determines validity:** Gateways/clients must not dictate arbitrary TTLs for successor locks. Successor locks derive their `root_valid_until` and Byte-Years accounting strictly from the signed genesis lock of the root. If the origin lock is unknown, the lock is rejected with `400 Bad Request`.
-* **Reservation-First Backpressure:** Never mutate the `RamIndex` before securing asynchronous disk capacity. Reserve with `tx.try_reserve()` before RAM mutation. If the queue is full, the request is rejected immediately (`RejectedCapacity` / `429 Too Many Requests`) without polluting RAM.
-* **Zero State Bloat (No Tombstones):** An expired voucher can never be double-spent, as clients and nodes can mathematically prove and reject its expired `root.valid_until`. Expired locks are purged entirely from RAM and disk; permanent tombstones are forbidden.
-
-### 11. 🧪 Mandatory Adversarial Wire-Level P2P Verification (Ban on Unit-Test-Only Illusion):
-* **No Unit-Test-Only Illusion:** No protocol rule, quota, rate-limit, or security defense is considered complete if it is only verified via in-memory unit tests in `humoco-sim-core` or locally at the HTTP gateway!
-* **Mandatory Adversarial Wire Tests:** Every network invariant (`INV-xxxx`) and server defense MUST have an integration test executing over real QUIC connections in `crates/humoco-node/tests/`:
-  - An over-quota or flood peer MUST be proven to be rejected or dropped by the receiving shard server (`transport.rs`).
-  - Fraudulent or malformed messages MUST trigger the exact specified wire rejection or slashing.
-  - "Green unit tests in core do not prove server protection." Every PR and feature must prove wire-level defense.
-
+1. **⚡ No Blocking I/O or RAM Guards Across Persistence (Durable-before-Vote / DEC-029):**
+   * On the PoS lock path (`POST /v1/lock`), never perform unmanaged blocking disk I/O on the runtime thread. Await the persistence worker's exact durable `redb` commit acknowledgment before releasing any binding signature or response envelope (< 20 ms local durable SLA).
+   * RAM collision checks use atomic CAS ($< 1\,\mu\text{s}$). Reserve queue capacity (`tx.try_reserve()`) before RAM mutation. No RAM guard is held while awaiting persistence.
+   * Background engines (TTL pruning, DB compaction) must never hold locks on the `RamIndex` during a synchronous `fsync` or write operation.
+2. **🕰️ No Unsanitized OS System Time on Consensus Path:**
+   * Never use `std::time::SystemTime::now()` naively for consensus or ingress decisions.
+   * Time windows are validated strictly relative to `root.valid_until` and the decentralized median time derived from F2F neighbors (`P2pClock` / `SimTime` / Spec 07).
+3. **🎯 Strict Idempotency & 409 Collision Semantics:**
+   * Identical lock (`lock_id` equal) on the same parent $\rightarrow$ `200 OK` (Verified).
+   * Diverging lock on the same parent $\rightarrow$ `409 Conflict` (double-spend detected).
+   * New lock $\rightarrow$ `201 Created` with signed `Attestation`.
+4. **🛡️ Panic Freedom in Libraries (Zero unwrap / expect):**
+   * Never use `.unwrap()` or `.expect()` on external network or API input.
+   * No unchecked `.partial_cmp().unwrap()` on floating-point numbers (use `total_cmp` or safe fallbacks).
+   * Propagate all errors cleanly via structured error types (`NodeError`) as `Result<T, E>`.
+5. **🔐 Length-Prefixed BLAKE3 Domain Separation:**
+   * Every hash uses canonical length-prefixed domain tags from `humoco-sim-core::crypto`: `hasher.update(&(tag.len() as u8).to_le_bytes()); hasher.update(tag);` (`HUMOCO_V1_*`).
+6. **🌊 Streaming Frame Allocation, Stateless Hashcash & Reservation-First:**
+   * Never allocate buffers blindly from untrusted header lengths (`Vec::with_capacity(wire_len)` is forbidden).
+   * Run cheap filters (stateless BLAKE3 Hashcash, token bucket, quota limits) before expensive operations (Ed25519 signatures, disk lookup).
+   * **Stateless Hashcash:** No PoW challenges stored in RAM. PoW is derived from `BLAKE3(len || "HUMOCO_V1_POW_STATELESS" || parent_lock || epoch_slot || nonce)` with a 10-minute time window.
+   * **Time-Based EMA:** Moving averages decay strictly as a function of elapsed physical time $\Delta t_{\text{sec}}$, never per event. Under load, gateways push load back via `HTTP 429` with `X-Required-Difficulty: <N>`.
+   * **Origin Lock Determines Validity:** Successor locks derive `root_valid_until` and Byte-Years strictly from the signed genesis lock of the root. Unknown root locks are rejected with `400 Bad Request`.
+7. **🧪 Mandatory Adversarial Wire-Level P2P Verification:**
+   * "Green unit tests in core do not prove server protection." No defense is complete if only verified via in-memory unit tests!
+   * Every network invariant (`INV-xxxx`) and server defense MUST have an integration test executing over real QUIC connections in `crates/humoco-node/tests/`: over-quota peers must be rejected, and malformed frames must trigger wire rejections or slashing.
 
 ---
 
-## 🗺️ 5. Codebase Map & Directory Structure
+## 🗺️ 6. Codebase Map, Specs & Developer Commands
 
 ```text
 human-money-node/
@@ -291,60 +155,30 @@ human-money-node/
 │
 ├── crates/
 │   ├── humoco-sim-core/     # Pure mathematics, state machines, determinism
-│   │   ├── src/
-│   │   │   ├── crypto.rs    # BLAKE3 domain tags, Ed25519, canon resolver min(H_canon)
-│   │   │   ├── storage.rs   # RamIndex (< 1µs CAS), IngressWindow & TTL bucket pruning
-│   │   │   ├── quota.rs     # Byte-Years (Storage-Time Product) & 5x Whale Brake
-│   │   │   ├── resolver.rs  # Deterministic split-brain resolver
-│   │   │   ├── wire.rs      # 32-byte C-aligned WireHeader (INV-1001)
-│   │   │   └── types.rs     # Universal types (LockRecord, SimTime, Attestation)
-│   │   └── tests/           # 17 deterministic specification test suites
+│   │   ├── src/             # crypto, storage (RamIndex), quota, resolver, wire, types
+│   │   └── tests/           # Deterministic specification test suites
 │   │
 │   └── humoco-node/         # Real production daemon
-│       ├── src/
-│       │   ├── config.rs    # humoco.toml configuration engine
-│       │   ├── identity.rs  # Ed25519 NodePubKey, POSIX 0600 & Argon2d HrwRoutingId (shard ticket)
-│       │   ├── daemon.rs    # Tokio runtime & graceful shutdown (CancellationToken)
-│       │   ├── storage/     # redb ACID engine, DualTierEngine & async flush
-│       │   ├── network/     # Quinn QUIC P2P transport, TLS 1.3 & PeerManager
-│       │   ├── ingress/     # 3-tier access control (VIP quota, F2F, BLAKE3 Hashcash PoW)
-│       │   ├── api/         # Axum REST server (/v1/lock, /v1/sync, /metrics)
-│       │   ├── control/     # UNIX Domain Socket IPC for local admin CLI
-│       │   └── cli.rs       # CLI commands: init, keygen, run, status, peers, quota
-│       └── tests/           # Storage, network, API, control & E2E cluster tests
+│       ├── src/             # identity, storage (redb DualTierEngine), network (QUIC Quinn),
+│       │                    # ingress (3-tier), api (Axum REST), control (UNIX socket), cli
+│       └── tests/           # Storage, network, API, control & E2E cluster integration tests
 │
-├── docs/                    # Numbered specification families 00–20 and 99; see INVARIANT_REGISTRY.md
-└── prompts/                 # 17 specialized AI audit prompts (mutation testing, security, etc.)
+├── docs/                    # Numbered specifications 00–20, 99 & INVARIANT_REGISTRY.md
+└── prompts/                 # Specialized AI audit prompts (Phases 0-6)
 ```
 
----
+### On-Demand Specification Index:
+* Detail definitions, proofs, and threat models reside in [`docs/`](docs/):
+  * Architecture & Mental Model: [`00_architektur_und_mental_model.md`](docs/00_architektur_und_mental_model.md)
+  * Sharding & Living-Mesh Routing: [`03_routing_und_sharding.md`](docs/03_routing_und_sharding.md)
+  * Wire Format & Headers: [`10_p2p_wire_format_und_session_framing.md`](docs/10_p2p_wire_format_und_session_framing.md)
+  * Persistence & DualTierEngine: [`12_lock_storage_und_ram_index.md`](docs/12_lock_storage_und_ram_index.md) & [`14_node_persistenz_und_redb_speicher.md`](docs/14_node_persistenz_und_redb_speicher.md)
+  * Invariant Registry: [`INVARIANT_REGISTRY.md`](docs/INVARIANT_REGISTRY.md)
 
-## 🧰 6. Developer Standard Commands
-
+### Developer Standard Test Commands:
 ```bash
-# Tier 1: Fast inner-loop unit/lib tests (< 3s, during development)
-cargo test-fast        # alias for: cargo test --workspace --lib (or: cargo t-fast)
-
-# Tier 2: Standard full workspace test suite (~12-15s, MANDATORY before commit/PR, Rule 11)
-cargo test-std         # alias for: cargo test --workspace (or: cargo t / cargo t-std)
-
-# Tier 3: Deep test suite including long-running cluster simulations
-cargo test-deep        # alias for: cargo test --workspace -- --ignored (or: cargo t-deep)
-
-# Nextest alternatives (if cargo-nextest is installed):
-# cargo nextest run --profile fast
-# cargo nextest run
-# cargo nextest run --profile deep --run-ignored all
-
-# Clippy check with strict warnings
+cargo test-fast        # Fast inner-loop unit/lib tests (< 3s): cargo test --workspace --lib
+cargo test-std         # Standard full workspace integration test suite (~12-15s, MANDATORY)
+cargo test-deep        # Deep test suite including long-running simulations (-- --ignored)
 cargo clippy --workspace --all-targets -- -D warnings
-
-# Initialize and start node
-cargo run -p humoco-node -- init --path ./my-node
-cargo run -p humoco-node -- keygen --out ./my-node/node_key.bin
-cargo run -p humoco-node -- run --config ./my-node/humoco.toml
-
-# Query status and peers via local control socket
-cargo run -p humoco-node -- status
-cargo run -p humoco-node -- peers
 ```

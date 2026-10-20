@@ -1,0 +1,23 @@
+# Nextest configuration for human-money-node workspace
+# See https://nexte.st/book/configuration.html
+
+[profile.default]
+slow-timeout = { period = "10s", terminate-after = 2 }
+
+# Committee wire tests and cluster tests spawn many network sockets and redb instances;
+# group them to limit concurrency and avoid socket/FD starvation.
+[[profile.default.overrides]]
+filter = 'test(committee) | test(quorum_wire) | binary(cluster_e2e_tests) | binary(phase11_wire_level_adversarial_tests)'
+threads-required = 2
+slow-timeout = { period = "30s" }
+
+[profile.fast]
+# Fast profile for rapid inner-loop developer feedback (< 3 seconds)
+# Skips heavy multi-node cluster and adversarial wire suites.
+default-filter = 'not (test(p0_t12) | binary(cluster_e2e_tests) | test(committee) | test(rank21) | test(fourteen_fast_signers) | binary(phase11_wire_level_adversarial_tests))'
+slow-timeout = { period = "5s" }
+
+[profile.deep]
+# Deep profile executes all standard tests plus long-running simulations
+slow-timeout = { period = "60s" }
+run-ignored = "all"

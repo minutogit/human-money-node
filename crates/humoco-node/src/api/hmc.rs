@@ -21,6 +21,7 @@
 //! 5. Client Persistence Boundary: The merchant only needs to persist the received
 //!    Layer-1 Voucher Deed (`ProofChain`) and the local cash-register sale association.
 //!    Hoarding, chaining, or back-filling historical quorum certificates is unnecessary data bloat.
+//!
 //! ============================================================================
 
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};

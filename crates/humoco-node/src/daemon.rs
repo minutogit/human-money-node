@@ -895,6 +895,7 @@ impl NodeDaemon {
 /// schedule pull attempts without continuous random probing of storage keys.
 /// This describes the existing synchronization mechanism, not a completed proof
 /// of membership continuity or recovery signing readiness.
+#[allow(clippy::too_many_arguments)]
 async fn run_shard_digest_pull_sync(
     transport: &crate::network::QuicTransport,
     peer_manager: &crate::network::PeerManager,
@@ -1108,6 +1109,7 @@ async fn run_shard_digest_pull_sync(
 /// Evaluates dominant digest clusters among Top-20 HRW responsible peers,
 /// pulls divergent bucket ranges (with extended TTL scan range), and marks
 /// the shard ready upon successful convergence.
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_single_shard(
     shard_id: u16,
     transport: &crate::network::QuicTransport,

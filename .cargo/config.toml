@@ -1,0 +1,13 @@
+[alias]
+# Fast inner-loop testing for quick developer feedback (< 3 seconds)
+t-fast = "test --workspace --lib"
+test-fast = "test --workspace --lib"
+
+# Standard full test suite (runs all unit, spec, wire & cluster tests)
+t = "test --workspace"
+t-std = "test --workspace"
+test-std = "test --workspace"
+
+# Deep test suite including #[ignore] long-running cluster simulations
+t-deep = "test --workspace -- --ignored"
+test-deep = "test --workspace -- --ignored"

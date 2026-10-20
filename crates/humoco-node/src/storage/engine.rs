@@ -2000,9 +2000,15 @@ impl DualTierEngine {
         }
         let ops_committed = batch.len();
 
+type HmcFlushItem = (
+    String,
+    Box<L2LockEntry>,
+    Option<tokio::sync::oneshot::Sender<Result<(), StorageError>>>,
+);
+
         // Categorize (drains the input vector exactly once, preserving FIFO within type).
         let mut locks: Vec<(LockRecord, u64)> = Vec::new();
-        let mut hmc: Vec<(String, Box<L2LockEntry>, Option<tokio::sync::oneshot::Sender<Result<(), StorageError>>>)> = Vec::new();
+        let mut hmc: Vec<HmcFlushItem> = Vec::new();
         let mut evidences: Vec<([u8; 32], Vec<u8>)> = Vec::new();
         let mut quotas: Vec<([u8; 32], u64)> = Vec::new();
         let mut bans: Vec<([u8; 32], u64)> = Vec::new();

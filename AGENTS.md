@@ -322,8 +322,19 @@ human-money-node/
 ## 🧰 6. Developer Standard Commands
 
 ```bash
-# Test entire workspace (must always be 100% green)
-cargo test --workspace
+# Tier 1: Fast inner-loop unit/lib tests (< 3s, during development)
+cargo test-fast        # alias for: cargo test --workspace --lib (or: cargo t-fast)
+
+# Tier 2: Standard full workspace test suite (~12-15s, MANDATORY before commit/PR, Rule 11)
+cargo test-std         # alias for: cargo test --workspace (or: cargo t / cargo t-std)
+
+# Tier 3: Deep test suite including long-running cluster simulations
+cargo test-deep        # alias for: cargo test --workspace -- --ignored (or: cargo t-deep)
+
+# Nextest alternatives (if cargo-nextest is installed):
+# cargo nextest run --profile fast
+# cargo nextest run
+# cargo nextest run --profile deep --run-ignored all
 
 # Clippy check with strict warnings
 cargo clippy --workspace --all-targets -- -D warnings

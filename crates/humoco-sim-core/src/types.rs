@@ -166,6 +166,7 @@ impl LockStatus {
 ///    and NOT tied to the survival, availability, or continued membership of the nodes
 ///    that originally signed the checkout attestation. Shards synchronize objective state,
 ///    not historical signature bundles.
+///
 /// ============================================================================
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LockRecord {

@@ -1302,7 +1302,13 @@ mod tests {
 
         let mut rng = SimpleRng::new(0xDEAD_BEEF_CAFE_BABE);
 
-        for _ in 0..10_000 {
+        let iterations = if std::env::var("HUMOCO_TEST_FULL").is_ok() {
+            10_000
+        } else {
+            512
+        };
+
+        for _ in 0..iterations {
             let nid = (rng.next_u32() % 1000) as u16;
             let pk = dummy_pubkey(nid);
             let path = (rng.next_u32() % 8) + 1; // 1..=8

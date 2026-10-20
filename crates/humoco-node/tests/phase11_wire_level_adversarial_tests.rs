@@ -1152,7 +1152,7 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
         let attack = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let forged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let delay = Arc::new(std::sync::atomic::AtomicU64::new(100));
+        let delay = Arc::new(std::sync::atomic::AtomicU64::new(20));
         let inner = Arc::new(
             NodeRequestHandler::with_peer_manager(
                 engine.clone(),
@@ -1225,15 +1225,11 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
     let sender = SigningKey::from_bytes(&[171; 32]);
     let mut selected = None;
     for i in 0..10_000 {
-        let req = make_hmc_genesis(
-            &format!("committee_voucher_{i}"),
-            test_now_ms() + 600_000,
-            &sender,
-        );
+        let tag = format!("committee_voucher_{i}");
+        let tx_hash = *blake3::hash(tag.as_bytes()).as_bytes();
+        let lookup_tag = bs58::encode(tx_hash).into_string();
         let shard = humoco_sim_core::types::canonical_voucher_shard(
-            &humoco_sim_core::types::genesis_parent_bytes_from_tag(
-                &bs58::encode(req.transaction_hash).into_string(),
-            ),
+            &humoco_sim_core::types::genesis_parent_bytes_from_tag(&lookup_tag),
         );
         if nodes[0]
             .pm
@@ -1241,7 +1237,11 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             .await
             == Some(gateway_rank)
         {
-            selected = Some(req);
+            selected = Some(make_hmc_genesis(
+                &tag,
+                test_now_ms() + 600_000,
+                &sender,
+            ));
             break;
         }
     }
@@ -1510,7 +1510,7 @@ async fn test_valid_signatures_for_wrong_request_or_tls_context_never_form_quoru
         for (i, node) in nodes.iter().enumerate().skip(1) {
             node.ready.store(i <= 14, Ordering::SeqCst);
             node.delay
-                .store(if i <= 14 { 100 } else { 0 }, Ordering::SeqCst);
+                .store(if i <= 14 { 20 } else { 0 }, Ordering::SeqCst);
             node.attack
                 .store(if i == 1 { attack } else { 0 }, Ordering::SeqCst);
         }

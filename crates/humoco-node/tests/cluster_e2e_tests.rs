@@ -168,19 +168,31 @@ impl TestNode {
         req: &L2LockRequest,
     ) -> Result<(StatusCode, L2ResponseEnvelope), Box<dyn std::error::Error + Send + Sync>> {
         let json_body = serde_json::to_string(req)?;
-        let (status, body) = self
-            .http_request(
-                "POST",
-                "/v1/lock",
-                Some(&json_body),
-                &[
-                    ("Content-Type", "application/json"),
-                    ("X-Peer-Token", "cluster_f2f_token"),
-                ],
-            )
-            .await?;
-        let resp: L2ResponseEnvelope = serde_json::from_slice(&body)?;
-        Ok((status, resp))
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let (status, body) = self
+                .http_request(
+                    "POST",
+                    "/v1/lock",
+                    Some(&json_body),
+                    &[
+                        ("Content-Type", "application/json"),
+                        ("X-Peer-Token", "cluster_f2f_token"),
+                    ],
+                )
+                .await?;
+            let resp: L2ResponseEnvelope = serde_json::from_slice(&body)?;
+            if status == StatusCode::SERVICE_UNAVAILABLE && attempts < 50 {
+                if let L2Verdict::Rejected { ref reason } = resp.verdict {
+                    if reason.contains("FLAG_NOT_READY") {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                        continue;
+                    }
+                }
+            }
+            return Ok((status, resp));
+        }
     }
 
     /// Calls `POST /v1/sync`.
@@ -604,21 +616,11 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
     };
 
     println!("-> Sending Genesis Lock (is_genesis=true)...");
-    let json_body = serde_json::to_string(&genesis_req).unwrap();
-    let (status, body) = node
-        .http_request(
-            "POST",
-            "/v1/lock",
-            Some(&json_body),
-            &[
-                ("Content-Type", "application/json"),
-                ("X-Peer-Token", "cluster_f2f_token"),
-            ],
-        )
+    let (status, envelope) = node
+        .post_lock(&genesis_req)
         .await
         .expect("Failed to reach server");
     assert_eq!(status, StatusCode::CREATED);
-    let envelope: L2ResponseEnvelope = serde_json::from_slice(&body).expect("Failed to parse L2ResponseEnvelope");
     match envelope.verdict {
         L2Verdict::Verified { .. } => println!("   [OK] Genesis Lock verified!"),
         _ => panic!("Expected Verified verdict for genesis!"),
@@ -702,22 +704,12 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         privacy_guard: None,
     };
 
-    let json_body = serde_json::to_string(&ds_req).unwrap();
-    let (status, body) = node
-        .http_request(
-            "POST",
-            "/v1/lock",
-            Some(&json_body),
-            &[
-                ("Content-Type", "application/json"),
-                ("X-Peer-Token", "cluster_f2f_token"),
-            ],
-        )
+    let (status, envelope) = node
+        .post_lock(&ds_req)
         .await
         .expect("Failed to send request");
 
     assert_eq!(status, StatusCode::CONFLICT);
-    let envelope: L2ResponseEnvelope = serde_json::from_slice(&body).expect("Parse error");
     match envelope.verdict {
         L2Verdict::Conflict { existing_lock } => {
             let existing_t_id = existing_lock.t_id;

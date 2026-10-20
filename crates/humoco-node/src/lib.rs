@@ -21,7 +21,7 @@ pub use config::NodeConfig;
 pub use control::{
     parse_account_tag, ControlClient, ControlRequest, ControlResponse, ControlServer, PeerStatusDto,
 };
-pub use daemon::{BoundAddrs, NodeDaemon};
+pub use daemon::{BoundAddrs, NodeDaemon, ShardReadinessManager, ShardStatus};
 pub use error::NodeError;
 pub use identity::NodeIdentity;
 pub use ingress::{IngressError, IngressTier, PowEngine, PowError, TierController};

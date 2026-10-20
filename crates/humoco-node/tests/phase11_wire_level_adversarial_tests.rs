@@ -342,13 +342,16 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
         tier_controller,
         pow_engine,
     );
+    let sender_key = SigningKey::from_bytes(&[11u8; 32]);
     state.peer_manager = Some(pm_gw.clone());
     state.transport = Some(gw_transport.clone());
-    let app = build_router(state);
-
-    let sender_key = SigningKey::from_bytes(&[11u8; 32]);
     let now = test_now_ms();
     let lock_req = make_hmc_genesis(&"cd".repeat(32), now + 900_000, &sender_key);
+    let lookup_tag = bs58::encode(&lock_req.transaction_hash).into_string();
+    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+    state.readiness_manager.mark_shard_ready(shard_id);
+    let app = build_router(state);
 
     let req = Request::builder()
         .method("POST")
@@ -360,9 +363,10 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
     let resp = app.oneshot(req).await.expect("oneshot");
     let status = resp.status();
     let envelope: L2ResponseEnvelope = response_json(resp).await;
+    eprintln!("test_phase11b verdict: {:?}", envelope.verdict);
     assert!(
         status == StatusCode::CREATED || status == StatusCode::OK,
-        "FINAL quorum over wire must yield 200/201, got {status}"
+        "FINAL quorum over wire must yield 200/201, got {status}: {:?}", envelope.verdict
     );
     let cert = envelope
         .quorum_certificate
@@ -1270,6 +1274,10 @@ async fn post_committee_lock(
     );
     state.peer_manager = Some(gw.pm.clone());
     state.transport = Some(gw.transport.clone());
+    let lookup_tag = req.ds_tag.clone().unwrap_or_else(|| bs58::encode(&req.transaction_hash).into_string());
+    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+    state.readiness_manager.mark_shard_ready(shard_id);
     let app = build_router(state);
     let started = std::time::Instant::now();
     let response = app

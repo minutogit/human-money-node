@@ -419,3 +419,145 @@ async fn test_boot_readiness_barrier_http_api_503() {
     let resp_lock2 = router.clone().oneshot(req_lock2).await.unwrap();
     assert_eq!(resp_lock2.status(), StatusCode::BAD_REQUEST, "POST /v1/lock must no longer return 503 once recovery completes");
 }
+
+#[tokio::test]
+async fn test_per_shard_readiness_demand_sync_503() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use ed25519_dalek::{Signer, SigningKey};
+    use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest, L2ResponseEnvelope};
+    use humoco_node::api::{build_router, AppState};
+    use humoco_node::daemon::ShardReadinessManager;
+    use humoco_node::ingress::{PowEngine, TierController};
+    use tower::ServiceExt;
+
+    let temp = tempdir().expect("tempdir");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("per_shard_barrier.redb")).expect("open redb"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+
+    let server_id = NodeIdentity::generate();
+    let pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    let is_sync_ready = Arc::new(AtomicBool::new(true)); // global sync ready
+
+    let handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            server_id.clone(),
+            pm.clone(),
+        )
+        .with_sync_ready(is_sync_ready.clone()),
+    );
+
+    let mut server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm.clone(),
+        handler,
+        CancellationToken::new(),
+    )
+    .expect("bind");
+    server_transport.set_sync_ready_handle(is_sync_ready.clone());
+    server_transport.set_sync_ready(true);
+
+    let pow_engine = Arc::new(PowEngine::new(*server_id.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+    tier_controller.register_f2f_peer("test_f2f_token");
+
+    let readiness_manager = Arc::new(ShardReadinessManager::new());
+    let mut state = AppState::new(
+        engine,
+        storage,
+        server_id,
+        tier_controller,
+        pow_engine,
+    );
+    state.transport = Some(server_transport.clone());
+    state.peer_manager = Some(pm);
+    state.readiness_manager = readiness_manager.clone();
+
+    let router = build_router(state);
+
+    // Create a valid genesis lock
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let sender_key = SigningKey::from_bytes(&[55u8; 32]);
+    let sender_pub = sender_key.verifying_key().to_bytes();
+    let tx_hash = *blake3::hash(b"per_shard_test_parent").as_bytes();
+    let mut req_payload = L2LockRequest {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: "voucher_shard_test_123".into(),
+        ds_tag: None,
+        transaction_hash: tx_hash,
+        is_genesis: true,
+        sender_ephemeral_pub: sender_pub,
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms: now,
+        deletable_at: Some((now + 600_000).to_string()),
+        privacy_guard: None,
+    };
+    let payload_hash = calculate_l2_payload_hash(&req_payload);
+    req_payload.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
+
+    let lookup_tag = bs58::encode(&req_payload.transaction_hash).into_string();
+    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+    let shard_id = humoco_sim_core::types::extract_shard_id(&parent_bytes);
+
+    // 1. Shard is not ready initially
+    assert!(!readiness_manager.is_shard_ready(shard_id));
+
+    // 2. Submitting lock must return 503 Service Unavailable with FLAG_NOT_READY
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_f2f_token")
+        .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+    let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).unwrap();
+    match env.verdict {
+        L2Verdict::Rejected { reason } => {
+            assert!(
+                reason.contains(&format!("FLAG_NOT_READY: Shard {} syncing", shard_id)),
+                "Unexpected reject reason: {reason}"
+            );
+        }
+        other => panic!("Expected Rejected verdict, got {:?}", other),
+    }
+
+    // 3. Demand sync was triggered, so try_trigger_demand_sync returns false (already active)
+    assert!(!readiness_manager.try_trigger_demand_sync(shard_id));
+
+    // 4. Mark shard ready upon convergence
+    readiness_manager.mark_shard_ready(shard_id);
+    assert!(readiness_manager.is_shard_ready(shard_id));
+
+    // 5. Once shard is ready, subsequent lock submission is accepted (201 Created or 200 OK)
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_f2f_token")
+        .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
+        .unwrap();
+    let resp2 = router.oneshot(req2).await.unwrap();
+    assert!(
+        resp2.status() == StatusCode::CREATED || resp2.status() == StatusCode::OK,
+        "Expected CREATED or OK once shard is ready, got {}",
+        resp2.status()
+    );
+}

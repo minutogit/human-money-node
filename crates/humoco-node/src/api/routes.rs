@@ -53,6 +53,7 @@ pub struct AppState {
     pub history_sampler: Arc<crate::api::history::HistorySampler>,
     pub event_log: Arc<crate::api::events::EventLog>,
     pub health_tracker: Arc<crate::api::health::HealthStateTracker>,
+    pub readiness_manager: Arc<crate::daemon::ShardReadinessManager>,
 }
 
 impl AppState {
@@ -87,6 +88,7 @@ impl AppState {
             });
         }
         let health_tracker = Arc::new(crate::api::health::HealthStateTracker::default());
+        let readiness_manager = Arc::new(crate::daemon::ShardReadinessManager::new());
         Self {
             engine,
             storage,
@@ -107,7 +109,16 @@ impl AppState {
             history_sampler,
             event_log,
             health_tracker,
+            readiness_manager,
         }
+    }
+
+    pub fn with_readiness_manager(
+        mut self,
+        readiness_manager: Arc<crate::daemon::ShardReadinessManager>,
+    ) -> Self {
+        self.readiness_manager = readiness_manager;
+        self
     }
 
     pub fn with_health_tracker(
@@ -1740,6 +1751,38 @@ async fn submit_hmc_lock(
         true
     };
 
+    if state.transport.is_some() && is_responsible && !state.readiness_manager.is_shard_ready(shard_id) {
+        if state.readiness_manager.try_trigger_demand_sync(shard_id) {
+            if let (Some(transport), Some(pm)) = (state.transport.clone(), state.peer_manager.clone()) {
+                let engine = state.engine.clone();
+                let storage = state.storage.clone();
+                let identity = state.identity.clone();
+                let rm = state.readiness_manager.clone();
+                tokio::spawn(async move {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    let _ = crate::daemon::sync_single_shard(
+                        shard_id,
+                        &transport,
+                        &pm,
+                        &engine,
+                        &storage,
+                        &identity,
+                        &rm,
+                        &cancel,
+                    )
+                    .await;
+                });
+            }
+        }
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: format!("FLAG_NOT_READY: Shard {} syncing", shard_id),
+            },
+        );
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+    }
+
     // # Architectural Invariant (Rule 9 / A09): Cheap-Checks-First
     // 1. Validate credentials presence in RAM (< 1 µs) BEFORE expensive Ed25519 verification.
     let ttl_seconds = (root_valid_until.saturating_sub(now_ms)) / 1000;
@@ -2388,6 +2431,38 @@ async fn submit_hmc_chain_lock_inner(
     } else {
         true
     };
+
+    if state.transport.is_some() && is_responsible && !state.readiness_manager.is_shard_ready(shard_id) {
+        if state.readiness_manager.try_trigger_demand_sync(shard_id) {
+            if let (Some(transport), Some(pm)) = (state.transport.clone(), state.peer_manager.clone()) {
+                let engine = state.engine.clone();
+                let storage = state.storage.clone();
+                let identity = state.identity.clone();
+                let rm = state.readiness_manager.clone();
+                tokio::spawn(async move {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    let _ = crate::daemon::sync_single_shard(
+                        shard_id,
+                        &transport,
+                        &pm,
+                        &engine,
+                        &storage,
+                        &identity,
+                        &rm,
+                        &cancel,
+                    )
+                    .await;
+                });
+            }
+        }
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: format!("FLAG_NOT_READY: Shard {} syncing", shard_id),
+            },
+        );
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+    }
 
     let (verdict, is_new, quorum_certificate) = if is_responsible {
         // Atomares Ketten-Locking via engine

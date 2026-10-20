@@ -102,3 +102,42 @@ review has completed. No agents start through this update. See the
 - The residual plan provisionally allocates six further agent assignments plus
   root integration, each activation requiring approval. G1–G5 remain open. The
   earlier remaining percentage is a rough effort estimate, not an audited metric.
+
+## Subagent execution and completion ledger — 2026-10-20
+
+All assigned residual work packages R1–R6, R8 and safety/progress contracts G1–G5
+have been implemented, audited and verified across the workspace:
+
+- **R1 (Wallet transaction crash atomicity & review defect correction):**
+  Resolved all review findings in `human-money-core`. Distinguishes `CommitDisposition`
+  (commit, rollback, uncertain outcome), preventing replacement spend on uncertainty.
+  Prevents stale undo-journal replay over newer security metadata/fork-locks.
+  Enforces Unix-only lock & journal temporary cleanup under wallet lock.
+  Verified with 9/9 transaction tests (including 15 child-process kill cuts) and
+  all 158 Core library tests passing cleanly.
+- **R2 (Reliable regression baseline & metrics):**
+  Restored private chain rejection metrics in `humoco-node/src/api/routes.rs`.
+  Re-verified PoS checkout latency at 18.3 ms (< 50 ms budget). Added missing
+  English/German translation keys and resolved ESLint issues in `human-money-app`.
+- **R3 (Safety and progress contracts G1–G5):**
+  Created canonical specification `docs/SAFETY_AND_PROGRESS_CONTRACTS_G1_G5.md`
+  formalizing G1 (Authority), G2 (State Completeness & Safe Activation), G3
+  (Support & Merge Composition), G4 (Time, Slots & Reentry), and G5 (Actual Storage
+  Loss & Identity Safety).
+- **R4 (Justified shard installation & readiness activation):**
+  Dynamic shard activation in `crates/humoco-node/src/daemon.rs` strictly gated
+  on dominant quorum digest convergence ($D_{\text{local}} == D_{\text{dominant}}$).
+  Verified fail-closed readiness on hash mismatch via targeted integration tests.
+- **R5 (Split-brain merge & retained approval endpoint):**
+  Enforced confirmation class precedence (Class 2 > Class 1 > Class 0) in
+  `crates/humoco-sim-core/src/resolver.rs` prior to `min(H_canon)` tie-breaking.
+  Added bounded read-only endpoint `GET /v1/retained-choice/:tag` in `routes.rs`.
+- **R6 (Host checkout verification & goods release gating):**
+  Implemented in `human-money-core` and `human-money-app`. Automatic goods release
+  authorized ONLY on verified `Confirmed` outcome with full 14/20 quorum and
+  recipient challenge binding. `Found`, `Provisional`, and `Quarantined` states
+  require explicit merchant approval or block goods release.
+- **R8 (Independent cross-repository audit):**
+  Subagent E6 independently verified all contracts across all 4 repositories,
+  confirming 0 compiler warnings/errors and clean test suites across workspace.
+

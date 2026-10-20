@@ -759,5 +759,99 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
     let (next_response, next_bytes) = client_transport.send_request(&conn, &next_header, &raw).await.expect("neighboring shard request");
     assert_ne!(next_response.flags & FLAG_NOT_READY, 0, "stable network status does not authorize another unready shard");
     assert!(next_bytes.is_empty());
+}
 
+#[tokio::test]
+async fn test_sync_single_shard_activates_upon_digest_convergence() {
+    let temp_server = tempdir().expect("tempdir");
+    let storage_server = Arc::new(RedbStorage::open(&temp_server.path().join("server.redb")).expect("open redb"));
+    let (engine_server, _worker_server) = DualTierEngine::new(storage_server.clone());
+
+    let server_id = NodeIdentity::generate();
+    let client_id = NodeIdentity::generate();
+    let cancel = CancellationToken::new();
+
+    let pm_server = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*client_id.node_id()],
+    ));
+    let pm_client = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*server_id.node_id()],
+    ));
+
+    let readiness_server = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    let readiness_client = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+
+    let handler_server = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine_server.clone(),
+            storage_server.clone(),
+            server_id.clone(),
+            pm_server.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true)))
+        .with_readiness_manager(readiness_server.clone()),
+    );
+
+    let temp_client = tempdir().expect("tempdir");
+    let storage_client = Arc::new(RedbStorage::open(&temp_client.path().join("client.redb")).expect("open redb"));
+    let (engine_client, _worker_client) = DualTierEngine::new(storage_client.clone());
+
+    let handler_client = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine_client.clone(),
+            storage_client.clone(),
+            client_id.clone(),
+            pm_client.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true)))
+        .with_readiness_manager(readiness_client.clone()),
+    );
+
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm_server.clone(),
+        handler_server,
+        cancel.clone(),
+    )
+    .expect("server bind");
+    let server_addr = server_transport.local_addr().expect("local addr");
+    server_transport.spawn_accept_loop();
+
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        pm_client.clone(),
+        handler_client,
+        cancel.clone(),
+    )
+    .expect("client bind");
+    let client_addr = client_transport.local_addr().expect("client addr");
+    client_transport.spawn_accept_loop();
+
+    pm_client.register_f2f_friend(*server_id.node_id(), Some(server_addr)).await;
+    pm_server.register_f2f_friend(*client_id.node_id(), Some(client_addr)).await;
+
+    pm_client.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), server_addr, 0, None).await;
+    pm_client.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    pm_client.set_first_seen_for_test(client_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+
+    // Both server and client have empty state for shard 42 initially -> matching digest!
+    assert!(!readiness_client.is_shard_ready(42));
+    let ready = humoco_node::daemon::sync_single_shard(
+        42,
+        &client_transport,
+        &pm_client,
+        &engine_client,
+        &storage_client,
+        &client_id,
+        &readiness_client,
+        &cancel,
+    ).await.expect("sync_single_shard");
+
+    assert!(ready, "Convergent dominant digest must activate shard readiness");
+    assert!(readiness_client.is_shard_ready(42));
+    cancel.cancel();
 }

@@ -170,3 +170,60 @@ fn test_split_brain_merge_convergence_20_nodes() {
         );
     }
 }
+
+#[test]
+fn test_split_brain_class_precedence_outranks_lower_min_canon_hash() {
+    use humoco_sim_core::resolver::{resolve_split_brain, ResolutionResult};
+    use humoco_sim_core::types::{LockRecord, LockStatus, SimTime};
+
+    let parent_lock = [0x42; 32];
+    let mut lock_provisional = LockRecord::new(
+        parent_lock,
+        [0x11; 32],
+        b"provisional_nonce".to_vec(),
+        SimTime(0),
+        SimTime(100_000),
+    );
+    lock_provisional.status = LockStatus::Provisional { sigs: 7, required: 7 };
+
+    let mut lock_unconfirmed = LockRecord::new(
+        parent_lock,
+        [0x22; 32],
+        b"unconfirmed_nonce".to_vec(),
+        SimTime(0),
+        SimTime(100_000),
+    );
+    lock_unconfirmed.status = LockStatus::Pending;
+
+    // Even if lock_unconfirmed has a smaller canonical hash,
+    // lock_provisional (Class 1) MUST outrank lock_unconfirmed (Class 0)!
+    let res = resolve_split_brain(&mut lock_provisional, &mut lock_unconfirmed);
+    assert!(matches!(res, ResolutionResult::WinnerA { .. }));
+    assert!(lock_unconfirmed.status.is_void());
+    assert!(lock_provisional.status.is_active());
+
+    // Symmetric check: Final (Class 2) vs Provisional (Class 1)
+    let mut lock_final = LockRecord::new(
+        parent_lock,
+        [0x33; 32],
+        b"final_nonce".to_vec(),
+        SimTime(0),
+        SimTime(100_000),
+    );
+    lock_final.status = LockStatus::Final { sigs: 14 };
+
+    let mut lock_prov2 = LockRecord::new(
+        parent_lock,
+        [0x44; 32],
+        b"prov_nonce".to_vec(),
+        SimTime(0),
+        SimTime(100_000),
+    );
+    lock_prov2.status = LockStatus::Provisional { sigs: 8, required: 8 };
+
+    // Final (Class 2) MUST outrank Provisional (Class 1)
+    let res2 = resolve_split_brain(&mut lock_prov2, &mut lock_final);
+    assert!(matches!(res2, ResolutionResult::WinnerB { .. }));
+    assert!(lock_prov2.status.is_void());
+    assert!(lock_final.status.is_final());
+}

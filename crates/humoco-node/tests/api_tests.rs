@@ -4466,3 +4466,46 @@ async fn test_storage_failure_never_returns_success_for_single_or_chain_ingress(
     let tag=bs58::encode(request.transaction_hash).into_string();
     assert!(engine.get_hmc_ram_lock(&tag).await.is_none());
 }
+
+#[tokio::test]
+async fn test_api_retained_own_choice_read_only_endpoint() {
+    let (app, storage, identity, _tier_controller, _) = setup_test_app();
+    let parent = [88u8; 32];
+    let record = humoco_sim_core::types::LockRecord::new(
+        parent,
+        [99u8; 32],
+        vec![1, 2, 3],
+        humoco_sim_core::types::SimTime(1_000),
+        humoco_sim_core::types::SimTime(600_000),
+    );
+    let tag = hex::encode(parent);
+
+    // 1. Not found initially
+    let response = app.clone().oneshot(
+        Request::builder()
+            .method("GET")
+            .uri(format!("/v1/retained-choice/{tag}"))
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // 2. Commit own approval
+    storage.commit_original_record_approval(&record, 600_000, identity.node_pubkey(), b"sig_prov", 0).unwrap();
+
+    // 3. Now found and truthfully reported without state mutations!
+    let response2 = app.clone().oneshot(
+        Request::builder()
+            .method("GET")
+            .uri(format!("/v1/retained-choice/{tag}"))
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(response2.status(), StatusCode::OK);
+    let body: serde_json::Value = response_json(response2).await;
+    assert_eq!(body["found"], true);
+    assert_eq!(body["child"], hex::encode(record.id));
+    assert_eq!(body["has_provisional"], true);
+    assert_eq!(body["has_final"], false);
+}
+

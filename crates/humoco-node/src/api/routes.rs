@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -214,6 +214,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/v1/node-status", get(public_node_status))
         .route("/v1/verify-current", post(crate::api::live::verify_current))
         .route("/v1/gateways", get(public_gateways))
+        .route("/v1/retained-choice/:tag", get(get_retained_choice))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -228,6 +229,7 @@ pub fn build_operator_router(state: AppState) -> Router {
         .route("/health/ready", get(health_ready))
         .route("/peers", get(get_peers))
         .route("/api/v1/network/peers", get(get_peers))
+        .route("/api/v1/retained-choice/:tag", get(get_retained_choice))
         .route("/dashboard", get(crate::api::dashboard::render_dashboard))
         .route("/dashboard/data", get(crate::api::dashboard::dashboard_data))
         .route("/dashboard/vouchers", get(crate::api::dashboard::dashboard_vouchers))
@@ -2009,7 +2011,15 @@ async fn submit_hmc_lock(
             state.metrics.record_rejected_conflict_409();
             StatusCode::CONFLICT
         }
-        L2Verdict::Rejected { reason } => write_rejection_status(reason),
+        L2Verdict::Rejected { reason } => {
+            let code = write_rejection_status(reason);
+            if code == StatusCode::TOO_MANY_REQUESTS {
+                state.metrics.record_rejected_capacity_429();
+            } else {
+                state.metrics.record_lock_rejected();
+            }
+            code
+        }
         L2Verdict::Verified { .. } if is_new => StatusCode::CREATED,
         L2Verdict::Verified { .. } => StatusCode::OK,
         _ => StatusCode::BAD_REQUEST,
@@ -2129,7 +2139,7 @@ async fn submit_hmc_chain_lock_inner(
     {
         Ok(tier) => tier,
         Err(err) => {
-            let (status, reason) = match err {
+            let (status, reason) = match &err {
                 IngressError::PoWRequired { .. } => (
                     StatusCode::UNAUTHORIZED,
                     "Proof-of-Work challenge response required".into(),
@@ -2156,8 +2166,18 @@ async fn submit_hmc_chain_lock_inner(
                 IngressError::InvalidPeerToken => (StatusCode::UNAUTHORIZED, "Invalid F2F peer token".into()),
                 IngressError::Storage(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Storage error: {}", e)),
             };
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                state.metrics.record_lock_rejected();
+            match &err {
+                IngressError::QuotaExceeded { .. } | IngressError::ReadQuotaExceeded { .. } => {
+                    state.metrics.record_rejected_quota_429();
+                }
+                IngressError::InvalidPoW(..) | IngressError::PoWRequired { .. } => {
+                    state.metrics.record_rejected_bad_pow_400();
+                }
+                _ => {
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        state.metrics.record_rejected_capacity_429();
+                    }
+                }
             }
             let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
             return (status, Json(envelope)).into_response();
@@ -2368,7 +2388,15 @@ async fn submit_hmc_chain_lock_inner(
             state.metrics.record_rejected_conflict_409();
             StatusCode::CONFLICT
         }
-        L2Verdict::Rejected { reason } => write_rejection_status(reason),
+        L2Verdict::Rejected { reason } => {
+            let code = write_rejection_status(reason);
+            if code == StatusCode::TOO_MANY_REQUESTS {
+                state.metrics.record_rejected_capacity_429();
+            } else {
+                state.metrics.record_lock_rejected();
+            }
+            code
+        }
         L2Verdict::Verified { .. } if is_new => StatusCode::CREATED,
         L2Verdict::Verified { .. } => StatusCode::OK,
         _ => StatusCode::BAD_REQUEST,
@@ -2432,7 +2460,53 @@ async fn public_gateways(State(state): State<AppState>) -> Json<serde_json::Valu
     Json(serde_json::json!({"gateways": state.config.discovery.public_gateway_urls}))
 }
 
+/// Bounded read-only retrieval of exact retained own approvals for uncertain originals (R5 / DEC-083/089).
+/// Pure read-only lookup into redb TABLE_OWN_CHOICES; does not mutate state or issue new votes.
+async fn get_retained_choice(
+    State(state): State<AppState>,
+    Path(tag): Path<String>,
+) -> Response {
+    if tag.len() > 128 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "tag too long"}))).into_response();
+    }
+    let node_pub = state.identity.node_pubkey();
+    match state.storage.own_signing_choice(node_pub, &tag) {
+        Ok(Some(choice)) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "found": true,
+                "child": hex::encode(choice.child),
+                "has_provisional": choice.approvals[0].is_some(),
+                "has_final": choice.approvals[1].is_some(),
+            }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "found": false,
+                "reason": "no retained choice for this tag"
+            }))).into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "error": format!("storage error: {e}")
+            }))).into_response()
+        }
+    }
+}
+
 async fn private_hourly_history(State(state): State<AppState>) -> Json<Vec<super::history_retention::HourSummary>> { Json(state.history_sampler.hourly.query()) }
+
+/// Translates existing engine rejection reasons without turning uncertain durable work into success.
+fn write_rejection_status(reason: &str) -> StatusCode {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("backpressure") || reason.contains("congested") {
+        StatusCode::TOO_MANY_REQUESTS
+    } else if reason.contains("durable") || reason.contains("storage signing")
+        || reason.contains("worker unavailable") || reason.contains("chain deadline") {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
 
 #[cfg(test)]
 mod local_capacity_collector_tests {
@@ -2480,18 +2554,5 @@ mod local_capacity_collector_tests {
         cancel.cancel();
         transport.close();
         transport.drain_tasks().await;
-    }
-}
-
-/// Translates existing engine rejection reasons without turning uncertain durable work into success.
-fn write_rejection_status(reason: &str) -> StatusCode {
-    let reason = reason.to_ascii_lowercase();
-    if reason.contains("backpressure") || reason.contains("congested") {
-        StatusCode::TOO_MANY_REQUESTS
-    } else if reason.contains("durable") || reason.contains("storage signing")
-        || reason.contains("worker unavailable") || reason.contains("chain deadline") {
-        StatusCode::SERVICE_UNAVAILABLE
-    } else {
-        StatusCode::BAD_REQUEST
     }
 }

@@ -63,13 +63,18 @@ pub fn resolve_split_brain_canonical(
         None => compute_canonical_hash(&lock_b.parent_lock, &lock_b.receiver_pub, &lock_b.nonce),
     };
 
-    // Finality immunity (INV-0206): A FINAL certified lock (has quorum) is immutable
-    // against unquorated / provisional locks.
-    if lock_a.status.is_final() && !lock_b.status.is_final() {
+    // Confirmation class precedence (DEC-064 / Contract G3 / INV-0206):
+    // Class 2 (Final) > Class 1 (Provisional) > Class 0 (Pending/Unconfirmed)
+    // A lower confirmation class NEVER displaces a higher confirmation class,
+    // regardless of canonical hash value.
+    let class_a = lock_a.status.confirmation_class();
+    let class_b = lock_b.status.confirmation_class();
+
+    if class_a > class_b {
         lock_b.status = LockStatus::Void {
             reason: format!(
-                "Equivocation collision: cannot displace FINAL certified lock {:?}",
-                lock_a.id
+                "Equivocation collision: Class {} lock cannot displace Class {} lock {:?}",
+                class_b, class_a, lock_a.id
             ),
         };
         return ResolutionResult::WinnerA {
@@ -77,11 +82,11 @@ pub fn resolve_split_brain_canonical(
             loser_hash: h_b,
         };
     }
-    if !lock_a.status.is_final() && lock_b.status.is_final() {
+    if class_b > class_a {
         lock_a.status = LockStatus::Void {
             reason: format!(
-                "Equivocation collision: cannot displace FINAL certified lock {:?}",
-                lock_b.id
+                "Equivocation collision: Class {} lock cannot displace Class {} lock {:?}",
+                class_a, class_b, lock_b.id
             ),
         };
         return ResolutionResult::WinnerB {

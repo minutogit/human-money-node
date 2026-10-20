@@ -7,9 +7,13 @@ use tokio_util::sync::CancellationToken;
 async fn public_bind_failure_releases_operator_and_database_in_the_same_runtime() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let occupied_public = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("occupied public port");
-    let operator_reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("operator port reservation");
-    let operator_address = operator_reservation.local_addr().expect("operator address");
-    drop(operator_reservation);
+    let reservation = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, Some(socket2::Protocol::TCP)).expect("reservation socket");
+    reservation.set_reuse_address(true).expect("set reuse_address");
+    #[cfg(unix)]
+    let _ = reservation.set_reuse_port(true);
+    reservation.bind(&"127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap().into()).expect("reservation bind");
+    let operator_address = reservation.local_addr().expect("operator address").as_socket().expect("as_socket");
+    drop(reservation);
     let mut config = NodeConfig::default();
     config.network.rpc_listen_addr = occupied_public.local_addr().expect("public address");
     config.network.p2p_listen_addr = "127.0.0.1:0".parse().expect("QUIC address");
@@ -24,10 +28,12 @@ async fn public_bind_failure_releases_operator_and_database_in_the_same_runtime(
     let result = tokio::time::timeout(Duration::from_secs(5), daemon.run()).await.expect("startup failure must return within its shutdown bound");
     assert!(result.is_err(), "occupied public listener must fail startup");
     assert!(cancel.is_cancelled(), "every startup error cancels the per-run producers");
-    let operator = tokio::net::TcpListener::bind(operator_address).await.expect("operator listener released before run returns");
+    assert!(
+        tokio::net::TcpStream::connect(operator_address).await.is_err(),
+        "operator listener released before run returns"
+    );
     let database = RedbStorage::open(&database_path).expect("all task-held database handles released before run returns");
     drop(database);
-    drop(operator);
     let completion = std::fs::read(config.control_socket_path().with_extension("stop.json")).expect("truthful completion record");
     let completion: serde_json::Value = serde_json::from_slice(&completion).expect("completion JSON");
     assert_eq!(completion["clean"], false, "failed startup must never advertise clean success");

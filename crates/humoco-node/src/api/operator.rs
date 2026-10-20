@@ -18,7 +18,20 @@ pub async fn spawn_operator_listener(
             "operator listener must bind loopback".into(),
         ));
     }
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    let _ = socket.set_reuse_port(true);
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    let listener = tokio::net::TcpListener::from_std(std_listener)?;
     tracing::info!(address = %listener.local_addr()?, "Private operator HTTP listener bound");
     let app = crate::api::routes::build_operator_router(state);
     let token = cancel;

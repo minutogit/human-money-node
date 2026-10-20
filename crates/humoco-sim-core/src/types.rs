@@ -141,6 +141,15 @@ impl LockStatus {
     pub fn is_void(&self) -> bool {
         matches!(self, LockStatus::Void { .. })
     }
+
+    /// Returns the DEC-064 / G3 confirmation class (Class 2 > Class 1 > Class 0).
+    pub fn confirmation_class(&self) -> u8 {
+        match self {
+            LockStatus::Final { .. } => 2,
+            LockStatus::Provisional { .. } => 1,
+            _ => 0,
+        }
+    }
 }
 
 /// The universal lock entry in HuMoCo Layer-2.

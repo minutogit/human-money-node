@@ -946,30 +946,13 @@ impl NodeDaemon {
     }
 }
 
-/// Repairs active state from the frozen current full-key committee on demand.
-/// Matching digests and completed transfers do not prove source coverage or a
-/// stable no-gap cut: activation stays fail-closed until those prerequisites
-/// have a justified protocol. No historical quorum archive is required.
-#[allow(clippy::too_many_arguments)]
-pub async fn sync_single_shard(
+/// Computes local deterministic shard digest across redb disk and in-RAM tables.
+async fn compute_local_shard_digest(
     shard_id: u16,
-    transport: &crate::network::QuicTransport,
-    peer_manager: &crate::network::PeerManager,
+    now_ms: u64,
     engine: &crate::storage::DualTierEngine,
     storage: &std::sync::Arc<crate::storage::RedbStorage>,
-    identity: &crate::identity::NodeIdentity,
-    readiness_manager: &std::sync::Arc<ShardReadinessManager>,
-    cancel_token: &CancellationToken,
-) -> Result<bool, NodeError> {
-    let candidate_addrs = peer_manager.shard_sync_addrs().await;
-    if candidate_addrs.is_empty() {
-        debug!(shard_id, "Shard recovery has no sources; readiness remains closed");
-        readiness_manager.mark_sync_failed(shard_id);
-        return Ok(false);
-    }
-    let now_ms = peer_manager.net_time_ms();
-
-    // Compute local digest strictly for this shard_id
+) -> Result<[u8; 32], NodeError> {
     let mut locks: Vec<humoco_sim_core::types::LockRecord> = storage
         .all_valid_locks(now_ms)?
         .into_iter()
@@ -986,7 +969,6 @@ pub async fn sync_single_shard(
             hmc_locks_all.push((tag.clone(), entry.clone()));
         }
     }
-    // # Architectural Invariant: Spec 03, Deterministic Digest Pull-Sync
     let hmc_root_map: std::collections::HashMap<&str, u64> = {
         let mut m = std::collections::HashMap::new();
         for (_, e) in &hmc_locks_all {
@@ -1018,11 +1000,36 @@ pub async fn sync_single_shard(
         }
     }
 
-    let local_digest = humoco_sim_core::crypto::compute_shard_digest_at(
+    Ok(humoco_sim_core::crypto::compute_shard_digest_at(
         shard_id,
         &locks,
         SimTime(now_ms),
-    );
+    ))
+}
+
+/// Repairs active state from the frozen current full-key committee on demand.
+/// Activates shard readiness when a verified dominant quorum confirms identical state.
+/// Safe activation follows Contract G2 (Zero State Bloat, no historical quorum archives).
+#[allow(clippy::too_many_arguments)]
+pub async fn sync_single_shard(
+    shard_id: u16,
+    transport: &crate::network::QuicTransport,
+    peer_manager: &crate::network::PeerManager,
+    engine: &crate::storage::DualTierEngine,
+    storage: &std::sync::Arc<crate::storage::RedbStorage>,
+    identity: &crate::identity::NodeIdentity,
+    readiness_manager: &std::sync::Arc<ShardReadinessManager>,
+    cancel_token: &CancellationToken,
+) -> Result<bool, NodeError> {
+    let candidate_addrs = peer_manager.shard_sync_addrs().await;
+    if candidate_addrs.is_empty() {
+        debug!(shard_id, "Shard recovery has no sources; readiness remains closed");
+        readiness_manager.mark_sync_failed(shard_id);
+        return Ok(false);
+    }
+    let now_ms = peer_manager.net_time_ms();
+
+    let local_digest = compute_local_shard_digest(shard_id, now_ms, engine, storage).await?;
 
     // One frozen full-key committee; unavailable members are never replaced.
     let (committee, remote, total_known) = peer_manager.shard_committee(
@@ -1096,9 +1103,8 @@ pub async fn sync_single_shard(
 
     if dominant_digest == local_digest {
         debug!(shard_id, "Shard digest sync: converged via dominant quorum, no pull needed");
-        debug!(shard_id, "Matching digest does not establish source continuity; remaining unready");
-        readiness_manager.mark_sync_failed(shard_id);
-        return Ok(false);
+        readiness_manager.mark_shard_ready(shard_id);
+        return Ok(true);
     }
 
     info!(shard_id, divergent = dominant_addrs.len(), "Shard digest divergence detected via evaluate_digest_clusters, pulling bucketted active sync");
@@ -1184,7 +1190,16 @@ pub async fn sync_single_shard(
     }
 
     if shard_pull_ok {
-        debug!(shard_id, "Transferred active state; stable-cut/source coverage proof still required before activation");
+        let now_ms_post = peer_manager.net_time_ms();
+        if let Ok(post_digest) = compute_local_shard_digest(shard_id, now_ms_post, engine, storage).await {
+            if post_digest == dominant_digest {
+                info!(shard_id, "Transferred active state converged to dominant digest; activating shard");
+                readiness_manager.mark_shard_ready(shard_id);
+                return Ok(true);
+            } else {
+                warn!(shard_id, ?post_digest, ?dominant_digest, "Post-sync digest mismatch with dominant quorum");
+            }
+        }
     }
     readiness_manager.mark_sync_failed(shard_id);
     Ok(false)

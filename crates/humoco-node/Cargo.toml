@@ -53,6 +53,7 @@ cuckoofilter = "0.5"
 mimalloc = { version = "0.1", default-features = false }
 zeroize = "1.8"
 tempfile = "3.10"
+socket2 = "0.6"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

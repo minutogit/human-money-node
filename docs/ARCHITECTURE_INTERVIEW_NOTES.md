@@ -172,6 +172,18 @@ current-authority, transfer/activation, merge, clock/reentry and actual-loss pro
 gates remain open. No human question is pending. Next technical continuation is
 G2/S3.4a source coverage, subject to G1; no new policy is selected by the plan.
 
+CP-0093 / §7.108 adds the user-requested read-only implementation audit, based on
+current source rather than stale “pending” labels. The complete89-decision map
+and15 grouped remaining work streams are in [the implementation audit](ARCHITECTURE_IMPLEMENTATION_AUDIT.md).
+Important current building blocks exist, but productive verifier wiring, all-path
+durability/readiness, source coverage, class-aware merge and operational boundaries
+remain incomplete. No new architecture decision, code edit or executed test result.
+
+CP-0094 / §7.109 expands the audited backlog into a detailed implementation plan
+with direct links to this file's DEC source entries, concrete steps/code targets,
+acceptance and staged dependencies. No new policy/decision or implementation is
+selected by that planning breakdown; G1–G5 remain explicit prerequisites.
+
 Unless explicitly evidenced otherwise, design details and implementation/verification
 of interview changes remain pending. Constraints in the direction column and the
 open-item register below are part of each record, not optional caveats.
@@ -10775,3 +10787,164 @@ Resume technical source-coverage work from §7.107 rather than re-asking settled
 requirements. Production/code/test work and commits remain outside this mandate.
 
 Completed checkpoint: **CP-0092**.
+
+
+### 7.108 Read-only implementation audit and remaining-work plan
+
+Date: 2026-10-20. User steering: inspect whether interview decisions are already
+implemented, explicitly use subagents, and provide the remaining implementation
+list/plan. This authorizes inspection and planning, not production fixes. No new
+preference question or DEC-090 is created. Three subagents inspected live/consumer,
+recovery/membership and storage/operations; the root reconciled overlaps and
+independently read critical call paths.
+
+Delivered [ARCHITECTURE_IMPLEMENTATION_AUDIT.md](ARCHITECTURE_IMPLEMENTATION_AUDIT.md):
+all89 decision IDs, current status, concrete source locations, remaining work,
+15 grouped prioritized work streams with acceptance and G1–G5 dependencies.
+No percentage or full-production security completion is inferred from the map.
+
+Source baseline: node HEAD51347f6e5ef0a4753ce7c86781c3dbb079b6be7c, clean at start;
+proto HEAD7d3dea75bba2c6e54a2ceda46dbf5044c84fde8a, clean; HMC
+HEADb9bbdf795e9f0e282e70d94713fc9e0edd1a6259 plus pre-existing modified working
+files (notably l2_gateway.rs/layer2_api.rs). Report records key SHA-256 source
+fingerprints. Findings describe those working files, not a claim about HEAD alone.
+
+Concrete observed gaps, not just missing tests:
+- Shared humoco-proto and a real full-key Ed25519 verifier exist. Productive HMC
+  evaluate_quorum_certificate still calls statistical verify_quorum_plausibility;
+  application outcomes collapse local/provisional/final to Confirmed. Helpers and
+  helper tests do not establish productive recipient proof verification.
+- Status uses original approval domains without fresh recipient challenge;
+  status-self and QUIC paths do not consistently enforce current per-shard safe
+  readiness/committee. A minority collision can preempt a collected valid14.
+- New HMC requests can await durable commit, but identical pending requests skip
+  is_new and its acknowledgment. DB transactions contain no separate immutable own
+  original-choice record. DEC-087 is partial; ordinary durable ordering is selected,
+  but no all-path crash claim is justified by existing postcommit worker-abort test.
+- Demand recovery exists, but no-source/failed-source flows publish READY, imports
+  may be ignored, search omits unknown older live roots, mutable offset pages lack
+  fixed snapshot/no-gap deltas and complete durable-install verification. Shard
+  quorum digests count enumerated indices, not fully qualified authenticated votes.
+- Committee selection admits connected unknown peers with Pubkey as routing ticket
+  and ignores passive presence; other paths retain2h freshness/RPC suspension.
+  HMC sync merge uses unsupported minhash rather than full admitted class ordering.
+- Chain engine retains all-or-nothing behavior despite selected valid-prefix rule.
+- Bounded channels/basic semaphores exist; recovery triggers/detached sends, batch
+  bytes/waiters and protected shard/sync budgets remain incomplete. Opposite lock
+  acquisition order in readiness manager is a static deadlock risk, not an observed
+  runtime hang. All-role5s QUIC keepalive/outgoing connection cache do not implement
+  the selected role-specific bounded idle-first shard pool.
+- Diagnostic GETs/metrics/peer aliases remain on the public router; directory URLs
+  are synthesized from P2P addresses rather than explicit HTTP advertisements.
+  Stop CLI checks socket disappearance while teardown lacks an absolute internal
+  deadline and verified process/DB release. TTL work is not bounded in chunks;
+  minute history exists but persistent hourly year aggregates do not.
+
+Scope correction: HMC request generation delegates retries/dispatch to host/Tauri
+applications. The actual host durable-intent, client cache/provider credentials,
+merchant journal and goods-release boundary were not inspected. DEC-071/072/079
+are external-unverified here, not proven absent globally; no duplicate wallet
+journal should be invented before inspecting that boundary. DEC-010 has direct
+write generation; no global preflight violation is asserted. DEC-069 exceptional
+retrieval remains distinct from mandatory original-signer/archive clearance.
+
+Priority/dependency result: A01 productive cryptographic proof; A02 uniform safe
+readiness; A03 atomic own-choice/ack and persistent-store failure gate; A04 full
+verified transfer; A05 eligible ticket/presence selection; A06 supported class merge
+and quorum/conflict precedence. A07–A13 cover bounded resources/batches/client
+integration/privacy/stop/discovery/expiry+history; A14 requires actual-path wire,
+consumer and real-process evidence alongside each implementation; A15 covers
+bounded exceptional approval retrieval and retiring obsolete paths. Independent
+privacy work may proceed alongside consensus prerequisites. Unselected/reopened/
+superseded mechanisms are not implementation tickets. G1–G5, parked Q-S3.3-01 and
+stopped broad trust research retain their earlier status.
+
+Inspection/validation: source/call sites/test assertions read; no tests, builds,
+benchmarks, production writes or commits. Existing tests are candidates with
+explicit limits: manual readiness flags, postcommit worker abort and helper-only
+signature tests are not end-to-end evidence. Final static checks passed:89 unique decision rows,15 work streams,169 existing
+source/document line references, balanced code fences, matching CP-0093 and120-line
+state. `git diff --check` passed; git status shows only audit/notes/state changes
+and node HEAD remains51347f6. These checks do not convert the findings into
+executed attack/latency/crash results.
+
+### CP-0093 — Deliver implementation audit and prioritized remaining work
+
+89 existing decisions mapped to current code/documentary/external/design status;
+15 remaining work streams with source evidence and acceptance saved. No new
+architecture decision or pending human question. Requested read-only code audit
+completed; source and runtime tests untouched. Next implementation selection can
+start from A01–A06 and their explicit G1–G5 dependencies, with independent A10
+privacy work; no settled interview package needs repeating.
+
+Completed checkpoint: **CP-0093**.
+
+
+### 7.109 Detailed implementation plan with decision-source traceability
+
+Date: 2026-10-20. User request: create a more detailed plan for remaining
+implementation, make the work unambiguous, and explicitly reference the decision
+source file in the plan. This is a planning deliverable; no new DEC or A/B choice.
+
+Delivered [ARCHITECTURE_IMPLEMENTATION_PLAN.md](ARCHITECTURE_IMPLEMENTATION_PLAN.md),
+retaining audit work IDs A01–A15. The plan names this file,
+`docs/ARCHITECTURE_INTERVIEW_NOTES.md`, §2.1 and linked §7 rationale as the primary
+decision source, with direct per-package DEC anchors. The audit remains the
+89-decision source-status/fingerprint crosswalk; the new artifact is a concrete
+execution/acceptance breakdown rather than a duplicate decision register or live
+handoff.
+
+Contents: five work waves W0–W4; explicit G1–G5 design outputs and counterexamples;
+contract/storage/installation/support/client milestones C1–C5 avoiding circular
+whole-package dependencies;15 packages each with priority, DEC source links,
+affected files, concrete ordered implementation steps, positive/adversarial
+actual-interface acceptance, and dependencies/completion gates. A14 test evidence
+starts with each fix, not as a final simulation-only campaign. A13 separates P1
+bounded expiry from P2 year-history; A09 first locates the actual host application
+instead of assuming its wallet persistence/cache/journal absent. A15 remains
+bounded exceptional own-approval retrieval with no historical quorum archive.
+
+The plan preserves all selected limits and supersessions: original own-choice
+atomic durable release DEC-087 versus historical DEC-062 early response; separate
+purpose-bound current live proof/no departed-signer dependency DEC-083/084; cheap
+ordinary read1, frozen<=20/14/800ms, demand/per-shard fail-closed recovery, full
+rootTTL+30s, class-first merge, private diagnostics and client-only cache/commercial
+logic. Existing shared proto/safe parsers/collectors/deployment artifacts are
+reused. Exact unselected formats, G2 algorithm and numeric tuning remain concrete
+engineering/proof deliverables, not silently selected new protocol policies.
+
+Baseline check: all10 recorded SHA-256 source fingerprints from the implementation
+audit matched current files before planning. Source revisions/findings are not
+otherwise re-audited or treated as passing execution. The new file and audit
+navigation pointer, notes and compact state are the only intended edits.
+Validation is static:15 package IDs,136 direct DEC-source anchors,148 final relative/anchor links,80 source/test
+file references, matching10 audit source fingerprints,89 unchanged decisions,
+120-line state and matching CP-0094 passed.
+`git diff --check` passed. No production changes, specification changes, commits,
+builds, runtime tests or proof-closure claim.
+Concurrent AGENTS.md simplification and deletion of .agents prompt/rule files
+appeared during planning; preserved without editing/reverting them. Re-read the
+new AGENTS.md and inspected .cargo/config.toml: plan future checks now explicitly
+name cargo test-fast/test-std/test-deep and strict Clippy, with standard integration
+mandatory and deep scenarios conditional. No such command was run here.
+
+### CP-0094 — Save detailed implementation plan
+
+Recorded user-directed plan expansion without a new decision.89 decisions remain;
+15 stable packages have concrete source-linked steps, target files, dependencies
+and acceptance tests. Open G1–G5 and external-host inspection remain explicit.
+No pending human question. Planning work delivered; no implementation performed.
+
+Completed checkpoint: **CP-0094**.
+
+
+### 7.110 Implementation execution handoff — CP-0095
+
+The maintainer authorized implementation with subagents and a final Git commit,
+then requested continuation. This lifts the former interview-only scope for
+this implementation task; it creates no new architecture decision. See
+[the execution record](ARCHITECTURE_IMPLEMENTATION_PROGRESS.md) for package-level
+implementation, actual tests, remaining proof obligations, full-suite failures
+and the confirmed per-shard readiness clarification. The plan and 89-decision
+register remain the requirement sources. This checkpoint is not a claim that
+all packages, safe turnover, host integration or release acceptance are complete.

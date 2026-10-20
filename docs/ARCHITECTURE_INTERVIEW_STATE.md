@@ -1,8 +1,9 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-20 (Europe/Berlin). Checkpoint: **CP-0092**.
-Mode: DEC-089 DB5 consolidation completed (§7.107); next technical focus S3.4a/G2 source coverage, with G1 authority assumptions.
+Updated: 2026-10-20 (Europe/Berlin). Checkpoint: **CP-0095**.
+Mode: authorized implementation in progress (§7.110); 89 decisions; see execution record for code, tests and unresolved G1–G5 gates.
 Workflow: [start/resume prompt](../prompts/architecture_interview.md); important choices: two options+recommendation; short derived batches require sign-off (WF-006).
+Agent workflow: maintainer confirmation before every further agent assignment; current residual work and provisional six-assignment order are in [the remaining plan](ARCHITECTURE_IMPLEMENTATION_REMAINING_PLAN.md).
 Details: [notes](ARCHITECTURE_INTERVIEW_NOTES.md); [legacy handoff](ARCHITECTURE_INTERVIEW_HANDOFF.md).
 Register: [89 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
 [alternatives](ARCHITECTURE_INTERVIEW_NOTES.md#22-alternatives-refinements-and-superseded-proposals),
@@ -10,7 +11,7 @@ Register: [89 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
 [record/spec gaps](ARCHITECTURE_INTERVIEW_NOTES.md#24-record-gaps-and-pending-specification-consolidation).
 
 ## Resume cursor
-- Active technical cursor: **S3.4a/G2 source continuity** after completed F1.1 consolidation (§7.107). DEC-089 answers DB5 yes; no pending human question.
+- Active cursor: **implementation in progress**, user authorized production/test changes, subagents and final commit. See [execution record](ARCHITECTURE_IMPLEMENTATION_PROGRESS.md). Maintainer confirmed network-size-only FINAL hysteresis and mandatory readiness per signing shard after an initial automatic approval-review rejection. No pending approval question. No new decision ID.
 - **DEC-083** withdraws Q-C4-ACTIVE-PROOF-CONTINUITY-01, neither A/B: no old-quorum archive; old signers leaving alone cannot make synchronized state unconfirmed.
 - **DEC-085 / §7.99**: Q-S3-RECOVERY-TRIGGER-01 answered A; on-demand recovery, no proactive assignment sweep or payment queue.14 timely valid votes still required; NOT_READY consumes existing six-member headroom.
 - **DEC-084 / §7.97**: DB2 five-item summary / DB2-01–08 accepted in full. C4.3b requirements selected; authority/coverage/crash proof and implementation remain pending.
@@ -27,7 +28,7 @@ Register: [89 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#
 - Broad trust research stays stopped; [separate prompt](../prompts/trust_network_blind_spot_research.md) requires explicit invocation. Operator belief is not a fault bound.
 - **DEC-060 / §7.66**: exact-payload/T_0 conditional three-send refines DEC-027; §7.33 historical. QUIC/correlated loss,800ms/cancellation,quotas/background bounds require composition.
 - Read first: DEC-053/054 **7.57–7.58**, [P0 draft0.2](PARTITION_RESILIENT_REGISTRY_P0.md), [results](P0_SIMULATION_RESULTS.md), [work plan v0.4](CEH_SECURITY_CLOSURE_WORK_PLAN.md).
-  Next on continuation: investigate G2 coverage/activation under explicit G1 authority premises;8+6+6 and empty-new-source counterexamples. No archive/predecessor veto or second payment round selected. Consolidation result is documentary, not a proved final buildable design.
+  Next on implementation request: follow plan W0/W1 and C1–C5 milestones; A14 tests accompany each fix, A10 privacy independently. Full activation needs G1–G5; no settled questions, new payment round or archive prerequisite.
 
 ## Constraints and settled requirements to retain
 - German conversation; English repository documents. Apply `AGENTS.md` and glossary.
@@ -79,7 +80,7 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 │   │   ├── S3.2 [finding] Copy alone insufficient; safe old-write cutoff unresolved
 │   │   ├── S3.3 [unresolved] Conditional handoff model run; Q-S3.3-01 parked; §7.40 / §7.34
 │   │   └── S3.4 [decided] No empty-state recovery; mandatory P2P sync gate; DEC-057
-│   │       └── S3.4a [partial; active G2] Quorum verified digest-pull selected; source coverage unproved; DEC-058/§7.107
+│   │       └── S3.4a [partial; G2 proof retained] Quorum verified digest-pull selected; source coverage unproved; DEC-058/§7.107
 │   │           ├── S3.4a.1 [decided] Snapshot+bounded deltas / DEC-059; exact buffer/cursor contract pending
 │   │           ├── S3.4a.2 [decided] Direct sync/projection; no extra corrections/versions; DEC-061
 │   │           ├── S3.4a.3 [partial] Wallet T_0 selected; concurrent code alignment unverified; §7.68
@@ -108,7 +109,7 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 │   │   └── O5.1/2/2a [decided] Private metrics/public discovery/client-only cache fallback DEC-077–079; delivery pending
 │   └── O6 [decided] Bounded metric history / direct diagnostics; aggregation details pending
 └── F1 [partial] Documentary reconciliation complete §7.107; final justified buildable design depends on G1–G5
-    └── F1.1 [complete] DEC-089:25 files/22 families,115 owned rules+2 retired undefined references; acceptance map saved
+    └── F1.1 [complete] DEC-089 consolidation+registry; F1.2/3 [complete]89-decision audit+15-package detailed source-linked plan §7.108–7.109
 ```
 
 ## Evidence and coverage gaps
@@ -116,5 +117,5 @@ HuMoCo architecture/security interview [in progress; prior decisions retained]
 - F1 §7.107: [result](ARCHITECTURE_CONSOLIDATION.md), [registry](INVARIANT_REGISTRY.md):115 owned definitions/topics+2 undefined retired references. G1 authority/G2 coverage+activation/G3 merge/G4 clocks+reentry/G5 actual loss remain; counts are not proof.
 - **7.44** witnesses concern old global finality; DEC-053 regional proof pending. Concurrent created_at_ms/hash/bucket edits require fresh audit; do not repeat field-absent claim (§7.68).
 - DEC-055/056 require passive-profile integration; P0 probe tests do not verify three-miss enforcement.
-- §7.95: static status-signing path lacks write sync-ready gate; source fingerprints recorded, concurrent production edits preserved. Planned QUIC/HTTP/core checks unexecuted. Nonce/signatures do not prove recovery coverage; no archive prerequisite.
-- Latest checkpoint: **CP-0092 / §7.107**;89 decisions. Static document checks pass; no interview production edits, runtime tests or commits. Concurrent implementation/test edits preserved and unverified.
+- §7.108 audit at node51347f6 + proto7d3dea7 + dirty HMCb9bbdf7: productive verifier, pending-ack/own-choice, READY/transfer, class/presence, privacy/stop gaps. Host wallet/PoS unverified; no runtime tests executed.
+- Latest checkpoint: **CP-0095 / §7.110**; 89 decisions. Production changes in node/proto/core; targeted evidence and full-suite failures recorded separately. Final integration/commit pending; unrelated user edits preserved.

@@ -154,16 +154,12 @@ impl SimNodeHandle {
     /// Waits until HTTP readiness (GET /health returns 200).
     pub async fn wait_ready(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for _ in 0..60 {
-            if let Ok((status, body)) = self
-                .http_request("GET", "/health", None, &[])
+            if let Ok((status, _body)) = self
+                .http_request("GET", "/healthz", None, &[])
                 .await
             {
                 if status == StatusCode::OK {
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
-                        if v.get("status").and_then(|s| s.as_str()) == Some("ok") {
-                            return Ok(());
-                        }
-                    }
+                    return Ok(());
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

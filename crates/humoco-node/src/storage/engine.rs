@@ -80,6 +80,23 @@ impl HmcRamIndex {
         }
     }
 
+    /// Removes a lock by lookup tag.
+    pub fn remove_lock(&mut self, tag: &str) -> Option<L2LockEntry> {
+        let entry = self.locks.remove(tag)?;
+        if let Some(vtags) = self.vouchers.get_mut(&entry.layer2_voucher_id) {
+            vtags.remove(tag);
+            if vtags.is_empty() {
+                self.vouchers.remove(&entry.layer2_voucher_id);
+                self.voucher_roots.remove(&entry.layer2_voucher_id);
+                self.voucher_genesis_parents.remove(&entry.layer2_voucher_id);
+            }
+        }
+        self.durable_entries.remove(tag);
+        self.valid_until.remove(tag);
+        self.filter.delete(tag);
+        Some(entry)
+    }
+
     pub fn insert_or_check(
         &mut self,
         lookup_tag: String,
@@ -2185,6 +2202,57 @@ type HmcFlushItem = (
             .map_err(|error| StorageError::DurableCommitFailed(format!("Prune worker failed: {error}")))??;
         self.last_prune_anchor.store(now.0, std::sync::atomic::Ordering::Relaxed);
         Ok(ram_pruned + hmc_pruned + disk_pruned.len() + disk_hmc_pruned)
+    }
+
+    /// Quarantines unconfirmed local minority locks for a shard that are missing from
+    /// the dominant quorum state (Spec 08, Pillar 4, DEC-064).
+    ///
+    /// Atomically removes displaced locks from disk and in-memory RamIndex / HmcRamIndex,
+    /// placing them into provisional storage so they cannot poison the active shard digest.
+    pub async fn quarantine_subquorum_locks(
+        &self,
+        shard_id: u16,
+        keep_native_parents: &std::collections::HashSet<[u8; 32]>,
+        keep_hmc_tags: &std::collections::HashSet<String>,
+    ) -> Result<(Vec<[u8; 32]>, Vec<String>), StorageError> {
+        let (q_native, q_hmc) = self.db.quarantine_subquorum_locks(
+            shard_id,
+            keep_native_parents,
+            keep_hmc_tags,
+        )?;
+
+        // Remove from in-memory RamIndex
+        {
+            let mut ram = self.ram.write().await;
+            let mut to_remove = Vec::new();
+            for (rec, _) in ram.all_locks() {
+                let sid = u16::from_be_bytes([rec.parent_lock[0], rec.parent_lock[1]]);
+                if sid == shard_id && !keep_native_parents.contains(&rec.parent_lock) {
+                    to_remove.push(rec.parent_lock);
+                }
+            }
+            for p in to_remove {
+                ram.remove(&p);
+            }
+        }
+
+        // Remove from in-memory HmcRamIndex
+        {
+            let mut hmc_ram = self.hmc_ram.write().await;
+            let mut to_remove = Vec::new();
+            for tag in hmc_ram.locks.keys() {
+                let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+                let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+                if sid == shard_id && !keep_hmc_tags.contains(tag) {
+                    to_remove.push(tag.clone());
+                }
+            }
+            for tag in to_remove {
+                hmc_ram.remove_lock(&tag);
+            }
+        }
+
+        Ok((q_native, q_hmc))
     }
 }
 

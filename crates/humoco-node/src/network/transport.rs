@@ -1235,11 +1235,12 @@ impl RequestHandler for NodeRequestHandler {
                         let Some(valid_until_ms) = valid_until_ms else {
                             continue;
                         };
+                        let created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
                         locks.push(humoco_sim_core::types::LockRecord::new(
                             parent_bytes,
                             entry.sender_ephemeral_pub,
                             entry.t_id.to_vec(),
-                            humoco_sim_core::types::SimTime(0),
+                            humoco_sim_core::types::SimTime(created_at_ms),
                             humoco_sim_core::types::SimTime(valid_until_ms),
                         ));
                     }

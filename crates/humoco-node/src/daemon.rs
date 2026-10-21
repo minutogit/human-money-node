@@ -1111,6 +1111,8 @@ pub async fn sync_single_shard(
 
     // 5-Minuten Bucket Shard Sync (docs/PLAN_BUCKETED_SHARD_SYNC.md & DEC-085/DEC-086):
     let mut shard_pull_ok = false;
+    let mut synced_native_parents: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut synced_hmc_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for addr in dominant_addrs {
         if cancel_token.is_cancelled() {
@@ -1129,6 +1131,9 @@ pub async fn sync_single_shard(
         let buckets_to_sync = [None];
 
         let mut peer_pull_ok = true;
+        let mut cur_peer_native = std::collections::HashSet::new();
+        let mut cur_peer_hmc = std::collections::HashSet::new();
+
         for target_b in buckets_to_sync {
             let mut cursor: u64 = 0;
             let limit: usize = 500;
@@ -1157,6 +1162,10 @@ pub async fn sync_single_shard(
 
                 for (rec, root_valid) in page_res.payload.locks {
                     if cancel_token.is_cancelled() { break; }
+                    let sid = u16::from_be_bytes([rec.parent_lock[0], rec.parent_lock[1]]);
+                    if sid == shard_id {
+                        cur_peer_native.insert(rec.parent_lock);
+                    }
                     if engine.ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync).await.is_err() {
                         peer_pull_ok = false;
                         break;
@@ -1164,6 +1173,11 @@ pub async fn sync_single_shard(
                 }
                 for (tag, entry) in page_res.payload.hmc_locks {
                     if cancel_token.is_cancelled() { break; }
+                    let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+                    let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+                    if sid == shard_id {
+                        cur_peer_hmc.insert(tag.clone());
+                    }
                     let (verdict, _) = engine.ingress_hmc_lock_durable(tag, entry, IngressOrigin::PartitionSync, None, None, None, None).await;
                     if !matches!(verdict, crate::api::hmc::L2Verdict::Verified { .. }) {
                         peer_pull_ok = false;
@@ -1184,12 +1198,19 @@ pub async fn sync_single_shard(
         }
 
         if peer_pull_ok {
+            synced_native_parents = cur_peer_native;
+            synced_hmc_tags = cur_peer_hmc;
             shard_pull_ok = true;
             break;
         }
     }
 
     if shard_pull_ok {
+        // Quarantine any local unconfirmed minority locks for this shard that do NOT belong to the dominant quorum
+        if let Err(e) = engine.quarantine_subquorum_locks(shard_id, &synced_native_parents, &synced_hmc_tags).await {
+            warn!(shard_id, error=%e, "Failed to quarantine subquorum locks");
+        }
+
         let now_ms_post = peer_manager.net_time_ms();
         if let Ok(post_digest) = compute_local_shard_digest(shard_id, now_ms_post, engine, storage).await {
             if post_digest == dominant_digest {

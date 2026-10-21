@@ -63,6 +63,7 @@ impl From<redb::CommitError> for StorageError {
 
 pub const TABLE_LOCKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("locks");
 pub const TABLE_PROVISIONAL_LOCKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("provisional_locks");
+pub const TABLE_PROVISIONAL_HMC_LOCKS: TableDefinition<&str, &[u8]> = TableDefinition::new("provisional_hmc_locks");
 pub const TABLE_TTL_INDEX: TableDefinition<(u64, &[u8; 32]), ()> = TableDefinition::new("ttl_index");
 pub const TABLE_SLASHING_EVIDENCE: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("slashing_evidence");
 pub const TABLE_QUOTA_ACCOUNTS: TableDefinition<&[u8; 32], u64> = TableDefinition::new("quota_accounts");
@@ -111,6 +112,7 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_OWN_CHOICE_TTL)?;
             let _ = write_txn.open_table(TABLE_LOCKS)?;
             let _ = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
+            let _ = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             let _ = write_txn.open_table(TABLE_TTL_INDEX)?;
             let _ = write_txn.open_table(TABLE_SLASHING_EVIDENCE)?;
             let _ = write_txn.open_table(TABLE_QUOTA_ACCOUNTS)?;
@@ -247,6 +249,9 @@ impl RedbStorage {
         {
             let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
             table_locks.insert(&lock.parent_lock, value_bytes.as_slice())?;
+
+            let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
+            let _ = table_prov_locks.remove(&lock.parent_lock);
 
             let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
             table_ttl.insert(&(bucket_sec, &lock.parent_lock), ())?;
@@ -521,6 +526,115 @@ impl RedbStorage {
         Ok(results)
     }
 
+    /// Quarantines unconfirmed local minority locks for a shard that are missing from
+    /// the dominant quorum state (Spec 08, Pillar 4, DEC-064).
+    ///
+    /// Moves native locks from TABLE_LOCKS to TABLE_PROVISIONAL_LOCKS and HMC locks from
+    /// TABLE_HMC_LOCKS to TABLE_PROVISIONAL_HMC_LOCKS, preventing minority state from poisoning
+    /// the active shard digest while preserving recoverable state and own-choice integrity.
+    pub fn quarantine_subquorum_locks(
+        &self,
+        shard_id: u16,
+        keep_native_parents: &std::collections::HashSet<[u8; 32]>,
+        keep_hmc_tags: &std::collections::HashSet<String>,
+    ) -> Result<(Vec<[u8; 32]>, Vec<String>), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        let mut quarantined_native = Vec::new();
+        let mut quarantined_hmc = Vec::new();
+        {
+            let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
+            let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
+            let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
+
+            let mut to_remove_native = Vec::new();
+            for item in table_locks.iter()? {
+                let (k_guard, v_guard) = match item {
+                    Ok(g) => g,
+                    Err(err) => {
+                        warn!("Corrupt entry in TABLE_LOCKS iterator during quarantine: {}", err);
+                        continue;
+                    }
+                };
+                let parent: [u8; 32] = *k_guard.value();
+                let sid = u16::from_be_bytes([parent[0], parent[1]]);
+                if sid == shard_id && !keep_native_parents.contains(&parent) {
+                    to_remove_native.push((parent, v_guard.value().to_vec()));
+                }
+            }
+
+            for (parent, val_bytes) in to_remove_native {
+                table_locks.remove(&parent)?;
+                table_prov_locks.insert(&parent, val_bytes.as_slice())?;
+                if let Ok((_record, root_valid_until)) = bincode::deserialize::<(LockRecord, u64)>(&val_bytes) {
+                    let bucket_sec = root_valid_until.saturating_add(30_000) / 1_000;
+                    let _ = table_ttl.remove(&(bucket_sec, &parent));
+                }
+                quarantined_native.push(parent);
+            }
+
+            let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
+            let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
+            let mut table_hmc_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
+            let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+
+            let mut to_remove_hmc = Vec::new();
+            for item in table_hmc.iter()? {
+                let (k_guard, v_guard) = match item {
+                    Ok(g) => g,
+                    Err(err) => {
+                        warn!("Corrupt entry in TABLE_HMC_LOCKS iterator during quarantine: {}", err);
+                        continue;
+                    }
+                };
+                let tag = k_guard.value().to_string();
+                let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+                let sid = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+                if sid == shard_id && !keep_hmc_tags.contains(&tag) {
+                    to_remove_hmc.push((tag, v_guard.value().to_vec()));
+                }
+            }
+
+            for (tag, val_bytes) in to_remove_hmc {
+                table_hmc.remove(tag.as_str())?;
+                table_prov_hmc.insert(tag.as_str(), val_bytes.as_slice())?;
+                if let Ok(entry) = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&val_bytes) {
+                    let _ = table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()));
+                    if let Some(valid_until_ms) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                        let bucket_sec = valid_until_ms.saturating_add(30_000) / 1_000;
+                        let _ = table_hmc_ttl.remove(&(bucket_sec, tag.as_str()));
+                    }
+                }
+                quarantined_hmc.push(tag);
+            }
+        }
+        write_txn.commit()?;
+        Ok((quarantined_native, quarantined_hmc))
+    }
+
+    /// Retrieves a provisional (quarantined) native lock record by its parent_lock hash.
+    pub fn get_provisional_lock(&self, parent_lock: &[u8; 32]) -> Result<Option<(LockRecord, u64)>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table_prov = read_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
+        if let Some(guard) = table_prov.get(parent_lock)? {
+            let (record, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+            Ok(Some((record, root_valid_until)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Retrieves a provisional (quarantined) HMC lock entry by its lookup tag.
+    pub fn get_provisional_hmc_lock(&self, lookup_tag: &str) -> Result<Option<crate::api::hmc::L2LockEntry>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table_prov = read_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
+        if let Some(guard) = table_prov.get(lookup_tag)? {
+            let entry: crate::api::hmc::L2LockEntry = serde_json::from_slice(guard.value())?;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Stores an HMC lock entry and updates the voucher index and TTL index.
     pub fn put_hmc_lock(&self, lookup_tag: &str, entry: &crate::api::hmc::L2LockEntry) -> Result<(), StorageError> {
         let val_bytes = serde_json::to_vec(entry)?;
@@ -560,6 +674,9 @@ impl RedbStorage {
         {
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
             table_hmc.insert(lookup_tag, val_bytes.as_slice())?;
+
+            let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
+            let _ = table_prov_hmc.remove(lookup_tag);
 
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
             table_vidx.insert((entry.layer2_voucher_id.as_str(), lookup_tag), ())?;
@@ -842,6 +959,14 @@ impl RedbStorage {
             for item in src_prov_locks.iter()? {
                 let (k, v) = item?;
                 dst_prov_locks.insert(k.value(), v.value())?;
+            }
+
+            // 1c. TABLE_PROVISIONAL_HMC_LOCKS
+            let src_prov_hmc = read_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
+            let mut dst_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
+            for item in src_prov_hmc.iter()? {
+                let (k, v) = item?;
+                dst_prov_hmc.insert(k.value(), v.value())?;
             }
 
             // 2. TABLE_TTL_INDEX

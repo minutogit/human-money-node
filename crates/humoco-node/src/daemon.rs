@@ -1021,6 +1021,14 @@ pub async fn sync_single_shard(
     readiness_manager: &std::sync::Arc<ShardReadinessManager>,
     cancel_token: &CancellationToken,
 ) -> Result<bool, NodeError> {
+    // DEC-057/F05: a degraded signing or storage state must never activate readiness.
+    if !engine.is_signing_healthy()
+        || !readiness_manager.storage_healthy.load(std::sync::atomic::Ordering::Acquire)
+    {
+        debug!(shard_id, "Shard recovery skipped: signing or storage unhealthy");
+        readiness_manager.mark_sync_failed(shard_id);
+        return Ok(false);
+    }
     let candidate_addrs = peer_manager.shard_sync_addrs().await;
     if candidate_addrs.is_empty() {
         debug!(shard_id, "Shard recovery has no sources; readiness remains closed");
@@ -1035,6 +1043,13 @@ pub async fn sync_single_shard(
     let (committee, remote, total_known) = peer_manager.shard_committee(
         *identity.node_pubkey(), *identity.hrw_routing_id(), shard_id,
     ).await;
+    // DEC-057/F05: never activate readiness for a shard we do not sit in.
+    let self_in_committee = committee.iter().any(|member| member.node_pubkey == *identity.node_pubkey());
+    if !self_in_committee {
+        debug!(shard_id, "Shard recovery skipped: self not in frozen shard committee");
+        readiness_manager.mark_sync_failed(shard_id);
+        return Ok(false);
+    }
     let mut peer_digests: Vec<([u8; 32], [u8; 32], SocketAddr)> = Vec::new();
     let mut seen_identities = std::collections::HashSet::new();
     let mut seq: u64 = 1;
@@ -1096,12 +1111,25 @@ pub async fn sync_single_shard(
             groups.entry(digest).or_default().push(addr);
         }
     }
-    let Some((dominant_digest, dominant_addrs)) = groups.into_iter().find(|(_, addresses)| addresses.len() >= needed && needed > 0) else {
+    let Some((dominant_digest, dominant_addrs)) = groups.into_iter().find(|(digest, addresses)| {
+        let count = addresses.len() + if self_in_committee && *digest == local_digest { 1 } else { 0 };
+        count >= needed && needed > 0
+    }) else {
         readiness_manager.mark_sync_failed(shard_id);
         return Ok(false);
     };
 
     if dominant_digest == local_digest {
+        // DEC-057/F05: convergence alone is insufficient — re-verify both
+        // activation guards before marking readiness.
+        if !committee.iter().any(|member| member.node_pubkey == *identity.node_pubkey())
+            || !engine.is_signing_healthy()
+            || !readiness_manager.storage_healthy.load(std::sync::atomic::Ordering::Acquire)
+        {
+            warn!(shard_id, "Digest converged but activation guards failed; refusing readiness");
+            readiness_manager.mark_sync_failed(shard_id);
+            return Ok(false);
+        }
         debug!(shard_id, "Shard digest sync: converged via dominant quorum, no pull needed");
         readiness_manager.mark_shard_ready(shard_id);
         return Ok(true);
@@ -1133,6 +1161,8 @@ pub async fn sync_single_shard(
         let mut peer_pull_ok = true;
         let mut cur_peer_native = std::collections::HashSet::new();
         let mut cur_peer_hmc = std::collections::HashSet::new();
+        let mut staged_native = Vec::new();
+        let mut staged_hmc = Vec::new();
 
         for target_b in buckets_to_sync {
             let mut cursor: u64 = 0;
@@ -1158,7 +1188,6 @@ pub async fn sync_single_shard(
                     }
                 };
                 seq = seq.wrapping_add(1);
-                let now_ms2 = peer_manager.net_time_ms();
 
                 for (rec, root_valid) in page_res.payload.locks {
                     if cancel_token.is_cancelled() { break; }
@@ -1166,10 +1195,7 @@ pub async fn sync_single_shard(
                     if sid == shard_id {
                         cur_peer_native.insert(rec.parent_lock);
                     }
-                    if engine.ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync).await.is_err() {
-                        peer_pull_ok = false;
-                        break;
-                    }
+                    staged_native.push((rec, root_valid));
                 }
                 for (tag, entry) in page_res.payload.hmc_locks {
                     if cancel_token.is_cancelled() { break; }
@@ -1178,11 +1204,7 @@ pub async fn sync_single_shard(
                     if sid == shard_id {
                         cur_peer_hmc.insert(tag.clone());
                     }
-                    let (verdict, _) = engine.ingress_hmc_lock_durable(tag, entry, IngressOrigin::PartitionSync, None, None, None, None).await;
-                    if !matches!(verdict, crate::api::hmc::L2Verdict::Verified { .. }) {
-                        peer_pull_ok = false;
-                        break;
-                    }
+                    staged_hmc.push((tag, entry));
                 }
 
                 if !peer_pull_ok || cancel_token.is_cancelled() { peer_pull_ok = false; break; }
@@ -1197,18 +1219,57 @@ pub async fn sync_single_shard(
             }
         }
 
-        if peer_pull_ok {
-            synced_native_parents = cur_peer_native;
-            synced_hmc_tags = cur_peer_hmc;
-            shard_pull_ok = true;
-            break;
+        // DEC-059/F07 Staged validation: only commit transferred records to productive
+        // engine and redb after the entire snapshot stream from this peer has arrived intact.
+        if peer_pull_ok && !cancel_token.is_cancelled() {
+            let now_ms2 = peer_manager.net_time_ms();
+            let mut apply_ok = true;
+            for (rec, root_valid) in staged_native {
+                if cancel_token.is_cancelled() { apply_ok = false; break; }
+                if engine.ingress_lock_with_origin(rec, SimTime(now_ms2), SimTime(root_valid), IngressOrigin::PartitionSync).await.is_err() {
+                    apply_ok = false;
+                    break;
+                }
+            }
+            if apply_ok {
+                for (tag, entry) in staged_hmc {
+                    if cancel_token.is_cancelled() { apply_ok = false; break; }
+                    let (verdict, _) = engine.ingress_hmc_lock_durable(tag, entry, IngressOrigin::PartitionSync, None, None, None, None).await;
+                    if !matches!(verdict, crate::api::hmc::L2Verdict::Verified { .. }) {
+                        apply_ok = false;
+                        break;
+                    }
+                }
+            }
+            if apply_ok {
+                synced_native_parents = cur_peer_native;
+                synced_hmc_tags = cur_peer_hmc;
+                shard_pull_ok = true;
+                break;
+            }
         }
     }
 
     if shard_pull_ok {
-        // Quarantine any local unconfirmed minority locks for this shard that do NOT belong to the dominant quorum
+        // DEC-057/F05: quarantine failure is a sync failure — must never activate.
         if let Err(e) = engine.quarantine_subquorum_locks(shard_id, &synced_native_parents, &synced_hmc_tags).await {
-            warn!(shard_id, error=%e, "Failed to quarantine subquorum locks");
+            warn!(shard_id, error=%e, "Failed to quarantine subquorum locks; aborting shard activation");
+            readiness_manager.mark_sync_failed(shard_id);
+            return Ok(false);
+        }
+
+        // DEC-057/F05: re-verify live committee membership and signing health
+        // after the pull; the mesh may have shifted while state was transferred.
+        let (committee_post, _, _) = peer_manager.shard_committee(
+            *identity.node_pubkey(), *identity.hrw_routing_id(), shard_id,
+        ).await;
+        if !committee_post.iter().any(|member| member.node_pubkey == *identity.node_pubkey())
+            || !engine.is_signing_healthy()
+            || !readiness_manager.storage_healthy.load(std::sync::atomic::Ordering::Acquire)
+        {
+            warn!(shard_id, "Post-pull guard tripped: not in committee or unhealthy signing; refusing readiness");
+            readiness_manager.mark_sync_failed(shard_id);
+            return Ok(false);
         }
 
         let now_ms_post = peer_manager.net_time_ms();

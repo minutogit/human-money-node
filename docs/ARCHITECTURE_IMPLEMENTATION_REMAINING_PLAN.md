@@ -1,5 +1,12 @@
 # Remaining implementation and acceptance plan
 
+Historical residual snapshot. The subsequent
+[complete implementation handoff plan](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md)
+dated 2026-10-21 reconciles newer commits and the full read-only audit. In
+particular, the wallet transaction proposal has since been integrated, while
+new release/readiness/quarantine regressions remain. Its six-assignment estimate
+is provisional history, not authorization or a fixed current queue.
+
 Date: 2026-10-20. Basis: CP-0095, current working trees and completed independent
 wallet patch review. Status: **planning; implementation incomplete**.
 

@@ -1853,8 +1853,14 @@ pub async fn execute_stop(
         return Ok(());
     }
 
-    let client = ControlClient::new(socket_path);
+    let client = ControlClient::new(socket_path.clone());
     client.shutdown(timeout).await?;
+
+    // DEC-076: the daemon's own completion marker proves a clean shutdown and
+    // process termination. The control socket file must additionally be gone
+    // before a successful exit, otherwise the daemon could still hold its
+    // resources (including the redb file lock) while the CLI reports success.
+    wait_for_socket_release(&socket_path, std::time::Duration::from_secs(timeout.max(1))).await?;
 
     if json {
         let out = serde_json::json!({
@@ -1864,6 +1870,27 @@ pub async fn execute_stop(
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
         println!("[✓] Node daemon stopped successfully.");
+    }
+    Ok(())
+}
+
+/// Polls until the control socket file is unlinked, proving the terminated
+/// daemon released it. A surviving socket file fails the stop with a nonzero
+/// exit instead of claiming a completed shutdown.
+async fn wait_for_socket_release(
+    socket_path: &Path,
+    budget: std::time::Duration,
+) -> Result<(), NodeError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    while std::fs::symlink_metadata(socket_path).is_ok() {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(NodeError::Daemon(format!(
+                "Timed out after {}s waiting for control socket '{}' to be released",
+                budget.as_secs(),
+                socket_path.display()
+            )));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     Ok(())
 }
@@ -2715,5 +2742,35 @@ mod tests {
         assert!(storage.is_node_banned(&pubkey).expect("check ban"));
         let banned = storage.all_banned_nodes().expect("banned");
         assert!(banned.contains(&pubkey));
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_control_socket_release() {
+        let temp = tempdir().expect("tempdir");
+        let socket_path = temp.path().join("humoco.sock");
+        std::fs::write(&socket_path, b"").expect("create socket placeholder");
+
+        let remover = socket_path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let _ = std::fs::remove_file(&remover);
+        });
+
+        wait_for_socket_release(&socket_path, std::time::Duration::from_secs(2))
+            .await
+            .expect("socket released");
+        assert!(!socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn stop_fails_when_control_socket_survives_the_budget() {
+        let temp = tempdir().expect("tempdir");
+        let socket_path = temp.path().join("humoco.sock");
+        std::fs::write(&socket_path, b"").expect("create socket placeholder");
+
+        let err = wait_for_socket_release(&socket_path, std::time::Duration::from_millis(50))
+            .await
+            .expect_err("surviving socket must fail the stop");
+        assert!(err.to_string().contains("to be released"), "{err}");
     }
 }

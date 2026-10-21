@@ -75,6 +75,26 @@ pub struct DiscoveryConfig {
     pub bootstrap_gateways: Vec<String>,
 }
 
+/// Maximum number of gateway candidates published through the public directory.
+pub const MAX_PUBLIC_GATEWAY_ENTRIES: usize = 32;
+
+/// Returns true when a gateway URL may be published on a public endpoint:
+/// bounded length, plain HTTP(S), and free of credentials, query or fragment.
+pub fn is_publishable_gateway_url(raw: &str) -> bool {
+    if raw.is_empty() || raw.len() > 2048 {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertConfig {
     #[serde(default)]
@@ -406,9 +426,7 @@ impl NodeConfig {
             return Err(NodeError::Daemon("at most 16 public HTTP gateway advertisements are allowed".into()));
         }
         for raw in &self.discovery.public_gateway_urls {
-            let url = reqwest::Url::parse(raw).map_err(|_| NodeError::Daemon("invalid public HTTP gateway URL".into()))?;
-            if raw.len() > 2048 || !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
-                || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+            if !is_publishable_gateway_url(raw) {
                 return Err(NodeError::Daemon("gateway URL must be bounded HTTP(S) without credentials, query or fragment".into()));
             }
         }

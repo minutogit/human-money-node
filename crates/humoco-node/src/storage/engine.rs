@@ -24,6 +24,8 @@ pub enum IngressOrigin {
 pub struct HmcRamIndex {
     /// lookup_tag -> L2LockEntry
     pub locks: HashMap<String, L2LockEntry>,
+    /// lookup_tag -> confirmation class (0 = Unconfirmed, 1 = Provisional, 2 = Final)
+    pub confirmation_classes: HashMap<String, u8>,
     /// layer2_voucher_id -> Set of lookup_tags
     pub vouchers: HashMap<String, HashSet<String>>,
     /// layer2_voucher_id -> root valid_until timestamp in ms
@@ -93,8 +95,34 @@ impl HmcRamIndex {
         }
         self.durable_entries.remove(tag);
         self.valid_until.remove(tag);
+        self.confirmation_classes.remove(tag);
         self.filter.delete(tag);
         Some(entry)
+    }
+
+    /// Sets the confirmation class of an existing lock entry.
+    pub fn set_confirmation_class(&mut self, tag: &str, class: u8) {
+        if self.locks.contains_key(tag) {
+            self.confirmation_classes.insert(tag.to_string(), class);
+        }
+    }
+
+    /// Promotes the confirmation class of the exact committed entry after a
+    /// durable original approval (DEC-029 / DEC-064): a durable class-1
+    /// approval upgrades the entry to Class 2 (Final), a durable class-0
+    /// approval upgrades it to Class 1 (Provisional).
+    ///
+    /// A late acknowledgment can never authorize a different RAM version:
+    /// if the lookup tag was replaced by another winner, the stale promotion
+    /// is ignored entirely.
+    pub fn promote_confirmation_class(&mut self, tag: &str, entry: &L2LockEntry, class: u8) {
+        if self.locks.get(tag).is_some_and(|current| current == entry) {
+            self.confirmation_classes.insert(tag.to_string(), class.saturating_add(1));
+        }
+    }
+
+    pub fn get_confirmation_class(&self, tag: &str) -> u8 {
+        self.confirmation_classes.get(tag).copied().unwrap_or(0)
     }
 
     pub fn insert_or_check(
@@ -103,6 +131,17 @@ impl HmcRamIndex {
         entry: L2LockEntry,
         origin: IngressOrigin,
         now_ms: Option<u64>,
+    ) -> (L2Verdict, bool) {
+        self.insert_or_check_with_class(lookup_tag, entry, origin, now_ms, 0)
+    }
+
+    pub fn insert_or_check_with_class(
+        &mut self,
+        lookup_tag: String,
+        entry: L2LockEntry,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+        incoming_class: u8,
     ) -> (L2Verdict, bool) {
         let root_valid = self.voucher_roots.get(&entry.layer2_voucher_id).copied();
         let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string()
@@ -182,8 +221,13 @@ impl HmcRamIndex {
                 (L2Verdict::Conflict { existing_lock: existing.clone() }, false)
             } else {
                 // Conflict on same lookup_tag with existing.t_id != entry.t_id!
-                // Deterministic split-brain healing via min(H_canon):
-                // H_canon = BLAKE3("HUMOCO_V1_CANON_RESOLVER" || parent_bytes || sender_ephemeral_pub || t_id)
+                // Confirmation class precedence (DEC-022, DEC-064 / Contract G3 / INV-0206):
+                // Class 2 (Final) > Class 1 (Provisional) > Class 0 (Pending/Unconfirmed)
+                // A lower confirmation class NEVER displaces a higher confirmation class,
+                // regardless of canonical hash value.
+                let class_existing = self.confirmation_classes.get(&lookup_tag).copied().unwrap_or(0);
+                let class_new = incoming_class;
+
                 let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
                 let h_existing = compute_hmc_canonical_hash(
                     &parent_bytes,
@@ -196,7 +240,18 @@ impl HmcRamIndex {
                     &entry.t_id,
                 );
 
-                if h_new < h_existing {
+                let should_replace = if class_new > class_existing {
+                    // DEC-064: Higher confirmation class strictly displaces lower class
+                    true
+                } else if class_new < class_existing {
+                    // DEC-022 / DEC-064: Lower confirmation class CAN NEVER displace higher class
+                    false
+                } else {
+                    // Equal confirmation class: deterministic tie-breaker via min(H_canon)
+                    h_new < h_existing
+                };
+
+                if should_replace {
                     // WinnerB: Incoming lock won! Atomically replace loser in RAM-Index
                     let prune_threshold_ms = valid_until_ms.saturating_add(30_000);
                     let bucket_sec = prune_threshold_ms / 1_000;
@@ -217,6 +272,7 @@ impl HmcRamIndex {
                         .or_default()
                         .insert(lookup_tag.clone());
                     self.durable_entries.remove(&lookup_tag);
+                    self.confirmation_classes.insert(lookup_tag.clone(), class_new);
                     self.locks.insert(lookup_tag.clone(), entry.clone());
                     self.filter.add(&lookup_tag);
                     (L2Verdict::Verified { lock_entry: entry }, true)
@@ -245,6 +301,7 @@ impl HmcRamIndex {
                 .or_default()
                 .insert(lookup_tag.clone());
             self.durable_entries.remove(&lookup_tag);
+            self.confirmation_classes.insert(lookup_tag.clone(), incoming_class);
             self.locks.insert(lookup_tag.clone(), entry.clone());
             self.filter.add(&lookup_tag);
             (L2Verdict::Verified { lock_entry: entry }, true)
@@ -667,10 +724,17 @@ impl DualTierEngine {
         let key = *blake3::hash(&bincode::serialize(&("original-hmc", &node, &tag, &entry.t_id, class))?).as_bytes();
         let committed_tag = tag.clone();
         let committed_entry = entry.clone();
-        let result = self.wait_original_approval(key, |complete| FlushOp::OriginalHmcApproval {
+        let result =         self.wait_original_approval(key, |complete| FlushOp::OriginalHmcApproval {
             tag, entry: Box::new(entry), node, approval, class, root, complete, health: self.stats.clone(),
         }).await?;
-        self.hmc_ram.write().await.mark_exact_durable(&committed_tag, &committed_entry, root);
+        {
+            let mut hmc = self.hmc_ram.write().await;
+            hmc.mark_exact_durable(&committed_tag, &committed_entry, root);
+            // Durable-before-Vote (DEC-029): once the original approval committed, the
+            // RAM entry is promoted (class 1 approval -> Class 2 Final, class 0 -> Class 1
+            // Provisional). Never touches an entry displaced by a later winner.
+            hmc.promote_confirmation_class(&committed_tag, &committed_entry, class);
+        }
         Ok(result)
     }
 
@@ -923,6 +987,17 @@ impl DualTierEngine {
             .await
     }
 
+    /// Ingress an HMC lock entry on the hot path (< 1µs in RAM) with an explicit
+    /// confirmation class (DEC-022 / DEC-064) and default ClientApi origin.
+    pub async fn ingress_hmc_lock_with_class(
+        &self,
+        lookup_tag: String,
+        entry: L2LockEntry,
+        confirmation_class: u8,
+    ) -> (L2Verdict, bool) {
+        self.ingress_hmc_lock_internal(lookup_tag, entry, IngressOrigin::ClientApi, None, None, Some(0), None, false, confirmation_class).await
+    }
+
     /// Ingress an HMC lock entry on the hot path (< 1µs in RAM) with an explicit IngressOrigin and queue an async flush operation if newly accepted.
     pub async fn ingress_hmc_lock_with_origin(
         &self,
@@ -951,7 +1026,7 @@ impl DualTierEngine {
         byte_years: Option<u64>,
         voucher_id: Option<String>,
     ) -> (L2Verdict, bool) {
-        self.ingress_hmc_lock_internal(lookup_tag, entry, origin, now_ms, tier, byte_years, voucher_id, false).await
+        self.ingress_hmc_lock_internal(lookup_tag, entry, origin, now_ms, tier, byte_years, voucher_id, false, 0).await
     }
 
     /// Ingress an HMC lock entry on the hot path with strict "Durable-before-Vote" (DEC-029 restoration).
@@ -967,7 +1042,7 @@ impl DualTierEngine {
         byte_years: Option<u64>,
         voucher_id: Option<String>,
     ) -> (L2Verdict, bool) {
-        self.ingress_hmc_lock_internal(lookup_tag, entry, origin, now_ms, tier, byte_years, voucher_id, true).await
+        self.ingress_hmc_lock_internal(lookup_tag, entry, origin, now_ms, tier, byte_years, voucher_id, true, 0).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -981,6 +1056,7 @@ impl DualTierEngine {
         byte_years: Option<u64>,
         voucher_id: Option<String>,
         durable: bool,
+        confirmation_class: u8,
     ) -> (L2Verdict, bool) {
         if !self.is_signing_healthy() {
             return (L2Verdict::Rejected { reason: "Storage signing unavailable".into() }, false);
@@ -1019,7 +1095,9 @@ impl DualTierEngine {
             } else {
                 None
             };
-            let (verdict, is_new) = hmc.insert_or_check(lookup_tag.clone(), entry.clone(), origin, now_ms);
+            let (verdict, is_new) = hmc.insert_or_check_with_class(
+                lookup_tag.clone(), entry.clone(), origin, now_ms, confirmation_class,
+            );
             (verdict, is_new, equivocation)
         };
 
@@ -1268,7 +1346,7 @@ impl DualTierEngine {
                 else { hop.ds_tag.clone().unwrap_or_default() };
             let entry = L2LockEntry::from(hop);
             let result = tokio::time::timeout_at(deadline, self.ingress_hmc_lock_internal(
-                tag, entry, origin, now_ms, tier, byte_years, Some(chain_req.layer2_voucher_id.clone()), durable,
+                tag, entry, origin, now_ms, tier, byte_years, Some(chain_req.layer2_voucher_id.clone()), durable, 0,
             )).await;
             let (verdict, is_new) = match result {
                 Ok(value) => value,
@@ -2351,6 +2429,215 @@ mod exact_hmc_durability_tests {
         assert!(!engine.hmc_ram.read().await.is_entry_durable(&tag, &a, 50_000));
         engine.persist_original_approval(tag.clone(), a.clone(), [8; 32], b"original".to_vec(), 0, 1_000).await.unwrap();
         assert!(engine.hmc_ram.read().await.is_entry_durable(&tag, &a, 50_000));
+        cancel.cancel();
+        worker.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod confirmation_class_precedence_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    const VOUCHER: &str = "class-precedence-voucher";
+    const COLLIDE_TAG: &str = "class-collide-tag";
+    const ROOT_TTL_MS: u64 = 50_000;
+
+    /// Genesis-shaped entry (`lookup_tag == bs58(t_id)`) anchoring the immutable
+    /// voucher root TTL so colliding spend entries at a shared parent tag can be
+    /// resolved via min(H_canon) on the PartitionSync path.
+    fn anchor_genesis(index: &mut HmcRamIndex) {
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let mut genesis = L2LockEntry {
+            layer2_voucher_id: VOUCHER.into(),
+            t_id: [11u8; 32],
+            sender_ephemeral_pub: key.verifying_key().to_bytes(),
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0u8; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: 1_000,
+            deletable_at: Some(ROOT_TTL_MS.to_string()),
+            privacy_guard: None,
+        };
+        let tag = bs58::encode(genesis.t_id).into_string();
+        genesis.layer2_signature =
+            key.sign(&crate::api::hmc::calculate_l2_payload_hash_for_entry(&genesis, &tag)).to_bytes();
+        let (verdict, is_new) = index.insert_or_check_with_class(
+            tag, genesis, IngressOrigin::ClientApi, None, 0,
+        );
+        assert!(matches!(verdict, L2Verdict::Verified { .. }), "genesis must anchor voucher root: {verdict:?}");
+        assert!(is_new);
+    }
+
+    fn signed_spend(t_id: [u8; 32], key: &SigningKey) -> L2LockEntry {
+        let mut entry = L2LockEntry {
+            layer2_voucher_id: VOUCHER.into(),
+            t_id,
+            sender_ephemeral_pub: key.verifying_key().to_bytes(),
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0u8; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: 1_000,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+        entry.layer2_signature =
+            key.sign(&crate::api::hmc::calculate_l2_payload_hash_for_entry(&entry, COLLIDE_TAG)).to_bytes();
+        entry
+    }
+
+    /// Two validly signed colliding spends ordered so `(low, high)`: H_canon(low)
+    /// < H_canon(high). With equal classes, min(H_canon) must favor `low`.
+    fn ordered_collision_pair() -> (L2LockEntry, L2LockEntry) {
+        let key = SigningKey::from_bytes(&[88u8; 32]);
+        let a = signed_spend([1u8; 32], &key);
+        let b = signed_spend([2u8; 32], &key);
+        let parent_bytes = *blake3::hash(COLLIDE_TAG.as_bytes()).as_bytes();
+        let h_a = compute_hmc_canonical_hash(&parent_bytes, &a.sender_ephemeral_pub, &a.t_id);
+        let h_b = compute_hmc_canonical_hash(&parent_bytes, &b.sender_ephemeral_pub, &b.t_id);
+        if h_a < h_b { (a, b) } else { (b, a) }
+    }
+
+    fn ingest(index: &mut HmcRamIndex, entry: &L2LockEntry, class: u8) -> (L2Verdict, bool) {
+        index.insert_or_check_with_class(
+            COLLIDE_TAG.to_string(), entry.clone(), IngressOrigin::PartitionSync, None, class,
+        )
+    }
+
+    #[test]
+    fn class2_cannot_be_displaced_by_lower_class_even_with_lower_h_canon() {
+        let mut index = HmcRamIndex::new();
+        anchor_genesis(&mut index);
+        let (low, high) = ordered_collision_pair();
+
+        // Confirm the higher-H_canon spend as Class 2 (Final). At equal class it
+        // would lose the min(H_canon) tie-break; class precedence precedes hashes.
+        let (verdict, is_new) = ingest(&mut index, &high, 2);
+        assert!(matches!(verdict, L2Verdict::Verified { .. }), "high-H Class 2 insert must be accepted: {verdict:?}");
+        assert!(is_new);
+        assert_eq!(index.get_confirmation_class(COLLIDE_TAG), 2);
+
+        // Class 0 carrying the strictly lower H_canon must NOT displace Class 2
+        // (DEC-022 / DEC-064): a lower class never displaces a higher class.
+        let (verdict, replaced) = ingest(&mut index, &low, 0);
+        assert!(matches!(verdict, L2Verdict::Conflict { .. }), "Class 0 must conflict against Class 2: {verdict:?}");
+        assert!(!replaced);
+        assert_eq!(index.locks.get(COLLIDE_TAG).unwrap().t_id, high.t_id);
+        assert_eq!(index.get_confirmation_class(COLLIDE_TAG), 2);
+
+        // Class 1 (Provisional) cannot displace Class 2 (Final) either.
+        let (verdict, replaced) = ingest(&mut index, &low.clone(), 1);
+        assert!(matches!(verdict, L2Verdict::Conflict { .. }), "Class 1 must conflict against Class 2: {verdict:?}");
+        assert!(!replaced);
+        assert_eq!(index.locks.get(COLLIDE_TAG).unwrap().t_id, high.t_id);
+        assert_eq!(index.get_confirmation_class(COLLIDE_TAG), 2);
+    }
+
+    #[test]
+    fn class1_cannot_be_displaced_by_class0_even_with_lower_h_canon() {
+        let mut index = HmcRamIndex::new();
+        anchor_genesis(&mut index);
+        let (low, high) = ordered_collision_pair();
+
+        let (verdict, is_new) = ingest(&mut index, &high, 1);
+        assert!(matches!(verdict, L2Verdict::Verified { .. }), "high-H Class 1 insert must be accepted: {verdict:?}");
+        assert!(is_new);
+
+        // Class 0 (Unconfirmed) never displaces Class 1 (Provisional), regardless
+        // of the canonical hash value (DEC-022 / DEC-064).
+        let (verdict, replaced) = ingest(&mut index, &low, 0);
+        assert!(matches!(verdict, L2Verdict::Conflict { .. }), "Class 0 must conflict against Class 1: {verdict:?}");
+        assert!(!replaced);
+        assert_eq!(index.locks.get(COLLIDE_TAG).unwrap().t_id, high.t_id);
+        assert_eq!(index.get_confirmation_class(COLLIDE_TAG), 1);
+    }
+
+    #[test]
+    fn higher_class_displaces_lower_class_even_when_losing_min_h_canon() {
+        let mut index = HmcRamIndex::new();
+        anchor_genesis(&mut index);
+        let (low, high) = ordered_collision_pair();
+
+        // Unconfirmed spend with lower H_canon first.
+        let (verdict, is_new) = ingest(&mut index, &low, 0);
+        assert!(matches!(verdict, L2Verdict::Verified { .. }) && is_new);
+        assert_eq!(index.get_confirmation_class(COLLIDE_TAG), 0);
+
+        // DEC-064: the higher-H_canon Class 2 spend strictly displaces Class 0.
+        let (verdict, replaced) = ingest(&mut index, &high, 2);
+        assert!(matches!(verdict, L2Verdict::Verified { .. }), "Class 2 must displace Class 0: {verdict:?}");
+        assert!(replaced);
+        assert_eq!(index.locks.get(COLLIDE_TAG).unwrap().t_id, high.t_id);
+        assert_eq!(index.get_confirmation_class(COLLIDE_TAG), 2);
+    }
+
+    #[test]
+    fn equal_class_resolves_via_min_h_canon_tiebreak() {
+        let mut index = HmcRamIndex::new();
+        anchor_genesis(&mut index);
+        let (low, high) = ordered_collision_pair();
+
+        let (verdict, is_new) = ingest(&mut index, &high, 0);
+        assert!(matches!(verdict, L2Verdict::Verified { .. }) && is_new);
+
+        // Equal class (0 vs 0): deterministic min(H_canon) tie-break must elect
+        // the strictly lower canonical hash.
+        let (verdict, replaced) = ingest(&mut index, &low, 0);
+        assert!(matches!(verdict, L2Verdict::Verified { .. }), "min(H_canon) winner must replace at equal class: {verdict:?}");
+        assert!(replaced);
+        assert_eq!(index.locks.get(COLLIDE_TAG).unwrap().t_id, low.t_id);
+        assert_eq!(index.get_confirmation_class(COLLIDE_TAG), 0);
+    }
+
+    #[tokio::test]
+    async fn ingress_with_class_registers_class_and_durable_approval_promotes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(RedbStorage::open(&dir.path().join("class-promotion.redb")).unwrap());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (engine, worker) = DualTierEngine::new_with_token(db, cancel.clone());
+
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let mut genesis = L2LockEntry {
+            layer2_voucher_id: "class-promotion-voucher".into(),
+            t_id: [11u8; 32],
+            sender_ephemeral_pub: key.verifying_key().to_bytes(),
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0u8; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: 1_000,
+            deletable_at: Some(ROOT_TTL_MS.to_string()),
+            privacy_guard: None,
+        };
+        let tag = bs58::encode(genesis.t_id).into_string();
+        genesis.layer2_signature =
+            key.sign(&crate::api::hmc::calculate_l2_payload_hash_for_entry(&genesis, &tag)).to_bytes();
+
+        // ingress_hmc_lock_with_class registers the explicit confirmation class.
+        let (verdict, is_new) = engine.ingress_hmc_lock_with_class(tag.clone(), genesis.clone(), 0).await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }) && is_new, "{verdict:?}");
+        assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 0);
+
+        // Durable class-0 original approval upgrades the entry to Class 1.
+        engine.persist_original_approval(
+            tag.clone(), genesis.clone(), [8; 32], b"first".to_vec(), 0, 1_000,
+        ).await.unwrap();
+        assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 1);
+
+        // Durable class-1 original approval upgrades the entry to Class 2 (Final).
+        engine.persist_original_approval(
+            tag.clone(), genesis.clone(), [8; 32], b"final".to_vec(), 1, 1_000,
+        ).await.unwrap();
+        assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 2);
+
         cancel.cancel();
         worker.await.unwrap();
     }

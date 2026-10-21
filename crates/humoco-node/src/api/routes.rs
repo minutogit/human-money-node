@@ -2455,9 +2455,37 @@ async fn public_node_status() -> Json<serde_json::Value> {
     Json(serde_json::json!({"service":"humoco-node", "protocol_version":1}))
 }
 
-/// Explicit HTTP advertisements only; cached-address fallback belongs to clients.
+/// Explicit HTTP publications and configured bootstrap candidates only;
+/// cached-address fallback and private topology remain client-side concerns.
 async fn public_gateways(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({"gateways": state.config.discovery.public_gateway_urls}))
+    Json(serde_json::json!({
+        "gateways": collect_public_gateways(&state.config.discovery),
+    }))
+}
+
+/// Merges the operator publication and the configured bootstrap list into one
+/// bounded, deduplicated candidate set. Malformed or credentialed entries are
+/// dropped instead of being published on a public endpoint.
+fn collect_public_gateways(discovery: &crate::config::DiscoveryConfig) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut gateways: Vec<String> = Vec::new();
+    for raw in discovery
+        .public_gateway_urls
+        .iter()
+        .chain(discovery.bootstrap_gateways.iter())
+    {
+        let candidate = raw.trim();
+        if candidate.is_empty() || !crate::config::is_publishable_gateway_url(candidate) {
+            continue;
+        }
+        if seen.insert(candidate.to_string()) {
+            gateways.push(candidate.to_string());
+        }
+        if gateways.len() >= crate::config::MAX_PUBLIC_GATEWAY_ENTRIES {
+            break;
+        }
+    }
+    gateways
 }
 
 /// Bounded read-only retrieval of exact retained own approvals for uncertain originals (R5 / DEC-083/089).
@@ -2472,11 +2500,16 @@ async fn get_retained_choice(
     let node_pub = state.identity.node_pubkey();
     match state.storage.own_signing_choice(node_pub, &tag) {
         Ok(Some(choice)) => {
+            // Exact retained approval bytes, so a client can verify the original
+            // decision offline. No new vote is issued and no state is mutated.
             (StatusCode::OK, Json(serde_json::json!({
                 "found": true,
                 "child": hex::encode(choice.child),
+                "valid_until_ms": choice.valid_until_ms,
                 "has_provisional": choice.approvals[0].is_some(),
                 "has_final": choice.approvals[1].is_some(),
+                "provisional_approval": choice.approvals[0].as_ref().map(hex::encode),
+                "final_approval": choice.approvals[1].as_ref().map(hex::encode),
             }))).into_response()
         }
         Ok(None) => {
@@ -2554,5 +2587,135 @@ mod local_capacity_collector_tests {
         cancel.cancel();
         transport.close();
         transport.drain_tasks().await;
+    }
+}
+
+#[cfg(test)]
+mod public_retained_evidence_tests {
+    use super::*;
+    use crate::ingress::{PowEngine, TierController};
+    use crate::storage::DualTierEngine;
+    use http_body_util::BodyExt;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    fn test_state() -> (tempfile::TempDir, AppState, Arc<RedbStorage>, NodeIdentity) {
+        let temp = tempdir().expect("tempdir");
+        let storage = Arc::new(RedbStorage::open(&temp.path().join("unit.redb")).expect("open redb"));
+        let (engine, _worker) = DualTierEngine::new(storage.clone());
+        let identity = NodeIdentity::generate();
+        let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+        let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+        let state = AppState::new(engine, storage.clone(), identity.clone(), tiers, pow);
+        (temp, state, storage, identity)
+    }
+
+    async fn body_json(response: Response) -> serde_json::Value {
+        let bytes = response.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn retained_choice_returns_exact_approval_bytes_and_validity() {
+        let (_temp, state, storage, identity) = test_state();
+        let parent = [7u8; 32];
+        let record = humoco_sim_core::types::LockRecord::new(
+            parent,
+            [8u8; 32],
+            vec![1, 2, 3],
+            humoco_sim_core::types::SimTime(1_000),
+            humoco_sim_core::types::SimTime(600_000),
+        );
+        let tag = hex::encode(parent);
+        storage
+            .commit_original_record_approval(&record, 600_000, identity.node_pubkey(), b"sig_prov", 0)
+            .expect("commit provisional approval");
+        storage
+            .commit_original_record_approval(&record, 600_000, identity.node_pubkey(), b"sig_final", 1)
+            .expect("commit final approval");
+
+        let response = get_retained_choice(State(state), Path(tag)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["found"], true);
+        assert_eq!(body["child"], hex::encode(record.id));
+        assert_eq!(body["valid_until_ms"], 600_000u64);
+        assert_eq!(body["provisional_approval"], hex::encode(b"sig_prov"));
+        assert_eq!(body["final_approval"], hex::encode(b"sig_final"));
+        assert_eq!(body["has_provisional"], true);
+        assert_eq!(body["has_final"], true);
+    }
+
+    #[tokio::test]
+    async fn retained_choice_reports_missing_class_without_inventing_bytes() {
+        let (_temp, state, storage, identity) = test_state();
+        let parent = [9u8; 32];
+        let record = humoco_sim_core::types::LockRecord::new(
+            parent,
+            [10u8; 32],
+            vec![4, 5, 6],
+            humoco_sim_core::types::SimTime(1_000),
+            humoco_sim_core::types::SimTime(600_000),
+        );
+        let tag = hex::encode(parent);
+        storage
+            .commit_original_record_approval(&record, 600_000, identity.node_pubkey(), b"sig_prov", 0)
+            .expect("commit provisional approval");
+
+        let response = get_retained_choice(State(state), Path(tag)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["provisional_approval"], hex::encode(b"sig_prov"));
+        assert_eq!(body["final_approval"], serde_json::Value::Null);
+        assert_eq!(body["has_final"], false);
+    }
+
+    #[tokio::test]
+    async fn gateway_directory_exposes_public_and_bootstrap_entries_once() {
+        let (_temp, state, _storage, _identity) = test_state();
+        let mut config = crate::config::NodeConfig::default();
+        config.discovery.public_gateway_urls = vec!["https://a.example".into(), "https://shared.example".into()];
+        config.discovery.bootstrap_gateways =
+            vec!["https://shared.example".into(), "https://b.example".into()];
+        let app = public_router(state.with_config(Arc::new(config)));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/gateways")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        let gateways: Vec<String> =
+            serde_json::from_value(body["gateways"].clone()).expect("gateway list");
+        assert_eq!(
+            gateways,
+            vec![
+                "https://a.example".to_string(),
+                "https://shared.example".to_string(),
+                "https://b.example".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn gateway_directory_drops_credentialed_and_malformed_entries() {
+        let discovery = crate::config::DiscoveryConfig {
+            public_gateway_urls: vec![
+                "https://a.example".into(),
+                "https://user:secret@b.example".into(),
+            ],
+            bootstrap_gateways: vec!["not-a-url".into(), "http://c.example".into()],
+        };
+        let gateways = collect_public_gateways(&discovery);
+        assert_eq!(
+            gateways,
+            vec!["https://a.example".to_string(), "http://c.example".to_string()]
+        );
     }
 }

@@ -295,7 +295,7 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
         "127.0.0.1:0".parse().unwrap(),
         &identity_a,
         pm_a.clone(),
-        handler_a,
+        handler_a.clone(),
         cancel_a.clone(),
     )
     .expect("bind transport A");
@@ -434,6 +434,9 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
     );
 
     // Verify ShardDigest queries from Node B to Node A match local Node B state across shards
+    handler_a.readiness_manager.mark_shard_ready(0);
+    handler_a.readiness_manager.mark_shard_ready(42);
+    handler_a.readiness_manager.mark_shard_ready(hmc_shard_id);
     let (d_shard0, _cnt0) = transport_b.request_shard_digest(&conn_b, 0, 2).await.expect("shard 0 digest");
     assert_ne!(d_shard0, [0u8; 32]);
 

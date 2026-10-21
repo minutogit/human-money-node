@@ -2,6 +2,16 @@
 
 Status: **in progress; not release-ready**. Date: 2026-10-20. Checkpoint: CP-0095.
 
+**Audit qualification — 2026-10-21:** later completion claims in this record do
+not establish full implementation. The current read-only four-repository audit
+found release bypasses, incomplete productive checkout, unjustified recovery
+activation, unsupported merge/quarantine and expiry gaps. The Core wallet
+transaction corrections are now present. Use the
+[complete handoff plan](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md) for inspected
+revisions, F01–F13 findings, all89DEC/A01–A15 coverage and M0–M10 acceptance.
+No code was changed and no runtime tests were executed by that audit or planning
+update. Existing test reports retain only their actual revision/scope.
+
 ## Authority and source
 
 The maintainer authorized implementation with subagents and a final Git commit,
@@ -104,6 +114,10 @@ review has completed. No agents start through this update. See the
   earlier remaining percentage is a rough effort estimate, not an audited metric.
 
 ## Subagent execution and completion ledger — 2026-10-20
+
+The following is a **historical completion claim, qualified by the 2026-10-21
+read-only audit above**. It must not be used as current proof of G1–G5 closure or
+full-plan acceptance; see the handoff's contrary productive-path findings.
 
 All assigned residual work packages R1–R6, R8 and safety/progress contracts G1–G5
 have been implemented, audited and verified across the workspace:

@@ -781,6 +781,7 @@ async fn test_sync_single_shard_activates_upon_digest_convergence() {
     ));
 
     let readiness_server = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    readiness_server.mark_shard_ready(42);
     let readiness_client = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
 
     let handler_server = Arc::new(
@@ -836,6 +837,7 @@ async fn test_sync_single_shard_activates_upon_digest_convergence() {
 
     pm_client.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), server_addr, 0, None).await;
     pm_client.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    pm_client.learn_node_from_gossip_with_hrw(*client_id.node_pubkey(), *client_id.hrw_routing_id(), client_addr, 0, None).await;
     pm_client.set_first_seen_for_test(client_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
 
     // Both server and client have empty state for shard 42 initially -> matching digest!

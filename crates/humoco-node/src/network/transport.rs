@@ -287,6 +287,7 @@ impl RequestHandler for NodeRequestHandler {
         let tier_controller = self.tier_controller.clone();
         let network_id = self.network_id;
         let readiness_manager = self.readiness_manager.clone();
+        let is_sync_ready = self.is_sync_ready.clone();
         Box::pin(async move {
             let msg_type = header.msg_type;
 
@@ -1190,9 +1191,32 @@ impl RequestHandler for NodeRequestHandler {
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0)
                     });
-                let mut locks: Vec<humoco_sim_core::types::LockRecord> = storage
-                    .all_valid_locks(now_ms)
-                    .unwrap_or_default()
+                // DEC-057 / F06: Storage read errors must never default to an empty witness.
+                if !engine.is_signing_healthy() {
+                    let resp_header = WireHeader::new(
+                        MsgType::ShardDigestResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_NOT_READY,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                }
+                let valid_locks_db = match storage.all_valid_locks(now_ms) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        error!(shard_id, error=%e, "Storage error reading valid locks for digest; failing closed with FLAG_NOT_READY");
+                        let resp_header = WireHeader::new(
+                            MsgType::ShardDigestResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_NOT_READY,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+                };
+                let mut locks: Vec<humoco_sim_core::types::LockRecord> = valid_locks_db
                     .into_iter()
                     .map(|(rec, _)| rec)
                     .collect();
@@ -1201,7 +1225,20 @@ impl RequestHandler for NodeRequestHandler {
                         locks.push(rec);
                     }
                 }
-                let mut hmc_locks_all = storage.all_valid_hmc_locks(now_ms).unwrap_or_default();
+                let mut hmc_locks_all = match storage.all_valid_hmc_locks(now_ms) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        error!(shard_id, error=%e, "Storage error reading valid HMC locks for digest; failing closed with FLAG_NOT_READY");
+                        let resp_header = WireHeader::new(
+                            MsgType::ShardDigestResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_NOT_READY,
+                            0,
+                        );
+                        return Ok((resp_header, Vec::new()));
+                    }
+                };
                 for (tag, entry) in &engine.hmc_ram.read().await.locks {
                     if !hmc_locks_all.iter().any(|(t, _)| t == tag) {
                         hmc_locks_all.push((tag.clone(), entry.clone()));
@@ -1263,11 +1300,14 @@ impl RequestHandler for NodeRequestHandler {
                 let lock_count = shard_locks.len() as u64;
                 let resp_bytes = bincode::serialize(&(digest, lock_count)).unwrap_or_default();
                 let payload_len = checked_payload_len(resp_bytes.len())?;
+                let is_ready = readiness_manager.is_shard_ready(shard_id)
+                    && is_sync_ready.load(std::sync::atomic::Ordering::Acquire);
+                let flags = if is_ready { 0 } else { humoco_sim_core::wire::FLAG_NOT_READY };
                 let resp_header = WireHeader::new(
                     MsgType::ShardDigestResponse as u16,
                     header.session_seq.wrapping_add(1),
                     header.epoch_id,
-                    0,
+                    flags,
                     payload_len,
                 );
                 return Ok((resp_header, resp_bytes));
@@ -2156,6 +2196,12 @@ impl QuicTransport {
             return Err(NodeError::Network(format!(
                 "Unexpected ShardDigest response msg_type {}",
                 resp_hdr.msg_type
+            )));
+        }
+        if resp_hdr.flags & humoco_sim_core::wire::FLAG_NOT_READY != 0 {
+            return Err(NodeError::Network(format!(
+                "Peer reported FLAG_NOT_READY for shard {}",
+                shard_id
             )));
         }
         let (digest, count): ([u8; 32], u64) = bincode::deserialize(&resp_payload)

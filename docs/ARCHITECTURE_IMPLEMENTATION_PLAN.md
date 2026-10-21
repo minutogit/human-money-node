@@ -1,5 +1,11 @@
 # Architecture Implementation Plan — Detailed Remaining Work
 
+Current continuation: use the
+[complete implementation handoff plan](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md)
+dated 2026-10-21 for current code findings, regressions and execution order. The
+A01–A15 requirements and acceptance criteria below remain the original crosswalk;
+this document's baseline observations are historical.
+
 Date: 2026-10-20. Baseline: CP-0093 code audit; 89 existing interview decisions.
 Status: **documented implementation backlog and acceptance plan**. No item is
 marked implemented or tested by writing this document. 15 work-package IDs A01–A15

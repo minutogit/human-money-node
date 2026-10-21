@@ -1,9 +1,9 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-20 (Europe/Berlin). Checkpoint: **CP-0095**.
-Mode: authorized implementation in progress (§7.110); 89 decisions; see execution record for code, tests and unresolved G1–G5 gates.
+Updated: 2026-10-21 (Europe/Berlin). Latest interview checkpoint: **CP-0095**; subsequent read-only audit and implementation handoff add no decision ID.
+Mode: implementation incomplete; full-plan audit reconciled against newer code. Use the [complete implementation handoff](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md) for current findings, dependencies and acceptance; G1–G5 remain unclosed.
 Workflow: [start/resume prompt](../prompts/architecture_interview.md); important choices: two options+recommendation; short derived batches require sign-off (WF-006).
-Agent workflow: maintainer confirmation before every further agent assignment; current residual work and provisional six-assignment order are in [the remaining plan](ARCHITECTURE_IMPLEMENTATION_REMAINING_PLAN.md).
+Agent workflow: maintainer confirmation before every further agent assignment, including reassignment. Use the [handoff protocol](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md#9-human-questions-and-agent-start-protocol); the older six-assignment estimate is historical, not a fixed current queue.
 Details: [notes](ARCHITECTURE_INTERVIEW_NOTES.md); [legacy handoff](ARCHITECTURE_INTERVIEW_HANDOFF.md).
 Register: [89 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
 [alternatives](ARCHITECTURE_INTERVIEW_NOTES.md#22-alternatives-refinements-and-superseded-proposals),

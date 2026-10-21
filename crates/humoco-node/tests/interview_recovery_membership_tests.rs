@@ -1,7 +1,7 @@
 //! Adversarial regressions for interview recovery and passive membership gates.
 use humoco_node::daemon::{sync_single_shard, ShardReadinessManager};
 use humoco_node::identity::NodeIdentity;
-use humoco_node::network::{DefaultRequestHandler, PeerManager, QuicTransport};
+use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, RedbStorage};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -296,3 +296,135 @@ async fn unknown_shard_is_rejected_over_real_quic_despite_global_readiness() {
     assert!(engine.hmc_ram.read().await.locks.is_empty());
     cancel.cancel();
 }
+
+#[tokio::test]
+async fn unhealthy_storage_sync_never_marks_shard_ready() {
+    let temp = tempfile::tempdir().expect("temp directory");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("unhealthy.redb")).expect("storage"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let manager = Arc::new(PeerManager::new(Vec::new()));
+    let cancel = CancellationToken::new();
+    let transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("address"),
+        &identity,
+        manager.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("transport");
+    let readiness = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
+
+    // When storage is explicitly flagged unhealthy
+    readiness.set_storage_healthy(false);
+    let ready = sync_single_shard(
+        42, &transport, &manager, &engine, &storage, &identity, &readiness, &cancel,
+    )
+    .await
+    .expect("recovery attempt");
+    assert!(!ready);
+    assert!(!readiness.is_shard_ready(42));
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn unassigned_node_sync_never_marks_shard_ready() {
+    let temp = tempfile::tempdir().expect("temp directory");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("unassigned.redb")).expect("storage"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let manager = Arc::new(PeerManager::new(Vec::new()));
+    let cancel = CancellationToken::new();
+    let transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("address"),
+        &identity,
+        manager.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("transport");
+    let readiness = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
+
+    // Setup a remote peer address so candidate_addrs is not empty
+    let remote = NodeIdentity::generate();
+    let addr = "127.0.0.1:31415".parse().expect("address");
+    manager.learn_node_from_gossip_with_hrw(*remote.node_pubkey(), *remote.hrw_routing_id(), addr, 0, None).await;
+    manager.set_first_seen_for_test(remote.node_pubkey(), Instant::now() - Duration::from_secs(25 * 3600)).await;
+
+    // Self identity is NOT registered or matured in manager -> self is not in committee
+    let ready = sync_single_shard(
+        42, &transport, &manager, &engine, &storage, &identity, &readiness, &cancel,
+    )
+    .await
+    .expect("recovery attempt");
+    assert!(!ready);
+    assert!(!readiness.is_shard_ready(42));
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn unready_shard_returns_flag_not_ready_and_is_rejected_as_recovery_witness() {
+    let temp = tempfile::tempdir().expect("temp directory");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("witness.redb")).expect("storage"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let server_id = NodeIdentity::generate();
+    let client_id = NodeIdentity::generate();
+    let cancel = CancellationToken::new();
+
+    let pm_server = Arc::new(PeerManager::with_f2f(Vec::new(), vec![*client_id.node_id()]));
+    let pm_client = Arc::new(PeerManager::with_f2f(Vec::new(), vec![*server_id.node_id()]));
+
+    let readiness_server = Arc::new(ShardReadinessManager::new());
+    let handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine,
+            storage,
+            server_id.clone(),
+            pm_server.clone(),
+        )
+        .with_readiness_manager(readiness_server.clone()),
+    );
+
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("address"),
+        &server_id,
+        pm_server.clone(),
+        handler,
+        cancel.clone(),
+    )
+    .expect("transport");
+    let server_addr = server_transport.local_addr().expect("addr");
+    server_transport.spawn_accept_loop();
+
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("address"),
+        &client_id,
+        pm_client.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("transport");
+    let client_addr = client_transport.local_addr().expect("addr");
+    client_transport.spawn_accept_loop();
+
+    pm_server.register_f2f_friend(*client_id.node_id(), Some(client_addr)).await;
+    pm_client.register_f2f_friend(*server_id.node_id(), Some(server_addr)).await;
+
+    let conn = client_transport.connect_peer(server_addr).await.expect("connect");
+
+    // Shard 42 is NOT marked ready on server -> request_shard_digest must fail due to FLAG_NOT_READY
+    let res = client_transport.request_shard_digest(&conn, 42, 1).await;
+    assert!(res.is_err(), "Unready shard must be rejected with FLAG_NOT_READY");
+    let err_msg = res.unwrap_err().to_string();
+    assert!(err_msg.contains("FLAG_NOT_READY"), "Error must mention FLAG_NOT_READY, got: {}", err_msg);
+
+    // Now mark shard 42 ready on server
+    readiness_server.mark_shard_ready(42);
+    let (digest, count) = client_transport.request_shard_digest(&conn, 42, 2).await.expect("ready shard digest");
+    assert_eq!(count, 0);
+    assert_ne!(digest, [0u8; 32]);
+
+    cancel.cancel();
+}
+
+

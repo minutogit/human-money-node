@@ -705,6 +705,8 @@ async fn test_phase11d_shard_digest_isolation_wire() {
             identity.clone(),
             pm.clone(),
         ));
+        handler.readiness_manager.mark_shard_ready(SHARD_SAME);
+        handler.readiness_manager.mark_shard_ready(SHARD_OTHER);
         let transport = QuicTransport::bind_with_options(
             "127.0.0.1:0".parse().expect("addr"),
             &identity,
@@ -988,6 +990,7 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
         server_id.clone(),
         pm_server.clone(),
     ));
+    handler.readiness_manager.mark_shard_ready(shard);
     let server = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().expect("addr"),
         &server_id,

@@ -303,6 +303,7 @@ impl RedbStorage {
         {
             let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
             let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
+            let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
 
             // Range up to now_sec inclusive
             let max_key = (now_sec, &[0xFFu8; 32]);
@@ -322,6 +323,9 @@ impl RedbStorage {
                 if sec <= now_sec {
                     table_ttl.remove(&(sec, &parent))?;
                     table_locks.remove(&parent)?;
+                    // Quarantined minority copies (TABLE_PROVISIONAL_LOCKS) share
+                    // the same TTL and are purged together here (F09, DEC-035).
+                    table_prov_locks.remove(&parent)?;
                     pruned.push(parent);
                 }
             }
@@ -329,6 +333,7 @@ impl RedbStorage {
             // Prune HMC TTL index
             let mut table_hmc_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
+            let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
 
             let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
@@ -343,6 +348,18 @@ impl RedbStorage {
                     if let Ok(entry) = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value()) {
                         table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
                     }
+                }
+                // Quarantined minority copy shares the same TTL and is purged
+                // together with live state at voucher expiration (F09, DEC-035).
+                let mut prov_quarantined = false;
+                if let Some(guard) = table_prov_hmc.get(tag.as_str())? {
+                    if let Ok(entry) = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value()) {
+                        table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
+                    }
+                    prov_quarantined = true;
+                }
+                if prov_quarantined {
+                    table_prov_hmc.remove(tag.as_str())?;
                 }
                 table_hmc.remove(tag.as_str())?;
                 pruned_hmc_count += 1;
@@ -532,6 +549,12 @@ impl RedbStorage {
     /// Moves native locks from TABLE_LOCKS to TABLE_PROVISIONAL_LOCKS and HMC locks from
     /// TABLE_HMC_LOCKS to TABLE_PROVISIONAL_HMC_LOCKS, preventing minority state from poisoning
     /// the active shard digest while preserving recoverable state and own-choice integrity.
+    ///
+    /// TTL index entries (TABLE_TTL_INDEX / TABLE_HMC_TTL_INDEX) are intentionally
+    /// preserved (F09, DEC-035): quarantined records are purged automatically at
+    /// voucher expiration by the shared bounded expiry worker together with the
+    /// live tables, so zero state bloat (Pillar 6) always holds for quarantine
+    /// storage as well.
     pub fn quarantine_subquorum_locks(
         &self,
         shard_id: u16,
@@ -544,7 +567,6 @@ impl RedbStorage {
         {
             let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
             let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
-            let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
 
             let mut to_remove_native = Vec::new();
             for item in table_locks.iter()? {
@@ -565,16 +587,14 @@ impl RedbStorage {
             for (parent, val_bytes) in to_remove_native {
                 table_locks.remove(&parent)?;
                 table_prov_locks.insert(&parent, val_bytes.as_slice())?;
-                if let Ok((_record, root_valid_until)) = bincode::deserialize::<(LockRecord, u64)>(&val_bytes) {
-                    let bucket_sec = root_valid_until.saturating_add(30_000) / 1_000;
-                    let _ = table_ttl.remove(&(bucket_sec, &parent));
-                }
+                // TTL index entry (TABLE_TTL_INDEX) is preserved so the shared
+                // expiry worker purges the quarantined record at voucher
+                // expiration (F09, DEC-035, Pillar 6).
                 quarantined_native.push(parent);
             }
 
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
             let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
-            let mut table_hmc_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
 
             let mut to_remove_hmc = Vec::new();
@@ -599,10 +619,9 @@ impl RedbStorage {
                 table_prov_hmc.insert(tag.as_str(), val_bytes.as_slice())?;
                 if let Ok(entry) = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&val_bytes) {
                     let _ = table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()));
-                    if let Some(valid_until_ms) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
-                        let bucket_sec = valid_until_ms.saturating_add(30_000) / 1_000;
-                        let _ = table_hmc_ttl.remove(&(bucket_sec, tag.as_str()));
-                    }
+                    // TTL index entry (TABLE_HMC_TTL_INDEX) is preserved so the
+                    // shared expiry worker purges the quarantined record at
+                    // voucher expiration (F09, DEC-035, Pillar 6).
                 }
                 quarantined_hmc.push(tag);
             }
@@ -783,6 +802,7 @@ impl RedbStorage {
         Self::prune_own_choices(write_txn, now_sec)?;
         let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
         let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
+        let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
         let expired_entries: Vec<(u64, [u8; 32])> = table_ttl
             .range(..(now_sec.saturating_add(1), &[0x00u8; 32]))?
             .take(256)
@@ -798,13 +818,18 @@ impl RedbStorage {
             if sec <= now_sec {
                 table_ttl.remove(&(sec, &parent))?;
                 table_locks.remove(&parent)?;
+                // Quarantined minority copies (TABLE_PROVISIONAL_LOCKS) share the
+                // same TTL and are purged together here (F09, DEC-035).
+                table_prov_locks.remove(&parent)?;
             }
         }
         drop(table_ttl);
         drop(table_locks);
+        drop(table_prov_locks);
 
         let mut table_hmc_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
         let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
+        let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
         let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
         let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
             .range(..(now_sec.saturating_add(1), ""))?
@@ -817,6 +842,18 @@ impl RedbStorage {
                 if let Ok(entry) = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value()) {
                     table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
                 }
+            }
+            // Quarantined minority copy shares the same TTL and is purged
+            // together with live state at voucher expiration (F09, DEC-035).
+            let mut prov_quarantined = false;
+            if let Some(guard) = table_prov_hmc.get(tag.as_str())? {
+                if let Ok(entry) = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value()) {
+                    table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
+                }
+                prov_quarantined = true;
+            }
+            if prov_quarantined {
+                table_prov_hmc.remove(tag.as_str())?;
             }
             table_hmc.remove(tag.as_str())?;
         }

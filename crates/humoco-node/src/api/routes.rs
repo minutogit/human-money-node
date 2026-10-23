@@ -1,3 +1,21 @@
+//! HTTP API routes for `humoco-node`.
+//!
+//! # Architectural Invariant: Pure Blind Service & No Client-Side Fraud Reporting (KISS Principle)
+//!
+//! Under the HuMoCo Layer-2 architecture and the "Subtraction before Construction" doctrine:
+//! 1. **No `/v1/report-fraud` on Tier-1 HTTP Ingress:**
+//!    In accordance with the Anti-Hearsay Principle (Spec 10/11) and DEC-020/DEC-081, node slashing
+//!    and network bans require irrefutable first-party cryptographic self-proof of equivocation
+//!    (`HUMOCO_V1_EQUIVOCATION`) exchanged directly across the Tier-2 QUIC mesh among authenticated peers.
+//!    Accepting unauthenticated third-party fraud complaints from anonymous clients over HTTP
+//!    is an anti-pattern that would introduce massive DDoS amplification and spam vectors.
+//! 2. **No Live Multi-Gateway Cross-Checks on Hot-Path:**
+//!    PoS terminals and clients verify Quorum Certificates locally and deterministically against
+//!    their background-synchronized known peer roster via local HRW committee calculation.
+//!    Because Ed25519 signatures are mathematically unforgeable, any rogue gateway fabricating
+//!    a roster or forging signatures is rejected fail-closed locally (< 1 ms) without needing
+//!    redundant live HTTP cross-checks against secondary gateways on the checkout hot-path.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -200,6 +218,12 @@ impl AppState {
 }
 
 /// Public permissionless client ingress. Operator diagnostics have a separate listener.
+///
+/// # Ingress Boundaries & KISS Principle
+/// - Tier-1 HTTP ingress does NOT implement `/v1/report-fraud` or live cross-check proxies.
+/// - Slashing occurs strictly via Tier-2 QUIC P2P equivocation gossip (`HUMOCO_V1_EQUIVOCATION`).
+/// - PoS checkout trust is achieved entirely offline by clients computing HRW committees against
+///   their cold-path synchronized peer roster and verifying Ed25519 threshold signatures.
 pub fn public_router(state: AppState) -> Router {
     let sync_router = Router::new()
         .route("/v1/sync", post(sync_locks))

@@ -107,7 +107,7 @@ fn make_lock_request(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: test_now_ms(),
         deletable_at: Some(del_str),
         privacy_guard,
     };

@@ -101,7 +101,7 @@ fn make_test_hmc_genesis(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: test_now_ms(),
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -134,7 +134,7 @@ fn make_test_hmc_spend(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: test_now_ms(),
         deletable_at: None,
         privacy_guard: None,
     };
@@ -515,6 +515,7 @@ async fn test_api_hmc_native_flow() {
         .unwrap()
         .as_millis() as u64) + 600_000;
     let del_str = valid_until_ms.to_string();
+    let created_at_ms = test_now_ms();
     let payload_hash = calculate_l2_payload_hash_raw(
         TRAP_NONE_PLACEHOLDER,
         &challenge_ds_tag,
@@ -523,7 +524,7 @@ async fn test_api_hmc_native_flow() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         Some(&del_str),
         "",
     );
@@ -545,7 +546,7 @@ async fn test_api_hmc_native_flow() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -670,6 +671,7 @@ async fn test_api_hmc_native_flow() {
             break;
         }
     }
+    let created_at_ms = test_now_ms();
     let ds_payload_hash = calculate_l2_payload_hash_raw(
         &voucher_id,
         &t_id_bs58,
@@ -678,7 +680,7 @@ async fn test_api_hmc_native_flow() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         None,
         "",
     );
@@ -700,7 +702,7 @@ async fn test_api_hmc_native_flow() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -740,6 +742,7 @@ async fn test_api_hmc_native_flow() {
             break;
         }
     }
+    let created_at_ms = test_now_ms();
     let ds_payload_hash2 = calculate_l2_payload_hash_raw(
         &voucher_id,
         &t_id_bs58,
@@ -748,7 +751,7 @@ async fn test_api_hmc_native_flow() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         None,
         "",
     );
@@ -770,7 +773,7 @@ async fn test_api_hmc_native_flow() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -1200,7 +1203,7 @@ async fn test_phase1_idempotent_retry_with_pow_and_created_at() {
 }
 
 #[tokio::test]
-async fn test_phase1_idempotent_retry_without_created_at() {
+async fn test_phase1_idempotent_retry_preserves_signed_created_at() {
     let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("friend_retry_token");
 
@@ -1278,6 +1281,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         .unwrap()
         .as_millis() as u64) + 600_000;
     let genesis_del_str = genesis_del_ms.to_string();
+    let created_at_ms = test_now_ms();
     let genesis_hash = humoco_node::api::hmc::calculate_l2_payload_hash_raw(
         "none",
         &genesis_lookup_tag,
@@ -1286,7 +1290,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         Some(&genesis_del_str),
         "",
     );
@@ -1307,7 +1311,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: Some(genesis_del_str),
         privacy_guard: None,
     };
@@ -1326,6 +1330,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         .unwrap();
     assert_eq!(res_gen.status(), StatusCode::CREATED);
 
+    let created_at_ms = test_now_ms();
     let payload_hash = humoco_node::api::hmc::calculate_l2_payload_hash_raw(
         &voucher_id,
         &lookup_tag,
@@ -1334,7 +1339,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         None,
         "",
     );
@@ -1356,7 +1361,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -1907,6 +1912,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
 
     let valid_until_ms = test_now_ms() + 600_000;
     let del_str = valid_until_ms.to_string();
+    let created_at_ms = test_now_ms();
     let payload_hash = calculate_l2_payload_hash_raw(
         TRAP_NONE_PLACEHOLDER,
         &t_id_bs58,
@@ -1915,7 +1921,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         Some(&del_str),
         "",
     );
@@ -1937,7 +1943,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
@@ -2076,6 +2082,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
     let del_str = valid_until_ms.to_string();
 
     // 1. Anchor Genesis Lock (Nonce 0 / Init)
+    let created_at_ms = test_now_ms();
     let genesis_hash = calculate_l2_payload_hash_raw(
         TRAP_NONE_PLACEHOLDER,
         &genesis_t_id_bs58,
@@ -2084,7 +2091,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         Some(&del_str),
         "",
     );
@@ -2106,7 +2113,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: Some(del_str.clone()),
         privacy_guard: None,
     };
@@ -2140,6 +2147,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
     let leap_key = SigningKey::generate(&mut rng);
     let leap_pub = leap_key.verifying_key().to_bytes();
 
+    let created_at_ms = test_now_ms();
     let leap_hash = calculate_l2_payload_hash_raw(
         &voucher_id,
         &leap_ds_tag,
@@ -2148,7 +2156,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         None,
         "",
     );
@@ -2170,7 +2178,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -2228,6 +2236,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
     let conflict_key = SigningKey::generate(&mut rng);
     let conflict_pub = conflict_key.verifying_key().to_bytes();
 
+    let created_at_ms = test_now_ms();
     let conflict_hash = calculate_l2_payload_hash_raw(
         &voucher_id,
         &leap_ds_tag,
@@ -2236,7 +2245,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         "none",
         "none",
         0,
-        0,
+        created_at_ms,
         None,
         "",
     );
@@ -2258,7 +2267,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -2424,6 +2433,7 @@ fn make_genesis_hmc_req(
     };
     let lookup_tag = bs58::encode(&tx_hash).into_string();
     let del_str = valid_until_ms.to_string();
+    let created_at_ms = test_now_ms();
     let payload_hash = calculate_l2_payload_hash_raw(
         TRAP_NONE_PLACEHOLDER,
         &lookup_tag,
@@ -2432,7 +2442,7 @@ fn make_genesis_hmc_req(
         "none",
         "none",
         encrypted_timestamp,
-        0,
+        created_at_ms,
         Some(&del_str),
         "",
     );
@@ -2450,7 +2460,7 @@ fn make_genesis_hmc_req(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: Some(del_str),
         privacy_guard: None,
     }
@@ -2472,6 +2482,7 @@ fn make_follow_hmc_req(
     h.update(&encrypted_timestamp.to_le_bytes());
     h.update(&sender_pub);
     let tx_hash = *h.finalize().as_bytes();
+    let created_at_ms = test_now_ms();
     let payload_hash = calculate_l2_payload_hash_raw(
         voucher_id,
         &ds_tag,
@@ -2480,7 +2491,7 @@ fn make_follow_hmc_req(
         "none",
         "none",
         encrypted_timestamp,
-        0,
+        created_at_ms,
         None,
         "",
     );
@@ -2498,7 +2509,7 @@ fn make_follow_hmc_req(
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
         encrypted_timestamp,
-        created_at_ms: 0,
+        created_at_ms,
         deletable_at: None,
         privacy_guard: None,
     }
@@ -4491,7 +4502,13 @@ async fn test_api_retained_own_choice_read_only_endpoint() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     // 2. Commit own approval
-    storage.commit_original_record_approval(&record, 600_000, identity.node_pubkey(), b"sig_prov", 0).unwrap();
+    let shard = u16::from_be_bytes([parent[0], parent[1]]);
+    let approval = humoco_node::api::routes::create_attestation_for_network(
+        &identity, record.id, parent, shard, 0, 1_000,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let original = bincode::serialize(&approval).unwrap();
+    storage.commit_original_record_approval(&record, 600_000, identity.node_pubkey(), &original, 0).unwrap();
 
     // 3. Now found and truthfully reported without state mutations!
     let response2 = app.clone().oneshot(
@@ -4507,5 +4524,52 @@ async fn test_api_retained_own_choice_read_only_endpoint() {
     assert_eq!(body["child"], hex::encode(record.id));
     assert_eq!(body["has_provisional"], true);
     assert_eq!(body["has_final"], false);
+    assert_eq!(body["node_pubkey"], hex::encode(identity.node_pubkey()));
+    assert_eq!(body["lookup_tag"], tag);
+    assert_eq!(body["network"], 0);
+    assert_eq!(body["purpose"], "original_approval");
+    assert_eq!(body["provisional_approval"], hex::encode(&original));
+    assert_eq!(storage.own_signing_choice(identity.node_pubkey(), &tag).unwrap().unwrap().approvals[0], Some(original.clone()));
+    let returned = hex::decode(body["provisional_approval"].as_str().unwrap()).unwrap();
+    let decoded: humoco_node::api::dto::AttestationDto = bincode::deserialize(&returned).unwrap();
+    let digest = humoco_proto::live::original_approval_digest(0, shard, 0, &parent, &record.id).unwrap();
+    let signature = ed25519_dalek::Signature::from_slice(&hex::decode(decoded.signature).unwrap()).unwrap();
+    identity.verifying_key().verify_strict(&digest, &signature).expect("retained original verifies with shared protocol");
+
 }
 
+
+#[tokio::test]
+async fn retained_choice_capacity_refuses_before_disk_and_recovers_after_release() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(RedbStorage::open(&dir.path().join("retrieval.redb")).unwrap());
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let state = AppState::new(engine, storage, identity, tiers, pow);
+    let held = state.retained_choice_reads.clone().try_acquire_many_owned(8).unwrap();
+    let app = build_router(state);
+    let request = || Request::builder().uri("/v1/retained-choice/unknown").body(Body::empty()).unwrap();
+    assert_eq!(app.clone().oneshot(request()).await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+    drop(held);
+    assert_eq!(app.oneshot(request()).await.unwrap().status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn signed_missing_or_stale_wallet_time_is_rejected_without_rewriting() {
+    let (app, storage, _, tiers, _) = setup_test_app();
+    tiers.register_f2f_peer("wallet-time-test");
+    let key = SigningKey::from_bytes(&[97; 32]);
+    for created_at in [0, test_now_ms() - 31_000] {
+        let mut request = make_test_hmc_genesis(&format!("time-{created_at}"), test_now_ms() + 600_000, &key);
+        request.created_at_ms = created_at;
+        request.layer2_signature = key.sign(&calculate_l2_payload_hash(&request)).to_bytes();
+        let tag = bs58::encode(request.transaction_hash).into_string();
+        let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock")
+            .header("content-type", "application/json").header("x-peer-token", "wallet-time-test")
+            .body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(storage.get_hmc_lock(&tag).unwrap().is_none());
+    }
+}

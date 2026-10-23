@@ -85,6 +85,7 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
 
     // B sends a Heartbeat advertising Node C's existence to A
     let hb_payload = humoco_node::network::framing::HeartbeatWirePayload {
+            signing_checkpoint: None,
         node_id: *identity_c.node_id(),
         addr: actual_addr_c,
         timestamp_ms: 0,
@@ -359,6 +360,7 @@ async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
 
     // Node A sends Heartbeat with TTL=16 and Argon2d routing ID
     let hb_a = humoco_node::network::framing::HeartbeatWirePayload {
+            signing_checkpoint: None,
         node_id: *identity_a.node_id(),
         addr: actual_addr_a,
         timestamp_ms: 50_000,

@@ -139,3 +139,45 @@ async fn private_http_rejects_foreign_origins_and_rebinding_hosts_but_allows_loc
     stop.cancel();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn signed_regional_view_is_private_and_matches_real_committee_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("regional.redb")).unwrap());
+    let stop = tokio_util::sync::CancellationToken::new();
+    let (engine, worker) = DualTierEngine::new_with_token(storage.clone(), stop.clone());
+    let identity = NodeIdentity::generate();
+    let manager = Arc::new(humoco_node::network::PeerManager::new(Vec::new()));
+    // Isolated eligibility fixture, not a proof of admission or the fault bound.
+    for _ in 0..20 {
+        let member = NodeIdentity::generate();
+        manager.learn_node_from_gossip_with_hrw(*member.node_pubkey(), *member.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
+        manager.set_first_seen_for_test(member.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    }
+    let immature = NodeIdentity::generate();
+    manager.learn_node_from_gossip_with_hrw(*immature.node_pubkey(), *immature.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
+    let (expected, _, _) = manager.shard_committee(*identity.node_pubkey(), *identity.hrw_routing_id(), 42).await;
+    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let mut state = AppState::new(engine, storage, identity.clone(), tiers, pow);
+    state.peer_manager = Some(manager.clone());
+    let public_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public_listener.local_addr().unwrap();
+    let private_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let private_addr = private_listener.local_addr().unwrap();
+    let public_cancel = stop.clone(); let private_cancel = stop.clone();
+    let public = humoco_node::api::build_router(state.clone());
+    let private = build_operator_router(state);
+    let a = tokio::spawn(async move { axum::serve(public_listener, public).with_graceful_shutdown(async move {public_cancel.cancelled().await}).await.unwrap(); });
+    let b = tokio::spawn(async move { axum::serve(private_listener, private).with_graceful_shutdown(async move {private_cancel.cancelled().await}).await.unwrap(); });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let path = "/v1/operator/regional-mesh-view";
+    assert_eq!(client.get(format!("http://{public_addr}{path}")).send().await.unwrap().status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(client.get(format!("http://{private_addr}{path}")).header("Origin","https://evil.example").send().await.unwrap().status(), reqwest::StatusCode::FORBIDDEN);
+    let view: humoco_proto::mesh::RegionalMeshView = client.get(format!("http://{private_addr}{path}")).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert!(!view.members.iter().any(|m| m.node_pubkey == *immature.node_pubkey()));
+    let policy = humoco_proto::mesh::RegionalMeshPolicy { network:0, source_keys:vec![*identity.node_pubkey()] };
+    let roster = humoco_proto::mesh::regional_committee(&policy,&[view],42,manager.net_time_ms()).unwrap();
+    assert_eq!(roster,expected.into_iter().map(|m|m.node_pubkey).collect::<Vec<_>>());
+    stop.cancel(); a.await.unwrap(); b.await.unwrap(); worker.await.unwrap();
+}

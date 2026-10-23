@@ -1,9 +1,9 @@
 # Architecture Interview — Compact State
 
-Updated: 2026-10-21 (Europe/Berlin). Latest interview checkpoint: **CP-0095**; subsequent read-only audit and implementation handoff add no decision ID.
-Mode: implementation incomplete; full-plan audit reconciled against newer code. Use the [complete implementation handoff](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md) for current findings, dependencies and acceptance; G1–G5 remain unclosed.
+Updated: 2026-10-23 (Europe/Berlin). Latest interview checkpoint: **CP-0095**; subsequent read-only audits and implementation plans add no decision ID.
+Mode: implementation incomplete at Node e585830 / Proto e119ee6 / Core 8265fd4 / App 1f0bd4e. Use the [current completion plan](ARCHITECTURE_IMPLEMENTATION_CLOSURE_PLAN.md) for current findings, dependencies and acceptance; G1–G5 remain unclosed.
 Workflow: [start/resume prompt](../prompts/architecture_interview.md); important choices: two options+recommendation; short derived batches require sign-off (WF-006).
-Agent workflow: maintainer confirmation before every further agent assignment, including reassignment. Use the [handoff protocol](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md#9-human-questions-and-agent-start-protocol); the older six-assignment estimate is historical, not a fixed current queue.
+Agent workflow: maintainer confirmation before every further agent assignment, including reassignment. Use the [completion protocol](ARCHITECTURE_IMPLEMENTATION_CLOSURE_PLAN.md#8-mandatory-finish-checklist-and-agent-workflow); the older six-assignment estimate is historical, not a fixed current queue.
 Details: [notes](ARCHITECTURE_INTERVIEW_NOTES.md); [legacy handoff](ARCHITECTURE_INTERVIEW_HANDOFF.md).
 Register: [89 decisions with status/provenance](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance),
 [alternatives](ARCHITECTURE_INTERVIEW_NOTES.md#22-alternatives-refinements-and-superseded-proposals),

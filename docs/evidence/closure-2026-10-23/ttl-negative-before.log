@@ -1,0 +1,22 @@
+   Compiling humoco-node v0.1.3 (/home/basti/Coding/humoco/human-money-node/crates/humoco-node)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.78s
+     Running unittests src/lib.rs (target/debug/deps/humoco_node-2059b4485da98032)
+
+running 1 test
+test storage::engine::exact_hmc_durability_tests::expiry_removes_confirmation_metadata_at_root_grace_horizon ... FAILED
+
+failures:
+
+---- storage::engine::exact_hmc_durability_tests::expiry_removes_confirmation_metadata_at_root_grace_horizon stdout ----
+
+thread 'storage::engine::exact_hmc_durability_tests::expiry_removes_confirmation_metadata_at_root_grace_horizon' (290) panicked at crates/humoco-node/src/storage/engine.rs:2364:9:
+expired class metadata must not accumulate
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    storage::engine::exact_hmc_durability_tests::expiry_removes_confirmation_metadata_at_root_grace_horizon
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 135 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p humoco-node --lib`

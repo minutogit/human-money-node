@@ -1,3 +1,5 @@
+mod signing;
+
 use std::path::Path;
 use std::sync::Arc;
 use humoco_sim_core::types::LockRecord;
@@ -9,6 +11,8 @@ use tracing::warn;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
+    #[error("FAIL_CLOSED_CORRUPT: signing history integrity unavailable")]
+    SigningHistoryCorrupt,
     #[error("Redb database error: {0}")]
     Database(#[from] redb::DatabaseError),
 
@@ -76,6 +80,8 @@ pub const TABLE_SYSTEM_AUDIT_EVENTS: TableDefinition<u64, &[u8]> = TableDefiniti
 /// Node-local original signing protection. Never included in shard synchronization.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnSigningChoice {
+    #[serde(default)]
+    pub generation: u64,
     pub child: [u8; 32],
     pub valid_until_ms: u64,
     /// First exact original approval in each binary confirmation class.
@@ -89,6 +95,7 @@ pub const TABLE_OWN_CHOICE_TTL: TableDefinition<(u64, &str), ()> = TableDefiniti
 pub struct RedbStorage {
     db: Arc<Database>,
     path: std::path::PathBuf,
+    signing_corrupt: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RedbStorage {
@@ -122,11 +129,13 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_BANNED_NODES)?;
             let _ = write_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
         }
+        let corrupt = signing::initialize(&write_txn)?;
         write_txn.commit()?;
 
         Ok(Self {
             db: Arc::new(db),
             path: path.to_path_buf(),
+            signing_corrupt: signing::latch(corrupt),
         })
     }
 
@@ -138,6 +147,7 @@ impl RedbStorage {
         &self, tag: &str, entry: &crate::api::hmc::L2LockEntry,
         node: &[u8; 32], approval: &[u8], class: u8, valid_until_ms: u64,
     ) -> Result<Vec<u8>, StorageError> {
+        if !self.is_signing_history_healthy() { return Err(StorageError::SigningHistoryCorrupt); }
         if class > 1 || approval.is_empty() || approval.len() > 16_384 || valid_until_ms == 0 {
             return Err(StorageError::DurableCommitFailed("Invalid original approval context".into()));
         }
@@ -145,12 +155,12 @@ impl RedbStorage {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(redb::Durability::Immediate);
         let retained = {
-            let mut choices = txn.open_table(TABLE_OWN_CHOICES)?;
+            let choices = txn.open_table(TABLE_OWN_CHOICES)?;
             let previous = choices.get(slot.as_str())?
                 .map(|v| serde_json::from_slice::<OwnSigningChoice>(v.value()))
                 .transpose()?;
             let mut choice = previous.unwrap_or(OwnSigningChoice {
-                child: entry.t_id, valid_until_ms, approvals: [None, None],
+                generation: 0, child: entry.t_id, valid_until_ms, approvals: [None, None],
             });
             if choice.child != entry.t_id || choice.valid_until_ms != valid_until_ms {
                 return Err(StorageError::OwnChoiceConflict);
@@ -161,8 +171,8 @@ impl RedbStorage {
                 if old.t_id != entry.t_id { return Err(StorageError::OwnChoiceConflict); }
             }
             choice.approvals[usize::from(class)].get_or_insert_with(|| approval.to_vec());
-            let bytes = serde_json::to_vec(&choice)?;
-            choices.insert(slot.as_str(), bytes.as_slice())?;
+            drop(choices);
+            signing::put_choice(&txn, slot.as_str(), &mut choice)?;
             let lock_bytes = serde_json::to_vec(entry)?;
             locks.insert(tag, lock_bytes.as_slice())?;
             txn.open_table(TABLE_HMC_VOUCHER_INDEX)?.insert((entry.layer2_voucher_id.as_str(), tag), ())?;
@@ -181,6 +191,7 @@ impl RedbStorage {
         &self, record: &LockRecord, root_valid_until_ms: u64, node: &[u8; 32],
         approval: &[u8], class: u8,
     ) -> Result<Vec<u8>, StorageError> {
+        if !self.is_signing_history_healthy() { return Err(StorageError::SigningHistoryCorrupt); }
         if class > 1 || approval.is_empty() || approval.len() > 16_384 || root_valid_until_ms == 0 {
             return Err(StorageError::DurableCommitFailed("Invalid original approval context".into()));
         }
@@ -189,10 +200,10 @@ impl RedbStorage {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(redb::Durability::Immediate);
         let retained = {
-            let mut choices = txn.open_table(TABLE_OWN_CHOICES)?;
+            let choices = txn.open_table(TABLE_OWN_CHOICES)?;
             let mut choice = choices.get(slot.as_str())?
                 .map(|v| serde_json::from_slice::<OwnSigningChoice>(v.value())).transpose()?
-                .unwrap_or(OwnSigningChoice { child: record.id, valid_until_ms: root_valid_until_ms, approvals: [None, None] });
+                .unwrap_or(OwnSigningChoice { generation: 0, child: record.id, valid_until_ms: root_valid_until_ms, approvals: [None, None] });
             if choice.child != record.id || choice.valid_until_ms != root_valid_until_ms { return Err(StorageError::OwnChoiceConflict); }
             let mut locks = txn.open_table(TABLE_LOCKS)?;
             if let Some(old) = locks.get(&record.parent_lock)? {
@@ -200,8 +211,8 @@ impl RedbStorage {
                 if old.id != record.id { return Err(StorageError::OwnChoiceConflict); }
             }
             choice.approvals[usize::from(class)].get_or_insert_with(|| approval.to_vec());
-            let bytes = serde_json::to_vec(&choice)?;
-            choices.insert(slot.as_str(), bytes.as_slice())?;
+            drop(choices);
+            signing::put_choice(&txn, slot.as_str(), &mut choice)?;
             let bytes = bincode::serialize(&(record, root_valid_until_ms))?;
             locks.insert(&record.parent_lock, bytes.as_slice())?;
             let expires_sec = root_valid_until_ms.saturating_add(30_999) / 1_000;
@@ -786,9 +797,8 @@ impl RedbStorage {
         let expired = ttl.range(..(now_sec, ""))?.take(256)
             .map(|row| row.map(|(key, _)| (key.value().0, key.value().1.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut choices = txn.open_table(TABLE_OWN_CHOICES)?;
         for (sec, slot) in expired {
-            choices.remove(slot.as_str())?;
+            signing::remove_choice(txn, slot.as_str())?;
             ttl.remove(&(sec, slot.as_str()))?;
         }
         Ok(())
@@ -1065,6 +1075,12 @@ impl RedbStorage {
 
             // Private own decisions are part of a consistent operator backup,
             // never of peer state synchronization.
+            let signing = read_txn.open_table(signing::TABLE_SIGNING_STATE)?;
+            let mut signing_dst = write_txn.open_table(signing::TABLE_SIGNING_STATE)?;
+            for row in signing.iter()? {
+                let (key, value) = row?;
+                signing_dst.insert(key.value(), value.value())?;
+            }
             let own = read_txn.open_table(TABLE_OWN_CHOICES)?;
             let mut own_dst = write_txn.open_table(TABLE_OWN_CHOICES)?;
             for row in own.iter()? {

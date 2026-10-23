@@ -232,6 +232,8 @@ fn default_flush_queue_capacity() -> usize {
 /// Status of the asynchronous ACID redb persistence worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistenceDto {
+    #[serde(default)]
+    pub signing_history_corrupt: bool,
     pub last_successful_flush_ms: u64,
     pub last_flush_ago_sec: Option<u64>,
     pub flush_queue_depth: usize,
@@ -246,6 +248,7 @@ pub struct PersistenceDto {
 impl Default for PersistenceDto {
     fn default() -> Self {
         Self {
+            signing_history_corrupt: false,
             last_successful_flush_ms: 0,
             last_flush_ago_sec: None,
             flush_queue_depth: 0,
@@ -890,6 +893,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     };
 
     let persistence = PersistenceDto {
+        signing_history_corrupt: !state.storage.is_signing_history_healthy(),
         last_successful_flush_ms: last_flush_ms,
         last_flush_ago_sec,
         flush_queue_depth,

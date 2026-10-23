@@ -76,6 +76,26 @@ async fn test_boot_readiness_barrier_wire_flag() {
         .await
         .expect("connect");
 
+    // Transport fixture only: one prepared shard must serve a committed-state
+    // witness even while the global legacy flag and another shard are unready.
+    let witness_shard = 0x9001u16;
+    let now = SimTime(pm_server.net_time_ms());
+    let mut parent = [0u8; 32];
+    parent[..2].copy_from_slice(&witness_shard.to_be_bytes());
+    let pending = LockRecord::new(parent, [8; 32], vec![1], now, SimTime(now.0 + 60_000));
+    engine.ram.write().await.try_insert(pending, now, SimTime(now.0 + 60_000)).expect("pending RAM fixture");
+    readiness.mark_shard_ready(witness_shard);
+    assert!(!is_sync_ready.load(Ordering::Acquire));
+    let header = WireHeader::new(MsgType::ShardDigestRequest as u16, 90, 0, 0, 2);
+    let (reply, bytes) = client_transport.send_request(&conn, &header, &witness_shard.to_le_bytes()).await.expect("ready shard digest");
+    assert_eq!(reply.flags & FLAG_NOT_READY, 0);
+    let (digest, count): ([u8; 32], u64) = bincode::deserialize(&bytes).expect("digest payload");
+    assert_eq!(count, 0, "uncommitted RAM entry must not enter a witness");
+    assert_eq!(digest, humoco_sim_core::crypto::compute_shard_digest_at(witness_shard, &[], now));
+    let (reply, _) = client_transport.send_request(&conn, &header, &(witness_shard + 1).to_le_bytes()).await.expect("unready shard digest");
+    assert_ne!(reply.flags & FLAG_NOT_READY, 0);
+    engine.ram.write().await.remove(&parent);
+
     let now_ms = pm_server.net_time_ms();
     let root_valid_until = now_ms + 600_000;
     let mut hmc_req = humoco_node::api::hmc::L2LockRequest {
@@ -156,6 +176,20 @@ async fn test_boot_readiness_barrier_wire_flag() {
     // 2. Now transition is_sync_ready to true
     is_sync_ready.store(true, Ordering::SeqCst);
     server_transport.set_sync_ready(true);
+
+    // A gateway can refresh its own envelope but cannot refresh the wallet's
+    // signed creation time. The receiving shard must reject before persistence.
+    let mut stale = wire.clone();
+    if let humoco_node::network::framing::LockWirePayload::Hmc { req, .. } = &mut stale {
+        req.created_at_ms = now_ms - 31_000;
+        req.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req)).to_bytes();
+    }
+    let stale_bytes = bincode::serialize(&stale).unwrap();
+    let stale_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 95, 0, 0, stale_bytes.len() as u32);
+    let (stale_reply, stale_payload) = client_transport.send_request(&conn, &stale_header, &stale_bytes).await.expect("stale wallet request");
+    assert_ne!(stale_reply.flags & humoco_sim_core::wire::FLAG_UNAUTHORIZED, 0);
+    assert!(stale_payload.is_empty());
+    assert!(storage.get_hmc_lock(&tag).unwrap().is_none());
 
     let header2 = WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 0, raw_payload.len() as u32);
     let (resp_hdr2, resp_payload2) = client_transport.send_request(&conn, &header2, &raw_payload).await.expect("send request after ready");
@@ -762,7 +796,7 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
 }
 
 #[tokio::test]
-async fn test_sync_single_shard_activates_upon_digest_convergence() {
+async fn recovering_self_cannot_supply_missing_quorum_vote() {
     let temp_server = tempdir().expect("tempdir");
     let storage_server = Arc::new(RedbStorage::open(&temp_server.path().join("server.redb")).expect("open redb"));
     let (engine_server, _worker_server) = DualTierEngine::new(storage_server.clone());
@@ -840,7 +874,8 @@ async fn test_sync_single_shard_activates_upon_digest_convergence() {
     pm_client.learn_node_from_gossip_with_hrw(*client_id.node_pubkey(), *client_id.hrw_routing_id(), client_addr, 0, None).await;
     pm_client.set_first_seen_for_test(client_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
 
-    // Both server and client have empty state for shard 42 initially -> matching digest!
+    // Q(2) = 2. Only the ready server may witness; the recovering self
+    // cannot turn one matching empty response into a quorum.
     assert!(!readiness_client.is_shard_ready(42));
     let ready = humoco_node::daemon::sync_single_shard(
         42,
@@ -853,7 +888,7 @@ async fn test_sync_single_shard_activates_upon_digest_convergence() {
         &cancel,
     ).await.expect("sync_single_shard");
 
-    assert!(ready, "Convergent dominant digest must activate shard readiness");
-    assert!(readiness_client.is_shard_ready(42));
+    assert!(!ready, "one witness plus unready self is not a recovery quorum");
+    assert!(!readiness_client.is_shard_ready(42));
     cancel.cancel();
 }

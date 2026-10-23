@@ -1948,6 +1948,41 @@ impl PeerManager {
         (committee, remote, total)
     }
 
+    /// Operator-only export of this node's qualified regional view. Source
+    /// authentication delegates these observations, never the Byzantine bound.
+    pub async fn regional_mesh_view(&self, identity: &crate::identity::NodeIdentity, network: u8) -> Result<humoco_proto::mesh::RegionalMeshView, crate::error::NodeError> {
+        use ed25519_dalek::Signer;
+        let known = self.known_network_nodes.read().await;
+        let banned = self.banned_nodes.read().await;
+        let local = *identity.node_pubkey();
+        let mut members = Vec::new();
+        for (key, info) in known.iter() {
+            let eligible = if *key == local {
+                info.hrw_routing_id == *identity.hrw_routing_id() && info.is_hrw_eligible()
+            } else { info.is_hrw_eligible() && info.is_presence_fresh() };
+            if eligible && !banned.contains(key) {
+                if members.len() >= humoco_proto::mesh::MAX_MESH_MEMBERS { return Err(crate::error::NodeError::LocalCapacity("regional view exceeds bounded export")); }
+                members.push(humoco_proto::mesh::RegionalMeshMember { node_pubkey:*key, hrw_routing_id:info.hrw_routing_id });
+            }
+        }
+        if !known.contains_key(&local) && self.local_ticket_is_mature() && !banned.contains(&local) {
+            if members.len() >= humoco_proto::mesh::MAX_MESH_MEMBERS { return Err(crate::error::NodeError::LocalCapacity("regional view exceeds bounded export")); }
+            members.push(humoco_proto::mesh::RegionalMeshMember { node_pubkey:local, hrw_routing_id:*identity.hrw_routing_id() });
+        }
+        drop(banned);
+        drop(known);
+        members.sort_by_key(|member| member.node_pubkey);
+        let issued_at_ms = self.net_time_ms();
+        let mut view = humoco_proto::mesh::RegionalMeshView {
+            version:1, network, source_key:local, issued_at_ms,
+            valid_until_ms:issued_at_ms.saturating_add(humoco_proto::mesh::MAX_VIEW_LIFETIME_MS),
+            members, signature:[0;64],
+        };
+        let digest = view.digest().map_err(|reason| crate::error::NodeError::Network(reason.into()))?;
+        view.signature = identity.signing_key().sign(&digest).to_bytes();
+        Ok(view)
+    }
+
     pub async fn is_local_committee_member(&self, self_pubkey: [u8; 32], self_hrw: [u8; 32], shard_id: u16) -> bool {
         let (committee, _, _) = self.shard_committee(self_pubkey, self_hrw, shard_id).await;
         committee.iter().any(|member| member.node_pubkey == self_pubkey)

@@ -1,8 +1,8 @@
 # Architecture Implementation Plan — Detailed Remaining Work
 
 Current continuation: use the
-[complete implementation handoff plan](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md)
-dated 2026-10-21 for current code findings, regressions and execution order. The
+[implementation completion plan](ARCHITECTURE_IMPLEMENTATION_CLOSURE_PLAN.md)
+dated 2026-10-23 for current code findings, regressions and execution order. The
 A01–A15 requirements and acceptance criteria below remain the original crosswalk;
 this document's baseline observations are historical.
 

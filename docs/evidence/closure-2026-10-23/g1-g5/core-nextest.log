@@ -1,0 +1,7 @@
+   Compiling human_money_core v0.4.1 (/home/basti/Coding/humoco/human-money-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 16.82s
+────────────
+ Nextest run ID 243f20d0-5f6b-4d1c-85a0-7ec0389ef111 with nextest profile: default
+    Starting 171 tests across 1 binary
+────────────
+     Summary [   2.242s] 171 tests run: 171 passed, 0 skipped

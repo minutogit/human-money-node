@@ -112,6 +112,8 @@ pub enum ControlResponse {
     /// Request accepted; completion is independently verified against this process instance.
     ShutdownAccepted { identity: super::lifecycle::ShutdownIdentity },
     Status {
+        #[serde(default)]
+        signing_history_corrupt: bool,
         node_id: String,
         #[serde(default)]
         public_key: Option<String>,
@@ -212,6 +214,7 @@ mod tests {
         assert_eq!(req, deserialized);
 
         let resp = ControlResponse::Status {
+            signing_history_corrupt: false,
             node_id: "test_node".into(),
             public_key: Some("test_pubkey".into()),
             hrw_routing_id: Some("hrw_test".into()),

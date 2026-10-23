@@ -1,0 +1,18 @@
+   Compiling humoco-node v0.1.3 (/home/basti/Coding/humoco/human-money-node/crates/humoco-node)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.14s
+     Running unittests src/lib.rs (target/debug/deps/humoco_node-2059b4485da98032)
+
+running 10 tests
+test storage::engine::confirmation_class_precedence_tests::equal_class_resolves_via_min_h_canon_tiebreak ... ok
+test storage::engine::confirmation_class_precedence_tests::class1_cannot_be_displaced_by_class0_even_with_lower_h_canon ... ok
+test storage::engine::confirmation_class_precedence_tests::higher_class_displaces_lower_class_even_when_losing_min_h_canon ... ok
+test storage::engine::confirmation_class_precedence_tests::class2_cannot_be_displaced_by_lower_class_even_with_lower_h_canon ... ok
+test storage::engine::exact_hmc_durability_tests::expiry_removes_confirmation_metadata_at_root_grace_horizon ... ok
+test storage::engine::exact_hmc_durability_tests::ram_only_import_is_not_a_durable_receipt_and_late_ack_cannot_mark_replacement ... ok
+test storage::engine::exact_hmc_durability_tests::rejected_original_choice_does_not_increment_committed_operations ... ok
+test storage::engine::exact_hmc_durability_tests::exact_ack_and_disk_recovery_mark_current_version_and_expiry_clears_it ... ok
+test storage::engine::exact_hmc_durability_tests::original_commit_also_marks_exact_hmc_version ... ok
+test storage::engine::confirmation_class_precedence_tests::own_durable_approval_does_not_establish_quorum_confirmation ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 126 filtered out; finished in 0.15s
+

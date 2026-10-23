@@ -107,20 +107,6 @@ impl HmcRamIndex {
         }
     }
 
-    /// Promotes the confirmation class of the exact committed entry after a
-    /// durable original approval (DEC-029 / DEC-064): a durable class-1
-    /// approval upgrades the entry to Class 2 (Final), a durable class-0
-    /// approval upgrades it to Class 1 (Provisional).
-    ///
-    /// A late acknowledgment can never authorize a different RAM version:
-    /// if the lookup tag was replaced by another winner, the stale promotion
-    /// is ignored entirely.
-    pub fn promote_confirmation_class(&mut self, tag: &str, entry: &L2LockEntry, class: u8) {
-        if self.locks.get(tag).is_some_and(|current| current == entry) {
-            self.confirmation_classes.insert(tag.to_string(), class.saturating_add(1));
-        }
-    }
-
     pub fn get_confirmation_class(&self, tag: &str) -> u8 {
         self.confirmation_classes.get(tag).copied().unwrap_or(0)
     }
@@ -415,6 +401,7 @@ impl HmcRamIndex {
                                 }
                             }
                             self.durable_entries.remove(&tag);
+                            self.confirmation_classes.remove(&tag);
                             self.valid_until.remove(&tag);
                             self.filter.delete(&tag);
                         } else {
@@ -655,7 +642,8 @@ impl DualTierEngine {
 
     /// Storage faults are a local signing gate, never peer fraud evidence.
     pub fn is_signing_healthy(&self) -> bool {
-        !self.stats.signing_failed.load(std::sync::atomic::Ordering::Acquire)
+        self.db.is_signing_history_healthy()
+            && !self.stats.signing_failed.load(std::sync::atomic::Ordering::Acquire)
             && !self.tx.is_closed()
     }
 
@@ -697,8 +685,10 @@ impl DualTierEngine {
                 rx.changed().await.map_err(|_| StorageError::DurableCommitFailed("Persistence worker stopped".into()))?;
             }
         };
-        tokio::time::timeout(std::time::Duration::from_millis(DURABLE_ACK_TIMEOUT_MS), wait).await
-            .map_err(|_| StorageError::DurableCommitFailed("Commit acknowledgment timed out; operation remains pending".into()))?
+        let result = tokio::time::timeout(std::time::Duration::from_millis(DURABLE_ACK_TIMEOUT_MS), wait).await
+            .map_err(|_| StorageError::DurableCommitFailed("Commit acknowledgment timed out; operation remains pending".into()))?;
+        if !self.is_signing_healthy() { return Err(StorageError::SigningHistoryCorrupt); }
+        result
     }
 
     /// Durably protects an original HMC approval before it may leave this node.
@@ -730,10 +720,8 @@ impl DualTierEngine {
         {
             let mut hmc = self.hmc_ram.write().await;
             hmc.mark_exact_durable(&committed_tag, &committed_entry, root);
-            // Durable-before-Vote (DEC-029): once the original approval committed, the
-            // RAM entry is promoted (class 1 approval -> Class 2 Final, class 0 -> Class 1
-            // Provisional). Never touches an entry displaced by a later winner.
-            hmc.promote_confirmation_class(&committed_tag, &committed_entry, class);
+            // Durability protects this node's original choice. It supplies one
+            // vote, not verified committee support (DEC-022 / DEC-064).
         }
         Ok(result)
     }
@@ -2349,6 +2337,27 @@ mod exact_hmc_durability_tests {
     }
 
     #[test]
+    fn expiry_removes_confirmation_metadata_at_root_grace_horizon() {
+        let mut index = HmcRamIndex::new();
+        for child in 1..=32 {
+            let mut lock = entry(child);
+            lock.layer2_voucher_id = format!("expiry-{child}");
+            let tag = bs58::encode(lock.t_id).into_string();
+            index.insert_recovered(tag.clone(), lock);
+            index.set_confirmation_class(&tag, 2);
+        }
+        assert_eq!(index.prune_expired(SimTime(80_000)), 0);
+        assert_eq!(index.confirmation_classes.len(), 32);
+        assert_eq!(index.prune_expired(SimTime(80_001)), 32);
+        assert!(index.confirmation_classes.is_empty(), "expired class metadata must not accumulate");
+        assert!(index.valid_until.is_empty());
+        assert!(index.vouchers.is_empty());
+        assert!(index.voucher_roots.is_empty());
+        assert!(index.voucher_genesis_parents.is_empty());
+        assert!(index.ttl_buckets.is_empty());
+    }
+
+    #[test]
     fn ram_only_import_is_not_a_durable_receipt_and_late_ack_cannot_mark_replacement() {
         let mut index = HmcRamIndex::new();
         let a = entry(1);
@@ -2596,7 +2605,7 @@ mod confirmation_class_precedence_tests {
     }
 
     #[tokio::test]
-    async fn ingress_with_class_registers_class_and_durable_approval_promotes_it() {
+    async fn own_durable_approval_does_not_establish_quorum_confirmation() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(RedbStorage::open(&dir.path().join("class-promotion.redb")).unwrap());
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -2626,17 +2635,17 @@ mod confirmation_class_precedence_tests {
         assert!(matches!(verdict, L2Verdict::Verified { .. }) && is_new, "{verdict:?}");
         assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 0);
 
-        // Durable class-0 original approval upgrades the entry to Class 1.
+        // A single provisional original is not a provisional quorum.
         engine.persist_original_approval(
             tag.clone(), genesis.clone(), [8; 32], b"first".to_vec(), 0, 1_000,
         ).await.unwrap();
-        assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 1);
+        assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 0);
 
-        // Durable class-1 original approval upgrades the entry to Class 2 (Final).
+        // A single final-capable original is not a FINAL quorum.
         engine.persist_original_approval(
             tag.clone(), genesis.clone(), [8; 32], b"final".to_vec(), 1, 1_000,
         ).await.unwrap();
-        assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 2);
+        assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 0);
 
         cancel.cancel();
         worker.await.unwrap();

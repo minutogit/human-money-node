@@ -1,0 +1,64 @@
+{
+  "captured_at": "2026-10-23T14:08:04.352925+00:00",
+  "scope": "Node source files at final validation; Core/App preexisting patches preserved",
+  "node_source_sha256": {
+    "crates/humoco-node/src/api/routes.rs": "8b769a21c99bb034ac73df63505907abf65884913a809905b008da72d0d28604",
+    "crates/humoco-node/src/daemon.rs": "fcfa2bb5ec8bc529bfffbbc68b86ef285d49f0e3198399c9f416882fde4f012a",
+    "crates/humoco-node/src/network/transport.rs": "fe5245e8a83365b8dba925ac1828dc400c2bd926c4594aedd7abf90532b53011",
+    "crates/humoco-node/src/storage/engine.rs": "20ae2f074607627ff97f949e316b3fd653dc50304098b32ebc9d13ff416f94a4",
+    "crates/humoco-node/tests/anti_self_slashing_wire_tests.rs": "f86fe9d46880167a2e294d9f716a899658cac7d6e032339296da632050bf8a91",
+    "crates/humoco-node/tests/api_tests.rs": "41ba4e1661f6d17194b8c448efe026e413aa53a1c89004086710ae78a97eb9fe",
+    "crates/humoco-node/tests/chaos_wire_http_fuzz.rs": "fef20e51fd6b4cee28b754b0dedddd59e5f64db48c8d2fee25fb588144defde6",
+    "crates/humoco-node/tests/cluster_e2e_tests.rs": "1143e0d69f08fa2553e2b0ae6b6f43ea6c8c960fac1d3683265bce14315d25f6",
+    "crates/humoco-node/tests/created_at_bucket_decoupling_tests.rs": "7da9ec677166667de96d63f095b9d4b23511ec1c7c3a9f57f30bd23b879ac7af",
+    "crates/humoco-node/tests/dos_resilience_test.rs": "9ffcad248362940fe048352a4e384a4cbefa580b456598019fcc90f5a94faf0a",
+    "crates/humoco-node/tests/dual_stack_and_sunset_tests.rs": "17a7ad661afbb0090e87ee38df159d778594e501f156084fd7bbee04d063ae04",
+    "crates/humoco-node/tests/phase11_wire_level_adversarial_tests.rs": "28e7150e70d9619ba750f43d407390e07e9c29a0531057f6d184a173beb405a1",
+    "crates/humoco-node/tests/phase4_net_time_and_quotas.rs": "0229b5e9066f99db17532d3d2bf251ffd0616f8afecdbb20da1035447f1382db",
+    "crates/humoco-node/tests/phase5_pull_sync_and_readiness.rs": "73d4ad3934d620d136fb2543ffa7009803b9cc9aad41a499ad574ef79f19edb5"
+  },
+  "logs_sha256": {
+    "workspace-tests.log": "100dc6d516ba0b7583071d68a74bba3c9a291db8822313bed08bd82c07d0f389",
+    "core-tests.log": "6cfc733709761b97024541d1c4ce78520ae58cfc049b426ba311138d45438f19",
+    "proto-tests.log": "954c47486825ee304b22152aae536e5252ffa435f2caa7f34b595c127e064535",
+    "app-backend.log": "d02de75143b603adb51ac2df51255bd1a53dd111b9ad1426d0cb94db9617c18d",
+    "clippy.log": "98b54978a772ecf3260574ae5c41c6058042b19cb60983a1042e750549db61f7",
+    "engine-tests.log": "3222f7ec337de7909353d74fb664a97287524ceeb59802f543a54137496f681c",
+    "freshness-regressions.log": "e82b04496acb968c3ceb7a9f33d0b8dd4cf978f49a93efc5c4debd5eefc8e517",
+    "ttl-negative-before.log": "ec2151c209980280e1b9d73dfa9afa0b737addf6727f9dfbc066533de13fa084",
+    "wallet-time-negative-before.log": "813f692687367cce7d71c0a03f2b48ef1a7615d590aa273014935659fe1c76e3"
+  },
+  "commands": [
+    {
+      "command": "cargo test-std --offline --no-fail-fast",
+      "exit_code": 0,
+      "passed": 628,
+      "ignored": 14
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --offline -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test --offline --locked --manifest-path ../human-money-core/Cargo.toml --lib",
+      "exit_code": 0,
+      "passed": 170
+    },
+    {
+      "command": "cargo test --offline --locked --manifest-path ../humoco-proto/Cargo.toml",
+      "exit_code": 0,
+      "passed": 15
+    },
+    {
+      "command": "./run-tests.sh --backend-only --quiet (human-money-app)",
+      "exit_code": 0
+    }
+  ],
+  "exclusions": [
+    "cargo test-deep not executed; 14 ignored tests remain unexecuted",
+    "App frontend not executed; no frontend changes in this increment",
+    "No source-complete recovery/turnover acceptance",
+    "No actual host durable-purchase/release positive integration",
+    "Local sibling dependencies do not certify published Git dependencies"
+  ]
+}

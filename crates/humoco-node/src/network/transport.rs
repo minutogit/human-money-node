@@ -25,6 +25,10 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// Handler trait for processing incoming bi-directional and uni-directional requests.
 pub trait RequestHandler: Send + Sync + 'static {
+    fn signing_checkpoint(&self) -> BoxFuture<Result<Option<crate::network::framing::SigningCheckpoint>, NodeError>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn handle(
         &self,
         header: WireHeader,
@@ -150,46 +154,41 @@ pub fn verify_equivocation_first_party(
                 return false;
             }
 
-            let verify_att = |att: &humoco_sim_core::types::Attestation| -> bool {
-                let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
-                    Ok(s) => s,
-                    Err(_) => return false,
-                };
-                let shard_candidates = [
-                    att.shard_id,
-                    u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]),
-                ];
-                // Parent-lock binding: the signature commits to (parent_lock, lock_id),
-                // preventing cross-voucher signature transplant replay.
-                // NetworkId is NOT hardcoded: both Mainnet and Testnet domain
-                // tags verify (cross-network replay inside slashing evidence
-                // must not let an offender escape on the "wrong" network).
-                let payload_digest = humoco_sim_core::crypto::compute_attestation_payload_digest(
-                    &att.parent_lock,
-                    &att.lock_id,
+            if a.shard_id != b.shard_id {
+                return false;
+            }
+            let shard = u16::from_be_bytes([a.parent_lock[0], a.parent_lock[1]]);
+            // Older originals omitted the shard metadata (zero); only the
+            // canonical parent-derived shard is a protected signing context.
+            if a.shard_id != 0 && a.shard_id != shard {
+                return false;
+            }
+            let verify_att = |att: &humoco_sim_core::types::Attestation,
+                              provisional: &[u8], final_domain: &[u8]| -> bool {
+                let sig = ed25519_dalek::Signature::from_bytes(&att.signature);
+                let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(
+                    &att.parent_lock, &att.lock_id,
                 );
-                let domains: [&[u8]; 4] = [
-                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
-                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
-                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
-                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
-                ];
-                shard_candidates.iter().any(|&shard_id| {
-                    domains.iter().any(|domain| {
-                        for status in [0u8, 1u8] {
-                            let d = humoco_sim_core::crypto::compute_sig_digest(
-                                domain, 0, 0, 0, shard_id, status, &payload_digest,
-                            );
-                            if vk.verify_strict(&d, &sig).is_ok() {
-                                return true;
-                            }
-                        }
-                        false
-                    })
+                // An original choice remains protected across a provisional to
+                // final promotion. Live observations use a separate purpose and
+                // cannot verify here. Domain and status must agree.
+                [(provisional, 0u8), (final_domain, 1u8)].into_iter().any(|(domain, status)| {
+                    let digest = humoco_sim_core::crypto::compute_sig_digest(
+                        domain, 0, 0, 0, shard, status, &payload,
+                    );
+                    vk.verify_strict(&digest, &sig).is_ok()
                 })
             };
-
-            verify_att(&a) && verify_att(&b)
+            // Both signatures must belong to ONE network. Independent existential
+            // checks would combine lawful originals from unrelated networks.
+            [
+                (humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+                 humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET),
+                (humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
+                 humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET),
+            ].into_iter().any(|(provisional, final_domain)| {
+                verify_att(&a, provisional, final_domain) && verify_att(&b, provisional, final_domain)
+            })
         }
     }
 }
@@ -266,6 +265,18 @@ impl NodeRequestHandler {
 }
 
 impl RequestHandler for NodeRequestHandler {
+    fn signing_checkpoint(&self) -> BoxFuture<Result<Option<crate::network::framing::SigningCheckpoint>, NodeError>> {
+        let storage = self.storage.clone();
+        let identity = self.identity.clone();
+        let network = match self.network_id { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 };
+        Box::pin(async move {
+            if !storage.is_signing_history_healthy() { return Ok(None); }
+            let state = tokio::task::spawn_blocking(move || storage.signing_checkpoint()).await
+                .map_err(|e| NodeError::Daemon(format!("checkpoint worker: {e}")))??;
+            Ok(Some(crate::network::framing::SigningCheckpoint::signed(&identity, network, state.0, state.1)))
+        })
+    }
+
     fn handle(
         &self,
         header: WireHeader,
@@ -287,7 +298,6 @@ impl RequestHandler for NodeRequestHandler {
         let tier_controller = self.tier_controller.clone();
         let network_id = self.network_id;
         let readiness_manager = self.readiness_manager.clone();
-        let is_sync_ready = self.is_sync_ready.clone();
         Box::pin(async move {
             let msg_type = header.msg_type;
 
@@ -561,6 +571,18 @@ impl RequestHandler for NodeRequestHandler {
                     return Ok((resp_header, Vec::new()));
                 }
 
+                // DEC-061: a fresh gateway envelope cannot renew wallet T0.
+                // Evaluate against the admission-time snapshot, before disk waits.
+                if let crate::network::framing::LockWirePayload::Hmc { req, .. } = &wire_payload {
+                    if req.created_at_ms == 0 || req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
+                        return Ok((WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq.wrapping_add(1), header.epoch_id,
+                            humoco_sim_core::wire::FLAG_UNAUTHORIZED, 0,
+                        ), Vec::new()));
+                    }
+                }
+
                 // 4. Check authenticated QUIC identity matches sender_pubkey
                 if let Some(auth_peer) = peer_identity {
                     if sender_pubkey != auth_peer {
@@ -741,12 +763,6 @@ impl RequestHandler for NodeRequestHandler {
                                     return Ok((resp_header, Vec::new()));
                                 }
                             }
-                            let mut chain_req = chain_req.clone();
-                            for hop in &mut chain_req.chain {
-                                if hop.created_at_ms == 0 {
-                                    hop.created_at_ms = now_ms;
-                                }
-                            }
                             let (verdict, _is_new) = engine.ingress_hmc_chain_lock_durable(chain_req.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
                             match verdict {
                                 crate::api::hmc::L2Verdict::Conflict { existing_lock } => {
@@ -825,10 +841,7 @@ impl RequestHandler for NodeRequestHandler {
                                 }
                             };
 
-                            let mut entry = crate::api::hmc::L2LockEntry::from(&req);
-                            if entry.created_at_ms == 0 {
-                                entry.created_at_ms = now_ms;
-                            }
+                            let entry = crate::api::hmc::L2LockEntry::from(&req);
                             // INV-1202: validate the ingress time window at the shard with
                             // the current network time (never blindly trust gateway time).
                             let (verdict, _is_new) = engine.ingress_hmc_lock_durable(lookup_tag.clone(), entry.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms), None, None, None).await;
@@ -1220,12 +1233,7 @@ impl RequestHandler for NodeRequestHandler {
                     .into_iter()
                     .map(|(rec, _)| rec)
                     .collect();
-                for (rec, _) in engine.ram.read().await.all_locks() {
-                    if !locks.iter().any(|l| l.parent_lock == rec.parent_lock) {
-                        locks.push(rec);
-                    }
-                }
-                let mut hmc_locks_all = match storage.all_valid_hmc_locks(now_ms) {
+                let hmc_locks_all = match storage.all_valid_hmc_locks(now_ms) {
                     Ok(h) => h,
                     Err(e) => {
                         error!(shard_id, error=%e, "Storage error reading valid HMC locks for digest; failing closed with FLAG_NOT_READY");
@@ -1239,11 +1247,6 @@ impl RequestHandler for NodeRequestHandler {
                         return Ok((resp_header, Vec::new()));
                     }
                 };
-                for (tag, entry) in &engine.hmc_ram.read().await.locks {
-                    if !hmc_locks_all.iter().any(|(t, _)| t == tag) {
-                        hmc_locks_all.push((tag.clone(), entry.clone()));
-                    }
-                }
                 // # Architectural Invariant: Spec 03, Deterministic Digest Pull-Sync
                 //
                 // HMC follow-up locks carry no own `deletable_at`; their TTL is
@@ -1300,8 +1303,7 @@ impl RequestHandler for NodeRequestHandler {
                 let lock_count = shard_locks.len() as u64;
                 let resp_bytes = bincode::serialize(&(digest, lock_count)).unwrap_or_default();
                 let payload_len = checked_payload_len(resp_bytes.len())?;
-                let is_ready = readiness_manager.is_shard_ready(shard_id)
-                    && is_sync_ready.load(std::sync::atomic::Ordering::Acquire);
+                let is_ready = readiness_manager.is_shard_ready(shard_id);
                 let flags = if is_ready { 0 } else { humoco_sim_core::wire::FLAG_NOT_READY };
                 let resp_header = WireHeader::new(
                     MsgType::ShardDigestResponse as u16,
@@ -1509,6 +1511,8 @@ impl RequestHandler for NodeRequestHandler {
         let storage = self.storage.clone();
         let peer_manager = self.peer_manager.clone();
         let identity = self.identity.clone();
+        let readiness = self.readiness_manager.clone();
+        let network = match self.network_id { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 };
         Box::pin(async move {
             if header.msg_type == MsgType::HeartbeatAck as u16 {
                 if (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0 {
@@ -1580,6 +1584,20 @@ impl RequestHandler for NodeRequestHandler {
                             .unwrap_or(0)
                     });
                 if let Ok(hb) = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload) {
+                    if let Some(checkpoint) = &hb.signing_checkpoint {
+                        if checkpoint.verify(identity.node_pubkey(), network) {
+                            let db = storage.clone();
+                            let checkpoint = checkpoint.clone();
+                            let corrupt = tokio::task::spawn_blocking(move || db.observe_verified_own_checkpoint(checkpoint.generation, checkpoint.fingerprint)).await
+                                .map_err(|e| NodeError::Daemon(format!("checkpoint evidence worker: {e}")))??;
+                            if corrupt {
+                                readiness.set_storage_healthy(false);
+                                engine.stats.signing_failed.store(true, std::sync::atomic::Ordering::Release);
+                                return Ok(());
+                            }
+                        }
+                    }
+
                     if hb.signature != [0u8; 64] {
                         let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                             hb.node_id,
@@ -2021,6 +2039,7 @@ impl QuicTransport {
         piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     ) -> Result<(), NodeError> {
         let hb = crate::network::framing::HeartbeatWirePayload {
+            signing_checkpoint: self.handler.signing_checkpoint().await?,
             node_id,
             addr: local_addr,
             timestamp_ms,

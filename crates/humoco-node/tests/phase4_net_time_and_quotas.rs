@@ -255,7 +255,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -375,6 +375,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     );
     let sig1 = identity_client.signing_key().sign(&digest1).to_bytes();
     let hb_wire = humoco_node::network::framing::HeartbeatWirePayload {
+            signing_checkpoint: None,
         node_id: *identity_client.node_pubkey(),
         addr: "127.0.0.1:9001".parse().unwrap(),
         timestamp_ms: t1,
@@ -419,7 +420,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -543,7 +544,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
         deletable_at: None,
         privacy_guard: None,
     };
@@ -591,6 +592,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
 
     // 2. Shard Node A sends Heartbeat with piggyback_observations to Node B
     let hb_wire = humoco_node::network::framing::HeartbeatWirePayload {
+            signing_checkpoint: None,
         node_id: *identity_a.node_pubkey(),
         addr: "127.0.0.1:9002".parse().unwrap(),
         timestamp_ms: t1 + 5,
@@ -632,7 +634,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         trap_r: None,
         trap_s: None,
         encrypted_timestamp: 0,
-        created_at_ms: 0,
+        created_at_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
         deletable_at: None,
         privacy_guard: None,
     };

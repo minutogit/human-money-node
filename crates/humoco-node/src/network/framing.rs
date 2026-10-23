@@ -9,9 +9,69 @@ pub const MAX_SYNC_FRAME_PAYLOAD_LEN: usize = 4 * 1024 * 1024; // 4 MiB
 pub const MAX_FRAME_PAYLOAD_LEN: usize = MAX_SYNC_FRAME_PAYLOAD_LEN;
 pub const DEFAULT_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Optional self-signed signing-history checkpoint, carried on the existing
+/// heartbeat stream. It is not a vote, quorum or membership claim.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SigningCheckpoint {
+    pub network: u8,
+    pub node_pubkey: [u8; 32],
+    pub generation: u64,
+    pub fingerprint: [u8; 32],
+    #[serde(with = "serde_sig_64")]
+    pub signature: [u8; 64],
+}
+impl SigningCheckpoint {
+    fn digest(&self) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        let domain = b"HUMOCO_V1_SIGNING_CHECKPOINT";
+        h.update(&[domain.len() as u8]); h.update(domain);
+        h.update(&[self.network]); h.update(&self.node_pubkey);
+        h.update(&self.generation.to_le_bytes()); h.update(&self.fingerprint);
+        *h.finalize().as_bytes()
+    }
+    pub fn signed(identity: &crate::identity::NodeIdentity, network: u8, generation: u64, fingerprint: [u8; 32]) -> Self {
+        use ed25519_dalek::Signer;
+        let mut result = Self { network, node_pubkey: *identity.node_pubkey(), generation, fingerprint, signature: [0; 64] };
+        result.signature = identity.signing_key().sign(&result.digest()).to_bytes();
+        result
+    }
+    pub fn verify(&self, expected_key: &[u8; 32], expected_network: u8) -> bool {
+        if self.node_pubkey != *expected_key || self.network != expected_network { return false; }
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(expected_key) else { return false; };
+        key.verify_strict(&self.digest(), &ed25519_dalek::Signature::from_bytes(&self.signature)).is_ok()
+    }
+}
+
 /// F2F Heartbeat Wire-Payload carrying node ID, socket address, and monotonic net_time (Spec 11).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HeartbeatWirePayload {
+    pub node_id: [u8; 32],
+    pub addr: std::net::SocketAddr,
+    pub timestamp_ms: u64,
+    #[serde(default)]
+    pub declared_write_ema_micro_bj: u64,
+    #[serde(default)]
+    pub declared_read_ema_credits: u64,
+    #[serde(default = "default_signature", with = "serde_sig_64")]
+    pub signature: [u8; 64],
+    #[serde(default)]
+    pub supported_suites_mask: u8,
+    #[serde(default, deserialize_with = "deserialize_piggyback_observations")]
+    pub piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
+    #[serde(default)]
+    pub pow_nonce: u64,
+    #[serde(default)]
+    pub hrw_routing_id: [u8; 32],
+    #[serde(default)]
+    pub ticket_epoch_t0: u64,
+    #[serde(default = "default_heartbeat_ttl")]
+    pub ttl: u8,
+    #[serde(default)]
+    pub signing_checkpoint: Option<SigningCheckpoint>,
+}
+
+#[derive(serde::Deserialize)]
+struct HeartbeatWithoutCheckpoint {
     pub node_id: [u8; 32],
     pub addr: std::net::SocketAddr,
     pub timestamp_ms: u64,
@@ -57,6 +117,22 @@ impl HeartbeatWirePayload {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
         if let Ok(hb) = bincode::deserialize::<HeartbeatWirePayload>(bytes) {
             Ok(hb)
+        } else if let Ok(old) = bincode::deserialize::<HeartbeatWithoutCheckpoint>(bytes) {
+            Ok(Self {
+                signing_checkpoint: None,
+                node_id: old.node_id,
+                addr: old.addr,
+                timestamp_ms: old.timestamp_ms,
+                declared_write_ema_micro_bj: old.declared_write_ema_micro_bj,
+                declared_read_ema_credits: old.declared_read_ema_credits,
+                signature: old.signature,
+                supported_suites_mask: old.supported_suites_mask,
+                piggyback_observations: old.piggyback_observations,
+                pow_nonce: old.pow_nonce,
+                hrw_routing_id: old.hrw_routing_id,
+                ticket_epoch_t0: old.ticket_epoch_t0,
+                ttl: old.ttl,
+            })
         } else {
             #[derive(serde::Deserialize)]
             struct MidHeartbeat {
@@ -76,6 +152,7 @@ impl HeartbeatWirePayload {
             }
             if let Ok(m) = bincode::deserialize::<MidHeartbeat>(bytes) {
                 Ok(HeartbeatWirePayload {
+            signing_checkpoint: None,
                     node_id: m.node_id,
                     addr: m.addr,
                     timestamp_ms: m.timestamp_ms,
@@ -106,6 +183,7 @@ impl HeartbeatWirePayload {
                 }
                 let l: LegacyHeartbeat = bincode::deserialize(bytes)?;
                 Ok(HeartbeatWirePayload {
+            signing_checkpoint: None,
                     node_id: l.node_id,
                     addr: l.addr,
                     timestamp_ms: l.timestamp_ms,
@@ -763,6 +841,7 @@ mod tests {
 
         // 1. Serde bincode roundtrip with 3 items capped to 2
         let hb = HeartbeatWirePayload {
+            signing_checkpoint: None,
             node_id: [9; 32],
             addr: "127.0.0.1:9090".parse().unwrap(),
             timestamp_ms: 12345,

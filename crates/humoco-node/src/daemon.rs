@@ -798,6 +798,7 @@ impl NodeDaemon {
             event_log: event_log.clone(),
             health_tracker: Arc::new(crate::api::health::HealthStateTracker::default()),
             readiness_manager: readiness_manager.clone(),
+            retained_choice_reads: Arc::new(tokio::sync::Semaphore::new(8)),
         };
 
         // Spawn history sampling task (60s tick in normal mode, 5s in simulation mode)
@@ -946,11 +947,11 @@ impl NodeDaemon {
     }
 }
 
-/// Computes local deterministic shard digest across redb disk and in-RAM tables.
+/// Computes the local digest from committed storage only; pending RAM is not a witness.
 async fn compute_local_shard_digest(
     shard_id: u16,
     now_ms: u64,
-    engine: &crate::storage::DualTierEngine,
+    _engine: &crate::storage::DualTierEngine,
     storage: &std::sync::Arc<crate::storage::RedbStorage>,
 ) -> Result<[u8; 32], NodeError> {
     let mut locks: Vec<humoco_sim_core::types::LockRecord> = storage
@@ -958,17 +959,7 @@ async fn compute_local_shard_digest(
         .into_iter()
         .map(|(rec, _)| rec)
         .collect();
-    for (rec, _) in engine.ram.read().await.all_locks() {
-        if !locks.iter().any(|l| l.parent_lock == rec.parent_lock) {
-            locks.push(rec);
-        }
-    }
-    let mut hmc_locks_all = storage.all_valid_hmc_locks(now_ms)?;
-    for (tag, entry) in &engine.hmc_ram.read().await.locks {
-        if !hmc_locks_all.iter().any(|(t, _)| t == tag) {
-            hmc_locks_all.push((tag.clone(), entry.clone()));
-        }
-    }
+    let hmc_locks_all = storage.all_valid_hmc_locks(now_ms)?;
     let hmc_root_map: std::collections::HashMap<&str, u64> = {
         let mut m = std::collections::HashMap::new();
         for (_, e) in &hmc_locks_all {
@@ -1111,8 +1102,8 @@ pub async fn sync_single_shard(
             groups.entry(digest).or_default().push(addr);
         }
     }
-    let Some((dominant_digest, dominant_addrs)) = groups.into_iter().find(|(digest, addresses)| {
-        let count = addresses.len() + if self_in_committee && *digest == local_digest { 1 } else { 0 };
+    let Some((dominant_digest, dominant_addrs)) = groups.into_iter().find(|(_, addresses)| {
+        let count = addresses.len();
         count >= needed && needed > 0
     }) else {
         readiness_manager.mark_sync_failed(shard_id);
@@ -1122,7 +1113,11 @@ pub async fn sync_single_shard(
     if dominant_digest == local_digest {
         // DEC-057/F05: convergence alone is insufficient — re-verify both
         // activation guards before marking readiness.
-        if !committee.iter().any(|member| member.node_pubkey == *identity.node_pubkey())
+        let (committee_now, _, _) = peer_manager.shard_committee(
+            *identity.node_pubkey(), *identity.hrw_routing_id(), shard_id,
+        ).await;
+        if committee_now.iter().map(|member| member.node_pubkey).collect::<Vec<_>>()
+            != committee.iter().map(|member| member.node_pubkey).collect::<Vec<_>>()
             || !engine.is_signing_healthy()
             || !readiness_manager.storage_healthy.load(std::sync::atomic::Ordering::Acquire)
         {
@@ -1263,7 +1258,8 @@ pub async fn sync_single_shard(
         let (committee_post, _, _) = peer_manager.shard_committee(
             *identity.node_pubkey(), *identity.hrw_routing_id(), shard_id,
         ).await;
-        if !committee_post.iter().any(|member| member.node_pubkey == *identity.node_pubkey())
+        if committee_post.iter().map(|member| member.node_pubkey).collect::<Vec<_>>()
+            != committee.iter().map(|member| member.node_pubkey).collect::<Vec<_>>()
             || !engine.is_signing_healthy()
             || !readiness_manager.storage_healthy.load(std::sync::atomic::Ordering::Acquire)
         {

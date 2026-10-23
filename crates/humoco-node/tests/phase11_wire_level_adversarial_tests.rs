@@ -612,6 +612,50 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
         "VICTIM MUST NOT be banned in PeerManager by forged proof"
     );
 
+    // Genuine signatures from different networks are not conflicting promises
+    // in one protected context. Sending them must not frame the signing key.
+    let sign_original = |lock_id: [u8; 32], domain: &[u8], status: u8| {
+        let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent, &lock_id);
+        let shard = u16::from_be_bytes([parent[0], parent[1]]);
+        let digest = humoco_sim_core::crypto::compute_sig_digest(
+            domain, 0, 0, 0, shard, status, &payload,
+        );
+        humoco_sim_core::types::Attestation {
+            node_id: victim_u16,
+            lock_id,
+            parent_lock: parent,
+            timestamp: SimTime(1_000),
+            signature: victim_id.signing_key().sign(&digest).to_bytes(),
+            shard_id: shard,
+        }
+    };
+    let original_a = sign_original(lock_a, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET, 0);
+    let cross_network_b = sign_original(lock_b, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET, 1);
+    let cross_network = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        original_a.clone(), cross_network_b, victim_pubkey,
+    );
+    assert!(!humoco_node::network::transport::verify_equivocation_first_party(victim_id.verifying_key(), &cross_network), "cross-network originals are not self-proof");
+    let payload = bincode::serialize(&cross_network).expect("serialize cross-network proof");
+    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 8, 0, 0, payload.len() as u32);
+    let (reply, _) = transport_stranger.send_request(&conn2, &hdr, &payload).await.expect("cross-network proof response");
+    assert_eq!(reply.msg_type, MsgType::EquivocationAck as u16);
+    assert!(!engine_s.is_node_banned(&victim_pubkey).await, "different network originals must not ban");
+    assert!(!pm_server.is_banned(&victim_pubkey).await);
+    assert!(storage_s.get_evidence(blake3::hash(&payload).as_bytes()).expect("evidence lookup").is_none());
+
+    // A provisional-to-final transition still protects the original spend slot
+    // within the same network. A conflicting original is genuine self-proof.
+    let original_b = sign_original(lock_b, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET, 1);
+    let genuine = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        original_a, original_b, victim_pubkey,
+    );
+    let payload = bincode::serialize(&genuine).expect("serialize genuine proof");
+    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 9, 0, 0, payload.len() as u32);
+    transport_stranger.send_request(&conn2, &hdr, &payload).await.expect("genuine proof response");
+    assert!(engine_s.is_node_banned(&victim_pubkey).await);
+    assert!(pm_server.is_banned(&victim_pubkey).await);
+    assert_eq!(storage_s.get_evidence(blake3::hash(&payload).as_bytes()).expect("evidence lookup"), Some(payload));
+
     server_cancel.cancel();
     stranger_cancel.cancel();
     transport_s.close();
@@ -659,14 +703,9 @@ async fn test_phase11d_shard_digest_isolation_wire() {
                 SimTime(now_ms),
                 SimTime(now_ms + 50_000_000),
             );
-            let _ = engine
-                .ingress_lock_with_origin(
-                    rec,
-                    SimTime(now_ms),
-                    SimTime(now_ms + 50_000_000),
-                    IngressOrigin::ClientApi,
-                )
-                .await;
+            // This fixture describes committed source state, not an async
+            // pending write. A witness must never depend on worker scheduling.
+            storage.put_lock(&rec, now_ms + 50_000_000).expect("committed fixture lock");
         }
         // Divergent locks for SHARD_OTHER.
         for i in 0..other_count {
@@ -682,14 +721,9 @@ async fn test_phase11d_shard_digest_isolation_wire() {
                 SimTime(now_ms),
                 SimTime(now_ms + 50_000_000),
             );
-            let _ = engine
-                .ingress_lock_with_origin(
-                    rec,
-                    SimTime(now_ms),
-                    SimTime(now_ms + 50_000_000),
-                    IngressOrigin::ClientApi,
-                )
-                .await;
+            // This fixture describes committed source state, not an async
+            // pending write. A witness must never depend on worker scheduling.
+            storage.put_lock(&rec, now_ms + 50_000_000).expect("committed fixture lock");
         }
 
         let identity = NodeIdentity::generate();

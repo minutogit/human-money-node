@@ -241,6 +241,7 @@ impl ControlServer {
                     };
                     let ticket_outdated = state.peer_manager.is_ticket_outdated();
                     ControlResponse::Status {
+                        signing_history_corrupt: !state.storage.is_signing_history_healthy(),
                         node_id: state.identity.node_id_hex(),
                         public_key: Some(state.identity.public_key_hex()),
                         hrw_routing_id: Some(hrw_hex.clone()),

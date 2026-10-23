@@ -1,5 +1,12 @@
 # Complete Architecture Implementation Handoff Plan
 
+**Historical detailed handoff.** Continue with
+[the 2026-10-23 completion plan](ARCHITECTURE_IMPLEMENTATION_CLOSURE_PLAN.md).
+The later audit verified real fixes but found remaining/new release, readiness,
+class-admission, quarantine, framing and resource defects. Baseline findings,
+worker-package labels and completion assumptions below are not current status;
+retain their applicable original acceptance criteria and decision provenance.
+
 Date: 2026-10-21 (Europe/Berlin). Requirement baseline: **89 decisions,
 DEC-001–DEC-089**, CP-0095, with their recorded refinements and withdrawals.
 Status: **planning only; implementation and final acceptance are incomplete**.

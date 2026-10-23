@@ -4,6 +4,14 @@
 **Date:** 2026-10-20  
 **References:** DEC-053–DEC-065, DEC-080–DEC-087, `docs/ARCHITECTURE_CONSOLIDATION.md`, `docs/INVARIANT_REGISTRY.md`
 
+**Execution clarification, 2026-10-23:** The maintainer selected recipient-configured
+signed regional views and reachable local rollback detection, explicitly excluding
+an undetectable consistent offline directory rollback and external trust anchors.
+The enforceable producer/consumer and encoding contract is
+[regional authority and signing history](REGIONAL_AUTHORITY_AND_SIGNING_HISTORY_CONTRACT.md).
+That document qualifies older unconditional safety/progress wording below. G2/G3/G4
+and complete purchase/release integration are not closed by G1/G5 implementation.
+
 ---
 
 ## Executive Summary & Guiding Doctrine

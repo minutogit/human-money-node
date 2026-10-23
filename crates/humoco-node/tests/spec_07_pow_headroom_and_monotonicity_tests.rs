@@ -212,6 +212,7 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
     // Node A sends direct Heartbeat (hops = 0) to Node B
     let conn_a_to_b = transport_a.connect_peer_unchecked(addr_b).await.unwrap();
     let hb = humoco_node::network::framing::HeartbeatWirePayload {
+            signing_checkpoint: None,
         node_id: pk_a,
         addr: addr_a,
         timestamp_ms: 1000,

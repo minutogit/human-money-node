@@ -2,6 +2,17 @@
 
 Status: **in progress; not release-ready**. Date: 2026-10-20. Checkpoint: CP-0095.
 
+**Current audit qualification — 2026-10-23:** Node `e585830`, Proto `e119ee6`,
+Core `8265fd4`, App `1f0bd4e` were reviewed read-only. Original-receipt/raw-string
+release bypasses, quarantine TTL coverage and retained approval-byte return were
+improved. Full completion remains unsupported: replayable caller-defined live
+context, missing productive intent/purchase flow, globally blocked witnesses,
+single-vote/volatile class admission, incomplete transfer, cross-context fraud
+verification and operational/evidence gaps remain. Use
+[the completion plan](ARCHITECTURE_IMPLEMENTATION_CLOSURE_PLAN.md) for exact
+sources, fifteen Z packages, all89DEC/A01–A15 ownership and mandatory evidence.
+This audit/planning update ran no runtime tests and changed no production code.
+
 **Audit qualification — 2026-10-21:** later completion claims in this record do
 not establish full implementation. The current read-only four-repository audit
 found release bypasses, incomplete productive checkout, unjustified recovery
@@ -155,3 +166,156 @@ have been implemented, audited and verified across the workspace:
   Subagent E6 independently verified all contracts across all 4 repositories,
   confirming 0 compiler warnings/errors and clean test suites across workspace.
 
+
+
+## Closure execution safety increment — 2026-10-23
+
+The maintainer explicitly authorized executing the closure plan in the current
+chat. No subagents were started; no commit, push or deployment was performed.
+Preexisting Core/App/Node/document changes were preserved. This is **partial
+implementation, not completion of Z00–Z14 or G1–G5**.
+
+See [the current manifest](ARCHITECTURE_COMPLETION_MANIFEST.md) for all89DEC
+selection classifications, package callers and open A/G/E/V obligations. The
+[repository snapshot](evidence/closure-2026-10-23/repository-snapshot.json) and
+[validation hashes/commands](evidence/closure-2026-10-23/validation.json) bind this
+increment to real working-tree sources; HEAD alone does not identify dirty code.
+
+Implemented and inspected:
+
+- Z02 containment: digest responses depend on the requested shard, not the legacy
+  global flag; pending RAM never joins committed digest witnesses, including the
+  daemon local projection. Recovering self contributes no quorum vote. Recheck
+  the entire frozen identity roster before readiness publication. The isolated
+  QUIC fixture demonstrates one prepared shard serving while another is unready;
+  it is explicitly not automatic recovery or a source-completeness proof.
+- Z03 containment: durable own original approval no longer promotes a lock to a
+  quorum confirmation class. A real engine/storage regression distinguishes own
+  choice durability from quorum support. Authenticated persistent support and
+  safe unknown-support exclusion/restart/import remain unfinished.
+- Z04 expiry: ordinary pruning removes confirmation-class metadata at root+30s,
+  alongside lock/TTL/root/durability indexes. The new regression failed before
+  the fix and passes afterward. Quarantine admission/publication and bounded
+  worker integration remain unfinished.
+- Z05 strict verifier: both original signatures must share one network and the
+  canonical protected shard; provisional/final domain and status must agree.
+  Genuine same-network conflicting originals across promotion remain sanctionable.
+  The direct strict-verifier cross-network assertion failed before the fix.
+  Important baseline qualification: the existing outer `FraudProofPayload::verify`
+  already rejected the constructed cross-network wire sample; no successful
+  baseline wire ban was demonstrated. The real QUIC regression now checks both
+  the negative framing case and the positive durable evidence/ban case. The
+  outer simulator verifier's mainnet-only behavior and full testnet/live-context
+  acceptance matrix remain separate work, not silently declared complete.
+- Z09 partial: a fresh gateway envelope cannot refresh a stale signed wallet T0
+  at the receiving shard. HTTP/QUIC no longer rewrite zero T0 after signing.
+  Clock checks use the captured admission time before persistence, not after a
+  durable wait. Positive fixtures now choose T0 before signing; missing/stale
+  T0 has explicit negative HTTP/QUIC regressions. Exact causal path and receiving
+  chain valid-prefix semantics remain unfinished.
+- Z10 partial: exceptional retained-choice reads run in a blocking worker with
+  eight nonwaiting admission permits and a250ms caller wait. The actual worker
+  retains its permit after timeout until it finishes. Public errors are generic;
+  responses include signer/configured network/tag/purpose and original bytes.
+  The HTTP test verifies the returned real signature with Proto and unchanged
+  stored bytes; exhausted capacity returns429 and recovers after release. A real
+  client reconciliation consumer and complete retained historical context remain
+  unfinished.
+
+Executed final evidence (socket-enabled where necessary):
+
+| Command / scope | Result | Artifact |
+| --- | --- | --- |
+| `cargo test-std --offline --no-fail-fast` |628 passed,0 failed,14 ignored | [Workspace log](evidence/closure-2026-10-23/workspace-tests.log) |
+| `cargo clippy --workspace --all-targets --offline -- -D warnings` | passed | [Clippy log](evidence/closure-2026-10-23/clippy.log) |
+| Core `cargo test --offline --locked --lib` |170 passed | [Core log](evidence/closure-2026-10-23/core-tests.log) |
+| Proto `cargo test --offline --locked` |15 passed | [Proto log](evidence/closure-2026-10-23/proto-tests.log) |
+| App `./run-tests.sh --backend-only --quiet` | passed (backend Clippy + tests) | [App log](evidence/closure-2026-10-23/app-backend.log) |
+
+Initial `cargo test-fast` failed three socket tests in the restricted sandbox;
+its approved socket-enabled rerun passed. Intermediate full runs exposed a
+pending-versus-committed digest fixture, a recovery test counting unready self,
+and zero-T0 fixtures. These were corrected with independent expected outcomes;
+no safety threshold was lowered. A latency fixture failed once with503 under the
+initial combined run, then passed in isolation (500/500) and in final full runs;
+its intermittent cause is not established. This is not a production SLA claim.
+`cargo test-deep`, App frontend and complete E01–E15/V01–V15 acceptance were not
+executed. Final green suites do not close G1/G2/G3/G5 or authorize release.
+
+Continuation blockers are explicit: independent recipient authority, source
+coverage and no-gap activation across turnover, authentic persistent support,
+actual wallet intent/challenge/L1-purchase flow and detectable signing-history
+loss. No missing mechanism is replaced by a success flag or a prose theorem.
+
+
+## G1/G5 selected continuation — 2026-10-23
+
+The maintainer explicitly selected reachable loss detection without an external
+trust anchor, and recipient-configured authenticated regional mesh sources.
+The maintainer also authorized local Git commits. This section supersedes the
+previous increment's statement that those two choices were still undecided.
+
+G1 now has a bounded canonical signed-view DTO in Proto, a private operator-only
+Node export of qualified mature living identities, an authenticated transactional
+recipient policy in Core, and registered App configuration/verification commands.
+The backend derives the exact ordered top20 independently of the payment proof;
+missing, stale, forged or disagreeing configured sources reject verification.
+An expired voucher root is rejected even with a current source view. Source
+honesty and the at-most-six Byzantine premise remain conditional. A source view
+is neither global membership proof nor complete-history evidence. Automatic
+refresh/UI and durable purchase release remain open; no automatic goods release
+was enabled.
+
+G5 now commits a monotonic generation and active-choice integrity commitment in
+the same immediate redb transaction as original approvals. Startup streams history
+validation; exact retries do not advance generation; TTL pruning advances it and
+removes expired commitment leaves. Consistent operator backups include this state.
+Verified own signed checkpoints piggyback on existing heartbeat gossip. A higher
+own generation or inconsistent equal-generation commitment latches local
+`FAIL_CLOSED_CORRUPT`, disables signing/readiness, survives backup/reopen, and is
+visible through the private control socket. It does not ban a peer. Forged,
+foreign-key and wrong-network checkpoints have no effect. No TPM, notary, third
+gossip stream or checkout network preflight was added. A complete internally
+consistent offline directory rollback without contradictory evidence is expressly
+outside the guarantee. Legacy migration cannot prove old integrity retroactively.
+
+The concrete bytes, trust premises, tests and remaining limits are specified in
+[the G1/G5 contract](REGIONAL_AUTHORITY_AND_SIGNING_HISTORY_CONTRACT.md).
+
+Final validation (source hashes and logs: [record](evidence/closure-2026-10-23/g1-g5/validation.json)):
+
+| Command | Result |
+| --- | --- |
+| `RUST_TEST_THREADS=4 cargo test-std --offline --no-fail-fast` | 632 passed, 14 ignored, 0 failed; real HTTP/QUIC/UNIX integration included |
+| Node `cargo clippy --offline --workspace --all-targets -- -D warnings` | passed |
+| Core `cargo nextest run --offline --lib --status-level fail` | 171 passed |
+| Proto `cargo test --offline` | 16 passed |
+| Proto `cargo clippy --offline --all-targets -- -D warnings` | passed |
+| App `./run-tests.sh --backend-only --quiet` | passed |
+
+Default-concurrency full runs exposed fixed 750 ms durable-ACK timeouts and a
+checkout benchmark failure under concurrent temporary-database pressure. Those
+failed experiments are retained as open stress/availability evidence, not erased
+by the bounded-parallel success. No production deadline, quorum or safety check
+was relaxed. One automatic approval-review timeout prevented a combined tool call
+from executing; a subsequent approved retry completed the affected checks.
+The real heartbeat fixture now uses distinct timestamps to avoid intentional
+mesh duplicate suppression. The benchmark retries the same signed request and
+accepts a verified idempotent 200 as well as a verified new 201.
+
+The entire closure plan is **not complete**. G2/G3 exclusion continuity, bounded
+no-gap synchronization/publication, full clock composition, durable wallet send
+intent and recipient challenge/purchase production, client reconciliation and
+source refresh, mixed-load progress and complete E/V acceptance remain open.
+Existing testnet fraud outer-verifier coverage also remains qualified. All local
+results use the resolved sibling dependency graph; App's published Git Core
+`master` dependency and CI graph are not certified by local commits.
+
+Local dependency commits for this increment:
+
+- Proto: `ea9933a` — signed regional mesh authority DTO and verifier.
+- Core: `33173f8` — persisted recipient policy and fail-closed checkout boundary.
+- App: `583aa3f` — registered configuration and regional verification IPC.
+
+The Node commit contains this execution record; its own identity is available in
+Git history. No repository was pushed.

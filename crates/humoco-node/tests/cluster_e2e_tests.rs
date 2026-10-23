@@ -466,10 +466,11 @@ async fn test_e2e_pos_latency_benchmark() {
         let mut last_resp = None;
         let mut elapsed = Duration::ZERO;
 
+        // Unknown outcomes retry the exact signed bytes and transaction identity.
+        let parent_hex = format!("bench_voucher_{i:064x}");
+        let req = make_e2e_hmc_genesis(&parent_hex, now + 600_000, &sender_key);
         while attempts < 3 {
             attempts += 1;
-            let parent_hex = format!("bench_voucher_{:064x}_{}", i, attempts);
-            let req = make_e2e_hmc_genesis(&parent_hex, now + 600_000, &sender_key);
 
             let start = Instant::now();
             let (status, resp) = target_node
@@ -478,7 +479,7 @@ async fn test_e2e_pos_latency_benchmark() {
                 .expect("Lock submit request");
             elapsed = start.elapsed();
 
-            if status == StatusCode::CREATED {
+            if matches!(status, StatusCode::CREATED | StatusCode::OK) {
                 last_status = status;
                 last_resp = Some(resp);
                 break;
@@ -494,7 +495,7 @@ async fn test_e2e_pos_latency_benchmark() {
 
         latencies.push(elapsed);
         let resp = last_resp.expect("Response must be present");
-        assert_eq!(last_status, StatusCode::CREATED);
+        assert!(matches!(last_status, StatusCode::CREATED | StatusCode::OK), "checkout {i}: {last_status}: {:?}", resp.verdict);
         assert!(matches!(resp.verdict, L2Verdict::Verified { .. }));
         assert_ne!(resp.server_signature, [0u8; 64]);
         success_count += 1;

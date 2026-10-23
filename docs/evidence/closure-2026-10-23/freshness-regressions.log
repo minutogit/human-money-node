@@ -1,0 +1,97 @@
+   Compiling humoco-node v0.1.3 (/home/basti/Coding/humoco/human-money-node/crates/humoco-node)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.02s
+     Running tests/anti_self_slashing_wire_tests.rs (target/debug/deps/anti_self_slashing_wire_tests-6736f0456730c1c8)
+
+running 1 test
+test test_shard_node_never_signs_conflicting_attestation_on_live_wire ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running tests/chaos_wire_http_fuzz.rs (target/debug/deps/chaos_wire_http_fuzz-174629c7cde50ac0)
+
+running 8 tests
+test test_chaos_wire_malicious_payload_len_bounded ... ok
+test test_chaos_wire_slowloris_timeout ... ok
+test test_chaos_wire_fuzz_random_headers_no_panic ... ok
+test test_chaos_http_oversized_body_rejected ... ok
+test test_chaos_pow_replay_and_invalid_challenge ... ok
+test test_chaos_http_fuzz_random_payloads ... ok
+test test_chaos_hmc_bad_signatures_no_panic ... ok
+test test_chaos_ingress_quota_exhaustion_under_flood ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+
+     Running tests/created_at_bucket_decoupling_tests.rs (target/debug/deps/created_at_bucket_decoupling_tests-ac97f232721db3f8)
+
+running 4 tests
+test test_created_at_determines_bucket_id ... ok
+test test_arbitrary_encrypted_timestamp_does_not_affect_bucket ... ok
+test test_idempotent_retries_with_identical_created_at_returns_200 ... ok
+test test_ingress_clock_drift_30s_window_enforced ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests/dos_resilience_test.rs (target/debug/deps/dos_resilience_test-753b231a43eca59f)
+
+running 2 tests
+test test_isolated_peer_failure_is_still_penalized ... ok
+test test_dos_correlated_failure_suppression_prevents_death_spiral ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.59s
+
+     Running tests/dual_stack_and_sunset_tests.rs (target/debug/deps/dual_stack_and_sunset_tests-dd8f9bc231435502)
+
+running 6 tests
+test test_warn_header_after_warn_time ... ok
+test test_reject_suite1_after_sunset_400 ... ok
+test test_quantum_bridge_lock_validation ... ok
+test test_normal_suite1_before_sunset_201 ... ok
+test test_suite2_after_reject_not_rejected ... ok
+test test_no_warn_before_time_or_for_suite2 ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+     Running tests/phase11_wire_level_adversarial_tests.rs (target/debug/deps/phase11_wire_level_adversarial_tests-fafb7ca90974d8c7)
+
+running 12 tests
+test test_phase11a_quorum_gating_wire_returns_503_never_200_201 ... ok
+test test_phase11f_100_node_hrw_quorum_validation ... ok
+test test_phase11e_paginated_sync_wire_reliable ... ok
+test test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire ... ok
+test test_phase11d_shard_digest_isolation_wire ... ok
+test test_phase11b_final_attestation_status_wire_n_ge_20 ... ok
+test test_rank21_receiving_server_rejects_over_real_quic ... ok
+test test_valid_signatures_for_wrong_request_or_tls_context_never_form_quorum_wire ... ok
+test test_fourteen_fast_signers_abort_stragglers_without_penalty_wire ... ok
+test test_exact_committee_includes_self_and_never_queries_rank21_wire ... ok
+test test_exact_committee_outside_gateway_queries_twenty_wire ... ok
+test test_seven_not_ready_peers_fail_fast_without_penalty_wire ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.36s
+
+     Running tests/phase4_net_time_and_quotas.rs (target/debug/deps/phase4_net_time_and_quotas-535d30cc2ba12394)
+
+running 7 tests
+test test_phase4_network_clock_f2f_median_and_wot_gating ... ok
+test test_phase4_peer_manager_clock_integration ... ok
+test test_phase4_network_clock_clamping_and_monotonicity ... ok
+test test_phase4_spec_09_slotted_median_and_dynamic_quotas ... ok
+test test_phase4_under_reporting_fraud_detection_and_gossip_slashing ... ok
+test test_phase4_wire_level_quota_rejection_and_3zone_plausibility ... ok
+test test_phase4_piggyback_heartbeat_cross_shard_silo_defense ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests/phase5_pull_sync_and_readiness.rs (target/debug/deps/phase5_pull_sync_and_readiness-d7133714345e2832)
+
+running 7 tests
+test test_boot_readiness_barrier_http_api_503 ... ok
+test test_cryptographic_verification_on_partition_sync ... ok
+test test_per_shard_readiness_demand_sync_503 ... ok
+test test_boot_readiness_barrier_wire_flag ... ok
+test test_stable_network_keeps_finality_separate_from_each_shards_readiness ... ok
+test test_paginated_active_sync_streaming_chunks ... ok
+test recovering_self_cannot_supply_missing_quorum_vote ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+

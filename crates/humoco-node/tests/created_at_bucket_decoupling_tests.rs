@@ -465,7 +465,7 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::CREATED, "Clock drift within 30s must be accepted");
 
-    // Case E: created_at_ms = 0 (omitted / default) -> server stamps now_ms -> accepted (201 Created)
+    // Case E: an omitted signed creation time cannot be rewritten by the server.
     let mut req_zero_drift = make_lock_req(0);
     req_zero_drift.transaction_hash = [0x88; 32];
     let zero_lookup = bs58::encode(&req_zero_drift.transaction_hash).into_string();
@@ -495,7 +495,7 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::CREATED, "created_at_ms = 0 must fallback to now_ms and succeed");
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "created_at_ms = 0 must fail without rewriting signed bytes");
 }
 
 // ---------------------------------------------------------------------------

@@ -54,6 +54,8 @@ pub struct AppState {
     pub event_log: Arc<crate::api::events::EventLog>,
     pub health_tracker: Arc<crate::api::health::HealthStateTracker>,
     pub readiness_manager: Arc<crate::daemon::ShardReadinessManager>,
+    /// Bound exceptional disk reads independently of checkout persistence.
+    pub retained_choice_reads: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -110,6 +112,7 @@ impl AppState {
             event_log,
             health_tracker,
             readiness_manager,
+            retained_choice_reads: Arc::new(tokio::sync::Semaphore::new(8)),
         }
     }
 
@@ -224,6 +227,7 @@ pub fn public_router(state: AppState) -> Router {
 /// Private operator endpoints; bind only to the configured local operator listener.
 pub fn build_operator_router(state: AppState) -> Router {
     Router::new()
+        .route("/v1/operator/regional-mesh-view", get(operator_regional_mesh_view))
         .route("/health", get(get_node_status))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
@@ -1385,7 +1389,7 @@ async fn query_status(
 async fn submit_hmc_lock(
     state: AppState,
     headers: HeaderMap,
-    mut req: L2LockRequest,
+    req: L2LockRequest,
     start: std::time::Instant,
 ) -> Response {
     state.metrics.record_write();
@@ -1442,9 +1446,7 @@ async fn submit_hmc_lock(
     let now_ms = state.net_time_ms();
 
     const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
-    if req.created_at_ms == 0 {
-        req.created_at_ms = now_ms;
-    } else if req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
+    if req.created_at_ms == 0 || req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
         let envelope = wrap_and_sign_verdict(
             &state.identity,
             L2Verdict::Rejected {
@@ -2051,7 +2053,7 @@ async fn submit_hmc_chain_lock(
 async fn submit_hmc_chain_lock_inner(
     state: AppState,
     headers: HeaderMap,
-    mut chain_req: L2ChainLockRequest,
+    chain_req: L2ChainLockRequest,
     start: std::time::Instant,
 ) -> Response {
 
@@ -2093,10 +2095,8 @@ async fn submit_hmc_chain_lock_inner(
     let now_ms = state.net_time_ms();
 
     const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
-    for hop in &mut chain_req.chain {
-        if hop.created_at_ms == 0 {
-            hop.created_at_ms = now_ms;
-        } else if hop.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
+    for hop in &chain_req.chain {
+        if hop.created_at_ms == 0 || hop.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
             let envelope = wrap_and_sign_verdict(
                 &state.identity,
                 L2Verdict::Rejected {
@@ -2497,13 +2497,39 @@ async fn get_retained_choice(
     if tag.len() > 128 {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "tag too long"}))).into_response();
     }
-    let node_pub = state.identity.node_pubkey();
-    match state.storage.own_signing_choice(node_pub, &tag) {
+    let Ok(permit) = state.retained_choice_reads.clone().try_acquire_owned() else {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error": "retrieval capacity exhausted"}))).into_response();
+    };
+    let node_pub = *state.identity.node_pubkey();
+    let storage = state.storage.clone();
+    let lookup_tag = tag.clone();
+    // A timeout cannot stop a running redb read. Keep the permit in the worker
+    // until it actually exits so repeated timeouts cannot create unbounded work.
+    let read = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        storage.own_signing_choice(&node_pub, &lookup_tag)
+    });
+    let result = match tokio::time::timeout(std::time::Duration::from_millis(250), read).await {
+        Ok(Ok(result)) => result,
+        failure => {
+            tracing::warn!(?failure, "Retained choice read unavailable");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "retrieval unavailable"}))).into_response();
+        }
+    };
+    match result {
         Ok(Some(choice)) => {
             // Exact retained approval bytes, so a client can verify the original
             // decision offline. No new vote is issued and no state is mutated.
             (StatusCode::OK, Json(serde_json::json!({
                 "found": true,
+                "node_pubkey": hex::encode(node_pub),
+                "lookup_tag": tag,
+                "network": match state.network_id {
+                    humoco_sim_core::types::NetworkId::Mainnet => 0,
+                    humoco_sim_core::types::NetworkId::Testnet => 1,
+                },
+                "purpose": "original_approval",
+                "version": 1,
                 "child": hex::encode(choice.child),
                 "valid_until_ms": choice.valid_until_ms,
                 "has_provisional": choice.approvals[0].is_some(),
@@ -2519,8 +2545,9 @@ async fn get_retained_choice(
             }))).into_response()
         }
         Err(e) => {
+            tracing::error!(error = %e, "Retained choice storage read failed");
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("storage error: {e}")
+                "error": "storage unavailable"
             }))).into_response()
         }
     }
@@ -2717,5 +2744,18 @@ mod public_retained_evidence_tests {
             gateways,
             vec!["https://a.example".to_string(), "http://c.example".to_string()]
         );
+    }
+}
+
+/// Signed regional observations are private operator data, never public discovery.
+async fn operator_regional_mesh_view(State(state): State<AppState>) -> Response {
+    if !state.engine.is_signing_healthy() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "signing unavailable").into_response();
+    }
+    let Some(manager) = &state.peer_manager else { return (StatusCode::SERVICE_UNAVAILABLE, "mesh unavailable").into_response(); };
+    let network = match state.network_id { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 };
+    match manager.regional_mesh_view(&state.identity, network).await {
+        Ok(view) if state.engine.is_signing_healthy() => Json(view).into_response(),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "mesh view unavailable").into_response(),
     }
 }

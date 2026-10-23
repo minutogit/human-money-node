@@ -1,8 +1,8 @@
 # Remaining implementation and acceptance plan
 
-Historical residual snapshot. The subsequent
-[complete implementation handoff plan](ARCHITECTURE_IMPLEMENTATION_HANDOFF_PLAN.md)
-dated 2026-10-21 reconciles newer commits and the full read-only audit. In
+Historical residual snapshot. The current
+[implementation completion plan](ARCHITECTURE_IMPLEMENTATION_CLOSURE_PLAN.md)
+dated 2026-10-23 reconciles newer commits and the full read-only audit. In
 particular, the wallet transaction proposal has since been integrated, while
 new release/readiness/quarantine regressions remain. Its six-assignment estimate
 is provisional history, not authorization or a fixed current queue.

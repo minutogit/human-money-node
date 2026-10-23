@@ -1,0 +1,28 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (/home/basti/Coding/humoco/humoco-proto/target/debug/deps/humoco_proto-290addba0a829324)
+
+running 15 tests
+test crypto::tests::test_domain_separators_unique_and_non_empty ... ok
+test crypto::tests::test_status_attestation_digest_determinism ... ok
+test types::tests::test_attestation_vote_bincode_roundtrip ... ok
+test types::tests::test_quorum_proof_bincode_roundtrip ... ok
+test crypto::tests::test_status_attestation_digest_avalanche ... ok
+test crypto::tests::test_lock_attestation_digest_determinism ... ok
+test types::tests::test_l2_verdict_roundtrip ... ok
+test crypto::tests::test_lock_attestation_digest_avalanche ... ok
+test verify::tests::empty_or_ambiguous_authority_never_forms_a_quorum ... ok
+test verify::tests::test_insufficient_votes ... ok
+test verify::tests::test_wrong_digest ... ok
+test verify::tests::test_bad_signature ... ok
+test verify::tests::test_duplicate_signer ... ok
+test verify::tests::test_non_committee_signer ... ok
+test verify::tests::test_valid_quorum_proof ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+   Doc-tests humoco_proto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

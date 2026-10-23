@@ -135,6 +135,7 @@ async fn real_quic_checkpoint_detects_restore_but_rejects_framing() {
     .enumerate()
     {
         let hb = HeartbeatWirePayload {
+            gateway_advertisement: None,
             node_id: *reporter.node_pubkey(),
             addr: client.local_addr().unwrap(),
             timestamp_ms: heartbeat_time + index as u64,

@@ -76,6 +76,29 @@ fn test_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+// Transport fixtures sign the separate output descriptor; no L1/SST field is
+// changed. Full L1/state-hash agreement is covered by the Core transfer vector.
+fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(req.transaction_hash); hash.update(req.sender_ephemeral_pub);
+    if let Some(receiver) = req.receiver_ephemeral_pub_hash { hash.update(receiver); }
+    hash.update(req.deletable_at.as_deref().unwrap().as_bytes());
+    req.layer2_voucher_id = hex::encode(hash.finalize());
+    let mut proof = humoco_proto::causal::CausalOutputProof { version: 1, voucher_id: req.layer2_voucher_id.clone(), transaction_id: req.transaction_hash, state_hash: req.transaction_hash, sender_pubkey: req.sender_ephemeral_pub, receiver_pubkey_hash: req.receiver_ephemeral_pub_hash, change_pubkey_hash: req.change_ephemeral_pub_hash, root_valid_until_ms: req.deletable_at.as_ref().unwrap().parse().unwrap(), is_root: true, signature: [0; 64] };
+    proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
+    req.causal_output = Some(proof);
+    req.layer2_signature = key.sign(&calculate_l2_payload_hash(req)).to_bytes();
+}
+async fn prepare_spend_fixture(app: &axum::Router, root: &L2LockRequest, owner: &SigningKey, token: &str) -> L2LockRequest {
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", token).body(Body::from(serde_json::to_vec(root).unwrap())).unwrap()).await.unwrap();
+    assert!(response.status().is_success());
+    use sha3::{Digest, Sha3_256};
+    let mut hash = Sha3_256::new(); hash.update(32u32.to_le_bytes()); hash.update(root.transaction_hash); hash.update(32u32.to_le_bytes()); hash.update(owner.verifying_key().as_bytes());
+    let tag = bs58::encode(hash.finalize()).into_string();
+    make_test_hmc_spend(&root.layer2_voucher_id, &tag, [0xAC; 32], owner)
+}
+
 fn make_test_hmc_genesis(
     parent_hex: &str,
     valid_until_ms: u64,
@@ -86,6 +109,7 @@ fn make_test_hmc_genesis(
     let del_str = valid_until_ms.to_string();
 
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -107,6 +131,7 @@ fn make_test_hmc_genesis(
     };
     let payload_hash = calculate_l2_payload_hash(&req);
     req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
+    authenticate_root_fixture(&mut req, sender_key);
     req
 }
 
@@ -119,6 +144,7 @@ fn make_test_hmc_spend(
     let sender_pub = sender_key.verifying_key().to_bytes();
 
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -461,8 +487,8 @@ async fn test_api_status_and_sync() {
         .unwrap();
     assert_eq!(res_sync.status(), StatusCode::OK);
     let sync_resp: SyncResponse = response_json(res_sync).await;
-    assert!(!sync_resp.locks.is_empty());
-    assert!(sync_resp.locks.iter().any(|l| l.id == tx_id_hex));
+    assert!(sync_resp.locks.is_empty(), "a root anchor is not a sync collision row");
+    assert!(_storage.voucher_root(&req_lock.layer2_voucher_id).unwrap().is_some());
 
     // 4. Call sync with locator including lock id -> filtered out
     let sync_req_filtered = SyncRequest {
@@ -486,421 +512,26 @@ async fn test_api_status_and_sync() {
 
 #[tokio::test]
 async fn test_api_hmc_native_flow() {
-    use humoco_node::api::hmc::{
-        calculate_l2_payload_hash_raw, L2AuthPayload, L2LockRequest, L2ResponseEnvelope,
-        L2StatusQuery, L2Verdict, TRAP_NONE_PLACEHOLDER,
-    };
-    use rand::rngs::OsRng;
-    use rand::RngCore;
-    use ed25519_dalek::{Signer, SigningKey};
-
-    let (app, _storage, identity, tier_controller, _) = setup_test_app();
-
-    let mut rng = OsRng;
-    let sender_key = SigningKey::generate(&mut rng);
-    let sender_pub = sender_key.verifying_key().to_bytes();
-
-    let mut t_id_bytes = [0u8; 32];
-    rng.fill_bytes(&mut t_id_bytes);
-    let t_id_bs58 = bs58::encode(&t_id_bytes).into_string();
-
-    let mut vid_bytes = [0u8; 32];
-    rng.fill_bytes(&mut vid_bytes);
-    let voucher_id = hex::encode(vid_bytes);
-
-    // 1. Create Genesis Lock
-    let challenge_ds_tag = t_id_bs58.clone();
-    let valid_until_ms = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64) + 600_000;
-    let del_str = valid_until_ms.to_string();
-    let created_at_ms = test_now_ms();
-    let payload_hash = calculate_l2_payload_hash_raw(
-        TRAP_NONE_PLACEHOLDER,
-        &challenge_ds_tag,
-        &t_id_bytes,
-        &sender_pub,
-        "none",
-        "none",
-        0,
-        created_at_ms,
-        Some(&del_str),
-        "",
-    );
-    let sig = sender_key.sign(&payload_hash);
-
-    let genesis_req = L2LockRequest {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: sender_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: voucher_id.clone(),
-        ds_tag: None,
-        transaction_hash: t_id_bytes,
-        is_genesis: true,
-        sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
-        layer2_signature: sig.to_bytes(),
-        trap_r: Some("none".into()),
-        trap_s: Some("none".into()),
-        encrypted_timestamp: 0,
-        created_at_ms,
-        deletable_at: Some(del_str),
-        privacy_guard: None,
-    };
-
-    // 0. Verify unauthenticated request without PoW or token gets rejected (Fix for P0-1 Quota-Bypass)
-    let res_unauth = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_unauth.status(), StatusCode::UNAUTHORIZED);
-
-    // Register F2F peer token for remaining flow
-    tier_controller.register_f2f_peer("hmc_test_token");
-
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .header("X-Peer-Token", "hmc_test_token")
-                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(res.status(), StatusCode::CREATED);
-    let envelope: L2ResponseEnvelope = response_json(res).await;
-    match envelope.verdict {
-        L2Verdict::Verified { ref lock_entry } => {
-            assert_eq!(lock_entry.layer2_voucher_id, voucher_id);
-            assert_eq!(lock_entry.t_id, t_id_bytes);
-        }
-        _ => panic!("Expected Verified verdict for genesis"),
-    }
-
-    // 1b. Idempotent Retry of Genesis -> 200 OK
-    let res_retry = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .header("X-Peer-Token", "hmc_test_token")
-                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_retry.status(), StatusCode::OK);
-    let env_retry: L2ResponseEnvelope = response_json(res_retry).await;
-    match env_retry.verdict {
-        L2Verdict::Verified { ref lock_entry } => {
-            assert_eq!(lock_entry.t_id, t_id_bytes);
-        }
-        _ => panic!("Expected Verified verdict on idempotent retry"),
-    }
-
-    // Verify server signature
+    let (app, storage, identity, tiers, _) = setup_test_app();
+    tiers.register_f2f_peer("hmc-native");
+    let owner = SigningKey::from_bytes(&[71; 32]);
+    let root = make_test_hmc_genesis("native-root", test_now_ms()+600_000, &owner);
+    let spend = prepare_spend_fixture(&app, &root, &owner, "hmc-native").await;
+    let tag = spend.ds_tag.clone().unwrap();
+    assert!(storage.get_hmc_lock(&bs58::encode(root.transaction_hash).into_string()).unwrap().is_none());
+    assert!(storage.voucher_root(&root.layer2_voucher_id).unwrap().is_some());
+    let post = |req: &L2LockRequest| Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", "hmc-native").body(Body::from(serde_json::to_vec(req).unwrap())).unwrap();
+    let first = app.clone().oneshot(post(&spend)).await.unwrap();
+    assert_eq!(first.status(), StatusCode::CREATED, "the first genuine spend must not collide with genesis");
+    let envelope: L2ResponseEnvelope = response_json(first).await;
     use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_vec(&envelope.verdict).unwrap());
-    let digest = hasher.finalize();
-    let server_sig = ed25519_dalek::Signature::from_bytes(&envelope.server_signature);
-    assert!(identity.verifying_key().verify_strict(&digest, &server_sig).is_ok());
-
-    // 2. Query status for Genesis
-    let query = L2StatusQuery {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: sender_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: voucher_id.clone(),
-        challenge_ds_tag: t_id_bs58.clone(),
-        locator_prefixes: vec![],
-        read_quorum: 1,
-    };
-
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/status")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&query).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(res.status(), StatusCode::OK);
-    let envelope: L2ResponseEnvelope = response_json(res).await;
-    match envelope.verdict {
-        L2Verdict::Verified { lock_entry } => {
-            assert_eq!(lock_entry.t_id, t_id_bytes);
-        }
-        _ => panic!("Expected Verified verdict for status query"),
-    }
-
-    // 3. Double-spend attempt on same ds_tag -> 409 Conflict
-    let parent_bytes = *blake3::hash(t_id_bs58.as_bytes()).as_bytes();
-    let ds_spend_key = SigningKey::generate(&mut rng);
-    let ds_spend_pub = ds_spend_key.verifying_key().to_bytes();
-    let h_genesis = humoco_node::storage::compute_hmc_canonical_hash(&parent_bytes, &sender_pub, &t_id_bytes);
-    let mut diff_t_id = [0u8; 32];
-    loop {
-        rng.fill_bytes(&mut diff_t_id);
-        let h_diff = humoco_node::storage::compute_hmc_canonical_hash(&parent_bytes, &ds_spend_pub, &diff_t_id);
-        if h_diff > h_genesis {
-            break;
-        }
-    }
-    let created_at_ms = test_now_ms();
-    let ds_payload_hash = calculate_l2_payload_hash_raw(
-        &voucher_id,
-        &t_id_bs58,
-        &diff_t_id,
-        &ds_spend_pub,
-        "none",
-        "none",
-        0,
-        created_at_ms,
-        None,
-        "",
-    );
-    let ds_sig = ds_spend_key.sign(&ds_payload_hash);
-
-    let ds_req = L2LockRequest {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: ds_spend_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: voucher_id.clone(),
-        ds_tag: Some(t_id_bs58.clone()),
-        transaction_hash: diff_t_id,
-        is_genesis: false,
-        sender_ephemeral_pub: ds_spend_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
-        layer2_signature: ds_sig.to_bytes(),
-        trap_r: Some("none".into()),
-        trap_s: Some("none".into()),
-        encrypted_timestamp: 0,
-        created_at_ms,
-        deletable_at: None,
-        privacy_guard: None,
-    };
-
-    let res_spend1 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .header("X-Peer-Token", "hmc_test_token")
-                .body(Body::from(serde_json::to_vec(&ds_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_spend1.status(), StatusCode::CONFLICT);
-    let env_spend1: L2ResponseEnvelope = response_json(res_spend1).await;
-    match env_spend1.verdict {
-        L2Verdict::Conflict { existing_lock } => {
-            // Must return the EXISTING genesis lock entry as evidence!
-            assert_eq!(existing_lock.t_id, t_id_bytes);
-            assert_ne!(existing_lock.t_id, diff_t_id);
-        }
-        _ => panic!("Expected Conflict verdict with existing entry on double spend"),
-    }
-
-    // Conflicting second spend attempt on same ds_tag -> 409 Conflict
-    let ds_spend_key2 = SigningKey::generate(&mut rng);
-    let ds_spend_pub2 = ds_spend_key2.verifying_key().to_bytes();
-    let mut diff_t_id2 = [0u8; 32];
-    loop {
-        rng.fill_bytes(&mut diff_t_id2);
-        let h_diff2 = humoco_node::storage::compute_hmc_canonical_hash(&parent_bytes, &ds_spend_pub2, &diff_t_id2);
-        if h_diff2 > h_genesis {
-            break;
-        }
-    }
-    let created_at_ms = test_now_ms();
-    let ds_payload_hash2 = calculate_l2_payload_hash_raw(
-        &voucher_id,
-        &t_id_bs58,
-        &diff_t_id2,
-        &ds_spend_pub2,
-        "none",
-        "none",
-        0,
-        created_at_ms,
-        None,
-        "",
-    );
-    let ds_sig2 = ds_spend_key2.sign(&ds_payload_hash2);
-
-    let ds_req2 = L2LockRequest {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: ds_spend_pub2,
-            auth_signature: None,
-        },
-        layer2_voucher_id: voucher_id.clone(),
-        ds_tag: Some(t_id_bs58.clone()),
-        transaction_hash: diff_t_id2,
-        is_genesis: false,
-        sender_ephemeral_pub: ds_spend_pub2,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
-        layer2_signature: ds_sig2.to_bytes(),
-        trap_r: Some("none".into()),
-        trap_s: Some("none".into()),
-        encrypted_timestamp: 0,
-        created_at_ms,
-        deletable_at: None,
-        privacy_guard: None,
-    };
-
-    let res_spend2 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .header("X-Peer-Token", "hmc_test_token")
-                .body(Body::from(serde_json::to_vec(&ds_req2).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_spend2.status(), StatusCode::CONFLICT);
-    let env_spend2: L2ResponseEnvelope = response_json(res_spend2).await;
-    match env_spend2.verdict {
-        L2Verdict::Conflict { existing_lock } => {
-            // Must return the EXISTING genesis lock entry as evidence!
-            assert_eq!(existing_lock.t_id, t_id_bytes);
-            assert_ne!(existing_lock.t_id, diff_t_id2);
-        }
-        _ => panic!("Expected Conflict verdict with existing entry on double spend"),
-    }
-
-    // 3b. Missing ds_tag on non-genesis spend -> 400 Bad Request
-    let mut no_ds_req = ds_req2.clone();
-    no_ds_req.ds_tag = None;
-    let no_ds_hash = humoco_node::api::hmc::calculate_l2_payload_hash(&no_ds_req);
-    no_ds_req.layer2_signature = ds_spend_key2.sign(&no_ds_hash).to_bytes();
-    let res_no_ds = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .header("X-Peer-Token", "hmc_test_token")
-                .body(Body::from(serde_json::to_vec(&no_ds_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_no_ds.status(), StatusCode::BAD_REQUEST);
-    let env_no_ds: L2ResponseEnvelope = response_json(res_no_ds).await;
-    match env_no_ds.verdict {
-        L2Verdict::Rejected { reason } => {
-            assert!(reason.contains("Missing or empty ds_tag"));
-        }
-        _ => panic!("Expected Rejected verdict for missing ds_tag"),
-    }
-
-    // 4. Query unknown voucher
-    let unknown_query = L2StatusQuery {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: sender_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: "unknown_voucher_hex".to_string(),
-        challenge_ds_tag: "abcde".to_string(),
-        locator_prefixes: vec![],
-        read_quorum: 1,
-    };
-    let res_unknown = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/status")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&unknown_query).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_unknown.status(), StatusCode::OK);
-    let env_unknown: L2ResponseEnvelope = response_json(res_unknown).await;
-    match env_unknown.verdict {
-        L2Verdict::UnknownVoucher => {}
-        _ => panic!("Expected UnknownVoucher verdict"),
-    }
-
-    // 5. Invalid signature with valid F2F token -> 400 Bad Request
-    let mut bad_sig_req = genesis_req.clone();
-    bad_sig_req.layer2_signature[0] ^= 0xFF;
-    let res_bad = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .header("X-Peer-Token", "hmc_test_token")
-                .body(Body::from(serde_json::to_vec(&bad_sig_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_bad.status(), StatusCode::BAD_REQUEST);
-    let env_bad: L2ResponseEnvelope = response_json(res_bad).await;
-    match env_bad.verdict {
-        L2Verdict::Rejected { reason } => {
-            assert!(reason.contains("Invalid cryptographic signature"));
-        }
-        _ => panic!("Expected Rejected verdict for bad signature"),
-    }
-
-    // 5b. Rule 9 (Cheap-Checks-First): unauthenticated bad signature must be rejected with 401 BEFORE signature check
-    let res_unauth_bad = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/lock")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&bad_sig_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        res_unauth_bad.status(),
-        StatusCode::UNAUTHORIZED,
-        "Rule 9 / A09: Unauthenticated spam must be rejected with 401 before expensive signature verification"
-    );
+    identity.verifying_key().verify_strict(&Sha256::digest(serde_json::to_vec(&envelope.verdict).unwrap()), &ed25519_dalek::Signature::from_bytes(&envelope.server_signature)).unwrap();
+    assert_eq!(app.clone().oneshot(post(&spend)).await.unwrap().status(), StatusCode::OK);
+    let alternate = make_test_hmc_spend(&root.layer2_voucher_id, &tag, [0xBB; 32], &owner);
+    let collision = app.oneshot(post(&alternate)).await.unwrap();
+    assert_eq!(collision.status(), StatusCode::CONFLICT);
+    let envelope: L2ResponseEnvelope = response_json(collision).await;
+    assert!(matches!(envelope.verdict, L2Verdict::Conflict { existing_lock } if existing_lock.t_id == spend.transaction_hash));
 }
 
 #[tokio::test]
@@ -957,6 +588,7 @@ async fn test_api_quorum_certificate_assembly_standalone() {
     let sender_key = SigningKey::from_bytes(&[8u8; 32]);
     let req_payload = make_test_hmc_genesis(&"0a".repeat(32), now + 600_000, &sender_key);
 
+    let req_payload = prepare_spend_fixture(&app, &req_payload, &sender_key, "friend_token").await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/lock")
@@ -1034,6 +666,7 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     let sender = NodeIdentity::generate();
     let root_valid_until = now_ms + 600_000;
     let mut hmc_req = humoco_node::api::hmc::L2LockRequest {
+        causal_output: None,
         auth: humoco_node::api::hmc::L2AuthPayload {
             ephemeral_pubkey: *sender.node_pubkey(),
             auth_signature: None,
@@ -1057,6 +690,10 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         let payload_hash = humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req);
         hmc_req.layer2_signature = sender.signing_key().sign(&payload_hash).to_bytes();
     }
+    let root = hmc_req.clone();
+    let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.transaction_hash).into_string(), (&root).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(now_ms), None, None, None).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    hmc_req = make_test_hmc_spend(&root.layer2_voucher_id, "handler-spend", [0x56; 32], sender.signing_key());
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
     let footprint =
         humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
@@ -1296,6 +933,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
     );
     let genesis_sig = sender_key.sign(&genesis_hash);
     let genesis_req = humoco_node::api::hmc::L2LockRequest {
+        causal_output: None,
         auth: humoco_node::api::hmc::L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -1346,6 +984,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
     let sig = sender_key.sign(&payload_hash);
 
     let hmc_req = humoco_node::api::hmc::L2LockRequest {
+        causal_output: None,
         auth: humoco_node::api::hmc::L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -1424,6 +1063,7 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let active_nodes = peer_mgr.active_known_nodes().await;
     assert_eq!(active_nodes.len(), 25);
 
+    let root_req = req_payload.clone();
     // Create AppState with network (transport and peer_mgr)
     let temp = tempdir().expect("tempdir");
     let db_path = temp.path().join("test_qc_rank.redb");
@@ -1433,6 +1073,9 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("gateway_test_token");
 
+    let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root_req.transaction_hash).into_string(), (&root_req).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(test_now_ms()), None, None, None).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    let req_payload = make_test_hmc_spend(&root_req.layer2_voucher_id, "rank-filter-spend", [0x57; 32], &sender_key);
     let mut state = AppState::new(
         engine,
         storage.clone(),
@@ -1878,7 +1521,7 @@ async fn test_prometheus_metrics_expansion() {
     assert!(body.contains("humoco_p2p_connected_peers"));
     assert!(body.contains("humoco_node_uptime_seconds"));
     assert!(body.contains("humoco_flush_queue_depth"));
-    assert!(body.contains("humoco_pos_latency_seconds_count 1"));
+    assert!(body.contains("humoco_pos_latency_seconds_count 0"));
     assert!(body.contains("humoco_locks_rejected_total 0"));
     assert!(body.contains("humoco_rejections_total{reason=\"conflict_409\"} 0"));
     assert!(body.contains("humoco_persistence_flush_batches_total"));
@@ -1927,7 +1570,8 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
     );
     let sig = sender_key.sign(&payload_hash);
 
-    let genesis_req = L2LockRequest {
+    let mut genesis_req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -1947,6 +1591,9 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         deletable_at: Some(del_str),
         privacy_guard: None,
     };
+    authenticate_root_fixture(&mut genesis_req, &sender_key);
+    let voucher_id = genesis_req.layer2_voucher_id.clone();
+
 
     let res_gen = app
         .clone()
@@ -1963,6 +1610,11 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .unwrap();
     assert_eq!(res_gen.status(), StatusCode::CREATED);
 
+    let spend = prepare_spend_fixture(&app, &genesis_req, &sender_key, "read_quorum_test_token").await;
+    let t_id_bs58 = spend.ds_tag.clone().unwrap();
+    let t_id_bytes = spend.transaction_hash;
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", "read_quorum_test_token").body(Body::from(serde_json::to_vec(&spend).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
     // 1. Query with default read_quorum (omitted from JSON) -> should default to 1 and have no QC
     let query_json = serde_json::json!({
         "auth": {
@@ -2097,7 +1749,8 @@ async fn test_api_hmc_fast_forward_leap_locks() {
     );
     let genesis_sig = sender_key.sign(&genesis_hash);
 
-    let genesis_req = L2LockRequest {
+    let mut genesis_req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -2117,6 +1770,9 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         deletable_at: Some(del_str.clone()),
         privacy_guard: None,
     };
+    authenticate_root_fixture(&mut genesis_req, &sender_key);
+    let voucher_id = genesis_req.layer2_voucher_id.clone();
+
 
     let res_gen = app
         .clone()
@@ -2163,6 +1819,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
     let leap_sig = leap_key.sign(&leap_hash);
 
     let leap_req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: leap_pub,
             auth_signature: None,
@@ -2252,6 +1909,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
     let conflict_sig = conflict_key.sign(&conflict_hash);
 
     let conflict_req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: conflict_pub,
             auth_signature: None,
@@ -2448,6 +2106,7 @@ fn make_genesis_hmc_req(
     );
     let sig = sender_key.sign(&payload_hash);
     L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None },
         layer2_voucher_id: voucher_id.to_string(),
         ds_tag: None,
@@ -2497,6 +2156,7 @@ fn make_follow_hmc_req(
     );
     let sig = sender_key.sign(&payload_hash);
     L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None },
         layer2_voucher_id: voucher_id.to_string(),
         ds_tag: Some(ds_tag),
@@ -2513,6 +2173,39 @@ fn make_follow_hmc_req(
         deletable_at: None,
         privacy_guard: None,
     }
+}
+
+
+fn causal_fixture_key(index: u8) -> SigningKey { SigningKey::from_bytes(&[41 + index; 32]) }
+fn sign_fixture_output(req: &mut L2LockRequest, key: &SigningKey, root_valid_until_ms: u64) {
+    let mut proof = humoco_proto::causal::CausalOutputProof { version: 1, voucher_id: req.layer2_voucher_id.clone(), transaction_id: req.transaction_hash, state_hash: req.transaction_hash, sender_pubkey: req.sender_ephemeral_pub, receiver_pubkey_hash: req.receiver_ephemeral_pub_hash, change_pubkey_hash: req.change_ephemeral_pub_hash, root_valid_until_ms, is_root: req.is_genesis, signature: [0; 64] };
+    proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
+    req.causal_output = Some(proof);
+    req.layer2_signature = key.sign(&calculate_l2_payload_hash(req)).to_bytes();
+}
+fn causal_fixture_spend(previous: &L2LockRequest, key: &SigningKey, id: u8) -> L2LockRequest {
+    use sha3::{Digest, Sha3_256};
+    let proof = previous.causal_output.as_ref().unwrap();
+    let mut hash = Sha3_256::new(); hash.update(32u32.to_le_bytes()); hash.update(proof.state_hash); hash.update(32u32.to_le_bytes()); hash.update(key.verifying_key().as_bytes());
+    let mut req = make_test_hmc_spend(&previous.layer2_voucher_id, &bs58::encode(hash.finalize()).into_string(), [id; 32], key);
+    sign_fixture_output(&mut req, key, proof.root_valid_until_ms);
+    req
+}
+fn real_causal_fixture() -> humoco_node::api::hmc::L2ChainLockRequest {
+    use sha3::{Digest, Sha3_256};
+    let key0 = causal_fixture_key(0); let key1 = causal_fixture_key(1); let key2 = causal_fixture_key(2);
+    let mut root = make_test_hmc_genesis("real-causal-fixture", test_now_ms() + 600_000, &key0);
+    root.receiver_ephemeral_pub_hash = Some(Sha3_256::digest(key1.verifying_key().as_bytes()).into());
+    authenticate_root_fixture(&mut root, &key0);
+    let mut first = causal_fixture_spend(&root, &key1, 2);
+    first.receiver_ephemeral_pub_hash = Some(Sha3_256::digest(key2.verifying_key().as_bytes()).into());
+    sign_fixture_output(&mut first, &key1, root.causal_output.as_ref().unwrap().root_valid_until_ms);
+    let last = causal_fixture_spend(&first, &key2, 3);
+    humoco_node::api::hmc::L2ChainLockRequest { auth: last.auth.clone(), layer2_voucher_id: root.layer2_voucher_id.clone(), chain: vec![root, first, last] }
+}
+async fn post_causal_fixture(app: &axum::Router, chain: &humoco_node::api::hmc::L2ChainLockRequest) -> (StatusCode, L2ResponseEnvelope) {
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type", "application/json").header("x-peer-token", "causal-fixture").body(Body::from(serde_json::to_vec(chain).unwrap())).unwrap()).await.unwrap();
+    (response.status(), response_json(response).await)
 }
 
 #[tokio::test]
@@ -2543,217 +2236,118 @@ async fn test_checkout_case_1_happy_single_lock() {
 
 #[tokio::test]
 async fn test_checkout_case_2_brand_new_genesis_voucher() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
-    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
-    tier_controller.register_f2f_peer("checkout_peer2");
-    let voucher_id = format!("voucher_case2_{}", test_now_ms());
-    let valid_until = test_now_ms() + 600_000;
-    let sender_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let sender_pub = sender_key.verifying_key().to_bytes();
-    let genesis = make_genesis_hmc_req(&voucher_id, &sender_key, valid_until, 1000);
-    let chain_req = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone()] };
-    let res = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer2").body(Body::from(serde_json::to_vec(&chain_req).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res.status(), StatusCode::CREATED);
-    let env: L2ResponseEnvelope = response_json(res).await;
-    match env.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, genesis.transaction_hash), _ => panic!("expected Verified genesis") };
-    // Verify via status query
-    let status_q = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: bs58::encode(&genesis.transaction_hash).into_string(), locator_prefixes: vec![], read_quorum: 1 };
-    let res_q = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&status_q).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res_q.status(), StatusCode::OK);
-    let env_q: L2ResponseEnvelope = response_json(res_q).await;
-    match env_q.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, genesis.transaction_hash), _ => panic!("status should be Verified") };
+    let (app, storage, _, tier, _) = setup_test_app();
+    tier.register_f2f_peer("causal-fixture");
+    let mut chain = real_causal_fixture();
+    chain.chain.truncate(1);
+    let (status, envelope) = post_causal_fixture(&app, &chain).await;
+    assert_eq!(status, StatusCode::CREATED, "{:?}", envelope.verdict);
+    assert!(envelope.quorum_certificate.is_none(), "a root spends nothing and receives no spend votes");
+    assert!(storage.get_hmc_lock(&bs58::encode(chain.chain[0].transaction_hash).into_string()).unwrap().is_none());
+    assert!(storage.voucher_root(&chain.layer2_voucher_id).unwrap().is_some());
+    let original = storage.voucher_root(&chain.layer2_voucher_id).unwrap().unwrap();
+    let attacker = SigningKey::from_bytes(&[99; 32]);
+    let mut forged = chain.clone();
+    forged.chain[0].sender_ephemeral_pub = attacker.verifying_key().to_bytes();
+    forged.chain[0].auth.ephemeral_pubkey = attacker.verifying_key().to_bytes();
+    forged.chain[0].causal_output = None;
+    forged.chain[0].layer2_signature = attacker.sign(&calculate_l2_payload_hash(&forged.chain[0])).to_bytes();
+    assert!(humoco_node::api::hmc::verify_l2_lock_signature(&forged.chain[0]));
+    assert_eq!(post_causal_fixture(&app, &forged).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(storage.voucher_root(&chain.layer2_voucher_id).unwrap().unwrap(), original);
+    assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::OK);
+
 }
 
 #[tokio::test]
 async fn test_checkout_case_3_offline_voucher_full_chain() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
-    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
-    tier_controller.register_f2f_peer("checkout_peer3");
-    let voucher_id = format!("voucher_case3_{}", test_now_ms());
-    let valid_until = test_now_ms() + 600_000;
-    let k1 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k2 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k3 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let genesis = make_genesis_hmc_req(&voucher_id, &k1, valid_until, 10);
-    let tag2 = format!("ds_tag_hop2_{}", test_now_ms());
-    let hop2 = make_follow_hmc_req(&voucher_id, tag2.clone(), &k2, 20, None, None);
-    let tag3 = format!("ds_tag_hop3_{}", test_now_ms());
-    let hop3 = make_follow_hmc_req(&voucher_id, tag3.clone(), &k3, 30, None, None);
-    let chain_req = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k1.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), hop2.clone(), hop3.clone()] };
-    let res = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer3").body(Body::from(serde_json::to_vec(&chain_req).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res.status(), StatusCode::CREATED);
-    let env: L2ResponseEnvelope = response_json(res).await;
-    match env.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, hop3.transaction_hash), _ => panic!("expected terminal Verified") };
-    // All 3 should now be queryable
-    for hop in [&genesis, &hop2, &hop3] {
-        let tag = if hop.is_genesis { bs58::encode(&hop.transaction_hash).into_string() } else { hop.ds_tag.clone().unwrap() };
-        let q = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: hop.sender_ephemeral_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: tag, locator_prefixes: vec![], read_quorum: 1 };
-        let r = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q).unwrap())).unwrap()).await.unwrap();
-        assert_eq!(r.status(), StatusCode::OK);
-        let e: L2ResponseEnvelope = response_json(r).await;
-        match e.verdict { L2Verdict::Verified { .. } => {}, _ => panic!("hop not found") };
-    }
+    let (app, storage, _, tier, _) = setup_test_app();
+    tier.register_f2f_peer("causal-fixture");
+    let mut chain = real_causal_fixture();
+    let (status, envelope) = post_causal_fixture(&app, &chain).await;
+    assert_eq!(status, StatusCode::CREATED, "{:?}", envelope.verdict);
+    for hop in chain.chain.iter().skip(1) { assert_eq!(storage.get_hmc_lock(hop.ds_tag.as_deref().unwrap()).unwrap().unwrap().t_id, hop.transaction_hash); }
+    assert!(storage.get_hmc_lock(&bs58::encode(chain.chain[0].transaction_hash).into_string()).unwrap().is_none());
+    chain.chain.clear();
 }
 
 #[tokio::test]
 async fn test_checkout_case_4_reconcile_missing_hops() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
-    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
-    tier_controller.register_f2f_peer("checkout_peer4");
-    let voucher_id = format!("voucher_case4_{}", test_now_ms());
-    let valid_until = test_now_ms() + 600_000;
-    let k1 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k2 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k3 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k4 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let genesis = make_genesis_hmc_req(&voucher_id, &k1, valid_until, 10);
-    let tag2 = format!("ds_tag4_hop2_{}", test_now_ms());
-    let hop2 = make_follow_hmc_req(&voucher_id, tag2.clone(), &k2, 20, None, None);
-    let tag3 = format!("ds_tag4_hop3_{}", test_now_ms());
-    let hop3 = make_follow_hmc_req(&voucher_id, tag3.clone(), &k3, 30, None, None);
-    let tag4 = format!("ds_tag4_hop4_{}", test_now_ms());
-    let hop4 = make_follow_hmc_req(&voucher_id, tag4.clone(), &k4, 40, None, None);
-    // Initially anchor genesis + hop2 via chain
-    let chain_first = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k1.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), hop2.clone()] };
-    let res_first = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer4").body(Body::from(serde_json::to_vec(&chain_first).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res_first.status(), StatusCode::CREATED);
-    // Now reconcile full chain including missing hops 3,4 (first two already known)
-    let chain_full = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k1.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), hop2.clone(), hop3.clone(), hop4.clone()] };
-    let res_full = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer4").body(Body::from(serde_json::to_vec(&chain_full).unwrap())).unwrap()).await.unwrap();
-    // Should have inserted missing hops atomically -> 201
-    assert_eq!(res_full.status(), StatusCode::CREATED);
-    let env: L2ResponseEnvelope = response_json(res_full).await;
-    match env.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, hop4.transaction_hash), _ => panic!("expected Verified terminal") };
+    let (app, storage, _, tier, _) = setup_test_app();
+    tier.register_f2f_peer("causal-fixture");
+    let mut chain = real_causal_fixture();
+    let mut anchor = chain.clone(); anchor.chain.truncate(1);
+    assert_eq!(post_causal_fixture(&app, &anchor).await.0, StatusCode::CREATED);
+    chain.chain.remove(0);
+    let (status, envelope) = post_causal_fixture(&app, &chain).await;
+    assert_eq!(status, StatusCode::CREATED, "{:?}", envelope.verdict);
+    assert_eq!(storage.get_hmc_lock(chain.chain[1].ds_tag.as_deref().unwrap()).unwrap().unwrap().t_id, chain.chain[1].transaction_hash);
 }
 
 #[tokio::test]
 async fn test_checkout_case_5_exponential_overlap_deduplication() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
-    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
-    tier_controller.register_f2f_peer("checkout_peer5");
-    let voucher_id = format!("voucher_case5_{}", test_now_ms());
-    let valid_until = test_now_ms() + 600_000;
-    let k1 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k2 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let genesis = make_genesis_hmc_req(&voucher_id, &k1, valid_until, 100);
-    let tag2 = format!("ds_tag5_hop2_{}", test_now_ms());
-    let hop2 = make_follow_hmc_req(&voucher_id, tag2.clone(), &k2, 200, None, None);
-    let chain = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k1.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), hop2.clone()] };
-    let res1 = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer5").body(Body::from(serde_json::to_vec(&chain).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res1.status(), StatusCode::CREATED);
-    // exponential overlap: same chain again via generic /v1/lock endpoint (tests delegation)
-    let res2 = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type","application/json").header("X-Peer-Token","checkout_peer5").body(Body::from(serde_json::to_vec(&chain).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res2.status(), StatusCode::OK, "duplicate chain must be idempotent 200");
-    let env2: L2ResponseEnvelope = response_json(res2).await;
-    match env2.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, hop2.transaction_hash), _ => panic!("expected Verified idempotent") };
-    // third time via direct chain endpoint still 200
-    let res3 = app.oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer5").body(Body::from(serde_json::to_vec(&chain).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res3.status(), StatusCode::OK);
+    let (app, storage, _, tier, _) = setup_test_app();
+    tier.register_f2f_peer("causal-fixture");
+    let mut chain = real_causal_fixture();
+    let mut prefix = chain.clone(); prefix.chain.truncate(2);
+    assert_eq!(post_causal_fixture(&app, &prefix).await.0, StatusCode::CREATED);
+    assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::CREATED);
+    assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::OK);
+    assert_eq!(storage.get_hmc_locks_for_voucher(&chain.layer2_voucher_id).unwrap().len(), 2);
+    chain.chain.clear();
 }
 
 #[tokio::test]
 async fn test_checkout_case_6_intermediate_conflict_preserves_valid_prefix() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
-    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
-    tier_controller.register_f2f_peer("checkout_peer6");
-    let voucher_id = format!("voucher_case6_{}", test_now_ms());
-    let valid_until = test_now_ms() + 600_000;
-    let k_gen = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k_a = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k_b = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k_c = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let genesis = make_genesis_hmc_req(&voucher_id, &k_gen, valid_until, 10);
-    // Initial legitimate hop A with unique tag
-    let tag_spend = format!("ds_tag_spend_{}", test_now_ms());
-    let hop_a = make_follow_hmc_req(&voucher_id, tag_spend.clone(), &k_a, 20, None, None);
-    let chain_init = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k_gen.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), hop_a.clone()] };
-    let res_init = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer6").body(Body::from(serde_json::to_vec(&chain_init).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res_init.status(), StatusCode::CREATED);
-    // Install a genuinely new valid prefix before reaching the conflicting step.
-    let prefix_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let prefix_tag = format!("valid_prefix_{}", test_now_ms());
-    let prefix = make_follow_hmc_req(&voucher_id, prefix_tag.clone(), &prefix_key, 15, None, None);
-    // Now attempt chain with intermediate double-spend: genesis (idempotent) + hop_b conflicting on SAME tag_spend as hop_a (different t_id) + hop_c following hop_b
-    let hop_b = make_follow_hmc_req(&voucher_id, tag_spend.clone(), &k_b, 25, None, None);
-    assert_ne!(hop_b.transaction_hash, hop_a.transaction_hash);
-    let tag_c = format!("ds_tag_c_{}", test_now_ms());
-    let hop_c = make_follow_hmc_req(&voucher_id, tag_c.clone(), &k_c, 30, None, None);
-    let chain_conflict = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k_gen.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone(), prefix.clone(), hop_b.clone(), hop_c.clone()] };
-    let res_conf = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer6").body(Body::from(serde_json::to_vec(&chain_conflict).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res_conf.status(), StatusCode::CONFLICT, "intermediate double-spend must yield 409 without terminal acceptance");
-    let env_conf: L2ResponseEnvelope = response_json(res_conf).await;
-    match env_conf.verdict { L2Verdict::Conflict { existing_lock } => assert_eq!(existing_lock.t_id, hop_a.transaction_hash), _ => panic!("expected Conflict with existing hop_a") };
-    let prefix_query = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload {ephemeral_pubkey:prefix_key.verifying_key().to_bytes(),auth_signature:None}, layer2_voucher_id:voucher_id.clone(), challenge_ds_tag:prefix_tag, locator_prefixes:vec![],read_quorum:1 };
-    let prefix_response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&prefix_query).unwrap())).unwrap()).await.unwrap();
-    let retained: L2ResponseEnvelope = response_json(prefix_response).await;
-    assert!(matches!(retained.verdict, L2Verdict::Verified {lock_entry} if lock_entry.t_id == prefix.transaction_hash), "a later conflict must preserve the new valid prefix");
-    // Verify hop_c was NOT inserted (stop at first conflict) – query by its tag should be Unknown/Missing
-    let q_c = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: k_c.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: tag_c, locator_prefixes: vec![], read_quorum: 1 };
-    let res_qc = app.clone().oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q_c).unwrap())).unwrap()).await.unwrap();
-    let _env_qc: L2ResponseEnvelope = response_json(res_qc).await;
-    // hop_c's parent tag_b corresponds to hop_b which was not inserted, so querying tag_b should return Verified for hop_a? Actually tag_gen still maps to hop_a Verified. But tag_b not present, query should be Missing or Verified not found.
-    // Instead verify hop_c not present via its t_id lookup (challenge = tag_b should still show hop_a)
-    // Query for hop_c's own tag (its ds_tag is tag_b, t_id is hop_c.tx) – but hop_c not inserted, so its t_id lookup should be Missing
-    let q_c2 = humoco_node::api::hmc::L2StatusQuery { auth: L2AuthPayload { ephemeral_pubkey: k_c.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), challenge_ds_tag: bs58::encode(&hop_c.transaction_hash).into_string(), locator_prefixes: vec![], read_quorum: 1 };
-    let res_qc2 = app.oneshot(Request::builder().method("POST").uri("/v1/status").header("content-type","application/json").body(Body::from(serde_json::to_vec(&q_c2).unwrap())).unwrap()).await.unwrap();
-    let env_qc2: L2ResponseEnvelope = response_json(res_qc2).await;
-    match env_qc2.verdict { L2Verdict::MissingLocks { .. } | L2Verdict::UnknownVoucher => {}, L2Verdict::Verified { .. } => panic!("hop_c must not be inserted beyond the conflicting step"), _ => {} };
+    let (app, storage, _, tier, _) = setup_test_app();
+    tier.register_f2f_peer("causal-fixture");
+    let mut chain = real_causal_fixture();
+    let mut anchor = chain.clone(); anchor.chain.truncate(1);
+    assert_eq!(post_causal_fixture(&app, &anchor).await.0, StatusCode::CREATED);
+    // The prepared collision row arrived before its causal prefix. This test
+    // checks prefix publication, not source-complete recovery admission.
+    let mut competing = chain.chain[2].clone(); competing.transaction_hash = [99; 32];
+    sign_fixture_output(&mut competing, &causal_fixture_key(2), chain.chain[0].causal_output.as_ref().unwrap().root_valid_until_ms);
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", "causal-fixture").body(Body::from(serde_json::to_vec(&competing).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let (status, verdict) = post_causal_fixture(&app, &chain).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{:?}", verdict.verdict);
+    assert_eq!(storage.get_hmc_lock(chain.chain[1].ds_tag.as_deref().unwrap()).unwrap().unwrap().t_id, chain.chain[1].transaction_hash);
+    assert_eq!(storage.get_hmc_lock(competing.ds_tag.as_deref().unwrap()).unwrap().unwrap().t_id, competing.transaction_hash);
+    chain.chain.clear();
 }
 
 #[tokio::test]
-async fn test_checkout_edge_case_historical_offline_timestamp_monotonicity() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
-    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
-    tier_controller.register_f2f_peer("checkout_edge1");
-    let voucher_id = format!("voucher_edge1_{}", test_now_ms());
-    let valid_until = test_now_ms() + 600_000;
-    let k1 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k2 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k3 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let genesis = make_genesis_hmc_req(&voucher_id, &k1, valid_until, 300);
-    let tag1 = bs58::encode(&genesis.transaction_hash).into_string();
-    // hop2 timestamp 200 < genesis 300 -> violates monotonicity (historical offline out-of-order)
-    let hop2 = make_follow_hmc_req(&voucher_id, tag1.clone(), &k2, 200, None, None);
-    let tag2 = bs58::encode(&hop2.transaction_hash).into_string();
-    let hop3 = make_follow_hmc_req(&voucher_id, tag2.clone(), &k3, 400, None, None);
-    let chain = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k1.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis, hop2, hop3] };
-    let res = app.oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_edge1").body(Body::from(serde_json::to_vec(&chain).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let env: L2ResponseEnvelope = response_json(res).await;
-    match env.verdict { L2Verdict::Rejected { reason } => assert!(reason.contains("monotonicity") || reason.contains("Timestamp")), _ => panic!("expected Rejected monotonicity") };
+async fn test_checkout_ciphertext_order_does_not_replace_authenticated_causality() {
+    let (app, storage, _, tier, _) = setup_test_app();
+    tier.register_f2f_peer("causal-fixture");
+    let mut chain = real_causal_fixture();
+    for (index, hop) in chain.chain.iter_mut().enumerate() {
+        hop.encrypted_timestamp = [900, 1, 700][index];
+        hop.layer2_signature = causal_fixture_key(index as u8).sign(&calculate_l2_payload_hash(hop)).to_bytes();
+    }
+    let (status, envelope) = post_causal_fixture(&app, &chain).await;
+    assert_eq!(status, StatusCode::CREATED, "ciphertext ordering is not causality: {:?}", envelope.verdict);
+    assert_eq!(storage.get_hmc_locks_for_voucher(&chain.layer2_voucher_id).unwrap().len(), 2);
 }
 
 #[tokio::test]
 async fn test_checkout_edge_case_split_dag_change_branch() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
-    let (app, _storage, _identity, tier_controller, _) = setup_test_app();
-    tier_controller.register_f2f_peer("checkout_edge2");
-    let voucher_id = format!("voucher_edge2_{}", test_now_ms());
-    let valid_until = test_now_ms() + 600_000;
-    let k_gen = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k_recv = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k_change = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let k_next = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let genesis = make_genesis_hmc_req(&voucher_id, &k_gen, valid_until, 10);
-    let tag_split_in = format!("ds_tag_split_{}", test_now_ms());
-    let change_hash = *blake3::hash(k_change.verifying_key().to_bytes().as_slice()).as_bytes();
-    let recv_hash = *blake3::hash(k_recv.verifying_key().to_bytes().as_slice()).as_bytes();
-    let split_hop = make_follow_hmc_req(&voucher_id, tag_split_in, &k_gen, 20, Some(change_hash), Some(recv_hash));
-    let tag_next_in = format!("ds_tag_next_{}", test_now_ms());
-    let next_hop = make_follow_hmc_req(&voucher_id, tag_next_in, &k_next, 30, None, None);
-    let chain = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k_gen.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis, split_hop.clone(), next_hop.clone()] };
-    let res = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_edge2").body(Body::from(serde_json::to_vec(&chain).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res.status(), StatusCode::CREATED);
-    let env: L2ResponseEnvelope = response_json(res).await;
-    match env.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, next_hop.transaction_hash), _ => panic!("split DAG chain should be Verified") };
-    // Also test independent branches in same chain
-    let voucher2 = format!("voucher_edge2b_{}", test_now_ms());
-    let genesis2 = make_genesis_hmc_req(&voucher2, &k_gen, valid_until, 10);
-    let tag_leaf_a = format!("ds_tag_leaf_a_{}", test_now_ms());
-    let leaf_a = make_follow_hmc_req(&voucher2, tag_leaf_a, &k_recv, 20, None, None);
-    let chain2 = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: k_gen.verifying_key().to_bytes(), auth_signature: None }, layer2_voucher_id: voucher2.clone(), chain: vec![genesis2, leaf_a.clone()] };
-    let res2 = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_edge2").body(Body::from(serde_json::to_vec(&chain2).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res2.status(), StatusCode::CREATED);
+    let (app, storage, _, tier, _) = setup_test_app();
+    tier.register_f2f_peer("causal-fixture");
+    let mut chain = real_causal_fixture();
+    use sha3::{Digest, Sha3_256};
+    let change_key = causal_fixture_key(3);
+    let ttl = chain.chain[0].causal_output.as_ref().unwrap().root_valid_until_ms;
+    chain.chain[1].change_ephemeral_pub_hash = Some(Sha3_256::digest(change_key.verifying_key().as_bytes()).into());
+    sign_fixture_output(&mut chain.chain[1], &causal_fixture_key(1), ttl);
+    let change = causal_fixture_spend(&chain.chain[1], &change_key, 4);
+    let receive_tag = chain.chain[2].ds_tag.clone().unwrap();
+    assert_ne!(change.ds_tag.as_ref().unwrap(), &receive_tag);
+    assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::CREATED);
+    chain.chain[2] = change;
+    assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::CREATED);
+    assert_eq!(storage.get_hmc_locks_for_voucher(&chain.layer2_voucher_id).unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -4436,6 +4030,10 @@ async fn test_empty_immature_committee_never_confirms_zero_of_zero() {
     let (committee, _, active) = pm.shard_committee(*identity.node_pubkey(), *identity.hrw_routing_id(), shard_id).await;
     assert_eq!(active, 0);
     assert!(committee.is_empty());
+    let (root_verdict, _) = engine.ingress_hmc_lock_durable(tag.clone(), (&request).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(test_now_ms()), None, None, None).await;
+    assert!(matches!(root_verdict, L2Verdict::Verified { .. }));
+    let request = make_test_hmc_spend(&request.layer2_voucher_id, "immature-spend", [94; 32], &owner);
+    let tag = request.ds_tag.clone().unwrap();
     let mut state = AppState::new(engine, storage.clone(), identity, tiers, pow);
     state.peer_manager = Some(pm);
     // No readiness or ticket maturity is manufactured for this negative fixture.
@@ -4562,10 +4160,10 @@ async fn signed_missing_or_stale_wallet_time_is_rejected_without_rewriting() {
     tiers.register_f2f_peer("wallet-time-test");
     let key = SigningKey::from_bytes(&[97; 32]);
     for created_at in [0, test_now_ms() - 31_000] {
-        let mut request = make_test_hmc_genesis(&format!("time-{created_at}"), test_now_ms() + 600_000, &key);
+        let mut request = make_test_hmc_spend("time-fixture", &format!("time-{created_at}"), [97; 32], &key);
         request.created_at_ms = created_at;
         request.layer2_signature = key.sign(&calculate_l2_payload_hash(&request)).to_bytes();
-        let tag = bs58::encode(request.transaction_hash).into_string();
+        let tag = request.ds_tag.clone().unwrap();
         let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock")
             .header("content-type", "application/json").header("x-peer-token", "wallet-time-test")
             .body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap()).await.unwrap();

@@ -319,3 +319,52 @@ Local dependency commits for this increment:
 
 The Node commit contains this execution record; its own identity is available in
 Git history. No repository was pushed.
+
+## Root/causality, snapshot and checkout increment — 2026-10-23
+
+This increment preserves L1 serialization and the SST formula. Genesis now lives
+only in the root table, with migration and immutable-deed protection; actual
+spends retain independent receiver/change collision slots. A separately signed
+versioned output proof crosses Proto/Core/App/Node. Real chains exercise valid
+prefix persistence, invalid ownership/tag/signature rejection and split paths.
+
+Active sync now uses owner/filter-bound MVCC cuts and streaming cursors, bounded
+pages, 32 sync admissions and bounded aggregate staging. Committed shard
+projections use the canonical root shard and exclude pending RAM and genesis.
+Verified compact HMC quorum support is durable and recovered independently of a
+node's own vote. Native support and atomic whole-shard installation remain open.
+
+Core now has durable exact-byte send intents and recipient purchase/challenge
+transactions. App exposes the backend APIs, exact-byte bounded dispatch,
+origin-isolated tokens, retained-choice observation and cold public discovery.
+Passive gateway advertisements use the existing signed hourly heartbeat.
+The complete productive end-to-end flow remains open.
+
+The maintainer selected explicit operator bootstrap. The new
+`run --bootstrap-new-region` flag authorizes only a fresh exclusively created
+registry. Normal boots, joins and restarts keep per-shard readiness closed.
+The real-daemon authenticated QUIC bootstrap/restart regression passes.
+
+See [the migration and bootstrap contract](ROOT_CAUSALITY_AND_BOOTSTRAP_CONTRACT.md)
+for precise guarantees and residual work. Earlier claims of completion or
+acceptance apply only to their recorded source versions. This increment does not
+close the entire E01–E15 matrix.
+
+Validation for this increment (logs in
+[evidence/root-causality](evidence/closure-2026-10-23/root-causality/validation.json)):
+
+| Command | Result |
+| --- | --- |
+| `RUST_TEST_THREADS=4 cargo test-std --offline --no-fail-fast` | 643 passed, 14 ignored, 0 failed |
+| Node strict workspace/all-target Clippy | passed |
+| Final exclusive-file bootstrap change: bootstrap + chain + sync integration targets | 6 passed; real daemon/QUIC included |
+| Core full nextest | 824 passed, 7 skipped |
+| Core strict all-target Clippy | failed: 11 lint diagnostics; not represented as clean |
+| Proto full tests | 17 passed |
+| App backend script | passed |
+| App TypeScript `tsc --noEmit` | passed |
+
+The full Node run preceded the final exclusive-file bootstrap refactor; the
+focused six-test rerun and strict all-target Clippy cover that final source delta.
+Neither ignored simulations nor the complete architecture acceptance matrix are
+counted as passed. No push was requested or performed.

@@ -1,0 +1,1250 @@
+   Compiling humoco-node v0.1.3 (/home/basti/Coding/humoco/human-money-node/crates/humoco-node)
+warning: unused import: `ed25519_dalek::Signer`
+   --> crates/humoco-node/tests/phase5_pull_sync_and_readiness.rs:127:9
+    |
+127 |     use ed25519_dalek::Signer as _;
+    |         ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `ed25519_dalek::Signer`
+   --> crates/humoco-node/tests/phase5_pull_sync_and_readiness.rs:734:9
+    |
+734 |     use ed25519_dalek::Signer as _;
+    |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `humoco-node` (test "phase5_pull_sync_and_readiness") generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.73s
+     Running unittests src/lib.rs (target/debug/deps/clap_complete-d24f249ac7ccfe16)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/humoco_node-4a68430b52a49dd2)
+
+running 142 tests
+test api::auth::tests::test_verify_token_header_formats ... ok
+test api::auth::tests::test_admin_rate_limiter ... ok
+test api::events::tests::test_event_log_overflow_eviction ... ok
+test api::events::tests::test_event_log_since_id_and_limit ... ok
+test api::events::tests::test_record_system ... ok
+test api::auth::tests::test_generate_and_persist_admin_token ... ok
+test api::events::tests::test_event_serialization ... ok
+test api::health::tests::test_format_health_duration ... ok
+test api::health::tests::test_evaluate_health_tracked_backward_compatible ... ok
+test api::health::tests::test_health_all_ok ... ok
+test api::health::tests::test_health_broom_detected ... ok
+test api::health::tests::test_health_clock_drift_warn_and_crit ... ok
+test api::health::tests::test_health_dashboard_exposed ... ok
+test api::health::tests::test_health_disk_space_low_warn_and_crit ... ok
+test api::health::tests::test_health_flush_stale_warn ... ok
+test api::health::tests::test_health_gateway_concentration ... ok
+test api::health::tests::test_health_highest_severity_wins ... ok
+test api::health::tests::test_health_no_peers_crit ... ok
+test api::health::tests::test_health_persist_error_crit ... ok
+test api::health::tests::test_health_queue_warn_and_crit ... ok
+test api::health::tests::test_health_sla_violated ... ok
+test api::health::tests::test_health_state_tracker_lifecycle ... ok
+test api::health::tests::test_health_subnet_dominance ... ok
+test api::health::tests::test_health_ticket_incubating ... ok
+test api::health::tests::test_health_village_mode_configured_zero_is_ok ... ok
+test api::history::tests::test_history_capacity_overflow ... ok
+test api::history::tests::test_history_serialization ... ok
+test api::history::tests::test_history_query_windows ... ok
+test api::keys::tests::test_parse_client_token ... ok
+test api::keys::tests::test_normalize_pubkey_display ... ok
+test api::keys::tests::test_parse_pubkey_garbage_and_malformed ... ok
+test api::keys::tests::test_parse_pubkey_invalid_length ... ok
+test api::keys::tests::test_parse_pubkey_peering_string ... ok
+test api::keys::tests::test_parse_pubkey_valid_base58 ... ok
+test api::metrics::tests::test_rejection_metrics_tracking ... ok
+test api::keys::tests::test_parse_pubkey_valid_hex ... ok
+test api::qr::tests::test_format_bits_computation ... ok
+test api::qr::tests::test_qr_versions_selection ... ok
+test api::routes::public_retained_evidence_tests::gateway_directory_drops_credentialed_and_malformed_entries ... ok
+test api::qr::tests::test_qr_ansi_generation ... ok
+test api::qr::tests::test_qr_svg_generation ... ok
+test api::routes::local_capacity_collector_tests::exhausted_256_slot_admission_is_neutral_for_write_and_read_collectors ... ok
+test api::system_stats::tests::test_read_disk_free ... ok
+test api::system_stats::tests::test_redb_growth_and_headroom_projection ... ok
+test api::system_stats::tests::test_sparkline_ring_buffer_chronology ... ok
+test api::system_stats::tests::test_system_stats_capacity_projections ... ok
+test cli::tests::stop_fails_when_control_socket_survives_the_budget ... ok
+test api::routes::public_retained_evidence_tests::retained_choice_reports_missing_class_without_inventing_bytes ... ok
+test api::routes::public_retained_evidence_tests::gateway_directory_exposes_public_and_bootstrap_entries_once ... ok
+test api::routes::public_retained_evidence_tests::retained_choice_returns_exact_approval_bytes_and_validity ... ok
+#!/usr/bin/env bash
+_humoco() {
+    local cur prev words cword
+    _init_completion || return
+    COMPREPLY=( $(compgen -W "init keygen run status peers quota doctor peer locks lock qr backup revoke completions stop config db restore" -- "$cur") )
+}
+complete -F _humoco humoco
+#compdef humoco
+_humoco() {
+    local -a commands
+    commands=(init keygen run status peers quota doctor peer locks lock qr backup revoke completions stop config db restore)
+    _describe 'command' commands
+}
+_humoco "$@"
+# fish completion for humoco
+complete -c humoco -a init -d 'subcommand'
+complete -c humoco -a keygen -d 'subcommand'
+complete -c humoco -a run -d 'subcommand'
+complete -c humoco -a status -d 'subcommand'
+complete -c humoco -a peers -d 'subcommand'
+complete -c humoco -a quota -d 'subcommand'
+complete -c humoco -a doctor -d 'subcommand'
+complete -c humoco -a peer -d 'subcommand'
+complete -c humoco -a locks -d 'subcommand'
+complete -c humoco -a lock -d 'subcommand'
+complete -c humoco -a qr -d 'subcommand'
+complete -c humoco -a backup -d 'subcommand'
+complete -c humoco -a revoke -d 'subcommand'
+complete -c humoco -a completions -d 'subcommand'
+complete -c humoco -a stop -d 'subcommand'
+complete -c humoco -a config -d 'subcommand'
+complete -c humoco -a db -d 'subcommand'
+complete -c humoco -a restore -d 'subcommand'
+Register-ArgumentCompleter -Native -CommandName humoco -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    @('init', 'keygen', 'run', 'status', 'peers', 'quota', 'doctor', 'peer', 'locks', 'lock', 'qr', 'backup', 'revoke', 'completions', 'stop', 'config', 'db', 'restore') | Where-Object { $_ -like "$wordToComplete*" }
+}
+set edit:completion:arg-completer[humoco] = {|@words|
+    put 'init' 'keygen' 'run' 'status' 'peers' 'quota' 'doctor' 'peer' 'locks' 'lock' 'qr' 'backup' 'revoke' 'completions' 'stop' 'config' 'db' 'restore'
+}
+test cli::tests::test_cli_completions_execution ... ok
+test cli::tests::test_cli_config_check_and_dump ... ok
+test cli::tests::stop_waits_for_control_socket_release ... ok
+test cli::tests::stop_requires_real_database_release_even_after_socket_unlink ... ok
+test cli::tests::test_cli_init_mnemonic_restore ... ok
+test cli::tests::test_cli_parsing ... ok
+test cli::tests::test_cli_peer_remove_offline ... ok
+test cli::tests::test_cli_init_and_status ... ok
+test config::tests::test_default_config ... ok
+test config::tests::test_default_toml_template_is_valid ... ok
+test config::tests::test_discovery_config_parsing ... ok
+test config::tests::test_parse_peers_numerical_and_hostname ... ok
+test config::tests::test_resolve_peer_endpoints_and_fallback ... ok
+test config::tests::test_save_and_load_from_file ... ok
+test config::tests::test_toml_serialize_deserialize_roundtrip ... ok
+test control::types::tests::test_json_serialization_roundtrip ... ok
+test control::types::tests::test_parse_account_tag ... ok
+test cli::tests::test_cli_doctor_and_offline_subcommands ... ok
+test cli::tests::test_cli_revoke_confirmation_and_evidence ... ok
+test daemon::tests::test_shard_readiness_manager_lifecycle ... ok
+test identity::tests::test_base58_encodings ... ok
+test identity::tests::test_did_key_format ... ok
+test identity::tests::test_fast_path_and_work_score ... ok
+test identity::tests::test_from_mnemonic_deterministic_and_slip10_vector ... ok
+test identity::tests::test_generate_and_node_id_derivation ... ok
+test identity::tests::test_generate_with_mnemonic_and_rederivation ... ok
+test identity::tests::test_invalid_mnemonic_phrases_return_descriptive_error ... ok
+test identity::tests::test_load_invalid_key_length ... ok
+test identity::tests::test_mnemonic_identity_roundtrip_save_load ... ok
+test identity::tests::test_save_and_load_roundtrip ... ok
+test ingress::pow::tests::test_pow_challenge_generation_and_verification ... ok
+test ingress::pow::tests::test_pow_challenge_parent_lock_binding ... ok
+test ingress::pow::tests::test_pow_clock_wiring_and_consensus_time ... ok
+test ingress::pow::tests::test_pow_difficulty_0 ... ok
+test ingress::pow::tests::test_pow_difficulty_16_standard ... ok
+test ingress::pow::tests::test_pow_insufficient_difficulty ... ok
+test ingress::pow::tests::test_pow_invalid_challenge_tampered ... ok
+test ingress::pow::tests::test_pow_replay_protection ... ok
+test cli::tests::test_cli_db_stats_and_restore_verification ... ok
+test ingress::tier::tests::test_tier_controller_dynamic_f2f_and_vip_quotas_with_whale_brake ... ok
+test ingress::tier::tests::test_tier_controller_f2f_client_registration_and_list ... ok
+test ingress::tier::tests::test_tier_controller_f2f_client_removal ... ok
+test ingress::tier::tests::test_tier_controller_f2f_peer ... ok
+test daemon::tests::test_daemon_lifecycle_with_cancel_token ... ok
+test ingress::tier::tests::test_tier_controller_network_thermometer_seeding_and_fast_reseed ... ok
+test network::clock::tests::test_clock_clamping_to_15_minutes ... ok
+test network::clock::tests::test_clock_f2f_median_calculation_and_skew_threshold ... ok
+test network::clock::tests::test_clock_mesh_merge_dynamic_clamp ... ok
+test network::clock::tests::test_clock_strict_monotonicity_and_no_inflation ... ok
+test network::clock::tests::test_clock_wot_gating_rejects_non_f2f ... ok
+test network::framing::tests::test_checked_payload_len ... ok
+test network::framing::tests::test_frame_empty_payload ... ok
+test network::framing::tests::test_frame_invalid_magic ... ok
+test network::framing::tests::test_frame_size_limit_rejection ... ok
+test network::framing::tests::test_frame_write_read_roundtrip ... ok
+test network::framing::tests::test_heartbeat_payload_serde_and_capping ... ok
+test ingress::tier::tests::test_tier_controller_public_pow ... ok
+test network::manager::tests::direct_friend_without_ticket_is_a_sync_source_not_a_committee_member ... ok
+test network::manager::tests::test_backoff_computation ... ok
+test network::manager::tests::test_calculate_fan_out_biomimetic ... ok
+test network::manager::tests::test_debounced_record_failure ... ok
+test network::manager::tests::test_handshake_preserves_diagnostic_malus_without_revoking_rpc ... ok
+test network::manager::tests::test_import_persisted_bans ... ok
+test network::manager::tests::test_peer_manager_operations ... ok
+test network::manager::tests::test_reset_peer_suspension_and_get_peer_rtt ... ok
+test network::peer::tests::test_peer_failure_debounce ... ok
+test network::peer::tests::test_peer_lifecycle_transitions ... ok
+test network::pool::tests::pending_reservations_release_capacity_on_task_abort ... ok
+test network::tls::tests::test_certificate_generation ... ok
+test network::tls::tests::test_extract_peer_node_id ... ok
+test network::tls::tests::test_handshake_signature_verification ... ok
+test network::tls::tests::test_quinn_configs_creation ... ok
+test storage::db::roots::tests::canonical_root_sidecar_cannot_preempt_an_unrelated_voucher_identity ... ok
+test network::framing::tests::test_slowloris_timeout ... ok
+test ingress::tier::tests::test_tier_controller_vip_quota_deduction ... ok
+test storage::db::roots::tests::legacy_genesis_migrates_to_root_metadata_and_never_occupies_a_spend_slot ... ok
+test storage::db::signing::tests::deleted_history_is_detected_and_latch_survives_reopen ... ok
+test storage::engine::confirmation_class_precedence_tests::class1_cannot_be_displaced_by_class0_even_with_lower_h_canon ... ok
+test storage::engine::confirmation_class_precedence_tests::class2_cannot_be_displaced_by_lower_class_even_with_lower_h_canon ... ok
+test storage::engine::confirmation_class_precedence_tests::equal_class_resolves_via_min_h_canon_tiebreak ... ok
+test storage::engine::confirmation_class_precedence_tests::higher_class_displaces_lower_class_even_when_losing_min_h_canon ... ok
+test storage::engine::confirmation_class_precedence_tests::own_durable_approval_does_not_establish_quorum_confirmation ... ok
+test daemon::tests::test_daemon_lifecycle_in_simulation_mode ... ok
+test storage::engine::exact_hmc_durability_tests::expiry_removes_confirmation_metadata_at_root_grace_horizon ... ok
+test storage::db::signing::tests::intact_restart_retry_expiry_and_backup_keep_monotonic_state ... ok
+test storage::engine::exact_hmc_durability_tests::exact_ack_and_disk_recovery_mark_current_version_and_expiry_clears_it ... ok
+test storage::db::support::tests::verified_final_support_survives_restart_and_expires_with_root ... ok
+test storage::engine::exact_hmc_durability_tests::ram_only_import_is_not_a_durable_receipt_and_late_ack_cannot_mark_replacement ... ok
+test storage::recent::tests::test_fifo_eviction_at_32_items ... ok
+test storage::recent::tests::test_thread_safety_concurrent_pushes_and_reads ... ok
+test storage::engine::exact_hmc_durability_tests::original_commit_also_marks_exact_hmc_version ... ok
+test storage::engine::exact_hmc_durability_tests::rejected_original_choice_does_not_increment_committed_operations ... ok
+
+test result: ok. 142 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.93s
+
+     Running unittests src/bin/cluster_sim.rs (target/debug/deps/cluster_sim-390366e4c0664bdf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/humoco-ae89a70a899fdb9b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/alert_notification_tests.rs (target/debug/deps/alert_notification_tests-78aa84a78c16b464)
+
+running 5 tests
+test test_alert_config_debug_masks_token ... ok
+test test_webhook_success_when_threshold_reached ... ok
+test test_cooldown_persistence_across_dispatcher_instances ... ok
+test test_cooldown_suppresses_duplicate_alerts ... ok
+test test_no_alert_when_too_few_peers ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
+
+     Running tests/anti_self_slashing_wire_tests.rs (target/debug/deps/anti_self_slashing_wire_tests-98428a457a7cd946)
+
+running 1 test
+test test_shard_node_never_signs_conflicting_attestation_on_live_wire ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+     Running tests/api_tests.rs (target/debug/deps/api_tests-3d79e708d234c543)
+
+running 53 tests
+test test_admin_friends_mutation ... ok
+test signed_missing_or_stale_wallet_time_is_rejected_without_rewriting ... ok
+test retained_choice_capacity_refuses_before_disk_and_recovers_after_release ... ok
+test test_admin_mesh_and_ingress_client_routes ... ok
+test test_admin_quota_mutation ... ok
+test test_admin_peer_reset_and_ping_endpoints ... ok
+test test_admin_verify_token_endpoint ... ok
+test test_admin_verify_token_rate_limiting ... ok
+test test_api_created_at_clock_drift_exceeded ... ok
+test test_api_hmc_native_flow ... ok
+test test_api_hmc_fast_forward_leap_locks ... ok
+test test_api_hmc_read_quorum_and_adaptive_logic ... ok
+test test_api_pex_peers_and_node_status_network ... ok
+test test_api_lock_conflict_double_spend ... ok
+test test_api_pow_adaptive_backpressure_and_stateless_hashcash ... ok
+test test_api_lock_submission_and_idempotency ... ok
+test test_api_pow_challenge_and_public_ingress ... ok
+test test_api_quorum_certificate_assembly_standalone ... ok
+test test_api_status_and_sync ... ok
+test test_api_retained_own_choice_read_only_endpoint ... ok
+test test_api_vip_tier_quota_deduction ... ok
+test test_banned_node_ingress_403_rejection ... ok
+test test_checkout_case_2_brand_new_genesis_voucher ... ok
+test test_checkout_case_1_happy_single_lock ... ok
+test test_checkout_case_3_offline_voucher_full_chain ... ok
+test test_checkout_case_4_reconcile_missing_hops ... ok
+test test_checkout_case_6_intermediate_conflict_preserves_valid_prefix ... ok
+test test_checkout_case_5_exponential_overlap_deduplication ... ok
+test test_checkout_edge_case_empty_and_single_hop_chains ... ok
+test test_checkout_ciphertext_order_does_not_replace_authenticated_causality ... ok
+test test_dashboard_endpoint_rendering_and_airgap ... ok
+test test_checkout_edge_case_split_dag_change_branch ... ok
+test test_event_log_persister_and_populate ... ok
+test test_dashboard_etag_and_304_not_modified ... ok
+test test_dashboard_sre_monitoring_and_conflict_deep_link ... ok
+test test_empty_immature_committee_never_confirms_zero_of_zero ... ok
+test test_healthcheck_split_live_and_ready ... ok
+test test_max_11_years_ttl_ingress_boundary_enforcement ... ok
+test test_node_status_and_metrics_telemetry_gauges ... ok
+test test_node_request_handler_lock_verify_and_digest ... ok
+test test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid ... ok
+test test_phase1_idempotent_retry_with_pow_and_created_at ... ok
+test test_phase1_idempotent_retry_preserves_signed_created_at ... ok
+test test_qa_dashboard_data_dto_backward_compatibility ... ok
+test test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate ... ok
+test test_qa_dashboard_status_badges_and_quorum_display ... ok
+test test_qa_health_evaluation_all_levels ... ok
+test test_qa_key_parsing_formats ... ok
+test test_qa_ring_buffer_boundary_conditions ... ok
+test test_prometheus_metrics_expansion ... ok
+test test_qa_dashboard_history_and_events_endpoints_structure ... ok
+test test_qa_admin_endpoints_unauthorized_and_mutations ... ok
+test test_storage_failure_never_returns_success_for_single_or_chain_ingress ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.72s
+
+     Running tests/audit_hardening_tests.rs (target/debug/deps/audit_hardening_tests-f7e07833be504490)
+
+running 4 tests
+test test_cold_boot_pruning_deferred_during_boot_sync ... ok
+test test_24h_finality_hysteresis_and_immature_rejection ... ok
+test test_anti_framing_split_brain_collision_does_not_ban_signers ... ok
+test test_hmc_ingress_window_enforcement_on_hot_path ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/chain_causality_and_prefix_tests.rs (target/debug/deps/chain_causality_and_prefix_tests-66f8457710faf178)
+
+running 3 tests
+test receiver_and_change_consume_independent_sst_slots_and_sidecars_are_authenticated ... ok
+test quic_bad_suffix_reports_step_and_preserves_committed_prefix ... ok
+test http_bad_suffix_retains_exact_durable_prefix_after_restart ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+     Running tests/chaos_wire_http_fuzz.rs (target/debug/deps/chaos_wire_http_fuzz-0c58132dbccda757)
+
+running 8 tests
+test test_chaos_http_oversized_body_rejected ... ok
+test test_chaos_http_fuzz_random_payloads ... ok
+test test_chaos_hmc_bad_signatures_no_panic ... ok
+test test_chaos_wire_malicious_payload_len_bounded ... ok
+test test_chaos_wire_slowloris_timeout ... ok
+test test_chaos_wire_fuzz_random_headers_no_panic ... ok
+test test_chaos_pow_replay_and_invalid_challenge ... ok
+test test_chaos_ingress_quota_exhaustion_under_flood ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s
+
+     Running tests/cluster_e2e_tests.rs (target/debug/deps/cluster_e2e_tests-6f16b59f20cf7c5f)
+
+running 7 tests
+test test_e2e_hmc_compliance_with_live_tcp ... ok
+test test_e2e_cluster_lock_and_sync ... ok
+test test_e2e_partition_and_conflict_resolution ... ok
+test test_e2e_sync_garbage_and_invalid_lock_rejection ... ok
+test test_e2e_pos_latency_benchmark ... ok
+test test_e2e_churn_preserves_frozen_quorum_and_restart_gate ... ok
+test test_e2e_bootstrap_n2_stays_closed_without_justified_activation ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.90s
+
+     Running tests/cluster_sync_recovery_tests.rs (target/debug/deps/cluster_sync_recovery_tests-a7332a86cff7e38b)
+
+running 2 tests
+test thirty_two_stalled_sync_jobs_do_not_consume_reserved_shard_rpc_slots ... ok
+test fixed_snapshot_cursor_survives_concurrent_insert_delete_and_rejects_foreign_cursor ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/control_tests.rs (target/debug/deps/control_tests-ec0f82baa76fd22e)
+
+running 5 tests
+test test_control_server_idle_client_and_cancellation ... ok
+test test_control_socket_status_and_peers ... ok
+test test_control_quota_topup_and_get ... ok
+test test_prometheus_metrics_endpoint ... ok
+test test_control_extensions_batch3 ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+     Running tests/created_at_bucket_decoupling_tests.rs (target/debug/deps/created_at_bucket_decoupling_tests-77b34018791243f0)
+
+running 4 tests
+test test_arbitrary_encrypted_timestamp_does_not_affect_bucket ... ok
+test test_created_at_determines_bucket_id ... ok
+test test_ingress_clock_drift_30s_window_enforced ... ok
+test test_idempotent_retries_with_identical_created_at_returns_200 ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/current_proof_boundaries_tests.rs (target/debug/deps/current_proof_boundaries_tests-c039d46372c459ef)
+
+running 3 tests
+test recipient_context_full_keys_and_exact_fourteen_are_required ... ok
+test live_state_signature_over_quic_requires_exact_ready_state ... ok
+test actual_public_http_never_serves_operator_aliases_or_fake_strong_lookup ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests/dos_resilience_test.rs (target/debug/deps/dos_resilience_test-6e339f26b5b452b4)
+
+running 2 tests
+test test_isolated_peer_failure_is_still_penalized ... ok
+test test_dos_correlated_failure_suppression_prevents_death_spiral ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.59s
+
+     Running tests/dual_stack_and_sunset_tests.rs (target/debug/deps/dual_stack_and_sunset_tests-780f5ab00c5925f6)
+
+running 6 tests
+test test_normal_suite1_before_sunset_201 ... ok
+test test_reject_suite1_after_sunset_400 ... ok
+test test_quantum_bridge_lock_validation ... ok
+test test_no_warn_before_time_or_for_suite2 ... ok
+test test_warn_header_after_warn_time ... ok
+test test_suite2_after_reject_not_rejected ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/f2f_gossip_and_shard_rpc_tests.rs (target/debug/deps/f2f_gossip_and_shard_rpc_tests-08a8ca7b9ae707eb)
+
+running 4 tests
+test test_unauthorized_direct_connection_refused ... ok
+test test_f2f_gossip_and_shard_direct_contact_lifecycle ... ok
+test test_unauthorized_active_sync_and_shard_digest_rejected ... ok
+test test_f2f_multihop_gossip_forwarding_and_incubation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/final_lock_immunity_tests.rs (target/debug/deps/final_lock_immunity_tests-11c7de7969c60d40)
+
+running 4 tests
+test test_two_provisional_locks_split_brain_uses_min_canonical_hash ... ok
+test test_two_final_locks_equivocation_uses_min_canonical_hash ... ok
+test test_final_lock_displaces_provisional_lock_with_lower_hash ... ok
+test test_final_lock_immune_to_unquorated_lower_hash_displacement ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/gateway_discovery_wire_tests.rs (target/debug/deps/gateway_discovery_wire_tests-31f711b0980dc70d)
+
+running 1 test
+test signed_passive_gateway_publication_arrives_over_quic_and_tampering_is_ignored ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/health_test.rs (target/debug/deps/health_test-426996535f9156f6)
+
+running 4 tests
+test test_duration_formatting_all_ranges ... ok
+test test_health_state_tracker_lifecycle_and_pruning ... ok
+test test_system_stats_redb_growth_and_headroom_projection ... ok
+test test_evaluate_health_tracked_with_dashboard_data ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/interview_recovery_membership_tests.rs (target/debug/deps/interview_recovery_membership_tests-de24eef577bee862)
+
+running 8 tests
+test readiness_admission_is_bounded_deduplicated_and_fail_closed ... ok
+test committee_uses_three_missed_heartbeats_not_rpc_failure_score ... ok
+test direct_peer_identity_cannot_substitute_for_a_mature_ticket ... ok
+test unassigned_node_sync_never_marks_shard_ready ... ok
+test peerless_recovery_never_authorizes_empty_state ... ok
+test unhealthy_storage_sync_never_marks_shard_ready ... ok
+test unknown_shard_is_rejected_over_real_quic_despite_global_readiness ... ok
+test unready_shard_returns_flag_not_ready_and_is_rejected_as_recovery_witness ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/mutant_kills.rs (target/debug/deps/mutant_kills-70c8b535bf88d7dd)
+
+running 5 tests
+test test_mutant_m2s3_spent_lock_filter_retains_unexpired_and_false_negative_safe ... ok
+test test_mutant_m2s3_spent_lock_filter_post_prune_removed ... ok
+test test_mutant_m2s6_hmc_disk_prune_removes_expired ... ok
+test test_mutant_m2s3_hmc_ram_filter_consistency_after_prune ... ok
+test test_mutant_m2s6_hmc_disk_prune_retains_unexpired_until_grace ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/network_tests.rs (target/debug/deps/network_tests-c61a1e295f2196df)
+
+running 4 tests
+test test_peer_lifecycle_and_suspension ... ok
+test test_dns_peer_periodic_resolution ... ok
+test test_stream_multiplexing_concurrent ... ok
+test test_quic_p2p_handshake_and_frame_exchange ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/operator_bootstrap_tests.rs (target/debug/deps/operator_bootstrap_tests-c5cfae893df828da)
+
+running 1 test
+test explicit_new_region_serves_committed_digest_but_restart_stays_closed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/operator_browser_boundary_tests.rs (target/debug/deps/operator_browser_boundary_tests-493a9424c83d08e9)
+
+running 2 tests
+test signed_regional_view_is_private_and_matches_real_committee_selection ... ok
+test private_http_rejects_foreign_origins_and_rebinding_hosts_but_allows_local_forwarding ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/operator_lifecycle_tests.rs (target/debug/deps/operator_lifecycle_tests-f5ae9a162378a3b3)
+
+running 4 tests
+test operator_configuration_cannot_bind_publicly_or_advertise_credentials ... ok
+test hourly_retention_preserves_deltas_and_marks_restart_gaps ... ok
+test hourly_history_never_interpolates_missing_years_or_unbounded_slots ... ok
+test stop_waits_for_process_exit_and_database_can_reopen ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/own_decision_durability.rs (target/debug/deps/own_decision_durability-40d11740db836a51)
+
+running 7 tests
+
+running 1 test
+test invalid_suffix_preserves_durable_prefix_and_never_returns_terminal_success ... ok
+test abrupt_process_exit_after_commit_retains_original_choice ... ok
+test identical_pending_root_retries_wait_for_durable_barrier ... ok
+test ram_expiry_pass_has_a_hard_examined_entry_limit ... ok
+test consistent_backup_includes_private_own_choices ... ok
+test own_choice_survives_merge_restart_and_same_child_promotion ... ok
+test timed_out_original_keeps_late_commit_and_retry_protection ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+
+     Running tests/phase11_wire_level_adversarial_tests.rs (target/debug/deps/phase11_wire_level_adversarial_tests-d656136fcda9e567)
+
+running 12 tests
+test test_phase11a_quorum_gating_wire_returns_503_never_200_201 ... ok
+test test_phase11b_final_attestation_status_wire_n_ge_20 ... ok
+test test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire ... ok
+test test_phase11d_shard_digest_isolation_wire ... ok
+test test_exact_committee_includes_self_and_never_queries_rank21_wire ... ok
+test test_phase11f_100_node_hrw_quorum_validation ... ok
+test test_phase11e_paginated_sync_wire_reliable ... ok
+test test_exact_committee_outside_gateway_queries_twenty_wire ... ok
+test test_fourteen_fast_signers_abort_stragglers_without_penalty_wire ... ok
+test test_rank21_receiving_server_rejects_over_real_quic ... ok
+test test_seven_not_ready_peers_fail_fast_without_penalty_wire ... ok
+test test_valid_signatures_for_wrong_request_or_tls_context_never_form_quorum_wire ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.52s
+
+     Running tests/phase3_integration_tests.rs (target/debug/deps/phase3_integration_tests-0e4e0418d042616d)
+
+running 3 tests
+test test_phase3_equivocation_ban_and_peer_disconnect ... ok
+test test_phase3_split_brain_deterministic_healing_min_h_canon ... ok
+test test_phase3_multi_shard_and_hmc_sync ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests/phase4_net_time_and_quotas.rs (target/debug/deps/phase4_net_time_and_quotas-2a38524ca7573b9e)
+
+running 7 tests
+test test_phase4_network_clock_f2f_median_and_wot_gating ... ok
+test test_phase4_peer_manager_clock_integration ... ok
+test test_phase4_network_clock_clamping_and_monotonicity ... ok
+test test_phase4_spec_09_slotted_median_and_dynamic_quotas ... ok
+test test_phase4_wire_level_quota_rejection_and_3zone_plausibility ... ok
+test test_phase4_under_reporting_fraud_detection_and_gossip_slashing ... ok
+test test_phase4_piggyback_heartbeat_cross_shard_silo_defense ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+
+     Running tests/phase5_pull_sync_and_readiness.rs (target/debug/deps/phase5_pull_sync_and_readiness-c600212190941adf)
+
+running 7 tests
+test test_cryptographic_verification_on_partition_sync ... ok
+test test_boot_readiness_barrier_http_api_503 ... ok
+test test_boot_readiness_barrier_wire_flag ... ok
+test recovering_self_cannot_supply_missing_quorum_vote ... ok
+test test_per_shard_readiness_demand_sync_503 ... ok
+test test_stable_network_keeps_finality_separate_from_each_shards_readiness ... ok
+test test_paginated_active_sync_streaming_chunks ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.90s
+
+     Running tests/quorum_assembly_tests.rs (target/debug/deps/quorum_assembly_tests-5d41c2e40a698106)
+
+running 1 test
+test test_gateway_assembles_quorum_from_mixed_200_and_201_responses ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.15s
+
+     Running tests/realistic_protocol_simulation_tests.rs (target/debug/deps/realistic_protocol_simulation_tests-91d551674c0c99e7)
+
+running 5 tests
+test test_scenario_1_isolated_village_start_and_mesh_merge ... ignored, long-running simulation
+test test_scenario_2_multi_hop_causality_chain_ingress_newcomer ... ignored, long-running simulation
+test test_scenario_3_double_spend_partition_and_canonical_resolution ... ignored, long-running simulation
+test test_scenario_4_offline_maintenance_catchup_sync ... ignored, long-running simulation
+test test_scenario_5_spam_rejection_fantasy_locks ... ignored, long-running simulation
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/shard_pool_lifecycle_tests.rs (target/debug/deps/shard_pool_lifecycle_tests-1e04af4f6b8b8860)
+
+running 1 test
+test shard_pool_capacity_idle_lru_and_inbound_busy_protection_are_neutral ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running tests/signing_history_loss_tests.rs (target/debug/deps/signing_history_loss_tests-de60da0c491e96a6)
+
+running 1 test
+test real_quic_checkpoint_detects_restore_but_rejects_framing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running tests/sim_01_evolutionary_growth.rs (target/debug/deps/sim_01_evolutionary_growth-b03103522f29323d)
+
+running 1 test
+test test_sim_01_evolutionary_growth ... ignored, long-running simulation
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sim_02_island_bridge_merge.rs (target/debug/deps/sim_02_island_bridge_merge-d8ff1afa8c5f2157)
+
+running 1 test
+test test_sim_02_island_bridge_merge ... ignored, long-running simulation
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sim_03_byzantine_resilience.rs (target/debug/deps/sim_03_byzantine_resilience-3b73b12df6e874ef)
+
+running 1 test
+test test_sim_03_byzantine_resilience ... ignored, long-running simulation
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sim_04_scale_30_churn_and_failover.rs (target/debug/deps/sim_04_scale_30_churn_and_failover-15e1389d417c33fa)
+
+running 1 test
+test test_sim_04_scale_30_churn_and_failover ... ignored, long-running simulation
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sim_05_shard_baton_handover_integration.rs (target/debug/deps/sim_05_shard_baton_handover_integration-21a364c98e724318)
+
+running 1 test
+test test_sim_05_shard_baton_handover_integration ... ignored, long-running simulation
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sim_06_lazy_gateway_free_rider_resilience.rs (target/debug/deps/sim_06_lazy_gateway_free_rider_resilience-670759ede89fb0ff)
+
+running 1 test
+test test_sim_06_lazy_gateway_free_rider_resilience ... ignored, long-running simulation
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sim_07_network_growth_and_merge_scenarios.rs (target/debug/deps/sim_07_network_growth_and_merge_scenarios-3a7b0f17ecafac33)
+
+running 3 tests
+test test_sc02_asymmetric_merge_10_vs_3_dominant_quorum_convergence ... ignored, long-running simulation
+test test_sc03_symmetric_stalemate_5_vs_5_wallet_reconciliation ... ignored, long-running simulation
+test test_sync_single_shard_quarantines_minority_locks_and_converges ... ignored, long-running simulation
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_07_pow_headroom_and_monotonicity_tests.rs (target/debug/deps/spec_07_pow_headroom_and_monotonicity_tests-fe3e60fa316edb29)
+
+running 15 tests
+test test_2_1_bootstrap_median_empty_and_single ... ok
+test test_2_2_bootstrap_median_1_and_2_nodes ... ok
+test test_3_1_and_3_2_monotonicity_downgrade_and_lateral_rejected ... ok
+test test_2_4_whale_immunity_3_supercomputers ... ok
+test test_2_3_large_network_median_21_nodes ... ok
+test test_3_4_pending_race_intermediate_rejected_and_higher_overwrites ... ok
+test test_3_3_monotonicity_upgrade_enters_incubation ... ok
+test test_4_3_connection_remains_open_despite_outdated_ticket ... ok
+test test_6_1_consensus_time_monotonicity_and_no_inflation_on_rapid_queries ... ok
+test test_6_2_mesh_merge_dynamic_clamp_adaptation ... ok
+test test_6_3_pow_engine_clock_alignment ... ok
+test test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop ... ok
+test test_6_4_pruning_ntp_warp_protection ... ok
+test test_5_1_status_pow_formatting ... ok
+test test_5_2_doctor_check_7_healthy_and_outdated ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/startup_cleanup_tests.rs (target/debug/deps/startup_cleanup_tests-0ffd25ed7bd816be)
+
+running 2 tests
+test public_bind_failure_releases_operator_and_database_in_the_same_runtime ... ok
+test occupied_quic_port_drains_the_earlier_persistence_worker ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/status_reconciliation_tests.rs (target/debug/deps/status_reconciliation_tests-4741598e682f0335)
+
+running 2 tests
+test test_status_query_unspent_and_spent_reconciliation ... ok
+test test_current_state_quorum_requires_real_fourteen_distinct_live_votes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.69s
+
+     Running tests/storage_tests.rs (target/debug/deps/storage_tests-ff55fc04d5d5b67b)
+
+running 9 tests
+test test_dual_tier_engine_hotpath_and_async_flush ... ok
+test test_defensive_deserialization_corrupted_entries ... ok
+test test_coldstart_crash_recovery_and_ttl_pruning ... ok
+test test_dual_tier_engine_hmc_ttl_pruning_and_recovery ... ok
+test test_recent_locks_ringbuffer_and_inspection ... ok
+test test_redb_storage_crud ... ok
+test test_durable_before_vote_crash_durability ... ok
+test test_voucher_query_methods ... ok
+test test_system_audit_events_storage_and_pruning ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+
+     Running tests/subquorum_canonical_merge_tests.rs (target/debug/deps/subquorum_canonical_merge_tests-a6d20d56912d15c3)
+
+running 2 tests
+test test_subquorum_hmc_13_vs_7_minority_with_lower_hash_prevails ... ok
+test test_subquorum_core_lock_record_13_vs_7_minority_with_lower_hash_prevails ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.16s
+
+     Running unittests src/lib.rs (target/debug/deps/humoco_sim_core-94c501882f154c10)
+
+running 81 tests
+test ceh::barrier::tests::test_barrier_drain_rejects_new_and_completes_in_flight ... ok
+test ceh::barrier::tests::test_barrier_open_acquire_and_drop ... ok
+test ceh::snapshot::tests::test_snapshot_root_determinism_and_sorting ... ok
+test ceh::snapshot::tests::test_snapshot_union_reconciliation ... ok
+test ceh::tests::test_domain_tags_length_prefixed ... ok
+test ceh::tests::test_candidate_proof_and_proposal ... ok
+test ceh::tests::test_epoch_certificate_hashing_and_signing ... ok
+test ceh::tests::test_genesis_manifest_hashing_and_signing ... ok
+test ceh::tests::test_lock_receipt_attestation ... ok
+test ceh::tests::test_prepare_and_commit_votes ... ok
+test ceh::tests::test_round_change_and_new_view ... ok
+test ceh::consensus::tests::test_view_change_on_round_timeout ... ok
+test ceh::tests::test_serde_roundtrips ... ok
+test ceh::verifier::tests::test_late_certificate_redemption_clears_conflict ... ok
+test ceh::verifier::tests::test_lru_cache_eviction ... ok
+test ceh::voucher_tree::tests::test_binary_split_tree_voucher_1_to_2_recursive ... ok
+test ceh::voucher_tree::tests::test_difference_detection_altered_child ... ok
+test ceh::voucher_tree::tests::test_find_divergent_vouchers_disjoint_and_empty ... ok
+test ceh::consensus::tests::test_normal_two_phase_bft_handoff ... ok
+test ceh::voucher_tree::tests::test_identical_root_regardless_of_hop_insertion_order ... ok
+test ceh::voucher_tree::tests::test_linear_chain_voucher_1_to_1 ... ok
+test ceh::voucher_tree::tests::test_prune_expired ... ok
+test ceh::voucher_tree::tests::test_union_reconciliation ... ok
+test chaos::tests::test_merge_resolves_min_canon ... ok
+test client_flow::tests::test_verify_quorum_threshold ... ok
+test crypto::tests::test_attestation_signing_and_verification ... ok
+test crypto::tests::test_canonical_hash_determinism ... ok
+test crypto::tests::test_compute_canonical_hash_normalized ... ok
+test crypto::tests::test_compute_genesis_root_and_sig_helpers ... ok
+test crypto::tests::test_compute_shard_digest_at_exact_boundaries ... ok
+test crypto::tests::test_compute_sig_digest_comprehensive ... ok
+test crypto::tests::test_compute_whitened_hrw_id_uniformity ... ok
+test crypto::tests::test_compute_work_from_hash_determinism_and_boundaries ... ok
+test crypto::tests::test_equivocation_proof_symmetry_and_determinism ... ok
+test crypto::tests::test_network_domain_separation_prevents_cross_replay ... ok
+test fraud::tests::test_ingress_counter_conflict_anti_framing ... ok
+test fraud::tests::test_ingress_counter_conflict_all_8_paths ... ok
+test fraud::tests::test_ingress_counter_conflict_reordering_symmetry ... ok
+test fraud::tests::test_ingress_envelope_sign_decode_verify ... ok
+test fraud::tests::test_pillar_values ... ok
+test fraud::tests::test_slot_detector_honest_no_spam ... ok
+test fraud::tests::test_slot_detector_spam ... ok
+test p0::state::tests::backdated_commit_cannot_release_or_persist_an_approval ... ok
+test p0::state::tests::durable_choice_survives_expired_ack_and_prunes_only_after_root_grace ... ok
+test quota::tests::test_byte_years_calculation ... ok
+test quota::tests::test_byte_years_edge_cases ... ok
+test quota::tests::test_diurnal_cycle_invariance ... ok
+test quota::tests::test_evaluate_quota_exceeded_claim_thresholds ... ok
+test quota::tests::test_hourly_slotted_ring_buffer_boundaries_and_accessors ... ok
+test quota::tests::test_hourly_slotted_ring_buffer_ntp_backwards_safety ... ok
+test quota::tests::test_hourly_slotted_ring_buffer_rolling_sum ... ok
+test quota::tests::test_integer_ema_time_decay ... ok
+test quota::tests::test_integer_ema_u128_overflow_safety ... ok
+test quota::tests::test_micro_from_ttl_seconds ... ok
+test quota::tests::test_network_thermometer_full_lifecycle_and_reseed ... ok
+test quota::tests::test_quartiles_and_damper ... ok
+test quota::tests::test_quartiles_edge_cases_and_spread_damper ... ok
+test quota::tests::test_slotted_ring_buffer_and_median_buffer_lifecycle ... ok
+test resolver::tests::test_identical_locks_no_op ... ok
+test resolver::tests::test_resolve_split_brain_canonical_with_signatures ... ok
+test resolver::tests::test_resolve_split_brain_with_proof_scenarios ... ok
+test resolver::tests::test_split_brain_no_conflict_different_parents ... ok
+test resolver::tests::test_split_brain_winner_loser_and_equal_hash ... ok
+test storage::tests::test_window_and_prune ... ok
+test telemetry::tests::test_starvation_stages ... ok
+test telemetry::tests::test_warning_level_non_authoritative ... ok
+test transport::tests::test_backoff_jitter_bounds ... ok
+test transport::tests::test_pool_dunbar_eviction ... ok
+test types::tests::test_evaluate_sync_status_village_and_global ... ok
+test types::tests::test_network_stress_thermometer_ema_and_burst_robustness ... ok
+test types::tests::test_peer_presence_entry_lifecycle_and_backoff_reset ... ok
+test types::tests::test_quorum_calculations ... ok
+test types::tests::test_replacement_node_rank_filter_and_retirement ... ok
+test types::tests::test_sim_time_arithmetic ... ok
+test types::tests::test_stress_damped_failure_and_persistence ... ok
+test wire::tests::test_lock_entry_144_size ... ok
+test wire::tests::test_token_bucket ... ok
+test wire::tests::test_wire_header_size ... ok
+test ceh::tests::test_unified_network_epoch_manifest ... ok
+test fraud::tests::test_ingress_counter_conflict_fuzz_10k ... ok
+test ceh::tests::test_merkle_tree_65536_leaves_root_and_proofs ... ok
+
+test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running unittests src/bin/humoco_sim.rs (target/debug/deps/humoco_sim-a8d84344064e4630)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ceh_adversarial_suite.rs (target/debug/deps/ceh_adversarial_suite-12a204880350f120)
+
+running 4 tests
+test test_scenario_2_22_node_newcomer_activation_race ... ok
+test test_scenario_1_39_node_bridge_attack_split_brain_impossibility ... ok
+test test_scenario_3_8_6_split_view_change_and_late_redemption ... ok
+test test_scenario_4_pioneer_mode_unified_manifest_at_n20 ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/ceh_dual_store_tests.rs (target/debug/deps/ceh_dual_store_tests-1cae5b9e7488f00c)
+
+running 7 tests
+test test_inv_ceh_02_causal_completeness_for_finality ... ok
+test test_inv_ceh_03_atomic_promotion ... ok
+test test_inv_1106_heartbeat_cryptographic_domain_isolation ... ok
+test test_inv_ceh_01_dual_store_zero_contamination ... ok
+test test_inv_ceh_04_genesis_handshake_incompatible_reject ... ok
+test test_inv_ceh_05_genesis_pioneer_adoption ... ok
+test test_inv_ceh_06_phase_transition_19_to_20_to_21_nodes ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mutant_kills.rs (target/debug/deps/mutant_kills-9d664fed0d5426a7)
+
+running 8 tests
+test test_mutant_m1o4_order_statistics_threshold_computation ... ok
+test test_mutant_m1o5_byteyears_zero_ttl_is_one ... ok
+test test_mutant_m1o7_quota_exact_boundary_le ... ok
+test test_mutant_m1o7_quota_split_exact_boundary ... ok
+test test_mutant_m1o8_epoch_hour_duplicate_overwrite ... ok
+test test_mutant_m1o4_verify_order_statistics_quorum_boundary ... ok
+test test_mutant_m1o8_epoch_hour_same_slot_modulo_overwrite ... ok
+test test_mutant_m2s4_verify_deterministic_sig_rejects_forgery ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/p0_adversarial_scenarios.rs (target/debug/deps/p0_adversarial_scenarios-af0088d140fdfc29)
+
+running 6 tests
+test p0_t08_admission_rejects_forgery_but_reports_the_real_capture_boundary ... ok
+test p0_t07_honest_observation_preserves_choice_and_allows_winning_descendants ... ok
+test p0_t10_late_smaller_evidence_revises_winner_and_scoped_repair_is_not_readiness ... ok
+test p0_t09_validation_precedes_min_hash_and_only_a_real_receipt_promotes_support ... ok
+test p0_t11_correlated_loss_queue_crashes_and_honest_view_skew_fail_closed ... ok
+test p0_t12_coordinated_100_of_1000_attack_damage_and_terminal_journal_are_explicit ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.24s
+
+     Running tests/p0_partition_scenarios.rs (target/debug/deps/p0_partition_scenarios-4724bfec09786990)
+
+running 6 tests
+test p0_t04_union_permutations_duplicates_and_signer_subsets_preserve_disjoint_payments ... ok
+test p0_t01_balanced_partition_operates_and_reconnect_delivers_only_after_healing ... ok
+test p0_t06_splits_preserve_unrelated_siblings_and_reject_losing_descendants ... ok
+test p0_t05_original_bridge_and_newcomer_witnesses_identify_only_actual_double_signers ... ok
+test p0_t03_small_components_require_adaptive_quorums_and_real_stability ... ok
+test p0_t02_asymmetric_partition_rejects_cross_view_duplicate_and_rank21_votes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s
+
+     Running tests/proptest_invariants.rs (target/debug/deps/proptest_invariants-8821d4e2181b81d3)
+
+running 11 tests
+test prop_canonical_resolver_identical_locks ... ok
+test prop_equivocation_proof_hash_set_collision_resistance ... ok
+test prop_canonical_resolver_no_conflict_on_distinct_parents ... ok
+test prop_equivocation_proof_node_id_collision_resistance ... ok
+test prop_equivocation_proof_symmetry ... ok
+test prop_canonical_resolver_commutativity ... ok
+test prop_network_thermometer_reseed_hard_floor_guarantees ... ok
+test prop_quota_calculation_monotonicity ... ok
+test prop_wire_header_valid_roundtrip ... ok
+test prop_wire_header_from_bytes_never_panics ... ok
+test prop_hourly_slotted_ring_buffer_bounds ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/proptests_humoco_properties.rs (target/debug/deps/proptests_humoco_properties-8382cbf99b1fc81e)
+
+running 36 tests
+test prop_backoff_jitter_deterministic_and_bounded ... ok
+test prop_byte_years_monotonic_in_ttl ... ok
+test prop_account_tag_roundtrip_and_determinism ... ok
+test prop_all_fixed_size_structs_stable ... ok
+test prop_apply_attestation_idempotent_duplicate ... ok
+test prop_first_seen_pacer_idempotent_known ... ok
+test prop_canon_hash_deterministic ... ok
+test prop_hard_floor_never_undercut ... ok
+test prop_ingress_window_implies_not_yet_prunable ... ok
+test prop_h_canon_domain_separation_length_prefix ... ok
+test prop_integer_ema_monotonic_and_bounded ... ok
+test prop_canon_total_order_strict_weak_ordering ... ok
+test prop_peer_presence_success_idempotent_at_floor ... ok
+test prop_lock_entry144_roundtrip ... ok
+test prop_lock_record_id_deterministic ... ok
+test prop_lock_record_bincode_roundtrip ... ok
+test prop_quota_clamped_and_hard_floor_with_k1 ... ok
+test prop_quota_monotonic_in_k_and_damper ... ok
+test prop_promote_to_final_idempotent ... ok
+test prop_ram_index_insert_idempotent ... ok
+test prop_ram_index_collision_idempotent ... ok
+test prop_resolver_determinism_permutation ... ok
+test prop_resolver_idempotent_double_resolve ... ok
+test prop_spread_damper_bounded ... ok
+test prop_resolver_respects_min_canon_ordering ... ok
+test prop_thermometer_moving_average_monotonic_with_floor ... ok
+test prop_try_accept_lock_resets_next_day ... ok
+test prop_try_accept_lock_monotonic_and_quota_bounded ... ok
+test prop_resolver_transitivity_three_locks ... ok
+test prop_ttl_prune_never_resurrects ... ok
+test prop_wire_header_parse_valid_roundtrip ... ok
+test prop_wire_header_roundtrip ... ok
+test prop_wire_header_valid_magic_invariant ... ok
+test prop_ttl_bubble_prune_two_phase_monotonic ... ok
+test prop_ttl_prune_idempotent_same_time ... ok
+test prop_ttl_prune_monotonic_len_and_count ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests/spec_00_spec_consistency_tests.rs (target/debug/deps/spec_00_spec_consistency_tests-3ec9e63a422727e3)
+
+running 9 tests
+test test_canonical_hash_with_signature ... ok
+test test_compute_genesis_root_determinism_and_domain ... ok
+test test_promotion_idempotency_and_hysteresis ... ok
+test test_apply_attestation_hysteresis_gate ... ok
+test test_dumb_server_hysteresis_gate ... ok
+test test_quorum_formula_consistency_table_r1_to_r20 ... ok
+test test_shard_id_extraction_endianness ... ok
+test test_sig_digest_domain_separation ... ok
+test test_slot_detector_1024_distribution ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_02_canon_resolver.rs (target/debug/deps/spec_02_canon_resolver-fc0a620affd42910)
+
+running 3 tests
+test test_canon_resolver_deterministic_choice ... ok
+test test_canon_resolver_idempotent_duplicate ... ok
+test test_canon_resolver_order_independence ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_02_lock_lifecycle.rs (target/debug/deps/spec_02_lock_lifecycle-801a7a008081824f)
+
+running 4 tests
+test test_lock_lifecycle_provisional_transition_7_nodes ... ok
+test test_reject_duplicate_attestation_and_expired_lock ... ok
+test test_lock_lifecycle_final_transition_20_nodes ... ok
+test test_lock_promotion_from_provisional_to_final ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_03_bucketed_shard_sync_and_retry_tests.rs (target/debug/deps/spec_03_bucketed_shard_sync_and_retry_tests-e99d911fd94aceef)
+
+running 5 tests
+test test_bucket_digest_determinism_across_arrival_order ... ok
+test test_bucket_isolation_between_time_windows ... ok
+test test_timestamp_to_bucket_id_and_sealing ... ok
+test test_gateway_retry_payload_identity_invariance ... ok
+test test_triple_send_packet_loss_probability_bound ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_03_digest_first_pull_sync.rs (target/debug/deps/spec_03_digest_first_pull_sync-4634cdcec1992683)
+
+running 3 tests
+test test_digest_first_pull_sync_insufficient_quorum_backoff ... ok
+test test_digest_first_pull_sync_poisoned_stream_payload_rejection ... ok
+test test_digest_first_pull_sync_bft_cluster_success ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_03_lazy_node_defense.rs (target/debug/deps/spec_03_lazy_node_defense-80ee85db393e028b)
+
+running 3 tests
+test test_spec_03_transient_missing_count_suspension_and_autonomous_decay ... ok
+test test_spec_03_top20_shard_and_rank21_backup ... ok
+test test_spec_03_lazy_node_defense_suspend_and_promote ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_03_replacement_node_lifecycle.rs (target/debug/deps/spec_03_replacement_node_lifecycle-8aa329cf12f1c959)
+
+running 2 tests
+test test_displaced_active_node_phantom_gossip_resistance_and_retirement ... ok
+test test_replacement_node_full_lifecycle_and_flapping_resilience ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_03_shard_baton_handover_and_growth.rs (target/debug/deps/spec_03_shard_baton_handover_and_growth-1974f8c1be7aa609)
+
+running 2 tests
+test test_shard_baton_handover_byzantine_noise_filtering ... ok
+test test_shard_baton_handover_multi_generation_growth ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_04_lazy_ingestion_causality_chain.rs (target/debug/deps/spec_04_lazy_ingestion_causality_chain-b2d2d1634e2d9d05)
+
+running 5 tests
+test test_lazy_ingestion_first_seen_collision_detection ... ok
+test test_lazy_ingestion_rejects_fake_genesis_root ... ok
+test test_lazy_ingestion_rejects_tampered_hash_link ... ok
+test test_lazy_ingestion_valid_3_hop_chain_accepted_in_ram ... ok
+test test_causality_proofchain_hop_limit_boundary ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_06_order_statistics_quorum.rs (target/debug/deps/spec_06_order_statistics_quorum-7cc80ba51fc5ba33)
+
+running 4 tests
+test cryptographic_committee_is_bounded_unique_and_permutation_invariant ... ok
+test rank21_and_duplicates_fail_even_with_fourteen_signatures ... ok
+test exact_quorum_preserves_provisional_and_final_thresholds ... ok
+test rank21_can_pass_statistical_threshold_but_never_exact_membership ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_06_smart_client_dumb_server_flow.rs (target/debug/deps/spec_06_smart_client_dumb_server_flow-f4d6cdd161bb68a1)
+
+running 6 tests
+test test_inv0602_idempotent_concurrent_ingress_both_200_ok ... ok
+test test_inv0601_client_side_custody_proof_chain_discarded_by_server ... ok
+test test_inv0603_three_way_ingress_verdict ... ok
+test test_inv0604_client_side_verification_14_of_20 ... ok
+test zero_trust_twenty_member_provisional_hysteresis ... ok
+test zero_trust_exact_membership_and_context ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/spec_07_asymmetric_wot_and_village_merge.rs (target/debug/deps/spec_07_asymmetric_wot_and_village_merge-b6b1060a410175f4)
+
+running 2 tests
+test test_village_merge_local_continuity_during_transition ... ok
+test test_single_friend_percolation_global_reach ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/spec_07_f2f_median_gaslighting_defense.rs (target/debug/deps/spec_07_f2f_median_gaslighting_defense-598413c0e0011d50)
+
+running 3 tests
+test test_f2f_median_filters_extreme_gaslighting_attack ... ok
+test test_f2f_median_even_peer_count_robustness ... ok
+test test_simulated_network_gaslighting_immunity ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_08_split_brain_equivocation_proof.rs (target/debug/deps/spec_08_split_brain_equivocation_proof-0ae47c82095f78d7)
+
+running 2 tests
+test test_split_brain_symmetric_double_spend_resolution ... ok
+test test_equivocation_proof_generation_and_o1_slashing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_08_split_brain_merge.rs (target/debug/deps/spec_08_split_brain_merge-14b402277413b090)
+
+running 2 tests
+test test_split_brain_class_precedence_outranks_lower_min_canon_hash ... ok
+test test_split_brain_merge_convergence_20_nodes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_08_village_shard_transition.rs (target/debug/deps/spec_08_village_shard_transition-bc8d5540ba744398)
+
+running 1 test
+test test_village_to_global_merge_lazy_upgrade_and_shard_shift ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/spec_09_network_thermometer_and_quotas.rs (target/debug/deps/spec_09_network_thermometer_and_quotas-958c1f75f78dc621)
+
+running 13 tests
+test test_spec_09_calculate_sync_read_credits ... ok
+test test_quartile_distribution_and_spread_damper ... ok
+test test_spec_09_28_day_slotted_median_inertia_against_botnet_spike ... ok
+test test_spec_09_merge_fast_reseed_and_scale_jump ... ok
+test test_spec_09_new_node_seed_prevents_coldstart_deadlock ... ok
+test test_spec_09_hard_floor_baseline_1000_locks_guarantee ... ok
+test test_spec_09_read_28_day_slotted_median_inertia_against_scraping_spike ... ok
+test test_spec_09_read_hard_floor_baseline_50000_reads_guarantee ... ok
+test test_spec_09_read_quota_evaluation_on_join ... ok
+test test_spec_09_read_whale_brake_and_sandbox_limits ... ok
+test test_spec_09_three_zone_quota_exceeded_plausibility_and_malus ... ok
+test test_spec_09_whale_brake_and_sandbox_limits ... ok
+test test_spec_09_organic_network_growth_and_silent_dropping ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_10_13_wire_framing_and_access_tiering.rs (target/debug/deps/spec_10_13_wire_framing_and_access_tiering-acc072100ef33530)
+
+running 4 tests
+test test_inv1001_144_byte_binary_layout_and_32b_wireheader ... ok
+test test_inv1302_ingress_token_bucket_rate_limiter ... ok
+test test_wire_header_flags_and_reserved ... ok
+test test_inv1301_three_tier_access_control ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_10_fraud_proofs.rs (target/debug/deps/spec_10_fraud_proofs-1e0d0ffa774ea21c)
+
+running 5 tests
+test test_pillar_1_successor_equivocation_with_different_parent_shard_id ... ok
+test test_pillar_2_v2_envelope_sequence_fork_conflict_bans_immediately ... ok
+test test_pillar_1_equivocation_double_sign_bans_immediately ... ok
+test test_pillar_3_heartbeat_spam_128_slot_detector_bans ... ok
+test test_pillar_2_ingress_counter_conflict_bans_immediately ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_11_dunbar_red_merge_simulation.rs (target/debug/deps/spec_11_dunbar_red_merge_simulation-682022047acd1824)
+
+running 1 test
+test test_single_bridge_choke_vs_multi_homing_merge ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/spec_11_f2f_10k_censorship_simulation.rs (target/debug/deps/spec_11_f2f_10k_censorship_simulation-efbc83ef88bb9c0c)
+
+running 1 test
+test test_10k_f2f_gossip_censorship_resilience ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/spec_11_first_seen_ingress_pacing.rs (target/debug/deps/spec_11_first_seen_ingress_pacing-0abc175d5685c46f)
+
+running 5 tests
+test test_inv1104_jitter_calculation ... ok
+test test_inv1104_known_node_immediate_forward_vs_first_seen_delayed ... ok
+test test_inv1104_mesh_percolation_stepwise_forwarding ... ok
+test test_inv1104_pacing_queue_rate_limits_botnet_flood ... ok
+test test_inv1104_queue_depth_probing_destroys_phantoms_instantly ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_11_gossip_propagation.rs (target/debug/deps/spec_11_gossip_propagation-7b7696573c0d09b5)
+
+running 3 tests
+test test_dunbar_gossip_clock_drift_edge_cases_within_60s ... ok
+test test_dunbar_gossip_propagation_15_nodes_with_drift ... ok
+test test_dunbar_gossip_seen_cache_deduplication_prevents_echo_flooding ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_11_multi_edge_merge_hysteresis_simulation.rs (target/debug/deps/spec_11_multi_edge_merge_hysteresis_simulation-099a8cfe76da725d)
+
+running 4 tests
+test test_f2f_reports_filtering_during_percolation ... ok
+test test_shard_quorum_safeguard_during_syncing_wave ... ok
+test test_bridge_count_scalability_k1_vs_k5_vs_k10 ... ok
+test test_multi_edge_merge_5_bridges_hysteresis_wave_and_convergence ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/spec_12_14_ram_index_and_storage_persistence.rs (target/debug/deps/spec_12_14_ram_index_and_storage_persistence-ea28edd9f0e837be)
+
+running 4 tests
+test test_inv1202_ingress_time_window ... ok
+test test_inv1203_zero_cost_ttl_eviction_after_grace ... ok
+test test_inv1401_dual_tier_safety_wal_and_crash_recovery ... ok
+test test_inv1201_hot_path_ram_latency_first_seen ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/spec_15_p2p_transport_and_connection_lifecycle.rs (target/debug/deps/spec_15_p2p_transport_and_connection_lifecycle-21c68e56a55fc37a)
+
+running 4 tests
+test test_inv1501_three_phase_connection_lifecycle_connected_degrading_suspended ... ok
+test test_inv1502_exponentielles_backoff_mit_jitter ... ok
+test test_transport_keepalive_and_idle_interaction ... ok
+test test_inv1503_connection_pool_limits_and_dunbar_eviction ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_16_chaos_and_partition_resilience.rs (target/debug/deps/spec_16_chaos_and_partition_resilience-7669a81b1e2a7670)
+
+running 3 tests
+test test_inv1603_crashes_do_not_authorize_replacement_signers ... ok
+test test_inv1602_30_percent_byzantine_packet_drop_resilience ... ok
+test test_inv1601_deep_partition_merge_60_40_over_12h_min_h_canon_convergence ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+     Running tests/spec_17_telemetry_and_social_defense.rs (target/debug/deps/spec_17_telemetry_and_social_defense-888db23c894e88a8)
+
+running 18 tests
+test test_inv1701_dashboard_warnings_do_not_evict_peers_automatically ... ok
+test test_inv1701_gateway_concentration_and_dominance_helpers ... ok
+test test_inv1702_1704_1705_combined_topology_health ... ok
+test test_inv1701_telemetry_is_non_authoritative_no_auto_ban ... ok
+test test_inv1702_legit_multi_node_cluster_with_pow_and_ge3_no_warning ... ok
+test test_inv1702_pow_invalid_even_with_high_degree_warns ... ok
+test test_inv1702_single_bridge_botnet_besen_detected_and_throttled ... ok
+test test_inv1702_single_edge_censorship_risk_and_clock_skew ... ok
+test test_inv1703_healing_without_revoke_stays_active ... ok
+test test_inv1703_starvation_cascade_21h_deactivated_48h_purged ... ok
+test test_inv1704_day2_no_audit_even_if_over_80_percent ... ok
+test test_inv1704_ingress_audit_threshold_80_percent_day1_warns ... ok
+test test_inv1704_multiple_peers_isolated_and_deterministic ... ok
+test test_inv1704_transparency_does_not_block_ingress_itself ... ok
+test test_inv1705_local_shard_performance_degraded_below_80 ... ok
+test test_inv1705_neighbor_shard_activity_optional_info ... ok
+test test_inv1705_topology_report_integrates_shard_and_ingress_warnings ... ok
+test test_prometheus_metrics_render_deterministic ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec_chaos_aggressive.rs (target/debug/deps/spec_chaos_aggressive-8d0f5d2afda1ccab)
+
+running 12 tests
+test test_chaos_byzantine_equivocation_sybil_storm ... ok
+test test_chaos_crash_loop_cold_start_under_load ... ok
+test test_chaos_gossip_prioritization_equivocation_vs_heartbeat ... ok
+test test_chaos_out_of_order_delivery_does_not_violate_min_canon ... ok
+test test_chaos_p2p_reordering_extreme_jitter ... ok
+test test_chaos_peer_presence_and_thermometer_jitter ... ok
+test test_chaos_ram_index_under_concurrent_prune_and_ingress ... ok
+test test_chaos_asymmetric_3way_split_brain_multi_edge_merge ... ok
+test test_chaos_wire_fuzz_no_panic_and_bounded_allocation ... ok
+test test_chaos_sequential_merge_order_invariance ... ok
+test test_chaos_causality_and_ingress_fuzz_no_panic ... ok
+test test_chaos_json_and_status_verdict_fuzz ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+   Doc-tests clap_complete
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests humoco_node
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests humoco_sim_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

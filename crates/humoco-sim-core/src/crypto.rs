@@ -375,13 +375,15 @@ pub fn compute_shard_digest(shard_id: ShardId, locks: &[LockRecord]) -> Hash256 
 ///
 /// Variant with an explicit time filter for validity checks.
 pub fn compute_shard_digest_at(shard_id: ShardId, locks: &[LockRecord], now: SimTime) -> Hash256 {
-    let mut active: Vec<&LockRecord> = locks
-        .iter()
-        .filter(|l| {
-            let sid = u16::from_be_bytes([l.parent_lock[0], l.parent_lock[1]]);
-            sid == shard_id && !l.status.is_void() && l.valid_until > now
-        })
-        .collect();
+    let selected: Vec<_> = locks.iter().filter(|lock| u16::from_be_bytes([lock.parent_lock[0], lock.parent_lock[1]]) == shard_id).cloned().collect();
+    compute_selected_shard_digest_at(shard_id, &selected, now)
+}
+
+/// Hash objective rows whose canonical shard membership was already checked by
+/// the caller. HMC membership derives from the root, not the SST collision key.
+/// This projection does not establish committee authority or recovery readiness.
+pub fn compute_selected_shard_digest_at(shard_id: ShardId, locks: &[LockRecord], now: SimTime) -> Hash256 {
+    let mut active: Vec<&LockRecord> = locks.iter().filter(|lock| !lock.status.is_void() && lock.valid_until > now).collect();
     active.sort_by(|a, b| a.parent_lock.cmp(&b.parent_lock));
     let mut hasher = blake3::Hasher::new();
     hasher.update(&[0x01]);
@@ -404,15 +406,13 @@ pub fn compute_shard_bucket_digest(
     bucket_id: u64,
     locks: &[LockRecord],
 ) -> Hash256 {
-    let mut bucket_locks: Vec<&LockRecord> = locks
-        .iter()
-        .filter(|l| {
-            let sid = u16::from_be_bytes([l.parent_lock[0], l.parent_lock[1]]);
-            sid == shard_id
-                && !l.status.is_void()
-                && crate::types::timestamp_to_bucket_id(l.created_at.0) == bucket_id
-        })
-        .collect();
+    let selected: Vec<_> = locks.iter().filter(|lock| u16::from_be_bytes([lock.parent_lock[0], lock.parent_lock[1]]) == shard_id).cloned().collect();
+    compute_selected_shard_bucket_digest(shard_id, bucket_id, &selected)
+}
+
+/// Bucket projection for records with independently checked shard membership.
+pub fn compute_selected_shard_bucket_digest(shard_id: ShardId, bucket_id: u64, locks: &[LockRecord]) -> Hash256 {
+    let mut bucket_locks: Vec<&LockRecord> = locks.iter().filter(|lock| !lock.status.is_void() && crate::types::timestamp_to_bucket_id(lock.created_at.0) == bucket_id).collect();
     bucket_locks.sort_by(|a, b| a.parent_lock.cmp(&b.parent_lock).then_with(|| a.id.cmp(&b.id)));
 
     let mut hasher = blake3::Hasher::new();

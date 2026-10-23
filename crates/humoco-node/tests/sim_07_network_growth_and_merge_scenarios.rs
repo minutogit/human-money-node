@@ -367,6 +367,7 @@ async fn test_sync_single_shard_quarantines_minority_locks_and_converges() {
     let shard_id = u16::from_be_bytes([parent_bytes_a[0], parent_bytes_a[1]]);
 
     let entry_a = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: voucher_a.clone(),
         t_id: genesis_a.transaction_hash,
         sender_ephemeral_pub: genesis_a.sender_ephemeral_pub,

@@ -109,6 +109,7 @@ impl SimWallet {
         );
         let sig = self.signing_key.sign(&payload_hash);
         L2LockRequest {
+        causal_output: None,
             auth: L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -155,6 +156,7 @@ impl SimWallet {
         );
         let sig = self.signing_key.sign(&payload_hash);
         L2LockRequest {
+        causal_output: None,
             auth: L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -208,6 +210,7 @@ impl SimWallet {
             );
             let sig = self.signing_key.sign(&payload_hash);
             let req = L2LockRequest {
+        causal_output: None,
                 auth: L2AuthPayload {
                     ephemeral_pubkey: sender_pub,
                     auth_signature: None,

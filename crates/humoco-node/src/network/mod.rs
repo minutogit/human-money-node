@@ -1,4 +1,5 @@
 pub mod clock;
+pub mod discovery;
 pub mod framing;
 pub mod manager;
 pub mod peer;

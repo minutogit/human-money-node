@@ -3,9 +3,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use humoco_node::identity::NodeIdentity;
-use humoco_node::network::{
-    DefaultRequestHandler, PeerManager, QuicTransport,
-};
+use humoco_node::network::{DefaultRequestHandler, PeerManager, QuicTransport};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
 #[tokio::test]
@@ -74,8 +72,10 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
     transport_c.spawn_accept_loop();
 
     // Register friend addresses in PeerManager
-    pm_a.register_f2f_friend(*identity_b.node_id(), Some(actual_addr_b)).await;
-    pm_b.register_f2f_friend(*identity_a.node_id(), Some(actual_addr_a)).await;
+    pm_a.register_f2f_friend(*identity_b.node_id(), Some(actual_addr_b))
+        .await;
+    pm_b.register_f2f_friend(*identity_a.node_id(), Some(actual_addr_a))
+        .await;
 
     // --- TEST 1: F2F Gossip is accepted between friends (A and B) ---
     let conn_b_to_a = transport_b
@@ -85,7 +85,8 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
 
     // B sends a Heartbeat advertising Node C's existence to A
     let hb_payload = humoco_node::network::framing::HeartbeatWirePayload {
-            signing_checkpoint: None,
+        gateway_advertisement: None,
+        signing_checkpoint: None,
         node_id: *identity_c.node_id(),
         addr: actual_addr_c,
         timestamp_ms: 0,
@@ -154,7 +155,8 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
 
     // --- TEST 3: Direct Shard-RPC is authorized because A learned C via gossip ---
     // Node C also knows Node A from network gossip:
-    pm_c.learn_node_from_gossip(*identity_a.node_id(), actual_addr_a, 1, None).await;
+    pm_c.learn_node_from_gossip(*identity_a.node_id(), actual_addr_a, 1, None)
+        .await;
 
     // A now connects directly to C (using connect_peer, which enforces the check)
     let conn_a_to_c = transport_a
@@ -297,7 +299,8 @@ async fn test_unauthorized_active_sync_and_shard_digest_rejected() {
     );
 
     // 3. Authorize C by registering it as a learned gossip node
-    pm_a.learn_node_from_gossip(*identity_c.node_id(), conn_c_to_a.remote_address(), 1, None).await;
+    pm_a.learn_node_from_gossip(*identity_c.node_id(), conn_c_to_a.remote_address(), 1, None)
+        .await;
 
     // Now a fresh request on a new connection must succeed (no unauthorized).
     let conn_c_to_a_3 = transport_c
@@ -333,34 +336,69 @@ async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
     let addr_c: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     let pm_a = Arc::new(PeerManager::with_f2f(vec![], vec![*identity_b.node_id()]));
-    let pm_b = Arc::new(PeerManager::with_f2f(vec![], vec![*identity_a.node_id(), *identity_c.node_id()]));
+    let pm_b = Arc::new(PeerManager::with_f2f(
+        vec![],
+        vec![*identity_a.node_id(), *identity_c.node_id()],
+    ));
     let pm_c = Arc::new(PeerManager::with_f2f(vec![], vec![*identity_b.node_id()]));
 
-    let transport_a = QuicTransport::bind_with_options(addr_a, &identity_a, pm_a.clone(), Arc::new(DefaultRequestHandler), cancel_a.clone()).unwrap();
+    let transport_a = QuicTransport::bind_with_options(
+        addr_a,
+        &identity_a,
+        pm_a.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_a.clone(),
+    )
+    .unwrap();
     let actual_addr_a = transport_a.local_addr().unwrap();
     let _accept_a = transport_a.spawn_accept_loop();
 
-    let transport_b = QuicTransport::bind_with_options(addr_b, &identity_b, pm_b.clone(), Arc::new(DefaultRequestHandler), cancel_b.clone()).unwrap();
+    let transport_b = QuicTransport::bind_with_options(
+        addr_b,
+        &identity_b,
+        pm_b.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_b.clone(),
+    )
+    .unwrap();
     let actual_addr_b = transport_b.local_addr().unwrap();
     let _accept_b = transport_b.spawn_accept_loop();
 
-    let transport_c = QuicTransport::bind_with_options(addr_c, &identity_c, pm_c.clone(), Arc::new(DefaultRequestHandler), cancel_c.clone()).unwrap();
+    let transport_c = QuicTransport::bind_with_options(
+        addr_c,
+        &identity_c,
+        pm_c.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_c.clone(),
+    )
+    .unwrap();
     let actual_addr_c = transport_c.local_addr().unwrap();
     let _accept_c = transport_c.spawn_accept_loop();
 
     // Register friend addresses
-    pm_a.register_f2f_friend(*identity_b.node_id(), Some(actual_addr_b)).await;
-    pm_b.register_f2f_friend(*identity_a.node_id(), Some(actual_addr_a)).await;
-    pm_b.register_f2f_friend(*identity_c.node_id(), Some(actual_addr_c)).await;
-    pm_c.register_f2f_friend(*identity_b.node_id(), Some(actual_addr_b)).await;
+    pm_a.register_f2f_friend(*identity_b.node_id(), Some(actual_addr_b))
+        .await;
+    pm_b.register_f2f_friend(*identity_a.node_id(), Some(actual_addr_a))
+        .await;
+    pm_b.register_f2f_friend(*identity_c.node_id(), Some(actual_addr_c))
+        .await;
+    pm_c.register_f2f_friend(*identity_b.node_id(), Some(actual_addr_b))
+        .await;
 
     // Connect friends
-    let _conn_a_b = transport_a.connect_peer_unchecked(actual_addr_b).await.unwrap();
-    let _conn_b_c = transport_b.connect_peer_unchecked(actual_addr_c).await.unwrap();
+    let _conn_a_b = transport_a
+        .connect_peer_unchecked(actual_addr_b)
+        .await
+        .unwrap();
+    let _conn_b_c = transport_b
+        .connect_peer_unchecked(actual_addr_c)
+        .await
+        .unwrap();
 
     // Node A sends Heartbeat with TTL=16 and Argon2d routing ID
     let hb_a = humoco_node::network::framing::HeartbeatWirePayload {
-            signing_checkpoint: None,
+        gateway_advertisement: None,
+        signing_checkpoint: None,
         node_id: *identity_a.node_id(),
         addr: actual_addr_a,
         timestamp_ms: 50_000,
@@ -378,25 +416,46 @@ async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
     let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
     hdr.reserved = 0; // hops = 0
 
-    let conn_a_to_b = transport_a.connect_peer_unchecked(actual_addr_b).await.unwrap();
-    transport_a.send_unidirectional(&conn_a_to_b, &hdr, &payload).await.unwrap();
+    let conn_a_to_b = transport_a
+        .connect_peer_unchecked(actual_addr_b)
+        .await
+        .unwrap();
+    transport_a
+        .send_unidirectional(&conn_a_to_b, &hdr, &payload)
+        .await
+        .unwrap();
 
     // Wait for multi-hop gossip propagation: A -> B -> C
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
     // Node B must have learned A (direct, hops=0)
     assert!(pm_b.is_known_node(identity_a.node_id()).await);
-    let info_at_b = pm_b.get_known_node_info(identity_a.node_id()).await.unwrap();
+    let info_at_b = pm_b
+        .get_known_node_info(identity_a.node_id())
+        .await
+        .unwrap();
     assert_eq!(info_at_b.min_hops(), 0);
 
     // Node C must have learned A through multi-hop forwarding from B (hops=1)
-    assert!(pm_c.is_known_node(identity_a.node_id()).await, "Node C must have learned Node A via F2F multi-hop gossip");
-    let info_at_c = pm_c.get_known_node_info(identity_a.node_id()).await.unwrap();
+    assert!(
+        pm_c.is_known_node(identity_a.node_id()).await,
+        "Node C must have learned Node A via F2F multi-hop gossip"
+    );
+    let info_at_c = pm_c
+        .get_known_node_info(identity_a.node_id())
+        .await
+        .unwrap();
     assert_eq!(info_at_c.min_hops(), 1);
 
     // Verify 24h incubation wall: Node A is newly learned, so is_immature() must be true, cannot be HRW eligible yet!
-    assert!(info_at_c.is_immature(), "Newly learned node must be IMMATURE under 24h incubation wall");
-    assert!(!info_at_c.is_hrw_eligible(), "Newly learned node must NOT be HRW eligible yet");
+    assert!(
+        info_at_c.is_immature(),
+        "Newly learned node must be IMMATURE under 24h incubation wall"
+    );
+    assert!(
+        !info_at_c.is_hrw_eligible(),
+        "Newly learned node must NOT be HRW eligible yet"
+    );
 
     // Clean up
     cancel_a.cancel();

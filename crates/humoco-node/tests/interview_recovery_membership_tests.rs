@@ -221,6 +221,7 @@ async fn unknown_shard_is_rejected_over_real_quic_despite_global_readiness() {
     let now_ms = pm_server.net_time_ms();
     let root_valid_until = now_ms + 600_000;
     let mut hmc_req = humoco_node::api::hmc::L2LockRequest {
+        causal_output: None,
         auth: humoco_node::api::hmc::L2AuthPayload {
             ephemeral_pubkey: *client_id.node_pubkey(),
             auth_signature: None,

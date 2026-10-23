@@ -58,6 +58,7 @@ async fn test_mutant_m2s3_hmc_ram_filter_consistency_after_prune() {
     let (engine, handle) = DualTierEngine::new(Arc::clone(&storage));
 
     let entry = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "v_filter".to_string(),
         t_id: [0x11; 32],
         sender_ephemeral_pub: [0x22; 32],
@@ -71,6 +72,9 @@ async fn test_mutant_m2s3_hmc_ram_filter_consistency_after_prune() {
         deletable_at: Some("50000".to_string()), // 50s
         privacy_guard: None,
     };
+    let mut root = entry.clone(); root.t_id = [0x10; 32];
+    let (root_verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.t_id).into_string(), root, humoco_node::storage::IngressOrigin::ClientApi, None, None, None, None).await;
+    assert!(matches!(root_verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
     let tag = "filter_prune_tag".to_string();
     let (_, is_new) = engine.ingress_hmc_lock(tag.clone(), entry).await;
     assert!(is_new);
@@ -107,6 +111,7 @@ fn test_mutant_m2s6_hmc_disk_prune_removes_expired() {
     let storage = RedbStorage::open(&db_path).unwrap();
 
     let entry_expired = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "v_exp".to_string(),
         t_id: [0xAA; 32],
         sender_ephemeral_pub: [0xBB; 32],
@@ -121,6 +126,7 @@ fn test_mutant_m2s6_hmc_disk_prune_removes_expired() {
         privacy_guard: None,
     };
     let entry_alive = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "v_alive".to_string(),
         t_id: [0x11; 32],
         sender_ephemeral_pub: [0x22; 32],
@@ -135,6 +141,10 @@ fn test_mutant_m2s6_hmc_disk_prune_removes_expired() {
         privacy_guard: None,
     };
 
+    for entry in [&entry_expired, &entry_alive] {
+        let mut root = entry.clone(); root.t_id[0] ^= 0x80;
+        storage.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root).unwrap();
+    }
     storage.put_hmc_lock("tag_exp", &entry_expired).unwrap();
     storage.put_hmc_lock("tag_alive", &entry_alive).unwrap();
 
@@ -171,6 +181,7 @@ fn test_mutant_m2s6_hmc_disk_prune_retains_unexpired_until_grace() {
     let storage = RedbStorage::open(&db_path).unwrap();
 
     let entry = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "v_grace".to_string(),
         t_id: [0x55; 32],
         sender_ephemeral_pub: [0x66; 32],
@@ -184,6 +195,9 @@ fn test_mutant_m2s6_hmc_disk_prune_retains_unexpired_until_grace() {
         deletable_at: Some("100000".to_string()), // 100s -> bucket 130
         privacy_guard: None,
     };
+    let mut root = entry.clone();
+    root.t_id = [0x54; 32];
+    storage.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root).unwrap();
     storage.put_hmc_lock("tag_grace", &entry).unwrap();
 
     // Prune before grace (now=100 -> bucket 100 <130 => must retain)

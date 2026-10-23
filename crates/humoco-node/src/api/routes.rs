@@ -31,15 +31,11 @@ use ed25519_dalek::Signer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-
-
-
 use humoco_sim_core::types::SimTime;
 
 use crate::api::dto::{
-    AttestationDto, ErrorResponse, LockRecordDto,
-    NodeStatusResponse, PeerEntryDto, PeersResponse, PowChallengeResponse,
-    QuorumCertificateDto, SyncRequest, SyncResponse,
+    AttestationDto, ErrorResponse, LockRecordDto, NodeStatusResponse, PeerEntryDto, PeersResponse,
+    PowChallengeResponse, QuorumCertificateDto, SyncRequest, SyncResponse,
 };
 use crate::api::hmc::{
     verify_l2_lock_signature, wrap_and_sign_verdict, wrap_and_sign_verdict_with_quorum,
@@ -86,7 +82,10 @@ impl AppState {
     ) -> Self {
         let metrics = Arc::new(crate::api::metrics::NodeMetrics::default());
         let system_stats = Arc::new(crate::api::system_stats::SystemStatsCollector::new("."));
-        let auth = Arc::new(crate::api::auth::AdminTokenManager::with_token("hmc_adm_dev", true));
+        let auth = Arc::new(crate::api::auth::AdminTokenManager::with_token(
+            "hmc_adm_dev",
+            true,
+        ));
         let config = Arc::new(crate::config::NodeConfig::default());
         let history_sampler = Arc::new(crate::api::history::HistorySampler::default());
         let event_log = Arc::new(crate::api::events::EventLog::default());
@@ -96,7 +95,8 @@ impl AppState {
                     event_log.populate(loaded);
                 }
             }
-            let (audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<crate::api::events::EventItem>(100);
+            let (audit_tx, mut audit_rx) =
+                tokio::sync::mpsc::channel::<crate::api::events::EventItem>(100);
             event_log.set_persister(audit_tx);
             let persister_storage = storage.clone();
             handle.spawn(async move {
@@ -158,10 +158,7 @@ impl AppState {
         self
     }
 
-    pub fn with_event_log(
-        mut self,
-        event_log: Arc<crate::api::events::EventLog>,
-    ) -> Self {
+    pub fn with_event_log(mut self, event_log: Arc<crate::api::events::EventLog>) -> Self {
         self.event_log = event_log;
         self
     }
@@ -251,7 +248,10 @@ pub fn public_router(state: AppState) -> Router {
 /// Private operator endpoints; bind only to the configured local operator listener.
 pub fn build_operator_router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/operator/regional-mesh-view", get(operator_regional_mesh_view))
+        .route(
+            "/v1/operator/regional-mesh-view",
+            get(operator_regional_mesh_view),
+        )
         .route("/health", get(get_node_status))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
@@ -259,32 +259,78 @@ pub fn build_operator_router(state: AppState) -> Router {
         .route("/api/v1/network/peers", get(get_peers))
         .route("/api/v1/retained-choice/:tag", get(get_retained_choice))
         .route("/dashboard", get(crate::api::dashboard::render_dashboard))
-        .route("/dashboard/data", get(crate::api::dashboard::dashboard_data))
-        .route("/dashboard/vouchers", get(crate::api::dashboard::dashboard_vouchers))
-        .route("/dashboard/voucher/:voucher_id", get(crate::api::dashboard::dashboard_voucher_detail))
-        .route("/dashboard/lock/:lookup_tag", get(crate::api::dashboard::dashboard_lock_raw))
-        .route("/dashboard/admin/verify-token", post(crate::api::dashboard::admin_verify_token))
-        .route("/dashboard/admin/friends", post(crate::api::dashboard::admin_add_friend))
-        .route("/dashboard/admin/friends/:key", delete(crate::api::dashboard::admin_remove_friend))
-        .route("/dashboard/admin/mesh/peers", post(crate::api::dashboard::admin_add_mesh_peer))
-        .route("/dashboard/admin/mesh/peers/:key", delete(crate::api::dashboard::admin_remove_mesh_peer))
-        .route("/dashboard/admin/ingress/clients", post(crate::api::dashboard::admin_add_ingress_client))
-        .route("/dashboard/admin/ingress/clients/:token_hash", delete(crate::api::dashboard::admin_remove_ingress_client))
-        .route("/dashboard/admin/quota", post(crate::api::dashboard::admin_topup_quota))
-        .route("/dashboard/admin/peers/:addr/reset", post(crate::api::dashboard::admin_reset_peer))
-        .route("/dashboard/admin/peers/:addr/ping", post(crate::api::dashboard::admin_ping_peer))
+        .route(
+            "/dashboard/data",
+            get(crate::api::dashboard::dashboard_data),
+        )
+        .route(
+            "/dashboard/vouchers",
+            get(crate::api::dashboard::dashboard_vouchers),
+        )
+        .route(
+            "/dashboard/voucher/:voucher_id",
+            get(crate::api::dashboard::dashboard_voucher_detail),
+        )
+        .route(
+            "/dashboard/lock/:lookup_tag",
+            get(crate::api::dashboard::dashboard_lock_raw),
+        )
+        .route(
+            "/dashboard/admin/verify-token",
+            post(crate::api::dashboard::admin_verify_token),
+        )
+        .route(
+            "/dashboard/admin/friends",
+            post(crate::api::dashboard::admin_add_friend),
+        )
+        .route(
+            "/dashboard/admin/friends/:key",
+            delete(crate::api::dashboard::admin_remove_friend),
+        )
+        .route(
+            "/dashboard/admin/mesh/peers",
+            post(crate::api::dashboard::admin_add_mesh_peer),
+        )
+        .route(
+            "/dashboard/admin/mesh/peers/:key",
+            delete(crate::api::dashboard::admin_remove_mesh_peer),
+        )
+        .route(
+            "/dashboard/admin/ingress/clients",
+            post(crate::api::dashboard::admin_add_ingress_client),
+        )
+        .route(
+            "/dashboard/admin/ingress/clients/:token_hash",
+            delete(crate::api::dashboard::admin_remove_ingress_client),
+        )
+        .route(
+            "/dashboard/admin/quota",
+            post(crate::api::dashboard::admin_topup_quota),
+        )
+        .route(
+            "/dashboard/admin/peers/:addr/reset",
+            post(crate::api::dashboard::admin_reset_peer),
+        )
+        .route(
+            "/dashboard/admin/peers/:addr/ping",
+            post(crate::api::dashboard::admin_ping_peer),
+        )
         .route("/dashboard/history", get(get_dashboard_history))
         .route("/dashboard/history/hourly", get(private_hourly_history))
         .route("/dashboard/events", get(get_dashboard_events))
         .route("/metrics", get(crate::api::metrics::prometheus_metrics))
         .layer(DefaultBodyLimit::max(64 * 1024))
-        .layer(axum::middleware::from_fn(crate::api::operator_boundary::enforce_operator_browser_boundary))
+        .layer(axum::middleware::from_fn(
+            crate::api::operator_boundary::enforce_operator_browser_boundary,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
 /// Compatibility entry point for public ingress.
-pub fn build_router(state: AppState) -> Router { public_router(state) }
+pub fn build_router(state: AppState) -> Router {
+    public_router(state)
+}
 
 #[derive(serde::Deserialize)]
 struct HistoryQuery {
@@ -385,22 +431,37 @@ async fn sync_locks(
     let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
 
     // Rate-limiting / quota protection for heavy sync queries (A09 & Rule 9)
-    let client_node_id: u16 = if let Some(auth) = headers.get("Authorization").and_then(|h| h.to_str().ok()) {
-        let tag = state.tier_controller.resolve_account_tag(auth).unwrap_or([0u8; 32]);
-        u16::from_be_bytes([tag[0], tag[1]])
-    } else if let Some(peer_token) = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok()) {
-        let hash = *blake3::hash(peer_token.as_bytes()).as_bytes();
-        u16::from_be_bytes([hash[0], hash[1]])
-    } else {
-        let first_loc = payload.sparse_locators.first().map(|s| s.as_bytes()).unwrap_or(b"sync_anonymous");
-        let hash = *blake3::hash(first_loc).as_bytes();
-        u16::from_be_bytes([hash[0], hash[1]])
-    };
+    let client_node_id: u16 =
+        if let Some(auth) = headers.get("Authorization").and_then(|h| h.to_str().ok()) {
+            let tag = state
+                .tier_controller
+                .resolve_account_tag(auth)
+                .unwrap_or([0u8; 32]);
+            u16::from_be_bytes([tag[0], tag[1]])
+        } else if let Some(peer_token) = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok()) {
+            let hash = *blake3::hash(peer_token.as_bytes()).as_bytes();
+            u16::from_be_bytes([hash[0], hash[1]])
+        } else {
+            let first_loc = payload
+                .sparse_locators
+                .first()
+                .map(|s| s.as_bytes())
+                .unwrap_or(b"sync_anonymous");
+            let hash = *blake3::hash(first_loc).as_bytes();
+            u16::from_be_bytes([hash[0], hash[1]])
+        };
 
     let sync_read_credits = 5;
-    if let Err(ingress_err) = state.tier_controller.evaluate_read_quota(client_node_id, sync_read_credits, epoch_day, 1.0) {
+    if let Err(ingress_err) =
+        state
+            .tier_controller
+            .evaluate_read_quota(client_node_id, sync_read_credits, epoch_day, 1.0)
+    {
         let reason = match ingress_err {
-            IngressError::ReadQuotaExceeded { available, required } => {
+            IngressError::ReadQuotaExceeded {
+                available,
+                required,
+            } => {
                 format!(
                     "429 Read quota exceeded: required {} credits, available {}",
                     required, available
@@ -471,9 +532,20 @@ async fn sync_locks(
         let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
         let parent_hex = hex::encode(parent_bytes);
         let id_hex = hex::encode(entry.t_id);
-        if !locators.contains(&parent_hex) && !locators.contains(&tag) && !locators.contains(&id_hex) {
-            let valid_until_ms = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            let created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
+        if !locators.contains(&parent_hex)
+            && !locators.contains(&tag)
+            && !locators.contains(&id_hex)
+        {
+            let valid_until_ms = entry
+                .deletable_at
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let created_at_ms = if entry.created_at_ms > 0 {
+                entry.created_at_ms
+            } else {
+                entry.encrypted_timestamp as u64
+            };
             let rec = humoco_sim_core::types::LockRecord {
                 id: entry.t_id,
                 parent_lock: parent_bytes,
@@ -508,16 +580,15 @@ async fn get_pow_challenge(
 }
 
 /// Handler for GET /health and GET /v1/status
-async fn get_node_status(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<NodeStatusResponse>) {
+async fn get_node_status(State(state): State<AppState>) -> (StatusCode, Json<NodeStatusResponse>) {
     state.metrics.record_read();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let (active_byte_years, _) = state.engine.get_active_footprint_byte_years(now_ms).await;
-    let total_locks = state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+    let total_locks =
+        state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
     let daily_write_quota_byte_years = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
     let network = match state.network_id {
@@ -542,9 +613,7 @@ async fn get_node_status(
 }
 
 /// Handler for GET /peers and GET /api/v1/network/peers (PEX Client Discovery)
-async fn get_peers(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<PeersResponse>) {
+async fn get_peers(State(state): State<AppState>) -> (StatusCode, Json<PeersResponse>) {
     let network = match state.network_id {
         humoco_sim_core::types::NetworkId::Mainnet => "mainnet".to_string(),
         humoco_sim_core::types::NetworkId::Testnet => "testnet".to_string(),
@@ -577,7 +646,6 @@ async fn get_peers(
         }),
     )
 }
-
 
 /// # Architectural Invariant: parent_lock-Bound Attestations (Phase 1 P0)
 ///
@@ -647,7 +715,6 @@ pub fn create_attestation(
     )
 }
 
-
 // ---------------------------------------------------------------------------
 // Shared quorum helpers — extracted from assemble_quorum_certificate and
 // assemble_status_quorum_certificate to eliminate duplicated bitmap and
@@ -659,12 +726,8 @@ pub fn create_attestation(
 /// before falling back to provisional forwarding. Returns the immutable
 /// `root.valid_until` in ms when the genesis lock is known on disk.
 async fn fetch_remote_voucher_root(state: &AppState, voucher_id: &str) -> Option<u64> {
-    if let Ok(locks) = state.storage.get_hmc_locks_for_voucher(voucher_id) {
-        for (_, entry) in locks {
-            if let Some(del) = entry.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
-                return Some(del);
-            }
-        }
+    if let Ok(Some(root)) = state.storage.voucher_root(voucher_id) {
+        return crate::storage::db::roots::root_valid_until(&root).ok();
     }
     // The authoritative shard check happens during the subsequent quorum
     // fanout (LockVerifyRequest); the shard enforces INV-1202 on `now_ms`.
@@ -672,10 +735,16 @@ async fn fetch_remote_voucher_root(state: &AppState, voucher_id: &str) -> Option
 }
 
 /// Maps each full signer identity to its immutable committee position.
-fn compute_committee_bitmap(committee: &[humoco_sim_core::types::CommitteeMember], signatures: &[AttestationDto]) -> u32 {
+fn compute_committee_bitmap(
+    committee: &[humoco_sim_core::types::CommitteeMember],
+    signatures: &[AttestationDto],
+) -> u32 {
     signatures.iter().fold(0, |bitmap, att| {
-        committee.iter().position(|member| Some(member.node_pubkey) == att.node_pubkey_bytes())
-            .map(|index| bitmap | (1 << index)).unwrap_or(bitmap)
+        committee
+            .iter()
+            .position(|member| Some(member.node_pubkey) == att.node_pubkey_bytes())
+            .map(|index| bitmap | (1 << index))
+            .unwrap_or(bitmap)
     })
 }
 
@@ -700,7 +769,9 @@ async fn verify_peer_attestation(
     expected_tls_pubkey: Option<[u8; 32]>,
 ) -> bool {
     let (expected_lock_id, expected_parent_lock) = expected_lock;
-    if att.shard_id != shard_id { return false; }
+    if att.shard_id != shard_id {
+        return false;
+    }
     // Strict 32-byte signer resolution first.
     let signer_pubkey: Option<[u8; 32]> = att.node_pubkey_bytes();
     let vk = if let Some(pk) = signer_pubkey {
@@ -753,7 +824,10 @@ async fn verify_peer_attestation(
             arr
         }
         _ => {
-            tracing::warn!(node_id = att.node_id, "Dropped attestation: invalid signature length");
+            tracing::warn!(
+                node_id = att.node_id,
+                "Dropped attestation: invalid signature length"
+            );
             return false;
         }
     };
@@ -766,13 +840,19 @@ async fn verify_peer_attestation(
             arr
         }
         _ => {
-            tracing::warn!(node_id = att.node_id, "Dropped attestation: invalid lock_id hex");
+            tracing::warn!(
+                node_id = att.node_id,
+                "Dropped attestation: invalid lock_id hex"
+            );
             return false;
         }
     };
 
     if att_lock_id_bytes != expected_lock_id {
-        tracing::warn!(node_id = att.node_id, "Dropped attestation: lock_id mismatch");
+        tracing::warn!(
+            node_id = att.node_id,
+            "Dropped attestation: lock_id mismatch"
+        );
         return false;
     }
 
@@ -783,12 +863,17 @@ async fn verify_peer_attestation(
             arr
         }
         _ => {
-            tracing::warn!(node_id = att.node_id, "Dropped attestation: invalid parent_lock hex");
+            tracing::warn!(
+                node_id = att.node_id,
+                "Dropped attestation: invalid parent_lock hex"
+            );
             return false;
         }
     };
 
-    if att_parent_lock_bytes != expected_parent_lock { return false; }
+    if att_parent_lock_bytes != expected_parent_lock {
+        return false;
+    }
 
     let domain_tag = if target_status == 1 {
         humoco_sim_core::crypto::domain_approve_final(network_id)
@@ -802,7 +887,13 @@ async fn verify_peer_attestation(
         &expected_lock_id,
     );
     let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
-        domain_tag, 0, 0, 0, shard_id, target_status, &payload_digest,
+        domain_tag,
+        0,
+        0,
+        0,
+        shard_id,
+        target_status,
+        &payload_digest,
     );
 
     if let Err(e) = vk.verify_strict(&sig_digest, &sig) {
@@ -855,7 +946,11 @@ enum PeerQueryResult {
 
 impl From<crate::error::NodeError> for PeerQueryError {
     fn from(error: crate::error::NodeError) -> Self {
-        if error.is_local_capacity() { Self::LocalCapacity } else { Self::Generic }
+        if error.is_local_capacity() {
+            Self::LocalCapacity
+        } else {
+            Self::Generic
+        }
     }
 }
 
@@ -883,7 +978,11 @@ async fn collect_peer_attestations(
     let mut collision_entry: Option<crate::api::hmc::L2LockEntry> = None;
 
     let is_write = query.msg_type == humoco_sim_core::wire::MsgType::LockVerifyRequest;
-    let deadline = if is_write { std::time::Duration::from_millis(800) } else { crate::network::manager::QUORUM_GLOBAL_TIMEOUT };
+    let deadline = if is_write {
+        std::time::Duration::from_millis(800)
+    } else {
+        crate::network::manager::QUORUM_GLOBAL_TIMEOUT
+    };
     let _ = tokio::time::timeout(deadline, async {
         let mut join_set = tokio::task::JoinSet::new();
 
@@ -906,10 +1005,10 @@ async fn collect_peer_attestations(
                         // Pillar 3: capture the actual TLS certificate key of the
                         // queried peer so the attestation signer can be bound to it.
                         let tls_pubkey = crate::network::tls::extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
-                        
+
                         // 1. Initial Send
                         let res = t.send_request(&conn, &h, &p).await;
-                        
+
                         // Triple-Send Heuristik für Schreibpfade (docs/PLAN_BUCKETED_SHARD_SYNC.md):
                         // Falls der 1. Versuch fehlschlägt, erfolgt ein 2. synchroner Retry mit identischem Payload (T_0)
                         let (resp_header, resp_payload) = match res {
@@ -1157,7 +1256,16 @@ pub async fn assemble_quorum_certificate(
     now_ms: u64,
     record_payload: Option<Vec<u8>>,
 ) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
-    assemble_quorum_certificate_with_override(state, lock_id, parent_lock, shard_id, now_ms, record_payload, None).await
+    assemble_quorum_certificate_with_override(
+        state,
+        lock_id,
+        parent_lock,
+        shard_id,
+        now_ms,
+        record_payload,
+        None,
+    )
+    .await
 }
 
 pub async fn assemble_quorum_certificate_with_override(
@@ -1175,62 +1283,200 @@ pub async fn assemble_quorum_certificate_with_override(
     let (committee, remote, total_active) = if let Some(pm) = &state.peer_manager {
         pm.shard_committee(self_pubkey, self_hrw, shard_id).await
     } else {
-        (vec![CommitteeMember { node_pubkey: self_pubkey, hrw_routing_id: self_hrw }], Vec::new(), 1)
+        (
+            vec![CommitteeMember {
+                node_pubkey: self_pubkey,
+                hrw_routing_id: self_hrw,
+            }],
+            Vec::new(),
+            1,
+        )
     };
     let (base_q, final_size) = humoco_sim_core::types::required_quorum(total_active);
-    let required_q = quorum_override.unwrap_or(base_q).min(total_active).max(base_q);
-    let target_status = u8::from(final_size && state.peer_manager.as_ref()
-        .map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false));
+    let required_q = quorum_override
+        .unwrap_or(base_q)
+        .min(total_active)
+        .max(base_q);
+    let target_status = u8::from(
+        final_size
+            && state
+                .peer_manager
+                .as_ref()
+                .map(|pm| pm.is_network_stable_ge20_for_24h(now_ms))
+                .unwrap_or(false),
+    );
     let mut collected_signatures = Vec::new();
     // A local signature requires the same authoritative, accepted RAM lock
     // as remote shard work. Membership alone is insufficient.
     let sync_ready = state.readiness_manager.is_shard_ready(shard_id);
-    if sync_ready && committee.iter().any(|member| member.node_pubkey == self_pubkey) {
-        let attestation = create_attestation_for_network(&state.identity, lock_id, parent_lock, shard_id, target_status, now_ms, state.network_id);
+    if sync_ready
+        && committee
+            .iter()
+            .any(|member| member.node_pubkey == self_pubkey)
+    {
+        let attestation = create_attestation_for_network(
+            &state.identity,
+            lock_id,
+            parent_lock,
+            shard_id,
+            target_status,
+            now_ms,
+            state.network_id,
+        );
         if let Ok(bytes) = bincode::serialize(&attestation) {
             let mut retained = None;
             if let Some(payload) = record_payload.as_deref() {
-                if let Ok(crate::network::framing::LockWirePayload::Hmc { req, .. }) = bincode::deserialize(payload) {
-                    let tag = if req.is_genesis { Some(bs58::encode(req.transaction_hash).into_string()) } else { req.ds_tag.clone() };
+                if let Ok(crate::network::framing::LockWirePayload::Hmc { req, .. }) =
+                    bincode::deserialize(payload)
+                {
+                    let tag = if req.is_genesis {
+                        Some(bs58::encode(req.transaction_hash).into_string())
+                    } else {
+                        req.ds_tag.clone()
+                    };
                     if let Some(tag) = tag {
                         if *blake3::hash(tag.as_bytes()).as_bytes() == parent_lock {
-                            if let Some(entry) = state.engine.get_hmc_ram_lock(&tag).await.filter(|e| e.t_id == lock_id) {
-                                retained = state.engine.persist_original_approval(tag, entry, self_pubkey, bytes.clone(), target_status, now_ms).await.ok();
+                            if let Some(entry) = state
+                                .engine
+                                .get_hmc_ram_lock(&tag)
+                                .await
+                                .filter(|e| e.t_id == lock_id)
+                            {
+                                retained = state
+                                    .engine
+                                    .persist_original_approval(
+                                        tag,
+                                        entry,
+                                        self_pubkey,
+                                        bytes.clone(),
+                                        target_status,
+                                        now_ms,
+                                    )
+                                    .await
+                                    .ok();
                             }
                         }
                     }
                 }
-            } else if let Some(record) = state.engine.get_ram_lock(&parent_lock).await.filter(|r| r.id == lock_id) {
-                retained = state.engine.persist_original_record_approval(record.clone(), record.valid_until, self_pubkey, bytes, target_status, now_ms).await.ok();
+            } else if let Some(record) = state
+                .engine
+                .get_ram_lock(&parent_lock)
+                .await
+                .filter(|r| r.id == lock_id)
+            {
+                retained = state
+                    .engine
+                    .persist_original_record_approval(
+                        record.clone(),
+                        record.valid_until,
+                        self_pubkey,
+                        bytes,
+                        target_status,
+                        now_ms,
+                    )
+                    .await
+                    .ok();
             }
-            if let Some(att) = retained.and_then(|bytes| AttestationDto::from_wire_bytes(&bytes)) { collected_signatures.push(att); }
+            if let Some(att) = retained.and_then(|bytes| AttestationDto::from_wire_bytes(&bytes)) {
+                collected_signatures.push(att);
+            }
         }
     }
-    let candidates: Vec<_> = remote.iter().map(|(member, addr)| (member.hrw_routing_id, *addr)).collect();
-    let expected_members: Vec<_> = remote.iter().map(|(member, _)| member.node_pubkey).collect();
+    let candidates: Vec<_> = remote
+        .iter()
+        .map(|(member, addr)| (member.hrw_routing_id, *addr))
+        .collect();
+    let expected_members: Vec<_> = remote
+        .iter()
+        .map(|(member, _)| member.node_pubkey)
+        .collect();
     let mut collision = None;
     if collected_signatures.len() < required_q {
-        if let (Some(transport), Some(pm), Some(payload)) = (&state.transport, &state.peer_manager, record_payload.as_deref()) {
-            collision = collect_peer_attestations(PeerAttestationQuery {
-                transport, peer_mgr: pm, candidate_nodes: &candidates,
-                expected_members: Some(&expected_members), parent_lock,
-                msg_type: humoco_sim_core::wire::MsgType::LockVerifyRequest,
-                resp_msg_type: humoco_sim_core::wire::MsgType::LockVerifyResponse,
-                payload, target_status, lock_id, shard_id, required_q,
-                shard_query_depth: state.shard_query_depth,
-                my_load: state.tier_controller.rolling_24h_average(),
-                quota_limit: (5.0 * state.tier_controller.effective_ncb() as f64).round() as u64,
-                network_id: state.network_id,
-            }, &mut collected_signatures).await;
+        if let (Some(transport), Some(pm), Some(payload)) = (
+            &state.transport,
+            &state.peer_manager,
+            record_payload.as_deref(),
+        ) {
+            collision = collect_peer_attestations(
+                PeerAttestationQuery {
+                    transport,
+                    peer_mgr: pm,
+                    candidate_nodes: &candidates,
+                    expected_members: Some(&expected_members),
+                    parent_lock,
+                    msg_type: humoco_sim_core::wire::MsgType::LockVerifyRequest,
+                    resp_msg_type: humoco_sim_core::wire::MsgType::LockVerifyResponse,
+                    payload,
+                    target_status,
+                    lock_id,
+                    shard_id,
+                    required_q,
+                    shard_query_depth: state.shard_query_depth,
+                    my_load: state.tier_controller.rolling_24h_average(),
+                    quota_limit: (5.0 * state.tier_controller.effective_ncb() as f64).round()
+                        as u64,
+                    network_id: state.network_id,
+                },
+                &mut collected_signatures,
+            )
+            .await;
         }
     }
     let signer_bitmap = compute_committee_bitmap(&committee, &collected_signatures);
     let cert = QuorumCertificateDto {
-        lock_id: hex::encode(lock_id), shard_id,
-        status: if collected_signatures.len() >= required_q { target_status } else { 0 },
-        active_nodes_count: total_active, signer_count: collected_signatures.len(),
-        signatures: collected_signatures, signer_bitmap,
+        lock_id: hex::encode(lock_id),
+        shard_id,
+        status: if collected_signatures.len() >= required_q {
+            target_status
+        } else {
+            0
+        },
+        active_nodes_count: total_active,
+        signer_count: collected_signatures.len(),
+        signatures: collected_signatures,
+        signer_bitmap,
     };
+    // Only an independently verified current committee quorum can promote the
+    // local active lock. A local original approval alone remains class zero.
+    if cert.is_quorum_reached() {
+        if let Some(payload) = record_payload.as_deref() {
+            if let Ok(crate::network::framing::LockWirePayload::Hmc { req, .. }) =
+                bincode::deserialize(payload)
+            {
+                let tag = if req.is_genesis {
+                    bs58::encode(req.transaction_hash).into_string()
+                } else {
+                    req.ds_tag.unwrap_or_default()
+                };
+                if state.engine.get_hmc_ram_lock(&tag).await.is_some() {
+                    if let Err(error) = state
+                        .engine
+                        .persist_confirmation_support(
+                            tag,
+                            cert.clone(),
+                            &state.identity,
+                            now_ms,
+                            state.network_id,
+                            state.peer_manager.clone(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%error, "Quorum support was not durably admitted");
+                        return (
+                            QuorumCertificateDto {
+                                status: 0,
+                                signatures: Vec::new(),
+                                signer_count: 0,
+                                signer_bitmap: 0,
+                                ..cert
+                            },
+                            collision,
+                        );
+                    }
+                }
+            }
+        }
+    }
     (cert, collision)
 }
 
@@ -1251,28 +1497,43 @@ async fn query_status(
     Json(payload): Json<L2StatusQuery>,
 ) -> Response {
     if payload.read_quorum > 1 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "RecipientChallengeRequired", "verification_endpoint": "/v1/verify-current"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "RecipientChallengeRequired", "verification_endpoint": "/v1/verify-current"
+            })),
+        )
+            .into_response();
     }
     state.metrics.record_read();
     let now_ms = state.net_time_ms();
     let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
-    let client_node_id: u16 = if let Some(auth) = headers.get("Authorization").and_then(|h| h.to_str().ok()) {
-        let tag = state.tier_controller.resolve_account_tag(auth).unwrap_or([0u8; 32]);
-        u16::from_be_bytes([tag[0], tag[1]])
-    } else if let Some(peer_token) = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok()) {
-        let hash = *blake3::hash(peer_token.as_bytes()).as_bytes();
-        u16::from_be_bytes([hash[0], hash[1]])
-    } else {
-        let v_hash = *blake3::hash(payload.layer2_voucher_id.as_bytes()).as_bytes();
-        u16::from_be_bytes([v_hash[0], v_hash[1]])
-    };
+    let client_node_id: u16 =
+        if let Some(auth) = headers.get("Authorization").and_then(|h| h.to_str().ok()) {
+            let tag = state
+                .tier_controller
+                .resolve_account_tag(auth)
+                .unwrap_or([0u8; 32]);
+            u16::from_be_bytes([tag[0], tag[1]])
+        } else if let Some(peer_token) = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok()) {
+            let hash = *blake3::hash(peer_token.as_bytes()).as_bytes();
+            u16::from_be_bytes([hash[0], hash[1]])
+        } else {
+            let v_hash = *blake3::hash(payload.layer2_voucher_id.as_bytes()).as_bytes();
+            u16::from_be_bytes([v_hash[0], v_hash[1]])
+        };
 
     let read_credits = 1;
-    if let Err(ingress_err) = state.tier_controller.evaluate_read_quota(client_node_id, read_credits, epoch_day, 1.0) {
+    if let Err(ingress_err) =
+        state
+            .tier_controller
+            .evaluate_read_quota(client_node_id, read_credits, epoch_day, 1.0)
+    {
         let reason = match ingress_err {
-            IngressError::ReadQuotaExceeded { available, required } => {
+            IngressError::ReadQuotaExceeded {
+                available,
+                required,
+            } => {
                 format!(
                     "429 Read quota exceeded: required {} reads, available {}",
                     required, available
@@ -1280,15 +1541,8 @@ async fn query_status(
             }
             _ => "429 Read quota exceeded".into(),
         };
-        let envelope = wrap_and_sign_verdict(
-            &state.identity,
-            L2Verdict::Rejected { reason },
-        );
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(envelope),
-        )
-            .into_response();
+        let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
+        return (StatusCode::TOO_MANY_REQUESTS, Json(envelope)).into_response();
     }
 
     let hmc = state.engine.hmc_ram.read().await;
@@ -1309,8 +1563,14 @@ async fn query_status(
     // remote result. If the public gateway IP fails, wallets rotate to the next
     // gateway (Hydra resilience); shard state lives only on shard custodians.
     if matches!(verdict, L2Verdict::UnknownVoucher) {
-        if let (Some(peer_mgr), Some(transport)) = (state.peer_manager.as_ref(), state.transport.as_ref()) {
-            let shard_id = if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id).await {
+        if let (Some(peer_mgr), Some(transport)) =
+            (state.peer_manager.as_ref(), state.transport.as_ref())
+        {
+            let shard_id = if let Some(sid) = state
+                .engine
+                .get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id)
+                .await
+            {
                 sid
             } else {
                 humoco_sim_core::types::voucher_shard_id(&payload.layer2_voucher_id)
@@ -1326,8 +1586,15 @@ async fn query_status(
                 let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
                 let sender_pubkey = *state.identity.node_pubkey();
                 let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-                    &sender_pubkey, 0, 0, now_ms,
-                    declared_write_ema, declared_read_ema, 0, true, &[0u8; 32],
+                    &sender_pubkey,
+                    0,
+                    0,
+                    now_ms,
+                    declared_write_ema,
+                    declared_read_ema,
+                    0,
+                    true,
+                    &[0u8; 32],
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
                 let status_query = crate::network::framing::StatusQueryPayload {
@@ -1342,37 +1609,51 @@ async fn query_status(
                 };
                 let payload_bytes = bincode::serialize(&status_query).unwrap_or_default();
                 let header = humoco_sim_core::wire::WireHeader::new(
-                    humoco_sim_core::wire::MsgType::StatusQuery as u16, 1, 0, 0,
+                    humoco_sim_core::wire::MsgType::StatusQuery as u16,
+                    1,
+                    0,
+                    0,
                     payload_bytes.len() as u32,
                 );
                 let remote_verdict: Option<L2Verdict> = async {
                     let conn = transport.connect_peer(addr).await.ok()?;
                     let fut = transport.send_request(&conn, &header, &payload_bytes);
-                    let (resp_header, resp_payload) = tokio::time::timeout(std::time::Duration::from_millis(1000), fut).await.ok()?.ok()?;
+                    let (resp_header, resp_payload) =
+                        tokio::time::timeout(std::time::Duration::from_millis(1000), fut)
+                            .await
+                            .ok()?
+                            .ok()?;
                     if resp_header.msg_type != humoco_sim_core::wire::MsgType::StatusResponse as u16
                         || resp_payload.is_empty()
                         || (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0
                         || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED) != 0
-                            || (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0
+                        || (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0
                     {
                         return None;
                     }
                     // Tag-only fallback returns the full L2LockEntry with
                     // first-party signature evidence.
-                    if let Ok(entry) = bincode::deserialize::<crate::api::hmc::L2LockEntry>(&resp_payload) {
+                    if let Ok(entry) =
+                        bincode::deserialize::<crate::api::hmc::L2LockEntry>(&resp_payload)
+                    {
                         if entry.layer2_voucher_id == payload.layer2_voucher_id {
                             return Some(L2Verdict::Verified { lock_entry: entry });
                         }
                     }
                     // Standard path returns an attestation; existence proves the
                     // lock lives on the shard (full entry sync via digest-pull).
-                    if let Ok(att) = bincode::deserialize::<crate::api::dto::AttestationDto>(&resp_payload) {
+                    if let Ok(att) =
+                        bincode::deserialize::<crate::api::dto::AttestationDto>(&resp_payload)
+                    {
                         // Attestation alone proves shard custody; report as
                         // MissingLocks would hide it, so surface as Verified
                         // with a minimal entry carrying the proven t_id. The
                         // client cross-checks t_id for double-spend (Spec 06).
-                        let lock_id_bytes = hex::decode(&att.lock_id).ok().and_then(|b| <[u8; 32]>::try_from(b).ok())?;
+                        let lock_id_bytes = hex::decode(&att.lock_id)
+                            .ok()
+                            .and_then(|b| <[u8; 32]>::try_from(b).ok())?;
                         let minimal = crate::api::hmc::L2LockEntry {
+                            causal_output: None,
                             layer2_voucher_id: payload.layer2_voucher_id.clone(),
                             t_id: lock_id_bytes,
                             sender_ephemeral_pub: [0u8; 32],
@@ -1386,10 +1667,13 @@ async fn query_status(
                             deletable_at: None,
                             privacy_guard: None,
                         };
-                        return Some(L2Verdict::Verified { lock_entry: minimal });
+                        return Some(L2Verdict::Verified {
+                            lock_entry: minimal,
+                        });
                     }
                     None
-                }.await;
+                }
+                .await;
                 if let Some(remote) = remote_verdict {
                     verdict = remote;
                 }
@@ -1419,19 +1703,31 @@ async fn submit_hmc_lock(
     state.metrics.record_write();
     // 0. Check if submitter or ephemeral key is banned/slashed
     if state.engine.is_node_banned(&req.sender_ephemeral_pub).await
-        || state.engine.is_node_banned(&req.auth.ephemeral_pubkey).await
+        || state
+            .engine
+            .is_node_banned(&req.auth.ephemeral_pubkey)
+            .await
     {
         let envelope = wrap_and_sign_verdict(
             &state.identity,
             L2Verdict::Rejected {
-                reason: "403 Forbidden: Signer is slashed and banned due to equivocation fraud".into(),
+                reason: "403 Forbidden: Signer is slashed and banned due to equivocation fraud"
+                    .into(),
             },
         );
         return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
     }
 
     // Lifecycle sunset & bridge lock checks
-    let suite_id = if req.privacy_guard.as_deref().is_some_and(|s| s.contains("suite2")) { 2 } else { 1 };
+    let suite_id = if req
+        .privacy_guard
+        .as_deref()
+        .is_some_and(|s| s.contains("suite2"))
+    {
+        2
+    } else {
+        1
+    };
 
     if req.privacy_guard.as_deref() == Some("bridge_missing_pqc") {
         return (
@@ -1470,7 +1766,10 @@ async fn submit_hmc_lock(
     let now_ms = state.net_time_ms();
 
     const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
-    if req.created_at_ms == 0 || req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
+    if !req.is_genesis
+        && (req.created_at_ms == 0
+            || req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS)
+    {
         let envelope = wrap_and_sign_verdict(
             &state.identity,
             L2Verdict::Rejected {
@@ -1486,12 +1785,22 @@ async fn submit_hmc_lock(
         .await;
 
     let parsed_deletable = req
-        .deletable_at
-        .as_deref()
-        .and_then(|s| s.parse::<u64>().ok());
+        .causal_output
+        .as_ref()
+        .filter(|proof| proof.is_root)
+        .map(|proof| proof.root_valid_until_ms)
+        .or_else(|| {
+            req.deletable_at.as_deref().and_then(|raw| {
+                raw.parse::<u64>().ok().or_else(|| {
+                    chrono::DateTime::parse_from_rfc3339(raw)
+                        .ok()
+                        .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
+                })
+            })
+        });
 
     let (valid_until, root_valid_until) = if req.is_genesis {
-        // Genesis Lock: deletable_at is mandatory and defines the immutable root_valid_until
+        // Genesis is only a Root Anchor; its signed validity is immutable.
         let del = match parsed_deletable {
             Some(d) => d,
             None => {
@@ -1507,7 +1816,7 @@ async fn submit_hmc_lock(
         (del, del)
     } else {
         // Follow-up Lock (Transfer / Split / Spend):
-        // Origin-Lock Mandate: the genesis lock must be anchored first.
+        // The separate genesis Root Anchor must be registered first.
         // Without a known root (locally or from the client-supplied TTL),
         // there is no immutable TTL to inherit — reject with 400 Bad Request.
         let root = match stored_root_valid {
@@ -1515,13 +1824,16 @@ async fn submit_hmc_lock(
             None => {
                 if let Some(del) = parsed_deletable {
                     del
-                } else if let Some(disk_root) = fetch_remote_voucher_root(&state, &req.layer2_voucher_id).await {
+                } else if let Some(disk_root) =
+                    fetch_remote_voucher_root(&state, &req.layer2_voucher_id).await
+                {
                     disk_root
                 } else {
                     let envelope = wrap_and_sign_verdict(
                         &state.identity,
                         L2Verdict::Rejected {
-                            reason: "Unknown voucher root: genesis lock must be anchored first".into(),
+                            reason: "Unknown voucher root: genesis lock must be anchored first"
+                                .into(),
                         },
                     );
                     return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
@@ -1568,21 +1880,34 @@ async fn submit_hmc_lock(
     let entry = L2LockEntry::from(&req);
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
     let shard_id = if req.is_genesis {
-        let sid = humoco_sim_core::types::extract_shard_id(&parent_bytes);
-        state.engine.record_hmc_voucher_genesis_parent(&req.layer2_voucher_id, parent_bytes).await;
-        sid
-    } else if let Some(sid) = state.engine.get_hmc_voucher_genesis_shard(&req.layer2_voucher_id).await {
+        // Do not mutate root routing before authentication and durable anchor
+        // admission. The engine publishes the root only after validation.
+        humoco_sim_core::types::extract_shard_id(&parent_bytes)
+    } else if let Some(sid) = state
+        .engine
+        .get_hmc_voucher_genesis_shard(&req.layer2_voucher_id)
+        .await
+    {
         sid
     } else {
         humoco_sim_core::types::voucher_shard_id(&req.layer2_voucher_id)
     };
     let is_responsible = if let Some(pm) = &state.peer_manager {
-        pm.is_local_committee_member(*state.identity.node_pubkey(), *state.identity.hrw_routing_id(), shard_id).await
+        pm.is_local_committee_member(
+            *state.identity.node_pubkey(),
+            *state.identity.hrw_routing_id(),
+            shard_id,
+        )
+        .await
     } else {
         true
     };
 
-    if state.transport.is_some() && is_responsible && !state.readiness_manager.is_shard_ready(shard_id) {
+    if state.transport.is_some()
+        && is_responsible
+        && !req.is_genesis
+        && !state.readiness_manager.is_shard_ready(shard_id)
+    {
         state.readiness_manager.request_sync(shard_id);
         let envelope = wrap_and_sign_verdict(
             &state.identity,
@@ -1658,6 +1983,15 @@ async fn submit_hmc_lock(
         return resp;
     }
 
+    // A root retry is metadata idempotency, not a new PoW purchase or vote.
+    // Await an exact durable acknowledgment even if its first commit is pending.
+    if req.is_genesis && state.engine.hmc_ram.read().await.root_anchors.contains_key(&req.layer2_voucher_id) {
+        if !verify_l2_lock_signature(&req) {
+            return (StatusCode::BAD_REQUEST, Json(wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason: "Invalid cryptographic signature".into() }))).into_response();
+        }
+        return commit_root_registration(&state, lookup_tag, entry, now_ms, ("Idempotent", 0), should_warn).await;
+    }
+
     // 4. Fast-path idempotency check: if identical lock already verified in RAM, return 200 OK immediately
     // Phase 10 (Hot-Path-Locks): the RAM read guard is cloned and dropped
     // BEFORE any network await (`assemble_quorum_certificate`), so writers
@@ -1680,7 +2014,9 @@ async fn submit_hmc_lock(
                     return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
                 }
 
-                let verdict = L2Verdict::Verified { lock_entry: existing.clone() };
+                let verdict = L2Verdict::Verified {
+                    lock_entry: existing.clone(),
+                };
                 let now_ms = state.net_time_ms();
                 let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
                 let declared_read_ema = state.tier_controller.current_read_ema_credits();
@@ -1692,7 +2028,9 @@ async fn submit_hmc_lock(
                 // signed digest and the wire payload commit to the same
                 // (epoch_day, epoch_seq).
                 let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-                    state.tier_controller.record_declared_usage(now_ms, footprint);
+                    state
+                        .tier_controller
+                        .record_declared_usage(now_ms, footprint);
                 let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                     &sender_pubkey,
                     epoch_day,
@@ -1706,30 +2044,45 @@ async fn submit_hmc_lock(
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
                 let current_anl_24h = declared_write_ema;
-                let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                    req: req.clone(),
-                    chain: None,
-                    root_valid_until,
-                    epoch_day,
-                    epoch_seq,
-                    cumulative_micro_byte_years,
-                    prev_day_final_bytes,
-                    current_anl_24h,
-                    declared_write_ema_micro_bj: declared_write_ema,
-                    declared_read_ema_credits: declared_read_ema,
-                    sender_pubkey,
-                    sender_signature,
-                    timestamp_ms: now_ms,
-                }).ok();
+                let wire_payload =
+                    bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+                        req: req.clone(),
+                        chain: None,
+                        root_valid_until,
+                        epoch_day,
+                        epoch_seq,
+                        cumulative_micro_byte_years,
+                        prev_day_final_bytes,
+                        current_anl_24h,
+                        declared_write_ema_micro_bj: declared_write_ema,
+                        declared_read_ema_credits: declared_read_ema,
+                        sender_pubkey,
+                        sender_signature,
+                        timestamp_ms: now_ms,
+                    })
+                    .ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate_with_override(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload, req_q_override).await;
+                let (cert, remote_collision) = assemble_quorum_certificate_with_override(
+                    &state,
+                    entry.t_id,
+                    parent_bytes,
+                    shard_id,
+                    now_ms,
+                    wire_payload,
+                    req_q_override,
+                )
+                .await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
-                state.metrics.record_local_latency(std::time::Duration::from_micros(1));
+                state
+                    .metrics
+                    .record_local_latency(std::time::Duration::from_micros(1));
 
                 // Remote double-spend evidence overrides idempotent fast-path.
-                if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached()) {
+                if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached())
+                {
                     let verdict = L2Verdict::Conflict { existing_lock };
-                    let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
+                    let envelope =
+                        wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
                     state.metrics.record_rejected_conflict_409();
                     state.metrics.record_e2e_latency(start.elapsed());
                     return (StatusCode::CONFLICT, Json(envelope)).into_response();
@@ -1738,12 +2091,15 @@ async fn submit_hmc_lock(
                 if !cert.is_quorum_reached() {
                     let reason = format!(
                         "Quorum not reached: required {} signatures, collected {}",
-                        cert.required_quorum(), cert.signatures.len()
+                        cert.required_quorum(),
+                        cert.signatures.len()
                     );
                     let rej_verdict = L2Verdict::Rejected { reason };
-                    let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert));
+                    let envelope =
+                        wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert));
                     state.metrics.record_e2e_latency(start.elapsed());
-                    let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+                    let mut resp =
+                        (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
                     if should_warn {
                         resp.headers_mut().insert(
                             axum::http::HeaderName::from_static("x-deprecation-warning"),
@@ -1755,7 +2111,8 @@ async fn submit_hmc_lock(
                     return resp;
                 }
 
-                let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
+                let envelope =
+                    wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
                 state.metrics.record_e2e_latency(start.elapsed());
                 let mut resp = (StatusCode::OK, Json(envelope)).into_response();
                 if should_warn {
@@ -1793,7 +2150,11 @@ async fn submit_hmc_lock(
                     "Proof-of-Work challenge response required".into(),
                 ),
                 IngressError::InvalidPoW(err) => {
-                    if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = err {
+                    if let crate::ingress::pow::PowError::InsufficientDifficulty {
+                        required,
+                        provided,
+                    } = err
+                    {
                         required_diff_hdr = Some(*required);
                         (
                             StatusCode::TOO_MANY_REQUESTS,
@@ -1806,14 +2167,20 @@ async fn submit_hmc_lock(
                         )
                     }
                 }
-                IngressError::QuotaExceeded { available, required } => (
+                IngressError::QuotaExceeded {
+                    available,
+                    required,
+                } => (
                     StatusCode::TOO_MANY_REQUESTS,
                     format!(
                         "VIP Quota exceeded: required {} byte-years, available {}",
                         required, available
                     ),
                 ),
-                IngressError::ReadQuotaExceeded { available, required } => (
+                IngressError::ReadQuotaExceeded {
+                    available,
+                    required,
+                } => (
                     StatusCode::TOO_MANY_REQUESTS,
                     format!(
                         "Read quota exceeded: required {} reads, available {}",
@@ -1824,10 +2191,9 @@ async fn submit_hmc_lock(
                     StatusCode::UNAUTHORIZED,
                     "Invalid VIP authentication token".into(),
                 ),
-                IngressError::InvalidPeerToken => (
-                    StatusCode::UNAUTHORIZED,
-                    "Invalid F2F peer token".into(),
-                ),
+                IngressError::InvalidPeerToken => {
+                    (StatusCode::UNAUTHORIZED, "Invalid F2F peer token".into())
+                }
                 IngressError::Storage(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Storage error: {}", e),
@@ -1865,8 +2231,11 @@ async fn submit_hmc_lock(
         if let crate::ingress::IngressTier::Tier1Vip = ingress_tier {
             if let Some(token) = auth_token {
                 if let Ok(account_tag) = state.tier_controller.resolve_account_tag(token) {
-                    let required_byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
-                    let _ = state.tier_controller.topup_vip_quota(account_tag, required_byte_years);
+                    let required_byte_years =
+                        humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
+                    let _ = state
+                        .tier_controller
+                        .topup_vip_quota(account_tag, required_byte_years);
                 }
             }
         }
@@ -1885,6 +2254,12 @@ async fn submit_hmc_lock(
         crate::ingress::IngressTier::Tier3Public => "Free",
     };
     let byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
+
+    // Genesis is only a durable Root Anchor. No exclusion is inserted, no
+    // original spend approval or quorum certificate may be minted for it.
+    if req.is_genesis {
+        return commit_root_registration(&state, lookup_tag, entry, now_ms, (tier_str, byte_years), should_warn).await;
+    }
 
     // 4. Ingress: Local shard storage vs. Stateless Gateway routing
     let (verdict, is_new, quorum_certificate) = if is_responsible {
@@ -1909,13 +2284,16 @@ async fn submit_hmc_lock(
                 let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
                 let declared_read_ema = state.tier_controller.current_read_ema_credits();
                 let sender_pubkey = *state.identity.node_pubkey();
-                let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
+                let footprint =
+                    humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
                 let op_hash = entry.t_id;
                 // Epoch-bound envelope (Phase 1 P0): reserve epoch first so the
                 // signed digest and the wire payload commit to the same
                 // (epoch_day, epoch_seq).
                 let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-                    state.tier_controller.record_declared_usage(now_ms, footprint);
+                    state
+                        .tier_controller
+                        .record_declared_usage(now_ms, footprint);
                 let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                     &sender_pubkey,
                     epoch_day,
@@ -1929,29 +2307,45 @@ async fn submit_hmc_lock(
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
                 let current_anl_24h = declared_write_ema;
-                let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                    req: req.clone(),
-                    chain: None,
-                    root_valid_until,
-                    epoch_day,
-                    epoch_seq,
-                    cumulative_micro_byte_years,
-                    prev_day_final_bytes,
-                    current_anl_24h,
-                    declared_write_ema_micro_bj: declared_write_ema,
-                    declared_read_ema_credits: declared_read_ema,
-                    sender_pubkey,
-                    sender_signature,
-                    timestamp_ms: now_ms,
-                }).ok();
+                let wire_payload =
+                    bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+                        req: req.clone(),
+                        chain: None,
+                        root_valid_until,
+                        epoch_day,
+                        epoch_seq,
+                        cumulative_micro_byte_years,
+                        prev_day_final_bytes,
+                        current_anl_24h,
+                        declared_write_ema_micro_bj: declared_write_ema,
+                        declared_read_ema_credits: declared_read_ema,
+                        sender_pubkey,
+                        sender_signature,
+                        timestamp_ms: now_ms,
+                    })
+                    .ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate_with_override(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload, req_q_override).await;
+                let (cert, remote_collision) = assemble_quorum_certificate_with_override(
+                    &state,
+                    entry.t_id,
+                    parent_bytes,
+                    shard_id,
+                    now_ms,
+                    wire_payload,
+                    req_q_override,
+                )
+                .await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
                 (Some(cert), remote_collision)
             }
         };
         // Remote genuine conflict overrides local Verified (split-brain).
-        if let Some(existing_lock) = remote_collision.filter(|_| !q_cert.as_ref().map(|c| c.is_quorum_reached()).unwrap_or(false)) {
+        if let Some(existing_lock) = remote_collision.filter(|_| {
+            !q_cert
+                .as_ref()
+                .map(|c| c.is_quorum_reached())
+                .unwrap_or(false)
+        }) {
             (L2Verdict::Conflict { existing_lock }, false, q_cert)
         } else {
             (local_verdict, local_is_new, q_cert)
@@ -1965,8 +2359,9 @@ async fn submit_hmc_lock(
         let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
         let op_hash = entry.t_id;
         // Epoch-bound envelope (Phase 1 P0).
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-            state.tier_controller.record_declared_usage(now_ms, footprint);
+        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = state
+            .tier_controller
+            .record_declared_usage(now_ms, footprint);
         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
             &sender_pubkey,
             epoch_day,
@@ -1994,16 +2389,28 @@ async fn submit_hmc_lock(
             sender_pubkey,
             sender_signature,
             timestamp_ms: now_ms,
-        }).ok();
+        })
+        .ok();
         let start_quorum = std::time::Instant::now();
-        let (cert, remote_collision) = assemble_quorum_certificate_with_override(&state, entry.t_id, parent_bytes, shard_id, now_ms, wire_payload, req_q_override).await;
+        let (cert, remote_collision) = assemble_quorum_certificate_with_override(
+            &state,
+            entry.t_id,
+            parent_bytes,
+            shard_id,
+            now_ms,
+            wire_payload,
+            req_q_override,
+        )
+        .await;
         state.metrics.record_quorum_latency(start_quorum.elapsed());
         // FLAG_COLLISION_DETECTED from any shard proves double-spend: 409.
         if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached()) {
             let verdict = L2Verdict::Conflict { existing_lock };
             (verdict, false, Some(cert))
         } else {
-            let verdict = L2Verdict::Verified { lock_entry: entry.clone() };
+            let verdict = L2Verdict::Verified {
+                lock_entry: entry.clone(),
+            };
             (verdict, true, Some(cert))
         }
     };
@@ -2013,10 +2420,12 @@ async fn submit_hmc_lock(
         if !cert.is_quorum_reached() {
             let reason = format!(
                 "Quorum not reached: required {} signatures, collected {}",
-                cert.required_quorum(), cert.signatures.len()
+                cert.required_quorum(),
+                cert.signatures.len()
             );
             let rej_verdict = L2Verdict::Rejected { reason };
-            let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert.clone()));
+            let envelope =
+                wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert.clone()));
             state.metrics.record_e2e_latency(start.elapsed());
             let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
             if should_warn {
@@ -2064,7 +2473,7 @@ async fn submit_hmc_lock(
     resp
 }
 
-/// Handler for POST /v1/lock/chain – atomares Ketten-Locking
+/// Ordered durable-prefix registration for POST /v1/lock/chain.
 async fn submit_hmc_chain_lock(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2080,7 +2489,6 @@ async fn submit_hmc_chain_lock_inner(
     chain_req: L2ChainLockRequest,
     start: std::time::Instant,
 ) -> Response {
-
     state.metrics.record_write();
     if chain_req.chain.is_empty() {
         let envelope = wrap_and_sign_verdict(
@@ -2092,56 +2500,42 @@ async fn submit_hmc_chain_lock_inner(
         return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
     }
 
+    if chain_req.chain.len() == 1 && chain_req.chain[0].is_genesis {
+        return submit_hmc_lock(state, headers, chain_req.chain[0].clone(), start).await;
+    }
+
     // Banned check for batch auth and each hop
-    if state.engine.is_node_banned(&chain_req.auth.ephemeral_pubkey).await {
+    if state
+        .engine
+        .is_node_banned(&chain_req.auth.ephemeral_pubkey)
+        .await
+    {
         let envelope = wrap_and_sign_verdict(
             &state.identity,
             L2Verdict::Rejected {
-                reason: "403 Forbidden: Signer is slashed and banned due to equivocation fraud".into(),
+                reason: "403 Forbidden: Signer is slashed and banned due to equivocation fraud"
+                    .into(),
             },
         );
         return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
     }
-    for hop in &chain_req.chain {
-        if state.engine.is_node_banned(&hop.sender_ephemeral_pub).await
-            || state.engine.is_node_banned(&hop.auth.ephemeral_pubkey).await
-        {
-            let envelope = wrap_and_sign_verdict(
-                &state.identity,
-                L2Verdict::Rejected {
-                    reason: "403 Forbidden: Signer is slashed and banned due to equivocation fraud".into(),
-                },
-            );
-            return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
-        }
-    }
-
+    // Freeze admission time once. Each step's signature, ban status, wallet T0
+    // and causal binding are checked immediately before its durable commit.
     let now_ms = state.net_time_ms();
-
-    const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
-    for hop in &chain_req.chain {
-        if hop.created_at_ms == 0 || hop.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
-            let envelope = wrap_and_sign_verdict(
-                &state.identity,
-                L2Verdict::Rejected {
-                    reason: "Sender timestamp outside 30s clock drift window".into(),
-                },
-            );
-            return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
-        }
-    }
 
     // Derive root_valid_until for Byte-Years accounting (same logic as engine)
     let stored_root = state
         .engine
         .get_hmc_voucher_root_valid(&chain_req.layer2_voucher_id)
         .await;
-    let chain_genesis_root = chain_req
-        .chain
-        .iter()
-        .find(|h| h.is_genesis)
-        .and_then(|h| h.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()));
-    let root_valid_until = stored_root.or(chain_genesis_root).unwrap_or(now_ms + 600_000);
+    let chain_genesis_root = chain_req.chain.iter().find(|h| h.is_genesis).and_then(|h| {
+        h.deletable_at
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+    });
+    let root_valid_until = stored_root
+        .or(chain_genesis_root)
+        .unwrap_or(now_ms + 600_000);
     let ttl_seconds = root_valid_until.saturating_sub(now_ms) / 1000;
 
     // 3-Tier Access Evaluation (single charge for whole batch)
@@ -2158,7 +2552,15 @@ async fn submit_hmc_chain_lock_inner(
 
     let ingress_tier = match state
         .tier_controller
-        .evaluate_and_charge_with_time(auth_token, peer_token, pow_challenge, pow_nonce, ttl_seconds, None, Some(now_ms))
+        .evaluate_and_charge_with_time(
+            auth_token,
+            peer_token,
+            pow_challenge,
+            pow_nonce,
+            ttl_seconds,
+            None,
+            Some(now_ms),
+        )
         .await
     {
         Ok(tier) => tier,
@@ -2169,26 +2571,53 @@ async fn submit_hmc_chain_lock_inner(
                     "Proof-of-Work challenge response required".into(),
                 ),
                 IngressError::InvalidPoW(e) => {
-                    if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } = e {
+                    if let crate::ingress::pow::PowError::InsufficientDifficulty {
+                        required,
+                        provided,
+                    } = e
+                    {
                         (
                             StatusCode::TOO_MANY_REQUESTS,
                             format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
                         )
                     } else {
-                        (StatusCode::UNAUTHORIZED, format!("Invalid Proof of Work: {}", e))
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            format!("Invalid Proof of Work: {}", e),
+                        )
                     }
                 }
-                IngressError::QuotaExceeded { available, required } => (
+                IngressError::QuotaExceeded {
+                    available,
+                    required,
+                } => (
                     StatusCode::TOO_MANY_REQUESTS,
-                    format!("VIP Quota exceeded: required {} byte-years, available {}", required, available),
+                    format!(
+                        "VIP Quota exceeded: required {} byte-years, available {}",
+                        required, available
+                    ),
                 ),
-                IngressError::ReadQuotaExceeded { available, required } => (
+                IngressError::ReadQuotaExceeded {
+                    available,
+                    required,
+                } => (
                     StatusCode::TOO_MANY_REQUESTS,
-                    format!("Read quota exceeded: required {} reads, available {}", required, available),
+                    format!(
+                        "Read quota exceeded: required {} reads, available {}",
+                        required, available
+                    ),
                 ),
-                IngressError::InvalidAuthToken => (StatusCode::UNAUTHORIZED, "Invalid VIP authentication token".into()),
-                IngressError::InvalidPeerToken => (StatusCode::UNAUTHORIZED, "Invalid F2F peer token".into()),
-                IngressError::Storage(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Storage error: {}", e)),
+                IngressError::InvalidAuthToken => (
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid VIP authentication token".into(),
+                ),
+                IngressError::InvalidPeerToken => {
+                    (StatusCode::UNAUTHORIZED, "Invalid F2F peer token".into())
+                }
+                IngressError::Storage(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Storage error: {}", e),
+                ),
             };
             match &err {
                 IngressError::QuotaExceeded { .. } | IngressError::ReadQuotaExceeded { .. } => {
@@ -2233,7 +2662,20 @@ async fn submit_hmc_chain_lock_inner(
         first_hop.ds_tag.clone().unwrap_or_default()
     };
     let _genesis_parent_bytes = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
-    let shard_id = humoco_sim_core::types::voucher_shard_id(&chain_req.layer2_voucher_id);
+    let shard_id = if let Some(root) = chain_req.chain.first().filter(|hop| hop.is_genesis) {
+        let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+            &bs58::encode(root.transaction_hash).into_string(),
+        );
+        humoco_sim_core::types::canonical_voucher_shard(&parent)
+    } else if let Some(shard) = state
+        .engine
+        .get_hmc_voucher_genesis_shard(&chain_req.layer2_voucher_id)
+        .await
+    {
+        shard
+    } else {
+        return (StatusCode::BAD_REQUEST, "unknown voucher root").into_response();
+    };
 
     let last_hop = chain_req.chain.last().unwrap();
     let lookup_tag = if last_hop.is_genesis {
@@ -2243,12 +2685,20 @@ async fn submit_hmc_chain_lock_inner(
     };
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
     let is_responsible = if let Some(pm) = &state.peer_manager {
-        pm.is_local_committee_member(*state.identity.node_pubkey(), *state.identity.hrw_routing_id(), shard_id).await
+        pm.is_local_committee_member(
+            *state.identity.node_pubkey(),
+            *state.identity.hrw_routing_id(),
+            shard_id,
+        )
+        .await
     } else {
         true
     };
 
-    if state.transport.is_some() && is_responsible && !state.readiness_manager.is_shard_ready(shard_id) {
+    if state.transport.is_some()
+        && is_responsible
+        && !state.readiness_manager.is_shard_ready(shard_id)
+    {
         state.readiness_manager.request_sync(shard_id);
         let envelope = wrap_and_sign_verdict(
             &state.identity,
@@ -2279,11 +2729,15 @@ async fn submit_hmc_chain_lock_inner(
                 let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
                 let declared_read_ema = state.tier_controller.current_read_ema_credits();
                 let sender_pubkey = *state.identity.node_pubkey();
-                let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds).saturating_mul(chain_req.chain.len() as u64);
+                let footprint =
+                    humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds)
+                        .saturating_mul(chain_req.chain.len() as u64);
                 let op_hash = lock_entry.t_id;
                 // Epoch-bound envelope (Phase 1 P0).
                 let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-                    state.tier_controller.record_declared_usage(now_ms, footprint);
+                    state
+                        .tier_controller
+                        .record_declared_usage(now_ms, footprint);
                 let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                     &sender_pubkey,
                     epoch_day,
@@ -2297,22 +2751,23 @@ async fn submit_hmc_chain_lock_inner(
                 );
                 let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
                 let current_anl_24h = declared_write_ema;
-                let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                    req: last_hop.clone(),
-                    chain: Some(chain_req.clone()),
-                    root_valid_until,
-                    epoch_day,
-                    epoch_seq,
-                    cumulative_micro_byte_years,
-                    prev_day_final_bytes,
-                    current_anl_24h,
-                    declared_write_ema_micro_bj: declared_write_ema,
-                    declared_read_ema_credits: declared_read_ema,
-                    sender_pubkey,
-                    sender_signature,
-                    timestamp_ms: now_ms,
-                })
-                .ok();
+                let wire_payload =
+                    bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+                        req: last_hop.clone(),
+                        chain: Some(chain_req.clone()),
+                        root_valid_until,
+                        epoch_day,
+                        epoch_seq,
+                        cumulative_micro_byte_years,
+                        prev_day_final_bytes,
+                        current_anl_24h,
+                        declared_write_ema_micro_bj: declared_write_ema,
+                        declared_read_ema_credits: declared_read_ema,
+                        sender_pubkey,
+                        sender_signature,
+                        timestamp_ms: now_ms,
+                    })
+                    .ok();
                 let start_quorum = std::time::Instant::now();
                 let (cert, remote_collision) = assemble_quorum_certificate(
                     &state,
@@ -2328,7 +2783,12 @@ async fn submit_hmc_chain_lock_inner(
             }
             _ => (None, None),
         };
-        if let Some(existing_lock) = remote_collision.filter(|_| !q_cert.as_ref().map(|c| c.is_quorum_reached()).unwrap_or(false)) {
+        if let Some(existing_lock) = remote_collision.filter(|_| {
+            !q_cert
+                .as_ref()
+                .map(|c| c.is_quorum_reached())
+                .unwrap_or(false)
+        }) {
             (L2Verdict::Conflict { existing_lock }, false, q_cert)
         } else {
             (local_verdict, local_is_new, q_cert)
@@ -2339,11 +2799,13 @@ async fn submit_hmc_chain_lock_inner(
         let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
         let declared_read_ema = state.tier_controller.current_read_ema_credits();
         let sender_pubkey = *state.identity.node_pubkey();
-        let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds).saturating_mul(chain_req.chain.len() as u64);
+        let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds)
+            .saturating_mul(chain_req.chain.len() as u64);
         let op_hash = entry.t_id;
         // Epoch-bound envelope (Phase 1 P0).
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-            state.tier_controller.record_declared_usage(now_ms, footprint);
+        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = state
+            .tier_controller
+            .record_declared_usage(now_ms, footprint);
         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
             &sender_pubkey,
             epoch_day,
@@ -2398,10 +2860,12 @@ async fn submit_hmc_chain_lock_inner(
         if !cert.is_quorum_reached() {
             let reason = format!(
                 "Quorum not reached: required {} signatures, collected {}",
-                cert.required_quorum(), cert.signatures.len()
+                cert.required_quorum(),
+                cert.signatures.len()
             );
             let rej_verdict = L2Verdict::Rejected { reason };
-            let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert.clone()));
+            let envelope =
+                wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert.clone()));
             state.metrics.record_e2e_latency(start.elapsed());
             return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
         }
@@ -2482,9 +2946,18 @@ async fn public_node_status() -> Json<serde_json::Value> {
 /// Explicit HTTP publications and configured bootstrap candidates only;
 /// cached-address fallback and private topology remain client-side concerns.
 async fn public_gateways(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "gateways": collect_public_gateways(&state.config.discovery),
-    }))
+    let mut gateways = collect_public_gateways(&state.config.discovery);
+    if let Some(manager) = &state.peer_manager {
+        for url in manager.advertised_gateway_urls().await {
+            if gateways.len() >= crate::config::MAX_PUBLIC_GATEWAY_ENTRIES {
+                break;
+            }
+            if !gateways.contains(&url) {
+                gateways.push(url);
+            }
+        }
+    }
+    Json(serde_json::json!({ "gateways": gateways }))
 }
 
 /// Merges the operator publication and the configured bootstrap list into one
@@ -2514,15 +2987,20 @@ fn collect_public_gateways(discovery: &crate::config::DiscoveryConfig) -> Vec<St
 
 /// Bounded read-only retrieval of exact retained own approvals for uncertain originals (R5 / DEC-083/089).
 /// Pure read-only lookup into redb TABLE_OWN_CHOICES; does not mutate state or issue new votes.
-async fn get_retained_choice(
-    State(state): State<AppState>,
-    Path(tag): Path<String>,
-) -> Response {
+async fn get_retained_choice(State(state): State<AppState>, Path(tag): Path<String>) -> Response {
     if tag.len() > 128 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "tag too long"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "tag too long"})),
+        )
+            .into_response();
     }
     let Ok(permit) = state.retained_choice_reads.clone().try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error": "retrieval capacity exhausted"}))).into_response();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "retrieval capacity exhausted"})),
+        )
+            .into_response();
     };
     let node_pub = *state.identity.node_pubkey();
     let storage = state.storage.clone();
@@ -2537,55 +3015,76 @@ async fn get_retained_choice(
         Ok(Ok(result)) => result,
         failure => {
             tracing::warn!(?failure, "Retained choice read unavailable");
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "retrieval unavailable"}))).into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "retrieval unavailable"})),
+            )
+                .into_response();
         }
     };
     match result {
         Ok(Some(choice)) => {
             // Exact retained approval bytes, so a client can verify the original
             // decision offline. No new vote is issued and no state is mutated.
-            (StatusCode::OK, Json(serde_json::json!({
-                "found": true,
-                "node_pubkey": hex::encode(node_pub),
-                "lookup_tag": tag,
-                "network": match state.network_id {
-                    humoco_sim_core::types::NetworkId::Mainnet => 0,
-                    humoco_sim_core::types::NetworkId::Testnet => 1,
-                },
-                "purpose": "original_approval",
-                "version": 1,
-                "child": hex::encode(choice.child),
-                "valid_until_ms": choice.valid_until_ms,
-                "has_provisional": choice.approvals[0].is_some(),
-                "has_final": choice.approvals[1].is_some(),
-                "provisional_approval": choice.approvals[0].as_ref().map(hex::encode),
-                "final_approval": choice.approvals[1].as_ref().map(hex::encode),
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "found": true,
+                    "node_pubkey": hex::encode(node_pub),
+                    "lookup_tag": tag,
+                    "network": match state.network_id {
+                        humoco_sim_core::types::NetworkId::Mainnet => 0,
+                        humoco_sim_core::types::NetworkId::Testnet => 1,
+                    },
+                    "purpose": "original_approval",
+                    "version": 1,
+                    "child": hex::encode(choice.child),
+                    "valid_until_ms": choice.valid_until_ms,
+                    "has_provisional": choice.approvals[0].is_some(),
+                    "has_final": choice.approvals[1].is_some(),
+                    "provisional_approval": choice.approvals[0].as_ref().map(hex::encode),
+                    "final_approval": choice.approvals[1].as_ref().map(hex::encode),
+                })),
+            )
+                .into_response()
         }
-        Ok(None) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
                 "found": false,
                 "reason": "no retained choice for this tag"
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Retained choice storage read failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": "storage unavailable"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "storage unavailable"
+                })),
+            )
+                .into_response()
         }
     }
 }
 
-async fn private_hourly_history(State(state): State<AppState>) -> Json<Vec<super::history_retention::HourSummary>> { Json(state.history_sampler.hourly.query()) }
+async fn private_hourly_history(
+    State(state): State<AppState>,
+) -> Json<Vec<super::history_retention::HourSummary>> {
+    Json(state.history_sampler.hourly.query())
+}
 
 /// Translates existing engine rejection reasons without turning uncertain durable work into success.
 fn write_rejection_status(reason: &str) -> StatusCode {
     let reason = reason.to_ascii_lowercase();
     if reason.contains("backpressure") || reason.contains("congested") {
         StatusCode::TOO_MANY_REQUESTS
-    } else if reason.contains("durable") || reason.contains("storage signing")
-        || reason.contains("worker unavailable") || reason.contains("chain deadline") {
+    } else if reason.contains("durable")
+        || reason.contains("storage signing")
+        || reason.contains("worker unavailable")
+        || reason.contains("chain deadline")
+    {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::BAD_REQUEST
@@ -2603,36 +3102,69 @@ mod local_capacity_collector_tests {
         let peer = NodeIdentity::generate();
         let addr: std::net::SocketAddr = "127.0.0.1:9909".parse().unwrap();
         let manager = Arc::new(crate::network::PeerManager::new(Vec::new()));
-        manager.learn_node_from_gossip(*peer.node_pubkey(), addr, 0, None).await;
+        manager
+            .learn_node_from_gossip(*peer.node_pubkey(), addr, 0, None)
+            .await;
         let cancel = tokio_util::sync::CancellationToken::new();
         let transport = crate::network::QuicTransport::bind_with_options(
-            "127.0.0.1:0".parse().unwrap(), &identity, manager.clone(),
-            Arc::new(DefaultRequestHandler), cancel.clone(),
-        ).unwrap();
+            "127.0.0.1:0".parse().unwrap(),
+            &identity,
+            manager.clone(),
+            Arc::new(DefaultRequestHandler),
+            cancel.clone(),
+        )
+        .unwrap();
         // Exercise the production 256-slot semaphore, not a string-classifier mock.
         let occupied = transport.reserve_all_outbound_shard_slots_for_test();
-        assert!(matches!(transport.connect_peer(addr).await,
-            Err(crate::error::NodeError::LocalCapacity(_))));
-        assert!(matches!(transport.connect_peer_unchecked(addr).await,
-            Err(crate::error::NodeError::LocalCapacity(_))));
+        assert!(matches!(
+            transport.connect_peer(addr).await,
+            Err(crate::error::NodeError::LocalCapacity(_))
+        ));
+        assert!(matches!(
+            transport.connect_peer_unchecked(addr).await,
+            Err(crate::error::NodeError::LocalCapacity(_))
+        ));
         assert!(manager.get_peer(&addr).await.is_none());
         let candidates = [(*peer.node_pubkey(), addr)];
         for (msg_type, resp_msg_type) in [
-            (humoco_sim_core::wire::MsgType::LockVerifyRequest, humoco_sim_core::wire::MsgType::LockVerifyResponse),
-            (humoco_sim_core::wire::MsgType::StatusQuery, humoco_sim_core::wire::MsgType::StatusResponse),
+            (
+                humoco_sim_core::wire::MsgType::LockVerifyRequest,
+                humoco_sim_core::wire::MsgType::LockVerifyResponse,
+            ),
+            (
+                humoco_sim_core::wire::MsgType::StatusQuery,
+                humoco_sim_core::wire::MsgType::StatusResponse,
+            ),
         ] {
             let mut signatures = Vec::new();
-            let conflict = collect_peer_attestations(PeerAttestationQuery {
-                transport: &transport, peer_mgr: &manager, candidate_nodes: &candidates,
-                expected_members: None, parent_lock: [1; 32], msg_type, resp_msg_type,
-                payload: &[], target_status: 1, lock_id: [2; 32], shard_id: 3,
-                required_q: 1, shard_query_depth: 0, my_load: 0, quota_limit: 1,
-                network_id: humoco_sim_core::types::NetworkId::Mainnet,
-            }, &mut signatures).await;
+            let conflict = collect_peer_attestations(
+                PeerAttestationQuery {
+                    transport: &transport,
+                    peer_mgr: &manager,
+                    candidate_nodes: &candidates,
+                    expected_members: None,
+                    parent_lock: [1; 32],
+                    msg_type,
+                    resp_msg_type,
+                    payload: &[],
+                    target_status: 1,
+                    lock_id: [2; 32],
+                    shard_id: 3,
+                    required_q: 1,
+                    shard_query_depth: 0,
+                    my_load: 0,
+                    quota_limit: 1,
+                    network_id: humoco_sim_core::types::NetworkId::Mainnet,
+                },
+                &mut signatures,
+            )
+            .await;
             assert!(conflict.is_none());
             assert!(signatures.is_empty());
-            assert!(manager.get_peer(&addr).await.is_none(),
-                "Local backpressure must not create a peer failure/malus record");
+            assert!(
+                manager.get_peer(&addr).await.is_none(),
+                "Local backpressure must not create a peer failure/malus record"
+            );
         }
         drop(occupied);
         cancel.cancel();
@@ -2652,7 +3184,8 @@ mod public_retained_evidence_tests {
 
     fn test_state() -> (tempfile::TempDir, AppState, Arc<RedbStorage>, NodeIdentity) {
         let temp = tempdir().expect("tempdir");
-        let storage = Arc::new(RedbStorage::open(&temp.path().join("unit.redb")).expect("open redb"));
+        let storage =
+            Arc::new(RedbStorage::open(&temp.path().join("unit.redb")).expect("open redb"));
         let (engine, _worker) = DualTierEngine::new(storage.clone());
         let identity = NodeIdentity::generate();
         let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
@@ -2662,7 +3195,12 @@ mod public_retained_evidence_tests {
     }
 
     async fn body_json(response: Response) -> serde_json::Value {
-        let bytes = response.into_body().collect().await.expect("body").to_bytes();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
         serde_json::from_slice(&bytes).expect("json body")
     }
 
@@ -2679,10 +3217,22 @@ mod public_retained_evidence_tests {
         );
         let tag = hex::encode(parent);
         storage
-            .commit_original_record_approval(&record, 600_000, identity.node_pubkey(), b"sig_prov", 0)
+            .commit_original_record_approval(
+                &record,
+                600_000,
+                identity.node_pubkey(),
+                b"sig_prov",
+                0,
+            )
             .expect("commit provisional approval");
         storage
-            .commit_original_record_approval(&record, 600_000, identity.node_pubkey(), b"sig_final", 1)
+            .commit_original_record_approval(
+                &record,
+                600_000,
+                identity.node_pubkey(),
+                b"sig_final",
+                1,
+            )
             .expect("commit final approval");
 
         let response = get_retained_choice(State(state), Path(tag)).await;
@@ -2710,7 +3260,13 @@ mod public_retained_evidence_tests {
         );
         let tag = hex::encode(parent);
         storage
-            .commit_original_record_approval(&record, 600_000, identity.node_pubkey(), b"sig_prov", 0)
+            .commit_original_record_approval(
+                &record,
+                600_000,
+                identity.node_pubkey(),
+                b"sig_prov",
+                0,
+            )
             .expect("commit provisional approval");
 
         let response = get_retained_choice(State(state), Path(tag)).await;
@@ -2725,7 +3281,8 @@ mod public_retained_evidence_tests {
     async fn gateway_directory_exposes_public_and_bootstrap_entries_once() {
         let (_temp, state, _storage, _identity) = test_state();
         let mut config = crate::config::NodeConfig::default();
-        config.discovery.public_gateway_urls = vec!["https://a.example".into(), "https://shared.example".into()];
+        config.discovery.public_gateway_urls =
+            vec!["https://a.example".into(), "https://shared.example".into()];
         config.discovery.bootstrap_gateways =
             vec!["https://shared.example".into(), "https://b.example".into()];
         let app = public_router(state.with_config(Arc::new(config)));
@@ -2766,7 +3323,10 @@ mod public_retained_evidence_tests {
         let gateways = collect_public_gateways(&discovery);
         assert_eq!(
             gateways,
-            vec!["https://a.example".to_string(), "http://c.example".to_string()]
+            vec![
+                "https://a.example".to_string(),
+                "http://c.example".to_string()
+            ]
         );
     }
 }
@@ -2776,10 +3336,30 @@ async fn operator_regional_mesh_view(State(state): State<AppState>) -> Response 
     if !state.engine.is_signing_healthy() {
         return (StatusCode::SERVICE_UNAVAILABLE, "signing unavailable").into_response();
     }
-    let Some(manager) = &state.peer_manager else { return (StatusCode::SERVICE_UNAVAILABLE, "mesh unavailable").into_response(); };
-    let network = match state.network_id { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 };
+    let Some(manager) = &state.peer_manager else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mesh unavailable").into_response();
+    };
+    let network = match state.network_id {
+        humoco_sim_core::types::NetworkId::Mainnet => 0,
+        humoco_sim_core::types::NetworkId::Testnet => 1,
+    };
     match manager.regional_mesh_view(&state.identity, network).await {
         Ok(view) if state.engine.is_signing_healthy() => Json(view).into_response(),
         _ => (StatusCode::SERVICE_UNAVAILABLE, "mesh view unavailable").into_response(),
     }
+}
+
+/// Root registration publishes metadata only after the exact redb commit.
+/// Never route this result through original-spend or quorum-vote assembly.
+async fn commit_root_registration(state: &AppState, tag: String, entry: L2LockEntry, now_ms: u64, accounting: (&str, u64), should_warn: bool) -> Response {
+    let (verdict, is_new) = state.engine.ingress_hmc_lock_durable(tag, entry, IngressOrigin::ClientApi, Some(now_ms), Some(accounting.0), Some(accounting.1), None).await;
+    let status = match &verdict {
+        L2Verdict::Verified { .. } if is_new => StatusCode::CREATED,
+        L2Verdict::Verified { .. } => StatusCode::OK,
+        L2Verdict::Rejected { reason } => write_rejection_status(reason),
+        _ => StatusCode::BAD_REQUEST,
+    };
+    let mut response = (status, Json(wrap_and_sign_verdict(&state.identity, verdict))).into_response();
+    if should_warn { response.headers_mut().insert(axum::http::HeaderName::from_static("x-deprecation-warning"), axum::http::HeaderValue::from_static("Suite 1 (Ed25519) deprecated - migrate to suite 2")); }
+    response
 }

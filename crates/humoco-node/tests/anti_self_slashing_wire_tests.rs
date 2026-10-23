@@ -43,6 +43,7 @@ fn make_hmc_spend(
 ) -> L2LockRequest {
     let sender_pub = sender_key.verifying_key().to_bytes();
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -75,6 +76,7 @@ fn make_hmc_genesis(
     let sender_pub = sender_key.verifying_key().to_bytes();
     let tx_hash = *blake3::hash(parent_hex.as_bytes()).as_bytes();
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,

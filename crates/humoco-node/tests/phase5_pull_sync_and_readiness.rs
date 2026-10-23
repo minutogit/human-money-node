@@ -99,6 +99,7 @@ async fn test_boot_readiness_barrier_wire_flag() {
     let now_ms = pm_server.net_time_ms();
     let root_valid_until = now_ms + 600_000;
     let mut hmc_req = humoco_node::api::hmc::L2LockRequest {
+        causal_output: None,
         auth: humoco_node::api::hmc::L2AuthPayload {
             ephemeral_pubkey: *client_id.node_pubkey(),
             auth_signature: None,
@@ -123,6 +124,15 @@ async fn test_boot_readiness_barrier_wire_flag() {
         let payload_hash = humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req);
         hmc_req.layer2_signature = client_id.signing_key().sign(&payload_hash).to_bytes();
     }
+    // Register metadata separately, then exercise the readiness barrier on a spend.
+    let root_tag = bs58::encode(hmc_req.transaction_hash).into_string();
+    let (verdict, _) = engine.ingress_hmc_lock(root_tag.clone(), L2LockEntry::from(&hmc_req)).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    hmc_req.is_genesis = false;
+    hmc_req.ds_tag = Some("readiness-spend-slot".into());
+    hmc_req.transaction_hash = [0x77;32];
+    hmc_req.deletable_at = None;
+    hmc_req.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req)).to_bytes();
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
     let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
@@ -222,9 +232,7 @@ async fn test_paginated_active_sync_streaming_chunks() {
             now,
             SimTime(500_000),
         );
-        let _ = engine
-            .ingress_lock_with_origin(rec, now, root_valid, IngressOrigin::ClientApi)
-            .await;
+        storage.put_lock(&rec, root_valid.0).expect("committed source row");
     }
 
     let server_id = NodeIdentity::generate();
@@ -349,6 +357,7 @@ async fn test_cryptographic_verification_on_partition_sync() {
 
     // 3. HMC L2LockEntry with invalid cryptographic signature
     let invalid_hmc_entry = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "voucher-test".into(),
         t_id: [0x11; 32],
         sender_ephemeral_pub: [0x22; 32],
@@ -530,6 +539,7 @@ async fn test_per_shard_readiness_demand_sync_503() {
     let sender_pub = sender_key.verifying_key().to_bytes();
     let tx_hash = *blake3::hash(b"per_shard_test_parent").as_bytes();
     let mut req_payload = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -555,6 +565,16 @@ async fn test_per_shard_readiness_demand_sync_503() {
     let lookup_tag = bs58::encode(&req_payload.transaction_hash).into_string();
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
     let shard_id = humoco_sim_core::types::extract_shard_id(&parent_bytes);
+
+    let root_registration = Request::builder().method("POST").uri("/v1/lock")
+        .header("content-type", "application/json").header("x-peer-token", "test_f2f_token")
+        .body(Body::from(serde_json::to_vec(&req_payload).unwrap())).unwrap();
+    assert_eq!(router.clone().oneshot(root_registration).await.unwrap().status(), StatusCode::CREATED);
+    req_payload.is_genesis = false;
+    req_payload.ds_tag = Some("http-readiness-spend-slot".into());
+    req_payload.transaction_hash = [0x78;32];
+    req_payload.deletable_at = None;
+    req_payload.layer2_signature = sender_key.sign(&calculate_l2_payload_hash(&req_payload)).to_bytes();
 
     // 1. Shard is not ready initially
     assert!(!readiness_manager.is_shard_ready(shard_id));
@@ -685,6 +705,7 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
     let now_ms = pm_server.net_time_ms();
     let root_valid_until = now_ms + 600_000;
     let mut hmc_req = humoco_node::api::hmc::L2LockRequest {
+        causal_output: None,
         auth: humoco_node::api::hmc::L2AuthPayload {
             ephemeral_pubkey: *client_id.node_pubkey(),
             auth_signature: None,
@@ -709,6 +730,15 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
         let payload_hash = humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req);
         hmc_req.layer2_signature = client_id.signing_key().sign(&payload_hash).to_bytes();
     }
+    // Register metadata separately, then exercise the readiness barrier on a spend.
+    let root_tag = bs58::encode(hmc_req.transaction_hash).into_string();
+    let (verdict, _) = engine.ingress_hmc_lock(root_tag.clone(), L2LockEntry::from(&hmc_req)).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    hmc_req.is_genesis = false;
+    hmc_req.ds_tag = Some("readiness-spend-slot".into());
+    hmc_req.transaction_hash = [0x77;32];
+    hmc_req.deletable_at = None;
+    hmc_req.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req)).to_bytes();
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
     let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
@@ -779,6 +809,19 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
     let bytes: [u8; 64] = hex::decode(&attestation.signature).unwrap().try_into().unwrap();
     server_id.verifying_key().verify_strict(&final_digest, &ed25519_dalek::Signature::from_bytes(&bytes)).expect("ready shard signs FINAL domain despite global false");
     assert!(!is_sync_ready.load(Ordering::SeqCst));
+    let mut neighbor_root = match &wire {
+        humoco_node::network::framing::LockWirePayload::Hmc { req, .. } => req.clone(),
+        _ => unreachable!(),
+    };
+    neighbor_root.is_genesis = true;
+    neighbor_root.ds_tag = None;
+    neighbor_root.transaction_hash = [0x56;32];
+    neighbor_root.layer2_voucher_id.push_str("_neighbouring_unready_root");
+    neighbor_root.deletable_at = Some(root_valid_until.to_string());
+    neighbor_root.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&neighbor_root)).to_bytes();
+    let neighbor_tag = bs58::encode(neighbor_root.transaction_hash).into_string();
+    let (verdict, _) = engine.ingress_hmc_lock(neighbor_tag, L2LockEntry::from(&neighbor_root)).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
     let mut neighbouring_wire = wire;
     if let humoco_node::network::framing::LockWirePayload::Hmc { req, sender_signature, .. } = &mut neighbouring_wire {
         req.transaction_hash = [0x56; 32];

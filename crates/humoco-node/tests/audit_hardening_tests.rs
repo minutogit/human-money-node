@@ -154,6 +154,7 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
 
     // 1. Root expiry within 30 seconds is rejected; child TTL cannot override it.
     let invalid_entry = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: voucher_id.clone(),
         t_id: [0x11; 32],
         sender_ephemeral_pub: [0x11; 32],
@@ -185,6 +186,7 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
 
     // 2. Valid root lifetime wins over arbitrary successor TTL metadata.
     let valid_entry = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: voucher_id.clone(),
         t_id: [0x22; 32],
         sender_ephemeral_pub: [0x33; 32],

@@ -50,8 +50,13 @@ macro_rules! impl_base58_array {
             {
                 let s = String::deserialize(deserializer)?;
                 let vec = bs58::decode(s).into_vec().map_err(de::Error::custom)?;
-                vec.try_into()
-                    .map_err(|_| de::Error::custom(concat!("Length mismatch, expected ", stringify!($N), " bytes")))
+                vec.try_into().map_err(|_| {
+                    de::Error::custom(concat!(
+                        "Length mismatch, expected ",
+                        stringify!($N),
+                        " bytes"
+                    ))
+                })
             }
         }
     };
@@ -78,9 +83,13 @@ macro_rules! impl_base58_array {
                 match s {
                     Some(s) => {
                         let vec = bs58::decode(s).into_vec().map_err(de::Error::custom)?;
-                        let arr: [u8; $N] = vec
-                            .try_into()
-                            .map_err(|_| de::Error::custom(concat!("Length mismatch, expected ", stringify!($N), " bytes")))?;
+                        let arr: [u8; $N] = vec.try_into().map_err(|_| {
+                            de::Error::custom(concat!(
+                                "Length mismatch, expected ",
+                                stringify!($N),
+                                " bytes"
+                            ))
+                        })?;
                         Ok(Some(arr))
                     }
                     None => Ok(None),
@@ -134,6 +143,10 @@ pub struct L2AuthPayload {
 /// The actual negotiable deed / currency carrying monetary value is the Layer-1 Voucher document itself.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct L2LockRequest {
+    /// Separate authenticated L2 output commitment; never part of L1/SST bytes.
+    #[serde(default)]
+    pub causal_output: Option<humoco_proto::causal::CausalOutputProof>,
+
     pub auth: L2AuthPayload,
     pub layer2_voucher_id: String,
     pub ds_tag: Option<String>,
@@ -181,6 +194,10 @@ pub struct L2LockRequest {
 /// custodies the actual transactional deed, ownership state, and monetary value.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct L2LockEntry {
+    /// Separate authenticated L2 output commitment; never part of L1/SST bytes.
+    #[serde(default)]
+    pub causal_output: Option<humoco_proto::causal::CausalOutputProof>,
+
     pub layer2_voucher_id: String,
     #[serde(with = "base58_32")]
     pub t_id: [u8; 32],
@@ -210,6 +227,7 @@ pub struct L2LockEntry {
 impl From<&L2LockRequest> for L2LockEntry {
     fn from(req: &L2LockRequest) -> Self {
         Self {
+            causal_output: req.causal_output.clone(),
             layer2_voucher_id: req.layer2_voucher_id.clone(),
             t_id: req.transaction_hash,
             sender_ephemeral_pub: req.sender_ephemeral_pub,

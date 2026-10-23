@@ -76,6 +76,7 @@ fn make_hmc_genesis(
     let sender_pub = sender_key.verifying_key().to_bytes();
     let tx_hash = *blake3::hash(parent_hex.as_bytes()).as_bytes();
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -98,6 +99,25 @@ fn make_hmc_genesis(
     let payload_hash = calculate_l2_payload_hash(&req);
     req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
     req
+}
+
+fn spend_root(root: &L2LockRequest, sender: &SigningKey) -> L2LockRequest {
+    use sha3::{Digest, Sha3_256};
+    let mut req = root.clone();
+    let mut hash = Sha3_256::new();
+    hash.update(32u32.to_le_bytes()); hash.update(root.transaction_hash);
+    hash.update(32u32.to_le_bytes()); hash.update(sender.verifying_key().as_bytes());
+    req.ds_tag = Some(bs58::encode(hash.finalize()).into_string());
+    req.transaction_hash = *blake3::hash(req.ds_tag.as_ref().unwrap().as_bytes()).as_bytes();
+    req.is_genesis = false;
+    req.created_at_ms = test_now_ms();
+    req.deletable_at = None;
+    req.layer2_signature = sender.sign(&calculate_l2_payload_hash(&req)).to_bytes();
+    req
+}
+async fn anchor_fixture(engine: &DualTierEngine, root: &L2LockRequest) {
+    let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.transaction_hash).into_string(), root.into(), IngressOrigin::ClientApi, Some(root.created_at_ms), None, None, None).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }), "{verdict:?}");
 }
 
 fn fake_pubkey(seed: u64) -> [u8; 32] {
@@ -188,11 +208,12 @@ async fn test_phase11a_quorum_gating_wire_returns_503_never_200_201() {
     );
     state.peer_manager = Some(pm);
     state.transport = Some(transport.clone());
-    let app = build_router(state);
-
     let sender_key = SigningKey::from_bytes(&[7u8; 32]);
     let now = test_now_ms();
-    let lock_req = make_hmc_genesis(&"ab".repeat(32), now + 600_000, &sender_key);
+    let root = make_hmc_genesis(&"ab".repeat(32), now + 600_000, &sender_key);
+    anchor_fixture(&state.engine, &root).await;
+    let lock_req = spend_root(&root, &sender_key);
+    let app = build_router(state);
 
     let req = Request::builder()
         .method("POST")
@@ -246,6 +267,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
         transport: QuicTransport,
         cancel: CancellationToken,
         _storage: Arc<RedbStorage>,
+        engine: DualTierEngine,
     }
     let mut shards: Vec<ShardNode> = Vec::new();
 
@@ -282,7 +304,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
 
         let handler = Arc::new(
             NodeRequestHandler::with_peer_manager(
-                engine,
+                engine.clone(),
                 storage.clone(),
                 identity.clone(),
                 pm.clone(),
@@ -307,6 +329,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
             transport,
             cancel,
             _storage: storage,
+            engine,
         });
     }
 
@@ -371,8 +394,11 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
     state.peer_manager = Some(pm_gw.clone());
     state.transport = Some(gw_transport.clone());
     let now = test_now_ms();
-    let lock_req = make_hmc_genesis(&"cd".repeat(32), now + 900_000, &sender_key);
-    let lookup_tag = bs58::encode(&lock_req.transaction_hash).into_string();
+    let root = make_hmc_genesis(&"cd".repeat(32), now + 900_000, &sender_key);
+    anchor_fixture(&state.engine, &root).await;
+    for shard in &shards { anchor_fixture(&shard.engine, &root).await; }
+    let lock_req = spend_root(&root, &sender_key);
+    let lookup_tag = bs58::encode(&root.transaction_hash).into_string();
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
     let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
     state.readiness_manager.mark_shard_ready(shard_id);
@@ -844,9 +870,7 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
         parent[0] = 0x02;
         parent[2..6].copy_from_slice(&i.to_be_bytes());
         let rec = LockRecord::new(parent, [0xAA; 32], i.to_le_bytes().to_vec(), now, SimTime(500_000));
-        let _ = engine
-            .ingress_lock_with_origin(rec, now, root_valid, IngressOrigin::ClientApi)
-            .await;
+        storage.put_lock(&rec, root_valid.0).expect("durable snapshot fixture");
     }
 
     let server_id = NodeIdentity::generate();
@@ -1191,6 +1215,8 @@ struct QuorumWireNode {
     delay: Arc<std::sync::atomic::AtomicU64>,
     engine: DualTierEngine,
     storage: Arc<RedbStorage>,
+    tier: Arc<TierController>,
+    pow: Arc<PowEngine>,
     _temp: tempfile::TempDir,
 }
 
@@ -1250,6 +1276,9 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
         .expect("bind");
         transport.set_sync_ready(true);
         transport.spawn_accept_loop();
+        let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+        let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
+        tier.register_f2f_peer("committee_wire_token");
         nodes.push(QuorumWireNode {
             identity,
             pm,
@@ -1261,6 +1290,8 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             delay,
             engine,
             storage,
+            tier,
+            pow,
             _temp: temp,
         });
     }
@@ -1316,7 +1347,9 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             break;
         }
     }
-    let req = selected.expect("find gateway rank");
+    let root = selected.expect("find gateway rank");
+    for node in &nodes { anchor_fixture(&node.engine, &root).await; }
+    let req = spend_root(&root, &sender);
     // Remove handshake scheduling from quorum timing assertions.
     for node in nodes.iter().skip(1) {
         nodes[0]
@@ -1333,9 +1366,10 @@ async fn post_committee_lock(
     req: &L2LockRequest,
 ) -> (StatusCode, L2ResponseEnvelope, std::time::Duration) {
     let gw = &nodes[0];
-    let pow = Arc::new(PowEngine::new(*gw.identity.node_id(), 8));
-    let tier = Arc::new(TierController::new(gw.storage.clone(), pow.clone()));
-    tier.register_f2f_peer("committee_wire_token");
+    // One real gateway controller owns monotonically increasing envelopes
+    // across requests. Recreating it would simulate a rollback on every POST.
+    let pow = gw.pow.clone();
+    let tier = gw.tier.clone();
     let mut state = AppState::new(
         gw.engine.clone(),
         gw.storage.clone(),
@@ -1345,9 +1379,7 @@ async fn post_committee_lock(
     );
     state.peer_manager = Some(gw.pm.clone());
     state.transport = Some(gw.transport.clone());
-    let lookup_tag = req.ds_tag.clone().unwrap_or_else(|| bs58::encode(&req.transaction_hash).into_string());
-    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-    let shard_id = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
+    let shard_id = gw.engine.get_hmc_voucher_genesis_shard(&req.layer2_voucher_id).await.expect("root shard");
     state.readiness_manager.mark_shard_ready(shard_id);
     let app = build_router(state);
     let started = std::time::Instant::now();
@@ -1371,11 +1403,7 @@ async fn post_committee_lock(
 async fn test_exact_committee_includes_self_and_never_queries_rank21_wire() {
     let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
     let (nodes, req) = quorum_wire_cluster(1).await;
-    let shard = humoco_sim_core::types::canonical_voucher_shard(
-        &humoco_sim_core::types::genesis_parent_bytes_from_tag(
-            &bs58::encode(req.transaction_hash).into_string(),
-        ),
-    );
+    let shard = nodes[0].engine.get_hmc_voucher_genesis_shard(&req.layer2_voucher_id).await.expect("root shard");
     let mut rank21 = None;
     for (i, n) in nodes.iter().enumerate().skip(1) {
         if n.pm
@@ -1511,12 +1539,7 @@ async fn test_rank21_receiving_server_rejects_over_real_quic() {
     let client = &nodes[1];
     let server = &nodes[0];
     let now = server.pm.net_time_ms();
-    let root_valid_until = req
-        .deletable_at
-        .as_deref()
-        .expect("ttl")
-        .parse::<u64>()
-        .expect("ttl integer");
+    let root_valid_until = server.engine.get_hmc_voucher_root_valid(&req.layer2_voucher_id).await.expect("root validity");
     let entry = humoco_node::api::hmc::L2LockEntry::from(&req);
     let footprint =
         humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds((root_valid_until - now) / 1000);
@@ -1585,10 +1608,12 @@ async fn test_valid_signatures_for_wrong_request_or_tls_context_never_form_quoru
             node.attack
                 .store(if i == 1 { attack } else { 0 }, Ordering::SeqCst);
         }
-        // Fresh genesis identifier with the same shard routing parent. Changing
-        // only voucher identity preserves the committee chosen by tx hash.
+        // Independent real spend slots under the same durable root preserve
+        // the frozen committee while avoiding a previous local signing slot.
         let mut req = genesis.clone();
-        req.layer2_voucher_id = format!("{}_attack_{attack}", genesis.layer2_voucher_id);
+        req.created_at_ms = test_now_ms();
+        req.ds_tag = Some(format!("{}_attack_{attack}", genesis.ds_tag.as_deref().unwrap()));
+        req.transaction_hash = *blake3::hash(req.ds_tag.as_ref().unwrap().as_bytes()).as_bytes();
         let sender = SigningKey::from_bytes(&[171; 32]);
         req.layer2_signature = sender.sign(&calculate_l2_payload_hash(&req)).to_bytes();
         let forged_before = nodes[1].forged.load(Ordering::SeqCst);
@@ -1596,7 +1621,7 @@ async fn test_valid_signatures_for_wrong_request_or_tls_context_never_form_quoru
         assert_eq!(
             nodes[1].forged.load(Ordering::SeqCst),
             forged_before + 1,
-            "attack {attack}: actually sent a genuinely signed wrong-context answer over QUIC"
+            "attack {attack}: actually sent a genuinely signed wrong-context answer over QUIC; status={status}, verdict={:?}", body.verdict
         );
         assert_eq!(
             status,

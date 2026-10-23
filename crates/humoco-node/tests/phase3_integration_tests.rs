@@ -15,6 +15,23 @@ use humoco_sim_core::storage::IngressVerdictLow;
 use humoco_sim_core::types::{LockRecord, SimTime};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
+async fn register_root(engine: &DualTierEngine, prototype: &L2LockEntry, key: &ed25519_dalek::SigningKey) -> String {
+    use humoco_node::api::hmc::{calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER};
+    let mut root = prototype.clone();
+    root.t_id = [0x42;32];
+    root.sender_ephemeral_pub = key.verifying_key().to_bytes();
+    let tag = bs58::encode(root.t_id).into_string();
+    let hash = calculate_l2_payload_hash_raw(TRAP_NONE_PLACEHOLDER, &tag, &root.t_id,
+        &root.sender_ephemeral_pub, root.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+        root.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER), root.encrypted_timestamp,
+        root.created_at_ms, root.deletable_at.as_deref(),
+        privacy_guard_commitment(root.privacy_guard.as_deref()).as_str());
+    root.layer2_signature = key.sign(&hash).to_bytes();
+    let (verdict, _) = engine.ingress_hmc_lock(tag.clone(), root).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    tag
+}
+
 /// 1. Test for deterministic Split-Brain healing via min(H_canon)
 /// Winner replaces loser in RAM/disk state for both Sim LockRecord and HMC L2LockEntry.
 #[tokio::test]
@@ -172,6 +189,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
     };
 
     let mut entry_loser = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "voucher_hmc_1".into(),
         t_id: t_id_loser,
         sender_ephemeral_pub: sender_a,
@@ -188,6 +206,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
     sign_entry(&key_a, &mut entry_loser);
 
     let mut entry_winner = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "voucher_hmc_1".into(),
         t_id: t_id_winner,
         sender_ephemeral_pub: sender_b,
@@ -202,6 +221,8 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         privacy_guard: None,
     };
     sign_entry(&key_b, &mut entry_winner);
+
+    register_root(&engine, &entry_loser, &key_a).await;
 
     // Ingress HMC loser lock first
     let (v_hmc1, is_new1) = engine.ingress_hmc_lock(lookup_tag.clone(), entry_loser.clone()).await;
@@ -240,6 +261,7 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         h_hmc_loser2 = compute_hmc_canonical_hash(&parent_bytes, &sender_a, &t_id_loser2);
     }
     let mut entry_loser2 = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "voucher_hmc_1".into(),
         t_id: t_id_loser2,
         sender_ephemeral_pub: sender_a,
@@ -356,10 +378,11 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
     // HMC lock on a specific voucher tag
     let hmc_tag = "voucher_multi_shard_sync_tag".to_string();
     let hmc_parent = *blake3::hash(hmc_tag.as_bytes()).as_bytes();
-    let hmc_shard_id = u16::from_be_bytes([hmc_parent[0], hmc_parent[1]]);
+    let _legacy_tag_shard = u16::from_be_bytes([hmc_parent[0], hmc_parent[1]]);
     let hmc_key = ed25519_dalek::SigningKey::from_bytes(&[0x88; 32]);
     let hmc_pub = hmc_key.verifying_key().to_bytes();
     let mut hmc_entry = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "voucher_sync_123".into(),
         t_id: [0x77; 32],
         sender_ephemeral_pub: hmc_pub,
@@ -391,7 +414,11 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
         );
         hmc_entry.layer2_signature = hmc_key.sign(&hash).to_bytes();
     }
-    let _ = engine_a.ingress_hmc_lock(hmc_tag.clone(), hmc_entry.clone()).await;
+    let root_tag = register_root(&engine_a, &hmc_entry, &hmc_key).await;
+    let root_parent = *blake3::hash(root_tag.as_bytes()).as_bytes();
+    let hmc_shard_id = humoco_sim_core::types::extract_shard_id(&root_parent);
+    let (verdict, _) = engine_a.ingress_hmc_lock(hmc_tag.clone(), hmc_entry.clone()).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
 
     // Wait 100ms for flush on Node A
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

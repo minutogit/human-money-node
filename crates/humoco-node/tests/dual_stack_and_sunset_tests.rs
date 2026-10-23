@@ -92,6 +92,7 @@ fn make_lock_request(
     };
 
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,

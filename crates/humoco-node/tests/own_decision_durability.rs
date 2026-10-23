@@ -169,6 +169,7 @@ fn signed_hop(genesis: bool, child: u8, stamp: u128) -> humoco_node::api::hmc::L
     use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest};
     let key = SigningKey::from_bytes(&[9; 32]);
     let mut hop = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: key.verifying_key().to_bytes(),
             auth_signature: None,
@@ -188,6 +189,14 @@ fn signed_hop(genesis: bool, child: u8, stamp: u128) -> humoco_node::api::hmc::L
         deletable_at: genesis.then(|| "50000".into()),
         privacy_guard: None,
     };
+    use sha3::{Digest, Sha3_256};
+    if !genesis {
+        let mut hash = Sha3_256::new(); hash.update(32u32.to_le_bytes()); hash.update([1; 32]); hash.update(32u32.to_le_bytes()); hash.update(key.verifying_key().as_bytes());
+        hop.ds_tag = Some(bs58::encode(hash.finalize()).into_string());
+    }
+    let mut proof = humoco_proto::causal::CausalOutputProof { version: 1, voucher_id: hop.layer2_voucher_id.clone(), transaction_id: hop.transaction_hash, state_hash: hop.transaction_hash, sender_pubkey: hop.sender_ephemeral_pub, receiver_pubkey_hash: Some(Sha3_256::digest(key.verifying_key().as_bytes()).into()), change_pubkey_hash: None, root_valid_until_ms: 50_000, is_root: genesis, signature: [0; 64] };
+    proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
+    hop.causal_output = Some(proof);
     hop.layer2_signature = key.sign(&calculate_l2_payload_hash(&hop)).to_bytes();
     hop
 }
@@ -215,14 +224,15 @@ async fn invalid_suffix_preserves_durable_prefix_and_never_returns_terminal_succ
     assert!(db
         .get_hmc_lock(&bs58::encode(genesis.transaction_hash).into_string())
         .unwrap()
-        .is_some());
-    assert!(db.get_hmc_lock("spend-tag").unwrap().is_none());
+        .is_none());
+    assert!(db.voucher_root(&genesis.layer2_voucher_id).unwrap().is_some());
+    assert!(db.get_hmc_locks_for_voucher(&genesis.layer2_voucher_id).unwrap().is_empty());
     cancel.cancel();
     worker.await.unwrap();
 }
 
 #[tokio::test]
-async fn identical_pending_hmc_retries_wait_for_durable_barrier() {
+async fn identical_pending_root_retries_wait_for_durable_barrier() {
     use humoco_node::api::hmc::{L2LockEntry, L2Verdict};
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(RedbStorage::open(&dir.path().join("pending.redb")).unwrap());
@@ -253,7 +263,7 @@ async fn identical_pending_hmc_retries_wait_for_durable_barrier() {
     };
     let first = submit(engine.clone(), tag.clone(), entry.clone());
     tokio::time::timeout(std::time::Duration::from_millis(100), async {
-        while !engine.hmc_ram.read().await.locks.contains_key(&tag) {
+        while !engine.hmc_ram.read().await.root_anchors.contains_key("prefix-voucher") {
             tokio::task::yield_now().await;
         }
     })
@@ -275,7 +285,8 @@ async fn identical_pending_hmc_retries_wait_for_durable_barrier() {
         second.await.unwrap().0,
         L2Verdict::Verified { .. }
     ));
-    assert!(db.get_hmc_lock(&tag).unwrap().is_some());
+    assert!(db.get_hmc_lock(&tag).unwrap().is_none());
+    assert!(db.voucher_root("prefix-voucher").unwrap().is_some());
     cancel.cancel();
     worker.await.unwrap();
 }

@@ -168,3 +168,18 @@ still cannot release goods before Z08. No blanket architecture completion follow
 ## Latest validation
 
 The G1/G5 continuation has a separate [validation record](evidence/closure-2026-10-23/g1-g5/validation.json). The original baseline/evidence above is historical. Latest workspace validation uses `RUST_TEST_THREADS=4`; default-concurrency timing failures remain open load findings.
+
+### 2026-10-23 root/causality continuation
+
+Implemented: separate durable genesis roots; immutable root deed and TTL; L1 SST
+preservation; author-signed L2 output proofs; sequential durable chain prefixes;
+MVCC sync cuts and bounded cursors; committed root-shard projections; compact
+verified HMC support recovery; exact-byte wallet intent and atomic purchase APIs;
+origin-isolated dispatch and passive gateway discovery; explicit one-time
+operator new-region bootstrap with closed normal restart.
+
+**Overall closure remains open.** Large-shard disk staging and atomic publication,
+full turnover/no-gap evidence, native support inheritance, productive terminal
+resolution/roster refresh, historical clock composition and full App/Core/Node/QUIC
+PoS fault-injection acceptance are not claimed. See
+[the precise contract](ROOT_CAUSALITY_AND_BOOTSTRAP_CONTRACT.md).

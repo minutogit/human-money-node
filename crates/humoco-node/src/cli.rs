@@ -1,7 +1,7 @@
-use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 
 use crate::api::qr::generate_qr_ansi;
 use crate::config::NodeConfig;
@@ -23,7 +23,9 @@ pub struct Cli {
 }
 
 fn parse_word_count(s: &str) -> Result<usize, String> {
-    let v: usize = s.parse().map_err(|_| format!("Invalid word count '{}': expected 12 or 24", s))?;
+    let v: usize = s
+        .parse()
+        .map_err(|_| format!("Invalid word count '{}': expected 12 or 24", s))?;
     if v != 12 && v != 24 {
         return Err(format!("Invalid word count {}: expected 12 or 24", v));
     }
@@ -87,6 +89,9 @@ pub enum Commands {
         /// Path to configuration file (default: ~/.humoco/humoco.toml)
         #[arg(short, long)]
         config: Option<PathBuf>,
+        /// Establish a NEW empty regional registry; refuses existing databases.
+        #[arg(long)]
+        bootstrap_new_region: bool,
     },
 
     /// Inspect node status, live statistics (if running) or configuration validity
@@ -380,31 +385,47 @@ impl Cli {
                 wizard,
                 qr,
                 json,
-            } => execute_init(path, force, with_key, mnemonic, words, passphrase, wizard, qr, json),
+            } => execute_init(
+                path, force, with_key, mnemonic, words, passphrase, wizard, qr, json,
+            ),
             Commands::Keygen { out, force } => execute_keygen(out, force),
-            Commands::Run { config } => execute_run(config).await,
+            Commands::Run { config, bootstrap_new_region } => execute_run_with_bootstrap(config, bootstrap_new_region).await,
             Commands::Status { config, json, qr } => execute_status(config, json, qr).await,
             Commands::Peers { config, json } => execute_peers(config, json).await,
             Commands::Quota { command } => execute_quota(command).await,
             Commands::Doctor { config, json } => execute_doctor(config, json).await,
             Commands::Peer { command } => match command {
                 PeerCommands::Add { peer, config } => execute_peer_add(peer, config).await,
-                PeerCommands::Remove { peer, save, ephemeral, config, json } => {
-                    execute_peer_remove(peer, save, ephemeral, config, json).await
-                }
+                PeerCommands::Remove {
+                    peer,
+                    save,
+                    ephemeral,
+                    config,
+                    json,
+                } => execute_peer_remove(peer, save, ephemeral, config, json).await,
                 PeerCommands::Qr { config } => execute_qr(config).await,
             },
-            Commands::Locks { limit, config, json } => execute_locks(limit, config, json).await,
+            Commands::Locks {
+                limit,
+                config,
+                json,
+            } => execute_locks(limit, config, json).await,
             Commands::Lock { command } => match command {
-                LockCommands::Inspect { parent_lock, config, json } => {
-                    execute_lock_inspect(parent_lock, config, json).await
-                }
+                LockCommands::Inspect {
+                    parent_lock,
+                    config,
+                    json,
+                } => execute_lock_inspect(parent_lock, config, json).await,
             },
             Commands::Qr { config } => execute_qr(config).await,
             Commands::Backup { out, config } => execute_backup(out, config).await,
             Commands::Revoke { config, confirm } => execute_revoke(config, confirm).await,
             Commands::Completions { shell } => execute_completions(shell),
-            Commands::Stop { timeout, config, json } => execute_stop(timeout, config, json).await,
+            Commands::Stop {
+                timeout,
+                config,
+                json,
+            } => execute_stop(timeout, config, json).await,
             Commands::Config { command } => match command {
                 ConfigCommands::Check { config, json } => execute_config_check(config, json).await,
                 ConfigCommands::Dump { config, json } => execute_config_dump(config, json),
@@ -412,9 +433,12 @@ impl Cli {
             Commands::Db { command } => match command {
                 DbCommands::Stats { config, json } => execute_db_stats(config, json).await,
             },
-            Commands::Restore { backup, verify, config, json } => {
-                execute_restore(backup, verify, config, json).await
-            }
+            Commands::Restore {
+                backup,
+                verify,
+                config,
+                json,
+            } => execute_restore(backup, verify, config, json).await,
         }
     }
 }
@@ -565,7 +589,8 @@ fn run_interactive_wizard(
 
     let passphrase = prompt_opt("5. BIP-39 Passphrase for mnemonic encryption")?;
 
-    if let Some(adv) = prompt_opt("6. Publicly advertised host:port (e.g. node.example.com:9090)")? {
+    if let Some(adv) = prompt_opt("6. Publicly advertised host:port (e.g. node.example.com:9090)")?
+    {
         if let Ok(addr) = adv.parse() {
             cfg.network.advertised_addr = Some(addr);
         }
@@ -645,8 +670,9 @@ pub fn execute_init(
             let wc = phrase.split_whitespace().count();
             (id, None, wc)
         } else if let Some(ref pp) = passphrase {
-            let mnemonic_obj = bip39::Mnemonic::generate(words)
-                .map_err(|err| NodeError::Identity(format!("Failed to generate mnemonic: {err}")))?;
+            let mnemonic_obj = bip39::Mnemonic::generate(words).map_err(|err| {
+                NodeError::Identity(format!("Failed to generate mnemonic: {err}"))
+            })?;
             let phrase = mnemonic_obj.to_string();
             let id = NodeIdentity::from_mnemonic(&phrase, Some(pp.as_str()))?;
             (id, Some(phrase), words)
@@ -679,7 +705,10 @@ pub fn execute_init(
         let conn_addr = if let Some(adv) = cfg.network.advertised_addr {
             adv.to_string()
         } else if cfg.network.p2p_listen_addr.ip().is_unspecified() {
-            format!("<public_ip_or_hostname>:{}", cfg.network.p2p_listen_addr.port())
+            format!(
+                "<public_ip_or_hostname>:{}",
+                cfg.network.p2p_listen_addr.port()
+            )
         } else {
             cfg.network.p2p_listen_addr.to_string()
         };
@@ -697,43 +726,113 @@ pub fn execute_init(
                 mnemonic_words: actual_words,
                 passphrase_set: passphrase.is_some(),
             };
-            println!("{}", serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?
+            );
             return Ok(());
         }
 
-        println!("┌──────────────────────────────────────────────────────────────────────────────┐");
+        println!(
+            "┌──────────────────────────────────────────────────────────────────────────────┐"
+        );
         println!("│                    HuMoCo Layer-2 Node Initialized                          │");
-        println!("├──────────────────────────────────────────────────────────────────────────────┤");
+        println!(
+            "├──────────────────────────────────────────────────────────────────────────────┤"
+        );
         if let Some(ref phrase) = phrase_opt {
-            println!("│ {}-Word Recovery Mnemonic (KEEP SECRET!):                                    │", actual_words);
+            println!(
+                "│ {}-Word Recovery Mnemonic (KEEP SECRET!):                                    │",
+                actual_words
+            );
             println!("│   {:<74} │", phrase);
-            println!("│   Passphrase: {:<62} │", if passphrase.is_some() { "set" } else { "not set" });
-            println!("│                                                                              │");
+            println!(
+                "│   Passphrase: {:<62} │",
+                if passphrase.is_some() {
+                    "set"
+                } else {
+                    "not set"
+                }
+            );
+            println!(
+                "│                                                                              │"
+            );
         } else if mnemonic.is_some() {
-            println!("│ Identity: Restored from provided BIP-39 mnemonic phrase ({} words).          │", actual_words);
-            println!("│   Passphrase: {:<62} │", if passphrase.is_some() { "set" } else { "not set" });
-            println!("│                                                                              │");
+            println!(
+                "│ Identity: Restored from provided BIP-39 mnemonic phrase ({} words).          │",
+                actual_words
+            );
+            println!(
+                "│   Passphrase: {:<62} │",
+                if passphrase.is_some() {
+                    "set"
+                } else {
+                    "not set"
+                }
+            );
+            println!(
+                "│                                                                              │"
+            );
         } else {
-            println!("│   Passphrase: {:<62} │", if passphrase.is_some() { "set" } else { "not set" });
+            println!(
+                "│   Passphrase: {:<62} │",
+                if passphrase.is_some() {
+                    "set"
+                } else {
+                    "not set"
+                }
+            );
         }
-        println!("│ Node ID:                                                                     │");
+        println!(
+            "│ Node ID:                                                                     │"
+        );
         println!("│   {:<74} │", identity.node_id_bs58());
-        println!("│                                                                              │");
+        println!(
+            "│                                                                              │"
+        );
         println!("│ HRW Routing ID (Argon2d Ticket, semantisch entflochten):                    │");
         println!("│   {:<74} │", identity.hrw_routing_id_bs58());
-        println!("│   nonce: {:<20} t0: {:<20} ({}) │", identity.nonce(), identity.t0(), if identity.t0() == 0 { "no incubation" } else { "ticket" });
-        println!("│                                                                              │");
-        println!("│ Public Key (Base58):                                                         │");
+        println!(
+            "│   nonce: {:<20} t0: {:<20} ({}) │",
+            identity.nonce(),
+            identity.t0(),
+            if identity.t0() == 0 {
+                "no incubation"
+            } else {
+                "ticket"
+            }
+        );
+        println!(
+            "│                                                                              │"
+        );
+        println!(
+            "│ Public Key (Base58):                                                         │"
+        );
         println!("│   {:<74} │", identity.public_key_bs58());
-        println!("│                                                                              │");
-        println!("│ Public Key (did:key):                                                        │");
+        println!(
+            "│                                                                              │"
+        );
+        println!(
+            "│ Public Key (did:key):                                                        │"
+        );
         println!("│   {:<74} │", identity.did_key());
-        println!("│                                                                              │");
-        println!("│ Connection string:                                                           │");
+        println!(
+            "│                                                                              │"
+        );
+        println!(
+            "│ Connection string:                                                           │"
+        );
         println!("│   {:<74} │", conn_string);
-        println!("│ (Share connection string with your trusted F2F peers to establish peering)   │");
-        println!("└──────────────────────────────────────────────────────────────────────────────┘");
-        println!("Initialized configuration template at: {}", target_path.display());
+        println!(
+            "│ (Share connection string with your trusted F2F peers to establish peering)   │"
+        );
+        println!(
+            "└──────────────────────────────────────────────────────────────────────────────┘"
+        );
+        println!(
+            "Initialized configuration template at: {}",
+            target_path.display()
+        );
 
         if qr {
             println!("\n=== Peering QR Code ===");
@@ -752,10 +851,16 @@ pub fn execute_init(
                 mnemonic_words: 0,
                 passphrase_set: false,
             };
-            println!("{}", serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?
+            );
             return Ok(());
         }
-        println!("Initialized configuration template at: {}", target_path.display());
+        println!(
+            "Initialized configuration template at: {}",
+            target_path.display()
+        );
     }
 
     Ok(())
@@ -785,6 +890,10 @@ pub fn execute_keygen(out: Option<PathBuf>, force: bool) -> Result<(), NodeError
 }
 
 pub async fn execute_run(config_path: Option<PathBuf>) -> Result<(), NodeError> {
+    execute_run_with_bootstrap(config_path, false).await
+}
+
+async fn execute_run_with_bootstrap(config_path: Option<PathBuf>, bootstrap: bool) -> Result<(), NodeError> {
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
     if !cfg_path.exists() {
         return Err(NodeError::Cli(format!(
@@ -804,10 +913,15 @@ pub async fn execute_run(config_path: Option<PathBuf>) -> Result<(), NodeError> 
 
     let identity = NodeIdentity::load_from_file(&config.identity.key_path)?;
     let daemon = NodeDaemon::new(config, identity);
+    let daemon = if bootstrap { daemon.bootstrap_new_region() } else { daemon };
     daemon.run().await
 }
 
-pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) -> Result<(), NodeError> {
+pub async fn execute_status(
+    config_path: Option<PathBuf>,
+    json: bool,
+    qr: bool,
+) -> Result<(), NodeError> {
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
 
     // Try loading configuration
@@ -860,7 +974,10 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
             let conn_addr = if let Some(adv) = cfg.network.advertised_addr {
                 adv.to_string()
             } else if cfg.network.p2p_listen_addr.ip().is_unspecified() {
-                format!("<public_ip_or_hostname>:{}", cfg.network.p2p_listen_addr.port())
+                format!(
+                    "<public_ip_or_hostname>:{}",
+                    cfg.network.p2p_listen_addr.port()
+                )
             } else {
                 cfg.network.p2p_listen_addr.to_string()
             };
@@ -887,7 +1004,11 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
                     rpc_listen: cfg.network.rpc_listen_addr.to_string(),
                     data_dir: data_dir.display().to_string(),
                 };
-                println!("{}", serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out)
+                        .map_err(|e| NodeError::Cli(e.to_string()))?
+                );
                 return Ok(());
             }
 
@@ -901,7 +1022,11 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
                 println!("Routing Nonce:     {}", n);
             }
             if let Some(t) = t0 {
-                println!("Routing T0:        {} ({} incubation)", t, if t == 0 { "no" } else { "24h" });
+                println!(
+                    "Routing T0:        {} ({} incubation)",
+                    t,
+                    if t == 0 { "no" } else { "24h" }
+                );
             }
             if let Some(ref pk) = pubkey {
                 println!("Public Key:        {}", pk);
@@ -947,40 +1072,66 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
 
     // Fallback: Offline static inspection
     if json {
-        let (config_valid, node_id, pubkey, hrw_hex, conn_str, p2p_str, rpc_str, data_str, peers_cnt, work_score) =
-            if let Some(ref cfg) = config {
-                let id_opt = if cfg.identity.key_path.exists() {
-                    NodeIdentity::load_from_file(&cfg.identity.key_path).ok()
-                } else {
-                    None
-                };
-                let conn_addr = if let Some(adv) = cfg.network.advertised_addr {
-                    adv.to_string()
-                } else if cfg.network.p2p_listen_addr.ip().is_unspecified() {
-                    format!("<public_ip_or_hostname>:{}", cfg.network.p2p_listen_addr.port())
-                } else {
-                    cfg.network.p2p_listen_addr.to_string()
-                };
-                let cs = id_opt.as_ref().map(|id| format!("{}@{}", id.public_key_bs58(), conn_addr));
-                let nid = id_opt.as_ref().map(|id| id.node_id_bs58());
-                let pk = id_opt.as_ref().map(|id| id.public_key_bs58());
-                let hrw = id_opt.as_ref().map(|id| id.hrw_routing_id_bs58());
-                let ws = id_opt.as_ref().map(|id| id.work_score());
-                (
-                    true,
-                    nid,
-                    pk,
-                    hrw,
-                    cs,
-                    cfg.network.p2p_listen_addr.to_string(),
-                    cfg.network.rpc_listen_addr.to_string(),
-                    cfg.storage.data_dir.display().to_string(),
-                    Some(cfg.f2f.peers.len()),
-                    ws,
+        let (
+            config_valid,
+            node_id,
+            pubkey,
+            hrw_hex,
+            conn_str,
+            p2p_str,
+            rpc_str,
+            data_str,
+            peers_cnt,
+            work_score,
+        ) = if let Some(ref cfg) = config {
+            let id_opt = if cfg.identity.key_path.exists() {
+                NodeIdentity::load_from_file(&cfg.identity.key_path).ok()
+            } else {
+                None
+            };
+            let conn_addr = if let Some(adv) = cfg.network.advertised_addr {
+                adv.to_string()
+            } else if cfg.network.p2p_listen_addr.ip().is_unspecified() {
+                format!(
+                    "<public_ip_or_hostname>:{}",
+                    cfg.network.p2p_listen_addr.port()
                 )
             } else {
-                (false, None, None, None, None, String::new(), String::new(), String::new(), None, None)
+                cfg.network.p2p_listen_addr.to_string()
             };
+            let cs = id_opt
+                .as_ref()
+                .map(|id| format!("{}@{}", id.public_key_bs58(), conn_addr));
+            let nid = id_opt.as_ref().map(|id| id.node_id_bs58());
+            let pk = id_opt.as_ref().map(|id| id.public_key_bs58());
+            let hrw = id_opt.as_ref().map(|id| id.hrw_routing_id_bs58());
+            let ws = id_opt.as_ref().map(|id| id.work_score());
+            (
+                true,
+                nid,
+                pk,
+                hrw,
+                cs,
+                cfg.network.p2p_listen_addr.to_string(),
+                cfg.network.rpc_listen_addr.to_string(),
+                cfg.storage.data_dir.display().to_string(),
+                Some(cfg.f2f.peers.len()),
+                ws,
+            )
+        } else {
+            (
+                false,
+                None,
+                None,
+                None,
+                None,
+                String::new(),
+                String::new(),
+                String::new(),
+                None,
+                None,
+            )
+        };
 
         let out = StatusJsonOutput {
             daemon: "OFFLINE".to_string(),
@@ -998,11 +1149,16 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
             pow_headroom_pct: None,
             ticket_outdated: None,
             p2p_listen: p2p_str,
-            advertised_addr: config.as_ref().and_then(|c| c.network.advertised_addr.map(|a| a.to_string())),
+            advertised_addr: config
+                .as_ref()
+                .and_then(|c| c.network.advertised_addr.map(|a| a.to_string())),
             rpc_listen: rpc_str,
             data_dir: data_str,
         };
-        println!("{}", serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?
+        );
         return Ok(());
     }
 
@@ -1035,7 +1191,10 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
                 let conn_addr = if let Some(adv) = cfg.network.advertised_addr {
                     adv.to_string()
                 } else if cfg.network.p2p_listen_addr.ip().is_unspecified() {
-                    format!("<public_ip_or_hostname>:{}", cfg.network.p2p_listen_addr.port())
+                    format!(
+                        "<public_ip_or_hostname>:{}",
+                        cfg.network.p2p_listen_addr.port()
+                    )
                 } else {
                     cfg.network.p2p_listen_addr.to_string()
                 };
@@ -1045,7 +1204,11 @@ pub async fn execute_status(config_path: Option<PathBuf>, json: bool, qr: bool) 
                 println!("Node ID:           {}", identity.node_id_bs58());
                 println!("HRW Routing ID:    {}", identity.hrw_routing_id_bs58());
                 println!("Routing Nonce:     {}", identity.nonce());
-                println!("Routing T0:        {} ({} incubation)", identity.t0(), if identity.t0() == 0 { "no" } else { "24h" });
+                println!(
+                    "Routing T0:        {} ({} incubation)",
+                    identity.t0(),
+                    if identity.t0() == 0 { "no" } else { "24h" }
+                );
                 println!("Public Key:        {}", pk);
                 println!("Public Key (did):  {}", identity.did_key());
                 println!("Connection String: {}", conn_string);
@@ -1105,20 +1268,53 @@ pub async fn execute_peers(config_path: Option<PathBuf>, json: bool) -> Result<(
                         last_failure_sec: p.last_failure_sec,
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out)
+                        .map_err(|e| NodeError::Cli(e.to_string()))?
+                );
                 return Ok(());
             }
 
             println!("=== HuMoCo Layer-2 Connected Peers (LIVE) ===");
             println!("Total peers: {}", peers.len());
-            println!("{:<22} {:<66} {:<12} {:<9} {:<10} {:<10} {:<10} {:<22}", "ADDRESS", "NODE ID", "STATUS", "MISSING", "RTT", "FAIL AGO", "MIN HOPS", "VIA (INGRESS)");
+            println!(
+                "{:<22} {:<66} {:<12} {:<9} {:<10} {:<10} {:<10} {:<22}",
+                "ADDRESS",
+                "NODE ID",
+                "STATUS",
+                "MISSING",
+                "RTT",
+                "FAIL AGO",
+                "MIN HOPS",
+                "VIA (INGRESS)"
+            );
             for p in &peers {
                 let node_id_str = p.node_id.as_deref().unwrap_or("-");
-                let hops_str = p.min_hops.map(|h| h.to_string()).unwrap_or_else(|| "-".to_string());
+                let hops_str = p
+                    .min_hops
+                    .map(|h| h.to_string())
+                    .unwrap_or_else(|| "-".to_string());
                 let ingress_str = p.ingress_peer.as_deref().unwrap_or("-");
-                let rtt_str = p.rtt_ms.map(|r| format!("{} ms", r)).unwrap_or_else(|| "-".to_string());
-                let fail_str = p.last_failure_sec.map(|f| format!("{}s", f)).unwrap_or_else(|| "-".to_string());
-                println!("{:<22} {:<66} {:<12} {:<9} {:<10} {:<10} {:<10} {:<22}", p.addr, node_id_str, p.status, p.missing_count, rtt_str, fail_str, hops_str, ingress_str);
+                let rtt_str = p
+                    .rtt_ms
+                    .map(|r| format!("{} ms", r))
+                    .unwrap_or_else(|| "-".to_string());
+                let fail_str = p
+                    .last_failure_sec
+                    .map(|f| format!("{}s", f))
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "{:<22} {:<66} {:<12} {:<9} {:<10} {:<10} {:<10} {:<22}",
+                    p.addr,
+                    node_id_str,
+                    p.status,
+                    p.missing_count,
+                    rtt_str,
+                    fail_str,
+                    hops_str,
+                    ingress_str
+                );
             }
             return Ok(());
         }
@@ -1144,7 +1340,10 @@ pub async fn execute_peers(config_path: Option<PathBuf>, json: bool) -> Result<(
         } else {
             Vec::new()
         };
-        println!("{}", serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?
+        );
         return Ok(());
     }
 
@@ -1155,7 +1354,10 @@ pub async fn execute_peers(config_path: Option<PathBuf>, json: bool) -> Result<(
             println!("  - {}", p);
         }
     } else {
-        println!("Configuration file '{}' not found and node is offline.", cfg_path.display());
+        println!(
+            "Configuration file '{}' not found and node is offline.",
+            cfg_path.display()
+        );
     }
 
     Ok(())
@@ -1183,7 +1385,11 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
                 checks.push(DoctorCheckJson {
                     name: "config_file".into(),
                     status: "error".into(),
-                    message: format!("Configuration file invalid at {} ({})", cfg_path.display(), e),
+                    message: format!(
+                        "Configuration file invalid at {} ({})",
+                        cfg_path.display(),
+                        e
+                    ),
                 });
                 (None, NodeConfig::default())
             }
@@ -1192,7 +1398,10 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
         checks.push(DoctorCheckJson {
             name: "config_file".into(),
             status: "warn".into(),
-            message: format!("Configuration file not found at {} (using defaults)", cfg_path.display()),
+            message: format!(
+                "Configuration file not found at {} (using defaults)",
+                cfg_path.display()
+            ),
         });
         (None, NodeConfig::default())
     };
@@ -1217,7 +1426,11 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
                         checks.push(DoctorCheckJson {
                             name: "key_permissions".into(),
                             status: "error".into(),
-                            message: format!("Key permissions mode {:04o}, expected 0600 at {}", mode, key_path.display()),
+                            message: format!(
+                                "Key permissions mode {:04o}, expected 0600 at {}",
+                                mode,
+                                key_path.display()
+                            ),
                         });
                     }
                 }
@@ -1332,7 +1545,10 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
     let sys_now = std::time::SystemTime::now();
     let t2 = std::time::Instant::now();
     let monotonic_ok = t2 >= t1;
-    let epoch_sec = sys_now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let epoch_sec = sys_now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let time_plausible = epoch_sec > 1_700_000_000;
     if monotonic_ok && time_plausible {
         checks.push(DoctorCheckJson {
@@ -1345,17 +1561,28 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
         checks.push(DoctorCheckJson {
             name: "monotonic_clock".into(),
             status: "error".into(),
-            message: format!("Clock synchronization check failed (monotonic: {}, epoch: {}s)", monotonic_ok, epoch_sec),
+            message: format!(
+                "Clock synchronization check failed (monotonic: {}, epoch: {}s)",
+                monotonic_ok, epoch_sec
+            ),
         });
     }
 
     // 7. Control socket responsiveness
     match daemon_status {
-        Ok(ControlResponse::Status { uptime_sec, active_locks, peers_connected, .. }) => {
+        Ok(ControlResponse::Status {
+            uptime_sec,
+            active_locks,
+            peers_connected,
+            ..
+        }) => {
             checks.push(DoctorCheckJson {
                 name: "control_socket".into(),
                 status: "ok".into(),
-                message: format!("Daemon ONLINE (uptime: {}s, locks: {}, peers: {})", uptime_sec, active_locks, peers_connected),
+                message: format!(
+                    "Daemon ONLINE (uptime: {}s, locks: {}, peers: {})",
+                    uptime_sec, active_locks, peers_connected
+                ),
             });
         }
         _ => {
@@ -1369,7 +1596,13 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
 
     // 8. PoW Headroom & Shard Ticket Health
     match &daemon_status {
-        Ok(ControlResponse::Status { ticket_outdated, headroom_pct, own_work, net_median_work, .. }) => {
+        Ok(ControlResponse::Status {
+            ticket_outdated,
+            headroom_pct,
+            own_work,
+            net_median_work,
+            ..
+        }) => {
             if *ticket_outdated {
                 all_passed = false;
                 checks.push(DoctorCheckJson {
@@ -1389,13 +1622,21 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
                     checks.push(DoctorCheckJson {
                         name: "pow_headroom".into(),
                         status: "warn".into(),
-                        message: format!("PoW Headroom low: {}% of median (re-mining recommended)", pct),
+                        message: format!(
+                            "PoW Headroom low: {}% of median (re-mining recommended)",
+                            pct
+                        ),
                     });
                 } else {
                     checks.push(DoctorCheckJson {
                         name: "pow_headroom".into(),
                         status: "ok".into(),
-                        message: format!("PoW Headroom healthy: {}% (Work: {}, Median: {})", pct, own_work.unwrap_or(1), net_median_work.unwrap_or(1)),
+                        message: format!(
+                            "PoW Headroom healthy: {}% (Work: {}, Median: {})",
+                            pct,
+                            own_work.unwrap_or(1),
+                            net_median_work.unwrap_or(1)
+                        ),
                     });
                 }
             } else {
@@ -1437,7 +1678,10 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
             all_passed,
             checks,
         };
-        println!("{}", serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?
+        );
         return Ok(());
     }
 
@@ -1476,7 +1720,10 @@ pub async fn execute_qr(config_path: Option<PathBuf>) -> Result<(), NodeError> {
     let conn_addr = if let Some(adv) = cfg.network.advertised_addr {
         adv.to_string()
     } else if cfg.network.p2p_listen_addr.ip().is_unspecified() {
-        format!("<public_ip_or_hostname>:{}", cfg.network.p2p_listen_addr.port())
+        format!(
+            "<public_ip_or_hostname>:{}",
+            cfg.network.p2p_listen_addr.port()
+        )
     } else {
         cfg.network.p2p_listen_addr.to_string()
     };
@@ -1490,7 +1737,11 @@ pub async fn execute_qr(config_path: Option<PathBuf>) -> Result<(), NodeError> {
     Ok(())
 }
 
-pub async fn execute_locks(limit: usize, config_path: Option<PathBuf>, json: bool) -> Result<(), NodeError> {
+pub async fn execute_locks(
+    limit: usize,
+    config_path: Option<PathBuf>,
+    json: bool,
+) -> Result<(), NodeError> {
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
     let cfg = NodeConfig::load_from_file(&cfg_path)?;
     let socket_path = cfg.control_socket_path();
@@ -1499,7 +1750,11 @@ pub async fn execute_locks(limit: usize, config_path: Option<PathBuf>, json: boo
     match client.get_recent_locks(limit).await? {
         ControlResponse::RecentLocks { locks } => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&locks).map_err(|e| NodeError::Cli(e.to_string()))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&locks)
+                        .map_err(|e| NodeError::Cli(e.to_string()))?
+                );
                 return Ok(());
             }
 
@@ -1520,21 +1775,35 @@ pub async fn execute_locks(limit: usize, config_path: Option<PathBuf>, json: boo
             }
             Ok(())
         }
-        ControlResponse::Error { message } => Err(NodeError::Cli(format!("Daemon error: {}", message))),
-        _ => Err(NodeError::Daemon("Unexpected response from control server".into())),
+        ControlResponse::Error { message } => {
+            Err(NodeError::Cli(format!("Daemon error: {}", message)))
+        }
+        _ => Err(NodeError::Daemon(
+            "Unexpected response from control server".into(),
+        )),
     }
 }
 
-pub async fn execute_lock_inspect(parent_lock: String, config_path: Option<PathBuf>, json: bool) -> Result<(), NodeError> {
+pub async fn execute_lock_inspect(
+    parent_lock: String,
+    config_path: Option<PathBuf>,
+    json: bool,
+) -> Result<(), NodeError> {
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
     let cfg = NodeConfig::load_from_file(&cfg_path)?;
     let socket_path = cfg.control_socket_path();
     let client = ControlClient::new(socket_path);
 
     match client.inspect_lock(&parent_lock).await? {
-        ControlResponse::LockInspection { inspection: Some(insp) } => {
+        ControlResponse::LockInspection {
+            inspection: Some(insp),
+        } => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&insp).map_err(|e| NodeError::Cli(e.to_string()))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&insp)
+                        .map_err(|e| NodeError::Cli(e.to_string()))?
+                );
                 return Ok(());
             }
 
@@ -1553,11 +1822,18 @@ pub async fn execute_lock_inspect(parent_lock: String, config_path: Option<PathB
                 println!("null");
                 return Ok(());
             }
-            println!("Lock with parent_lock '{}' not found in RAM index.", parent_lock);
+            println!(
+                "Lock with parent_lock '{}' not found in RAM index.",
+                parent_lock
+            );
             Ok(())
         }
-        ControlResponse::Error { message } => Err(NodeError::Cli(format!("Daemon error: {}", message))),
-        _ => Err(NodeError::Daemon("Unexpected response from control server".into())),
+        ControlResponse::Error { message } => {
+            Err(NodeError::Cli(format!("Daemon error: {}", message)))
+        }
+        _ => Err(NodeError::Daemon(
+            "Unexpected response from control server".into(),
+        )),
     }
 }
 
@@ -1692,7 +1968,10 @@ pub async fn execute_backup(out: PathBuf, config_path: Option<PathBuf>) -> Resul
         if let Ok(resp) = client.create_backup(&out_str).await {
             match resp {
                 ControlResponse::BackupCreated { path, locks_count } => {
-                    println!("[✓] Consistent backup snapshot created at '{}' ({} locks backed up).", path, locks_count);
+                    println!(
+                        "[✓] Consistent backup snapshot created at '{}' ({} locks backed up).",
+                        path, locks_count
+                    );
                     return Ok(());
                 }
                 ControlResponse::Error { message } => {
@@ -1734,7 +2013,10 @@ pub async fn execute_backup(out: PathBuf, config_path: Option<PathBuf>) -> Resul
 }
 
 /// Permanently revokes and self-destructs the node identity via cryptographic equivocation proof (Pillar 3 Heartbeat Spam).
-pub async fn execute_revoke(config: Option<PathBuf>, confirm: Option<String>) -> Result<(), NodeError> {
+pub async fn execute_revoke(
+    config: Option<PathBuf>,
+    confirm: Option<String>,
+) -> Result<(), NodeError> {
     let cfg_path = config.unwrap_or_else(NodeConfig::default_config_path);
     if !cfg_path.exists() {
         return Err(NodeError::Cli(format!(
@@ -1760,7 +2042,10 @@ pub async fn execute_revoke(config: Option<PathBuf>, confirm: Option<String>) ->
     println!("║ Dieser Vorgang verbrennt die Identität dieses Knotens UNWIDERRUFLICH:         ║");
     println!("║ • Alle F2F-Freunde werden die Verbindung DAUERHAFT trennen.                  ║");
     println!("║ • Dein gemintes Argon2d-Shard-Ticket wird für immer entwertet.               ║");
-    println!("║ • Dieser Schlüssel ({}) kann NIE WIEDER genutzt werden!║", identity.public_key_hex());
+    println!(
+        "║ • Dieser Schlüssel ({}) kann NIE WIEDER genutzt werden!║",
+        identity.public_key_hex()
+    );
     println!("║ • Es wird ein kryptographischer Equivocation-FraudProof erzeugt.             ║");
     println!("╚══════════════════════════════════════════════════════════════════════════════╝");
 
@@ -1787,7 +2072,9 @@ pub async fn execute_revoke(config: Option<PathBuf>, confirm: Option<String>) ->
     };
 
     if !is_confirmed {
-        println!("❌ Abbruch: Vorgang wurde nicht mit 'DELETE' oder 'KILL' bestätigt. Nichts verändert.");
+        println!(
+            "❌ Abbruch: Vorgang wurde nicht mit 'DELETE' oder 'KILL' bestätigt. Nichts verändert."
+        );
         return Ok(());
     }
 
@@ -1798,8 +2085,12 @@ pub async fn execute_revoke(config: Option<PathBuf>, confirm: Option<String>) ->
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let hb1 = humoco_sim_core::fraud::sign_heartbeat(node_id, humoco_sim_core::types::SimTime(now_ms));
-    let hb2 = humoco_sim_core::fraud::sign_heartbeat(node_id, humoco_sim_core::types::SimTime(now_ms + 1000));
+    let hb1 =
+        humoco_sim_core::fraud::sign_heartbeat(node_id, humoco_sim_core::types::SimTime(now_ms));
+    let hb2 = humoco_sim_core::fraud::sign_heartbeat(
+        node_id,
+        humoco_sim_core::types::SimTime(now_ms + 1000),
+    );
     let proof = humoco_sim_core::fraud::FraudProofPayload::new_heartbeat_spam(hb1, hb2);
 
     // Save banned state to local database if present
@@ -1840,7 +2131,10 @@ pub async fn execute_stop(
         NodeConfig::default()
     };
     let socket_path = cfg.control_socket_path();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.max(1));
+    let database_path = cfg.storage.data_dir.join("humoco.redb");
     if !socket_path.exists() {
+        wait_for_database_release(&database_path, deadline).await?;
         if json {
             let out = serde_json::json!({
                 "status": "already_stopped",
@@ -1848,19 +2142,29 @@ pub async fn execute_stop(
             });
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
         } else {
-            println!("Node daemon is not running (socket '{}' not found).", socket_path.display());
+            println!(
+                "Node daemon is not running (socket '{}' not found).",
+                socket_path.display()
+            );
         }
         return Ok(());
     }
 
     let client = ControlClient::new(socket_path.clone());
-    client.shutdown(timeout).await?;
+    tokio::time::timeout_at(deadline, client.shutdown(timeout))
+        .await
+        .map_err(|_| NodeError::Daemon("Shutdown deadline exceeded".into()))??;
 
     // DEC-076: the daemon's own completion marker proves a clean shutdown and
     // process termination. The control socket file must additionally be gone
     // before a successful exit, otherwise the daemon could still hold its
     // resources (including the redb file lock) while the CLI reports success.
-    wait_for_socket_release(&socket_path, std::time::Duration::from_secs(timeout.max(1))).await?;
+    wait_for_socket_release(
+        &socket_path,
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await?;
+    wait_for_database_release(&database_path, deadline).await?;
 
     if json {
         let out = serde_json::json!({
@@ -1893,6 +2197,55 @@ async fn wait_for_socket_release(
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     Ok(())
+}
+
+/// Proves release of the actual redb OS file lock. Unlinking the control socket
+/// alone cannot establish this. Probe only an existing database and never create
+/// or initialize a replacement store. All retries share the original deadline.
+async fn wait_for_database_release(
+    path: &Path,
+    deadline: tokio::time::Instant,
+) -> Result<(), NodeError> {
+    if !path.try_exists()? {
+        return Ok(());
+    }
+    loop {
+        let path = path.to_path_buf();
+        let probe = tokio::task::spawn_blocking(move || match redb::Database::open(path) {
+            Ok(database) => {
+                drop(database);
+                Ok(true)
+            }
+            Err(redb::DatabaseError::DatabaseAlreadyOpen) => Ok(false),
+            Err(error) => Err(NodeError::Daemon(format!(
+                "Cannot verify database release: {error}"
+            ))),
+        });
+        match tokio::time::timeout_at(deadline, probe).await {
+            Ok(Ok(Ok(true))) => return Ok(()),
+            Ok(Ok(Ok(false))) => {}
+            Ok(Ok(Err(error))) => return Err(error),
+            Ok(Err(error)) => {
+                return Err(NodeError::Daemon(format!(
+                    "Database release worker: {error}"
+                )))
+            }
+            Err(_) => {
+                return Err(NodeError::Daemon(
+                    "Shutdown deadline exceeded waiting for redb file lock release".into(),
+                ))
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(NodeError::Daemon(
+                "Shutdown deadline exceeded waiting for redb file lock release".into(),
+            ));
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(25)),
+        )
+        .await;
+    }
 }
 
 pub async fn execute_peer_remove(
@@ -1960,10 +2313,16 @@ pub async fn execute_peer_remove(
     } else if online_removed {
         println!("[✓] Peer '{}' removed successfully (live).", peer);
         if saved_to_file {
-            println!("[✓] Peer removed from configuration file '{}'.", cfg_path.display());
+            println!(
+                "[✓] Peer removed from configuration file '{}'.",
+                cfg_path.display()
+            );
         }
     } else if saved_to_file {
-        println!("[✓] Peer '{}' removed from configuration file (offline).", peer);
+        println!(
+            "[✓] Peer '{}' removed from configuration file (offline).",
+            peer
+        );
     } else {
         println!("Peer '{}' removed (or was not present).", peer);
     }
@@ -1971,7 +2330,10 @@ pub async fn execute_peer_remove(
     Ok(())
 }
 
-pub async fn execute_config_check(config_path: Option<PathBuf>, json: bool) -> Result<(), NodeError> {
+pub async fn execute_config_check(
+    config_path: Option<PathBuf>,
+    json: bool,
+) -> Result<(), NodeError> {
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
     let mut checks = Vec::new();
     let mut all_ok = true;
@@ -2026,14 +2388,21 @@ pub async fn execute_config_check(config_path: Option<PathBuf>, json: bool) -> R
                     checks.push(DoctorCheckJson {
                         name: "key_permissions".into(),
                         status: "ok".into(),
-                        message: format!("Key permissions POSIX 0600 verified at {}", key_path.display()),
+                        message: format!(
+                            "Key permissions POSIX 0600 verified at {}",
+                            key_path.display()
+                        ),
                     });
                 } else {
                     all_ok = false;
                     checks.push(DoctorCheckJson {
                         name: "key_permissions".into(),
                         status: "error".into(),
-                        message: format!("Key permissions mode {:04o}, expected 0600 at {}", mode, key_path.display()),
+                        message: format!(
+                            "Key permissions mode {:04o}, expected 0600 at {}",
+                            mode,
+                            key_path.display()
+                        ),
                     });
                 }
             }
@@ -2066,7 +2435,10 @@ pub async fn execute_config_check(config_path: Option<PathBuf>, json: bool) -> R
             checks.push(DoctorCheckJson {
                 name: "data_dir".into(),
                 status: "error".into(),
-                message: format!("Parent directory for data_dir does not exist: {}", parent.display()),
+                message: format!(
+                    "Parent directory for data_dir does not exist: {}",
+                    parent.display()
+                ),
             });
         }
     }
@@ -2141,9 +2513,15 @@ pub fn execute_config_dump(config_path: Option<PathBuf>, json: bool) -> Result<(
         NodeConfig::default()
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&config).map_err(|e| NodeError::Cli(e.to_string()))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&config).map_err(|e| NodeError::Cli(e.to_string()))?
+        );
     } else {
-        println!("{}", toml::to_string_pretty(&config).map_err(|e| NodeError::Cli(e.to_string()))?);
+        println!(
+            "{}",
+            toml::to_string_pretty(&config).map_err(|e| NodeError::Cli(e.to_string()))?
+        );
     }
     Ok(())
 }
@@ -2171,7 +2549,11 @@ pub async fn execute_db_stats(config_path: Option<PathBuf>, json: bool) -> Resul
         } else {
             println!("=== HuMoCo DB Statistics (Online) ===");
             println!("Active Locks:     {}", stats.active_locks);
-            println!("DB Size:          {} bytes ({:.2} MB)", stats.db_size_bytes, stats.db_size_bytes as f64 / 1_048_576.0);
+            println!(
+                "DB Size:          {} bytes ({:.2} MB)",
+                stats.db_size_bytes,
+                stats.db_size_bytes as f64 / 1_048_576.0
+            );
             if let Some(pages) = stats.page_allocations {
                 println!("Page Allocations: {}", pages);
             }
@@ -2182,7 +2564,10 @@ pub async fn execute_db_stats(config_path: Option<PathBuf>, json: bool) -> Resul
     // Offline mode: open Redb directly
     let db_path = cfg.storage.data_dir.join("humoco.redb");
     if !db_path.exists() {
-        return Err(NodeError::Cli(format!("Database file not found at '{}'", db_path.display())));
+        return Err(NodeError::Cli(format!(
+            "Database file not found at '{}'",
+            db_path.display()
+        )));
     }
 
     let storage = RedbStorage::open(&db_path)?;
@@ -2199,7 +2584,11 @@ pub async fn execute_db_stats(config_path: Option<PathBuf>, json: bool) -> Resul
     } else {
         println!("=== HuMoCo DB Statistics (Offline) ===");
         println!("Active Locks:     {}", active_locks);
-        println!("DB Size:          {} bytes ({:.2} MB)", db_size_bytes, db_size_bytes as f64 / 1_048_576.0);
+        println!(
+            "DB Size:          {} bytes ({:.2} MB)",
+            db_size_bytes,
+            db_size_bytes as f64 / 1_048_576.0
+        );
         if let Some(pages) = page_allocations {
             println!("Page Allocations: {}", pages);
         }
@@ -2219,7 +2608,10 @@ pub async fn execute_restore(
         .ok_or_else(|| NodeError::Cli("Missing backup file path".into()))?;
 
     if !source_path.exists() {
-        return Err(NodeError::Cli(format!("Backup file not found at '{}'", source_path.display())));
+        return Err(NodeError::Cli(format!(
+            "Backup file not found at '{}'",
+            source_path.display()
+        )));
     }
 
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
@@ -2232,7 +2624,12 @@ pub async fn execute_restore(
     // 1. Verify backup file integrity
     let backup_storage = match RedbStorage::open(&source_path) {
         Ok(s) => s,
-        Err(e) => return Err(NodeError::Cli(format!("Backup file corrupt or invalid redb format: {}", e))),
+        Err(e) => {
+            return Err(NodeError::Cli(format!(
+                "Backup file corrupt or invalid redb format: {}",
+                e
+            )))
+        }
     };
     let (locks_count, backup_size, _) = backup_storage.get_stats()?;
 
@@ -2274,8 +2671,14 @@ pub async fn execute_restore(
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
-        println!("[✓] Backup integrity verified ({} locks, {} bytes).", locks_count, backup_size);
-        println!("[✓] Target database successfully restored to '{}'.", target_db_path.display());
+        println!(
+            "[✓] Backup integrity verified ({} locks, {} bytes).",
+            locks_count, backup_size
+        );
+        println!(
+            "[✓] Target database successfully restored to '{}'.",
+            target_db_path.display()
+        );
         println!("[✓] Restored locks: {}.", restored_locks);
     }
 
@@ -2295,12 +2698,34 @@ mod tests {
         let key_path = temp.path().join("node_key.bin");
 
         // One-shot Init: creates both config and key
-        execute_init(Some(config_path.clone()), false, false, None, 12, None, false, false, false).expect("execute_init");
+        execute_init(
+            Some(config_path.clone()),
+            false,
+            false,
+            None,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("execute_init");
         assert!(config_path.exists());
         assert!(key_path.exists());
 
         // Init without force should fail
-        assert!(execute_init(Some(config_path.clone()), false, false, None, 12, None, false, false, false).is_err());
+        assert!(execute_init(
+            Some(config_path.clone()),
+            false,
+            false,
+            None,
+            12,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_err());
 
         // Keygen with force to overwrite
         execute_keygen(Some(key_path.clone()), true).expect("execute_keygen");
@@ -2313,18 +2738,30 @@ mod tests {
         config.save_to_file(&config_path).expect("save config");
 
         // Status check (offline text)
-        execute_status(Some(config_path.clone()), false, false).await.expect("execute_status");
+        execute_status(Some(config_path.clone()), false, false)
+            .await
+            .expect("execute_status");
 
         // Status check (offline JSON and QR)
-        execute_status(Some(config_path.clone()), true, false).await.expect("execute_status json");
-        execute_status(Some(config_path.clone()), false, true).await.expect("execute_status qr");
+        execute_status(Some(config_path.clone()), true, false)
+            .await
+            .expect("execute_status json");
+        execute_status(Some(config_path.clone()), false, true)
+            .await
+            .expect("execute_status qr");
 
         // Peers check (offline text and JSON)
-        execute_peers(Some(config_path.clone()), false).await.expect("execute_peers");
-        execute_peers(Some(config_path.clone()), true).await.expect("execute_peers json");
+        execute_peers(Some(config_path.clone()), false)
+            .await
+            .expect("execute_peers");
+        execute_peers(Some(config_path.clone()), true)
+            .await
+            .expect("execute_peers json");
 
         // QR command
-        execute_qr(Some(config_path.clone())).await.expect("execute_qr");
+        execute_qr(Some(config_path.clone()))
+            .await
+            .expect("execute_qr");
 
         // Quota Topup and Get (offline)
         let topup_cmd = QuotaCommands::Topup {
@@ -2371,12 +2808,23 @@ mod tests {
         );
 
         // Status check prints public key and connection string
-        execute_status(Some(config_path), false, false).await.expect("execute_status");
+        execute_status(Some(config_path), false, false)
+            .await
+            .expect("execute_status");
     }
 
     #[test]
     fn test_cli_parsing() {
-        let cli = Cli::parse_from(["humoco", "init", "--force", "--with-key", "--mnemonic", "abandon about", "--qr", "--json"]);
+        let cli = Cli::parse_from([
+            "humoco",
+            "init",
+            "--force",
+            "--with-key",
+            "--mnemonic",
+            "abandon about",
+            "--qr",
+            "--json",
+        ]);
         assert_eq!(
             cli.command,
             Commands::Init {
@@ -2392,7 +2840,15 @@ mod tests {
             }
         );
         // Verify custom words and passphrase parsing
-        let cli = Cli::parse_from(["humoco", "init", "--words", "24", "--passphrase", "secret", "--wizard"]);
+        let cli = Cli::parse_from([
+            "humoco",
+            "init",
+            "--words",
+            "24",
+            "--passphrase",
+            "secret",
+            "--wizard",
+        ]);
         assert_eq!(
             cli.command,
             Commands::Init {
@@ -2424,21 +2880,40 @@ mod tests {
         assert_eq!(
             cli.command,
             Commands::Run {
-                config: Some(PathBuf::from("/tmp/humoco.toml"))
+                config: Some(PathBuf::from("/tmp/humoco.toml")),
+                bootstrap_new_region: false
             }
         );
 
         let cli = Cli::parse_from(["humoco", "status", "--json", "--qr"]);
-        assert_eq!(cli.command, Commands::Status { config: None, json: true, qr: true });
+        assert_eq!(
+            cli.command,
+            Commands::Status {
+                config: None,
+                json: true,
+                qr: true
+            }
+        );
 
         let cli = Cli::parse_from(["humoco", "peers", "--json"]);
-        assert_eq!(cli.command, Commands::Peers { config: None, json: true });
+        assert_eq!(
+            cli.command,
+            Commands::Peers {
+                config: None,
+                json: true
+            }
+        );
 
         let cli = Cli::parse_from(["humoco", "qr"]);
         assert_eq!(cli.command, Commands::Qr { config: None });
 
         let cli = Cli::parse_from(["humoco", "peer", "qr"]);
-        assert_eq!(cli.command, Commands::Peer { command: PeerCommands::Qr { config: None } });
+        assert_eq!(
+            cli.command,
+            Commands::Peer {
+                command: PeerCommands::Qr { config: None }
+            }
+        );
 
         let cli = Cli::parse_from(["humoco", "quota", "topup", "alice", "1000"]);
         assert_eq!(
@@ -2516,14 +2991,33 @@ mod tests {
 
         // Completions
         let cli = Cli::parse_from(["humoco", "completions", "bash"]);
-        assert_eq!(cli.command, Commands::Completions { shell: clap_complete::Shell::Bash });
+        assert_eq!(
+            cli.command,
+            Commands::Completions {
+                shell: clap_complete::Shell::Bash
+            }
+        );
 
         // Stop
         let cli = Cli::parse_from(["humoco", "stop", "--timeout", "20", "--json"]);
-        assert_eq!(cli.command, Commands::Stop { timeout: 20, config: None, json: true });
+        assert_eq!(
+            cli.command,
+            Commands::Stop {
+                timeout: 20,
+                config: None,
+                json: true
+            }
+        );
 
         // Peer Remove
-        let cli = Cli::parse_from(["humoco", "peer", "remove", "alice@127.0.0.1:9090", "--ephemeral", "--json"]);
+        let cli = Cli::parse_from([
+            "humoco",
+            "peer",
+            "remove",
+            "alice@127.0.0.1:9090",
+            "--ephemeral",
+            "--json",
+        ]);
         assert_eq!(
             cli.command,
             Commands::Peer {
@@ -2539,17 +3033,47 @@ mod tests {
 
         // Config Check & Dump
         let cli = Cli::parse_from(["humoco", "config", "check", "--json"]);
-        assert_eq!(cli.command, Commands::Config { command: ConfigCommands::Check { config: None, json: true } });
+        assert_eq!(
+            cli.command,
+            Commands::Config {
+                command: ConfigCommands::Check {
+                    config: None,
+                    json: true
+                }
+            }
+        );
 
         let cli = Cli::parse_from(["humoco", "config", "dump", "--json"]);
-        assert_eq!(cli.command, Commands::Config { command: ConfigCommands::Dump { config: None, json: true } });
+        assert_eq!(
+            cli.command,
+            Commands::Config {
+                command: ConfigCommands::Dump {
+                    config: None,
+                    json: true
+                }
+            }
+        );
 
         // Db Stats
         let cli = Cli::parse_from(["humoco", "db", "stats", "--json"]);
-        assert_eq!(cli.command, Commands::Db { command: DbCommands::Stats { config: None, json: true } });
+        assert_eq!(
+            cli.command,
+            Commands::Db {
+                command: DbCommands::Stats {
+                    config: None,
+                    json: true
+                }
+            }
+        );
 
         // Restore
-        let cli = Cli::parse_from(["humoco", "restore", "--verify", "/tmp/backup.redb", "--json"]);
+        let cli = Cli::parse_from([
+            "humoco",
+            "restore",
+            "--verify",
+            "/tmp/backup.redb",
+            "--json",
+        ]);
         assert_eq!(
             cli.command,
             Commands::Restore {
@@ -2578,17 +3102,36 @@ mod tests {
     async fn test_cli_peer_remove_offline() {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("humoco.toml");
-        execute_init(Some(config_path.clone()), false, false, None, 12, None, false, false, false).expect("init");
+        execute_init(
+            Some(config_path.clone()),
+            false,
+            false,
+            None,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("init");
 
         // Add peer
-        execute_peer_add("carol@127.0.0.1:9099".into(), Some(config_path.clone())).await.expect("peer add");
+        execute_peer_add("carol@127.0.0.1:9099".into(), Some(config_path.clone()))
+            .await
+            .expect("peer add");
         let mut cfg = NodeConfig::load_from_file(&config_path).expect("load config");
         assert!(cfg.f2f.peers.contains(&"carol@127.0.0.1:9099".to_string()));
 
         // Remove peer with save
-        execute_peer_remove("carol@127.0.0.1:9099".into(), true, false, Some(config_path.clone()), false)
-            .await
-            .expect("peer remove");
+        execute_peer_remove(
+            "carol@127.0.0.1:9099".into(),
+            true,
+            false,
+            Some(config_path.clone()),
+            false,
+        )
+        .await
+        .expect("peer remove");
         cfg = NodeConfig::load_from_file(&config_path).expect("load config");
         assert!(!cfg.f2f.peers.contains(&"carol@127.0.0.1:9099".to_string()));
     }
@@ -2597,11 +3140,26 @@ mod tests {
     async fn test_cli_config_check_and_dump() {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("humoco.toml");
-        execute_init(Some(config_path.clone()), false, false, None, 12, None, false, false, false).expect("init");
+        execute_init(
+            Some(config_path.clone()),
+            false,
+            false,
+            None,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("init");
 
         // Config check
-        assert!(execute_config_check(Some(config_path.clone()), false).await.is_ok());
-        assert!(execute_config_check(Some(config_path.clone()), true).await.is_ok());
+        assert!(execute_config_check(Some(config_path.clone()), false)
+            .await
+            .is_ok());
+        assert!(execute_config_check(Some(config_path.clone()), true)
+            .await
+            .is_ok());
 
         // Config dump
         assert!(execute_config_dump(Some(config_path.clone()), false).is_ok());
@@ -2612,7 +3170,18 @@ mod tests {
     async fn test_cli_db_stats_and_restore_verification() {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("humoco.toml");
-        execute_init(Some(config_path.clone()), false, false, None, 12, None, false, false, false).expect("init");
+        execute_init(
+            Some(config_path.clone()),
+            false,
+            false,
+            None,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("init");
 
         let mut config = NodeConfig::load_from_file(&config_path).expect("load config");
         config.storage.data_dir = temp.path().join("data");
@@ -2632,12 +3201,18 @@ mod tests {
         drop(storage);
 
         // Test db stats offline
-        assert!(execute_db_stats(Some(config_path.clone()), false).await.is_ok());
-        assert!(execute_db_stats(Some(config_path.clone()), true).await.is_ok());
+        assert!(execute_db_stats(Some(config_path.clone()), false)
+            .await
+            .is_ok());
+        assert!(execute_db_stats(Some(config_path.clone()), true)
+            .await
+            .is_ok());
 
         // Backup db
         let backup_file = temp.path().join("backup.redb");
-        execute_backup(backup_file.clone(), Some(config_path.clone())).await.expect("backup");
+        execute_backup(backup_file.clone(), Some(config_path.clone()))
+            .await
+            .expect("backup");
         assert!(backup_file.exists());
 
         // Remove active db
@@ -2652,7 +3227,10 @@ mod tests {
 
         // Verify restored lock
         let restored_storage = RedbStorage::open(&db_path).expect("open restored");
-        let (rec, _) = restored_storage.get_lock(&[5u8; 32]).expect("get").expect("found");
+        let (rec, _) = restored_storage
+            .get_lock(&[5u8; 32])
+            .expect("get")
+            .expect("found");
         assert_eq!(rec.receiver_pub, [6u8; 32]);
     }
 
@@ -2662,7 +3240,18 @@ mod tests {
         let config_path = temp.path().join("humoco.toml");
         let key_path = temp.path().join("node_key.bin");
 
-        execute_init(Some(config_path.clone()), false, false, None, 12, None, false, false, false).expect("execute_init");
+        execute_init(
+            Some(config_path.clone()),
+            false,
+            false,
+            None,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("execute_init");
         assert!(config_path.exists());
         assert!(key_path.exists());
 
@@ -2673,15 +3262,22 @@ mod tests {
         config.save_to_file(&config_path).expect("save config");
 
         // Doctor check (text and JSON)
-        execute_doctor(Some(config_path.clone()), false).await.expect("execute_doctor");
-        execute_doctor(Some(config_path.clone()), true).await.expect("execute_doctor json");
+        execute_doctor(Some(config_path.clone()), false)
+            .await
+            .expect("execute_doctor");
+        execute_doctor(Some(config_path.clone()), true)
+            .await
+            .expect("execute_doctor json");
 
         // Peer Add offline
         execute_peer_add("bob@127.0.0.1:9095".into(), Some(config_path.clone()))
             .await
             .expect("execute_peer_add");
         let reloaded = NodeConfig::load_from_file(&config_path).expect("reload config");
-        assert!(reloaded.f2f.peers.contains(&"bob@127.0.0.1:9095".to_string()));
+        assert!(reloaded
+            .f2f
+            .peers
+            .contains(&"bob@127.0.0.1:9095".to_string()));
 
         // Create db file and backup offline
         let db_path = config.storage.data_dir.join("humoco.redb");
@@ -2704,7 +3300,10 @@ mod tests {
 
         // Verify backup content
         let backup_storage = RedbStorage::open(&backup_out).expect("open backup");
-        let (rec, root_valid) = backup_storage.get_lock(&[3u8; 32]).expect("get_lock").expect("found");
+        let (rec, root_valid) = backup_storage
+            .get_lock(&[3u8; 32])
+            .expect("get_lock")
+            .expect("found");
         assert_eq!(rec.receiver_pub, [4u8; 32]);
         assert_eq!(root_valid, 600_000);
     }
@@ -2715,7 +3314,18 @@ mod tests {
         let config_path = temp.path().join("humoco.toml");
         let key_path = temp.path().join("node_key.bin");
 
-        execute_init(Some(config_path.clone()), false, false, None, 12, None, false, false, false).expect("execute_init");
+        execute_init(
+            Some(config_path.clone()),
+            false,
+            false,
+            None,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("execute_init");
         let mut config = NodeConfig::load_from_file(&config_path).expect("load config");
         config.identity.key_path = key_path.clone();
         config.storage.data_dir = temp.path().join("data");
@@ -2735,7 +3345,9 @@ mod tests {
         assert!(err.is_err());
 
         // Valid confirm with DELETE should succeed and ban the node
-        execute_revoke(Some(config_path.clone()), Some("DELETE".into())).await.expect("execute_revoke");
+        execute_revoke(Some(config_path.clone()), Some("DELETE".into()))
+            .await
+            .expect("execute_revoke");
 
         // Verify banned state in database
         let storage = RedbStorage::open(&db_path).expect("open storage");
@@ -2772,5 +3384,21 @@ mod tests {
             .await
             .expect_err("surviving socket must fail the stop");
         assert!(err.to_string().contains("to be released"), "{err}");
+    }
+    #[tokio::test]
+    async fn stop_requires_real_database_release_even_after_socket_unlink() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("humoco.redb");
+        let database = redb::Database::create(&path).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(60);
+        assert!(wait_for_database_release(&path, deadline).await.is_err());
+        drop(database);
+        wait_for_database_release(
+            &path,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(!temp.path().join("humoco.sock").exists());
     }
 }

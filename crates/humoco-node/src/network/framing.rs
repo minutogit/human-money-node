@@ -1,11 +1,11 @@
-use std::time::Duration;
 use humoco_sim_core::wire::{MsgType, WireHeader, CURRENT_PROTOCOL_VERSION, WIRE_MAGIC};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::NodeError;
 
 pub const MAX_STANDARD_FRAME_PAYLOAD_LEN: usize = 64 * 1024; // 64 KiB
-pub const MAX_SYNC_FRAME_PAYLOAD_LEN: usize = 4 * 1024 * 1024; // 4 MiB
+pub const MAX_SYNC_FRAME_PAYLOAD_LEN: usize = MAX_STANDARD_FRAME_PAYLOAD_LEN;
 pub const MAX_FRAME_PAYLOAD_LEN: usize = MAX_SYNC_FRAME_PAYLOAD_LEN;
 pub const DEFAULT_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -24,27 +24,78 @@ impl SigningCheckpoint {
     fn digest(&self) -> [u8; 32] {
         let mut h = blake3::Hasher::new();
         let domain = b"HUMOCO_V1_SIGNING_CHECKPOINT";
-        h.update(&[domain.len() as u8]); h.update(domain);
-        h.update(&[self.network]); h.update(&self.node_pubkey);
-        h.update(&self.generation.to_le_bytes()); h.update(&self.fingerprint);
+        h.update(&[domain.len() as u8]);
+        h.update(domain);
+        h.update(&[self.network]);
+        h.update(&self.node_pubkey);
+        h.update(&self.generation.to_le_bytes());
+        h.update(&self.fingerprint);
         *h.finalize().as_bytes()
     }
-    pub fn signed(identity: &crate::identity::NodeIdentity, network: u8, generation: u64, fingerprint: [u8; 32]) -> Self {
+    pub fn signed(
+        identity: &crate::identity::NodeIdentity,
+        network: u8,
+        generation: u64,
+        fingerprint: [u8; 32],
+    ) -> Self {
         use ed25519_dalek::Signer;
-        let mut result = Self { network, node_pubkey: *identity.node_pubkey(), generation, fingerprint, signature: [0; 64] };
+        let mut result = Self {
+            network,
+            node_pubkey: *identity.node_pubkey(),
+            generation,
+            fingerprint,
+            signature: [0; 64],
+        };
         result.signature = identity.signing_key().sign(&result.digest()).to_bytes();
         result
     }
     pub fn verify(&self, expected_key: &[u8; 32], expected_network: u8) -> bool {
-        if self.node_pubkey != *expected_key || self.network != expected_network { return false; }
-        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(expected_key) else { return false; };
-        key.verify_strict(&self.digest(), &ed25519_dalek::Signature::from_bytes(&self.signature)).is_ok()
+        if self.node_pubkey != *expected_key || self.network != expected_network {
+            return false;
+        }
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(expected_key) else {
+            return false;
+        };
+        key.verify_strict(
+            &self.digest(),
+            &ed25519_dalek::Signature::from_bytes(&self.signature),
+        )
+        .is_ok()
     }
 }
 
 /// F2F Heartbeat Wire-Payload carrying node ID, socket address, and monotonic net_time (Spec 11).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HeartbeatWirePayload {
+    pub node_id: [u8; 32],
+    pub addr: std::net::SocketAddr,
+    pub timestamp_ms: u64,
+    #[serde(default)]
+    pub declared_write_ema_micro_bj: u64,
+    #[serde(default)]
+    pub declared_read_ema_credits: u64,
+    #[serde(default = "default_signature", with = "serde_sig_64")]
+    pub signature: [u8; 64],
+    #[serde(default)]
+    pub supported_suites_mask: u8,
+    #[serde(default, deserialize_with = "deserialize_piggyback_observations")]
+    pub piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
+    #[serde(default)]
+    pub pow_nonce: u64,
+    #[serde(default)]
+    pub hrw_routing_id: [u8; 32],
+    #[serde(default)]
+    pub ticket_epoch_t0: u64,
+    #[serde(default = "default_heartbeat_ttl")]
+    pub ttl: u8,
+    #[serde(default)]
+    pub signing_checkpoint: Option<SigningCheckpoint>,
+    #[serde(default)]
+    pub gateway_advertisement: Option<crate::network::discovery::GatewayAdvertisement>,
+}
+
+#[derive(serde::Deserialize)]
+struct HeartbeatWithoutGateway {
     pub node_id: [u8; 32],
     pub addr: std::net::SocketAddr,
     pub timestamp_ms: u64,
@@ -117,9 +168,27 @@ impl HeartbeatWirePayload {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
         if let Ok(hb) = bincode::deserialize::<HeartbeatWirePayload>(bytes) {
             Ok(hb)
+        } else if let Ok(old) = bincode::deserialize::<HeartbeatWithoutGateway>(bytes) {
+            Ok(Self {
+                node_id: old.node_id,
+                addr: old.addr,
+                timestamp_ms: old.timestamp_ms,
+                declared_write_ema_micro_bj: old.declared_write_ema_micro_bj,
+                declared_read_ema_credits: old.declared_read_ema_credits,
+                signature: old.signature,
+                supported_suites_mask: old.supported_suites_mask,
+                piggyback_observations: old.piggyback_observations,
+                pow_nonce: old.pow_nonce,
+                hrw_routing_id: old.hrw_routing_id,
+                ticket_epoch_t0: old.ticket_epoch_t0,
+                ttl: old.ttl,
+                signing_checkpoint: old.signing_checkpoint,
+                gateway_advertisement: None,
+            })
         } else if let Ok(old) = bincode::deserialize::<HeartbeatWithoutCheckpoint>(bytes) {
             Ok(Self {
                 signing_checkpoint: None,
+                gateway_advertisement: None,
                 node_id: old.node_id,
                 addr: old.addr,
                 timestamp_ms: old.timestamp_ms,
@@ -152,7 +221,8 @@ impl HeartbeatWirePayload {
             }
             if let Ok(m) = bincode::deserialize::<MidHeartbeat>(bytes) {
                 Ok(HeartbeatWirePayload {
-            signing_checkpoint: None,
+                    signing_checkpoint: None,
+                    gateway_advertisement: None,
                     node_id: m.node_id,
                     addr: m.addr,
                     timestamp_ms: m.timestamp_ms,
@@ -183,7 +253,8 @@ impl HeartbeatWirePayload {
                 }
                 let l: LegacyHeartbeat = bincode::deserialize(bytes)?;
                 Ok(HeartbeatWirePayload {
-            signing_checkpoint: None,
+                    signing_checkpoint: None,
+                    gateway_advertisement: None,
                     node_id: l.node_id,
                     addr: l.addr,
                     timestamp_ms: l.timestamp_ms,
@@ -276,9 +347,7 @@ mod hmc_req_json {
         serializer.serialize_bytes(&raw)
     }
 
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<crate::api::hmc::L2LockRequest, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<crate::api::hmc::L2LockRequest, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -314,7 +383,9 @@ mod hmc_chain_opt_json {
     {
         let opt: Option<Vec<u8>> = serde::Deserialize::deserialize(deserializer)?;
         match opt {
-            Some(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(de::Error::custom),
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(de::Error::custom),
             None => Ok(None),
         }
     }
@@ -366,14 +437,20 @@ impl LockWirePayload {
     pub fn declared_write_ema_micro_bj(&self) -> u64 {
         match self {
             Self::Sim(..) => 0,
-            Self::Hmc { declared_write_ema_micro_bj, .. } => *declared_write_ema_micro_bj,
+            Self::Hmc {
+                declared_write_ema_micro_bj,
+                ..
+            } => *declared_write_ema_micro_bj,
         }
     }
 
     pub fn declared_read_ema_credits(&self) -> u64 {
         match self {
             Self::Sim(..) => 0,
-            Self::Hmc { declared_read_ema_credits, .. } => *declared_read_ema_credits,
+            Self::Hmc {
+                declared_read_ema_credits,
+                ..
+            } => *declared_read_ema_credits,
         }
     }
 
@@ -394,21 +471,29 @@ impl LockWirePayload {
     pub fn cumulative_micro_byte_years(&self) -> u64 {
         match self {
             Self::Sim(..) => 0,
-            Self::Hmc { cumulative_micro_byte_years, .. } => *cumulative_micro_byte_years,
+            Self::Hmc {
+                cumulative_micro_byte_years,
+                ..
+            } => *cumulative_micro_byte_years,
         }
     }
 
     pub fn prev_day_final_bytes(&self) -> u64 {
         match self {
             Self::Sim(..) => 0,
-            Self::Hmc { prev_day_final_bytes, .. } => *prev_day_final_bytes,
+            Self::Hmc {
+                prev_day_final_bytes,
+                ..
+            } => *prev_day_final_bytes,
         }
     }
 
     pub fn current_anl_24h(&self) -> u64 {
         match self {
             Self::Sim(..) => 0,
-            Self::Hmc { current_anl_24h, .. } => *current_anl_24h,
+            Self::Hmc {
+                current_anl_24h, ..
+            } => *current_anl_24h,
         }
     }
 
@@ -422,7 +507,9 @@ impl LockWirePayload {
     pub fn sender_pubkey(&self) -> [u8; 32] {
         match self {
             Self::Sim(rec, _) => rec.receiver_pub,
-            Self::Hmc { sender_pubkey, req, .. } => {
+            Self::Hmc {
+                sender_pubkey, req, ..
+            } => {
                 if *sender_pubkey != [0u8; 32] {
                     *sender_pubkey
                 } else {
@@ -435,7 +522,9 @@ impl LockWirePayload {
     pub fn sender_signature(&self) -> [u8; 64] {
         match self {
             Self::Sim(..) => [0u8; 64],
-            Self::Hmc { sender_signature, .. } => *sender_signature,
+            Self::Hmc {
+                sender_signature, ..
+            } => *sender_signature,
         }
     }
 
@@ -520,7 +609,8 @@ impl SyncPayload {
         if let Ok(sp) = bincode::deserialize::<SyncPayload>(bytes) {
             Ok(sp)
         } else {
-            let locks: Vec<(humoco_sim_core::types::LockRecord, u64)> = bincode::deserialize(bytes)?;
+            let locks: Vec<(humoco_sim_core::types::LockRecord, u64)> =
+                bincode::deserialize(bytes)?;
             Ok(SyncPayload {
                 locks,
                 hmc_locks: Vec::new(),
@@ -532,12 +622,14 @@ impl SyncPayload {
 /// Paginated ActiveSync request payload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveSyncRequest {
+    pub version: u8,
     #[serde(default)]
     pub cursor: u64,
     #[serde(default = "default_sync_limit")]
     pub limit: usize,
     #[serde(default)]
     pub target_bucket_id: Option<u64>,
+    pub target_shard: Option<u16>,
 }
 
 pub fn default_sync_limit() -> usize {
@@ -546,11 +638,23 @@ pub fn default_sync_limit() -> usize {
 
 impl ActiveSyncRequest {
     pub fn new(cursor: u64, limit: usize) -> Self {
-        Self { cursor, limit, target_bucket_id: None }
+        Self {
+            version: 2,
+            cursor,
+            limit,
+            target_bucket_id: None,
+            target_shard: None,
+        }
     }
 
     pub fn with_bucket(cursor: u64, limit: usize, target_bucket_id: Option<u64>) -> Self {
-        Self { cursor, limit, target_bucket_id }
+        Self {
+            version: 2,
+            cursor,
+            limit,
+            target_bucket_id,
+            target_shard: None,
+        }
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
@@ -558,21 +662,20 @@ impl ActiveSyncRequest {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        if bytes.is_empty() {
-            Ok(Self {
-                cursor: 0,
-                limit: default_sync_limit(),
-                target_bucket_id: None,
-            })
-        } else {
-            bincode::deserialize(bytes)
+        let request: Self = bincode::deserialize(bytes)?;
+        if request.version != 2 {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "fixed snapshot protocol version required".into(),
+            )));
         }
+        Ok(request)
     }
 }
 
 /// Paginated ActiveSync response payload.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ActiveSyncResponse {
+    pub version: u8,
     pub payload: SyncPayload,
     pub has_more: bool,
     #[serde(default)]
@@ -582,6 +685,7 @@ pub struct ActiveSyncResponse {
 impl ActiveSyncResponse {
     pub fn new(payload: SyncPayload, has_more: bool, next_cursor: Option<u64>) -> Self {
         Self {
+            version: 2,
             payload,
             has_more,
             next_cursor,
@@ -593,17 +697,13 @@ impl ActiveSyncResponse {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        if let Ok(resp) = bincode::deserialize::<ActiveSyncResponse>(bytes) {
-            Ok(resp)
-        } else {
-            // Backward compatibility with raw SyncPayload
-            let payload = SyncPayload::from_bytes(bytes)?;
-            Ok(ActiveSyncResponse {
-                payload,
-                has_more: false,
-                next_cursor: None,
-            })
+        let response: Self = bincode::deserialize(bytes)?;
+        if response.version != 2 {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "fixed snapshot response required".into(),
+            )));
         }
+        Ok(response)
     }
 }
 
@@ -619,9 +719,7 @@ pub fn checked_payload_len(len: usize) -> Result<u32, NodeError> {
 
 /// Returns the maximum allowed payload length based on the message type (INV: DoS / OOM protection).
 pub fn max_payload_len_for_msg_type(msg_type: u16) -> usize {
-    if msg_type == MsgType::ActiveSyncRequest as u16
-        || msg_type == MsgType::ActiveSyncDone as u16
-    {
+    if msg_type == MsgType::ActiveSyncRequest as u16 || msg_type == MsgType::ActiveSyncDone as u16 {
         MAX_SYNC_FRAME_PAYLOAD_LEN
     } else {
         MAX_STANDARD_FRAME_PAYLOAD_LEN
@@ -675,6 +773,26 @@ pub async fn read_frame_with_timeout<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     timeout_dur: Duration,
 ) -> Result<(WireHeader, Vec<u8>), NodeError> {
+    let ((header, payload), _permit) = read_frame_admitted(reader, timeout_dur, None).await?;
+    Ok((header, payload))
+}
+
+/// Class-specific admission happens after the validated header and before reading
+/// or allocating the body. The owned permit lives through handler completion.
+pub(crate) async fn read_frame_admitted<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    timeout_dur: Duration,
+    pools: Option<(
+        std::sync::Arc<tokio::sync::Semaphore>,
+        std::sync::Arc<tokio::sync::Semaphore>,
+    )>,
+) -> Result<
+    (
+        (WireHeader, Vec<u8>),
+        Option<tokio::sync::OwnedSemaphorePermit>,
+    ),
+    NodeError,
+> {
     tokio::time::timeout(timeout_dur, async {
         let mut header_bytes = [0u8; WireHeader::SIZE];
         reader.read_exact(&mut header_bytes).await?;
@@ -707,17 +825,34 @@ pub async fn read_frame_with_timeout<R: AsyncReadExt + Unpin>(
             )));
         }
 
+        let permit = if let Some((sync, rpc)) = pools {
+            let pool = if header.msg_type == MsgType::ActiveSyncRequest as u16 {
+                sync
+            } else {
+                rpc
+            };
+            Some(
+                pool.try_acquire_owned()
+                    .map_err(|_| NodeError::LocalCapacity("wire service admission exhausted"))?,
+            )
+        } else {
+            None
+        };
         let mut payload = Vec::with_capacity(payload_len.min(64 * 1024));
         let mut limited_reader = reader.take(payload_len as u64);
         limited_reader.read_to_end(&mut payload).await?;
         if payload.len() != payload_len {
-            return Err(NodeError::Network("Unexpected EOF while reading frame payload".into()));
+            return Err(NodeError::Network(
+                "Unexpected EOF while reading frame payload".into(),
+            ));
         }
 
-        Ok((header, payload))
+        Ok(((header, payload), permit))
     })
     .await
-    .map_err(|_| NodeError::Network("Read timeout exceeded on QUIC stream (Slowloris protection)".into()))?
+    .map_err(|_| {
+        NodeError::Network("Read timeout exceeded on QUIC stream (Slowloris protection)".into())
+    })?
 }
 
 #[cfg(test)]
@@ -782,16 +917,22 @@ mod tests {
     async fn test_frame_size_limit_rejection() {
         // Standard message (Heartbeat) over 64 KiB must be rejected
         let large_payload = vec![0u8; 65 * 1024];
-        let header = WireHeader::new(MsgType::Heartbeat as u16, 1, 1, 0, large_payload.len() as u32);
+        let header = WireHeader::new(
+            MsgType::Heartbeat as u16,
+            1,
+            1,
+            0,
+            large_payload.len() as u32,
+        );
         let mut buffer = Vec::new();
         let err = write_frame(&mut buffer, &header, &large_payload).await;
         assert!(err.is_err(), "Standard frame > 64KiB must be rejected");
 
-        // Sync message (ActiveSyncDone) up to 4 MiB is accepted
+        // Sync frames obey the same ceiling before any payload read.
         let sync_header = WireHeader::new(MsgType::ActiveSyncDone as u16, 1, 1, 0, 100 * 1024);
         let sync_payload = vec![1u8; 100 * 1024];
         let ok = write_frame(&mut buffer, &sync_header, &sync_payload).await;
-        assert!(ok.is_ok(), "Sync frame up to 4MiB must be accepted");
+        assert!(ok.is_err(), "Sync frame >64KiB must be rejected");
     }
 
     #[tokio::test]
@@ -801,7 +942,10 @@ mod tests {
         let timeout_dur = Duration::from_millis(50);
         let res = read_frame_with_timeout(&mut client_stream, timeout_dur).await;
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Read timeout exceeded"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Read timeout exceeded"));
     }
 
     #[test]
@@ -842,6 +986,7 @@ mod tests {
         // 1. Serde bincode roundtrip with 3 items capped to 2
         let hb = HeartbeatWirePayload {
             signing_checkpoint: None,
+            gateway_advertisement: None,
             node_id: [9; 32],
             addr: "127.0.0.1:9090".parse().unwrap(),
             timestamp_ms: 12345,
@@ -857,9 +1002,19 @@ mod tests {
         };
         let bytes = bincode::serialize(&hb).expect("serialize bincode");
         let decoded = HeartbeatWirePayload::from_bytes(&bytes).expect("deserialize bincode");
-        assert_eq!(decoded.piggyback_observations.len(), 2, "Must cap at 2 entries");
-        assert_eq!(decoded.piggyback_observations[0].gateway_pubkey, ev1.gateway_pubkey);
-        assert_eq!(decoded.piggyback_observations[1].gateway_pubkey, ev2.gateway_pubkey);
+        assert_eq!(
+            decoded.piggyback_observations.len(),
+            2,
+            "Must cap at 2 entries"
+        );
+        assert_eq!(
+            decoded.piggyback_observations[0].gateway_pubkey,
+            ev1.gateway_pubkey
+        );
+        assert_eq!(
+            decoded.piggyback_observations[1].gateway_pubkey,
+            ev2.gateway_pubkey
+        );
 
         // 2. JSON serde: omitted piggyback_observations defaults to empty Vec
         let json_str = r#"{
@@ -870,12 +1025,21 @@ mod tests {
             "declared_read_ema_credits": 200,
             "supported_suites_mask": 0
         }"#;
-        let decoded_json: HeartbeatWirePayload = serde_json::from_str(json_str).expect("deserialize json");
-        assert!(decoded_json.piggyback_observations.is_empty(), "Omitted field defaults to empty Vec");
+        let decoded_json: HeartbeatWirePayload =
+            serde_json::from_str(json_str).expect("deserialize json");
+        assert!(
+            decoded_json.piggyback_observations.is_empty(),
+            "Omitted field defaults to empty Vec"
+        );
 
         // 3. JSON serde with 3 entries caps at 2
         let json_with_3 = serde_json::to_string(&hb).expect("serialize json");
-        let decoded_json_3: HeartbeatWirePayload = serde_json::from_str(&json_with_3).expect("deserialize json");
-        assert_eq!(decoded_json_3.piggyback_observations.len(), 2, "JSON must cap at 2 entries");
+        let decoded_json_3: HeartbeatWirePayload =
+            serde_json::from_str(&json_with_3).expect("deserialize json");
+        assert_eq!(
+            decoded_json_3.piggyback_observations.len(),
+            2,
+            "JSON must cap at 2 entries"
+        );
     }
 }

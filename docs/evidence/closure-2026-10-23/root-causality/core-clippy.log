@@ -1,0 +1,160 @@
+    Checking humoco-proto v0.1.0 (/home/basti/Coding/humoco/humoco-proto)
+    Checking human_money_core v0.4.1 (/home/basti/Coding/humoco/human-money-core)
+error: useless conversion to the same type: `error::Error`
+   --> src/app_service/conflicts.rs:134:45
+    |
+134 |                 container.verify_integrity().map_err(Error::from)?;
+    |                                             ^^^^^^^^^^^^^^^^^^^^^ help: consider removing
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#useless_conversion
+    = note: `-D clippy::useless-conversion` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::useless_conversion)]`
+
+error: useless conversion to the same type: `error::Error`
+   --> src/app_service/conflicts.rs:280:56
+    |
+280 |                 Err(e) => TransactionOutcome::Rollback(Error::from(e)),
+    |                                                        ^^^^^^^^^^^^^^ help: consider removing `Error::from()`: `e`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#useless_conversion
+
+error: useless conversion to the same type: `error::Error`
+   --> src/app_service/conflicts.rs:413:14
+    |
+413 |                )
+    |   ______________^
+    |  |______________|
+414 | ||             .map_err(Error::from)
+    | ||_________________________________^
+415 | |          } else {
+    | |_________- help: consider removing
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#useless_conversion
+
+error: useless conversion to the same type: `error::Error`
+   --> src/app_service/conflicts.rs:423:14
+    |
+423 |                )
+    |   ______________^
+    |  |______________|
+424 | ||             .map_err(Error::from)
+    | ||_________________________________^
+425 | |          }
+    | |_________- help: consider removing
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#useless_conversion
+
+error: useless conversion to the same type: `error::Error`
+   --> src/app_service/transactions.rs:219:60
+    |
+219 |                       .verify_container_signature(creator_id)
+    |  ____________________________________________________________^
+220 | |                     .map_err(Error::from)?;
+    | |_________________________________________^ help: consider removing
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#useless_conversion
+
+error: redundant guard
+    --> src/services/l2_gateway.rs:1211:20
+     |
+1211 |         Some(s) if s == "genesis" => 0,
+     |                    ^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#redundant_guards
+     = note: `-D clippy::redundant-guards` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::redundant_guards)]`
+help: try
+     |
+1211 -         Some(s) if s == "genesis" => 0,
+1211 +         Some("genesis") => 0,
+     |
+
+error: the following explicit lifetimes could be elided: 'a
+   --> src/services/latency_router.rs:106:30
+    |
+106 | pub fn select_peer_from_top3<'a>(
+    |                              ^^
+107 |     peers: &'a [PeerLatencyInfo],
+    |             ^^
+108 |     jitter_seed: u64,
+109 | ) -> Option<&'a PeerLatencyInfo> {
+    |              ^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_lifetimes
+    = note: `-D clippy::needless-lifetimes` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_lifetimes)]`
+help: elide the lifetimes
+    |
+106 ~ pub fn select_peer_from_top3(
+107 ~     peers: &[PeerLatencyInfo],
+108 |     jitter_seed: u64,
+109 ~ ) -> Option<&PeerLatencyInfo> {
+    |
+
+error: deref which would be done by auto-deref
+   --> src/storage/key_manager.rs:184:78
+    |
+184 |             container.password_wrapped_key_with_nonce = crypto::encrypt_data(&*wrapping, &key)
+    |                                                                              ^^^^^^^^^^ help: try: `&wrapping`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#explicit_auto_deref
+    = note: `-D clippy::explicit-auto-deref` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::explicit_auto_deref)]`
+
+error: this `impl` can be derived
+   --> src/wallet/routing_memory.rs:228:1
+    |
+228 | / impl Default for RoutingMemoryStore {
+229 | |     fn default() -> Self {
+230 | |         Self {
+231 | |             corridors: HashMap::new(),
+...   |
+234 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#derivable_impls
+    = note: `-D clippy::derivable-impls` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::derivable_impls)]`
+help: replace the manual implementation with a derive attribute
+    |
+223 + #[derive(Default)]
+224 | pub struct RoutingMemoryStore {
+    |
+
+error: this function has too many arguments (9/7)
+   --> src/wallet/coin_selection.rs:107:1
+    |
+107 | / pub fn score_voucher(
+108 | |     amount: Decimal,
+109 | |     target: Decimal,
+110 | |     is_boomerang: bool,
+...   |
+116 | |     _recipient_id: &str,
+117 | | ) -> (i64, ScoreBreakdown) {
+    | |__________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: this `map_or` can be simplified
+   --> src/wallet/lifecycle.rs:520:16
+    |
+520 |               && instance
+    |  ________________^
+521 | |                 .voucher
+522 | |                 .transactions
+523 | |                 .first()
+524 | |                 .map_or(false, |tx| tx.t_type == "init");
+    | |________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_map_or
+    = note: `-D clippy::unnecessary-map-or` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_map_or)]`
+help: use is_some_and instead
+    |
+524 -                 .map_or(false, |tx| tx.t_type == "init");
+524 +                 .is_some_and(|tx| tx.t_type == "init");
+    |
+
+error: could not compile `human_money_core` (lib) due to 11 previous errors

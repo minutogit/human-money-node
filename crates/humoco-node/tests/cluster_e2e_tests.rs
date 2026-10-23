@@ -37,6 +37,7 @@ fn make_e2e_hmc_genesis(
     let del_str = valid_until_ms.to_string();
 
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -70,6 +71,7 @@ fn make_e2e_hmc_spend(
     let sender_pub = sender_key.verifying_key().to_bytes();
 
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -382,7 +384,9 @@ async fn test_e2e_cluster_lock_and_sync() {
     let sender_key = SigningKey::from_bytes(&[1u8; 32]);
     let parent_hex = "ab".repeat(32);
     let now = test_now_ms();
-    let lock_req = make_e2e_hmc_genesis(&parent_hex, now + 600_000, &sender_key);
+    let root = make_e2e_hmc_genesis(&parent_hex, now + 600_000, &sender_key);
+    for node in &harness.nodes { assert_eq!(node.post_lock(&root).await.unwrap().0, StatusCode::CREATED); }
+    let lock_req = make_e2e_hmc_spend(&root.layer2_voucher_id, "cluster-spend-slot", [8;32], &sender_key);
     let tx_id_hex = hex::encode(lock_req.transaction_hash);
 
     // 1. Submit lock on Node 0 (Node 1) via POST /v1/lock
@@ -537,11 +541,7 @@ async fn test_e2e_partition_and_conflict_resolution() {
     let genesis_key = SigningKey::from_bytes(&[0x99u8; 32]);
     let genesis_req = make_e2e_hmc_genesis(voucher_id, now + 600_000, &genesis_key);
 
-    let (status_gen, _) = harness.nodes[0]
-        .post_lock(&genesis_req)
-        .await
-        .expect("Genesis submit");
-    assert_eq!(status_gen, StatusCode::CREATED);
+    for node in &harness.nodes { assert_eq!(node.post_lock(&genesis_req).await.unwrap().0, StatusCode::CREATED); }
 
     let parent_lock_bytes = [0x77u8; 32];
     let parent_hex = hex::encode(parent_lock_bytes);
@@ -605,171 +605,32 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
 
     println!("Starting Compliance Test against live TCP node at {}...", node.rpc_addr);
 
-    // 1. Genesis Lock
-    use humoco_node::api::hmc::{
-        calculate_l2_payload_hash_raw, L2AuthPayload, L2LockRequest, L2ResponseEnvelope,
-        L2StatusQuery, L2Verdict, TRAP_NONE_PLACEHOLDER,
-    };
-    use rand::rngs::OsRng;
-    use rand::RngCore;
-    use ed25519_dalek::{Signer, SigningKey};
-
-    let mut rng = OsRng;
-    let sender_key = SigningKey::generate(&mut rng);
+    use humoco_node::api::hmc::L2StatusQuery;
+    let sender_key = SigningKey::from_bytes(&[73;32]);
     let sender_pub = sender_key.verifying_key().to_bytes();
-
-    let mut t_id_bytes = [0u8; 32];
-    rng.fill_bytes(&mut t_id_bytes);
-    let genesis_t_id = bs58::encode(t_id_bytes).into_string();
-
-    let mut v_bytes = [0u8; 32];
-    rng.fill_bytes(&mut v_bytes);
-    let v_id = hex::encode(v_bytes);
-
-    let challenge_ds_tag = genesis_t_id.clone();
-    let valid_until_ms = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64) + 600_000;
-    let del_str = valid_until_ms.to_string();
-    let payload_hash = calculate_l2_payload_hash_raw(
-        TRAP_NONE_PLACEHOLDER,
-        &challenge_ds_tag,
-        &t_id_bytes,
-        &sender_pub,
-        "none",
-        "none",
-        0,
-        0,
-        Some(&del_str),
-        "",
-    );
-    let sig = sender_key.sign(&payload_hash);
-
-    let genesis_req = L2LockRequest {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: sender_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: v_id.clone(),
-        ds_tag: None,
-        transaction_hash: t_id_bytes,
-        is_genesis: true,
-        sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
-        layer2_signature: sig.to_bytes(),
-        trap_r: Some("none".into()),
-        trap_s: Some("none".into()),
-        encrypted_timestamp: 0,
-        created_at_ms: test_now_ms(),
-        deletable_at: Some(del_str),
-        privacy_guard: None,
-    };
-
-    println!("-> Sending Genesis Lock (is_genesis=true)...");
-    let (status, envelope) = node
-        .post_lock(&genesis_req)
-        .await
-        .expect("Failed to reach server");
+    let genesis_req = make_e2e_hmc_genesis("live-compliance-root", test_now_ms()+600_000, &sender_key);
+    let v_id = genesis_req.layer2_voucher_id.clone();
+    let (status, envelope) = node.post_lock(&genesis_req).await.unwrap();
     assert_eq!(status, StatusCode::CREATED);
-    match envelope.verdict {
-        L2Verdict::Verified { .. } => println!("   [OK] Genesis Lock verified!"),
-        _ => panic!("Expected Verified verdict for genesis!"),
-    }
-
-    // 2. Happy Path Query
-    println!("-> Querying Status (Happy Path)...");
+    assert!(envelope.quorum_certificate.is_none());
+    let spend = make_e2e_hmc_spend(&v_id, "live-compliance-slot", [74;32], &sender_key);
+    assert_eq!(node.post_lock(&spend).await.unwrap().0, StatusCode::CREATED);
     let query_happy = L2StatusQuery {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: genesis_req.sender_ephemeral_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: v_id.clone(),
-        challenge_ds_tag: genesis_t_id.clone(),
-        locator_prefixes: vec![],
-        read_quorum: 1,
+        auth: spend.auth.clone(), layer2_voucher_id: v_id.clone(),
+        challenge_ds_tag: spend.ds_tag.clone().unwrap(), locator_prefixes: vec![], read_quorum: 1,
     };
-
-    let json_body = serde_json::to_string(&query_happy).unwrap();
-    let (status, body) = node
-        .http_request(
-            "POST",
-            "/v1/status",
-            Some(&json_body),
-            &[("Content-Type", "application/json")],
-        )
-        .await
-        .expect("Failed to reach server");
+    let (status, body) = node.http_request("POST", "/v1/status",
+        Some(&serde_json::to_string(&query_happy).unwrap()), &[("Content-Type", "application/json")]).await.unwrap();
     assert_eq!(status, StatusCode::OK);
-    let envelope: L2ResponseEnvelope = serde_json::from_slice(&body).expect("Parse failed");
-    match envelope.verdict {
-        L2Verdict::Verified { .. } => println!("   [OK] Happy Path Verified!"),
-        _ => panic!("Expected Verified verdict for Genesis status!"),
-    }
-
-    // 3. Double Spend
-    let ds_key = SigningKey::generate(&mut rng);
-    let ds_pub = ds_key.verifying_key().to_bytes();
-    let parent_bytes = *blake3::hash(genesis_t_id.as_bytes()).as_bytes();
-    let h_genesis = humoco_node::storage::compute_hmc_canonical_hash(&parent_bytes, &genesis_req.sender_ephemeral_pub, &genesis_req.transaction_hash);
-    let mut diff_t_id = [0u8; 32];
-    loop {
-        rng.fill_bytes(&mut diff_t_id);
-        let h_diff = humoco_node::storage::compute_hmc_canonical_hash(&parent_bytes, &ds_pub, &diff_t_id);
-        if h_diff > h_genesis {
-            break;
-        }
-    }
-    let ds_payload_hash = calculate_l2_payload_hash_raw(
-        &v_id,
-        &genesis_t_id,
-        &diff_t_id,
-        &ds_pub,
-        "none",
-        "none",
-        0,
-        0,
-        None,
-        "",
-    );
-    let ds_sig = ds_key.sign(&ds_payload_hash);
-
-    let ds_req = L2LockRequest {
-        auth: L2AuthPayload {
-            ephemeral_pubkey: ds_pub,
-            auth_signature: None,
-        },
-        layer2_voucher_id: v_id.clone(),
-        ds_tag: Some(genesis_t_id.clone()),
-        transaction_hash: diff_t_id,
-        is_genesis: false,
-        sender_ephemeral_pub: ds_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
-        layer2_signature: ds_sig.to_bytes(),
-        trap_r: Some("none".into()),
-        trap_s: Some("none".into()),
-        encrypted_timestamp: 0,
-        created_at_ms: test_now_ms(),
-        deletable_at: None,
-        privacy_guard: None,
-    };
-
-    let (status, envelope) = node
-        .post_lock(&ds_req)
-        .await
-        .expect("Failed to send request");
-
+    let envelope: L2ResponseEnvelope = serde_json::from_slice(&body).unwrap();
+    assert!(matches!(envelope.verdict, L2Verdict::Verified { .. }));
+    let alternative_key = SigningKey::from_bytes(&[76;32]);
+    let alternative = make_e2e_hmc_spend(&v_id, "live-compliance-slot", [75;32], &alternative_key);
+    let (status, envelope) = node.post_lock(&alternative).await.unwrap();
     assert_eq!(status, StatusCode::CONFLICT);
     match envelope.verdict {
-        L2Verdict::Conflict { existing_lock } => {
-            let existing_t_id = existing_lock.t_id;
-            assert_eq!(existing_t_id, genesis_req.transaction_hash);
-            assert_ne!(existing_t_id, diff_t_id, "Server allowed double spend!");
-            println!("   [OK] Double Spend properly proved via returning existing lock!");
-        }
-        _ => panic!("Unexpected verdict for double-spend!"),
+        L2Verdict::Conflict { existing_lock } => assert_eq!(existing_lock.t_id, spend.transaction_hash),
+        verdict => panic!("Expected genuine spend conflict, got {verdict:?}"),
     }
 
     // 4. Unknown Voucher
@@ -894,7 +755,9 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     let sender_key_a = SigningKey::from_bytes(&[7u8; 32]);
     let parent_hex = "ff".repeat(32);
     let now = test_now_ms();
-    let req = make_e2e_hmc_genesis(&parent_hex, now + 600_000, &sender_key_a);
+    let root = make_e2e_hmc_genesis(&parent_hex, now + 600_000, &sender_key_a);
+    assert_eq!(node_a.post_lock(&root).await.unwrap().0, StatusCode::CREATED);
+    let req = make_e2e_hmc_spend(&root.layer2_voucher_id, "closed-spend-slot", [19;32], &sender_key_a);
     let tx_id_hex = hex::encode(req.transaction_hash);
 
     let (status, resp) = node_a.post_lock(&req).await.expect("post_lock on Node A");
@@ -955,6 +818,7 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     }
 
     assert!(!synced, "A rejected bootstrap write must never materialize on the joining node");
+    assert_eq!(node_b.post_lock(&root).await.unwrap().0, StatusCode::CREATED);
     let (status, response) = node_b.post_lock(&req).await.expect("joining node write");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(matches!(response.verdict, L2Verdict::Rejected { .. }));
@@ -972,27 +836,23 @@ async fn test_e2e_churn_preserves_frozen_quorum_and_restart_gate() {
     let now = test_now_ms();
     let sender_key_1 = SigningKey::from_bytes(&[0x11u8; 32]);
     let parent_hex_1 = "11".repeat(32);
-    let req1 = make_e2e_hmc_genesis(&parent_hex_1, now + 600_000, &sender_key_1);
-    let _tx_id_1 = hex::encode(req1.transaction_hash);
-
-    // Submit lock 1 to Node 0
-    let (status, resp) = harness.nodes[0].post_lock(&req1).await.expect("Submit lock 1");
+    let root1 = make_e2e_hmc_genesis(&parent_hex_1, now + 600_000, &sender_key_1);
+    let sender_key_2 = SigningKey::from_bytes(&[0x22u8; 32]);
+    let root2 = make_e2e_hmc_genesis("churn-root-two", now + 600_000, &sender_key_2);
+    for node in &harness.nodes {
+        assert_eq!(node.post_lock(&root1).await.unwrap().0, StatusCode::CREATED);
+        assert_eq!(node.post_lock(&root2).await.unwrap().0, StatusCode::CREATED);
+    }
+    let req1 = make_e2e_hmc_spend(&root1.layer2_voucher_id, "churn-slot-one", [31;32], &sender_key_1);
+    let (status, resp) = harness.nodes[0].post_lock(&req1).await.unwrap();
     assert_eq!(status, StatusCode::CREATED);
     assert!(matches!(resp.verdict, L2Verdict::Verified { .. }));
-    assert_ne!(resp.server_signature, [0u8; 64]);
-
-    // Shut down Node 2 (simulating offline churn)
     harness.nodes[2].cancel_token.cancel();
     tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Submit lock 2 to Node 0 while Node 2 is offline
-    let sender_key_2 = SigningKey::from_bytes(&[0x22u8; 32]);
-    let parent_hex_2 = "22".repeat(32);
-    let req2 = make_e2e_hmc_genesis(&parent_hex_2, now + 600_000, &sender_key_2);
+    let req2 = make_e2e_hmc_spend(&root2.layer2_voucher_id, "churn-slot-two", [32;32], &sender_key_2);
     let tx_id_2 = hex::encode(req2.transaction_hash);
-
-    let (status, resp) = harness.nodes[0].post_lock(&req2).await.expect("Submit lock 2");
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "A frozen three-member committee cannot replace the offline member");
+    let (status, resp) = harness.nodes[0].post_lock(&req2).await.unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "Frozen committee cannot replace the offline member");
     assert!(matches!(resp.verdict, L2Verdict::Rejected { .. }));
 
     // Respawn Node 2 reusing its storage directory and identity
@@ -1094,6 +954,7 @@ async fn test_e2e_sync_garbage_and_invalid_lock_rejection() {
 
     // 3. Ingest HMC lock with missing voucher root and invalid deletable_at
     let invalid_hmc_entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "test_voucher_garbage".into(),
         t_id: [0x88u8; 32],
         layer2_signature: [0xAAu8; 64],

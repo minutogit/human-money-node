@@ -2,38 +2,57 @@
 //! Covers: wire framing OOM protection, Slowloris timeout, HTTP ingress fuzz,
 //! PoW replay, quota exhaustion, HMC signature fuzz – all must not panic.
 
-use std::sync::Arc;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use tempfile::tempdir;
-use tower::ServiceExt;
 use ed25519_dalek::{Signer, SigningKey};
+use humoco_node::network::framing::{read_frame, read_frame_with_timeout, write_frame};
 use humoco_node::{
-    api::{build_router, AppState, hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest}},
+    api::{
+        build_router,
+        hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest},
+        AppState,
+    },
     identity::NodeIdentity,
     ingress::PowEngine,
     ingress::TierController,
     storage::{DualTierEngine, RedbStorage},
 };
-use humoco_sim_core::wire::{WireHeader, MsgType};
-use humoco_node::network::framing::{write_frame, read_frame, read_frame_with_timeout};
+use humoco_sim_core::wire::{MsgType, WireHeader};
+use std::sync::Arc;
 use std::time::Duration;
+use tempfile::tempdir;
+use tower::ServiceExt;
 
 // deterministic xorshift
 struct Xor64(u64);
 impl Xor64 {
-    fn new(seed: u64) -> Self { Self(seed.max(1)) }
-    fn next(&mut self) -> u64 { let mut x=self.0; x ^= x<<13; x ^= x>>7; x ^= x<<17; self.0=x; x }
-    fn range(&mut self, lo: u64, hi: u64) -> u64 { lo + (self.next() % (hi - lo + 1)) }
-    fn bytes(&mut self, n: usize) -> Vec<u8> { (0..n).map(|_| self.next() as u8).collect() }
+    fn new(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    fn range(&mut self, lo: u64, hi: u64) -> u64 {
+        lo + (self.next() % (hi - lo + 1))
+    }
+    fn bytes(&mut self, n: usize) -> Vec<u8> {
+        (0..n).map(|_| self.next() as u8).collect()
+    }
 }
 
 /// Explicit test-only readiness for a fresh, isolated registry with no peers.
 /// This does not model activation after transfer or dynamic committee changes.
 fn isolated_ready(state: &AppState) {
-    for shard in 0..=u16::MAX { state.readiness_manager.mark_shard_ready(shard); }
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
 }
 
 fn setup_app() -> axum::Router {
@@ -70,7 +89,11 @@ fn make_genesis(parent_hex: &str, valid_until_ms: u64, key: &SigningKey) -> L2Lo
     let tx_hash = *blake3::hash(parent_hex.as_bytes()).as_bytes();
     let del = valid_until_ms.to_string();
     let mut req = L2LockRequest {
-        auth: L2AuthPayload{ ephemeral_pubkey: pubb, auth_signature: None },
+        causal_output: None,
+        auth: L2AuthPayload {
+            ephemeral_pubkey: pubb,
+            auth_signature: None,
+        },
         layer2_voucher_id: format!("voucher_{}", parent_hex),
         ds_tag: None,
         transaction_hash: tx_hash,
@@ -78,9 +101,16 @@ fn make_genesis(parent_hex: &str, valid_until_ms: u64, key: &SigningKey) -> L2Lo
         sender_ephemeral_pub: pubb,
         receiver_ephemeral_pub_hash: None,
         change_ephemeral_pub_hash: None,
-        layer2_signature: [0u8;64],
-        trap_r: Some("none".into()), trap_s: Some("none".into()),
-        encrypted_timestamp: 0, created_at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64, deletable_at: Some(del), privacy_guard: None,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+        deletable_at: Some(del),
+        privacy_guard: None,
     };
     let h = calculate_l2_payload_hash(&req);
     req.layer2_signature = key.sign(&h).to_bytes();
@@ -98,17 +128,40 @@ async fn test_chaos_wire_malicious_payload_len_bounded() {
     let hdr_big = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, huge.len() as u32);
     let mut buf = Vec::new();
     let err = write_frame(&mut buf, &hdr_big, &huge).await;
-    assert!(err.is_err(), "128KiB Heartbeat must be rejected (>64KiB limit)");
+    assert!(
+        err.is_err(),
+        "128KiB Heartbeat must be rejected (>64KiB limit)"
+    );
 
-    // Sync frame 4MiB allowed, 5MiB rejected
+    // Every wire frame, including sync, is bounded to 64 KiB.
     let ok_sync = vec![1u8; 3 * 1024 * 1024];
-    let hdr_sync = WireHeader::new(MsgType::ActiveSyncDone as u16, 2, 0, 0, ok_sync.len() as u32);
+    let hdr_sync = WireHeader::new(
+        MsgType::ActiveSyncDone as u16,
+        2,
+        0,
+        0,
+        ok_sync.len() as u32,
+    );
     buf.clear();
-    assert!(write_frame(&mut buf, &hdr_sync, &ok_sync).await.is_ok(), "3MiB sync must pass");
+    assert!(
+        write_frame(&mut buf, &hdr_sync, &ok_sync).await.is_err(),
+        "3MiB sync must be rejected"
+    );
     let too_big_sync = vec![1u8; 5 * 1024 * 1024];
-    let hdr_too = WireHeader::new(MsgType::ActiveSyncDone as u16, 3, 0, 0, too_big_sync.len() as u32);
+    let hdr_too = WireHeader::new(
+        MsgType::ActiveSyncDone as u16,
+        3,
+        0,
+        0,
+        too_big_sync.len() as u32,
+    );
     buf.clear();
-    assert!(write_frame(&mut buf, &hdr_too, &too_big_sync).await.is_err(), "5MiB sync must be rejected");
+    assert!(
+        write_frame(&mut buf, &hdr_too, &too_big_sync)
+            .await
+            .is_err(),
+        "5MiB sync must be rejected"
+    );
 
     // Read path: header claims 10MB but we only send header + truncated payload -> must error, not allocate 10MB
     // Craft header with payload_len = u32::MAX
@@ -119,17 +172,26 @@ async fn test_chaos_wire_malicious_payload_len_bounded() {
     // Attempt to read – should fail with limit error before allocating MAX
     let mut cursor = std::io::Cursor::new(bad_buf);
     let res = read_frame(&mut cursor).await;
-    assert!(res.is_err(), "u32::MAX payload_len must be rejected without OOM");
+    assert!(
+        res.is_err(),
+        "u32::MAX payload_len must be rejected without OOM"
+    );
     let err_str = res.unwrap_err().to_string();
-    assert!(err_str.contains("exceeds maximum") || err_str.contains("Invalid") || err_str.contains("limit"), "error must mention limit: {}", err_str);
+    assert!(
+        err_str.contains("exceeds maximum")
+            || err_str.contains("Invalid")
+            || err_str.contains("limit"),
+        "error must mention limit: {}",
+        err_str
+    );
 
     // Chunked growth test: Ensure allocation is min(payload_len, 64k) not blind Vec::with_capacity(wire_len)
-    for len in [0u32, 1, 64*1024, 65*1024, 1_000_000] {
-        let bounded = (len as usize).min(64*1024);
-        assert!(bounded <= 64*1024);
+    for len in [0u32, 1, 64 * 1024, 65 * 1024, 1_000_000] {
+        let bounded = (len as usize).min(64 * 1024);
+        assert!(bounded <= 64 * 1024);
         // simulate bounded allocation
         let v = Vec::<u8>::with_capacity(bounded);
-        assert!(v.capacity() <= 64*1024);
+        assert!(v.capacity() <= 64 * 1024);
     }
 }
 
@@ -137,8 +199,10 @@ async fn test_chaos_wire_malicious_payload_len_bounded() {
 async fn test_chaos_wire_fuzz_random_headers_no_panic() {
     let mut rng = Xor64::new(0xDEAD1234);
     for _ in 0..5000 {
-        let mut raw = [0u8;32];
-        for b in &mut raw { *b = rng.next() as u8; }
+        let mut raw = [0u8; 32];
+        for b in &mut raw {
+            *b = rng.next() as u8;
+        }
         // Try to interpret as WireHeader – must not panic
         let h = WireHeader::from_bytes(&raw);
         let _ = h.to_bytes();
@@ -179,10 +243,18 @@ async fn test_chaos_http_fuzz_random_payloads() {
             .unwrap();
         let res = app.clone().oneshot(req).await.unwrap();
         // Must not be 500 Internal Server Error panic – only 400/401/429/404 etc. allowed
-        assert_ne!(res.status(), StatusCode::INTERNAL_SERVER_ERROR, "fuzz payload must not cause 500");
+        assert_ne!(
+            res.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "fuzz payload must not cause 500"
+        );
         // Must be 400 Bad Request, 401 Unauthorized, 429 Too Many Requests, or 413 Payload Too Large
         // We accept any 4xx
-        assert!(res.status().is_client_error() || res.status()==StatusCode::NOT_FOUND, "status {} should be 4xx", res.status());
+        assert!(
+            res.status().is_client_error() || res.status() == StatusCode::NOT_FOUND,
+            "status {} should be 4xx",
+            res.status()
+        );
     }
 
     // Also fuzz /v1/status
@@ -216,7 +288,7 @@ async fn test_chaos_http_fuzz_random_payloads() {
 async fn test_chaos_http_oversized_body_rejected() {
     let app = setup_app();
     // 128KiB body exceeds 64KiB DefaultBodyLimit -> should be 413 or 400, not panic
-    let big = vec![b'A'; 128*1024];
+    let big = vec![b'A'; 128 * 1024];
     let req = Request::builder()
         .method("POST")
         .uri("/v1/lock")
@@ -224,7 +296,11 @@ async fn test_chaos_http_oversized_body_rejected() {
         .body(Body::from(big))
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
-    assert!(res.status().is_client_error(), "oversized body must be 4xx, got {}", res.status());
+    assert!(
+        res.status().is_client_error(),
+        "oversized body must be 4xx, got {}",
+        res.status()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -237,38 +313,54 @@ async fn test_chaos_pow_replay_and_invalid_challenge() {
     let (challenge, diff, _) = pow.generate_challenge();
     let nonce = PowEngine::solve_blake3_hashcash(&challenge, diff, 50_000).expect("solve");
 
-    let sender_key = SigningKey::from_bytes(&[7u8;32]);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-    let req = make_genesis(&"ff".repeat(32), now+600_000, &sender_key);
+    let sender_key = SigningKey::from_bytes(&[7u8; 32]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let req = make_genesis(&"ff".repeat(32), now + 600_000, &sender_key);
 
     // First use -> 201
-    let req1 = Request::builder().method("POST").uri("/v1/lock")
-        .header("content-type","application/json")
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
         .header("x-pow-challenge", &challenge)
         .header("x-pow-nonce", nonce.to_string())
-        .body(Body::from(serde_json::to_vec(&req).unwrap())).unwrap();
+        .body(Body::from(serde_json::to_vec(&req).unwrap()))
+        .unwrap();
     let res1 = app.clone().oneshot(req1).await.unwrap();
     assert_eq!(res1.status(), StatusCode::CREATED);
 
     // Replay same challenge+nonce on different parent -> 401 (invalid) or 429 ReplayDetected
-    let sender_key2 = SigningKey::from_bytes(&[8u8;32]);
-    let req2 = make_genesis(&"aa".repeat(32), now+600_000, &sender_key2);
-    let replay_req = Request::builder().method("POST").uri("/v1/lock")
-        .header("content-type","application/json")
+    let sender_key2 = SigningKey::from_bytes(&[8u8; 32]);
+    let req2 = make_genesis(&"aa".repeat(32), now + 600_000, &sender_key2);
+    let replay_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
         .header("x-pow-challenge", &challenge)
         .header("x-pow-nonce", nonce.to_string())
-        .body(Body::from(serde_json::to_vec(&req2).unwrap())).unwrap();
+        .body(Body::from(serde_json::to_vec(&req2).unwrap()))
+        .unwrap();
     let res2 = app.clone().oneshot(replay_req).await.unwrap();
-    assert!(res2.status()==StatusCode::UNAUTHORIZED || res2.status()==StatusCode::TOO_MANY_REQUESTS, "replay must be 401 or 429, got {}", res2.status());
+    assert!(
+        res2.status() == StatusCode::UNAUTHORIZED || res2.status() == StatusCode::TOO_MANY_REQUESTS,
+        "replay must be 401 or 429, got {}",
+        res2.status()
+    );
 
     // Tampered challenge hex -> 401
     let mut tampered = challenge.clone();
     tampered.replace_range(0..2, "ff");
-    let bad_req = Request::builder().method("POST").uri("/v1/lock")
-        .header("content-type","application/json")
+    let bad_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
         .header("x-pow-challenge", &tampered)
         .header("x-pow-nonce", "0")
-        .body(Body::from(serde_json::to_vec(&req2).unwrap())).unwrap();
+        .body(Body::from(serde_json::to_vec(&req2).unwrap()))
+        .unwrap();
     let res3 = app.clone().oneshot(bad_req).await.unwrap();
     assert_eq!(res3.status(), StatusCode::UNAUTHORIZED);
 
@@ -277,11 +369,14 @@ async fn test_chaos_pow_replay_and_invalid_challenge() {
     for _ in 0..100 {
         let fake_chal = hex::encode(rng.bytes(32));
         let fake_nonce = rng.next().to_string();
-        let reqf = Request::builder().method("POST").uri("/v1/lock")
-            .header("content-type","application/json")
+        let reqf = Request::builder()
+            .method("POST")
+            .uri("/v1/lock")
+            .header("content-type", "application/json")
             .header("x-pow-challenge", &fake_chal)
             .header("x-pow-nonce", &fake_nonce)
-            .body(Body::from(serde_json::to_vec(&req2).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&req2).unwrap()))
+            .unwrap();
         let res = app.clone().oneshot(reqf).await.unwrap();
         assert!(res.status().is_client_error());
     }
@@ -302,7 +397,7 @@ async fn test_chaos_ingress_quota_exhaustion_under_flood() {
     let pow = Arc::new(PowEngine::new(*identity.node_id(), 0)); // difficulty 0 for speed
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     // Register VIP with tiny quota 500 BY
-    let tag = [0x77u8;32];
+    let tag = [0x77u8; 32];
     let token = "flood_vip";
     tier.register_vip_token(token, tag);
     storage.set_quota(&tag, 500).unwrap();
@@ -313,31 +408,58 @@ async fn test_chaos_ingress_quota_exhaustion_under_flood() {
     let app = build_router(state);
 
     // 5-year lock = 960 BY >500 -> 429 immediately
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-    let sender = SigningKey::from_bytes(&[9u8;32]);
-    let req_big = make_genesis(&"bb".repeat(32), now + 5*31_536_000_000, &sender);
-    let res_big = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock")
-        .header("content-type","application/json")
-        .header("authorization", format!("Bearer {}", token))
-        .body(Body::from(serde_json::to_vec(&req_big).unwrap())).unwrap()).await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let sender = SigningKey::from_bytes(&[9u8; 32]);
+    let req_big = make_genesis(&"bb".repeat(32), now + 5 * 31_536_000_000, &sender);
+    let res_big = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token))
+                .body(Body::from(serde_json::to_vec(&req_big).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_big.status(), StatusCode::TOO_MANY_REQUESTS);
 
     // Flood small locks – quota 500 should allow 2x 192 BY (1-year) then 429
     // Need to wait for async persist between charges to avoid stale-disk reload bug (known race)
     let mut successes = 0;
     for i in 0..5 {
-        let k = SigningKey::from_bytes(&[ (10+i) as u8;32]);
-        let req = make_genesis(&format!("{:02x}", i).repeat(32), now+31_536_000_000, &k);
-        let res = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock")
-            .header("content-type","application/json")
-            .header("authorization", format!("Bearer {}", token))
-            .body(Body::from(serde_json::to_vec(&req).unwrap())).unwrap()).await.unwrap();
-        if res.status()==StatusCode::CREATED { successes+=1; }
-        else { assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS); }
+        let k = SigningKey::from_bytes(&[(10 + i) as u8; 32]);
+        let req = make_genesis(&format!("{:02x}", i).repeat(32), now + 31_536_000_000, &k);
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lock")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if res.status() == StatusCode::CREATED {
+            successes += 1;
+        } else {
+            assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
         // Allow async persist to catch up (100ms) before next charge – prevents disk-stale reload
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
-    assert_eq!(successes, 2, "500 BY quota should allow exactly 2x 192 BY locks");
+    assert_eq!(
+        successes, 2,
+        "500 BY quota should allow exactly 2x 192 BY locks"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -350,32 +472,58 @@ async fn test_chaos_hmc_bad_signatures_no_panic() {
     tier.register_f2f_peer("hmc_fuzz_token");
     let mut rng = Xor64::new(0xC0FFEE);
     for _ in 0..200 {
-        let mut fake_sig = [0u8;64];
-        for b in &mut fake_sig { *b = rng.next() as u8; }
-        let mut tx = [0u8;32];
-        for b in &mut tx { *b = rng.next() as u8; }
+        let mut fake_sig = [0u8; 64];
+        for b in &mut fake_sig {
+            *b = rng.next() as u8;
+        }
+        let mut tx = [0u8; 32];
+        for b in &mut tx {
+            *b = rng.next() as u8;
+        }
         let bad_req = L2LockRequest {
-            auth: L2AuthPayload{ ephemeral_pubkey: [rng.next() as u8;32], auth_signature: None },
+            causal_output: None,
+            auth: L2AuthPayload {
+                ephemeral_pubkey: [rng.next() as u8; 32],
+                auth_signature: None,
+            },
             layer2_voucher_id: hex::encode(rng.bytes(16)),
             ds_tag: None,
             transaction_hash: tx,
             is_genesis: true,
-            sender_ephemeral_pub: [rng.next() as u8;32],
+            sender_ephemeral_pub: [rng.next() as u8; 32],
             receiver_ephemeral_pub_hash: None,
             change_ephemeral_pub_hash: None,
             layer2_signature: fake_sig,
-            trap_r: Some("none".into()), trap_s: Some("none".into()),
+            trap_r: Some("none".into()),
+            trap_s: Some("none".into()),
             encrypted_timestamp: 0,
-            created_at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
-            deletable_at: Some((std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 600_000).to_string()),
+            created_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            deletable_at: Some(
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+                    + 600_000)
+                    .to_string(),
+            ),
             privacy_guard: None,
         };
-        let req = Request::builder().method("POST").uri("/v1/lock")
-            .header("content-type","application/json")
-            .header("x-peer-token","hmc_fuzz_token")
-            .body(Body::from(serde_json::to_vec(&bad_req).unwrap())).unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/lock")
+            .header("content-type", "application/json")
+            .header("x-peer-token", "hmc_fuzz_token")
+            .body(Body::from(serde_json::to_vec(&bad_req).unwrap()))
+            .unwrap();
         let res = app.clone().oneshot(req).await.unwrap();
-        assert_ne!(res.status(), StatusCode::INTERNAL_SERVER_ERROR, "bad sig must not cause 500");
+        assert_ne!(
+            res.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "bad sig must not cause 500"
+        );
         assert!(res.status().is_client_error());
     }
 }

@@ -1,3 +1,4 @@
+use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{
@@ -5,7 +6,6 @@ use std::sync::{
     Arc, RwLock as StdRwLock,
 };
 use std::time::{Duration, Instant};
-use rand::Rng;
 use tokio::sync::RwLock;
 
 use crate::network::peer::{PeerConnectionType, PeerInfo, PeerStatus};
@@ -244,10 +244,7 @@ pub struct DnsPeerState {
 /// Phase 10: queued fraud-proof forward message — the payload plus the
 /// immediate sender to exclude on forward (echo protection). `None` means
 /// locally detected (broadcast to all F2F friends).
-pub type FraudProofForwardMsg = (
-    humoco_sim_core::fraud::FraudProofPayload,
-    Option<[u8; 32]>,
-);
+pub type FraudProofForwardMsg = (humoco_sim_core::fraud::FraudProofPayload, Option<[u8; 32]>);
 
 /// Bounded LRU-style deduplication cache for seen heartbeats (Spec 11).
 #[derive(Debug)]
@@ -285,6 +282,11 @@ type LocalTicketObservation = Arc<std::sync::Mutex<Option<([u8; 32], [u8; 32], I
 
 #[derive(Clone, Debug)]
 pub struct PeerManager {
+    gateway_advertisements: Arc<
+        parking_lot::RwLock<
+            std::collections::BTreeMap<[u8; 32], crate::network::discovery::GatewayAdvertisement>,
+        >,
+    >,
     peers: Arc<RwLock<HashMap<SocketAddr, PeerInfo>>>,
     f2f_friends: Arc<RwLock<HashMap<[u8; 32], Option<SocketAddr>>>>,
     dns_peers: Arc<RwLock<Vec<DnsPeerState>>>,
@@ -304,8 +306,13 @@ pub struct PeerManager {
     ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
     local_sync_ready: Arc<std::sync::atomic::AtomicBool>,
     merge_hysteresis_until_ms: Arc<AtomicU64>,
-    fraud_proof_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<FraudProofForwardMsg>>>>,
-    recent_observed_evidences: Arc<tokio::sync::RwLock<std::collections::VecDeque<humoco_sim_core::fraud::IngressEnvelopeEvidence>>>,
+    fraud_proof_tx:
+        Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<FraudProofForwardMsg>>>>,
+    recent_observed_evidences: Arc<
+        tokio::sync::RwLock<
+            std::collections::VecDeque<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
+        >,
+    >,
     seen_heartbeats: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
     /// Phase 10: bounded LRU seen-set for fraud-proof forwarding dedup
     /// (prevents gossip amplification loops) + echo protection basis.
@@ -317,7 +324,10 @@ pub struct PeerManager {
 impl PeerManager {
     /// Creates a new PeerManager pre-populated with configured peer addresses.
     pub fn new(configured_peers: Vec<SocketAddr>) -> Self {
-        let entries = configured_peers.into_iter().map(|addr| (None, addr)).collect();
+        let entries = configured_peers
+            .into_iter()
+            .map(|addr| (None, addr))
+            .collect();
         Self::with_f2f(entries, Vec::new())
     }
 
@@ -384,6 +394,9 @@ impl PeerManager {
             f2f_friends: Arc::new(RwLock::new(friend_map)),
             dns_peers: Arc::new(RwLock::new(dns_state_list)),
             known_network_nodes: Arc::new(RwLock::new(HashMap::new())),
+            gateway_advertisements: Arc::new(parking_lot::RwLock::new(
+                std::collections::BTreeMap::new(),
+            )),
             verifying_keys: Arc::new(RwLock::new(vk_map)),
             banned_nodes: Arc::new(RwLock::new(HashSet::new())),
             endpoint: Arc::new(StdRwLock::new(None)),
@@ -396,7 +409,9 @@ impl PeerManager {
             local_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             merge_hysteresis_until_ms: Arc::new(AtomicU64::new(0)),
             fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
-            recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(16))),
+            recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(
+                std::collections::VecDeque::with_capacity(16),
+            )),
             seen_heartbeats: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(10_000))),
             seen_fraud_proofs: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(1024))),
             local_ticket_observation: Arc::new(std::sync::Mutex::new(None)),
@@ -417,7 +432,12 @@ impl PeerManager {
     }
 
     /// Checks if a heartbeat has already been seen; if not, records it. Returns true if new, false if duplicate.
-    pub async fn check_and_record_heartbeat(&self, node_id: &[u8; 32], nonce: u64, timestamp_ms: u64) -> bool {
+    pub async fn check_and_record_heartbeat(
+        &self,
+        node_id: &[u8; 32],
+        nonce: u64,
+        timestamp_ms: u64,
+    ) -> bool {
         let mut hasher = blake3::Hasher::new();
         hasher.update(node_id);
         hasher.update(&nonce.to_le_bytes());
@@ -465,10 +485,7 @@ impl PeerManager {
         out
     }
 
-    pub async fn set_fraud_proof_tx(
-        &self,
-        tx: tokio::sync::mpsc::Sender<FraudProofForwardMsg>,
-    ) {
+    pub async fn set_fraud_proof_tx(&self, tx: tokio::sync::mpsc::Sender<FraudProofForwardMsg>) {
         let mut slot = self.fraud_proof_tx.write().await;
         *slot = Some(tx);
     }
@@ -548,7 +565,8 @@ impl PeerManager {
             dns_guard.iter().map(|s| s.entry.clone()).collect()
         };
         // Resolve all hostnames without holding any manager lock.
-        let mut resolved: Vec<(crate::config::PeerConfigEntry, Option<SocketAddr>)> = Vec::with_capacity(snapshot.len());
+        let mut resolved: Vec<(crate::config::PeerConfigEntry, Option<SocketAddr>)> =
+            Vec::with_capacity(snapshot.len());
         for entry in snapshot {
             let endpoint = if entry.raw_endpoint.contains(':') {
                 entry.raw_endpoint.clone()
@@ -571,12 +589,16 @@ impl PeerManager {
         // Apply mutations sequentially, one lock at a time.
         let mut changed = false;
         for (entry, new_addr_opt) in resolved {
-            let Some(new_addr) = new_addr_opt else { continue };
+            let Some(new_addr) = new_addr_opt else {
+                continue;
+            };
             let old_addr_opt = {
                 let dns_guard = self.dns_peers.read().await;
                 dns_guard
                     .iter()
-                    .find(|s| s.entry.raw_endpoint == entry.raw_endpoint && s.entry.pubkey == entry.pubkey)
+                    .find(|s| {
+                        s.entry.raw_endpoint == entry.raw_endpoint && s.entry.pubkey == entry.pubkey
+                    })
                     .and_then(|s| s.current_addr)
             };
             if Some(new_addr) == old_addr_opt {
@@ -633,10 +655,9 @@ impl PeerManager {
 
             {
                 let mut dns_guard = self.dns_peers.write().await;
-                if let Some(state) = dns_guard
-                    .iter_mut()
-                    .find(|s| s.entry.raw_endpoint == entry.raw_endpoint && s.entry.pubkey == entry.pubkey)
-                {
+                if let Some(state) = dns_guard.iter_mut().find(|s| {
+                    s.entry.raw_endpoint == entry.raw_endpoint && s.entry.pubkey == entry.pubkey
+                }) {
                     state.current_addr = Some(new_addr);
                 }
             }
@@ -814,7 +835,9 @@ impl PeerManager {
         };
 
         let mut peers = self.peers.write().await;
-        let entry = peers.entry(addr).or_insert_with(|| PeerInfo::with_type(addr, conn_type));
+        let entry = peers
+            .entry(addr)
+            .or_insert_with(|| PeerInfo::with_type(addr, conn_type));
         entry.conn_type = conn_type;
         entry.mark_success(node_id, conn);
         drop(peers);
@@ -865,7 +888,11 @@ impl PeerManager {
     pub async fn note_connection_closed(&self, addr: &SocketAddr, stable_id: usize) {
         let mut peers = self.peers.write().await;
         if let Some(peer) = peers.get_mut(addr) {
-            if peer.connection.as_ref().is_some_and(|conn| conn.stable_id() == stable_id) {
+            if peer
+                .connection
+                .as_ref()
+                .is_some_and(|conn| conn.stable_id() == stable_id)
+            {
                 peer.clear_connection_preserve_malus();
             }
         }
@@ -925,7 +952,9 @@ impl PeerManager {
         }
         if let Some(a) = addr {
             let mut peers = self.peers.write().await;
-            let entry = peers.entry(a).or_insert_with(|| PeerInfo::with_type(a, PeerConnectionType::FriendToFriend));
+            let entry = peers
+                .entry(a)
+                .or_insert_with(|| PeerInfo::with_type(a, PeerConnectionType::FriendToFriend));
             entry.node_id = Some(node_id);
             entry.conn_type = PeerConnectionType::FriendToFriend;
         }
@@ -967,7 +996,9 @@ impl PeerManager {
             }
             {
                 let mut peers = self.peers.write().await;
-                let entry = peers.entry(addr).or_insert_with(|| PeerInfo::with_type(addr, PeerConnectionType::FriendToFriend));
+                let entry = peers.entry(addr).or_insert_with(|| {
+                    PeerInfo::with_type(addr, PeerConnectionType::FriendToFriend)
+                });
                 entry.node_id = Some(pubkey);
                 entry.conn_type = PeerConnectionType::FriendToFriend;
             }
@@ -1057,12 +1088,14 @@ impl PeerManager {
 
     /// Returns true if the node's own shard ticket was reported as outdated by an F2F peer.
     pub fn is_ticket_outdated(&self) -> bool {
-        self.ticket_outdated.load(std::sync::atomic::Ordering::Relaxed)
+        self.ticket_outdated
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Sets the outdated status of the node's own shard ticket.
     pub fn set_ticket_outdated(&self, outdated: bool) {
-        self.ticket_outdated.store(outdated, std::sync::atomic::Ordering::Relaxed);
+        self.ticket_outdated
+            .store(outdated, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Calculates the decentralized median PoW work score across all active (mature) known nodes.
@@ -1105,7 +1138,9 @@ impl PeerManager {
     async fn maybe_promote_pending(&self, node_pubkey: &[u8; 32]) {
         let mut nodes = self.known_network_nodes.write().await;
         if let Some(entry) = nodes.get_mut(node_pubkey) {
-            if let (Some(pending), Some(since)) = (entry.pending_hrw_routing_id, entry.pending_since) {
+            if let (Some(pending), Some(since)) =
+                (entry.pending_hrw_routing_id, entry.pending_since)
+            {
                 if since.elapsed() >= HRW_INCUBATION_DURATION {
                     entry.hrw_routing_id = pending;
                     if let Some(pw) = entry.pending_work_score {
@@ -1123,8 +1158,15 @@ impl PeerManager {
 
     /// Learns or updates a node discovered through F2F gossip.
     /// Legacy wrapper: hrw_routing_id == node_pubkey (fast-path) for backward compatibility.
-    pub async fn learn_node_from_gossip(&self, node_id: [u8; 32], addr: SocketAddr, hops: u8, ingress_peer: Option<SocketAddr>) {
-        self.learn_node_from_gossip_with_hrw(node_id, node_id, addr, hops, ingress_peer).await;
+    pub async fn learn_node_from_gossip(
+        &self,
+        node_id: [u8; 32],
+        addr: SocketAddr,
+        hops: u8,
+        ingress_peer: Option<SocketAddr>,
+    ) {
+        self.learn_node_from_gossip_with_hrw(node_id, node_id, addr, hops, ingress_peer)
+            .await;
     }
 
     /// Semantically decoupled learning method with explicit HRW routing ticket (defaults to work_score = 1).
@@ -1136,7 +1178,15 @@ impl PeerManager {
         hops: u8,
         ingress_peer: Option<SocketAddr>,
     ) {
-        self.learn_node_from_gossip_with_hrw_and_work(node_pubkey, hrw_routing_id, addr, hops, ingress_peer, 1).await;
+        self.learn_node_from_gossip_with_hrw_and_work(
+            node_pubkey,
+            hrw_routing_id,
+            addr,
+            hops,
+            ingress_peer,
+            1,
+        )
+        .await;
     }
 
     /// Semantically decoupled learning method with explicit HRW routing ticket and work score.
@@ -1161,7 +1211,9 @@ impl PeerManager {
         let mut nodes = self.known_network_nodes.write().await;
         if let Some(entry) = nodes.get_mut(&node_pubkey) {
             // Promotion if due, before inspecting new value
-            if let (Some(pending), Some(since)) = (entry.pending_hrw_routing_id, entry.pending_since) {
+            if let (Some(pending), Some(since)) =
+                (entry.pending_hrw_routing_id, entry.pending_since)
+            {
                 if since.elapsed() >= HRW_INCUBATION_DURATION {
                     entry.hrw_routing_id = pending;
                     if let Some(pw) = entry.pending_work_score {
@@ -1247,7 +1299,15 @@ impl PeerManager {
         new_hrw_routing_id: [u8; 32],
         addr: SocketAddr,
     ) {
-        self.learn_node_from_gossip_with_hrw_and_work(node_pubkey, new_hrw_routing_id, addr, 0, None, 1).await;
+        self.learn_node_from_gossip_with_hrw_and_work(
+            node_pubkey,
+            new_hrw_routing_id,
+            addr,
+            0,
+            None,
+            1,
+        )
+        .await;
     }
 
     /// Re-mining ticket update with explicit work score.
@@ -1258,7 +1318,15 @@ impl PeerManager {
         addr: SocketAddr,
         work_score: u64,
     ) {
-        self.learn_node_from_gossip_with_hrw_and_work(node_pubkey, new_hrw_routing_id, addr, 0, None, work_score).await;
+        self.learn_node_from_gossip_with_hrw_and_work(
+            node_pubkey,
+            new_hrw_routing_id,
+            addr,
+            0,
+            None,
+            work_score,
+        )
+        .await;
     }
 
     /// Alias: upsert_known_node — for evaluator compatibility.
@@ -1268,7 +1336,8 @@ impl PeerManager {
         hrw_routing_id: [u8; 32],
         addr: SocketAddr,
     ) {
-        self.learn_node_from_gossip_with_hrw(node_pubkey, hrw_routing_id, addr, 0, None).await;
+        self.learn_node_from_gossip_with_hrw(node_pubkey, hrw_routing_id, addr, 0, None)
+            .await;
     }
 
     /// Alias: handle_migration / on_node_id_migration
@@ -1278,17 +1347,15 @@ impl PeerManager {
         new_hrw_routing_id: [u8; 32],
         addr: SocketAddr,
     ) {
-        self.learn_node_from_gossip_with_hrw(node_pubkey, new_hrw_routing_id, addr, 0, None).await;
+        self.learn_node_from_gossip_with_hrw(node_pubkey, new_hrw_routing_id, addr, 0, None)
+            .await;
     }
 
     /// Returns the effective HRW routing ticket for HRW scoring.
     /// During 24h incubation, the old ticket is used; thereafter the new one.
     /// For IMMATURE (<24h since first_seen), the active ticket is still returned,
     /// but `is_hrw_eligible` signals IMMATURE (no voting weight).
-    pub async fn get_effective_hrw_routing_id(
-        &self,
-        node_pubkey: &[u8; 32],
-    ) -> Option<[u8; 32]> {
+    pub async fn get_effective_hrw_routing_id(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
         self.maybe_promote_pending(node_pubkey).await;
         let nodes = self.known_network_nodes.read().await;
         nodes.get(node_pubkey).map(|e| e.hrw_routing_id)
@@ -1323,24 +1390,35 @@ impl PeerManager {
     pub async fn get_pubkey_by_hrw_routing_id(&self, hrw_id: &[u8; 32]) -> Option<[u8; 32]> {
         {
             let nodes = self.known_network_nodes.read().await;
-            if let Some(pk) = nodes.values().find(|info| &info.hrw_routing_id == hrw_id)
-                .map(|info| info.node_pubkey) {
+            if let Some(pk) = nodes
+                .values()
+                .find(|info| &info.hrw_routing_id == hrw_id)
+                .map(|info| info.node_pubkey)
+            {
                 return Some(pk);
             }
             // A known identity with another ticket must not regain the
             // bootstrap routing id through the friendship fallback.
-            if nodes.contains_key(hrw_id) { return None; }
+            if nodes.contains_key(hrw_id) {
+                return None;
+            }
         }
         // Direct authenticated friends bootstrap with routing id = public
         // key before their first topology announcement. Preserve read/sync
         // targets without accepting arbitrary unknown routing ids.
-        self.f2f_friends.read().await.contains_key(hrw_id).then_some(*hrw_id)
+        self.f2f_friends
+            .read()
+            .await
+            .contains_key(hrw_id)
+            .then_some(*hrw_id)
     }
 
     /// Returns pending ticket if present (still incubating).
     pub async fn get_pending_hrw_routing_id(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
         let nodes = self.known_network_nodes.read().await;
-        nodes.get(node_pubkey).and_then(|e| e.pending_hrw_routing_id)
+        nodes
+            .get(node_pubkey)
+            .and_then(|e| e.pending_hrw_routing_id)
     }
 
     pub async fn pending_hrw(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
@@ -1405,7 +1483,9 @@ impl PeerManager {
         let mut nodes = self.known_network_nodes.write().await;
         let now = Instant::now();
         for entry in nodes.values_mut() {
-            if let (Some(pending), Some(since)) = (entry.pending_hrw_routing_id, entry.pending_since) {
+            if let (Some(pending), Some(since)) =
+                (entry.pending_hrw_routing_id, entry.pending_since)
+            {
                 if now.duration_since(since) >= HRW_INCUBATION_DURATION {
                     entry.hrw_routing_id = pending;
                     if let Some(pw) = entry.pending_work_score {
@@ -1486,11 +1566,9 @@ impl PeerManager {
         // Phase 10: snapshot each map sequentially and drop the guard before
         // taking the next lock — never holds 4 read guards at once.
         let banned: HashSet<[u8; 32]> = self.banned_nodes.read().await.clone();
-        let friends: HashMap<[u8; 32], Option<SocketAddr>> =
-            self.f2f_friends.read().await.clone();
+        let friends: HashMap<[u8; 32], Option<SocketAddr>> = self.f2f_friends.read().await.clone();
         let peers: HashMap<SocketAddr, PeerInfo> = self.peers.read().await.clone();
-        let known: HashMap<[u8; 32], KnownNodeInfo> =
-            self.known_network_nodes.read().await.clone();
+        let known: HashMap<[u8; 32], KnownNodeInfo> = self.known_network_nodes.read().await.clone();
 
         // 1. Add Local Node
         let local_addr_str = local_addr
@@ -1533,8 +1611,10 @@ impl PeerManager {
 
             let peer_opt = resolved_addr.and_then(|addr| peers.get(&addr));
             let missing_count = peer_opt.map(|p| p.missing_count).unwrap_or(0);
-            let last_failure_sec = peer_opt.and_then(|p| p.last_failure.map(|t| t.elapsed().as_secs()));
-            let rtt_ms = peer_opt.and_then(|p| p.connection.as_ref().map(|c| c.rtt().as_millis() as u32));
+            let last_failure_sec =
+                peer_opt.and_then(|p| p.last_failure.map(|t| t.elapsed().as_secs()));
+            let rtt_ms =
+                peer_opt.and_then(|p| p.connection.as_ref().map(|c| c.rtt().as_millis() as u32));
 
             let status_str = if is_banned {
                 "Banned (Equivocation)".to_string()
@@ -1553,12 +1633,14 @@ impl PeerManager {
             let is_im = info_opt
                 .map(|k| k.first_seen.elapsed() < HRW_INCUBATION_DURATION)
                 .unwrap_or(false);
-            let pending_bs58 = info_opt
-                .and_then(|k| k.pending_hrw_routing_id.map(|t| bs58::encode(&t).into_string()));
-            let rem_sec = info_opt
-                .and_then(|k| k.pending_remaining().map(|d| d.as_secs()));
+            let pending_bs58 = info_opt.and_then(|k| {
+                k.pending_hrw_routing_id
+                    .map(|t| bs58::encode(&t).into_string())
+            });
+            let rem_sec = info_opt.and_then(|k| k.pending_remaining().map(|d| d.as_secs()));
             let min_hops = info_opt.map(|k| k.min_hops.max(1)).unwrap_or(1);
-            let best_ingress_peer = info_opt.and_then(|k| k.best_ingress_peer.map(|a| a.to_string()));
+            let best_ingress_peer =
+                info_opt.and_then(|k| k.best_ingress_peer.map(|a| a.to_string()));
 
             map.insert(
                 *friend_id,
@@ -1591,8 +1673,10 @@ impl PeerManager {
             let is_banned = banned.contains(node_pubkey);
             let peer_opt = peers.get(&info.addr);
             let missing_count = peer_opt.map(|p| p.missing_count).unwrap_or(0);
-            let last_failure_sec = peer_opt.and_then(|p| p.last_failure.map(|t| t.elapsed().as_secs()));
-            let rtt_ms = peer_opt.and_then(|p| p.connection.as_ref().map(|c| c.rtt().as_millis() as u32));
+            let last_failure_sec =
+                peer_opt.and_then(|p| p.last_failure.map(|t| t.elapsed().as_secs()));
+            let rtt_ms =
+                peer_opt.and_then(|p| p.connection.as_ref().map(|c| c.rtt().as_millis() as u32));
 
             let status_str = if is_banned {
                 "Banned (Equivocation)".to_string()
@@ -1606,7 +1690,9 @@ impl PeerManager {
                 "Learned via Gossip".to_string()
             };
 
-            let pending_bs58 = info.pending_hrw_routing_id.map(|t| bs58::encode(&t).into_string());
+            let pending_bs58 = info
+                .pending_hrw_routing_id
+                .map(|t| bs58::encode(&t).into_string());
             let rem_sec = info.pending_remaining().map(|d| d.as_secs());
             let is_immature = info.first_seen.elapsed() < HRW_INCUBATION_DURATION;
             let best_ingress_peer = info.best_ingress_peer.map(|a| a.to_string());
@@ -1636,16 +1722,17 @@ impl PeerManager {
 
         let mut list: Vec<NetworkNodeDto> = map.into_values().collect();
         // Sort: Local node first, then F2F friends, then by min_hops, then address
-        list.sort_by(|a, b| {
-            match (a.is_local, b.is_local) {
+        list.sort_by(|a, b| match (a.is_local, b.is_local) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => match (a.is_f2f, b.is_f2f) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
-                _ => match (a.is_f2f, b.is_f2f) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.min_hops.cmp(&b.min_hops).then_with(|| a.address.cmp(&b.address)),
-                },
-            }
+                _ => a
+                    .min_hops
+                    .cmp(&b.min_hops)
+                    .then_with(|| a.address.cmp(&b.address)),
+            },
         });
         list
     }
@@ -1667,7 +1754,10 @@ impl PeerManager {
     /// prefix) returns `None` instead of silently overwriting — this eliminates
     /// the old `u16_to_vk` collision-overwrite attack. New code MUST use
     /// [`Self::get_peer_verifying_key_by_node_id`].
-    pub async fn get_peer_verifying_key(&self, node_id_u16: u16) -> Option<ed25519_dalek::VerifyingKey> {
+    pub async fn get_peer_verifying_key(
+        &self,
+        node_id_u16: u16,
+    ) -> Option<ed25519_dalek::VerifyingKey> {
         let keys = self.verifying_keys.read().await;
         let mut found: Option<ed25519_dalek::VerifyingKey> = None;
         for (pubkey, vk) in keys.iter() {
@@ -1682,7 +1772,10 @@ impl PeerManager {
     }
 
     /// Retrieves an Ed25519 verifying key by the full 32-byte Node ID.
-    pub async fn get_peer_verifying_key_by_node_id(&self, node_id: &[u8; 32]) -> Option<ed25519_dalek::VerifyingKey> {
+    pub async fn get_peer_verifying_key_by_node_id(
+        &self,
+        node_id: &[u8; 32],
+    ) -> Option<ed25519_dalek::VerifyingKey> {
         let keys = self.verifying_keys.read().await;
         keys.get(node_id).copied()
     }
@@ -1691,7 +1784,11 @@ impl PeerManager {
     /// Gossip (Heartbeats and Equivocation Proofs) is ONLY accepted from direct F2F friends.
     /// Cryptographic identity (verified remote_node_id) is primarily used for authorization.
     /// Strictly based on permanent NodePubKey / NodeId, not HRW.
-    pub async fn can_accept_gossip(&self, remote_addr: &SocketAddr, remote_node_id: Option<&[u8; 32]>) -> bool {
+    pub async fn can_accept_gossip(
+        &self,
+        remote_addr: &SocketAddr,
+        remote_node_id: Option<&[u8; 32]>,
+    ) -> bool {
         if let Some(node_id) = remote_node_id {
             if self.is_banned(node_id).await {
                 return false;
@@ -1709,7 +1806,11 @@ impl PeerManager {
     ///
     /// Local RPC reliability diagnostics do not revoke identity authorization.
     /// Permanent verified equivocation bans are refused.
-    pub async fn can_authorize_direct_rpc(&self, remote_addr: &SocketAddr, remote_node_id: Option<&[u8; 32]>) -> bool {
+    pub async fn can_authorize_direct_rpc(
+        &self,
+        remote_addr: &SocketAddr,
+        remote_node_id: Option<&[u8; 32]>,
+    ) -> bool {
         if let Some(node_id) = remote_node_id {
             if self.is_banned(node_id).await {
                 return false;
@@ -1891,20 +1992,37 @@ impl PeerManager {
     pub async fn active_known_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
-        known.into_iter().filter(|(pk, info)| info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk))
-            .map(|(pk, info)| (pk, info.addr)).collect()
+        known
+            .into_iter()
+            .filter(|(pk, info)| {
+                info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk)
+            })
+            .map(|(pk, info)| (pk, info.addr))
+            .collect()
     }
 
     /// HRW tickets of the same qualified identity set used for committee selection.
     pub async fn active_hrw_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
-        known.into_iter().filter(|(pk, info)| info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk))
-            .map(|(_, info)| (info.hrw_routing_id, info.addr)).collect()
+        known
+            .into_iter()
+            .filter(|(pk, info)| {
+                info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk)
+            })
+            .map(|(_, info)| (info.hrw_routing_id, info.addr))
+            .collect()
     }
 
     fn local_ticket_is_mature(&self) -> bool {
-        self.local_ticket_observation.lock().map(|value| value.as_ref().is_some_and(|(_, _, since)| since.elapsed() >= HRW_INCUBATION_DURATION)).unwrap_or(false)
+        self.local_ticket_observation
+            .lock()
+            .map(|value| {
+                value
+                    .as_ref()
+                    .is_some_and(|(_, _, since)| since.elapsed() >= HRW_INCUBATION_DURATION)
+            })
+            .unwrap_or(false)
     }
 
     /// Local ticket view for write authorization. Reachability and suspension
@@ -1915,42 +2033,116 @@ impl PeerManager {
         self_pubkey: [u8; 32],
         self_hrw: [u8; 32],
         shard_id: u16,
-    ) -> (Vec<humoco_sim_core::types::CommitteeMember>, Vec<(humoco_sim_core::types::CommitteeMember, SocketAddr)>, usize) {
-        use humoco_sim_core::types::{CommitteeMember, select_shard_committee};
+    ) -> (
+        Vec<humoco_sim_core::types::CommitteeMember>,
+        Vec<(humoco_sim_core::types::CommitteeMember, SocketAddr)>,
+        usize,
+    ) {
+        use humoco_sim_core::types::{select_shard_committee, CommitteeMember};
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
         let mut endpoints = HashMap::new();
         for (pk, info) in &known {
-            if *pk != self_pubkey && info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk) {
+            if *pk != self_pubkey
+                && info.is_hrw_eligible()
+                && info.is_presence_fresh()
+                && !banned.contains(pk)
+            {
                 endpoints.insert(*pk, (info.hrw_routing_id, info.addr));
             }
         }
         // A transport connection authenticates identity, not a mined mature ticket.
         // Never synthesize a routing ticket from an unknown peer's public key.
-        let mut members: Vec<_> = endpoints.iter().map(|(pk, (hrw, _))| CommitteeMember {
-            node_pubkey: *pk, hrw_routing_id: *hrw,
-        }).collect();
+        let mut members: Vec<_> = endpoints
+            .iter()
+            .map(|(pk, (hrw, _))| CommitteeMember {
+                node_pubkey: *pk,
+                hrw_routing_id: *hrw,
+            })
+            .collect();
         let self_mature = if let Some(info) = known.get(&self_pubkey) {
             info.hrw_routing_id == self_hrw && info.is_hrw_eligible()
         } else if let Ok(mut observation) = self.local_ticket_observation.lock() {
             match *observation {
-                Some((pk, hrw, since)) if pk == self_pubkey && hrw == self_hrw => since.elapsed() >= HRW_INCUBATION_DURATION,
-                _ => { *observation = Some((self_pubkey, self_hrw, Instant::now())); false }
+                Some((pk, hrw, since)) if pk == self_pubkey && hrw == self_hrw => {
+                    since.elapsed() >= HRW_INCUBATION_DURATION
+                }
+                _ => {
+                    *observation = Some((self_pubkey, self_hrw, Instant::now()));
+                    false
+                }
             }
-        } else { false };
+        } else {
+            false
+        };
         if self_mature && !banned.contains(&self_pubkey) {
-            members.push(CommitteeMember { node_pubkey: self_pubkey, hrw_routing_id: self_hrw });
+            members.push(CommitteeMember {
+                node_pubkey: self_pubkey,
+                hrw_routing_id: self_hrw,
+            });
         }
         let total = members.len();
         let committee = select_shard_committee(shard_id, &members);
-        let remote = committee.iter().filter_map(|member| endpoints.get(&member.node_pubkey)
-            .map(|(_, addr)| (*member, *addr))).collect();
+        let remote = committee
+            .iter()
+            .filter_map(|member| {
+                endpoints
+                    .get(&member.node_pubkey)
+                    .map(|(_, addr)| (*member, *addr))
+            })
+            .collect();
         (committee, remote, total)
+    }
+
+    pub async fn observe_gateway_advertisement(
+        &self,
+        advertisement: crate::network::discovery::GatewayAdvertisement,
+        expected: &[u8; 32],
+        network: u8,
+    ) {
+        let now = self.net_time_ms();
+        if !advertisement.verify(expected, network, now) || self.is_banned(expected).await {
+            return;
+        }
+        let mut cache = self.gateway_advertisements.write();
+        cache.retain(|_, ad| ad.valid_until_ms > now);
+        if cache
+            .get(expected)
+            .is_some_and(|old| old.issued_at_ms >= advertisement.issued_at_ms)
+        {
+            return;
+        }
+        if cache.len() >= 256 && !cache.contains_key(expected) {
+            return;
+        }
+        cache.insert(*expected, advertisement);
+    }
+
+    pub async fn advertised_gateway_urls(&self) -> Vec<String> {
+        let banned = self.banned_nodes.read().await;
+        let cache = self.gateway_advertisements.read();
+        let now = self.net_time_ms();
+        let mut urls = std::collections::BTreeSet::new();
+        for (key, ad) in cache.iter() {
+            if !banned.contains(key) && ad.valid_until_ms > now {
+                for url in &ad.urls {
+                    urls.insert(url.clone());
+                    if urls.len() >= crate::config::MAX_PUBLIC_GATEWAY_ENTRIES {
+                        return urls.into_iter().collect();
+                    }
+                }
+            }
+        }
+        urls.into_iter().collect()
     }
 
     /// Operator-only export of this node's qualified regional view. Source
     /// authentication delegates these observations, never the Byzantine bound.
-    pub async fn regional_mesh_view(&self, identity: &crate::identity::NodeIdentity, network: u8) -> Result<humoco_proto::mesh::RegionalMeshView, crate::error::NodeError> {
+    pub async fn regional_mesh_view(
+        &self,
+        identity: &crate::identity::NodeIdentity,
+        network: u8,
+    ) -> Result<humoco_proto::mesh::RegionalMeshView, crate::error::NodeError> {
         use ed25519_dalek::Signer;
         let known = self.known_network_nodes.read().await;
         let banned = self.banned_nodes.read().await;
@@ -1959,39 +2151,77 @@ impl PeerManager {
         for (key, info) in known.iter() {
             let eligible = if *key == local {
                 info.hrw_routing_id == *identity.hrw_routing_id() && info.is_hrw_eligible()
-            } else { info.is_hrw_eligible() && info.is_presence_fresh() };
+            } else {
+                info.is_hrw_eligible() && info.is_presence_fresh()
+            };
             if eligible && !banned.contains(key) {
-                if members.len() >= humoco_proto::mesh::MAX_MESH_MEMBERS { return Err(crate::error::NodeError::LocalCapacity("regional view exceeds bounded export")); }
-                members.push(humoco_proto::mesh::RegionalMeshMember { node_pubkey:*key, hrw_routing_id:info.hrw_routing_id });
+                if members.len() >= humoco_proto::mesh::MAX_MESH_MEMBERS {
+                    return Err(crate::error::NodeError::LocalCapacity(
+                        "regional view exceeds bounded export",
+                    ));
+                }
+                members.push(humoco_proto::mesh::RegionalMeshMember {
+                    node_pubkey: *key,
+                    hrw_routing_id: info.hrw_routing_id,
+                });
             }
         }
-        if !known.contains_key(&local) && self.local_ticket_is_mature() && !banned.contains(&local) {
-            if members.len() >= humoco_proto::mesh::MAX_MESH_MEMBERS { return Err(crate::error::NodeError::LocalCapacity("regional view exceeds bounded export")); }
-            members.push(humoco_proto::mesh::RegionalMeshMember { node_pubkey:local, hrw_routing_id:*identity.hrw_routing_id() });
+        if !known.contains_key(&local) && self.local_ticket_is_mature() && !banned.contains(&local)
+        {
+            if members.len() >= humoco_proto::mesh::MAX_MESH_MEMBERS {
+                return Err(crate::error::NodeError::LocalCapacity(
+                    "regional view exceeds bounded export",
+                ));
+            }
+            members.push(humoco_proto::mesh::RegionalMeshMember {
+                node_pubkey: local,
+                hrw_routing_id: *identity.hrw_routing_id(),
+            });
         }
         drop(banned);
         drop(known);
         members.sort_by_key(|member| member.node_pubkey);
         let issued_at_ms = self.net_time_ms();
         let mut view = humoco_proto::mesh::RegionalMeshView {
-            version:1, network, source_key:local, issued_at_ms,
-            valid_until_ms:issued_at_ms.saturating_add(humoco_proto::mesh::MAX_VIEW_LIFETIME_MS),
-            members, signature:[0;64],
+            version: 1,
+            network,
+            source_key: local,
+            issued_at_ms,
+            valid_until_ms: issued_at_ms.saturating_add(humoco_proto::mesh::MAX_VIEW_LIFETIME_MS),
+            members,
+            signature: [0; 64],
         };
-        let digest = view.digest().map_err(|reason| crate::error::NodeError::Network(reason.into()))?;
+        let digest = view
+            .digest()
+            .map_err(|reason| crate::error::NodeError::Network(reason.into()))?;
         view.signature = identity.signing_key().sign(&digest).to_bytes();
         Ok(view)
     }
 
-    pub async fn is_local_committee_member(&self, self_pubkey: [u8; 32], self_hrw: [u8; 32], shard_id: u16) -> bool {
+    pub async fn is_local_committee_member(
+        &self,
+        self_pubkey: [u8; 32],
+        self_hrw: [u8; 32],
+        shard_id: u16,
+    ) -> bool {
         let (committee, _, _) = self.shard_committee(self_pubkey, self_hrw, shard_id).await;
-        committee.iter().any(|member| member.node_pubkey == self_pubkey)
+        committee
+            .iter()
+            .any(|member| member.node_pubkey == self_pubkey)
     }
 
     /// Checks whether the local node is among the responsible Top-N (default 20) shard nodes
     /// for the given shard_id according to HRW score.
-    pub async fn is_local_responsible_for_shard(&self, self_hrw: &[u8; 32], shard_id: u16, top_n: usize) -> bool {
-        self.local_shard_rank(self_hrw, shard_id).await.map(|r| r <= top_n).unwrap_or(true)
+    pub async fn is_local_responsible_for_shard(
+        &self,
+        self_hrw: &[u8; 32],
+        shard_id: u16,
+        top_n: usize,
+    ) -> bool {
+        self.local_shard_rank(self_hrw, shard_id)
+            .await
+            .map(|r| r <= top_n)
+            .unwrap_or(true)
     }
 
     /// Legacy rank inspection using full 256-bit scores. Runtime write
@@ -2016,22 +2246,38 @@ impl PeerManager {
     }
 
     /// Returns the top-N candidate nodes for a given shard_id according to HRW ranking.
-    pub async fn get_top_n_shards_for_lock(&self, shard_id: u16, n: usize) -> Vec<([u8; 32], SocketAddr)> {
+    pub async fn get_top_n_shards_for_lock(
+        &self,
+        shard_id: u16,
+        n: usize,
+    ) -> Vec<([u8; 32], SocketAddr)> {
         let active = self.active_hrw_nodes().await;
         let mut members = Vec::new();
         let mut endpoints = HashMap::new();
         for (hrw, addr) in active {
             if let Some(pk) = self.get_pubkey_by_hrw_routing_id(&hrw).await {
-                members.push(humoco_sim_core::types::CommitteeMember { node_pubkey: pk, hrw_routing_id: hrw });
+                members.push(humoco_sim_core::types::CommitteeMember {
+                    node_pubkey: pk,
+                    hrw_routing_id: hrw,
+                });
                 endpoints.insert(pk, addr);
             }
         }
-        humoco_sim_core::types::select_shard_committee(shard_id, &members).into_iter()
-            .take(n).filter_map(|member| endpoints.get(&member.node_pubkey)
-                .map(|addr| (member.hrw_routing_id, *addr))).collect()
+        humoco_sim_core::types::select_shard_committee(shard_id, &members)
+            .into_iter()
+            .take(n)
+            .filter_map(|member| {
+                endpoints
+                    .get(&member.node_pubkey)
+                    .map(|addr| (member.hrw_routing_id, *addr))
+            })
+            .collect()
     }
 
-    pub async fn record_observed_evidence(&self, ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
+    pub async fn record_observed_evidence(
+        &self,
+        ev: humoco_sim_core::fraud::IngressEnvelopeEvidence,
+    ) {
         let mut guard = self.recent_observed_evidences.write().await;
         if guard.len() >= 16 {
             guard.pop_front();
@@ -2039,12 +2285,19 @@ impl PeerManager {
         guard.push_back(ev);
     }
 
-    pub async fn sample_piggyback_evidences(&self, max_count: usize) -> Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
+    pub async fn sample_piggyback_evidences(
+        &self,
+        max_count: usize,
+    ) -> Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
         let guard = self.recent_observed_evidences.read().await;
         guard.iter().rev().take(max_count).cloned().collect()
     }
 
-    pub async fn update_node_write_evidence(&self, node_id: &[u8; 32], ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
+    pub async fn update_node_write_evidence(
+        &self,
+        node_id: &[u8; 32],
+        ev: humoco_sim_core::fraud::IngressEnvelopeEvidence,
+    ) {
         let mut known = self.known_network_nodes.write().await;
         if let Some(info) = known.get_mut(node_id) {
             info.update_write_evidence(ev);
@@ -2056,7 +2309,11 @@ impl PeerManager {
         }
     }
 
-    pub async fn update_node_read_evidence(&self, node_id: &[u8; 32], ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
+    pub async fn update_node_read_evidence(
+        &self,
+        node_id: &[u8; 32],
+        ev: humoco_sim_core::fraud::IngressEnvelopeEvidence,
+    ) {
         let mut known = self.known_network_nodes.write().await;
         if let Some(info) = known.get_mut(node_id) {
             info.update_read_evidence(ev);
@@ -2068,14 +2325,24 @@ impl PeerManager {
         }
     }
 
-    pub async fn get_node_write_evidence(&self, node_id: &[u8; 32]) -> Option<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
+    pub async fn get_node_write_evidence(
+        &self,
+        node_id: &[u8; 32],
+    ) -> Option<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
         let known = self.known_network_nodes.read().await;
-        known.get(node_id).and_then(|info| info.last_write_evidence.clone())
+        known
+            .get(node_id)
+            .and_then(|info| info.last_write_evidence.clone())
     }
 
-    pub async fn get_node_read_evidence(&self, node_id: &[u8; 32]) -> Option<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
+    pub async fn get_node_read_evidence(
+        &self,
+        node_id: &[u8; 32],
+    ) -> Option<humoco_sim_core::fraud::IngressEnvelopeEvidence> {
         let known = self.known_network_nodes.read().await;
-        known.get(node_id).and_then(|info| info.last_read_evidence.clone())
+        known
+            .get(node_id)
+            .and_then(|info| info.last_read_evidence.clone())
     }
 
     /// Computes decentralized network median write daily rate and read daily rate across mature known nodes.
@@ -2091,14 +2358,20 @@ impl PeerManager {
             if let Some(ref w_ev) = kinfo.last_write_evidence {
                 let ev_sec = w_ev.timestamp_ms / 1000;
                 let delta_secs = now_sec.saturating_sub(ev_sec);
-                let decayed_ema = humoco_sim_core::quota::decay_integer_ema(w_ev.declared_write_ema_micro_bj, delta_secs);
+                let decayed_ema = humoco_sim_core::quota::decay_integer_ema(
+                    w_ev.declared_write_ema_micro_bj,
+                    delta_secs,
+                );
                 let daily_rate = humoco_sim_core::quota::ema_to_daily_rate(decayed_ema) / 1_000_000;
                 write_rates.push(daily_rate);
             }
             if let Some(ref r_ev) = kinfo.last_read_evidence {
                 let ev_sec = r_ev.timestamp_ms / 1000;
                 let delta_secs = now_sec.saturating_sub(ev_sec);
-                let decayed_ema = humoco_sim_core::quota::decay_integer_ema(r_ev.declared_read_ema_credits, delta_secs);
+                let decayed_ema = humoco_sim_core::quota::decay_integer_ema(
+                    r_ev.declared_read_ema_credits,
+                    delta_secs,
+                );
                 let daily_rate = humoco_sim_core::quota::ema_to_daily_rate(decayed_ema);
                 read_rates.push(daily_rate);
             }
@@ -2121,9 +2394,18 @@ impl PeerManager {
 
     /// Best-effort nonblocking size using mature passive presence, never RPC malus.
     pub fn active_nodes_count(&self) -> usize {
-        let Ok(known) = self.known_network_nodes.try_read() else { return 0; };
-        let Ok(banned) = self.banned_nodes.try_read() else { return 0; };
-        let remote_count = known.iter().filter(|(pk, info)| info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(*pk)).count();
+        let Ok(known) = self.known_network_nodes.try_read() else {
+            return 0;
+        };
+        let Ok(banned) = self.banned_nodes.try_read() else {
+            return 0;
+        };
+        let remote_count = known
+            .iter()
+            .filter(|(pk, info)| {
+                info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(*pk)
+            })
+            .count();
         remote_count + usize::from(self.local_ticket_is_mature())
     }
 
@@ -2137,7 +2419,11 @@ impl PeerManager {
     pub async fn total_network_size(&self) -> usize {
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
-        known.iter().filter(|(pk, info)| info.is_presence_fresh() && !banned.contains(*pk)).count() + 1
+        known
+            .iter()
+            .filter(|(pk, info)| info.is_presence_fresh() && !banned.contains(*pk))
+            .count()
+            + 1
     }
 
     /// Pure merge-jump predicate (Spec 09 INV-0908): abrupt growth detection.
@@ -2154,8 +2440,10 @@ impl PeerManager {
 
     /// Marks a detected partition merge: arms the 24h quota moratorium window.
     pub fn note_merge_detected(&self, now_ms: u64) {
-        self.merge_hysteresis_until_ms
-            .store(now_ms.saturating_add(MERGE_HYSTERESIS_MS), Ordering::Relaxed);
+        self.merge_hysteresis_until_ms.store(
+            now_ms.saturating_add(MERGE_HYSTERESIS_MS),
+            Ordering::Relaxed,
+        );
     }
 
     /// Checks whether the node is inside the 24h post-merge quota moratorium.
@@ -2202,7 +2490,8 @@ impl PeerManager {
 
     /// Test helper: overrides the 24h-stability anchor (simulates long-stable N >= 20).
     pub fn set_ge20_anchor_for_test(&self, anchor_ms: u64) {
-        self.ge20_first_reached_ms.store(anchor_ms, Ordering::Relaxed);
+        self.ge20_first_reached_ms
+            .store(anchor_ms, Ordering::Relaxed);
     }
 
     /// Test helper: overrides last_seen to simulate stale presence ghosts.
@@ -2277,7 +2566,6 @@ impl PeerManager {
         }
         result
     }
-
 
     /// Computes an hourly jitter interval (50min + 0..20min = avg 60min).
     pub fn heartbeat_jitter_secs() -> u64 {
@@ -2388,8 +2676,12 @@ mod tests {
         // Drive peer into suspension (debounced: space failures >= 60s apart)
         let t0 = Instant::now();
         manager.record_failure_at(addr, t0).await;
-        manager.record_failure_at(addr, t0 + Duration::from_secs(61)).await;
-        manager.record_failure_at(addr, t0 + Duration::from_secs(122)).await;
+        manager
+            .record_failure_at(addr, t0 + Duration::from_secs(61))
+            .await;
+        manager
+            .record_failure_at(addr, t0 + Duration::from_secs(122))
+            .await;
         assert!(manager.is_peer_suspended_by_addr(&addr).await);
         assert!(manager.is_peer_suspended_by_id(&nid).await);
 
@@ -2436,7 +2728,11 @@ mod tests {
         assert!(b1.as_millis() >= (DEFAULT_BASE_BACKOFF_MS * 2 * 3 / 4) as u128);
         assert!(b1.as_millis() <= (DEFAULT_BASE_BACKOFF_MS * 2 * 5 / 4) as u128);
         assert!(b6.as_millis() <= (DEFAULT_MAX_BACKOFF_MS * 5 / 4) as u128);
-        assert_eq!(b12.as_secs(), 3600, "Attempt >= 12 must trigger 1h dormant cap");
+        assert_eq!(
+            b12.as_secs(),
+            3600,
+            "Attempt >= 12 must trigger 1h dormant cap"
+        );
     }
 
     #[tokio::test]
@@ -2449,13 +2745,21 @@ mod tests {
         assert_eq!(manager.get_peer(&addr).await.unwrap().missing_count, 1);
 
         // Rapid failures within 60s must not increase missing_count
-        manager.record_failure_at(addr, t0 + Duration::from_secs(1)).await;
-        manager.record_failure_at(addr, t0 + Duration::from_secs(15)).await;
-        manager.record_failure_at(addr, t0 + Duration::from_secs(59)).await;
+        manager
+            .record_failure_at(addr, t0 + Duration::from_secs(1))
+            .await;
+        manager
+            .record_failure_at(addr, t0 + Duration::from_secs(15))
+            .await;
+        manager
+            .record_failure_at(addr, t0 + Duration::from_secs(59))
+            .await;
         assert_eq!(manager.get_peer(&addr).await.unwrap().missing_count, 1);
 
         // Failure after 60s increases missing_count to 2
-        manager.record_failure_at(addr, t0 + Duration::from_secs(60)).await;
+        manager
+            .record_failure_at(addr, t0 + Duration::from_secs(60))
+            .await;
         assert_eq!(manager.get_peer(&addr).await.unwrap().missing_count, 2);
     }
 
@@ -2485,8 +2789,12 @@ mod tests {
         // Degrade peer
         let t0 = Instant::now();
         manager.record_failure_at(addr, t0).await;
-        manager.record_failure_at(addr, t0 + Duration::from_secs(65)).await;
-        manager.record_failure_at(addr, t0 + Duration::from_secs(130)).await;
+        manager
+            .record_failure_at(addr, t0 + Duration::from_secs(65))
+            .await;
+        manager
+            .record_failure_at(addr, t0 + Duration::from_secs(130))
+            .await;
         let peer = manager.get_peer(&addr).await.unwrap();
         assert_eq!(peer.missing_count, 3);
         assert_eq!(peer.status, PeerStatus::Suspended);
@@ -2504,11 +2812,16 @@ mod tests {
         let banned_id = [42u8; 32];
         let banned_addr: SocketAddr = "127.0.0.1:9096".parse().unwrap();
         manager.add_peer(banned_addr).await;
-        manager.record_success(banned_addr, Some(banned_id), None).await;
+        manager
+            .record_success(banned_addr, Some(banned_id), None)
+            .await;
         manager.ban_node(&banned_id).await;
 
         let banned_res = manager.reset_peer_suspension(banned_addr).await;
         assert!(banned_res.is_err());
-        assert_eq!(banned_res.unwrap_err(), "Peer is permanently banned due to equivocation fraud");
+        assert_eq!(
+            banned_res.unwrap_err(),
+            "Peer is permanently banned due to equivocation fraud"
+        );
     }
 }

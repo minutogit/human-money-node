@@ -1,8 +1,8 @@
+use humoco_sim_core::wire::{MsgType, WireHeader};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use humoco_sim_core::wire::{MsgType, WireHeader};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -12,20 +12,22 @@ pub const STREAM_CONCURRENCY_LIMIT: usize = 1024;
 /// Maximum number of concurrent QUIC handshake / connection handler tasks (DoS/OOM protection).
 pub const CONNECTION_CONCURRENCY_LIMIT: usize = 256;
 
-
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
 use crate::network::framing::{checked_payload_len, read_frame, write_frame};
 use crate::network::manager::PeerManager;
-use crate::network::tls::{
-    extract_peer_identity_from_connection,
-};
+use crate::network::tls::extract_peer_identity_from_connection;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// Handler trait for processing incoming bi-directional and uni-directional requests.
 pub trait RequestHandler: Send + Sync + 'static {
-    fn signing_checkpoint(&self) -> BoxFuture<Result<Option<crate::network::framing::SigningCheckpoint>, NodeError>> {
+    fn gateway_advertisement(&self) -> Option<crate::network::discovery::GatewayAdvertisement> {
+        None
+    }
+    fn signing_checkpoint(
+        &self,
+    ) -> BoxFuture<Result<Option<crate::network::framing::SigningCheckpoint>, NodeError>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -86,12 +88,13 @@ impl RequestHandler for DefaultRequestHandler {
                 x if x == MsgType::LockVerifyRequest as u16 => MsgType::LockVerifyResponse as u16,
                 x if x == MsgType::ActiveSyncRequest as u16 => MsgType::ActiveSyncDone as u16,
                 x if x == MsgType::ShardDigestRequest as u16 => MsgType::ShardDigestResponse as u16,
-                x if x == MsgType::ShardBucketRangeRequest as u16 => MsgType::ShardBucketRangeResponse as u16,
+                x if x == MsgType::ShardBucketRangeRequest as u16 => {
+                    MsgType::ShardBucketRangeResponse as u16
+                }
                 x if x == MsgType::EquivocationProof as u16 => MsgType::EquivocationAck as u16,
                 _ => MsgType::StatusResponse as u16,
             };
-            let resp_header =
-                WireHeader::new(resp_type, header.session_seq, header.epoch_id, 0, 0);
+            let resp_header = WireHeader::new(resp_type, header.session_seq, header.epoch_id, 0, 0);
             Ok((resp_header, Vec::new()))
         })
     }
@@ -116,11 +119,13 @@ pub fn verify_equivocation_first_party(
         humoco_sim_core::fraud::FraudProofPillar::IngressCounterConflict => {
             // Anti-framing: never accept unsecured simulator mocks. Both envelopes
             // must be signed by the accused key itself.
-            let a = match humoco_sim_core::fraud::decode_ingress_envelope(&proof.evidence_packet_a) {
+            let a = match humoco_sim_core::fraud::decode_ingress_envelope(&proof.evidence_packet_a)
+            {
                 Some(e) => e,
                 None => return false,
             };
-            let b = match humoco_sim_core::fraud::decode_ingress_envelope(&proof.evidence_packet_b) {
+            let b = match humoco_sim_core::fraud::decode_ingress_envelope(&proof.evidence_packet_b)
+            {
                 Some(e) => e,
                 None => return false,
             };
@@ -164,35 +169,46 @@ pub fn verify_equivocation_first_party(
                 return false;
             }
             let verify_att = |att: &humoco_sim_core::types::Attestation,
-                              provisional: &[u8], final_domain: &[u8]| -> bool {
+                              provisional: &[u8],
+                              final_domain: &[u8]|
+             -> bool {
                 let sig = ed25519_dalek::Signature::from_bytes(&att.signature);
                 let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(
-                    &att.parent_lock, &att.lock_id,
+                    &att.parent_lock,
+                    &att.lock_id,
                 );
                 // An original choice remains protected across a provisional to
                 // final promotion. Live observations use a separate purpose and
                 // cannot verify here. Domain and status must agree.
-                [(provisional, 0u8), (final_domain, 1u8)].into_iter().any(|(domain, status)| {
-                    let digest = humoco_sim_core::crypto::compute_sig_digest(
-                        domain, 0, 0, 0, shard, status, &payload,
-                    );
-                    vk.verify_strict(&digest, &sig).is_ok()
-                })
+                [(provisional, 0u8), (final_domain, 1u8)]
+                    .into_iter()
+                    .any(|(domain, status)| {
+                        let digest = humoco_sim_core::crypto::compute_sig_digest(
+                            domain, 0, 0, 0, shard, status, &payload,
+                        );
+                        vk.verify_strict(&digest, &sig).is_ok()
+                    })
             };
             // Both signatures must belong to ONE network. Independent existential
             // checks would combine lawful originals from unrelated networks.
             [
-                (humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
-                 humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET),
-                (humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
-                 humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET),
-            ].into_iter().any(|(provisional, final_domain)| {
-                verify_att(&a, provisional, final_domain) && verify_att(&b, provisional, final_domain)
+                (
+                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+                ),
+                (
+                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
+                    humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
+                ),
+            ]
+            .into_iter()
+            .any(|(provisional, final_domain)| {
+                verify_att(&a, provisional, final_domain)
+                    && verify_att(&b, provisional, final_domain)
             })
         }
     }
 }
-
 
 /// Node daemon request handler with access to dual-tier storage for gossip and active sync.
 #[derive(Clone)]
@@ -205,6 +221,8 @@ pub struct NodeRequestHandler {
     pub is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
     pub readiness_manager: Arc<crate::daemon::ShardReadinessManager>,
     pub network_id: humoco_sim_core::types::NetworkId,
+    snapshot_cuts: Arc<crate::storage::db::snapshot::SnapshotCuts>,
+    gateway_urls: Vec<String>,
 }
 
 impl NodeRequestHandler {
@@ -221,6 +239,8 @@ impl NodeRequestHandler {
             tier_controller: None,
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             readiness_manager: Arc::new(crate::daemon::ShardReadinessManager::new()),
+            snapshot_cuts: Arc::new(crate::storage::db::snapshot::SnapshotCuts::default()),
+            gateway_urls: Vec::new(),
             network_id: humoco_sim_core::types::NetworkId::default(),
         }
     }
@@ -239,11 +259,21 @@ impl NodeRequestHandler {
             tier_controller: None,
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             readiness_manager: Arc::new(crate::daemon::ShardReadinessManager::new()),
+            snapshot_cuts: Arc::new(crate::storage::db::snapshot::SnapshotCuts::default()),
+            gateway_urls: Vec::new(),
             network_id: humoco_sim_core::types::NetworkId::default(),
         }
     }
 
-    pub fn with_tier_controller(mut self, tier_controller: Arc<crate::ingress::TierController>) -> Self {
+    pub fn with_gateway_urls(mut self, urls: Vec<String>) -> Self {
+        self.gateway_urls = urls;
+        self
+    }
+
+    pub fn with_tier_controller(
+        mut self,
+        tier_controller: Arc<crate::ingress::TierController>,
+    ) -> Self {
         self.tier_controller = Some(tier_controller);
         self
     }
@@ -253,7 +283,10 @@ impl NodeRequestHandler {
         self
     }
 
-    pub fn with_readiness_manager(mut self, manager: Arc<crate::daemon::ShardReadinessManager>) -> Self {
+    pub fn with_readiness_manager(
+        mut self,
+        manager: Arc<crate::daemon::ShardReadinessManager>,
+    ) -> Self {
         self.readiness_manager = manager;
         self
     }
@@ -265,15 +298,39 @@ impl NodeRequestHandler {
 }
 
 impl RequestHandler for NodeRequestHandler {
-    fn signing_checkpoint(&self) -> BoxFuture<Result<Option<crate::network::framing::SigningCheckpoint>, NodeError>> {
+    fn gateway_advertisement(&self) -> Option<crate::network::discovery::GatewayAdvertisement> {
+        let now = self.peer_manager.as_ref()?.net_time_ms();
+        let network = match self.network_id {
+            humoco_sim_core::types::NetworkId::Mainnet => 0,
+            humoco_sim_core::types::NetworkId::Testnet => 1,
+        };
+        crate::network::discovery::GatewayAdvertisement::signed(
+            &self.identity,
+            network,
+            self.gateway_urls.clone(),
+            now,
+        )
+    }
+
+    fn signing_checkpoint(
+        &self,
+    ) -> BoxFuture<Result<Option<crate::network::framing::SigningCheckpoint>, NodeError>> {
         let storage = self.storage.clone();
         let identity = self.identity.clone();
-        let network = match self.network_id { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 };
+        let network = match self.network_id {
+            humoco_sim_core::types::NetworkId::Mainnet => 0,
+            humoco_sim_core::types::NetworkId::Testnet => 1,
+        };
         Box::pin(async move {
-            if !storage.is_signing_history_healthy() { return Ok(None); }
-            let state = tokio::task::spawn_blocking(move || storage.signing_checkpoint()).await
+            if !storage.is_signing_history_healthy() {
+                return Ok(None);
+            }
+            let state = tokio::task::spawn_blocking(move || storage.signing_checkpoint())
+                .await
                 .map_err(|e| NodeError::Daemon(format!("checkpoint worker: {e}")))??;
-            Ok(Some(crate::network::framing::SigningCheckpoint::signed(&identity, network, state.0, state.1)))
+            Ok(Some(crate::network::framing::SigningCheckpoint::signed(
+                &identity, network, state.0, state.1,
+            )))
         })
     }
 
@@ -298,6 +355,7 @@ impl RequestHandler for NodeRequestHandler {
         let tier_controller = self.tier_controller.clone();
         let network_id = self.network_id;
         let readiness_manager = self.readiness_manager.clone();
+        let snapshot_cuts = self.snapshot_cuts.clone();
         Box::pin(async move {
             let msg_type = header.msg_type;
 
@@ -332,9 +390,12 @@ impl RequestHandler for NodeRequestHandler {
                         let is_first_party_valid = if !proof.verify() {
                             false
                         } else if let Some(pm) = peer_manager.as_ref() {
-                            if let Some(vk) = pm.get_peer_verifying_key_by_node_id(&offender).await {
+                            if let Some(vk) = pm.get_peer_verifying_key_by_node_id(&offender).await
+                            {
                                 verify_equivocation_first_party(&vk, &proof)
-                            } else if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&offender) {
+                            } else if let Ok(vk) =
+                                ed25519_dalek::VerifyingKey::from_bytes(&offender)
+                            {
                                 verify_equivocation_first_party(&vk, &proof)
                             } else {
                                 verify_equivocation_first_party(identity.verifying_key(), &proof)
@@ -369,24 +430,51 @@ impl RequestHandler for NodeRequestHandler {
                         warn!("EquivocationProof rejected: deserialize failed: {}", e);
                     }
                 }
-                let resp_header = WireHeader::new(MsgType::EquivocationAck as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
+                let resp_header = WireHeader::new(
+                    MsgType::EquivocationAck as u16,
+                    header.session_seq.wrapping_add(1),
+                    header.epoch_id,
+                    0,
+                    0,
+                );
                 return Ok((resp_header, Vec::new()));
             }
             if msg_type == MsgType::LiveStateRequest as u16 {
                 let vote = if payload.len() <= 8192 && peer_identity.is_some() {
-                    if let Ok(context) = serde_json::from_slice::<humoco_proto::live::LiveStateContext>(&payload) {
-                        crate::api::live::sign_current_state(&engine, &identity, peer_manager.as_ref(), &readiness_manager, network_id, &context).await
-                    } else { None }
-                } else { None };
+                    if let Ok(context) =
+                        serde_json::from_slice::<humoco_proto::live::LiveStateContext>(&payload)
+                    {
+                        crate::api::live::sign_current_state(
+                            &engine,
+                            &identity,
+                            peer_manager.as_ref(),
+                            &readiness_manager,
+                            network_id,
+                            &context,
+                        )
+                        .await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let (flags, bytes) = match vote.and_then(|v| bincode::serialize(&v).ok()) {
                     Some(bytes) => (0, bytes),
                     None => (humoco_sim_core::wire::FLAG_NOT_READY, Vec::new()),
                 };
-                return Ok((WireHeader::new(MsgType::LiveStateResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, flags, checked_payload_len(bytes.len())?), bytes));
+                return Ok((
+                    WireHeader::new(
+                        MsgType::LiveStateResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        flags,
+                        checked_payload_len(bytes.len())?,
+                    ),
+                    bytes,
+                ));
             }
             if msg_type == MsgType::LockVerifyRequest as u16 {
-
-
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
@@ -412,7 +500,10 @@ impl RequestHandler for NodeRequestHandler {
                 // signatures, and per-sender quota accounting. They are hard-rejected with
                 // FLAG_UNAUTHORIZED so production quota enforcement cannot be circumvented
                 // over the wire.
-                let wire_payload = match bincode::deserialize::<crate::network::framing::LockWirePayload>(&payload) {
+                let wire_payload = match bincode::deserialize::<
+                    crate::network::framing::LockWirePayload,
+                >(&payload)
+                {
                     Ok(p) => {
                         if matches!(p, crate::network::framing::LockWirePayload::Sim(..)) {
                             warn!("LockVerifyRequest rejected: Sim payload bypass forbidden on P2P wire");
@@ -465,23 +556,31 @@ impl RequestHandler for NodeRequestHandler {
                             .as_ref()
                             .map(|c| c.layer2_voucher_id.as_str())
                             .unwrap_or(req.layer2_voucher_id.as_str());
-                        if let Some(genesis_parent) = engine.get_hmc_voucher_genesis_parent(voucher_id).await {
+                        if let Some(genesis_parent) =
+                            engine.get_hmc_voucher_genesis_parent(voucher_id).await
+                        {
                             humoco_sim_core::types::canonical_voucher_shard(&genesis_parent)
                         } else if let Some(chain_req) = chain {
-                            if let Some(genesis_hop) = chain_req.chain.iter().find(|h| h.is_genesis) {
-                                let genesis_tag = bs58::encode(&genesis_hop.transaction_hash).into_string();
-                                let p_bytes = humoco_sim_core::types::genesis_parent_bytes_from_tag(&genesis_tag);
+                            if let Some(genesis_hop) = chain_req.chain.iter().find(|h| h.is_genesis)
+                            {
+                                let genesis_tag =
+                                    bs58::encode(&genesis_hop.transaction_hash).into_string();
+                                let p_bytes = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+                                    &genesis_tag,
+                                );
                                 humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
                             } else if req.is_genesis {
                                 let tag = bs58::encode(&req.transaction_hash).into_string();
-                                let p_bytes = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+                                let p_bytes =
+                                    humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
                                 humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
                             } else {
                                 humoco_sim_core::types::voucher_shard_id(voucher_id)
                             }
                         } else if req.is_genesis {
                             let tag = bs58::encode(&req.transaction_hash).into_string();
-                            let p_bytes = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+                            let p_bytes =
+                                humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
                             humoco_sim_core::types::canonical_voucher_shard(&p_bytes)
                         } else {
                             humoco_sim_core::types::voucher_shard_id(voucher_id)
@@ -492,15 +591,22 @@ impl RequestHandler for NodeRequestHandler {
                 // Write authorization is restricted to the canonical Top-20.
                 // Local reachability never admits replacement ranks.
                 let is_responsible = if let Some(pm) = peer_manager.as_ref() {
-                    pm.is_local_committee_member(*identity.node_pubkey(), *identity.hrw_routing_id(), shard_id).await
+                    pm.is_local_committee_member(
+                        *identity.node_pubkey(),
+                        *identity.hrw_routing_id(),
+                        shard_id,
+                    )
+                    .await
                 } else {
                     true
                 };
                 if !is_responsible {
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
-                        header.session_seq.wrapping_add(1), header.epoch_id,
-                        humoco_sim_core::wire::FLAG_NOT_IN_SHARD, 0,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_NOT_IN_SHARD,
+                        0,
                     );
                     return Ok((resp_header, Vec::new()));
                 }
@@ -516,7 +622,8 @@ impl RequestHandler for NodeRequestHandler {
                 // 1. Cheap checks first (Rule 9): stateless declared-rate filter before
                 // any asymmetric crypto or state mutation. Over-quota senders are
                 // rejected here even with null/invalid signatures.
-                let declared_daily_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_write_ema) / 1_000_000;
+                let declared_daily_rate =
+                    humoco_sim_core::quota::ema_to_daily_rate(declared_write_ema) / 1_000_000;
                 if declared_daily_rate > write_limit {
                     warn!(declared_daily_rate, write_limit, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: declared write load exceeds 5.0 * ncb_eff");
                     let resp_header = WireHeader::new(
@@ -560,7 +667,11 @@ impl RequestHandler for NodeRequestHandler {
                 // must not consume quota or RAM.
                 const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
                 if timestamp_ms == 0 || timestamp_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
-                    warn!(timestamp_ms, now_ms, "LockVerifyRequest rejected: sender timestamp outside 30s drift window");
+                    warn!(
+                        timestamp_ms,
+                        now_ms,
+                        "LockVerifyRequest rejected: sender timestamp outside 30s drift window"
+                    );
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
                         header.session_seq.wrapping_add(1),
@@ -573,13 +684,24 @@ impl RequestHandler for NodeRequestHandler {
 
                 // DEC-061: a fresh gateway envelope cannot renew wallet T0.
                 // Evaluate against the admission-time snapshot, before disk waits.
-                if let crate::network::framing::LockWirePayload::Hmc { req, .. } = &wire_payload {
-                    if req.created_at_ms == 0 || req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS {
-                        return Ok((WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq.wrapping_add(1), header.epoch_id,
-                            humoco_sim_core::wire::FLAG_UNAUTHORIZED, 0,
-                        ), Vec::new()));
+                if let crate::network::framing::LockWirePayload::Hmc {
+                    req, chain: None, ..
+                } = &wire_payload
+                {
+                    if !req.is_genesis
+                        && (req.created_at_ms == 0
+                            || req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS)
+                    {
+                        return Ok((
+                            WireHeader::new(
+                                MsgType::LockVerifyResponse as u16,
+                                header.session_seq.wrapping_add(1),
+                                header.epoch_id,
+                                humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                0,
+                            ),
+                            Vec::new(),
+                        ));
                     }
                 }
 
@@ -636,13 +758,23 @@ impl RequestHandler for NodeRequestHandler {
                         );
                         return Ok((resp_header, Vec::new()));
                     }
-                    crate::network::framing::LockWirePayload::Hmc { req, root_valid_until, chain, .. } => {
+                    crate::network::framing::LockWirePayload::Hmc {
+                        req,
+                        root_valid_until,
+                        chain,
+                        ..
+                    } => {
                         let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
                         let entry = crate::api::hmc::L2LockEntry::from(req);
-                        let base_fp = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+                        let base_fp =
+                            humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
                         let base_by = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_s);
                         let chain_len = chain.as_ref().map(|c| c.chain.len()).unwrap_or(1);
-                        (entry.t_id, base_fp.saturating_mul(chain_len as u64), base_by.saturating_mul(chain_len as u64))
+                        (
+                            entry.t_id,
+                            base_fp.saturating_mul(chain_len as u64),
+                            base_by.saturating_mul(chain_len as u64),
+                        )
                     }
                 };
 
@@ -676,11 +808,22 @@ impl RequestHandler for NodeRequestHandler {
 
                 if !readiness_manager.is_shard_ready(shard_id) {
                     readiness_manager.request_sync(shard_id);
-                    return Ok((WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_NOT_READY, 0), Vec::new()));
+                    return Ok((
+                        WireHeader::new(
+                            MsgType::LockVerifyResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            humoco_sim_core::wire::FLAG_NOT_READY,
+                            0,
+                        ),
+                        Vec::new(),
+                    ));
                 }
                 if let Some(pm) = peer_manager.as_ref() {
                     if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
-                        if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
+                        if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
+                            &prev, &curr,
+                        ) {
                             warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: under-reporting detected in LockVerifyRequest! Slashing perpetrator.");
                             let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
                             let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
@@ -702,7 +845,8 @@ impl RequestHandler for NodeRequestHandler {
                             return Ok((resp_header, Vec::new()));
                         }
                     }
-                    pm.update_node_write_evidence(&sender_pubkey, curr.clone()).await;
+                    pm.update_node_write_evidence(&sender_pubkey, curr.clone())
+                        .await;
                     pm.record_observed_evidence(curr.clone()).await;
                 }
 
@@ -711,7 +855,9 @@ impl RequestHandler for NodeRequestHandler {
                 // is full the request is rejected here and RAM stays untouched.
                 if let Some(tc) = &tier_controller {
                     let epoch_day = tc.current_epoch_day_at(now_ms);
-                    if let Err(e) = tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day) {
+                    if let Err(e) =
+                        tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day)
+                    {
                         warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
                         let resp_header = WireHeader::new(
                             MsgType::LockVerifyResponse as u16,
@@ -740,42 +886,108 @@ impl RequestHandler for NodeRequestHandler {
                         return Ok((resp_header, Vec::new()));
                     }
                     crate::network::framing::LockWirePayload::Hmc { req, chain, .. } => {
+                        if req.is_genesis
+                            && chain.as_ref().is_none_or(|chain| chain.chain.len() == 1)
+                        {
+                            if !crate::api::hmc::verify_l2_lock_signature(&req) {
+                                return Ok((
+                                    WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
+                                        0,
+                                    ),
+                                    Vec::new(),
+                                ));
+                            }
+                            let tag = bs58::encode(req.transaction_hash).into_string();
+                            let (verdict, _) = engine
+                                .ingress_hmc_lock_durable(
+                                    tag,
+                                    crate::api::hmc::L2LockEntry::from(&req),
+                                    crate::storage::IngressOrigin::ClientApi,
+                                    Some(now_ms),
+                                    None,
+                                    None,
+                                    None,
+                                )
+                                .await;
+                            let bytes = serde_json::to_vec(&verdict)
+                                .map_err(|e| NodeError::Network(e.to_string()))?;
+                            return Ok((
+                                WireHeader::new(
+                                    MsgType::LockVerifyResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    0,
+                                    checked_payload_len(bytes.len())?,
+                                ),
+                                bytes,
+                            ));
+                        }
                         if let Some(chain_req) = chain {
                             if chain_req.chain.is_empty() {
                                 warn!("LockVerifyRequest rejected: empty chain");
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
+                                let resp_header = WireHeader::new(
+                                    MsgType::LockVerifyResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    0,
+                                    0,
+                                );
                                 return Ok((resp_header, Vec::new()));
                             }
-                            if engine.is_node_banned(&chain_req.auth.ephemeral_pubkey).await {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                            if engine
+                                .is_node_banned(&chain_req.auth.ephemeral_pubkey)
+                                .await
+                            {
+                                let resp_header = WireHeader::new(
+                                    MsgType::LockVerifyResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+                                    0,
+                                );
                                 return Ok((resp_header, Vec::new()));
                             }
-                            for hop in &chain_req.chain {
-                                if engine.is_node_banned(&hop.sender_ephemeral_pub).await
-                                    || engine.is_node_banned(&hop.auth.ephemeral_pubkey).await
-                                {
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
-                                    return Ok((resp_header, Vec::new()));
-                                }
-                                if !crate::api::hmc::verify_l2_lock_signature(hop) {
-                                    warn!("LockVerifyRequest rejected: invalid hop signature in chain");
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_SIGNATURE_INVALID, 0);
-                                    return Ok((resp_header, Vec::new()));
-                                }
-                            }
-                            let (verdict, _is_new) = engine.ingress_hmc_chain_lock_durable(chain_req.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms)).await;
+                            let (verdict, _is_new) = engine
+                                .ingress_hmc_chain_lock_durable(
+                                    chain_req.clone(),
+                                    crate::storage::IngressOrigin::ClientApi,
+                                    Some(now_ms),
+                                )
+                                .await;
                             match verdict {
                                 crate::api::hmc::L2Verdict::Conflict { existing_lock } => {
                                     // True double-spend: report colliding lock payload so the
                                     // stateless gateway can return 409 Conflict (INV-0604).
-                                    let colliding = bincode::serialize(&existing_lock).unwrap_or_default();
+                                    let colliding =
+                                        bincode::serialize(&existing_lock).unwrap_or_default();
                                     let payload_len = checked_payload_len(colliding.len())?;
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_COLLISION_DETECTED, payload_len);
+                                    let resp_header = WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_COLLISION_DETECTED,
+                                        payload_len,
+                                    );
                                     return Ok((resp_header, colliding));
                                 }
-                                crate::api::hmc::L2Verdict::Rejected { .. } => {
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
-                                    return Ok((resp_header, Vec::new()));
+                                rejection @ crate::api::hmc::L2Verdict::Rejected { .. } => {
+                                    let bytes = serde_json::to_vec(&rejection).map_err(|e| {
+                                        NodeError::Network(format!(
+                                            "chain rejection serialization: {e}"
+                                        ))
+                                    })?;
+                                    let resp_header = WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                        checked_payload_len(bytes.len())?,
+                                    );
+                                    return Ok((resp_header, bytes));
                                 }
                                 _ => {
                                     let last_hop = chain_req.chain.last().unwrap();
@@ -784,26 +996,58 @@ impl RequestHandler for NodeRequestHandler {
                                     } else {
                                         last_hop.ds_tag.clone().unwrap_or_default()
                                     };
-                                    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+                                    let parent_bytes =
+                                        *blake3::hash(lookup_tag.as_bytes()).as_bytes();
                                     let requested_status = (header.flags & 0xFF) as u8;
-                                    let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
-                                    let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
-                                        && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
-                                    let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
-                                    let attestation = crate::api::routes::create_attestation_for_network(
-                                        &identity,
-                                        op_hash,
-                                        parent_bytes,
-                                        shard_id,
-                                        final_status,
-                                        now_ms,
-                                        network_id,
-                                    );
-                                    let candidate = bincode::serialize(&attestation).unwrap_or_default();
-                                    let retained = engine.persist_original_approval(lookup_tag.clone(), crate::api::hmc::L2LockEntry::from(last_hop), *identity.node_pubkey(), candidate, final_status, now_ms).await;
+                                    let local_active_count = peer_manager
+                                        .as_ref()
+                                        .map(|pm| pm.active_nodes_count())
+                                        .unwrap_or(1);
+                                    let can_be_final =
+                                        humoco_sim_core::types::required_quorum(local_active_count)
+                                            .1
+                                            && peer_manager
+                                                .as_ref()
+                                                .map(|pm| pm.is_network_stable_ge20_for_24h(now_ms))
+                                                .unwrap_or(false);
+                                    let final_status =
+                                        requested_status.min(if can_be_final { 1 } else { 0 });
+                                    let attestation =
+                                        crate::api::routes::create_attestation_for_network(
+                                            &identity,
+                                            op_hash,
+                                            parent_bytes,
+                                            shard_id,
+                                            final_status,
+                                            now_ms,
+                                            network_id,
+                                        );
+                                    let candidate =
+                                        bincode::serialize(&attestation).unwrap_or_default();
+                                    let retained = engine
+                                        .persist_original_approval(
+                                            lookup_tag.clone(),
+                                            crate::api::hmc::L2LockEntry::from(last_hop),
+                                            *identity.node_pubkey(),
+                                            candidate,
+                                            final_status,
+                                            now_ms,
+                                        )
+                                        .await;
                                     let resp_bytes = match retained {
                                         Ok(bytes) => bytes,
-                                        Err(_) => return Ok((WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_NOT_READY, 0), Vec::new())),
+                                        Err(_) => {
+                                            return Ok((
+                                                WireHeader::new(
+                                                    MsgType::LockVerifyResponse as u16,
+                                                    header.session_seq.wrapping_add(1),
+                                                    header.epoch_id,
+                                                    humoco_sim_core::wire::FLAG_NOT_READY,
+                                                    0,
+                                                ),
+                                                Vec::new(),
+                                            ))
+                                        }
                                     };
                                     let payload_len = checked_payload_len(resp_bytes.len())?;
                                     let resp_header = WireHeader::new(
@@ -820,12 +1064,24 @@ impl RequestHandler for NodeRequestHandler {
                             if engine.is_node_banned(&req.sender_ephemeral_pub).await
                                 || engine.is_node_banned(&req.auth.ephemeral_pubkey).await
                             {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_PEER_SUSPENDED, 0);
+                                let resp_header = WireHeader::new(
+                                    MsgType::LockVerifyResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+                                    0,
+                                );
                                 return Ok((resp_header, Vec::new()));
                             }
 
                             if !crate::api::hmc::verify_l2_lock_signature(&req) {
-                                let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_SIGNATURE_INVALID, 0);
+                                let resp_header = WireHeader::new(
+                                    MsgType::LockVerifyResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
+                                    0,
+                                );
                                 return Ok((resp_header, Vec::new()));
                             }
 
@@ -835,7 +1091,13 @@ impl RequestHandler for NodeRequestHandler {
                                 match &req.ds_tag {
                                     Some(tag) if !tag.trim().is_empty() => tag.clone(),
                                     _ => {
-                                        let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
+                                        let resp_header = WireHeader::new(
+                                            MsgType::LockVerifyResponse as u16,
+                                            header.session_seq.wrapping_add(1),
+                                            header.epoch_id,
+                                            0,
+                                            0,
+                                        );
                                         return Ok((resp_header, Vec::new()));
                                     }
                                 }
@@ -844,40 +1106,100 @@ impl RequestHandler for NodeRequestHandler {
                             let entry = crate::api::hmc::L2LockEntry::from(&req);
                             // INV-1202: validate the ingress time window at the shard with
                             // the current network time (never blindly trust gateway time).
-                            let (verdict, _is_new) = engine.ingress_hmc_lock_durable(lookup_tag.clone(), entry.clone(), crate::storage::IngressOrigin::ClientApi, Some(now_ms), None, None, None).await;
+                            let (verdict, _is_new) = engine
+                                .ingress_hmc_lock_durable(
+                                    lookup_tag.clone(),
+                                    entry.clone(),
+                                    crate::storage::IngressOrigin::ClientApi,
+                                    Some(now_ms),
+                                    None,
+                                    None,
+                                    None,
+                                )
+                                .await;
 
                             match verdict {
                                 crate::api::hmc::L2Verdict::Conflict { existing_lock } => {
-                                    let colliding = bincode::serialize(&existing_lock).unwrap_or_default();
+                                    let colliding =
+                                        bincode::serialize(&existing_lock).unwrap_or_default();
                                     let payload_len = checked_payload_len(colliding.len())?;
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_COLLISION_DETECTED, payload_len);
+                                    let resp_header = WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_COLLISION_DETECTED,
+                                        payload_len,
+                                    );
                                     return Ok((resp_header, colliding));
                                 }
-                                crate::api::hmc::L2Verdict::Rejected { .. } => {
-                                    let resp_header = WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
-                                    return Ok((resp_header, Vec::new()));
+                                rejection @ crate::api::hmc::L2Verdict::Rejected { .. } => {
+                                    let bytes = serde_json::to_vec(&rejection).map_err(|e| {
+                                        NodeError::Network(format!(
+                                            "chain rejection serialization: {e}"
+                                        ))
+                                    })?;
+                                    let resp_header = WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                        checked_payload_len(bytes.len())?,
+                                    );
+                                    return Ok((resp_header, bytes));
                                 }
                                 _ => {
-                                    let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+                                    let parent_bytes =
+                                        *blake3::hash(lookup_tag.as_bytes()).as_bytes();
                                     let requested_status = (header.flags & 0xFF) as u8;
-                                    let local_active_count = peer_manager.as_ref().map(|pm| pm.active_nodes_count()).unwrap_or(1);
-                                    let can_be_final = humoco_sim_core::types::required_quorum(local_active_count).1
-                                        && peer_manager.as_ref().map(|pm| pm.is_network_stable_ge20_for_24h(now_ms)).unwrap_or(false);
-                                    let final_status = requested_status.min(if can_be_final { 1 } else { 0 });
-                                    let attestation = crate::api::routes::create_attestation_for_network(
-                                        &identity,
-                                        entry.t_id,
-                                        parent_bytes,
-                                        shard_id,
-                                        final_status,
-                                        now_ms,
-                                        network_id,
-                                    );
-                                    let candidate = bincode::serialize(&attestation).unwrap_or_default();
-                                    let retained = engine.persist_original_approval(lookup_tag.clone(), entry.clone(), *identity.node_pubkey(), candidate, final_status, now_ms).await;
+                                    let local_active_count = peer_manager
+                                        .as_ref()
+                                        .map(|pm| pm.active_nodes_count())
+                                        .unwrap_or(1);
+                                    let can_be_final =
+                                        humoco_sim_core::types::required_quorum(local_active_count)
+                                            .1
+                                            && peer_manager
+                                                .as_ref()
+                                                .map(|pm| pm.is_network_stable_ge20_for_24h(now_ms))
+                                                .unwrap_or(false);
+                                    let final_status =
+                                        requested_status.min(if can_be_final { 1 } else { 0 });
+                                    let attestation =
+                                        crate::api::routes::create_attestation_for_network(
+                                            &identity,
+                                            entry.t_id,
+                                            parent_bytes,
+                                            shard_id,
+                                            final_status,
+                                            now_ms,
+                                            network_id,
+                                        );
+                                    let candidate =
+                                        bincode::serialize(&attestation).unwrap_or_default();
+                                    let retained = engine
+                                        .persist_original_approval(
+                                            lookup_tag.clone(),
+                                            entry.clone(),
+                                            *identity.node_pubkey(),
+                                            candidate,
+                                            final_status,
+                                            now_ms,
+                                        )
+                                        .await;
                                     let resp_bytes = match retained {
                                         Ok(bytes) => bytes,
-                                        Err(_) => return Ok((WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_NOT_READY, 0), Vec::new())),
+                                        Err(_) => {
+                                            return Ok((
+                                                WireHeader::new(
+                                                    MsgType::LockVerifyResponse as u16,
+                                                    header.session_seq.wrapping_add(1),
+                                                    header.epoch_id,
+                                                    humoco_sim_core::wire::FLAG_NOT_READY,
+                                                    0,
+                                                ),
+                                                Vec::new(),
+                                            ))
+                                        }
                                     };
                                     let payload_len = checked_payload_len(resp_bytes.len())?;
                                     let resp_header = WireHeader::new(
@@ -911,20 +1233,52 @@ impl RequestHandler for NodeRequestHandler {
                 };
                 let read_limit = (5.0 * ncb_read_eff as f64).round() as u64;
 
-                let (lock_id, parent_lock, shard_id, declared_write_ema, declared_read_ema, raw_sender_pubkey, timestamp_ms, sender_signature) =
-                    if let Ok(sq) = bincode::deserialize::<crate::network::framing::StatusQueryPayload>(&payload) {
-                        (sq.lock_id, sq.parent_lock, sq.shard_id, sq.declared_write_ema_micro_bj, sq.current_read_ema_credits, sq.sender_pubkey, sq.timestamp_ms, sq.sender_signature)
-                    } else if let Ok((l_id, p_lock, s_id)) = bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload) {
-                        (l_id, p_lock, s_id, 0, 0, [0u8; 32], 0, [0u8; 64])
-                    } else {
-                        let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
-                        return Ok((resp_header, Vec::new()));
-                    };
+                let (
+                    lock_id,
+                    parent_lock,
+                    shard_id,
+                    declared_write_ema,
+                    declared_read_ema,
+                    raw_sender_pubkey,
+                    timestamp_ms,
+                    sender_signature,
+                ) = if let Ok(sq) =
+                    bincode::deserialize::<crate::network::framing::StatusQueryPayload>(&payload)
+                {
+                    (
+                        sq.lock_id,
+                        sq.parent_lock,
+                        sq.shard_id,
+                        sq.declared_write_ema_micro_bj,
+                        sq.current_read_ema_credits,
+                        sq.sender_pubkey,
+                        sq.timestamp_ms,
+                        sq.sender_signature,
+                    )
+                } else if let Ok((l_id, p_lock, s_id)) =
+                    bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload)
+                {
+                    (l_id, p_lock, s_id, 0, 0, [0u8; 32], 0, [0u8; 64])
+                } else {
+                    let resp_header = WireHeader::new(
+                        MsgType::StatusResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        0,
+                        0,
+                    );
+                    return Ok((resp_header, Vec::new()));
+                };
 
                 // 1. Cheap check: declared read rate vs 5x whale brake limit
-                let declared_read_rate = humoco_sim_core::quota::ema_to_daily_rate(declared_read_ema);
+                let declared_read_rate =
+                    humoco_sim_core::quota::ema_to_daily_rate(declared_read_ema);
                 if declared_read_rate > read_limit {
-                    warn!(declared_read_rate, read_limit, "StatusQuery rejected: declared read load exceeds 5.0 * ncb_read_eff");
+                    warn!(
+                        declared_read_rate,
+                        read_limit,
+                        "StatusQuery rejected: declared read load exceeds 5.0 * ncb_read_eff"
+                    );
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
                         header.session_seq.wrapping_add(1),
@@ -1011,7 +1365,9 @@ impl RequestHandler for NodeRequestHandler {
 
                     if let Some(pm) = peer_manager.as_ref() {
                         if let Some(prev) = pm.get_node_read_evidence(&sender_pubkey).await {
-                            if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &curr) {
+                            if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
+                                &prev, &curr,
+                            ) {
                                 warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: read under-reporting detected in StatusQuery! Slashing perpetrator.");
                                 let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
                                 let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
@@ -1033,7 +1389,8 @@ impl RequestHandler for NodeRequestHandler {
                                 return Ok((resp_header, Vec::new()));
                             }
                         }
-                        pm.update_node_read_evidence(&sender_pubkey, curr.clone()).await;
+                        pm.update_node_read_evidence(&sender_pubkey, curr.clone())
+                            .await;
                         pm.record_observed_evidence(curr.clone()).await;
                     }
                 }
@@ -1116,7 +1473,8 @@ impl RequestHandler for NodeRequestHandler {
                         let is_tag_only = lock_id == [0u8; 32];
                         for (lookup_tag, entry) in &hmc.locks {
                             let tag_hash = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-                            let parent_matches = tag_hash == parent_lock || lookup_tag.as_bytes() == &parent_lock[..];
+                            let parent_matches = tag_hash == parent_lock
+                                || lookup_tag.as_bytes() == &parent_lock[..];
                             if !parent_matches {
                                 continue;
                             }
@@ -1124,10 +1482,16 @@ impl RequestHandler for NodeRequestHandler {
                                 continue;
                             }
                             // Canonical shard check (INV-0302): prefer genesis anchor.
-                            let shard_ok = if let Some(genesis_parent) = hmc.get_voucher_genesis_parent(&entry.layer2_voucher_id) {
-                                shard_id == humoco_sim_core::types::canonical_voucher_shard(&genesis_parent)
+                            let shard_ok = if let Some(genesis_parent) =
+                                hmc.get_voucher_genesis_parent(&entry.layer2_voucher_id)
+                            {
+                                shard_id
+                                    == humoco_sim_core::types::canonical_voucher_shard(
+                                        &genesis_parent,
+                                    )
                             } else {
-                                let v_hash = *blake3::hash(entry.layer2_voucher_id.as_bytes()).as_bytes();
+                                let v_hash =
+                                    *blake3::hash(entry.layer2_voucher_id.as_bytes()).as_bytes();
                                 let v_shard = u16::from_be_bytes([v_hash[0], v_hash[1]]);
                                 let p_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
                                 shard_id == v_shard || shard_id == p_shard
@@ -1187,7 +1551,13 @@ impl RequestHandler for NodeRequestHandler {
                     );
                     return Ok((resp_header, resp_bytes));
                 }
-                let resp_header = WireHeader::new(MsgType::StatusResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, 0);
+                let resp_header = WireHeader::new(
+                    MsgType::StatusResponse as u16,
+                    header.session_seq.wrapping_add(1),
+                    header.epoch_id,
+                    0,
+                    0,
+                );
                 return Ok((resp_header, Vec::new()));
             } else if msg_type == MsgType::ShardDigestRequest as u16 {
                 let shard_id = if payload.len() >= 2 {
@@ -1215,87 +1585,12 @@ impl RequestHandler for NodeRequestHandler {
                     );
                     return Ok((resp_header, Vec::new()));
                 }
-                let valid_locks_db = match storage.all_valid_locks(now_ms) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        error!(shard_id, error=%e, "Storage error reading valid locks for digest; failing closed with FLAG_NOT_READY");
-                        let resp_header = WireHeader::new(
-                            MsgType::ShardDigestResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_NOT_READY,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
-                };
-                let mut locks: Vec<humoco_sim_core::types::LockRecord> = valid_locks_db
-                    .into_iter()
-                    .map(|(rec, _)| rec)
-                    .collect();
-                let hmc_locks_all = match storage.all_valid_hmc_locks(now_ms) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        error!(shard_id, error=%e, "Storage error reading valid HMC locks for digest; failing closed with FLAG_NOT_READY");
-                        let resp_header = WireHeader::new(
-                            MsgType::ShardDigestResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_NOT_READY,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
-                };
-                // # Architectural Invariant: Spec 03, Deterministic Digest Pull-Sync
-                //
-                // HMC follow-up locks carry no own `deletable_at`; their TTL is
-                // strictly inherited from the known voucher genesis root
-                // (Rule 10). The old `now_ms + 1 year` fallback was
-                // wall-clock dependent and broke digest convergence across
-                // nodes. Digests MUST be time-independent: inherit
-                // deterministically, skip orphans with unknown root.
-                let hmc_root_map: std::collections::HashMap<&str, u64> = {
-                    let mut m = std::collections::HashMap::new();
-                    for (_, e) in &hmc_locks_all {
-                        if let Some(v) = e.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
-                            m.entry(e.layer2_voucher_id.as_str()).or_insert(v);
-                        }
-                    }
-                    m
-                };
-                for (tag, entry) in &hmc_locks_all {
-                    let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-                    if !locks.iter().any(|l| l.parent_lock == parent_bytes) {
-                        let valid_until_ms = entry
-                            .deletable_at
-                            .as_deref()
-                            .and_then(|s| s.parse::<u64>().ok())
-                            .or_else(|| hmc_root_map.get(entry.layer2_voucher_id.as_str()).copied());
-                        let Some(valid_until_ms) = valid_until_ms else {
-                            continue;
-                        };
-                        let created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
-                        locks.push(humoco_sim_core::types::LockRecord::new(
-                            parent_bytes,
-                            entry.sender_ephemeral_pub,
-                            entry.t_id.to_vec(),
-                            humoco_sim_core::types::SimTime(created_at_ms),
-                            humoco_sim_core::types::SimTime(valid_until_ms),
-                        ));
-                    }
-                }
-                if let Some(pm) = peer_manager.as_ref() {
-                    pm.register_active_shard(shard_id).await;
-                }
-                let shard_locks: Vec<humoco_sim_core::types::LockRecord> = locks
-                    .into_iter()
-                    .filter(|l| {
-                        let sid = u16::from_be_bytes([l.parent_lock[0], l.parent_lock[1]]);
-                        sid == shard_id && !l.status.is_void() && l.valid_until > humoco_sim_core::types::SimTime(now_ms)
-                    })
-                    .collect();
-                let digest = humoco_sim_core::crypto::compute_shard_digest_at(
+                let db = storage.clone();
+                let shard_locks = tokio::task::spawn_blocking(move || db.committed_shard_records(shard_id, now_ms)).await
+                    .map_err(|e| NodeError::Network(format!("digest worker: {e}")))?
+                    .map_err(|e| NodeError::Network(format!("committed digest unavailable: {e}")))?;
+                if let Some(pm) = peer_manager.as_ref() { pm.register_active_shard(shard_id).await; }
+                let digest = humoco_sim_core::crypto::compute_selected_shard_digest_at(
                     shard_id,
                     &shard_locks,
                     humoco_sim_core::types::SimTime(now_ms),
@@ -1304,7 +1599,11 @@ impl RequestHandler for NodeRequestHandler {
                 let resp_bytes = bincode::serialize(&(digest, lock_count)).unwrap_or_default();
                 let payload_len = checked_payload_len(resp_bytes.len())?;
                 let is_ready = readiness_manager.is_shard_ready(shard_id);
-                let flags = if is_ready { 0 } else { humoco_sim_core::wire::FLAG_NOT_READY };
+                let flags = if is_ready {
+                    0
+                } else {
+                    humoco_sim_core::wire::FLAG_NOT_READY
+                };
                 let resp_header = WireHeader::new(
                     MsgType::ShardDigestResponse as u16,
                     header.session_seq.wrapping_add(1),
@@ -1314,12 +1613,14 @@ impl RequestHandler for NodeRequestHandler {
                 );
                 return Ok((resp_header, resp_bytes));
             } else if msg_type == MsgType::ShardBucketRangeRequest as u16 {
-                let req: humoco_sim_core::types::ShardBucketRangeRequest = bincode::deserialize(&payload)
-                    .unwrap_or(humoco_sim_core::types::ShardBucketRangeRequest {
-                        shard_id: 0,
-                        start_bucket: 0,
-                        bucket_count: humoco_sim_core::types::BUCKETS_PER_DAY as u16,
-                    });
+                let req: humoco_sim_core::types::ShardBucketRangeRequest = bincode::deserialize(
+                    &payload,
+                )
+                .unwrap_or(humoco_sim_core::types::ShardBucketRangeRequest {
+                    shard_id: 0,
+                    start_bucket: 0,
+                    bucket_count: humoco_sim_core::types::BUCKETS_PER_DAY as u16,
+                });
                 let shard_id = req.shard_id;
                 let now_ms = peer_manager
                     .as_ref()
@@ -1330,65 +1631,22 @@ impl RequestHandler for NodeRequestHandler {
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0)
                     });
-                let mut locks: Vec<humoco_sim_core::types::LockRecord> = storage
-                    .all_valid_locks(now_ms)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(rec, _)| rec)
-                    .collect();
-                for (rec, _) in engine.ram.read().await.all_locks() {
-                    if !locks.iter().any(|l| l.parent_lock == rec.parent_lock) {
-                        locks.push(rec);
-                    }
-                }
-                let mut hmc_locks_all = storage.all_valid_hmc_locks(now_ms).unwrap_or_default();
-                for (tag, entry) in &engine.hmc_ram.read().await.locks {
-                    if !hmc_locks_all.iter().any(|(t, _)| t == tag) {
-                        hmc_locks_all.push((tag.clone(), entry.clone()));
-                    }
-                }
-                let hmc_root_map: std::collections::HashMap<&str, u64> = {
-                    let mut m = std::collections::HashMap::new();
-                    for (_, e) in &hmc_locks_all {
-                        if let Some(v) = e.deletable_at.as_deref().and_then(|s| s.parse::<u64>().ok()) {
-                            m.entry(e.layer2_voucher_id.as_str()).or_insert(v);
-                        }
-                    }
-                    m
-                };
-                for (tag, entry) in &hmc_locks_all {
-                    let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-                    if !locks.iter().any(|l| l.parent_lock == parent_bytes) {
-                        let valid_until_ms = entry
-                            .deletable_at
-                            .as_deref()
-                            .and_then(|s| s.parse::<u64>().ok())
-                            .or_else(|| hmc_root_map.get(entry.layer2_voucher_id.as_str()).copied());
-                        let Some(valid_until_ms) = valid_until_ms else {
-                            continue;
-                        };
-                        let created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
-                        locks.push(humoco_sim_core::types::LockRecord::new(
-                            parent_bytes,
-                            entry.sender_ephemeral_pub,
-                            entry.t_id.to_vec(),
-                            humoco_sim_core::types::SimTime(created_at_ms),
-                            humoco_sim_core::types::SimTime(valid_until_ms),
-                        ));
-                    }
-                }
-
+                let db = storage.clone();
+                let locks = tokio::task::spawn_blocking(move || db.committed_shard_records(shard_id, now_ms)).await
+                    .map_err(|e| NodeError::Network(format!("bucket worker: {e}")))?
+                    .map_err(|e| NodeError::Network(format!("committed buckets unavailable: {e}")))?;
                 let mut buckets = Vec::new();
                 let end_bucket = req.start_bucket.saturating_add(req.bucket_count as u64);
                 for b_id in req.start_bucket..end_bucket {
-                    let digest = humoco_sim_core::crypto::compute_shard_bucket_digest(shard_id, b_id, &locks);
+                    let digest = humoco_sim_core::crypto::compute_selected_shard_bucket_digest(
+                        shard_id, b_id, &locks,
+                    );
                     let count = locks
                         .iter()
                         .filter(|l| {
-                            let sid = u16::from_be_bytes([l.parent_lock[0], l.parent_lock[1]]);
-                            sid == shard_id
-                                && !l.status.is_void()
-                                && humoco_sim_core::types::timestamp_to_bucket_id(l.created_at.0) == b_id
+                            !l.status.is_void()
+                                && humoco_sim_core::types::timestamp_to_bucket_id(l.created_at.0)
+                                    == b_id
                         })
                         .count() as u32;
                     let is_sealed = humoco_sim_core::types::is_bucket_sealed(b_id, now_ms);
@@ -1412,81 +1670,25 @@ impl RequestHandler for NodeRequestHandler {
                 return Ok((resp_header, resp_bytes));
             } else if msg_type == MsgType::ActiveSyncRequest as u16 {
                 let req = crate::network::framing::ActiveSyncRequest::from_bytes(&payload)
-                    .unwrap_or_else(|_| crate::network::framing::ActiveSyncRequest::new(0, 500));
-                let mut locks = storage.all_valid_locks(0).unwrap_or_default();
-                for (rec, rv) in engine.ram.read().await.all_locks() {
-                    if !locks.iter().any(|(l, _)| l.parent_lock == rec.parent_lock) {
-                        locks.push((rec, rv.0));
-                    }
-                }
-                if let Some(tb) = req.target_bucket_id {
-                    locks.retain(|(l, _)| humoco_sim_core::types::timestamp_to_bucket_id(l.created_at.0) == tb);
-                }
-                locks.sort_by(|a, b| a.0.parent_lock.cmp(&b.0.parent_lock));
-
-                let mut hmc_locks = storage.all_valid_hmc_locks(0).unwrap_or_default();
-                let hmc_ram = engine.hmc_ram.read().await;
-                for (tag, entry) in &hmc_ram.locks {
-                    if !hmc_locks.iter().any(|(t, _)| t == tag) {
-                        hmc_locks.push((tag.clone(), entry.clone()));
-                    }
-                }
-                if let Some(tb) = req.target_bucket_id {
-                    hmc_locks.retain(|(_, entry)| {
-                        let created_at_ms = if entry.created_at_ms > 0 { entry.created_at_ms } else { entry.encrypted_timestamp as u64 };
-                        humoco_sim_core::types::timestamp_to_bucket_id(created_at_ms) == tb
-                    });
-                }
-                hmc_locks.sort_by(|a, b| a.0.cmp(&b.0));
-
-                let total_locks = locks.len();
-                let total_hmc = hmc_locks.len();
-                debug!(
-                    total_locks,
-                    total_hmc,
-                    cursor = req.cursor,
-                    limit = req.limit,
-                    "NodeRequestHandler handling ActiveSyncRequest"
+                    .map_err(|e| NodeError::Network(format!("invalid sync request: {e}")))?;
+                let owner = peer_identity.ok_or_else(|| {
+                    NodeError::Network("sync requires authenticated identity".into())
+                })?;
+                let page =
+                    tokio::task::spawn_blocking(move || snapshot_cuts.page(&storage, req, owner))
+                        .await
+                        .map_err(|e| NodeError::Network(format!("snapshot worker: {e}")))??;
+                let serialized = page
+                    .to_bytes()
+                    .map_err(|e| NodeError::Network(format!("snapshot serialization: {e}")))?;
+                let response = WireHeader::new(
+                    MsgType::ActiveSyncDone as u16,
+                    header.session_seq.wrapping_add(1),
+                    header.epoch_id,
+                    0,
+                    checked_payload_len(serialized.len())?,
                 );
-
-                let total_locks = locks.len();
-                let total_hmc = hmc_locks.len();
-                let total_items = total_locks + total_hmc;
-                let offset = req.cursor as usize;
-                let limit = req.limit.clamp(1, 1000);
-
-                let mut chunk_locks = Vec::new();
-                let mut chunk_hmc = Vec::new();
-
-                if offset < total_locks {
-                    let end_locks = (offset + limit).min(total_locks);
-                    chunk_locks.extend_from_slice(&locks[offset..end_locks]);
-                    let taken = chunk_locks.len();
-                    if taken < limit && total_hmc > 0 {
-                        let hmc_needed = limit - taken;
-                        let end_hmc = hmc_needed.min(total_hmc);
-                        chunk_hmc.extend_from_slice(&hmc_locks[0..end_hmc]);
-                    }
-                } else if offset < total_items {
-                    let hmc_offset = offset - total_locks;
-                    let end_hmc = (hmc_offset + limit).min(total_hmc);
-                    chunk_hmc.extend_from_slice(&hmc_locks[hmc_offset..end_hmc]);
-                }
-
-                let items_in_chunk = chunk_locks.len() + chunk_hmc.len();
-                let next_offset = offset + items_in_chunk;
-                let has_more = next_offset < total_items;
-                let next_cursor = if has_more { Some(next_offset as u64) } else { None };
-
-                let sync_resp = crate::network::framing::ActiveSyncResponse::new(
-                    crate::network::framing::SyncPayload::new(chunk_locks, chunk_hmc),
-                    has_more,
-                    next_cursor,
-                );
-                let serialized = sync_resp.to_bytes().unwrap_or_default();
-                let payload_len = checked_payload_len(serialized.len())?;
-                let resp_header = WireHeader::new(MsgType::ActiveSyncDone as u16, header.session_seq.wrapping_add(1), header.epoch_id, 0, payload_len);
-                return Ok((resp_header, serialized));
+                return Ok((response, serialized));
             }
             let default_h = DefaultRequestHandler;
             default_h.handle(header, payload).await
@@ -1512,7 +1714,10 @@ impl RequestHandler for NodeRequestHandler {
         let peer_manager = self.peer_manager.clone();
         let identity = self.identity.clone();
         let readiness = self.readiness_manager.clone();
-        let network = match self.network_id { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 };
+        let network = match self.network_id {
+            humoco_sim_core::types::NetworkId::Mainnet => 0,
+            humoco_sim_core::types::NetworkId::Testnet => 1,
+        };
         Box::pin(async move {
             if header.msg_type == MsgType::HeartbeatAck as u16 {
                 if (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0 {
@@ -1538,9 +1743,12 @@ impl RequestHandler for NodeRequestHandler {
                         let is_first_party_valid = if !proof.verify() {
                             false
                         } else if let Some(pm) = peer_manager.as_ref() {
-                            if let Some(vk) = pm.get_peer_verifying_key_by_node_id(&offender).await {
+                            if let Some(vk) = pm.get_peer_verifying_key_by_node_id(&offender).await
+                            {
                                 verify_equivocation_first_party(&vk, &proof)
-                            } else if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&offender) {
+                            } else if let Ok(vk) =
+                                ed25519_dalek::VerifyingKey::from_bytes(&offender)
+                            {
                                 verify_equivocation_first_party(&vk, &proof)
                             } else {
                                 verify_equivocation_first_party(identity.verifying_key(), &proof)
@@ -1568,7 +1776,10 @@ impl RequestHandler for NodeRequestHandler {
                         }
                     }
                     Err(e) => {
-                        warn!("EquivocationProof (uni) rejected: deserialize failed: {}", e);
+                        warn!(
+                            "EquivocationProof (uni) rejected: deserialize failed: {}",
+                            e
+                        );
                     }
                 }
                 return Ok(());
@@ -1583,16 +1794,39 @@ impl RequestHandler for NodeRequestHandler {
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0)
                     });
-                if let Ok(hb) = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload) {
+                if let Ok(hb) = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload)
+                {
+                    if let (Some(pm), Some(advertisement)) =
+                        (&peer_manager, &hb.gateway_advertisement)
+                    {
+                        pm.observe_gateway_advertisement(
+                            advertisement.clone(),
+                            &hb.node_id,
+                            network,
+                        )
+                        .await;
+                    }
+
                     if let Some(checkpoint) = &hb.signing_checkpoint {
                         if checkpoint.verify(identity.node_pubkey(), network) {
                             let db = storage.clone();
                             let checkpoint = checkpoint.clone();
-                            let corrupt = tokio::task::spawn_blocking(move || db.observe_verified_own_checkpoint(checkpoint.generation, checkpoint.fingerprint)).await
-                                .map_err(|e| NodeError::Daemon(format!("checkpoint evidence worker: {e}")))??;
+                            let corrupt = tokio::task::spawn_blocking(move || {
+                                db.observe_verified_own_checkpoint(
+                                    checkpoint.generation,
+                                    checkpoint.fingerprint,
+                                )
+                            })
+                            .await
+                            .map_err(|e| {
+                                NodeError::Daemon(format!("checkpoint evidence worker: {e}"))
+                            })??;
                             if corrupt {
                                 readiness.set_storage_healthy(false);
-                                engine.stats.signing_failed.store(true, std::sync::atomic::Ordering::Release);
+                                engine
+                                    .stats
+                                    .signing_failed
+                                    .store(true, std::sync::atomic::Ordering::Release);
                                 return Ok(());
                             }
                         }
@@ -1618,10 +1852,13 @@ impl RequestHandler for NodeRequestHandler {
 
                         if let Some(pm) = peer_manager.as_ref() {
                             if let Some(prev) = pm.get_node_write_evidence(&hb.node_id).await {
-                                if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &ev_write) {
+                                if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
+                                    &prev, &ev_write,
+                                ) {
                                     warn!(node = %hex::encode(hb.node_id), "CRITICAL FRAUD: under-reporting detected in Heartbeat! Slashing perpetrator.");
                                     let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev_write.clone());
-                                    let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                    let evidence_bytes =
+                                        bincode::serialize(&proof).unwrap_or_default();
                                     let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
                                     let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
                                     engine.ban_node(hb.node_id, now_ms).await;
@@ -1645,10 +1882,13 @@ impl RequestHandler for NodeRequestHandler {
                                 hb.signature,
                             );
                             if let Some(prev) = pm.get_node_read_evidence(&hb.node_id).await {
-                                if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &ev_read) {
+                                if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
+                                    &prev, &ev_read,
+                                ) {
                                     warn!(node = %hex::encode(hb.node_id), "CRITICAL FRAUD: read under-reporting detected in Heartbeat! Slashing perpetrator.");
                                     let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev_read.clone());
-                                    let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+                                    let evidence_bytes =
+                                        bincode::serialize(&proof).unwrap_or_default();
                                     let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
                                     let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
                                     engine.ban_node(hb.node_id, now_ms).await;
@@ -1683,7 +1923,8 @@ impl RequestHandler for NodeRequestHandler {
                                         continue;
                                     }
                                     let is_newer = ev.timestamp_ms > prev.timestamp_ms;
-                                    let is_higher = ev.declared_read_ema_credits > prev.declared_read_ema_credits;
+                                    let is_higher = ev.declared_read_ema_credits
+                                        > prev.declared_read_ema_credits;
                                     if is_newer || is_higher {
                                         pm.update_node_read_evidence(&gw_pub, ev).await;
                                     }
@@ -1704,7 +1945,8 @@ impl RequestHandler for NodeRequestHandler {
                                         continue;
                                     }
                                     let is_newer = ev.timestamp_ms > prev.timestamp_ms;
-                                    let is_higher = ev.declared_write_ema_micro_bj > prev.declared_write_ema_micro_bj;
+                                    let is_higher = ev.declared_write_ema_micro_bj
+                                        > prev.declared_write_ema_micro_bj;
                                     if is_newer || is_higher {
                                         pm.update_node_write_evidence(&gw_pub, ev).await;
                                     }
@@ -1732,6 +1974,8 @@ pub struct QuicTransport {
     cancel_token: CancellationToken,
     tasks: tokio_util::task::TaskTracker,
     stream_semaphore: Arc<Semaphore>,
+    sync_streams: Arc<Semaphore>,
+    shard_streams: Arc<Semaphore>,
     connection_semaphore: Arc<Semaphore>,
     shard_pool: crate::network::pool::ShardConnectionPool,
     is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
@@ -1748,7 +1992,8 @@ impl QuicTransport {
 
     /// Sets the sync-ready state.
     pub fn set_sync_ready(&self, ready: bool) {
-        self.is_sync_ready.store(ready, std::sync::atomic::Ordering::SeqCst);
+        self.is_sync_ready
+            .store(ready, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Replaces the underlying sync-ready atomic handle.
@@ -1780,17 +2025,31 @@ impl QuicTransport {
         handler: Arc<dyn RequestHandler>,
         cancel_token: CancellationToken,
     ) -> Result<Self, NodeError> {
-        Self::bind_with_options_for_network(addr, identity, peer_manager, handler, cancel_token, humoco_sim_core::types::NetworkId::Mainnet)
+        Self::bind_with_options_for_network(
+            addr,
+            identity,
+            peer_manager,
+            handler,
+            cancel_token,
+            humoco_sim_core::types::NetworkId::Mainnet,
+        )
     }
 
     /// Binds transport with the exact network TLS domain and role-specific keepalive.
     pub fn bind_with_options_for_network(
-        addr: SocketAddr, identity: &NodeIdentity, peer_manager: Arc<PeerManager>,
-        handler: Arc<dyn RequestHandler>, cancel_token: CancellationToken,
+        addr: SocketAddr,
+        identity: &NodeIdentity,
+        peer_manager: Arc<PeerManager>,
+        handler: Arc<dyn RequestHandler>,
+        cancel_token: CancellationToken,
         network_id: humoco_sim_core::types::NetworkId,
     ) -> Result<Self, NodeError> {
-        let server_config = crate::network::tls::build_quinn_server_config_with_network(identity, network_id)?;
-        let client_config = crate::network::tls::build_quinn_client_config_with_identity_and_network(identity, network_id)?;
+        let server_config =
+            crate::network::tls::build_quinn_server_config_with_network(identity, network_id)?;
+        let client_config =
+            crate::network::tls::build_quinn_client_config_with_identity_and_network(
+                identity, network_id,
+            )?;
 
         let mut endpoint = quinn::Endpoint::server(server_config, addr).map_err(|e| {
             NodeError::Network(format!("Failed to bind QUIC endpoint on {}: {}", addr, e))
@@ -1799,7 +2058,8 @@ impl QuicTransport {
         endpoint.set_default_client_config(client_config);
         peer_manager.set_endpoint(endpoint.clone());
 
-        let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel::<crate::network::manager::FraudProofForwardMsg>(100);
+        let (fraud_tx, mut fraud_rx) =
+            tokio::sync::mpsc::channel::<crate::network::manager::FraudProofForwardMsg>(100);
         let pm_for_channel = peer_manager.clone();
         let tasks = tokio_util::task::TaskTracker::new();
         tasks.spawn(async move {
@@ -1807,12 +2067,16 @@ impl QuicTransport {
         });
 
         let transport = Self {
-            endpoint, network_id, tasks: tasks.clone(),
+            endpoint,
+            network_id,
+            tasks: tasks.clone(),
             identity: identity.clone(),
             peer_manager,
             handler,
             cancel_token: cancel_token.clone(),
             stream_semaphore: Arc::new(Semaphore::new(STREAM_CONCURRENCY_LIMIT)),
+            sync_streams: Arc::new(Semaphore::new(32)),
+            shard_streams: Arc::new(Semaphore::new(256)),
             connection_semaphore: Arc::new(Semaphore::new(CONNECTION_CONCURRENCY_LIMIT)),
             shard_pool: crate::network::pool::ShardConnectionPool::new(),
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -1869,14 +2133,23 @@ impl QuicTransport {
 
     /// Occupies the actual local admission budget without creating 256 sockets.
     #[cfg(test)]
-    pub(crate) fn reserve_all_outbound_shard_slots_for_test(&self) -> tokio::sync::OwnedSemaphorePermit {
+    pub(crate) fn reserve_all_outbound_shard_slots_for_test(
+        &self,
+    ) -> tokio::sync::OwnedSemaphorePermit {
         self.shard_pool.occupy_all()
     }
 
     /// Connects to a remote peer address via QUIC, reusing existing open connection if present.
     /// Iron rule / F2F: Permits direct connections only to F2F friends or nodes learned via F2F gossip.
-    pub async fn connect_peer(&self, addr: SocketAddr) -> Result<crate::network::pool::PeerConnectionLease, NodeError> {
-        if !self.peer_manager.can_authorize_direct_rpc(&addr, None).await {
+    pub async fn connect_peer(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<crate::network::pool::PeerConnectionLease, NodeError> {
+        if !self
+            .peer_manager
+            .can_authorize_direct_rpc(&addr, None)
+            .await
+        {
             return Err(NodeError::Network(format!(
                 "Direct connection to {} refused: peer is neither an F2F friend nor known via F2F gossip",
                 addr
@@ -1893,20 +2166,31 @@ impl QuicTransport {
         }
 
         // Reserve before dialing; only unleased idle sessions may be displaced.
-        let shard_slot = if self.peer_manager.is_f2f_addr(&addr).await { None } else {
+        let shard_slot = if self.peer_manager.is_f2f_addr(&addr).await {
+            None
+        } else {
             Some(self.shard_pool.reserve()?)
         };
         let connecting = if self.peer_manager.is_f2f_addr(&addr).await {
-            let config = crate::network::tls::build_quinn_friend_client_config(&self.identity, self.network_id)?;
+            let config = crate::network::tls::build_quinn_friend_client_config(
+                &self.identity,
+                self.network_id,
+            )?;
             self.endpoint.connect_with(config, addr, "localhost")
-        } else { self.endpoint.connect(addr, "localhost") }.map_err(NodeError::QuinnConnect)?;
+        } else {
+            self.endpoint.connect(addr, "localhost")
+        }
+        .map_err(NodeError::QuinnConnect)?;
 
         let connection = connecting.await.map_err(NodeError::QuinnConnection)?;
         let remote_node_id = extract_peer_identity_from_connection(&connection).map(|(nid, _)| nid);
         if let Some(nid) = remote_node_id {
             if self.peer_manager.is_banned(&nid).await {
                 connection.close(0u32.into(), b"banned: equivocation proof");
-                return Err(NodeError::Network(format!("Peer {} is banned", hex::encode(nid))));
+                return Err(NodeError::Network(format!(
+                    "Peer {} is banned",
+                    hex::encode(nid)
+                )));
             }
         }
         if let Some((nid, vk)) = extract_peer_identity_from_connection(&connection) {
@@ -1929,33 +2213,56 @@ impl QuicTransport {
         let stream_semaphore = self.stream_semaphore.clone();
         let transport = self.clone();
         self.tasks.spawn(async move {
-            Self::handle_connection(conn_clone, handler, peer_manager, cancel_token, remote_node_id, stream_semaphore, transport).await;
+            Self::handle_connection(
+                conn_clone,
+                handler,
+                peer_manager,
+                cancel_token,
+                remote_node_id,
+                stream_semaphore,
+                transport,
+            )
+            .await;
         });
 
         Ok(lease)
     }
 
     /// Explicit/unchecked connection to a peer address (useful for bootstrap / friend registration).
-    pub async fn connect_peer_unchecked(&self, addr: SocketAddr) -> Result<crate::network::pool::PeerConnectionLease, NodeError> {
+    pub async fn connect_peer_unchecked(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<crate::network::pool::PeerConnectionLease, NodeError> {
         if let Some(conn) = self.peer_manager.get_connection(&addr).await {
             return self.shard_pool.lease(conn);
         }
 
         // Reserve before dialing; only unleased idle sessions may be displaced.
-        let shard_slot = if self.peer_manager.is_f2f_addr(&addr).await { None } else {
+        let shard_slot = if self.peer_manager.is_f2f_addr(&addr).await {
+            None
+        } else {
             Some(self.shard_pool.reserve()?)
         };
         let connecting = if self.peer_manager.is_f2f_addr(&addr).await {
-            let config = crate::network::tls::build_quinn_friend_client_config(&self.identity, self.network_id)?;
+            let config = crate::network::tls::build_quinn_friend_client_config(
+                &self.identity,
+                self.network_id,
+            )?;
             self.endpoint.connect_with(config, addr, "localhost")
-        } else { self.endpoint.connect(addr, "localhost") }.map_err(NodeError::QuinnConnect)?;
+        } else {
+            self.endpoint.connect(addr, "localhost")
+        }
+        .map_err(NodeError::QuinnConnect)?;
 
         let connection = connecting.await.map_err(NodeError::QuinnConnection)?;
         let remote_node_id = extract_peer_identity_from_connection(&connection).map(|(nid, _)| nid);
         if let Some(nid) = remote_node_id {
             if self.peer_manager.is_banned(&nid).await {
                 connection.close(0u32.into(), b"banned: equivocation proof");
-                return Err(NodeError::Network(format!("Peer {} is banned", hex::encode(nid))));
+                return Err(NodeError::Network(format!(
+                    "Peer {} is banned",
+                    hex::encode(nid)
+                )));
             }
         }
         if let Some((nid, vk)) = extract_peer_identity_from_connection(&connection) {
@@ -1978,7 +2285,16 @@ impl QuicTransport {
         let stream_semaphore = self.stream_semaphore.clone();
         let transport = self.clone();
         self.tasks.spawn(async move {
-            Self::handle_connection(conn_clone, handler, peer_manager, cancel_token, remote_node_id, stream_semaphore, transport).await;
+            Self::handle_connection(
+                conn_clone,
+                handler,
+                peer_manager,
+                cancel_token,
+                remote_node_id,
+                stream_semaphore,
+                transport,
+            )
+            .await;
         });
 
         Ok(lease)
@@ -2023,7 +2339,6 @@ pub async fn send_unidirectional_frame(
 }
 
 impl QuicTransport {
-
     /// Sends a signed F2F heartbeat to a single peer (used by daemon heartbeat emitter).
     #[allow(clippy::too_many_arguments)]
     pub async fn send_heartbeat_to(
@@ -2039,6 +2354,7 @@ impl QuicTransport {
         piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     ) -> Result<(), NodeError> {
         let hb = crate::network::framing::HeartbeatWirePayload {
+            gateway_advertisement: self.handler.gateway_advertisement(),
             signing_checkpoint: self.handler.signing_checkpoint().await?,
             node_id,
             addr: local_addr,
@@ -2085,7 +2401,10 @@ impl QuicTransport {
 
         // Also do not forward to the originator if known
         let originator_node_id = hb.node_id;
-        let known_originator_addr = self.peer_manager.get_known_node_addr(&originator_node_id).await;
+        let known_originator_addr = self
+            .peer_manager
+            .get_known_node_addr(&originator_node_id)
+            .await;
         if let Some(orig_addr) = known_originator_addr {
             candidates.retain(|a| *a != orig_addr);
         }
@@ -2122,7 +2441,9 @@ impl QuicTransport {
             let hdr = header;
             let pld = payload.clone();
             self.tasks.spawn(async move {
-                let _ = transport.send_unidirectional_to_peer(target, &hdr, &pld).await;
+                let _ = transport
+                    .send_unidirectional_to_peer(target, &hdr, &pld)
+                    .await;
             });
         }
     }
@@ -2143,7 +2464,8 @@ impl QuicTransport {
         &self,
         proof: &humoco_sim_core::fraud::FraudProofPayload,
     ) {
-        self.broadcast_equivocation_proof_to_f2f_except(proof, None).await;
+        self.broadcast_equivocation_proof_to_f2f_except(proof, None)
+            .await;
     }
 
     /// Phase 10: deduplicated fraud-proof forwarding with echo protection.
@@ -2195,7 +2517,9 @@ impl QuicTransport {
             let transport = self.clone();
             let payload = payload.clone();
             self.tasks.spawn(async move {
-                let _ = transport.send_unidirectional_to_peer(addr, &header, &payload).await;
+                let _ = transport
+                    .send_unidirectional_to_peer(addr, &header, &payload)
+                    .await;
             });
         }
     }
@@ -2244,7 +2568,13 @@ impl QuicTransport {
         };
         let payload = bincode::serialize(&req).unwrap_or_default();
         let payload_len = checked_payload_len(payload.len())?;
-        let header = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, seq, 0, 0, payload_len);
+        let header = WireHeader::new(
+            MsgType::ShardBucketRangeRequest as u16,
+            seq,
+            0,
+            0,
+            payload_len,
+        );
         let (resp_hdr, resp_payload) = self.send_request(conn, &header, &payload).await?;
         if resp_hdr.msg_type != MsgType::ShardBucketRangeResponse as u16 {
             return Err(NodeError::Network(format!(
@@ -2265,7 +2595,18 @@ impl QuicTransport {
         limit: usize,
         target_bucket_id: Option<u64>,
     ) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
-        let req = crate::network::framing::ActiveSyncRequest::with_bucket(cursor, limit, target_bucket_id);
+        self.request_active_sync_selected(conn, seq, cursor, limit, target_bucket_id, None).await
+    }
+
+    /// Freeze a snapshot cut for one root shard, including its separate anchors.
+    pub async fn request_active_sync_page_for_shard(&self, conn: &quinn::Connection, seq: u64, cursor: u64, limit: usize, shard: u16) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
+        self.request_active_sync_selected(conn, seq, cursor, limit, None, Some(shard)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request_active_sync_selected(&self, conn: &quinn::Connection, seq: u64, cursor: u64, limit: usize, target_bucket_id: Option<u64>, target_shard: Option<u16>) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
+        let mut req = crate::network::framing::ActiveSyncRequest::with_bucket(cursor, limit, target_bucket_id);
+        req.target_shard = target_shard;
         let req_bytes = req.to_bytes().unwrap_or_default();
         let payload_len = checked_payload_len(req_bytes.len())?;
         let header = WireHeader::new(MsgType::ActiveSyncRequest as u16, seq, 0, 0, payload_len);
@@ -2288,7 +2629,8 @@ impl QuicTransport {
         cursor: u64,
         limit: usize,
     ) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
-        self.request_active_sync_page_for_bucket(conn, seq, cursor, limit, None).await
+        self.request_active_sync_page_for_bucket(conn, seq, cursor, limit, None)
+            .await
     }
 
     /// Requests full active sync data across all pages from a peer.
@@ -2301,9 +2643,26 @@ impl QuicTransport {
         let mut all_hmc = Vec::new();
         let mut cursor = 0u64;
         let mut current_seq = seq;
+        let mut aggregate_bytes = 0u64;
         loop {
-            let resp = self.request_active_sync_page(conn, current_seq, cursor, 500).await?;
+            let resp = self
+                .request_active_sync_page(conn, current_seq, cursor, 500)
+                .await?;
             current_seq = current_seq.wrapping_add(1);
+            let count = all_locks.len()
+                + all_hmc.len()
+                + resp.payload.locks.len()
+                + resp.payload.hmc_locks.len();
+            if count > 10_000 {
+                return Err(NodeError::LocalCapacity(
+                    "active sync aggregate entry limit",
+                ));
+            }
+            aggregate_bytes = aggregate_bytes
+                .saturating_add(bincode::serialized_size(&resp.payload).unwrap_or(u64::MAX));
+            if aggregate_bytes > 512 * 1024 {
+                return Err(NodeError::LocalCapacity("active sync aggregate byte limit"));
+            }
             all_locks.extend(resp.payload.locks);
             all_hmc.extend(resp.payload.hmc_locks);
             if !resp.has_more {
@@ -2314,7 +2673,9 @@ impl QuicTransport {
                 _ => break,
             }
         }
-        Ok(crate::network::framing::SyncPayload::new(all_locks, all_hmc))
+        Ok(crate::network::framing::SyncPayload::new(
+            all_locks, all_hmc,
+        ))
     }
 
     /// Spawns the incoming connection accept loop in the background.
@@ -2420,341 +2781,343 @@ impl QuicTransport {
                     return;
                 }
             }
-        loop {
-            tokio::select! {
-                _ = cancel_token.cancelled() => break,
-                bi_res = conn.accept_bi() => {
-                    if let Some(nid) = remote_node_id {
-                        if peer_manager.is_banned(&nid).await {
-                            conn.close(0u32.into(), b"banned: equivocation proof");
-                            break;
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => break,
+                    bi_res = conn.accept_bi() => {
+                        if let Some(nid) = remote_node_id {
+                            if peer_manager.is_banned(&nid).await {
+                                conn.close(0u32.into(), b"banned: equivocation proof");
+                                break;
+                            }
                         }
-                    }
-                    match bi_res {
-                        Ok((mut send, mut recv)) => {
-                            let lease = match transport.shard_pool.lease(conn.clone()) {
-                                Ok(lease) => lease, Err(_) => continue,
-                            };
-                            let h = handler.clone();
-                            let pm = peer_manager.clone();
-                            let sem = stream_semaphore.clone();
-                            transport.tasks.spawn(async move {
-                                let _lease = lease;
-                                let _permit = match sem.try_acquire_owned() {
-                                    Ok(p) => p,
-                                    Err(_) => {
-                                        warn!(
-                                            remote = %remote_addr,
-                                            "Stream concurrency limit {} reached, dropping incoming bi-stream (DoS protection)", STREAM_CONCURRENCY_LIMIT
-                                        );
-                                        return;
-                                    }
+                        match bi_res {
+                            Ok((mut send, mut recv)) => {
+                                let lease = match transport.shard_pool.lease(conn.clone()) {
+                                    Ok(lease) => lease, Err(_) => continue,
                                 };
-                                match read_frame(&mut recv).await {
-                                    Ok((header, payload)) => {
-                                        // Shard-Direct RPC Authorization:
-                                        // LockVerifyRequest, ActiveSyncRequest, and ShardDigestRequest are only allowed if peer is F2F friend or known via gossip
-                                        let is_restricted_rpc = header.msg_type == MsgType::LockVerifyRequest as u16
-                                            || header.msg_type == MsgType::StatusQuery as u16
-                                            || header.msg_type == MsgType::ActiveSyncRequest as u16
-                                            || header.msg_type == MsgType::ShardDigestRequest as u16
-                                            || header.msg_type == MsgType::ShardBucketRangeRequest as u16
-                                            || header.msg_type == MsgType::LiveStateRequest as u16;
-
-                                        if is_restricted_rpc
-                                            && !pm.can_authorize_direct_rpc(&remote_addr, remote_node_id.as_ref()).await
-                                        {
+                                let h = handler.clone();
+                                let pm = peer_manager.clone();
+                                let sem = stream_semaphore.clone();
+                                let sync_pool = transport.sync_streams.clone();
+                                let shard_pool = transport.shard_streams.clone();
+                                transport.tasks.spawn(async move {
+                                    let _lease = lease;
+                                    let _permit = match sem.try_acquire_owned() {
+                                        Ok(p) => p,
+                                        Err(_) => {
                                             warn!(
                                                 remote = %remote_addr,
-                                                node_id = ?remote_node_id.map(hex::encode),
-                                                msg_type = header.msg_type,
-                                                "Rejected direct RPC from unauthorized peer (neither F2F nor known via gossip)"
+                                                "Stream concurrency limit {} reached, dropping incoming bi-stream (DoS protection)", STREAM_CONCURRENCY_LIMIT
                                             );
-                                            // Phase 8 (Spec 15/19 Tit-for-Tat): locally suspended
-                                            // or permanently banned peers are refused with
-                                            // FLAG_PEER_SUSPENDED so the gateway applies
-                                            // no checkout committee replacement is allowed; unknown peers get a plain
-                                            // unauthorized response without any malus effect.
-                                            let suspended_or_banned = if let Some(nid) = remote_node_id {
-                                                pm.is_banned(&nid).await
-                                                    || pm.is_peer_suspended_by_id(&nid).await
-                                                    || pm.is_peer_suspended_by_addr(&remote_addr).await
-                                            } else {
-                                                pm.is_peer_suspended_by_addr(&remote_addr).await
-                                            };
-                                            let resp_payload = b"unauthorized";
-                                            let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
-                                            let resp_flags = if suspended_or_banned {
-                                                humoco_sim_core::wire::FLAG_PEER_SUSPENDED
-                                            } else {
-                                                humoco_sim_core::wire::FLAG_UNAUTHORIZED
-                                            };
-                                            let resp_header = WireHeader::new(
-                                                MsgType::StatusResponse as u16,
-                                                header.session_seq.wrapping_add(1),
-                                                header.epoch_id,
-                                                resp_flags,
-                                                payload_len,
-                                            );
-                                            if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
-                                                debug!(error = %e, "Failed to write unauthorized response frame");
-                                            }
-                                            let _ = send.finish();
                                             return;
                                         }
+                                    };
+                                    match crate::network::framing::read_frame_admitted(&mut recv, crate::network::framing::DEFAULT_STREAM_READ_TIMEOUT, Some((sync_pool, shard_pool))).await {
+                                        Ok(((header, payload), _service_permit)) => {
+                                            // Shard-Direct RPC Authorization:
+                                            // LockVerifyRequest, ActiveSyncRequest, and ShardDigestRequest are only allowed if peer is F2F friend or known via gossip
+                                            let is_restricted_rpc = header.msg_type == MsgType::LockVerifyRequest as u16
+                                                || header.msg_type == MsgType::StatusQuery as u16
+                                                || header.msg_type == MsgType::ActiveSyncRequest as u16
+                                                || header.msg_type == MsgType::ShardDigestRequest as u16
+                                                || header.msg_type == MsgType::ShardBucketRangeRequest as u16
+                                                || header.msg_type == MsgType::LiveStateRequest as u16;
 
-                                        match h.handle_authenticated(header, payload, remote_node_id).await {
-                                            Ok((resp_header, resp_payload)) => {
-                                                if let Err(e) = write_frame(&mut send, &resp_header, &resp_payload).await {
-                                                    debug!(error = %e, "Failed to write frame response");
+                                            if is_restricted_rpc
+                                                && !pm.can_authorize_direct_rpc(&remote_addr, remote_node_id.as_ref()).await
+                                            {
+                                                warn!(
+                                                    remote = %remote_addr,
+                                                    node_id = ?remote_node_id.map(hex::encode),
+                                                    msg_type = header.msg_type,
+                                                    "Rejected direct RPC from unauthorized peer (neither F2F nor known via gossip)"
+                                                );
+                                                // Phase 8 (Spec 15/19 Tit-for-Tat): locally suspended
+                                                // or permanently banned peers are refused with
+                                                // FLAG_PEER_SUSPENDED so the gateway applies
+                                                // no checkout committee replacement is allowed; unknown peers get a plain
+                                                // unauthorized response without any malus effect.
+                                                let suspended_or_banned = if let Some(nid) = remote_node_id {
+                                                    pm.is_banned(&nid).await
+                                                        || pm.is_peer_suspended_by_id(&nid).await
+                                                        || pm.is_peer_suspended_by_addr(&remote_addr).await
+                                                } else {
+                                                    pm.is_peer_suspended_by_addr(&remote_addr).await
+                                                };
+                                                let resp_payload = b"unauthorized";
+                                                let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
+                                                let resp_flags = if suspended_or_banned {
+                                                    humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                                                } else {
+                                                    humoco_sim_core::wire::FLAG_UNAUTHORIZED
+                                                };
+                                                let resp_header = WireHeader::new(
+                                                    MsgType::StatusResponse as u16,
+                                                    header.session_seq.wrapping_add(1),
+                                                    header.epoch_id,
+                                                    resp_flags,
+                                                    payload_len,
+                                                );
+                                                if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
+                                                    debug!(error = %e, "Failed to write unauthorized response frame");
                                                 }
                                                 let _ = send.finish();
-                                            }
-                                            Err(e) => {
-                                                error!(error = %e, "Request handler failed");
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!(error = %e, "Failed to read incoming bi-stream frame");
-                                    }
-                                }
-                            });
-                        }
-                        Err(_) => {
-                            // Phase 8 (Spec 15/19, TODO-ARCH-02): the QUIC session
-                            // ended (orderly shutdown, graceful CONNECTION_CLOSE,
-                            // or Tier-2 15s idle timeout = NORMAL state of the
-                            // ephemeral LRU pool). This is NEVER a peer failure:
-                            // clear the handle, preserve the Tit-for-Tat malus.
-                            peer_manager.note_connection_closed(&remote_addr, conn.stable_id()).await;
-                            break;
-                        },
-                    }
-                }
-                uni_res = conn.accept_uni() => {
-                    match uni_res {
-                        Ok(mut recv) => {
-                            let lease = match transport.shard_pool.lease(conn.clone()) {
-                                Ok(lease) => lease, Err(_) => continue,
-                            };
-                            let h = handler.clone();
-                            let pm = peer_manager.clone();
-                            let sem = stream_semaphore.clone();
-                            let conn_clone = conn.clone();
-                            let transport_clone = transport.clone();
-                            transport.tasks.spawn(async move {
-                                let _lease = lease;
-                                let _permit = match sem.try_acquire_owned() {
-                                    Ok(p) => p,
-                                    Err(_) => {
-                                        warn!(
-                                            remote = %remote_addr,
-                                            "Stream concurrency limit {} reached, dropping incoming uni-stream (DoS protection)", STREAM_CONCURRENCY_LIMIT
-                                        );
-                                        return;
-                                    }
-                                };
-                                match read_frame(&mut recv).await {
-                                    Ok((header, payload)) => {
-                                        // GOSSIP BARRIER:
-                                        // GOSSIP BARRIER:
-                                        // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
-                                        let is_gossip = header.msg_type == MsgType::Heartbeat as u16
-                                            || header.msg_type == MsgType::EquivocationProof as u16;
-
-                                        if is_gossip && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await {
-                                            warn!(
-                                                remote = %remote_addr,
-                                                node_id = ?remote_node_id.map(hex::encode),
-                                                msg_type = header.msg_type,
-                                                "GOSSIP BARRIER: Dropped gossip from non-F2F connection"
-                                            );
-                                            return;
-                                        }
-
-                                        // HeartbeatAck handling:
-                                        if header.msg_type == MsgType::HeartbeatAck as u16
-                                            && (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0
-                                        {
-                                            pm.set_ticket_outdated(true);
-                                            warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from F2F peer: shard ticket is outdated");
-                                        }
-
-                                        // If an authentic Heartbeat is received from an F2F friend, update known_network_nodes and clock:
-                                        if header.msg_type == MsgType::Heartbeat as u16 {
-                                            let hops = header.reserved;
-                                            if (hops as u32) >= crate::network::manager::MAX_GOSSIP_HOPS {
-                                                warn!(hops, "GOSSIP BARRIER: Dropped gossip, max hops exceeded");
                                                 return;
                                             }
 
-                                            let is_f2f = if let Some(ref nid) = remote_node_id {
-                                                pm.is_f2f_friend(nid).await
-                                            } else {
-                                                pm.is_f2f_addr(&remote_addr).await
-                                            };
-                                            let res1 = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload);
-                                            let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
-
-                                            if let Ok(hb) = res1 {
-                                                // Check deduplication cache to prevent gossip loops (Spec 11)
-                                                if !pm.check_and_record_heartbeat(&hb.node_id, hb.pow_nonce, hb.timestamp_ms).await {
-                                                    debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped duplicate heartbeat (already seen)");
-                                                    return;
-                                                }
-
-                                                // TTL drop check
-                                                if hb.ttl == 0 {
-                                                    debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with TTL == 0");
-                                                    return;
-                                                }
-
-                                                if hb.signature != [0u8; 64] {
-                                                    let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
-                                                        hb.node_id,
-                                                        0,
-                                                        0,
-                                                        hb.timestamp_ms,
-                                                        hb.declared_write_ema_micro_bj,
-                                                        hb.declared_read_ema_credits,
-                                                        0,
-                                                        false,
-                                                        [0u8; 32],
-                                                        hb.signature,
-                                                    );
-                                                    if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write) {
-                                                        warn!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with invalid signature");
-                                                        return;
+                                            match h.handle_authenticated(header, payload, remote_node_id).await {
+                                                Ok((resp_header, resp_payload)) => {
+                                                    if let Err(e) = write_frame(&mut send, &resp_header, &resp_payload).await {
+                                                        debug!(error = %e, "Failed to write frame response");
                                                     }
+                                                    let _ = send.finish();
                                                 }
-
-                                                let node_id = hb.node_id;
-                                                if pm.is_banned(&node_id).await {
-                                                    warn!(node = %hex::encode(node_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
-                                                    return;
+                                                Err(e) => {
+                                                    error!(error = %e, "Request handler failed");
                                                 }
-                                                let is_direct = remote_node_id == Some(node_id);
-                                                if is_direct && hops > 0 {
-                                                    warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
-                                                    return;
-                                                }
-                                                if !is_direct && hops == 0 {
-                                                    warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
-                                                    return;
-                                                }
-
-                                                // Verify Argon2d Shard Ticket PoW & HRW routing ID
-                                                let (verified_hrw, work_score) = if hb.pow_nonce != 0 || hb.ticket_epoch_t0 != 0 {
-                                                    let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
-                                                    if expected_hrw != hb.hrw_routing_id {
-                                                        warn!(
-                                                            node = %hex::encode(node_id),
-                                                            "GOSSIP BARRIER: Invalid Argon2d shard ticket PoW (hrw_routing_id mismatch)"
-                                                        );
-                                                        return;
-                                                    }
-                                                    let w = crate::identity::compute_work_score(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
-                                                    (expected_hrw, w)
-                                                } else if hb.hrw_routing_id != [0u8; 32] {
-                                                    // Fast-path / legacy BLAKE3
-                                                    let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, 0, 0);
-                                                    if expected_hrw != hb.hrw_routing_id && node_id != hb.hrw_routing_id {
-                                                        warn!(
-                                                            node = %hex::encode(node_id),
-                                                            "GOSSIP BARRIER: Invalid fast-path shard ticket (hrw_routing_id mismatch)"
-                                                        );
-                                                        return;
-                                                    }
-                                                    (hb.hrw_routing_id, 1)
-                                                } else {
-                                                    (node_id, 1)
-                                                };
-
-                                                // Check ticket PoW validity against network median
-                                                let (is_acceptable, _median) = pm.is_ticket_acceptable(work_score);
-                                                if !is_acceptable {
-                                                    if hops == 0 {
-                                                        warn!(
-                                                            node = %hex::encode(node_id),
-                                                            "Direct F2F friend has outdated shard ticket; sending FLAG_POW_OUTDATED feedback"
-                                                        );
-                                                        let ack_hdr = WireHeader::new(
-                                                            MsgType::HeartbeatAck as u16,
-                                                            header.session_seq.wrapping_add(1),
-                                                            header.epoch_id,
-                                                            humoco_sim_core::wire::FLAG_POW_OUTDATED,
-                                                            0,
-                                                        );
-                                                        let _ = send_unidirectional_frame(&conn_clone, &ack_hdr, &[]).await;
-                                                    } else {
-                                                        warn!(
-                                                            node = %hex::encode(node_id),
-                                                            hops,
-                                                            "GOSSIP BARRIER: Dropped multi-hop gossip with outdated PoW"
-                                                        );
-                                                    }
-                                                    return;
-                                                }
-
-                                                pm.learn_node_from_gossip_with_hrw_and_work(
-                                                    node_id,
-                                                    verified_hrw,
-                                                    hb.addr,
-                                                    hops as u8,
-                                                    Some(remote_addr),
-                                                    work_score,
-                                                ).await;
-
-                                                // Spec 07 / Spec 11: Clock samples fed to P2pClock must originate strictly from direct authenticated F2F peers,
-                                                // never relayed third-party hops (Task 4: F2F-Only Clock Samples).
-                                                if hops == 0 && is_f2f && is_direct {
-                                                    pm.clock().record_heartbeat(true, hb.timestamp_ms);
-                                                }
-
-                                                // Multi-hop forwarding to Dunbar fan-out subset of F2F peers (Spec 11)
-                                                if hb.ttl > 1 && (hops as u32) + 1 < crate::network::manager::MAX_GOSSIP_HOPS {
-                                                    transport_clone.forward_heartbeat_gossip(&hb, hops, remote_addr).await;
-                                                }
-                                            } else if let Ok((adv_id, adv_addr)) = res2 {
-                                                if pm.is_banned(&adv_id).await {
-                                                    warn!(node = %hex::encode(adv_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
-                                                    return;
-                                                }
-                                                let is_direct = remote_node_id == Some(adv_id);
-                                                if is_direct && hops > 0 {
-                                                    warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
-                                                    return;
-                                                }
-                                                if !is_direct && hops == 0 {
-                                                    warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
-                                                    return;
-                                                }
-                                                pm.learn_node_from_gossip(adv_id, adv_addr, hops as u8, Some(remote_addr)).await;
                                             }
                                         }
-
-                                        if let Err(e) = h.handle_unidirectional_authenticated(header, payload, remote_node_id).await {
-                                            debug!(error = %e, "Failed to handle unidirectional frame");
+                                        Err(e) => {
+                                            debug!(error = %e, "Failed to read incoming bi-stream frame");
                                         }
                                     }
-                                    Err(e) => {
-                                        debug!(error = %e, "Failed to read incoming uni-stream frame");
-                                    }
-                                }
-                            });
+                                });
+                            }
+                            Err(_) => {
+                                // Phase 8 (Spec 15/19, TODO-ARCH-02): the QUIC session
+                                // ended (orderly shutdown, graceful CONNECTION_CLOSE,
+                                // or Tier-2 15s idle timeout = NORMAL state of the
+                                // ephemeral LRU pool). This is NEVER a peer failure:
+                                // clear the handle, preserve the Tit-for-Tat malus.
+                                peer_manager.note_connection_closed(&remote_addr, conn.stable_id()).await;
+                                break;
+                            },
                         }
-                        Err(_) => {
-                            // Phase 8 (Spec 15/19, TODO-ARCH-02): see bi-stream
-                            // branch above — session end / Tier-2 15s idle timeout
-                            // is normal and NEVER calls `record_failure`.
-                            peer_manager.note_connection_closed(&remote_addr, conn.stable_id()).await;
-                            break;
-                        },
+                    }
+                    uni_res = conn.accept_uni() => {
+                        match uni_res {
+                            Ok(mut recv) => {
+                                let lease = match transport.shard_pool.lease(conn.clone()) {
+                                    Ok(lease) => lease, Err(_) => continue,
+                                };
+                                let h = handler.clone();
+                                let pm = peer_manager.clone();
+                                let sem = stream_semaphore.clone();
+                                let conn_clone = conn.clone();
+                                let transport_clone = transport.clone();
+                                transport.tasks.spawn(async move {
+                                    let _lease = lease;
+                                    let _permit = match sem.try_acquire_owned() {
+                                        Ok(p) => p,
+                                        Err(_) => {
+                                            warn!(
+                                                remote = %remote_addr,
+                                                "Stream concurrency limit {} reached, dropping incoming uni-stream (DoS protection)", STREAM_CONCURRENCY_LIMIT
+                                            );
+                                            return;
+                                        }
+                                    };
+                                    match read_frame(&mut recv).await {
+                                        Ok((header, payload)) => {
+                                            // GOSSIP BARRIER:
+                                            // GOSSIP BARRIER:
+                                            // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
+                                            let is_gossip = header.msg_type == MsgType::Heartbeat as u16
+                                                || header.msg_type == MsgType::EquivocationProof as u16;
+
+                                            if is_gossip && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await {
+                                                warn!(
+                                                    remote = %remote_addr,
+                                                    node_id = ?remote_node_id.map(hex::encode),
+                                                    msg_type = header.msg_type,
+                                                    "GOSSIP BARRIER: Dropped gossip from non-F2F connection"
+                                                );
+                                                return;
+                                            }
+
+                                            // HeartbeatAck handling:
+                                            if header.msg_type == MsgType::HeartbeatAck as u16
+                                                && (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0
+                                            {
+                                                pm.set_ticket_outdated(true);
+                                                warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from F2F peer: shard ticket is outdated");
+                                            }
+
+                                            // If an authentic Heartbeat is received from an F2F friend, update known_network_nodes and clock:
+                                            if header.msg_type == MsgType::Heartbeat as u16 {
+                                                let hops = header.reserved;
+                                                if (hops as u32) >= crate::network::manager::MAX_GOSSIP_HOPS {
+                                                    warn!(hops, "GOSSIP BARRIER: Dropped gossip, max hops exceeded");
+                                                    return;
+                                                }
+
+                                                let is_f2f = if let Some(ref nid) = remote_node_id {
+                                                    pm.is_f2f_friend(nid).await
+                                                } else {
+                                                    pm.is_f2f_addr(&remote_addr).await
+                                                };
+                                                let res1 = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload);
+                                                let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
+
+                                                if let Ok(hb) = res1 {
+                                                    // Check deduplication cache to prevent gossip loops (Spec 11)
+                                                    if !pm.check_and_record_heartbeat(&hb.node_id, hb.pow_nonce, hb.timestamp_ms).await {
+                                                        debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped duplicate heartbeat (already seen)");
+                                                        return;
+                                                    }
+
+                                                    // TTL drop check
+                                                    if hb.ttl == 0 {
+                                                        debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with TTL == 0");
+                                                        return;
+                                                    }
+
+                                                    if hb.signature != [0u8; 64] {
+                                                        let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                                                            hb.node_id,
+                                                            0,
+                                                            0,
+                                                            hb.timestamp_ms,
+                                                            hb.declared_write_ema_micro_bj,
+                                                            hb.declared_read_ema_credits,
+                                                            0,
+                                                            false,
+                                                            [0u8; 32],
+                                                            hb.signature,
+                                                        );
+                                                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write) {
+                                                            warn!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with invalid signature");
+                                                            return;
+                                                        }
+                                                    }
+
+                                                    let node_id = hb.node_id;
+                                                    if pm.is_banned(&node_id).await {
+                                                        warn!(node = %hex::encode(node_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
+                                                        return;
+                                                    }
+                                                    let is_direct = remote_node_id == Some(node_id);
+                                                    if is_direct && hops > 0 {
+                                                        warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
+                                                        return;
+                                                    }
+                                                    if !is_direct && hops == 0 {
+                                                        warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
+                                                        return;
+                                                    }
+
+                                                    // Verify Argon2d Shard Ticket PoW & HRW routing ID
+                                                    let (verified_hrw, work_score) = if hb.pow_nonce != 0 || hb.ticket_epoch_t0 != 0 {
+                                                        let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
+                                                        if expected_hrw != hb.hrw_routing_id {
+                                                            warn!(
+                                                                node = %hex::encode(node_id),
+                                                                "GOSSIP BARRIER: Invalid Argon2d shard ticket PoW (hrw_routing_id mismatch)"
+                                                            );
+                                                            return;
+                                                        }
+                                                        let w = crate::identity::compute_work_score(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
+                                                        (expected_hrw, w)
+                                                    } else if hb.hrw_routing_id != [0u8; 32] {
+                                                        // Fast-path / legacy BLAKE3
+                                                        let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, 0, 0);
+                                                        if expected_hrw != hb.hrw_routing_id && node_id != hb.hrw_routing_id {
+                                                            warn!(
+                                                                node = %hex::encode(node_id),
+                                                                "GOSSIP BARRIER: Invalid fast-path shard ticket (hrw_routing_id mismatch)"
+                                                            );
+                                                            return;
+                                                        }
+                                                        (hb.hrw_routing_id, 1)
+                                                    } else {
+                                                        (node_id, 1)
+                                                    };
+
+                                                    // Check ticket PoW validity against network median
+                                                    let (is_acceptable, _median) = pm.is_ticket_acceptable(work_score);
+                                                    if !is_acceptable {
+                                                        if hops == 0 {
+                                                            warn!(
+                                                                node = %hex::encode(node_id),
+                                                                "Direct F2F friend has outdated shard ticket; sending FLAG_POW_OUTDATED feedback"
+                                                            );
+                                                            let ack_hdr = WireHeader::new(
+                                                                MsgType::HeartbeatAck as u16,
+                                                                header.session_seq.wrapping_add(1),
+                                                                header.epoch_id,
+                                                                humoco_sim_core::wire::FLAG_POW_OUTDATED,
+                                                                0,
+                                                            );
+                                                            let _ = send_unidirectional_frame(&conn_clone, &ack_hdr, &[]).await;
+                                                        } else {
+                                                            warn!(
+                                                                node = %hex::encode(node_id),
+                                                                hops,
+                                                                "GOSSIP BARRIER: Dropped multi-hop gossip with outdated PoW"
+                                                            );
+                                                        }
+                                                        return;
+                                                    }
+
+                                                    pm.learn_node_from_gossip_with_hrw_and_work(
+                                                        node_id,
+                                                        verified_hrw,
+                                                        hb.addr,
+                                                        hops as u8,
+                                                        Some(remote_addr),
+                                                        work_score,
+                                                    ).await;
+
+                                                    // Spec 07 / Spec 11: Clock samples fed to P2pClock must originate strictly from direct authenticated F2F peers,
+                                                    // never relayed third-party hops (Task 4: F2F-Only Clock Samples).
+                                                    if hops == 0 && is_f2f && is_direct {
+                                                        pm.clock().record_heartbeat(true, hb.timestamp_ms);
+                                                    }
+
+                                                    // Multi-hop forwarding to Dunbar fan-out subset of F2F peers (Spec 11)
+                                                    if hb.ttl > 1 && (hops as u32) + 1 < crate::network::manager::MAX_GOSSIP_HOPS {
+                                                        transport_clone.forward_heartbeat_gossip(&hb, hops, remote_addr).await;
+                                                    }
+                                                } else if let Ok((adv_id, adv_addr)) = res2 {
+                                                    if pm.is_banned(&adv_id).await {
+                                                        warn!(node = %hex::encode(adv_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
+                                                        return;
+                                                    }
+                                                    let is_direct = remote_node_id == Some(adv_id);
+                                                    if is_direct && hops > 0 {
+                                                        warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
+                                                        return;
+                                                    }
+                                                    if !is_direct && hops == 0 {
+                                                        warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
+                                                        return;
+                                                    }
+                                                    pm.learn_node_from_gossip(adv_id, adv_addr, hops as u8, Some(remote_addr)).await;
+                                                }
+                                            }
+
+                                            if let Err(e) = h.handle_unidirectional_authenticated(header, payload, remote_node_id).await {
+                                                debug!(error = %e, "Failed to handle unidirectional frame");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            debug!(error = %e, "Failed to read incoming uni-stream frame");
+                                        }
+                                    }
+                                });
+                            }
+                            Err(_) => {
+                                // Phase 8 (Spec 15/19, TODO-ARCH-02): see bi-stream
+                                // branch above — session end / Tier-2 15s idle timeout
+                                // is normal and NEVER calls `record_failure`.
+                                peer_manager.note_connection_closed(&remote_addr, conn.stable_id()).await;
+                                break;
+                            },
+                        }
                     }
                 }
             }
-        }
         })
     }
 

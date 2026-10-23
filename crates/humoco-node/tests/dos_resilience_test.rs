@@ -71,7 +71,7 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
     .expect("bind transport");
 
     let mut state = AppState::new(
-        engine,
+        engine.clone(),
         storage.clone(),
         identity.clone(),
         tier_controller.clone(),
@@ -93,6 +93,7 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
         let del_str = valid_until_ms.to_string();
 
         let mut req_payload = humoco_node::api::hmc::L2LockRequest {
+        causal_output: None,
             auth: humoco_node::api::hmc::L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -116,6 +117,13 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
         use ed25519_dalek::Signer;
         req_payload.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
 
+        let root = req_payload.clone();
+        let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.transaction_hash).into_string(), (&root).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(now), None, None, None).await;
+        assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+        req_payload.is_genesis = false; req_payload.ds_tag = Some(format!("dos-spend-{round}")); req_payload.deletable_at = None; req_payload.transaction_hash = [round as u8 + 50; 32];
+        req_payload.layer2_signature = sender_key.sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&req_payload)).to_bytes();
+        let shard = engine.get_hmc_voucher_genesis_shard(&root.layer2_voucher_id).await.unwrap();
+        assert!(!peer_mgr.is_local_committee_member(*identity.node_pubkey(), *identity.hrw_routing_id(), shard).await, "fixture must route real shard requests, not stop at a local readiness gate");
         let req = Request::builder()
             .method("POST")
             .uri("/v1/lock")

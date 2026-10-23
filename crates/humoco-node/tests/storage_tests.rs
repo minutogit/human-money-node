@@ -276,6 +276,7 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
     let db_path = dir.path().join("test_hmc_ttl.redb");
 
     let entry_short = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "v_short".to_string(),
         t_id: [0x11; 32],
         sender_ephemeral_pub: [0x22; 32],
@@ -291,6 +292,7 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
     };
 
     let entry_long = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "v_long".to_string(),
         t_id: [0x44; 32],
         sender_ephemeral_pub: [0x55; 32],
@@ -310,6 +312,8 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
         let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
         let (engine, worker_handle) = DualTierEngine::new(Arc::clone(&storage));
 
+        anchor_storage_fixture(&engine, &entry_short).await;
+        anchor_storage_fixture(&engine, &entry_long).await;
         let (_, is_new1) = engine.ingress_hmc_lock("tag_short".to_string(), entry_short.clone()).await;
         assert!(is_new1);
         let (_, is_new2) = engine.ingress_hmc_lock("tag_long".to_string(), entry_long.clone()).await;
@@ -375,6 +379,7 @@ fn test_defensive_deserialization_corrupted_entries() {
     storage.put_lock(&lock1, 600_000).unwrap();
 
     let entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: "v_valid".to_string(),
         t_id: [0x11; 32],
         sender_ephemeral_pub: [0x22; 32],
@@ -388,6 +393,8 @@ fn test_defensive_deserialization_corrupted_entries() {
         deletable_at: Some("600000".to_string()),
         privacy_guard: None,
     };
+    let root = root_fixture(&entry);
+    storage.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root).unwrap();
     storage.put_hmc_lock("tag_valid", &entry).unwrap();
     storage.ban_node(&[0x99; 32], 12345).unwrap();
 
@@ -409,33 +416,9 @@ fn test_defensive_deserialization_corrupted_entries() {
         write_txn.commit().unwrap();
     }
 
-    // 3. Re-open storage and verify defensive loading
-    let storage = RedbStorage::open(&db_path).unwrap();
-
-    // all_valid_locks should skip corrupted entry and return the intact one
-    let valid_locks = storage.all_valid_locks(0).unwrap();
-    assert_eq!(valid_locks.len(), 1, "Should skip corrupted lock and return valid one");
-    assert_eq!(valid_locks[0].0.id, lock1.id);
-
-    // active_locks_for_shard should also skip corrupted entry
-    let shard_id = u16::from_be_bytes([lock1.parent_lock[0], lock1.parent_lock[1]]);
-    let shard_locks = storage.active_locks_for_shard(shard_id, 0).unwrap();
-    assert_eq!(shard_locks.len(), 1);
-    assert_eq!(shard_locks[0].0.id, lock1.id);
-
-    // all_hmc_locks and all_valid_hmc_locks should skip corrupted entry
-    let hmc_locks = storage.all_hmc_locks().unwrap();
-    assert_eq!(hmc_locks.len(), 1, "Should skip corrupted HMC entry");
-    assert_eq!(hmc_locks[0].0, "tag_valid");
-
-    let valid_hmc = storage.all_valid_hmc_locks(0).unwrap();
-    assert_eq!(valid_hmc.len(), 1);
-    assert_eq!(valid_hmc[0].0, "tag_valid");
-
-    // all_slashed_nodes should return the valid banned node
-    let slashed = storage.all_slashed_nodes().unwrap();
-    assert_eq!(slashed.len(), 1);
-    assert_eq!(slashed[0], [0x99; 32]);
+    // Corruption may hide a prior root/spend decision. Migration must fail
+    // closed rather than advertise a source-complete state after skipping it.
+    assert!(RedbStorage::open(&db_path).is_err());
 }
 
 #[tokio::test]
@@ -495,6 +478,7 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
     let hmc_parent = [0x55u8; 32];
     let hmc_parent_hex = hex::encode(hmc_parent);
     let hmc_entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
         t_id: [0x77; 32],
         layer2_voucher_id: "voucher_test".to_string(),
         sender_ephemeral_pub: [0x88; 32],
@@ -508,6 +492,7 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
         deletable_at: Some("150000".to_string()),
         privacy_guard: None,
     };
+    anchor_storage_fixture(&engine, &hmc_entry).await;
     let (h_verdict, is_new) = engine
         .ingress_hmc_lock(hmc_parent_hex.clone(), hmc_entry.clone())
         .await;
@@ -530,6 +515,7 @@ async fn test_voucher_query_methods() {
 
     let tag1 = "tag_01".to_string();
     let entry1 = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
         t_id: [0x01; 32],
         layer2_voucher_id: "voucher_alpha".to_string(),
         sender_ephemeral_pub: [0x11; 32],
@@ -546,6 +532,7 @@ async fn test_voucher_query_methods() {
 
     let tag2 = "tag_02".to_string();
     let entry2 = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
         t_id: [0x02; 32],
         layer2_voucher_id: "voucher_beta".to_string(),
         sender_ephemeral_pub: [0x22; 32],
@@ -560,6 +547,8 @@ async fn test_voucher_query_methods() {
         privacy_guard: None,
     };
 
+    anchor_storage_fixture(&engine, &entry1).await;
+    anchor_storage_fixture(&engine, &entry2).await;
     let _ = engine.ingress_hmc_lock(tag1.clone(), entry1.clone()).await;
     let _ = engine.ingress_hmc_lock(tag2.clone(), entry2.clone()).await;
 
@@ -650,6 +639,7 @@ async fn test_durable_before_vote_crash_durability() {
     let parent_bytes = [0x42u8; 32];
     let tag = hex::encode(parent_bytes);
     let entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
         t_id: [0x42; 32],
         layer2_voucher_id: "voucher_crash".to_string(),
         sender_ephemeral_pub: [0x42; 32],
@@ -660,10 +650,11 @@ async fn test_durable_before_vote_crash_durability() {
         trap_s: None,
         encrypted_timestamp: 1000,
         created_at_ms: 1000,
-        deletable_at: Some("2000000000000".to_string()),
+        deletable_at: Some("600000".to_string()),
         privacy_guard: None,
     };
 
+    anchor_storage_fixture(&engine, &entry).await;
     // Ingress using durable method (DEC-029 restoration)
     let (verdict, is_new) = engine
         .ingress_hmc_lock_durable(
@@ -677,7 +668,7 @@ async fn test_durable_before_vote_crash_durability() {
         )
         .await;
 
-    assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+    assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }), "{verdict:?}");
     assert!(is_new);
 
     // Now simulate an abrupt crash without graceful shutdown drain:
@@ -710,3 +701,15 @@ async fn test_durable_before_vote_crash_durability() {
 }
 
 
+
+// Byte-storage fixtures use artificial signatures. Separate roots exercise the
+// production namespace/TTL boundary; genuine author authentication is covered
+// by chain_causality_and_prefix_tests over HTTP and QUIC.
+fn root_fixture(entry: &humoco_node::api::hmc::L2LockEntry) -> humoco_node::api::hmc::L2LockEntry {
+    let mut root = entry.clone(); root.t_id[0] ^= 0x80; root
+}
+async fn anchor_storage_fixture(engine: &DualTierEngine, entry: &humoco_node::api::hmc::L2LockEntry) {
+    let root = root_fixture(entry);
+    let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.t_id).into_string(), root, humoco_node::storage::IngressOrigin::ClientApi, None, None, None, None).await;
+    assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }), "{verdict:?}");
+}

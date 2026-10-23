@@ -1,0 +1,831 @@
+   Compiling human_money_core v0.4.1 (/home/basti/Coding/humoco/human-money-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 4.85s
+────────────
+ Nextest run ID 7f2ce87c-838c-432b-a461-15b17a5e06a6 with nextest profile: default
+    Starting 824 tests across 26 binaries (7 tests skipped)
+        PASS [   0.014s] (  1/824) human_money_core app_service::conflicts::checkout_release_tests::provisional_and_found_require_explicit_merchant_approval
+        PASS [   0.018s] (  2/824) human_money_core app_service::conflicts::checkout_release_tests::live_checkout_proof_requires_recipient_challenge_and_14_of_20_quorum
+        PASS [   0.021s] (  3/824) human_money_core app_service::conflicts::checkout_release_tests::confirmed_outcome_authorizes_automatic_goods_release
+        PASS [   0.022s] (  4/824) human_money_core app_service::backup_ops::tests::aead_detects_every_single_byte_mutation
+        PASS [   0.022s] (  5/824) human_money_core app_service::conflicts::checkout_release_tests::quarantined_never_authorizes_goods_release_even_with_merchant_approval
+        PASS [   0.026s] (  6/824) human_money_core app_service::backup_ops::tests::blob_names_are_opaque_and_path_specific
+        PASS [   0.233s] (  7/824) human_money_core app_service::storage_ops::tests::test_delete_non_existent_standard
+        PASS [   0.227s] (  8/824) human_money_core app_service::storage_ops::tests::test_delete_standard_fails_when_wallet_locked
+        PASS [   0.233s] (  9/824) human_money_core app_service::storage_ops::tests::test_delete_standard_fails_when_folder_name_differs_from_uuid
+        PASS [   0.230s] ( 10/824) human_money_core app_service::storage_ops::tests::test_delete_standard_fails_when_vouchers_exist
+        PASS [   0.227s] ( 11/824) human_money_core app_service::storage_ops::tests::test_delete_standard_rejects_path_traversal
+        PASS [   0.230s] ( 12/824) human_money_core app_service::storage_ops::tests::test_delete_standard_success_when_no_vouchers
+        PASS [   0.227s] ( 13/824) human_money_core app_service::storage_ops::tests::test_export_inspect_import_standard_cleartext
+        PASS [   0.010s] ( 14/824) human_money_core models::seal::tests::test_cloning_protection
+        PASS [   0.010s] ( 15/824) human_money_core models::seal::tests::test_compare_seals_fork_detected
+        PASS [   0.261s] ( 16/824) human_money_core app_service::backup_ops::tests::tampered_blob_and_authenticated_traversal_are_rejected_before_staging
+        PASS [   0.010s] ( 17/824) human_money_core models::seal::tests::test_compare_seals_remote_is_newer
+        PASS [   0.011s] ( 18/824) human_money_core models::seal::tests::test_compare_seals_local_is_newer
+        PASS [   0.011s] ( 19/824) human_money_core models::seal::tests::test_compare_seals_synchronized
+        PASS [   0.011s] ( 20/824) human_money_core models::seal::tests::test_create_initial_seal
+        PASS [   0.012s] ( 21/824) human_money_core models::seal::tests::test_recover_seal_epoch
+        PASS [   0.012s] ( 22/824) human_money_core models::seal::tests::test_tamper_detection
+        PASS [   0.012s] ( 23/824) human_money_core models::seal::tests::test_update_seal_chain
+        PASS [   0.011s] ( 24/824) human_money_core models::secure_container::tests::test_container_config_serialization
+        PASS [   0.013s] ( 25/824) human_money_core models::secure_container::tests::test_payload_type_to_didcomm_uri
+        PASS [   0.011s] ( 26/824) human_money_core models::secure_container::tests::test_secure_container_drop
+        PASS [   0.010s] ( 27/824) human_money_core models::voucher::tests::test_value_definition_precision_and_formatting
+        PASS [   0.014s] ( 28/824) human_money_core models::storage_integrity::tests::test_storage_integrity_record_lifecycle
+        PASS [   0.009s] ( 29/824) human_money_core models::voucher::tests::test_voucher_expiration
+        PASS [   0.010s] ( 30/824) human_money_core services::bundle_processor::tests::test_verify_bundle_signature_invalid
+        PASS [   0.012s] ( 31/824) human_money_core services::bundle_processor::tests::test_verify_container_signature_invalid
+        PASS [   0.011s] ( 32/824) human_money_core services::crypto::identity::tests::test_validate_user_id
+        PASS [   0.021s] ( 33/824) human_money_core models::voucher::tests::test_voucher_create_balance_and_transaction_flow
+        PASS [   0.012s] ( 34/824) human_money_core services::crypto::identity::tests::test_whitespace_handling_in_user_id
+        PASS [   0.011s] ( 35/824) human_money_core services::crypto::identity::tests::test_whitespace_handling_with_prefix
+        PASS [   0.014s] ( 36/824) human_money_core services::crypto::keys::tests::test_derive_deterministic_change_key
+        PASS [   0.012s] ( 37/824) human_money_core services::crypto::keys::tests::test_derive_ed25519_keypair_slip10_vector
+        PASS [   0.010s] ( 38/824) human_money_core services::crypto::keys::tests::test_hmac_sha512_basic
+        PASS [   0.010s] ( 39/824) human_money_core services::crypto::keys::tests::test_hmac_sha512_slip10_basic
+        PASS [   0.013s] ( 40/824) human_money_core services::crypto::keys::tests::test_derive_ed25519_keypair_with_passphrase_vector
+        PASS [   0.011s] ( 41/824) human_money_core services::crypto::symmetric::tests::test_encrypt_decrypt_with_aad
+        PASS [   0.011s] ( 42/824) human_money_core services::crypto::utils::tests::test_decode_bs58_fixed_32_bytes_ok
+        PASS [   0.011s] ( 43/824) human_money_core services::crypto::utils::tests::test_decode_bs58_fixed_64_bytes_ok
+        PASS [   0.010s] ( 44/824) human_money_core services::crypto::utils::tests::test_decode_bs58_fixed_invalid_chars
+        PASS [   0.011s] ( 45/824) human_money_core services::crypto::utils::tests::test_decode_bs58_fixed_dos_length_guard
+        PASS [   0.011s] ( 46/824) human_money_core services::crypto::utils::tests::test_get_short_hash_from_user_id
+        PASS [   0.013s] ( 47/824) human_money_core services::crypto::utils::tests::test_decode_bs58_fixed_wrong_length
+        PASS [   0.010s] ( 48/824) human_money_core services::jws_profile_service::tests::test_jws_missing_parts
+        PASS [   0.013s] ( 49/824) human_money_core services::jws_profile_service::tests::test_jws_invalid_signature
+        PASS [   0.016s] ( 50/824) human_money_core services::dynamic_policy_engine::tests::test_evaluate_dynamic_rules_cel_engine_core
+        PASS [   0.011s] ( 51/824) human_money_core services::jws_profile_service::tests::test_jws_roundtrip
+        PASS [   0.014s] ( 52/824) human_money_core services::l2_gateway::recipient_authority_tests::canonical_original_proof_requires_independent_full_key_authority
+        PASS [   0.011s] ( 53/824) human_money_core services::l2_gateway::tests::test_l2_chain_lock_request_serde
+        PASS [   0.355s] ( 54/824) human_money_core app_service::backup_ops::tests::differential_inventory_reuses_unchanged_files_and_deletes_removed_blobs
+        PASS [   0.010s] ( 55/824) human_money_core services::l2_gateway::tests::test_l2_verdict_conflict_handling
+        PASS [   0.011s] ( 56/824) human_money_core services::l2_gateway::tests::test_l2_verdict_verified_with_quorum_certificate
+        PASS [   0.010s] ( 57/824) human_money_core services::l2_gateway::tests::test_quorum_certificate_dto_serde
+        PASS [   0.029s] ( 58/824) human_money_core services::l2_gateway::tests::test_build_voucher_lock_chain_error_cases
+        PASS [   0.031s] ( 59/824) human_money_core services::l2_gateway::tests::test_build_voucher_lock_chain_genesis_variants
+        PASS [   0.025s] ( 60/824) human_money_core services::l2_gateway::tests::test_l2_lock_request_signature_commits_to_created_at_ms
+        PASS [   0.012s] ( 61/824) human_money_core services::l2_gateway::tests::test_verify_quorum_plausibility_bootstrap_n2
+        PASS [   0.010s] ( 62/824) human_money_core services::l2_gateway::tests::test_verify_quorum_plausibility_boundary_n20
+        PASS [   0.010s] ( 63/824) human_money_core services::latency_router::tests::test_compute_median_latency_duplicates
+        PASS [   0.017s] ( 64/824) human_money_core services::l2_gateway::tests::test_verify_checkout_receipt_14_of_20_bft
+        PASS [   0.010s] ( 65/824) human_money_core services::latency_router::tests::test_compute_median_latency_empty
+        PASS [   0.011s] ( 66/824) human_money_core services::latency_router::tests::test_compute_median_latency_even_length_upper_middle
+        PASS [   0.010s] ( 67/824) human_money_core services::latency_router::tests::test_compute_median_latency_single
+        PASS [   0.011s] ( 68/824) human_money_core services::latency_router::tests::test_compute_median_latency_five_elements
+        PASS [   0.011s] ( 69/824) human_money_core services::latency_router::tests::test_compute_median_latency_three_pings_odd
+        PASS [   0.010s] ( 70/824) human_money_core services::latency_router::tests::test_compute_median_latency_unsorted_three
+        PASS [   0.010s] ( 71/824) human_money_core services::latency_router::tests::test_select_best_peer
+        PASS [   0.011s] ( 72/824) human_money_core services::latency_router::tests::test_select_best_peer_all_offline
+        PASS [   0.011s] ( 73/824) human_money_core services::latency_router::tests::test_select_peer_from_top3_all_offline_none
+        PASS [   0.011s] ( 74/824) human_money_core services::latency_router::tests::test_select_peer_from_top3_fewer_than_three
+        PASS [   0.010s] ( 75/824) human_money_core services::latency_router::tests::test_select_peer_from_top3_jitter
+        PASS [   0.010s] ( 76/824) human_money_core services::latency_router::tests::test_select_peer_from_top3_ignores_offline
+        PASS [   0.011s] ( 77/824) human_money_core services::latency_router::tests::test_sort_and_select_top3_jittered_mutating
+        PASS [   0.010s] ( 78/824) human_money_core services::latency_router::tests::test_sort_peers_by_latency_online_first
+        PASS [   0.011s] ( 79/824) human_money_core services::latency_router::tests::test_update_ema_latency_basic
+        PASS [   0.011s] ( 80/824) human_money_core services::latency_router::tests::test_update_ema_latency_large_values
+        PASS [   0.010s] ( 81/824) human_money_core services::latency_router::tests::test_update_ema_latency_rounding
+        PASS [   0.011s] ( 82/824) human_money_core services::latency_router::tests::test_update_ema_latency_no_change
+        PASS [   0.010s] ( 83/824) human_money_core services::latency_router::tests::test_update_ema_latency_zero
+        PASS [   0.010s] ( 84/824) human_money_core services::mnemonic::tests::test_german_mnemonic_invalid_word
+        PASS [   0.011s] ( 85/824) human_money_core services::mnemonic::tests::test_german_mnemonic_invalid_checksum
+        PASS [   0.017s] ( 86/824) human_money_core services::mnemonic::tests::test_bip39_crate_from_entropy
+        PASS [   0.013s] ( 87/824) human_money_core services::mnemonic::tests::test_german_mnemonic_generation_and_validation
+        PASS [   0.018s] ( 88/824) human_money_core services::mnemonic::tests::test_bip39_official_vector_with_passphrase
+        PASS [   0.011s] ( 89/824) human_money_core services::trap_manager::tests::test_sst_degenerate_guards_fire
+        PASS [   0.012s] ( 90/824) human_money_core services::trap_manager::tests::test_canonical_y_boundary_values
+        PASS [   0.011s] ( 91/824) human_money_core services::trap_manager::tests::test_sst_inconsistent_third_shard_rejected
+        PASS [   0.010s] ( 92/824) human_money_core services::trap_manager::tests::test_sst_non_canonical_scalars_rejected
+        PASS [   0.019s] ( 93/824) human_money_core services::mnemonic::tests::test_german_seed_derivation
+        PASS [   0.014s] ( 94/824) human_money_core services::trap_manager::tests::test_sst_roundtrip_generation_witness_and_extraction
+        PASS [   0.010s] ( 95/824) human_money_core services::utils::tests::test_current_unix_timestamp_ms_and_mocking
+        PASS [   0.011s] ( 96/824) human_money_core services::trap_manager::tests::test_validate_shard_structure_accepts_max_canonical_point
+        PASS [   0.010s] ( 97/824) human_money_core services::utils::tests::test_parse_timestamp_ms
+        PASS [   0.010s] ( 98/824) human_money_core services::utils::tests::test_round_up_date_invalid_interval
+        PASS [   0.010s] ( 99/824) human_money_core services::utils::tests::test_round_up_date_all_intervals
+        PASS [   0.444s] (100/824) human_money_core app_service::conflicts::regional_mesh_backend_tests::stored_configuration_survives_restart_and_rejects_receipt_selected_authority
+        PASS [   0.010s] (101/824) human_money_core services::voucher_validation::identity::tests::test_verify_nominal_value_mismatch
+        PASS [   0.010s] (102/824) human_money_core services::voucher_validation::anti_spoofing_tests::test_validation_rejects_live_voucher_with_test_prefix_standard
+        PASS [   0.010s] (103/824) human_money_core services::voucher_validation::identity::tests::test_verify_validity_duration_min_range_violation
+        PASS [   0.012s] (104/824) human_money_core services::voucher_validation::anti_spoofing_tests::test_validation_rejects_live_voucher_with_test_prefix_currency
+        PASS [   0.010s] (105/824) human_money_core services::voucher_validation::identity::tests::test_verify_nominal_value_success
+        PASS [   0.014s] (106/824) human_money_core services::voucher_validation::signatures::tests::test_evaluate_signature_impact_fatal_conflict
+        PASS [   0.015s] (107/824) human_money_core services::voucher_validation::signatures::tests::test_evaluate_signature_impact_resolved
+        PASS [   0.010s] (108/824) human_money_core storage::wallet_transaction::tests::crash_child
+        PASS [   0.011s] (109/824) human_money_core storage::wallet_transaction::tests::kernel_directory_fsync_errors_are_propagated
+        PASS [   0.285s] (110/824) human_money_core app_service::storage_ops::tests::test_export_inspect_import_standard_password
+        PASS [   0.013s] (111/824) human_money_core test_utils::tests::test_get_current_timestamp_format
+        PASS [   0.287s] (112/824) human_money_core app_service::storage_ops::tests::test_inspect_invalid_payload_type
+        PASS [   0.288s] (113/824) human_money_core app_service::storage_ops::tests::test_inspect_import_raw_toml
+        PASS [   0.014s] (114/824) human_money_core test_utils::tests::test_get_timestamp_add_years
+        PASS [   0.013s] (115/824) human_money_core test_utils::tests::test_get_timestamp_end_of_current_year
+        PASS [   0.019s] (116/824) human_money_core wallet::coin_selection::tests::test_find_exact_subset_dp_cap_fallback
+        PASS [   0.011s] (117/824) human_money_core wallet::coin_selection::tests::test_find_exact_subset_early_exit
+        PASS [   0.010s] (118/824) human_money_core wallet::coin_selection::tests::test_score_boomerang_dominates
+        PASS [   0.011s] (119/824) human_money_core wallet::coin_selection::tests::test_score_corridor_range
+        PASS [   0.010s] (120/824) human_money_core wallet::coin_selection::tests::test_score_eigen_penalty
+        PASS [   0.010s] (121/824) human_money_core wallet::coin_selection::tests::test_score_fit_exact_vs_split
+        PASS [   0.601s] (122/824) human_money_core app_service::backup_ops::tests::mnemonic_backup_excludes_local_password_and_restores
+        PASS [   0.051s] (123/824) human_money_core wallet::reputation_tests::tests::test_active_gossip_state_persistence_roundtrip
+        PASS [   0.021s] (124/824) human_money_core wallet::reputation_tests::tests::test_bundle_own_fingerprints_bypass_lottery_and_preserved_for_subsequent_transfers
+        PASS [   0.011s] (125/824) human_money_core wallet::reputation_tests::tests::test_can_skip_l2_spend_lock_invariant
+        PASS [   0.675s] (126/824) human_money_core app_service::conflicts::checkout_release_tests::original_write_receipt_never_authorizes_automatic_goods_release
+        PASS [   0.225s] (127/824) human_money_core storage::wallet_transaction::tests::cleanup_of_nonce_temporary_files_preserves_unknown_files
+        PASS [   0.130s] (128/824) human_money_core wallet::reputation_tests::tests::test_app_service_check_reputation
+        PASS [   0.025s] (129/824) human_money_core wallet::reputation_tests::tests::test_direct_queue_distinct_recipient_filter
+        PASS [   0.025s] (130/824) human_money_core wallet::reputation_tests::tests::test_conflict_role_victim_identification
+        PASS [   0.718s] (131/824) human_money_core app_service::backup_ops::tests::custom_password_supports_both_recovery_routes_and_noop_diff
+        PASS [   0.025s] (132/824) human_money_core wallet::reputation_tests::tests::test_import_protection_immunity
+        PASS [   0.276s] (133/824) human_money_core storage::wallet_transaction::tests::oversized_snapshot_is_rejected_before_any_mutation
+        PASS [   0.028s] (134/824) human_money_core wallet::reputation_tests::tests::test_ingress_only_tip_to_direct_queue_predecessors_to_archive
+        PASS [   0.042s] (135/824) human_money_core wallet::reputation_tests::tests::test_fifo_drain_preserves_untested_gossips
+        PASS [   0.130s] (136/824) human_money_core wallet::reputation_tests::tests::test_bundle_scaling_32_vouchers_with_320_fingerprints
+        PASS [   0.031s] (137/824) human_money_core wallet::reputation_tests::tests::test_known_offender_transaction_blocked_unless_force_accepted
+        PASS [   0.023s] (138/824) human_money_core wallet::reputation_tests::tests::test_possession_priority_for_local_active_vouchers
+        PASS [   0.043s] (139/824) human_money_core wallet::reputation_tests::tests::test_known_offender_voucher_creator_blocked_unless_force_accepted
+        PASS [   0.023s] (140/824) human_money_core wallet::reputation_tests::tests::test_reproduces_local_tag_invalid_prev_hash
+        PASS [   0.056s] (141/824) human_money_core wallet::reputation_tests::tests::test_multi_proof_reputation_check
+        PASS [   0.047s] (142/824) human_money_core wallet::reputation_tests::tests::test_redemption_transaction_enqueued_in_direct_queue
+        PASS [   0.056s] (143/824) human_money_core wallet::reputation_tests::tests::test_quarantine_egress_proportional_to_vouchers
+        PASS [   0.053s] (144/824) human_money_core wallet::reputation_tests::tests::test_quarantine_ingress_hard_rejection_proportional_excess
+        PASS [   0.019s] (145/824) human_money_core wallet::routing_memory::tests::test_asymptotic_reinforcement_cap
+        PASS [   0.027s] (146/824) human_money_core wallet::routing_memory::tests::test_bundle_cap_enforcement
+        PASS [   0.059s] (147/824) human_money_core wallet::reputation_tests::tests::test_verify_fingerprint_signature_fuzz_malformed_fields
+        PASS [   0.035s] (148/824) human_money_core wallet::routing_memory::tests::test_bundle_deduplication
+        PASS [   0.053s] (149/824) human_money_core wallet::reputation_tests::tests::test_wrapper_serialization_and_hash_integrity
+        PASS [   0.078s] (150/824) human_money_core wallet::reputation_tests::tests::test_storage_cleanup_phase_2_chronological_retention
+        PASS [   0.394s] (151/824) human_money_core storage::wallet_transaction::tests::post_rename_directory_fsync_error_yields_uncertain_outcome_and_blocks_replacement_spend
+        PASS [   0.038s] (152/824) human_money_core wallet::routing_memory::tests::test_diminishing_returns
+        PASS [   0.022s] (153/824) human_money_core wallet::routing_memory::tests::test_lazy_decay_half_life
+        PASS [   0.035s] (154/824) human_money_core wallet::routing_memory::tests::test_eviction_prefers_zero_weight_over_active_hot_corridors
+        PASS [   0.024s] (155/824) human_money_core wallet::routing_memory::tests::test_migrate_legacy_seen_bundle_ids
+        PASS [   0.045s] (156/824) human_money_core wallet::routing_memory::tests::test_lru_cap
+        PASS [   0.034s] (157/824) human_money_core wallet::routing_memory::tests::test_prune_expired_bundles
+        PASS [   0.026s] (158/824) human_money_core wallet::tests::internal_logic::test_resolve_conflict_offline_must_not_overwrite_adjudicated_statuses
+        PASS [   0.035s] (159/824) human_money_core wallet::tests::internal_logic::test_resolve_conflict_offline_earliest_wins
+        PASS [   0.040s] (160/824) human_money_core wallet::routing_memory::tests::test_remove_bundle_id_conditional
+        PASS [   0.029s] (161/824) human_money_core wallet::tests::internal_logic::test_resolve_conflict_offline_tie_breaker_determinism
+        PASS [   0.028s] (162/824) human_money_core wallet::tests::internal_logic::test_storage_cleanup_precise_fingerprint_count
+        PASS [   0.061s] (163/824) human_money_core wallet::tests::internal_logic::test_rederive_secret_seed_logic
+        PASS [   0.014s] (164/824) human_money_core::causality_depth_tests test_immutable_features_min_transfer_serialization
+        PASS [   0.029s] (165/824) human_money_core::causality_depth_tests test_hop_depth_edge
+        PASS [   0.946s] (166/824) human_money_core app_service::l2_intents::tests::exact_intent_is_durable_before_transport_and_blocks_replacement_after_restart
+        PASS [   0.949s] (167/824) human_money_core app_service::backup_ops::tests::old_backup_restores_queries_and_reconciles_spent_voucher
+        PASS [   0.090s] (168/824) human_money_core wallet::tests::internal_logic::test_attribution_is_deterministic_for_three_member_buckets
+        PASS [   0.016s] (169/824) human_money_core::coin_selection_test test_asymptotic_corridor_cap
+        PASS [   0.332s] (170/824) human_money_core wallet::reputation_tests::tests::test_clock_drift_protection_skips_expiration_sweep
+        PASS [   0.033s] (171/824) human_money_core::causality_depth_tests test_min_transfer_amount
+        PASS [   0.028s] (172/824) human_money_core::coin_selection_test test_bumerang_priority_dominates
+        PASS [   0.014s] (173/824) human_money_core::coin_selection_test test_bundle_deduplication_no_double_reinforcement
+        PASS [   0.534s] (174/824) human_money_core storage::wallet_transaction::tests::stale_journal_after_abort_plus_newer_fork_lock_is_rejected
+        PASS [   0.016s] (175/824) human_money_core::coin_selection_test test_lazy_decay_half_life_365d
+        PASS [   0.109s] (176/824) human_money_core::causality_depth_tests test_consolidation_split_allowed_before_threshold_with_transfer
+        PASS [   0.552s] (177/824) human_money_core storage::wallet_transaction::tests::corrupt_wrong_auth_and_foreign_journals_do_not_overwrite_wallets
+        PASS [   0.038s] (178/824) human_money_core::coin_selection_test test_deterministic_ranking_tie_break
+        PASS [   0.012s] (179/824) human_money_core::coin_selection_test test_lazy_decay_no_time_no_decay
+        PASS [   0.036s] (180/824) human_money_core::coin_selection_test test_greedy_split_when_no_exact_available
+        PASS [   0.044s] (181/824) human_money_core::coin_selection_test test_exact_match_single_avoids_split
+        PASS [   0.014s] (182/824) human_money_core::coin_selection_test test_scoring_breakdown_components
+        PASS [   0.024s] (183/824) human_money_core::coin_selection_test test_lru_cap_1000
+        PASS [   0.027s] (184/824) human_money_core::coin_selection_test test_relative_fefo_older_scores_higher
+        PASS [   0.023s] (185/824) human_money_core::integration_tests app_service::integration_tests::test_get_public_profile_locked
+        PASS [   0.037s] (186/824) human_money_core::coin_selection_test test_unsigned_sender_id_does_not_get_boomerang_priority
+        PASS [   0.029s] (187/824) human_money_core::integration_tests app_service::integration_tests::test_get_allowed_signature_roles_from_standard
+        PASS [   0.152s] (188/824) human_money_core::causality_depth_tests test_constants_and_hop_depth
+        PASS [   0.044s] (189/824) human_money_core::coin_selection_test test_subset_sum_preferred_over_greedy_split
+        PASS [   0.026s] (190/824) human_money_core::integration_tests app_service::integration_tests::test_open_voucher_signing_request_locked
+        PASS [   0.033s] (191/824) human_money_core::integration_tests app_service::integration_tests::test_is_wallet_unlocked
+        PASS [   0.014s] (192/824) human_money_core::integration_tests app_service::integration_tests::test_update_public_profile_locked
+        PASS [   0.045s] (193/824) human_money_core::coin_selection_test test_wallet_rank_and_prepare_integration
+        PASS [   0.016s] (194/824) human_money_core::integration_tests architecture::hardening::tests::test_security_trap_detects_bad_instance_id_storage
+        PASS [   0.125s] (195/824) human_money_core::causality_depth_tests test_min_transfer_and_consolidation_combined
+        PASS [   0.298s] (196/824) human_money_core::causality_depth_tests test_consolidation_split_forbidden
+        PASS [   0.167s] (197/824) human_money_core::integration_tests architecture::cloning_protection::test_wallet_cloning_protection_and_handover
+        PASS [   0.182s] (198/824) human_money_core::integration_tests architecture::cloning_protection::test_legacy_wallet_migration
+        PASS [   0.199s] (199/824) human_money_core::integration_tests architecture::hardening::tests::test_cleanup_synchronizes_stores
+        PASS [   0.201s] (200/824) human_money_core::integration_tests architecture::hardening::tests::test_operations_on_empty_wallet_do_not_panic
+        PASS [   0.195s] (201/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_cleanup_phase1_removes_expired_fingerprints
+        PASS [   0.336s] (202/824) human_money_core::causality_depth_tests test_issuer_recirculation_forbidden
+        PASS [   0.221s] (203/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_cleanup_phase2_removes_by_limit_and_tie_breaker
+        PASS [   1.308s] (204/824) human_money_core app_service::checkout::tests::purchase_commit_binds_real_l1_challenge_authority_and_idempotent_restart
+        PASS [   0.012s] (205/824) human_money_core::integration_tests architecture::security_audit_fixes::test_ds_tag_malleability_regression
+        PASS [   0.418s] (206/824) human_money_core::causality_depth_tests test_hop_limit_boundary
+        PASS [   0.012s] (207/824) human_money_core::integration_tests architecture::security_audit_fixes::test_verify_integrity_malformed_base58_no_panic
+        PASS [   0.013s] (208/824) human_money_core::integration_tests architecture::security_audit_fixes::test_verify_integrity_wrong_length_no_panic
+        PASS [   0.013s] (209/824) human_money_core::integration_tests architecture::security_audit_fixes::test_verify_transactions_empty_list_no_panic
+        PASS [   0.013s] (210/824) human_money_core::integration_tests architecture::security_hardening::test_context_prefix_spoofing
+        PASS [   0.027s] (211/824) human_money_core::integration_tests architecture::security_hardening::test_premature_reveal
+        PASS [   0.030s] (212/824) human_money_core::integration_tests architecture::security_hardening::test_privacy_guard_tampering
+        PASS [   0.930s] (213/824) human_money_core storage::wallet_transaction::tests::subprocess_recovery_can_itself_be_killed_and_repeated
+        PASS [   0.016s] (214/824) human_money_core::integration_tests core_logic::lifecycle::test_bundle_metadata_store_bounded_eviction
+        PASS [   0.142s] (215/824) human_money_core::integration_tests architecture::rollback_guard_tests::tests::test_fork_lock_prevents_state_changes
+        PASS [   0.038s] (216/824) human_money_core::integration_tests core_logic::flow_integrity::test_init_transfer_split_chain
+        PASS [   0.024s] (217/824) human_money_core::integration_tests core_logic::lifecycle::test_canonical_json_is_deterministic_and_sorted
+        PASS [   0.028s] (218/824) human_money_core::integration_tests core_logic::lifecycle::test_pending_events_bounded_eviction
+        PASS [   0.043s] (219/824) human_money_core::integration_tests core_logic::lifecycle::test_double_spend_detection_logic
+        PASS [   0.034s] (220/824) human_money_core::integration_tests core_logic::lifecycle::test_fails_to_create_forbidden_transaction_type
+        PASS [   0.037s] (221/824) human_money_core::integration_tests core_logic::lifecycle::test_full_creation_and_validation_cycle
+        PASS [   0.168s] (222/824) human_money_core::integration_tests architecture::rollback_guard_tests::tests::test_zone_2_soft_rejection_and_override
+        PASS [   0.907s] (223/824) human_money_core wallet::reputation_tests::tests::test_active_gossip_queue_capacity_bounds
+        PASS [   0.030s] (224/824) human_money_core::integration_tests core_logic::lifecycle::test_serialization_deserialization
+        PASS [   0.043s] (225/824) human_money_core::integration_tests core_logic::lifecycle::test_secure_voucher_transfer_via_encrypted_bundle
+        PASS [   0.045s] (226/824) human_money_core::integration_tests core_logic::lifecycle::test_spendable_balance_fail_closed_zero_on_malformed_amount
+        PASS [   0.043s] (227/824) human_money_core::integration_tests core_logic::lifecycle::test_split_fails_on_insufficient_funds
+        PASS [   0.039s] (228/824) human_money_core::integration_tests core_logic::lifecycle::test_split_fails_on_non_allow_partial_transfers_voucher
+        PASS [   0.028s] (229/824) human_money_core::integration_tests core_logic::lifecycle::test_validation_fails_on_guarantor_count
+        PASS [   0.037s] (230/824) human_money_core::integration_tests core_logic::lifecycle::test_split_transaction_cycle_and_balance_check
+        PASS [   0.024s] (231/824) human_money_core::integration_tests core_logic::lifecycle::test_validation_fails_on_inconsistent_unit
+        PASS [   0.025s] (232/824) human_money_core::integration_tests core_logic::lifecycle::test_validation_fails_on_missing_required_field
+        PASS [   0.033s] (233/824) human_money_core::integration_tests core_logic::lifecycle::test_validation_fails_on_invalid_signature
+        PASS [   0.472s] (234/824) human_money_core::integration_tests architecture::hardening::tests::test_recovery_handles_split_transaction_chain
+        PASS [   0.031s] (235/824) human_money_core::integration_tests core_logic::lifecycle::test_validation_fails_on_tampered_guarantor_signature
+        PASS [   0.024s] (236/824) human_money_core::integration_tests core_logic::lifecycle::test_validity_duration_rules
+        PASS [   0.033s] (237/824) human_money_core::integration_tests core_logic::lifecycle::test_validation_succeeds_with_extra_fields_in_json
+        PASS [   0.031s] (238/824) human_money_core::integration_tests core_logic::math::test_transaction_fails_on_excess_precision
+        PASS [   0.296s] (239/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_recovery_rebuilds_if_fingerprint_stores_missing
+        PASS [   0.025s] (240/824) human_money_core::integration_tests core_logic::privacy_modes::test_privacy_mode_flexible_requires_anonymous_recipient
+        PASS [   0.026s] (241/824) human_money_core::integration_tests core_logic::privacy_modes::test_privacy_mode_flexible_success_with_anonymous_recipient
+        PASS [   0.025s] (242/824) human_money_core::integration_tests core_logic::privacy_modes::test_privacy_mode_public_fails_anonymous_recipient
+        PASS [   0.024s] (243/824) human_money_core::integration_tests core_logic::privacy_modes::test_privacy_mode_public_fails_missing_sender
+        PASS [   0.028s] (244/824) human_money_core::integration_tests core_logic::privacy_modes::test_privacy_mode_public_success
+        PASS [   0.322s] (245/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_gossip_zero_voucher_bundle_emits_no_fingerprints
+        PASS [   0.024s] (246/824) human_money_core::integration_tests core_logic::privacy_modes::test_privacy_mode_stealth_fails_with_did_recipient
+        PASS [   0.025s] (247/824) human_money_core::integration_tests core_logic::privacy_modes::test_privacy_mode_stealth_fails_with_sender_id
+        PASS [   0.025s] (248/824) human_money_core::integration_tests core_logic::privacy_modes::test_privacy_mode_stealth_success
+        PASS [   0.028s] (249/824) human_money_core::integration_tests core_logic::privacy_traceability::tests::test_public_mode_without_sender_signature_ignored
+        PASS [   0.415s] (250/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_gossip_lottery_preservation_for_bundle_vouchers
+        PASS [   0.057s] (251/824) human_money_core::integration_tests core_logic::privacy_split_workflows::tests::test_chained_privacy_splits
+        PASS [   0.039s] (252/824) human_money_core::integration_tests core_logic::privacy_traceability::tests::test_receive_private_bundle_with_spoofed_identity
+        PASS [   0.052s] (253/824) human_money_core::integration_tests core_logic::privacy_traceability::tests::test_privacy_traceability_direct_decryption
+        PASS [   0.058s] (254/824) human_money_core::integration_tests core_logic::privacy_traceability::tests::test_flexible_privacy_toggle
+        PASS [   0.043s] (255/824) human_money_core::integration_tests core_logic::privacy_traceability::tests::test_strict_privacy_validation
+        PASS [   0.404s] (256/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_gossip_sent_to_recipient_filter_and_cleanup
+        PASS [   0.025s] (257/824) human_money_core::integration_tests core_logic::security::double_spend::test_conflict_classification
+        PASS [   0.029s] (258/824) human_money_core::integration_tests core_logic::security::double_spend::test_cleanup_expired_fingerprints
+        PASS [   0.066s] (259/824) human_money_core::integration_tests core_logic::privacy_traceability::tests::test_traceability_skips_outbound_split
+        PASS [   0.029s] (260/824) human_money_core::integration_tests core_logic::security::double_spend::test_fingerprint_exchange
+        PASS [   0.029s] (261/824) human_money_core::integration_tests core_logic::security::double_spend::test_fingerprint_generation
+        PASS [   0.074s] (262/824) human_money_core::integration_tests core_logic::privacy_traceability::tests::test_traceability_aborts_on_corrupt_inbound_guard
+        PASS [   0.010s] (263/824) human_money_core::integration_tests core_logic::security::identity_trap_audit::test_ds_tag_prefix_independent
+        PASS [   0.013s] (264/824) human_money_core::integration_tests core_logic::security::identity_trap_audit::test_degenerate_and_invalid_extraction_handling
+        PASS [   0.012s] (265/824) human_money_core::integration_tests core_logic::security::identity_trap_audit::test_fabricated_shards_do_not_reveal_or_frame_identity
+        PASS [   0.407s] (266/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_selection_heuristic_proportional_budget
+        PASS [   0.450s] (267/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_gossip_quarantine_relay_pool_strict_fifo_cap
+        PASS [   0.028s] (268/824) human_money_core::integration_tests core_logic::security::double_spend_identification::test_sst_identity_recovery_from_conflicting_fingerprints
+        PASS [   0.013s] (269/824) human_money_core::integration_tests core_logic::security::identity_trap_audit::test_honest_double_spend_identity_always_recovered
+        PASS [   0.014s] (270/824) human_money_core::integration_tests core_logic::security::identity_trap_audit::test_scalar_malleability_no_bypass
+        PASS [   0.013s] (271/824) human_money_core::integration_tests core_logic::security::identity_trap_audit::test_trap_replay_rejected_by_shard_mismatch
+        PASS [   0.045s] (272/824) human_money_core::integration_tests core_logic::security::forced_double_spend_stealth_vulnerability::tests::test_vulnerability_forced_double_spend_stealth_binding
+        PASS [   0.178s] (273/824) human_money_core::integration_tests core_logic::math::test_chained_transaction_math_and_scaling
+        PASS [   0.031s] (274/824) human_money_core::integration_tests core_logic::security::privacy_evasion::detect_silent_signature_leak_in_private_mode
+        PASS [   0.031s] (275/824) human_money_core::integration_tests core_logic::security::privacy_evasion::detect_whitespace_obfuscation_in_public_mode
+        PASS [   0.633s] (276/824) human_money_core::integration_tests architecture::resilience_and_gossip::tests::test_gossip_ingress_accepts_valid_fingerprint
+        PASS [   0.032s] (277/824) human_money_core::integration_tests core_logic::security::privacy_evasion::enforce_identity_consistency_in_flexible_mode
+        PASS [   0.038s] (278/824) human_money_core::integration_tests core_logic::security::privacy_evasion::enforce_ephemeral_key_uniqueness
+        PASS [   0.032s] (279/824) human_money_core::integration_tests core_logic::security::privacy_evasion::prevent_private_and_public_input_mixing
+        PASS [   0.061s] (280/824) human_money_core::integration_tests core_logic::security::identity_trap_audit::test_manipulated_shard_rejected_by_recipient_witness_check
+        PASS [   0.020s] (281/824) human_money_core::integration_tests core_logic::security::privacy_evasion::verify_encryption_padding_constancy
+        PASS [   0.034s] (282/824) human_money_core::integration_tests core_logic::security::privacy_evasion::prevent_trapezoidal_identity_leak
+        PASS [   0.021s] (283/824) human_money_core::integration_tests core_logic::security::root_account::test_create_prefix_account_user_id
+        PASS [   0.015s] (284/824) human_money_core::integration_tests core_logic::security::root_account::test_create_root_account_user_id
+        PASS [   0.150s] (285/824) human_money_core::integration_tests core_logic::security::concurrent_access_vulnerability::test_lock_reentrancy_does_not_protect_against_same_process
+        PASS [   0.025s] (286/824) human_money_core::integration_tests core_logic::security::root_account::test_get_prefix_from_user_id_edge_cases
+        PASS [   0.088s] (287/824) human_money_core::integration_tests core_logic::security::privacy_evasion::prevent_trap_data_replay
+        PASS [   0.021s] (288/824) human_money_core::integration_tests core_logic::security::root_account::test_pubkey_extraction_from_prefix_account
+        PASS [   0.149s] (289/824) human_money_core::integration_tests core_logic::security::double_spend::test_local_double_spend_detection_lifecycle
+        PASS [   0.042s] (290/824) human_money_core::integration_tests core_logic::security::root_account::test_genesis_with_root_account
+        PASS [   0.062s] (291/824) human_money_core::integration_tests core_logic::security::root_account::test_balance_lifecycle_mixed_identities
+        PASS [   0.016s] (292/824) human_money_core::integration_tests core_logic::security::root_account::test_pubkey_extraction_from_root_account
+        PASS [   0.013s] (293/824) human_money_core::integration_tests core_logic::security::root_account::test_validate_root_account_user_id
+        PASS [   0.085s] (294/824) human_money_core::integration_tests core_logic::security::privacy_mode_compliance::tests::test_public_mode_compliance
+        PASS [   0.072s] (295/824) human_money_core::integration_tests core_logic::security::root_account::test_balance_lifecycle_root_to_root
+        PASS [   0.092s] (296/824) human_money_core::integration_tests core_logic::security::privacy_mode_compliance::tests::test_flexible_mode_compliance
+        PASS [   0.084s] (297/824) human_money_core::integration_tests core_logic::security::privacy_mode_compliance::tests::test_stealth_mode_compliance
+        PASS [   0.013s] (298/824) human_money_core::integration_tests core_logic::security::trap_verification::test_hash_to_curve_not_default
+        PASS [   0.036s] (299/824) human_money_core::integration_tests core_logic::security::root_account::test_stealth_balance_root_account
+        PASS [   0.035s] (300/824) human_money_core::integration_tests core_logic::security::standard_validation::required_signatures_validation::test_creator_as_guarantor_attack_fails
+        PASS [   0.031s] (301/824) human_money_core::integration_tests core_logic::security::standard_validation::required_signatures_validation::test_fails_on_signature_from_wrong_signer
+        PASS [   0.034s] (302/824) human_money_core::integration_tests core_logic::security::standard_validation::required_signatures_validation::test_fails_on_missing_mandatory_signature
+        PASS [   0.035s] (303/824) human_money_core::integration_tests core_logic::security::standard_validation::required_signatures_validation::test_fails_on_wrong_signature_description
+        PASS [   0.016s] (304/824) human_money_core::integration_tests core_logic::security::trap_verification::test_sst_collision_math_reconstruction
+        PASS [   0.035s] (305/824) human_money_core::integration_tests core_logic::security::standard_validation::required_signatures_validation::test_required_signature_ok
+        PASS [   0.034s] (306/824) human_money_core::integration_tests core_logic::security::state_and_collaboration::test_serialization_roundtrip_with_special_chars
+        PASS [   0.014s] (307/824) human_money_core::integration_tests core_logic::security::trap_verification::test_sst_random_mask_substitution_is_futile
+        PASS [   0.019s] (308/824) human_money_core::integration_tests core_logic::security::trap_verification::test_sst_zero_challenge_forgery_rejected
+        PASS [   0.015s] (309/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_full_transfer_amount_mismatch
+        PASS [   0.046s] (310/824) human_money_core::integration_tests core_logic::security::state_and_collaboration::test_wallet_state_management_on_split
+        PASS [   0.029s] (311/824) human_money_core::integration_tests core_logic::security::trap_verification::test_sst_ds_tag_manipulation_detected_with_bypass
+        PASS [   0.058s] (312/824) human_money_core::integration_tests core_logic::security::state_and_collaboration::test_collaborative_fraud_detection_with_fingerprints
+        PASS [   0.038s] (313/824) human_money_core::integration_tests core_logic::security::trap_verification::test_sst_generation_determinism
+        PASS [   0.026s] (314/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_inconsistent_split_transaction
+        PASS [   0.025s] (315/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_init_amount_mismatch
+        PASS [   0.024s] (316/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_invalid_precision_in_nominal_value
+        PASS [   0.041s] (317/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_create_inconsistent_transaction
+        PASS [   0.030s] (318/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_remainder_in_full_transfer
+        PASS [   0.031s] (319/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_negative_or_zero_amount_transaction
+        PASS [   0.037s] (320/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_tamper_transaction_history
+        PASS [   0.283s] (321/824) human_money_core::integration_tests core_logic::security::concurrent_access_vulnerability::test_concurrent_access_stale_state_detected_on_any_write
+        PASS [   0.047s] (322/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_tamper_core_data_and_guarantors
+        PASS [   0.043s] (323/824) human_money_core::integration_tests persistence::archive::test_voucher_archiving_on_full_spend
+        PASS [   0.043s] (324/824) human_money_core::integration_tests persistence::event_chunking::test_event_migration_and_chunking
+        PASS [   0.015s] (325/824) human_money_core::integration_tests persistence::file_storage::test_get_lock_file_path_is_correct
+        PASS [   0.063s] (326/824) human_money_core::integration_tests persistence::file_storage::test_empty_password_handling
+        PASS [   0.070s] (327/824) human_money_core::integration_tests persistence::file_storage::test_active_gossip_persists_and_loads
+        PASS [   0.061s] (328/824) human_money_core::integration_tests persistence::file_storage::test_load_from_corrupted_profile_file
+        PASS [   0.067s] (329/824) human_money_core::integration_tests persistence::file_storage::test_known_fingerprints_persist_and_load
+        PASS [   0.063s] (330/824) human_money_core::integration_tests persistence::file_storage::test_load_with_missing_voucher_store
+        PASS [   0.065s] (331/824) human_money_core::integration_tests persistence::file_storage::test_lock_file_is_deleted_after_unlock
+        PASS [   0.066s] (332/824) human_money_core::integration_tests persistence::file_storage::test_own_fingerprints_persist_and_load
+        PASS [   0.120s] (333/824) human_money_core::integration_tests core_logic::voucher_traceability_deep::tests::test_deep_traceability_with_splits_and_transfers
+        PASS [   0.151s] (334/824) human_money_core::integration_tests core_logic::security::vulnerabilities::test_attack_fuzzing_random_mutations
+        PASS [   0.013s] (335/824) human_money_core::integration_tests persistence::file_storage::test_wallet_lock_guard_concurrent_same_process_rejected
+        PASS [   0.013s] (336/824) human_money_core::integration_tests persistence::file_storage::test_wallet_lock_guard_does_not_delete_persistent_lock
+        PASS [   0.412s] (337/824) human_money_core::integration_tests core_logic::security::concurrent_access_vulnerability::test_concurrent_access_double_spend_must_be_blocked
+        PASS [   0.064s] (338/824) human_money_core::integration_tests persistence::file_storage::test_profile_exists_returns_correct_booleans
+        PASS [   0.084s] (339/824) human_money_core::integration_tests persistence::file_storage::test_password_recovery_and_reset_with_data
+        PASS [   0.093s] (340/824) human_money_core::integration_tests persistence::file_storage::test_wallet_creation_save_and_load
+        PASS [   0.101s] (341/824) human_money_core::integration_tests persistence::file_storage::test_storage_reentrancy_same_process
+        PASS [   0.123s] (342/824) human_money_core::integration_tests persistence::file_storage::test_save_and_load_arbitrary_data
+        PASS [   0.119s] (343/824) human_money_core::integration_tests persistence::file_storage::test_save_and_load_with_bundle_history
+        PASS [   0.235s] (344/824) human_money_core::integration_tests persistence::event_log::test_status_transition_emits_event
+        PASS [   0.234s] (345/824) human_money_core::integration_tests persistence::event_log::test_voucher_creation_emits_event
+        PASS [   0.464s] (346/824) human_money_core::integration_tests core_logic::security::double_spend::test_proactive_double_spend_prevention_and_self_healing_in_appservice
+        PASS [   0.027s] (347/824) human_money_core::integration_tests services::bypass::test_logic_modification_with_bypass
+        PASS [   0.013s] (348/824) human_money_core::integration_tests services::crypto::test_derive_ed25519_keypair
+        PASS [   0.014s] (349/824) human_money_core::integration_tests services::crypto::test_ed25519_signature
+        PASS [   0.014s] (350/824) human_money_core::integration_tests services::crypto::test_ed25519_to_x25519_conversion
+        PASS [   0.012s] (351/824) human_money_core::integration_tests services::crypto::test_ephemeral_dh_key_generation
+        PASS [   0.011s] (352/824) human_money_core::integration_tests services::crypto::test_generate_mnemonic
+        PASS [   0.032s] (353/824) human_money_core::integration_tests services::bypass::test_signature_bypass_mechanism
+        PASS [   0.015s] (354/824) human_money_core::integration_tests services::crypto::test_get_pubkey_from_user_id
+        PASS [   0.157s] (355/824) human_money_core::integration_tests persistence::integrity::test_wallet_integrity_invalid_signature
+        PASS [   0.013s] (356/824) human_money_core::integration_tests services::crypto::test_static_encryption_flow
+        PASS [   0.015s] (357/824) human_money_core::integration_tests services::crypto::test_user_id_creation_supports_root_and_prefix
+        PASS [   0.023s] (358/824) human_money_core::integration_tests services::crypto::test_sender_can_reopen_container
+        PASS [   0.024s] (359/824) human_money_core::integration_tests services::crypto::test_multi_recipient_secure_container
+        PASS [   0.144s] (360/824) human_money_core::integration_tests persistence::integrity::test_wallet_integrity_manipulated_item
+        PASS [   0.171s] (361/824) human_money_core::integration_tests persistence::integrity::test_storage_integrity_after_login_anchor_write
+        PASS [   0.012s] (362/824) human_money_core::integration_tests services::crypto::test_validate_mnemonic
+        PASS [   0.012s] (363/824) human_money_core::integration_tests services::crypto_properties::test_curve_point_derivation_is_injective_and_deterministic
+        PASS [   0.136s] (364/824) human_money_core::integration_tests persistence::integrity::test_wallet_integrity_missing_digest
+        PASS [   0.012s] (365/824) human_money_core::integration_tests services::crypto_properties::test_hkdf_info_contains_key_material_and_differs_per_keypair
+        PASS [   0.013s] (366/824) human_money_core::integration_tests services::crypto_properties::test_get_pubkey_error_has_readable_messages_and_correct_cause_chain
+        PASS [   0.012s] (367/824) human_money_core::integration_tests services::crypto_properties::test_mnemonic_generation_covers_all_bip39_sizes
+        PASS [   0.013s] (368/824) human_money_core::integration_tests services::crypto_properties::test_hkdf_info_is_independent_of_argument_order
+        PASS [   0.012s] (369/824) human_money_core::integration_tests services::crypto_properties::test_mnemonic_generation_rejects_unsupported_sizes
+        PASS [   0.159s] (370/824) human_money_core::integration_tests persistence::integrity::test_wallet_integrity_missing_bundles_meta_after_restart
+        PASS [   0.013s] (371/824) human_money_core::integration_tests services::crypto_properties::test_recipient_payload_decryption_requires_minimum_byte_length
+        PASS [   0.013s] (372/824) human_money_core::integration_tests services::crypto_properties::test_symmetric_decryption_distinguishes_length_error_from_decryption_error
+        PASS [   0.013s] (373/824) human_money_core::integration_tests services::crypto_properties::test_short_hash_is_deterministic_unique_and_fixed_size
+        PASS [   0.012s] (374/824) human_money_core::integration_tests services::crypto_properties::test_user_id_prefix_cannot_contain_consecutive_hyphens
+        PASS [   0.013s] (375/824) human_money_core::integration_tests services::crypto_properties::test_user_id_error_variants_have_descriptive_messages
+        PASS [   0.012s] (376/824) human_money_core::integration_tests services::crypto_properties::test_user_id_prefix_cannot_start_or_end_with_hyphen
+        PASS [   0.012s] (377/824) human_money_core::integration_tests services::crypto_properties::test_user_id_prefix_length_is_enforced_at_63_chars
+        PASS [   0.012s] (378/824) human_money_core::integration_tests services::crypto_properties::test_user_id_prefix_only_allows_lowercase_digits_and_hyphens
+        PASS [   0.015s] (379/824) human_money_core::integration_tests services::crypto_properties::test_user_id_validation_accepts_hyphens_and_digits_in_prefix
+        PASS [   0.012s] (380/824) human_money_core::integration_tests services::crypto_properties::test_user_id_validation_rejects_malformed_input_and_detects_tampering
+        PASS [   0.013s] (381/824) human_money_core::integration_tests services::crypto_properties::test_user_id_validation_each_prefix_rule_independently_triggers_rejection
+        PASS [   0.013s] (382/824) human_money_core::integration_tests services::crypto_properties::test_user_id_validation_enforces_prefix_length_limit
+        PASS [   0.127s] (383/824) human_money_core::integration_tests persistence::integrity::test_wallet_integrity_missing_item
+        PASS [   0.013s] (384/824) human_money_core::integration_tests services::flexible_encryption::test_plaintext_allowed_for_non_financial_payloads
+        PASS [   0.012s] (385/824) human_money_core::integration_tests services::jws_profile::test_jws_profile_invalid_signature
+        PASS [   0.013s] (386/824) human_money_core::integration_tests services::flexible_encryption::test_pbkdf2_key_derivation
+        PASS [   0.013s] (387/824) human_money_core::integration_tests services::flexible_encryption::test_plaintext_blocked_for_financial_payloads
+        PASS [   0.013s] (388/824) human_money_core::integration_tests services::flexible_encryption::test_symmetric_encryption
+        PASS [   0.129s] (389/824) human_money_core::integration_tests persistence::integrity::test_wallet_integrity_repair
+        PASS [   0.014s] (390/824) human_money_core::integration_tests services::jws_profile::test_jws_profile_minimal
+        PASS [   0.015s] (391/824) human_money_core::integration_tests services::jws_profile::test_jws_profile_protocol_version_persistence
+        PASS [   0.015s] (392/824) human_money_core::integration_tests services::jws_profile::test_jws_profile_missing_parts
+        PASS [   0.017s] (393/824) human_money_core::integration_tests services::jws_profile::test_jws_profile_missing_id
+        PASS [   0.015s] (394/824) human_money_core::integration_tests services::jws_profile::test_jws_profile_roundtrip_complete
+        PASS [   0.013s] (395/824) human_money_core::integration_tests services::jws_profile::test_jws_profile_unicode_support
+        PASS [   0.127s] (396/824) human_money_core::integration_tests persistence::integrity::test_wallet_integrity_unknown_item
+        PASS [   0.218s] (397/824) human_money_core::integration_tests persistence::integrity::test_storage_integrity_after_save_encrypted_data
+        PASS [   0.013s] (398/824) human_money_core::integration_tests services::utils::test_iso8601_duration_date_math_correctness
+        PASS [   0.016s] (399/824) human_money_core::integration_tests services::utils::test_iso8601_duration_month_addition_across_year_boundary
+        PASS [   0.028s] (400/824) human_money_core::integration_tests services::utils::test_chronological_validation_with_timezones
+        PASS [   0.013s] (401/824) human_money_core::integration_tests services::utils::test_iso8601_duration_rejects_each_format_violation_independently
+        PASS [   0.585s] (402/824) human_money_core::integration_tests core_logic::security::identity_trap_audit::test_forged_witness_without_key_knowledge_rejected
+        PASS [   0.029s] (403/824) human_money_core::integration_tests services::utils::test_issuance_firewall_blocks_creator_when_validity_below_minimum
+        PASS [   0.021s] (404/824) human_money_core::integration_tests services::utils::test_local_id_after_full_transfer
+        PASS [   0.021s] (405/824) human_money_core::integration_tests services::utils::test_local_id_after_split
+        PASS [   0.022s] (406/824) human_money_core::integration_tests services::utils::test_local_id_changes_on_round_trip
+        PASS [   0.012s] (407/824) human_money_core::integration_tests services::utils::test_round_up_date_logic
+        PASS [   0.022s] (408/824) human_money_core::integration_tests services::utils::test_local_id_for_initial_creator
+        PASS [   0.022s] (409/824) human_money_core::integration_tests services::utils::test_local_id_for_non_owner
+        PASS [   0.014s] (410/824) human_money_core::integration_tests services::utils::test_round_up_date_p1m_correctly_handles_december
+        PASS [   0.041s] (411/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::issuance_firewall::test_firewall_allows_internal_creator_transfer_when_expired
+        PASS [   0.040s] (412/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::issuance_firewall::test_firewall_allows_valid_issuance_to_third_party
+        PASS [   0.052s] (413/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::issuance_firewall::test_firewall_allows_transfer_if_rule_is_undefined
+        PASS [   0.065s] (414/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::issuance_firewall::test_firewall_allows_non_creator_transfer_when_expired
+        PASS [   0.035s] (415/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::issuance_firewall::test_firewall_blocks_expired_issuance_to_third_party
+        PASS [   0.027s] (416/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::issuance_firewall::test_gatekeeper_blocks_creation_of_too_short_voucher
+        PASS [   0.025s] (417/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::layer2_security::test_layer2_anchor_prevents_validity_tampering
+        PASS [   0.029s] (418/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::test_create_transaction_when_voucher_is_not_allow_partial_transfers_then_fails_on_split
+        PASS [   0.027s] (419/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::test_validate_voucher_when_decimal_places_are_invalid_then_fails
+        PASS [   0.035s] (420/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::test_create_transaction_when_type_is_not_allowed_then_fails
+        PASS [   0.029s] (421/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::test_validate_voucher_when_full_transfer_amount_mismatches_then_fails
+        PASS [   0.013s] (422/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::test_validate_voucher_when_validity_is_too_short_then_fails
+        PASS [   0.024s] (423/824) human_money_core::integration_tests validation::business_rules::behavioral_rules::test_validate_voucher_when_validity_is_too_long_then_fails
+        PASS [   0.023s] (424/824) human_money_core::integration_tests validation::business_rules::structural_integrity::test_validate_voucher_when_amount_string_is_malformed_then_fails
+        PASS [   0.023s] (425/824) human_money_core::integration_tests validation::business_rules::structural_integrity::test_validate_voucher_when_date_logic_is_invalid_then_fails
+        PASS [   0.014s] (426/824) human_money_core::integration_tests validation::forward_compatibility::compatibility_scenarios::test_parse_standard_with_unknown_fields_in_toml_then_succeeds
+        PASS [   0.025s] (427/824) human_money_core::integration_tests validation::business_rules::structural_integrity::test_validate_voucher_when_standard_uuid_mismatches_then_fails
+        PASS [   0.029s] (428/824) human_money_core::integration_tests validation::business_rules::structural_integrity::test_validate_voucher_when_transaction_time_order_is_invalid_then_fails
+        PASS [   0.024s] (429/824) human_money_core::integration_tests validation::forward_compatibility::compatibility_scenarios::test_validate_voucher_when_t_type_is_unknown_then_fails
+        PASS [   0.025s] (430/824) human_money_core::integration_tests validation::forward_compatibility::compatibility_scenarios::test_validate_voucher_with_unknown_fields_in_json_then_succeeds
+        PASS [   0.036s] (431/824) human_money_core::integration_tests validation::logic_integrity::test_balance_attribution_logic
+        PASS [   0.028s] (432/824) human_money_core::integration_tests validation::logic_integrity::test_init_transaction_party_rules
+        PASS [   0.033s] (433/824) human_money_core::integration_tests validation::logic_integrity::test_p2pkh_change_output_verification
+        PASS [   0.030s] (434/824) human_money_core::integration_tests validation::logic_integrity::test_p2pkh_hash_fallback_match
+        PASS [   0.029s] (435/824) human_money_core::integration_tests validation::logic_integrity::test_p2pkh_identity_match_isolation
+        PASS [   0.028s] (436/824) human_money_core::integration_tests validation::logic_integrity::test_p2pkh_recipient_id_fallback
+        PASS [   0.029s] (437/824) human_money_core::integration_tests validation::logic_integrity::test_p2pkh_recipient_match
+        PASS [   0.027s] (438/824) human_money_core::integration_tests validation::logic_integrity::test_p2pkh_sender_id_fallback
+        PASS [   0.029s] (439/824) human_money_core::integration_tests validation::logic_integrity::test_signature_count_limits
+        PASS [   0.027s] (440/824) human_money_core::integration_tests validation::logic_integrity::test_transaction_amount_precision
+        PASS [   0.310s] (441/824) human_money_core::integration_tests services::l2_synchronization::test_scenario_1_happy_path
+        PASS [   0.309s] (442/824) human_money_core::integration_tests services::l2_synchronization::test_scenario_4_initial_registration
+        PASS [   0.321s] (443/824) human_money_core::integration_tests services::l2_integration::test_l2_voucher_id_mixup_protection
+        PASS [   0.029s] (444/824) human_money_core::integration_tests validation::logic_integrity::test_transaction_type_validation
+        PASS [   0.337s] (445/824) human_money_core::integration_tests services::l2_integration::test_l2_lock_payload_hash_commits_to_created_at_ms
+        PASS [   0.037s] (446/824) human_money_core::integration_tests validation::logic_integrity::test_transaction_monotonic_time
+        PASS [   0.031s] (447/824) human_money_core::integration_tests validation::logic_integrity::test_valid_until_matches_creation_date
+        PASS [   0.034s] (448/824) human_money_core::integration_tests validation::logic_integrity::test_trap_data_privacy_validation
+        PASS [   0.030s] (449/824) human_money_core::integration_tests validation::privacy_modes::test_flexible_mode_hybrid_behavior
+        PASS [   0.034s] (450/824) human_money_core::integration_tests validation::privacy_modes::test_private_mode_enforcement
+        PASS [   0.029s] (451/824) human_money_core::integration_tests validation::privacy_modes::test_public_mode_enforcement
+        PASS [   0.012s] (452/824) human_money_core::integration_tests validation::standard_definition::integration_with_voucher::test_create_voucher_when_lang_preference_is_set_then_uses_correct_localized_text
+        PASS [   0.014s] (453/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_fail_fast_validation_amount_decimal_places_exceeds_18
+        PASS [   0.033s] (454/824) human_money_core::integration_tests validation::signature_reuse::test_prevent_signature_reuse_in_init
+        PASS [   0.029s] (455/824) human_money_core::integration_tests validation::signature_reuse::test_reject_two_guarantors_same_key
+        PASS [   0.013s] (456/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_fail_fast_validation_min_transfer_amount_invalid_number
+        PASS [   0.032s] (457/824) human_money_core::integration_tests validation::signature_reuse::test_reject_same_key_different_prefix
+        PASS [   0.024s] (458/824) human_money_core::integration_tests validation::standard_definition::integration_with_voucher::test_create_transaction_when_standard_is_wrong_then_fails
+        PASS [   0.014s] (459/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_fail_fast_validation_min_transfer_amount_scale_exceeds_decimal_places
+        PASS [   0.375s] (460/824) human_money_core::integration_tests services::l2_integration::test_gateway_retry_invariance_idempotency
+        PASS [   0.014s] (461/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_fail_fast_validation_min_transfer_amount_valid
+        PASS [   0.014s] (462/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_fail_fast_validation_standard_uuid_contains_colons
+        PASS [   0.012s] (463/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_get_localized_text_when_no_english_then_falls_back_to_first
+        PASS [   0.013s] (464/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_get_localized_text_when_direct_match_exists_then_returns_it
+        PASS [   0.013s] (465/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_get_localized_text_when_no_match_then_falls_back_to_english
+        PASS [   0.018s] (466/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_fail_fast_validation_min_transfer_amount_zero_or_negative
+        PASS [   0.014s] (467/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_verify_standard_when_content_is_tampered_then_fails
+        PASS [   0.014s] (468/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_logic_hash_behavior_when_immutable_or_mutable_changed
+        PASS [   0.013s] (469/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_verify_standard_when_issuer_id_is_malformed_then_fails
+        PASS [   0.015s] (470/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_verify_standard_when_signature_block_is_missing_then_fails
+        PASS [   0.015s] (471/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_verify_standard_when_toml_is_valid_then_succeeds
+        PASS [   0.014s] (472/824) human_money_core::integration_tests validation::standard_definition::security_hardening::test_parse_standard_when_field_types_are_mismatched_then_fails
+        PASS [   0.017s] (473/824) human_money_core::integration_tests validation::standard_definition::security_hardening::test_verify_standard_when_signature_string_is_empty_then_fails
+        PASS [   0.016s] (474/824) human_money_core::integration_tests validation::standard_definition::security_hardening::test_verify_standard_when_signature_string_is_invalid_base58_then_fails
+        PASS [   0.018s] (475/824) human_money_core::integration_tests validation::standard_definition::specific_parameter_constraints::test_invalid_enum_parsing
+        PASS [   0.029s] (476/824) human_money_core::integration_tests validation::standard_definition::security_hardening::test_create_voucher_when_standard_template_is_incomplete_then_fails
+        PASS [   0.030s] (477/824) human_money_core::integration_tests validation::standard_definition::specific_parameter_constraints::test_allowed_signature_roles_enforcement
+        PASS [   0.414s] (478/824) human_money_core::integration_tests services::l2_integration::test_l2_signature_payload_manipulation
+        PASS [   0.043s] (479/824) human_money_core::integration_tests validation::standard_definition::parsing_and_verification::test_verify_standard_when_signature_is_from_wrong_issuer_then_fails
+        PASS [   0.032s] (480/824) human_money_core::integration_tests validation::standard_definition::specific_parameter_constraints::test_nominal_value_unit_mismatch_rejected
+        PASS [   0.029s] (481/824) human_money_core::integration_tests validation::standard_definition::specific_parameter_constraints::test_validity_duration_range_enforcement
+        PASS [   0.030s] (482/824) human_money_core::integration_tests validation::standard_definition::specific_parameter_constraints::test_validity_duration_range_min_enforcement
+        PASS [   0.022s] (483/824) human_money_core::integration_tests validation::unit_service::test_cel_regex_patterns
+        PASS [   0.029s] (484/824) human_money_core::integration_tests validation::unit_service::test_cel_field_group_rules_gender_counting
+        PASS [   0.429s] (485/824) human_money_core::integration_tests services::l2_synchronization::test_scenario_3_double_spend_detection
+        PASS [   0.053s] (486/824) human_money_core::integration_tests validation::unit_service::test_cel_content_rules_fixed_fields
+        PASS [   0.033s] (487/824) human_money_core::integration_tests validation::voucher_naming::test_voucher_summary_uses_human_readable_standard_name
+        PASS [   0.041s] (488/824) human_money_core::integration_tests validation::validity_rounding::test_validation_rejects_voucher_exceeding_rounded_max_duration
+        PASS [   0.040s] (489/824) human_money_core::integration_tests validation::voucher_naming::test_voucher_summary_uses_human_readable_currency_name
+        PASS [   0.031s] (490/824) human_money_core::integration_tests wallet_api::conflict_detection::test_cleanup_expired_histories_respects_grace_period
+        PASS [   0.055s] (491/824) human_money_core::integration_tests validation::validity_rounding::test_validation_accepts_quarterly_and_half_year_rounding
+        PASS [   0.470s] (492/824) human_money_core::integration_tests services::l2_integration::test_l2_fake_double_spend_protection
+        PASS [   0.023s] (493/824) human_money_core::integration_tests wallet_api::conflict_detection::test_cleanup_long_grace_period_retains_all
+        PASS [   0.037s] (494/824) human_money_core::integration_tests wallet_api::conflict_detection::test_cleanup_known_fingerprints_removes_expired_only
+        PASS [   0.025s] (495/824) human_money_core::integration_tests wallet_api::conflict_detection::test_cleanup_removes_empty_entries_from_map
+        PASS [   0.056s] (496/824) human_money_core::integration_tests wallet_api::chained_workflows::test_chained_workflow_strict_public
+        PASS [   0.066s] (497/824) human_money_core::integration_tests validation::validity_rounding::test_validation_accepts_valid_voucher_with_rounded_max_duration_yearly
+        PASS [   0.022s] (498/824) human_money_core::integration_tests wallet_api::conflict_detection::test_double_spend_detection_merges_all_three_sources
+        PASS [   0.024s] (499/824) human_money_core::integration_tests wallet_api::conflict_detection::test_double_spend_detection_classifies_conflicts_correctly
+        PASS [   0.023s] (500/824) human_money_core::integration_tests wallet_api::conflict_detection::test_double_spend_detection_no_false_positives
+        PASS [   0.016s] (501/824) human_money_core::integration_tests wallet_api::conflict_detection::test_export_import_fingerprints_roundtrip
+        PASS [   0.012s] (502/824) human_money_core::integration_tests wallet_api::conflict_detection::test_replay_deduplication_across_sources
+        PASS [   0.032s] (503/824) human_money_core::integration_tests wallet_api::conflict_detection::test_earliest_wins_selects_minimum_encrypted_timestamp
+        PASS [   0.018s] (504/824) human_money_core::integration_tests wallet_api::conflict_detection::test_import_foreign_fingerprints_deduplication
+        PASS [   0.026s] (505/824) human_money_core::integration_tests wallet_api::conflict_detection::test_fingerprint_valid_until_is_rounded_to_end_of_month
+        PASS [   0.030s] (506/824) human_money_core::integration_tests wallet_api::conflict_detection::test_fingerprint_ds_tag_is_non_empty
+        PASS [   0.025s] (507/824) human_money_core::integration_tests wallet_api::conflict_detection::test_proof_creation_fallback_for_anonymous_offender_id
+        PASS [   0.028s] (508/824) human_money_core::integration_tests wallet_api::conflict_detection::test_proof_id_is_deterministic_and_derived_from_input
+        PASS [   0.027s] (509/824) human_money_core::integration_tests wallet_api::conflict_detection::test_timestamp_encryption_is_deterministic_and_non_trivial
+        PASS [   0.027s] (510/824) human_money_core::integration_tests wallet_api::conflict_detection::test_timestamp_encryption_is_key_specific
+        PASS [   0.028s] (511/824) human_money_core::integration_tests wallet_api::conflict_detection::test_scan_rebuild_does_not_duplicate_fingerprints_in_known_history
+        PASS [   0.090s] (512/824) human_money_core::integration_tests wallet_api::chained_workflows::test_chained_workflow_strict_private
+        PASS [   0.026s] (513/824) human_money_core::integration_tests wallet_api::conflict_management::test_cleanup_proofs_removes_expired_only
+        PASS [   0.098s] (514/824) human_money_core::integration_tests wallet_api::chained_workflows::test_chained_workflow_ultimate_flexible
+        PASS [   0.028s] (515/824) human_money_core::integration_tests wallet_api::conflict_management::test_endorsement_replay_onto_foreign_proof_is_rejected
+        PASS [   0.519s] (516/824) human_money_core::integration_tests services::l2_synchronization::test_scenario_2_offline_sync
+        PASS [   0.028s] (517/824) human_money_core::integration_tests wallet_api::conflict_management::test_get_proof_id_for_voucher_all_heuristics
+        PASS [   0.027s] (518/824) human_money_core::integration_tests wallet_api::conflict_management::test_wallet_add_resolution_endorsement
+        PASS [   0.028s] (519/824) human_money_core::integration_tests wallet_api::conflict_management::test_wallet_list_and_get_conflicts
+        PASS [   0.030s] (520/824) human_money_core::integration_tests wallet_api::event_sourcing::test_event_generation_on_create
+        PASS [   0.012s] (521/824) human_money_core::integration_tests wallet_api::general_workflows::api_app_service_mnemonic_helpers
+        PASS [   0.066s] (522/824) human_money_core::integration_tests wallet_api::event_sourcing::test_get_event_history_merging
+        PASS [   0.080s] (523/824) human_money_core::integration_tests wallet_api::future_dates::test_future_dated_vouchers
+        PASS [   0.024s] (524/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_create_voucher_and_get_id
+        PASS [   0.643s] (525/824) human_money_core::integration_tests services::l2_integration::test_l2_double_spend_quarantine
+        PASS [   0.038s] (526/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_proactive_double_spend_prevention
+        PASS [   0.144s] (527/824) human_money_core::integration_tests wallet_api::general_workflows::api_app_service_lifecycle_with_passphrase
+        PASS [   0.186s] (528/824) human_money_core::integration_tests wallet_api::event_sourcing::test_expiration_sweep_on_load
+        PASS [   0.026s] (529/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_query_total_balance
+        PASS [   0.072s] (530/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_lifecycle
+        PASS [   0.028s] (531/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_rejects_invalid_bundle
+        PASS [   0.194s] (532/824) human_money_core::integration_tests wallet_api::event_sourcing::test_persistence_flush_order
+        PASS [   0.197s] (533/824) human_money_core::integration_tests wallet_api::event_sourcing::test_transactional_safety_and_rollback
+        PASS [   0.023s] (534/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_transfer_inactive_voucher
+        PASS [   0.045s] (535/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_transfer_full_amount
+        PASS [   0.039s] (536/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_transfer_invalid_amount
+        PASS [   0.215s] (537/824) human_money_core::integration_tests wallet_api::general_workflows::api_app_service_get_voucher_details_returns_correct_data
+        PASS [   0.199s] (538/824) human_money_core::integration_tests wallet_api::general_workflows::api_app_service_password_recovery
+        PASS [   0.047s] (539/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_transfer_split_amount
+        PASS [   0.066s] (540/824) human_money_core::integration_tests wallet_api::general_workflows::api_wallet_transfer_multi_source
+        PASS [   0.216s] (541/824) human_money_core::integration_tests wallet_api::general_workflows::api_app_service_password_recovery_with_passphrase
+        PASS [   0.324s] (542/824) human_money_core::integration_tests wallet_api::conflict_management::test_conflict_override_persistence
+        PASS [   0.019s] (543/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_create_profile_fails_with_invalid_mnemonic
+        PASS [   1.995s] (544/824) human_money_core::integration_tests architecture::gossip_decoupled_double_spend::tests::test_gossip_decoupled_double_spend_detection
+        PASS [   0.172s] (545/824) human_money_core::integration_tests wallet_api::hostile_standards::test_violation_of_max_creation_validity
+        PASS [   0.445s] (546/824) human_money_core::integration_tests wallet_api::endorsed_vouchers::tests::test_endorsed_voucher_ignored_in_fingerprint_scan
+        PASS [   0.446s] (547/824) human_money_core::integration_tests wallet_api::endorsed_vouchers::tests::test_endorsed_voucher_does_not_affect_balance
+        PASS [   0.142s] (548/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_data_encryption_fails_when_locked
+        PASS [   0.451s] (549/824) human_money_core::integration_tests wallet_api::endorsed_vouchers::tests::test_endorsed_voucher_persists_after_restart
+        PASS [   0.018s] (550/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_passphrase_affects_keypair
+        PASS [   0.257s] (551/824) human_money_core::integration_tests wallet_api::hostile_standards::test_disallowed_transaction_type
+        PASS [   0.202s] (552/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_data_encryption_fails_with_wrong_password
+        PASS [   0.204s] (553/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_data_encryption_workflow
+        PASS [   0.145s] (554/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_login_fails_with_wrong_password
+        PASS [   0.602s] (555/824) human_money_core::integration_tests wallet_api::general_workflows::api_app_service_full_lifecycle
+        PASS [   0.432s] (556/824) human_money_core::integration_tests wallet_api::hostile_bundles::test_rejection_of_broken_transaction_chain
+        PASS [   0.431s] (557/824) human_money_core::integration_tests wallet_api::hostile_bundles::test_rejection_of_inconsistent_split_math
+        PASS [   0.273s] (558/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_a_action_fails_with_wrong_password
+        PASS [   0.308s] (559/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_recovery_preserves_wallet_data
+        PASS [   0.515s] (560/824) human_money_core::integration_tests wallet_api::hostile_bundles::test_rejection_of_voucher_replay_in_new_bundle
+        PASS [   0.326s] (561/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_logout_clears_active_session_immediately
+        PASS [   0.256s] (562/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_a_wrong_password_fails_even_if_mode_b_is_active
+        PASS [   0.239s] (563/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_b_action_fails_without_session
+        PASS [   0.022s] (564/824) human_money_core::integration_tests wallet_api::local_ids::test_correct_id_after_split_and_uniqueness
+        PASS [   0.604s] (565/824) human_money_core::integration_tests wallet_api::hostile_bundles::test_rejection_of_self_received_bundle
+        PASS [   0.608s] (566/824) human_money_core::integration_tests wallet_api::hostile_bundles::test_rejection_of_identical_bundle_replay
+        PASS [   0.019s] (567/824) human_money_core::integration_tests wallet_api::local_ids::test_error_when_user_has_no_balance_or_history
+        PASS [   0.029s] (568/824) human_money_core::integration_tests wallet_api::local_ids::test_correct_id_for_archived_state
+        PASS [   0.340s] (569/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_a_overrides_mode_b_succeeds
+        PASS [   0.197s] (570/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_b_lock_session_works
+        PASS [   0.018s] (571/824) human_money_core::integration_tests wallet_api::maintenance::test_cleanup_of_expired_archived_instances
+        PASS [   0.350s] (572/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_a_action_succeeds_with_password_only
+        PASS [   0.105s] (573/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_unlock_session_fail
+        PASS [   0.024s] (574/824) human_money_core::integration_tests wallet_api::mixed_mode_vulnerability::test_mixed_mode_double_spend_vulnerability
+        PASS [   0.035s] (575/824) human_money_core::integration_tests wallet_api::local_ids::test_path_dependency_bounce_back
+        PASS [   0.035s] (576/824) human_money_core::integration_tests wallet_api::local_ids::test_path_dependency_long_chain
+        PASS [   0.107s] (577/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_unlock_session_success
+        PASS [   0.028s] (578/824) human_money_core::integration_tests wallet_api::multi_identity_vulnerability::test_legitimate_split_safety
+        PASS [   0.027s] (579/824) human_money_core::integration_tests wallet_api::multi_identity_vulnerability::test_multi_identity_double_spend_prevention
+        PASS [   0.043s] (580/824) human_money_core::integration_tests wallet_api::proof_persistence::test_proof_is_created_even_when_transaction_missing_from_store
+        PASS [   0.689s] (581/824) human_money_core::integration_tests wallet_api::hostile_bundles::test_rejection_of_bundle_for_different_prefix_same_identity
+        PASS [   0.024s] (582/824) human_money_core::integration_tests wallet_api::signature_workflows::api_wallet_signature_fail_mismatched_voucher_id
+        PASS [   0.038s] (583/824) human_money_core::integration_tests wallet_api::signature_workflows::api_wallet_full_signature_workflow
+        PASS [   0.059s] (584/824) human_money_core::integration_tests wallet_api::privacy_balance_checks::test_deep_privacy_balance_calculation
+        PASS [   0.026s] (585/824) human_money_core::integration_tests wallet_api::signature_workflows::api_wallet_signature_fail_wrong_payload_type
+        PASS [   0.036s] (586/824) human_money_core::integration_tests wallet_api::signature_workflows::api_wallet_signature_fail_tampered_container
+        PASS [   0.299s] (587/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_b_action_succeeds_with_session
+        PASS [   0.032s] (588/824) human_money_core::integration_tests wallet_api::signature_workflows::api_wallet_signature_roundtrip_silver_optional
+        PASS [   0.044s] (589/824) human_money_core::integration_tests wallet_api::signature_workflows::api_wallet_signature_fail_wrong_recipient
+        PASS [   0.037s] (590/824) human_money_core::integration_tests wallet_api::signature_workflows::api_wallet_signature_roundtrip_minuto_required
+        PASS [   0.022s] (591/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_fails_active_state
+        PASS [   0.021s] (592/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_fails_already_in_circulation_via_split
+        PASS [   0.016s] (593/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_fails_already_in_circulation_via_transfer
+        PASS [   0.016s] (594/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_fails_creator_signature
+        PASS [   0.016s] (595/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_fails_invalid_state
+        PASS [   0.017s] (596/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_non_existent_signature_id
+        PASS [   0.018s] (597/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_fails_not_the_creator
+        PASS [   0.017s] (598/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_non_existent_voucher_id
+        PASS [   0.018s] (599/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_success_incomplete_state
+        PASS [   0.020s] (600/824) human_money_core::integration_tests wallet_api::signature_workflows::test_remove_signature_triggers_status_downgrade
+        PASS [   0.010s] (601/824) human_money_core::integration_tests wallet_api::state_management::api_app_service_conflict_api_fails_when_locked
+        PASS [   0.217s] (602/824) human_money_core::integration_tests wallet_api::role_integration::test_integration_detects_victim_role
+        PASS [   0.247s] (603/824) human_money_core::integration_tests wallet_api::state_management::api_app_service_full_conflict_resolution_workflow
+        PASS [   0.374s] (604/824) human_money_core::integration_tests wallet_api::signature_workflows::api_app_service_symmetric_signature_workflow
+        PASS [   0.377s] (605/824) human_money_core::integration_tests wallet_api::signature_workflows::api_app_service_full_signature_workflow
+        PASS [   0.174s] (606/824) human_money_core::integration_tests wallet_api::state_management::test_create_voucher_adds_exactly_one_instance
+        PASS [   0.387s] (607/824) human_money_core::integration_tests wallet_api::role_integration::test_integration_detects_victim_role_on_loser_only
+        PASS [   0.391s] (608/824) human_money_core::integration_tests wallet_api::role_integration::test_integration_detects_witness_role_on_split_win
+        PASS [   0.382s] (609/824) human_money_core::integration_tests wallet_api::state_management::api_wallet_reactive_double_spend_earliest_wins
+        PASS [   0.382s] (610/824) human_money_core::integration_tests wallet_api::state_management::api_wallet_reactive_double_spend_identical_timestamps
+        PASS [   0.382s] (611/824) human_money_core::integration_tests wallet_api::state_management::test_concurrent_app_service_causes_stale_state_double_spend
+        PASS [   0.017s] (612/824) human_money_core::integration_tests wallet_api::voucher_states::test_delete_incomplete_voucher
+        PASS [   0.022s] (613/824) human_money_core::integration_tests wallet_api::voucher_states::test_detached_signature_reception_in_process_bundle
+        PASS [   0.172s] (614/824) human_money_core::integration_tests wallet_api::state_management::test_create_voucher_is_transactional_on_save_failure
+        PASS [   0.016s] (615/824) human_money_core::integration_tests wallet_api::voucher_states::test_quarantined_voucher_behavior
+        PASS [   0.014s] (616/824) human_money_core::integration_tests wallet_api::wallet_queries::test_asset_class_listing
+        PASS [   0.015s] (617/824) human_money_core::integration_tests wallet_api::wallet_queries::test_balance_aggregation_strictly_separates_test_and_live_money
+        PASS [   0.014s] (618/824) human_money_core::integration_tests wallet_api::wallet_queries::test_get_voucher_details_fuzzy_lookup_success
+        PASS [   0.014s] (619/824) human_money_core::integration_tests wallet_api::wallet_queries::test_get_voucher_details_not_found
+        PASS [   0.014s] (620/824) human_money_core::integration_tests wallet_api::wallet_queries::test_list_vouchers_respects_test_filter
+        PASS [   0.018s] (621/824) human_money_core::l2_wallet_safety_tests test_gateway_retry_preserves_identical_payload_and_handles_200_and_201
+        PASS [   0.013s] (622/824) human_money_core::redeem_terminal_state_tests test_all_standards_are_signed_and_contain_redeem
+        PASS [   0.019s] (623/824) human_money_core::l2_wallet_safety_tests test_wallet_prevents_accidental_double_spend_after_status_detects_successor
+        PASS [   0.016s] (624/824) human_money_core::redeem_terminal_state_tests test_expired_issuance_to_creator_requires_redeem
+        PASS [   0.014s] (625/824) human_money_core::redeem_terminal_state_tests test_redeem_to_non_creator_fails
+        PASS [   0.015s] (626/824) human_money_core::redeem_terminal_state_tests test_spendable_balance_and_split_before_redeem
+        PASS [   0.569s] (627/824) human_money_core::integration_tests wallet_api::signature_workflows::test_full_guarantor_workflow_via_app_service
+        PASS [   0.252s] (628/824) human_money_core::integration_tests wallet_api::transactionality::test_import_endorsement_is_transactional_on_save_failure
+        PASS [   0.007s] (629/824) human_money_core::seal_anchor_tests test_bootstrap_village_mode_quorum
+        PASS [   0.014s] (630/824) human_money_core::redeem_terminal_state_tests test_terminal_state_transaction_after_redeem_forbidden
+        PASS [   0.014s] (631/824) human_money_core::seal_anchor_tests test_cryptographic_proof_of_rollback_detection
+        PASS [   0.013s] (632/824) human_money_core::seal_anchor_tests test_deterministic_key_derivation_zero_storage
+        PASS [   0.013s] (633/824) human_money_core::seal_anchor_tests test_fast_forward_leap_lock_5_offline_steps
+        PASS [   0.006s] (634/824) human_money_core::seal_anchor_tests test_fault_tolerant_quorum_2_of_3
+        PASS [   0.007s] (635/824) human_money_core::seal_anchor_tests test_l2_missing_locks_guidance
+        PASS [   0.007s] (636/824) human_money_core::seal_anchor_tests test_multi_device_fork_conflict_409
+        PASS [   0.007s] (637/824) human_money_core::seal_anchor_tests test_single_malicious_node_cannot_lock_wallet
+        PASS [   0.012s] (638/824) human_money_core::seal_anchor_tests test_status_query_key_matches_step_nonce
+        PASS [   0.310s] (639/824) human_money_core::integration_tests wallet_api::transactionality::test_receive_bundle_is_transactional_on_conflict_and_save_failure
+        PASS [   0.609s] (640/824) human_money_core::integration_tests wallet_api::state_management::api_wallet_save_and_load_fidelity
+        PASS [   0.336s] (641/824) human_money_core::integration_tests wallet_api::transactionality::test_receive_bundle_is_transactional_on_save_failure
+        PASS [   0.243s] (642/824) human_money_core::integration_tests wallet_api::transactionality::test_transfer_bundle_is_transactional_on_save_failure
+        PASS [   0.089s] (643/824) human_money_core::seal_anchor_tests test_state_hash_determinism
+        PASS [   0.170s] (644/824) human_money_core::redeem_terminal_state_tests test_consolidation_zone_to_creator_requires_redeem
+        PASS [   0.019s] (645/824) human_money_core::security_audit_conflict_and_traps audit_2_public_mode_rejects_tampered_trap_shards_control
+        PASS [   0.012s] (646/824) human_money_core::security_audit_conflict_and_traps audit_4_non_canonical_scalar_is_rejected_instead_of_misattributing
+        PASS [   0.031s] (647/824) human_money_core::security_audit_conflict_and_traps audit_1_stealth_framing_is_rejected_by_proof_verification_gate
+        PASS [   0.012s] (648/824) human_money_core::security_audit_conflict_and_traps audit_5_forged_proof_import_is_rejected_and_victim_stays_active
+        PASS [   0.026s] (649/824) human_money_core::security_audit_conflict_and_traps audit_3_time_shifted_double_spends_are_now_fully_attributable
+        PASS [   0.093s] (650/824) human_money_core::seal_anchor_tests test_time_insensitivity_and_expiration
+        PASS [   0.025s] (651/824) human_money_core::security_audit_conflict_and_traps audit_6_genuine_signed_proof_still_quarantines_the_loser
+        PASS [   0.007s] (652/824) human_money_core::security_audit_defensive_wave5 wave5_is_init_fingerprint_edge_cases
+        PASS [   0.406s] (653/824) human_money_core::integration_tests wallet_api::transactionality::test_attach_signature_is_transactional_on_save_failure
+        PASS [   0.239s] (654/824) human_money_core::l2_wallet_safety_tests test_wallet_backup_restore_reconciles_already_spent_voucher_via_status_query
+        PASS [   0.186s] (655/824) human_money_core::seal_anchor_tests test_rollback_detection_and_reconciliation
+        PASS [   0.090s] (656/824) human_money_core::security_audit_defensive_wave5 wave5_foreign_equivocation_same_tid_divergent_shards_both_stored_and_detected
+        PASS [   0.007s] (657/824) human_money_core::security_audit_general_wildcard audit_00_wildcard_22_trial_decryption_recipient_loop_must_be_bounded
+        PASS [   0.007s] (658/824) human_money_core::security_audit_general_wildcard audit_00_wildcard_23_plausibility_window_must_reject_epoch_sibling_regardless_of_wall_clock
+        PASS [   0.180s] (659/824) human_money_core::seal_anchor_tests test_two_tier_trigger_timing
+        PASS [   0.013s] (660/824) human_money_core::security_audit_general_wildcard audit_00_wildcard_24_future_locked_tip_must_not_grief_recipient
+        PASS [   0.008s] (661/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f02_shard_parsing_rejects_non_canonical_response_scalar
+        PASS [   0.139s] (662/824) human_money_core::security_audit_defensive_wave5 wave5_chain_validation_rejects_nontrivial_trap_on_init
+        PASS [   0.132s] (663/824) human_money_core::security_audit_defensive_wave5 wave5_foreign_bucket_cap_150_is_enforced
+        PASS [   0.007s] (664/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f06_placeholder_t_type_must_not_weaken_shard_count
+        PASS [   0.550s] (665/824) human_money_core::integration_tests wallet_api::transactionality::test_balances_are_summable_behavior
+        PASS [   0.007s] (666/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f09_extract_identity_rejects_identical_shards
+        PASS [   0.196s] (667/824) human_money_core::security_audit_defensive_wave5 wave5_chain_validation_rejects_malformed_shard_strings
+        PASS [   0.124s] (668/824) human_money_core::security_audit_general_wildcard audit_00_wildcard_21_detached_signature_must_not_attach_to_arbitrary_instance
+        PASS [   0.074s] (669/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f05_import_proof_rejects_forged_did_key_attribution_claim
+        PASS [   0.191s] (670/824) human_money_core::security_audit_defensive_wave5 wave5_shard_structure_rejects_oversized_strings
+        PASS [   0.074s] (671/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f07_trap_anchoring_framing_arbitrary_slope_must_be_rejected
+        PASS [   0.184s] (672/824) human_money_core::security_audit_general_wildcard audit_00_wildcard_20_torn_binding_write_order_must_be_crash_safe
+        PASS [   0.006s] (673/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f15_derive_proof_id_canonicalizes_whitespace_did_key_marker
+        PASS [   0.006s] (674/824) human_money_core::security_audit_module_01_traps security_audit_module_01::guard_extract_identity_rejects_identical_tau
+        PASS [   0.007s] (675/824) human_money_core::security_audit_module_01_traps security_audit_module_01::guard_extract_identity_rejects_non_canonical_response
+        PASS [   0.070s] (676/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f10_proof_id_must_be_canonical_across_offender_render_variants
+        PASS [   0.090s] (677/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f13_offline_extra_shard_must_not_block_import_of_authentic_proof
+        PASS [   0.356s] (678/824) human_money_core::security_audit_defensive_wave5 wave5_bundle_receive_atomicity_on_unknown_standard
+        PASS [   0.223s] (679/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f08_poison_fingerprint_must_not_persist_local_did_key_offender_claim
+        PASS [   0.007s] (680/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_sst_degenerate_cases_firewall
+        PASS [   0.262s] (681/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_framed_did_key_offender_claim_is_rejected_at_import
+        PASS [   0.018s] (682/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_sst_l1_payment_rejection_on_corrupt_witness
+        PASS [   0.011s] (683/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_sst_zero_knowledge_no_p_pre_registry_mining
+        PASS [   0.320s] (684/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f12_guardless_transfer_with_poisoned_trap_shards_must_be_rejected
+        PASS [   0.420s] (685/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f01_gossip_poisoning_must_not_quarantine_local_voucher
+        PASS [   0.007s] (686/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_01_forged_privacy_guard_with_low_order_ephemeral_key_must_be_rejected
+        PASS [   0.006s] (687/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_02_non_canonical_signer_id_must_be_rejected_in_signature_validation
+        PASS [   0.006s] (688/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_03_ed25519_scalar_malleability_must_be_rejected
+        PASS [   0.007s] (689/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_04_forged_creator_attribution_must_be_rejected_in_signature_validation
+        PASS [   0.006s] (690/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_05_control_direct_successor_divergence_must_be_fork
+        PASS [   0.006s] (691/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_06_empty_prefix_and_separator_less_aliases_must_be_rejected
+        PASS [   0.006s] (692/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_07_identity_hkdf_and_short_hash_invariants_are_pinned
+        PASS [   0.007s] (693/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_08_offline_fabricated_junk_collision_must_not_yield_usable_offender_identity
+        PASS [   0.213s] (694/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_sst_instant_proof_direct_did_deanonymization
+        PASS [   0.006s] (695/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_10_small_order_did_key_identities_must_be_rejected_by_key_resolution
+        PASS [   0.007s] (696/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_11_lock_entry_signature_without_voucher_binding_must_not_quarantine_foreign_voucher
+        PASS [   0.008s] (697/824) human_money_core::security_audit_module_03_cel control_array_comprehensions_remain_functional
+        PASS [   0.007s] (698/824) human_money_core::security_audit_module_03_cel control_cross_type_uint_vs_int_comparison_is_exact
+        PASS [   0.007s] (699/824) human_money_core::security_audit_module_03_cel control_dot_access_over_missing_fields_already_fails_closed
+        PASS [   0.419s] (700/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f14_epoch_near_sibling_timestamp_must_not_win_offline_race
+        PASS [   0.007s] (701/824) human_money_core::security_audit_module_03_cel control_fractional_json_numbers_map_to_cel_float_deterministically
+        PASS [   0.007s] (702/824) human_money_core::security_audit_module_03_cel control_numeric_ordering_predicates_remain_functional
+        PASS [   0.007s] (703/824) human_money_core::security_audit_module_03_cel control_ordering_comparison_over_missing_field_already_fails_closed
+        PASS [   0.422s] (704/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_former_holder_can_forge_collision_documented_behavior
+        PASS [   0.006s] (705/824) human_money_core::security_audit_module_03_cel control_reimport_of_identical_standard_content_stays_allowed
+        PASS [   0.008s] (706/824) human_money_core::security_audit_module_03_cel control_positive_rules_over_present_fields_remain_passable
+        PASS [   0.007s] (707/824) human_money_core::security_audit_module_03_cel control_u64_max_value_preserved_exactly_without_float_detour
+        PASS [   0.007s] (708/824) human_money_core::security_audit_module_03_cel control_unbound_context_variable_still_fails_closed
+        PASS [   0.007s] (709/824) human_money_core::security_audit_module_03_cel finding01_bracket_inequality_over_absent_voucher_field_must_fail_closed
+        PASS [   0.458s] (710/824) human_money_core::security_audit_module_01_traps security_audit_module_01::f11_import_bucket_stuffing_must_not_quarantine_cross_voucher_instances
+        PASS [   0.008s] (711/824) human_money_core::security_audit_module_03_cel finding01_bracket_sender_disclosure_rule_bypass_by_omission
+        PASS [   0.007s] (712/824) human_money_core::security_audit_module_03_cel finding01_out_of_bounds_index_null_propagation_must_fail_closed
+        PASS [   0.008s] (713/824) human_money_core::security_audit_module_03_cel finding01_logical_not_over_bracket_accessed_absent_field_must_fail_closed
+        PASS [   0.008s] (714/824) human_money_core::security_audit_module_03_cel finding02_check_decimals_negative_scale_limit_must_not_pass
+        PASS [   0.307s] (715/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_init_fingerprints_excluded_from_gossip_export_and_ingress
+        PASS [   0.008s] (716/824) human_money_core::security_audit_module_03_cel finding03_max_limit_over_string_amount_must_not_pass_for_violating_value
+        PASS [   0.008s] (717/824) human_money_core::security_audit_module_03_cel finding03_min_limit_over_string_amount_must_not_pass_for_violating_value
+        PASS [   0.420s] (718/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_gossip_ingress_rejects_tampered_timestamp_or_trap_fields
+        PASS [   0.008s] (719/824) human_money_core::security_audit_module_03_cel finding04_import_same_uuid_divergent_content_must_not_overwrite_installed_standard
+        PASS [   0.006s] (720/824) human_money_core::security_audit_module_03_cel finding05_deeply_nested_expression_must_err_not_abort
+        PASS [   0.006s] (721/824) human_money_core::security_audit_module_03_cel finding10_usage_time_identity_check_must_reject_tampered_mutable_zone_and_stripped_signature
+        PASS [   0.008s] (722/824) human_money_core::security_audit_module_03_cel finding07_comprehension_over_non_array_range_must_err_not_panic
+        PASS [   0.008s] (723/824) human_money_core::security_audit_module_03_cel finding09_import_must_reject_path_traversal_and_absolute_uuid
+        PASS [   0.008s] (724/824) human_money_core::security_audit_module_04_integrity sa04_02_chain_validation_must_not_panic_on_split_amount_overflow
+        PASS [   0.019s] (725/824) human_money_core::security_audit_module_03_cel finding08_map_literal_comprehension_must_be_deterministic_or_fail_closed
+        PASS [   0.008s] (726/824) human_money_core::security_audit_module_04_integrity sa04_05_split_validator_must_reject_identical_output_anchors
+        PASS [   0.030s] (727/824) human_money_core::security_audit_module_03_cel finding05_comprehension_over_large_array_must_respect_iteration_budget
+        PASS [   0.026s] (728/824) human_money_core::security_audit_module_04_integrity sa04_03_aborted_multi_transfer_must_leave_archive_untouched
+        PASS [   0.036s] (729/824) human_money_core::security_audit_module_04_integrity sa04_01_receive_bundle_must_not_panic_on_amount_sum_overflow
+        PASS [   0.029s] (730/824) human_money_core::security_audit_module_04_integrity sa04_04_failed_multi_voucher_receive_must_not_partially_commit
+        PASS [   0.021s] (731/824) human_money_core::security_audit_module_04_integrity sa04_06_forged_bundle_and_foreign_container_signatures_must_fail_end_to_end
+        PASS [   0.019s] (732/824) human_money_core::security_audit_module_04_integrity sa04_07_storage_formatting_is_exact_within_validated_precision_domain
+        PASS [   0.410s] (733/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_gossip_instant_proof_quarantines_loser_branch_in_realtime
+        PASS [   0.008s] (734/824) human_money_core::security_audit_module_04_integrity sa04_09_chain_validator_must_reject_structurally_invalid_sst_shards
+        PASS [   0.007s] (735/824) human_money_core::security_audit_module_05_storage sa05_03_mnemonic_validation_errors_must_not_disclose_phrase_words
+        PASS [   0.028s] (736/824) human_money_core::security_audit_module_04_integrity sa04_08_guard_equivocation_must_produce_attributable_evidence
+        PASS [   0.006s] (737/824) human_money_core::security_audit_module_05_storage sa05_06_secure_container_drop_must_zeroize_all_sensitive_fields
+        PASS [   0.044s] (738/824) human_money_core::security_audit_module_05_storage sa05_02_tampered_archive_record_must_be_detected_before_deserialization
+        PASS [   0.049s] (739/824) human_money_core::security_audit_module_05_storage sa05_01_archived_voucher_states_must_be_encrypted_at_rest
+        PASS [   0.045s] (740/824) human_money_core::security_audit_module_05_storage sa05_05_plaintext_archive_record_must_be_rejected_as_integrity_violation
+        PASS [   0.049s] (741/824) human_money_core::security_audit_module_05_storage sa05_04_rolled_back_voucher_store_must_not_load_silently
+        PASS [   0.039s] (742/824) human_money_core::security_audit_module_05_storage sa05_08_legacy_v2_fingerprint_data_must_not_be_silently_degraded
+        PASS [   0.049s] (743/824) human_money_core::security_audit_module_05_storage sa05_07_store_binding_hash_must_be_authenticated_and_mandatory
+        PASS [   0.016s] (744/824) human_money_core::security_audit_module_05_storage sa05_10_archive_construction_with_empty_password_must_be_rejected
+        PASS [   0.021s] (745/824) human_money_core::security_audit_module_05_storage sa05_11_arbitrary_data_read_paths_must_enforce_name_sanitization
+        PASS [   0.018s] (746/824) human_money_core::security_audit_module_06_privacy sa06_01_private_bundle_envelope_must_not_leak_permanent_key_signature
+        PASS [   0.017s] (747/824) human_money_core::security_audit_module_06_privacy sa06_02_received_bundle_content_must_match_signed_bundle_id
+        PASS [   0.013s] (748/824) human_money_core::security_audit_module_06_privacy sa06_03_cleartext_financial_containers_must_be_rejected_on_receipt
+        PASS [   0.013s] (749/824) human_money_core::security_audit_module_06_privacy sa06_04_malformed_signing_request_must_not_panic_signer
+        PASS [   0.007s] (750/824) human_money_core::security_audit_module_06_privacy sa06_06_jws_must_reject_tampered_typ_and_noncanonical_did
+        PASS [   0.007s] (751/824) human_money_core::security_audit_module_06_privacy sa06_07_trust_assertion_signature_must_bind_all_semantic_fields
+        PASS [   0.040s] (752/824) human_money_core::security_audit_module_05_storage sa05_09_archive_record_deletion_and_relocation_must_be_detectable
+        PASS [   0.024s] (753/824) human_money_core::security_audit_module_06_privacy sa06_05_events_must_retain_counterparty_did_in_private_mode_for_offline_forensics
+        PASS [   0.021s] (754/824) human_money_core::security_audit_module_06_privacy sa06_08_mixed_visibility_bundle_must_not_carry_permanent_key_envelope_signature
+        PASS [   0.020s] (755/824) human_money_core::security_audit_module_06_privacy sa06_11_placeholder_shard_spend_must_fail_reception_validation
+        PASS [   0.013s] (756/824) human_money_core::security_audit_module_06_privacy sa06_12_unverified_endorsements_and_verdicts_must_not_flip_reputation
+        PASS [   0.024s] (757/824) human_money_core::security_audit_module_06_privacy sa06_10_received_display_name_must_be_sanitized_and_bounded
+        PASS [   0.290s] (758/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_synthetic_placeholder_proof_import_structure
+        PASS [   0.012s] (759/824) human_money_core::security_audit_module_06_privacy sa06_13_suspected_identity_must_be_bound_or_neutralized_on_import
+        PASS [   0.008s] (760/824) human_money_core::security_audit_wave4_cel control101_ordinary_rules_remain_evaluable
+        PASS [   0.008s] (761/824) human_money_core::security_audit_wave4_cel control103_ascii_position_rules_remain_exact
+        PASS [   0.013s] (762/824) human_money_core::security_audit_module_06_privacy sa06_14_l2_lock_request_anchors_must_be_absent_or_digest_bound
+        PASS [   0.010s] (763/824) human_money_core::security_audit_wave4_cel control102_pristine_gates_remain_functional
+        PASS [   0.007s] (764/824) human_money_core::security_audit_wave4_cel finding101_message_literal_must_err_not_abort_process
+        PASS [   0.008s] (765/824) human_money_core::security_audit_wave4_cel finding103_misaligned_index_must_fail_closed_not_invent_values
+        PASS [   0.006s] (766/824) human_money_core::security_audit_wave4_crypto security_audit_wave4_crypto::audit_w4_cry_302_create_secure_container_with_empty_password_must_be_rejected
+        PASS [   0.008s] (767/824) human_money_core::security_audit_wave4_crypto security_audit_wave4_crypto::audit_w4_cry_301_forged_low_order_epk_container_must_not_decrypt_for_victim
+        PASS [   0.008s] (768/824) human_money_core::security_audit_wave4_cel finding103_multibyte_prefix_bypasses_negated_position_rule
+        PASS [   0.024s] (769/824) human_money_core::security_audit_module_06_privacy sa06_15_gossip_wireformat_must_not_link_family_spends_via_deletable_at
+        PASS [   0.008s] (770/824) human_money_core::security_audit_wave4_integrity wh4_04_502_chain_time_ordering_must_reject_offset_confusion
+        PASS [   0.011s] (771/824) human_money_core::security_audit_wave4_integrity wh4_04_501_init_without_attributed_creator_must_fail_validation
+        PASS [   0.065s] (772/824) human_money_core::security_audit_module_06_privacy sa06_09_signing_paths_must_rebind_container_integrity_id
+        PASS [   0.021s] (773/824) human_money_core::security_audit_wave4_storage wh4_05_003_file_storage_must_reject_empty_passwords_at_save_and_reset
+        PASS [   0.029s] (774/824) human_money_core::security_audit_wave4_integrity wh4_04_k4_committed_multi_send_must_not_silently_lose_forensics
+        PASS [   0.035s] (775/824) human_money_core::security_audit_wave4_privacy wh4_06_701_received_notes_must_be_sanitized_and_bounded_in_bundle_history
+        PASS [   0.012s] (776/824) human_money_core::security_audit_wave4_traps wh4_01_201_import_rejects_unverified_ephemeral_offender_claims
+        PASS [   0.032s] (777/824) human_money_core::security_audit_wave4_storage wh4_05_002b_missing_manifest_must_not_bootstrap_over_deleted_records
+        PASS [   0.033s] (778/824) human_money_core::security_audit_wave4_storage wh4_05_002a_manifest_sync_must_refuse_diverged_disk_state
+        PASS [   0.013s] (779/824) human_money_core::security_audit_wave4_traps wh4_01_202_trap_bearing_init_must_not_classify_as_spend_claim
+        PASS [   0.277s] (780/824) human_money_core::security_audit_module_02_crypto security_audit_module_02::audit_02_09_stripped_shard_spend_passes_chain_validation_and_masquerades_as_init
+        PASS [   0.051s] (781/824) human_money_core::security_audit_wave4_storage wh4_05_001_record_substitution_within_directory_must_be_detected
+        PASS [   0.373s] (782/824) human_money_core::security_audit_module_01_traps security_audit_module_01::test_unauthenticated_third_party_cannot_trigger_quarantine
+        PASS [   0.130s] (783/824) human_money_core::security_audit_wave4_wildcard w4_wc_001_poisoned_endorsed_voucher_must_not_brick_login
+        PASS [   0.093s] (784/824) human_money_core::security_audit_wildcard audit_00_wildcard_01_signing_request_oversized_must_be_rejected
+        PASS [   0.133s] (785/824) human_money_core::security_audit_wave4_wildcard w4_wc_002_endorsed_voucher_must_not_pollute_own_fingerprints_at_load_rebuild
+        PASS [   0.120s] (786/824) human_money_core::security_audit_wave4_wildcard w4_wc_004_swallowed_seal_failure_in_persisting_commands_must_keep_integrity_consistent
+        PASS [   0.008s] (787/824) human_money_core::security_audit_wildcard audit_00_wildcard_03_malformed_current_time_must_be_fail_closed_expired
+        PASS [   0.008s] (788/824) human_money_core::security_audit_wildcard audit_00_wildcard_02_comprehensive_seal_must_detect_voucher_store_changes
+        PASS [   0.008s] (789/824) human_money_core::security_audit_wildcard audit_00_wildcard_07_state_merge_must_not_preserve_attacker_l2_anchor_over_honest_disk
+        PASS [   0.008s] (790/824) human_money_core::security_audit_wildcard audit_00_wildcard_06_predictable_voucher_id_must_fail_closed
+        PASS [   0.015s] (791/824) human_money_core::security_audit_wildcard audit_00_wildcard_04_corrupted_voucher_must_not_be_spendable
+        PASS [   0.007s] (792/824) human_money_core::security_audit_wildcard audit_00_wildcard_32_multi_node_quorum_must_not_collapse_syncd_and_leap
+        PASS [   0.153s] (793/824) human_money_core::security_audit_wave4_wildcard w4_wc_001_poisoned_endorsed_voucher_must_not_brick_mnemonic_recovery
+        PASS [   0.009s] (794/824) human_money_core::security_audit_wildcard audit_00_wildcard_33_cel_regex_length_and_redos_protection
+        PASS [   0.014s] (795/824) human_money_core::security_audit_wildcard audit_00_wildcard_27_sai_pubkey_equality_in_balance_and_eigen
+        PASS [   0.008s] (796/824) human_money_core::security_audit_wildcard audit_00_wildcard_34_archive_path_traversal_must_be_rejected
+        PASS [   4.894s] (797/824) human_money_core storage::wallet_transaction::tests::subprocess_cuts_restore_old_state_until_durable_commit
+        PASS [   0.007s] (798/824) human_money_core::security_audit_wildcard audit_00_wildcard_36_spendable_balance_must_use_instant_compare
+        PASS [   0.013s] (799/824) human_money_core::security_audit_wildcard audit_00_wildcard_35_expired_voucher_spend_must_be_rejected
+        PASS [   0.009s] (800/824) human_money_core::security_audit_wildcard audit_00_wildcard_38_folder_name_collision_must_not_occur
+        PASS [   0.166s] (801/824) human_money_core::security_audit_wave4_wildcard w4_wc_003_garbage_ttime_voucher_must_never_become_active_regression_guard
+        PASS [   0.170s] (802/824) human_money_core::security_audit_wave4_wildcard w4_wc_003_attach_must_not_activate_never_received_voucher
+        PASS [   0.007s] (803/824) human_money_core::security_audit_wildcard audit_00_wildcard_41_saturating_add_must_not_hide_overflow
+        PASS [   0.008s] (804/824) human_money_core::security_audit_wildcard audit_00_wildcard_42_proof_store_must_enforce_cap
+        PASS [   0.172s] (805/824) human_money_core::security_audit_wave4_wildcard w4_wc_003_spending_garbage_ttime_voucher_must_fail_gracefully_regression_guard
+        PASS [   0.012s] (806/824) human_money_core::security_audit_wildcard audit_00_wildcard_r2_09_seal_persist_must_be_comprehensive
+        PASS [   0.015s] (807/824) human_money_core::security_audit_wildcard audit_00_wildcard_r2_08_detached_signature_oversized_must_be_rejected
+        PASS [   0.013s] (808/824) human_money_core::security_audit_wildcard audit_00_wildcard_r2_11_hop_depth_limit_must_be_enforced
+        PASS [   0.006s] (809/824) human_money_core::bin/l2_client_simulator tests::test_state_save_and_load
+        PASS [   0.006s] (810/824) human_money_core::bin/l2_client_simulator tests::test_manual_genesis_voucher_id_derivation
+        PASS [   0.028s] (811/824) human_money_core::security_audit_wildcard audit_00_wildcard_40_foreign_gossip_must_survive_wallet_load
+        PASS [   0.015s] (812/824) human_money_core::security_audit_wildcard audit_00_wildcard_r2_10_sai_alias_balance_must_match
+        PASS [   0.005s] (813/824) human_money_core::bin/l2_client_simulator tests::test_valid_lock_request_generation
+        PASS [   1.047s] (814/824) human_money_core::security_audit_general_wildcard audit_00_wildcard_19_unbounded_foreign_ingress_must_be_bounded
+        PASS [   2.259s] (815/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_refresh_fails_on_expired_session
+        PASS [   0.061s] (816/824) human_money_core::security_audit_wildcard audit_00_wildcard_37_tampered_envelope_signature_must_be_rejected
+        PASS [   0.060s] (817/824) human_money_core::security_audit_wildcard audit_00_wildcard_39_target_dir_traversal_must_be_rejected_or_contained
+        PASS [   0.231s] (818/824) human_money_core::security_audit_wave4_traps wh4_01_203_foreign_ingress_admission_must_be_capacity_bounded
+        PASS [   0.381s] (819/824) human_money_core::security_audit_module_04_integrity sa04_10_fingerprint_ingress_must_bind_to_local_input_context
+        PASS [   0.059s] (820/824) human_money_core::security_audit_wildcard audit_00_wildcard_43_l2_ephemeral_must_be_random
+        PASS [   2.179s] (821/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_b_timeout
+        PASS [   0.379s] (822/824) human_money_core::security_audit_wildcard audit_00_wildcard_05_gossip_ingress_must_enforce_global_cap
+        PASS [   4.165s] (823/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_b_action_refreshes_session
+        PASS [   4.216s] (824/824) human_money_core::integration_tests wallet_api::lifecycle_and_data::tests::test_session_mode_b_refresh_activity_sliding_window
+────────────
+     Summary [   7.654s] 824 tests run: 824 passed, 7 skipped

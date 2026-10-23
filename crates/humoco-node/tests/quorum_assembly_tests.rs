@@ -92,6 +92,7 @@ fn make_hmc_genesis(
     let sender_pub = sender_key.verifying_key().to_bytes();
     let tx_hash = *blake3::hash(parent_hex.as_bytes()).as_bytes();
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -233,7 +234,7 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
     let now = test_now_ms();
 
     let mut counter = 0u64;
-    let (_target_shard_id, lock_x_req) = loop {
+    let (_target_shard_id, root_req) = loop {
         counter += 1;
         let req = make_hmc_genesis(&format!("lock_x_quorum_{counter}"), now + 900_000, &sender_key);
         let tag = bs58::encode(&req.transaction_hash).into_string();
@@ -250,8 +251,27 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
         }
     };
 
+    // Genesis is metadata only; the first spend owns the collision slot.
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    for engine in std::iter::once(&gw_engine).chain(shards.iter().map(|s| &s.engine)) {
+        let (verdict, _) = engine.ingress_hmc_lock_with_origin(root_tag.clone(),
+            L2LockEntry::from(&root_req), IngressOrigin::ClientApi, Some(now)).await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+    use sha3::{Digest, Sha3_256};
+    let mut hash = Sha3_256::new();
+    hash.update(32u32.to_le_bytes());
+    hash.update(root_req.transaction_hash);
+    hash.update(32u32.to_le_bytes());
+    hash.update(sender_key.verifying_key().to_bytes());
+    let lookup_tag = bs58::encode(hash.finalize()).into_string();
+    let mut lock_x_req = root_req.clone();
+    lock_x_req.is_genesis = false;
+    lock_x_req.ds_tag = Some(lookup_tag.clone());
+    lock_x_req.transaction_hash = [91; 32];
+    lock_x_req.deletable_at = None;
+    lock_x_req.layer2_signature = sender_key.sign(&calculate_l2_payload_hash(&lock_x_req)).to_bytes();
     let lock_x_entry = L2LockEntry::from(&lock_x_req);
-    let lookup_tag = bs58::encode(&lock_x_req.transaction_hash).into_string();
 
     // Pre-populate Lock X on the first 9 shard nodes (shards 0..9).
     // When they later receive LockVerifyRequest for Lock X, it will be an

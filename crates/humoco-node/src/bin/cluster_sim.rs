@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-use std::net::SocketAddr;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::http::StatusCode;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::Rng;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -51,6 +51,7 @@ fn make_hmc_genesis(
     let del_str = valid_until_ms.to_string();
 
     let mut req = L2LockRequest {
+        causal_output: None,
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
             auth_signature: None,
@@ -124,7 +125,8 @@ async fn post_lock_http(
                 .unwrap_or_default()
                 .as_secs();
             let slot = now_sec / 600;
-            let challenge_bytes = humoco_node::ingress::pow::compute_stateless_challenge(&parent_bytes, slot);
+            let challenge_bytes =
+                humoco_node::ingress::pow::compute_stateless_challenge(&parent_bytes, slot);
             let challenge_hex = hex::encode(challenge_bytes);
             let start_nonce: u64 = rand::random::<u32>() as u64;
             let mut nonce = start_nonce;
@@ -296,7 +298,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("\x1b[1;36m╚══════════════════════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
     let num_nodes = 4;
-    println!("\x1b[1;33m🚀 Initialisiere {} HuMoCo Knoten im echten F2F Mesh...\x1b[0m", num_nodes);
+    println!(
+        "\x1b[1;33m🚀 Initialisiere {} HuMoCo Knoten im echten F2F Mesh...\x1b[0m",
+        num_nodes
+    );
 
     // 1. Pre-generate all identities and storage directories
     let mut node_defs = Vec::with_capacity(num_nodes);
@@ -309,7 +314,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         node_defs.push((i, identity, key_path, control_socket, temp));
     }
 
-    let all_pubkeys: Vec<String> = node_defs.iter().map(|(_, id, _, _, _)| id.public_key_hex()).collect();
+    let all_pubkeys: Vec<String> = node_defs
+        .iter()
+        .map(|(_, id, _, _, _)| id.public_key_hex())
+        .collect();
 
     // 2. Start daemons with full mutual trust and simulation mode
     let mut instances = Vec::with_capacity(num_nodes);
@@ -562,7 +570,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             h.update(&sender_pub);
                             let tx_hash = *h.finalize().as_bytes();
 
-                            let mut conflicting_spend = L2LockRequest {
+                            let mut conflicting_spend = L2LockRequest { causal_output: None,
                                 auth: L2AuthPayload {
                                     ephemeral_pubkey: sender_pub,
                                     auth_signature: None,
@@ -696,7 +704,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 h.update(&sender_pub);
                                 let tx_hash = *h.finalize().as_bytes();
 
-                                let mut spend = L2LockRequest {
+                                let mut spend = L2LockRequest { causal_output: None,
                                     auth: L2AuthPayload {
                                         ephemeral_pubkey: sender_pub,
                                         auth_signature: None,

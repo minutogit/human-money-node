@@ -251,6 +251,7 @@ async fn live_state_signature_over_quic_requires_exact_ready_state() {
     expected.shard_id = 9;
     expected.root_valid_until = pm.net_time_ms() + 600_000;
     let entry = L2LockEntry {
+        causal_output: None,
         layer2_voucher_id: expected.voucher_id.clone(),
         t_id: expected.child_lock,
         sender_ephemeral_pub: [8; 32],

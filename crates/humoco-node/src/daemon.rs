@@ -1205,21 +1205,30 @@ pub async fn sync_single_shard(
     while requests.join_next().await.is_some() {}
     let result = async {
         if cancel_token.is_cancelled() { return Ok(false); }
-        type CutCommitment = ([u8;32],[u8;32]);
-        let mut groups: HashMap<CutCommitment,HashSet<[u8;32]>> = HashMap::new();
+        let mut groups: HashMap<[u8;32],HashSet<[u8;32]>> = HashMap::new();
         for (key,_,reply,expires) in &sources {
-            if frozen_keys.contains(key) && Instant::now() < *expires { groups.entry((reply.digest,reply.support_digest)).or_default().insert(*key); }
+            if frozen_keys.contains(key) && Instant::now() < *expires { groups.entry(reply.digest).or_default().insert(*key); }
         }
-        let Some(((digest,support_digest),witnesses)) = groups.into_iter().find(|(_,keys)|keys.len() >= needed) else { return Ok(false); };
+        let Some((digest,witnesses)) = groups.into_iter().find(|(_,keys)|keys.len() >= needed) else { return Ok(false); };
         let witnesses_count = witnesses.len();
-        let proofs: Vec<_> = sources.iter().filter(|(key,_,_,_)|witnesses.contains(key)).map(|(key,_,reply,_)|(*key,reply.clone())).collect();
-        let inherited = crate::storage::db::support::VerifiedInheritedCut::verify(transport.network_id(),shard_id,*identity.node_pubkey(),&frozen_keys,needed,digest,support_digest,&proofs)?;
+        let mut compatible_supports: Vec<_> = sources.iter()
+            .filter(|(key,_,reply,_)|witnesses.contains(key) && reply.digest == digest)
+            .map(|(_,_,reply,_)|reply.support_digest)
+            .collect::<HashSet<_>>().into_iter().collect();
+        compatible_supports.sort_unstable();
+        let proofs: Vec<_> = sources.iter()
+            .filter(|(key,_,reply,_)|witnesses.contains(key) && reply.digest == digest)
+            .map(|(key,_,reply,_)|(*key,reply.clone())).collect();
+        let inherited = crate::storage::db::support::VerifiedInheritedCut::verify(transport.network_id(),shard_id,*identity.node_pubkey(),&frozen_keys,needed,digest,&compatible_supports,&proofs)?;
         let class = if total >= 20 && peer_manager.is_network_stable_ge20_for_24h(peer_manager.net_time_ms()) { 2 } else { 1 };
         let mut context = blake3::Hasher::new();
         let domain = b"HUMOCO_V1_LIVE_CUT_SUPPORT";
         context.update(&[domain.len() as u8]); context.update(domain);
         context.update(&[match transport.network_id() { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 }]);
-        context.update(&shard_id.to_le_bytes()); context.update(&digest); context.update(&support_digest); context.update(&[class]);
+        context.update(&shard_id.to_le_bytes()); context.update(&digest);
+        context.update(&(compatible_supports.len() as u8).to_le_bytes());
+        for support in &compatible_supports { context.update(support); }
+        context.update(&[class]);
         for key in &frozen_keys { context.update(key); }
         let context = *context.finalize().as_bytes();
         let minimum_deadline = sources.iter().filter(|(key,_,_,_)|witnesses.contains(key)).map(|(_,_,_,deadline)|*deadline).min();
@@ -1228,7 +1237,7 @@ pub async fn sync_single_shard(
         // deserialization, validation and write buffers BEFORE requesting bytes.
         let Ok(_cache) = readiness_manager.sync_bytes.clone().try_acquire_many_owned(128*1024) else { return Ok(false); };
         for (key,conn,reply,_) in &sources {
-            if !witnesses.contains(key) || reply.digest != digest { continue; }
+            if !witnesses.contains(key) || reply.digest != digest || !compatible_supports.contains(&reply.support_digest) { continue; }
             let now = peer_manager.net_time_ms();
             let stage = Arc::new(engine.recovery_work.spawn_blocking(move ||ShardStage::new(shard_id,now)).await
                 .map_err(|e|NodeError::Daemon(format!("staging worker: {e}")))??);
@@ -1255,12 +1264,16 @@ pub async fn sync_single_shard(
             }
             if !complete { continue; }
             let cut = stage.clone();
-            if engine.recovery_work.spawn_blocking(move ||cut.digest()).await.map_err(|e|NodeError::Daemon(format!("staging digest: {e}")))?? != digest { continue; }
+            let Ok(staged_digest_res) = engine.recovery_work.spawn_blocking(move ||cut.digest()).await else { continue; };
+            let Ok(staged_digest) = staged_digest_res else { continue; };
+            if staged_digest != digest { continue; }
             let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
             if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys || cancel_token.is_cancelled() || Instant::now() >= deadline { return Ok(false); }
             let Ok(_installation_memory) = readiness_manager.sync_bytes.clone().try_acquire_many_owned(512*1024) else { return Ok(false); };
             let cut = stage.clone();
-            if engine.recovery_work.spawn_blocking(move ||cut.support_digest()).await.map_err(|e|NodeError::Daemon(format!("support digest: {e}")))?? != support_digest { continue; }
+            let Ok(staged_support_res) = engine.recovery_work.spawn_blocking(move ||cut.support_digest()).await else { continue; };
+            let Ok(staged_support) = staged_support_res else { continue; };
+            if !compatible_supports.contains(&staged_support) { continue; }
             engine.install_shard_snapshot(stage,digest,class,context,witnesses_count,inherited.clone()).await?;
             if cancel_token.is_cancelled() || Instant::now() >= deadline || !engine.is_signing_healthy() { return Ok(false); }
             let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;

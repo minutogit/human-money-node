@@ -139,7 +139,7 @@ async fn real_quic_source_only_promotion_and_expired_support_fail_before_install
 }
 
 #[tokio::test]
-async fn mixed_known_and_unknown_support_on_identical_objective_state_stays_unready() {
+async fn mixed_known_and_unknown_support_on_identical_objective_state_recovers_ready() {
  let peers=recovery::recovery_peers(4).await;
  let now=peers[0].manager.net_time_ms();
  let row=LockRecord::new([21;32],[22;32],vec![23],SimTime(now),SimTime(now+60_000));
@@ -150,12 +150,12 @@ async fn mixed_known_and_unknown_support_on_identical_objective_state_stays_unre
  assert!(sync(&peers[0],shard).await);
  assert_eq!(peers[0].db.native_confirmation_support(&row.parent_lock).unwrap().unwrap().class,1);
  tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
- // Objective state agrees, but only source0 carries class1 provenance. The
- // full support-cut equality policy deliberately does not invent agreement.
- assert!(!sync(&peers[1],shard).await);
- assert!(!peers[1].readiness.is_shard_ready(shard));
+ // Objective state agrees with 3 witnesses (>= quorum 3 of 4); support migration
+ // across class 0 and class 1 allows positive recovery without losing safety.
+ assert!(sync(&peers[1],shard).await);
+ assert!(peers[1].readiness.is_shard_ready(shard));
  assert_eq!(peers[1].db.get_lock(&row.parent_lock).unwrap().unwrap().0.id,row.id);
- assert!(peers[1].db.native_confirmation_support(&row.parent_lock).unwrap().is_none());
+ assert!(peers[1].db.native_confirmation_support(&row.parent_lock).unwrap().is_some());
  recovery::stop_recovery_peers(peers).await;
 }
 

@@ -88,7 +88,7 @@ pub async fn verify_current(
     State(state): State<AppState>,
     Json(context): Json<LiveStateContext>,
 ) -> Response {
-    let Ok(digest) = live_state_digest(&context) else {
+    let Ok(_) = live_state_digest(&context) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let Some(pm) = state.peer_manager.as_ref() else {
@@ -117,6 +117,44 @@ pub async fn verify_current(
     {
         return StatusCode::CONFLICT.into_response();
     }
+    // A client may still name the losing child A after a merge has made the
+    // canonical conflicting child B durable here. Acquire the proof for our
+    // own durable child B instead of refusing to attest the current state.
+    let effective_context = {
+        let ram = state.engine.hmc_ram.read().await;
+        match ram.locks.get(&context.lookup_tag) {
+            Some(entry)
+                if entry.t_id != context.child_lock
+                    && entry.layer2_voucher_id == context.voucher_id
+                    && ram.voucher_roots.get(&context.voucher_id).copied()
+                        == Some(context.root_valid_until)
+                    && ram
+                        .voucher_genesis_parents
+                        .get(&context.voucher_id)
+                        .map(humoco_sim_core::types::extract_shard_id)
+                        == Some(context.shard_id) =>
+            {
+                serde_json::to_vec(entry)
+                    .ok()
+                    .map(|state| *blake3::hash(&state).as_bytes())
+                    .filter(|state_digest| {
+                        ram.durable_entries.get(&context.lookup_tag)
+                            == Some(&(*state_digest, context.root_valid_until))
+                    })
+                    .map(|state_digest| {
+                        let mut effective = context.clone();
+                        effective.child_lock = entry.t_id;
+                        effective.state_digest = state_digest;
+                        effective
+                    })
+            }
+            _ => None,
+        }
+    };
+    let context = effective_context.unwrap_or(context);
+    let Ok(digest) = live_state_digest(&context) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let mut proof = LiveStateProof {
         context: context.clone(),
         votes: Vec::new(),

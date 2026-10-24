@@ -368,29 +368,29 @@ fn hash_fact(h: &mut blake3::Hasher,kind:u8,key:&str,parent:&[u8;32],child:&[u8;
 #[derive(Clone)]
 pub(crate) struct VerifiedInheritedCut {
     objective: [u8;32],
-    support: [u8;32],
+    supports: Vec<[u8;32]>,
     shard: u16,
 }
 impl VerifiedInheritedCut {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn verify(network: NetworkId,shard:u16,receiver:[u8;32],committee:&[[u8;32]],quorum:usize,
-        objective:[u8;32],support:[u8;32],sources:&[([u8;32],crate::network::framing::FrozenShardReply)]) -> Result<Self,StorageError> {
+        objective:[u8;32],supports:&[[u8;32]],sources:&[([u8;32],crate::network::framing::FrozenShardReply)]) -> Result<Self,StorageError> {
         let invalid = || StorageError::DurableCommitFailed("unsupported inherited cut".into());
         if committee.is_empty() || committee.len() > 20 || quorum == 0 || quorum > committee.len()
             || !committee.contains(&receiver) || committee.iter().collect::<HashSet<_>>().len() != committee.len() || sources.len() > 20 { return Err(invalid()); }
         let mut seen = HashSet::new();
         for (key,reply) in sources {
             if !committee.contains(key) || *key == receiver || !seen.insert(*key) || reply.version != 2 || reply.lease_ms != 25_000
-                || reply.digest != objective || reply.support_digest != support { return Err(invalid()); }
+                || reply.digest != objective || !supports.contains(&reply.support_digest) { return Err(invalid()); }
             let vk = ed25519_dalek::VerifyingKey::from_bytes(key).map_err(|_|invalid())?;
             let sig = ed25519_dalek::Signature::from_slice(&reply.signature).map_err(|_|invalid())?;
             vk.verify_strict(&reply.signing_digest(network,shard,key,&receiver),&sig).map_err(|_|invalid())?;
         }
         if seen.len() < quorum { return Err(invalid()); }
-        Ok(Self { objective,support,shard })
+        Ok(Self { objective,supports:supports.to_vec(),shard })
     }
     pub(crate) fn validate(&self,stage:&super::install::ShardStage,objective:[u8;32]) -> Result<(),StorageError> {
-        if self.objective != objective || self.shard != stage.shard || stage.support_digest()? != self.support {
+        if self.objective != objective || self.shard != stage.shard || !self.supports.contains(&stage.support_digest()?) {
             return Err(StorageError::DurableCommitFailed("inherited cut commitment mismatch".into()));
         }
         Ok(())

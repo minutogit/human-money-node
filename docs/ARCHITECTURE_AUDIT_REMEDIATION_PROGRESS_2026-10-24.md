@@ -14,7 +14,7 @@ This increment executes **R00 for F01 and R01 only**, authorized by the maintain
 | R01 / F01 | Completed for this increment; F01 closed by maintained boundary regressions | Z01/Z02/Z03/Z06/Z12; E03/E07/E15. New maintained real-QUIC negatives plus positive diagnostics/current-proof tests; see below. |
 | R02 / F02 | Completed; F02 closed by maintained boundary regressions | Z03/Z04/Z06/Z07; G3/E05. Fresh recipient native and HMC tests prove preservation of class 2, negative tests prove no raw status promotion, 5/5 boundary tests passed, full suite passed (674 passed, 0 failed, 14 ignored), historical defect probe fails on assertion (installed == 2 != 1). |
 | R03 / F03 | Completed; F03 verified across cluster sync recovery and merge scenarios | Z02/Z06/Z07; G2/G3/E04. Distributed recovery proof worksheet established; cluster sync recovery passed (9/9); network merge scenarios passed (3/3); full test suite passed (674 passed, 0 failed); clippy 0 warnings. |
-| R04 / F04 | Not started | Recipient attempt lifecycle/capacity remains open. |
+| R04 / F04 | Completed; F04 closed by maintained checkout regressions | Z08/Z13; E02/E12. Challenge renewal for live root vouchers on expired pending reservations, bounded active reservation pruning, decoupling of completed replay storage from 256 active capacity, UI purchase ID stabilization; all Core and App tests and clippy pass. |
 | R05 / F05 | Not started | Cold authority renewal remains open. |
 | R06 / F06 | Not started | Automatic reconciliation remains open. |
 | R07 / F07 | Not started | Full fault/resource/IPC acceptance remains open. |
@@ -186,4 +186,36 @@ The final acceptance run for R03 completed with:
 - `RUST_TEST_THREADS=4 cargo test-std`: 674 passed; 0 failed; 14 ignored.
 
 **Verdict:** R03 / F03 is completed and verified. Package closed.
+
+## R04 increment — recipient lifecycle, challenge renewal and durable capacity
+
+### Implemented changes
+
+1. **Challenge Renewal (`human-money-core/src/app_service/checkout.rs`):**
+   - In `begin_checkout_purchase`, if an existing purchase record is found:
+     - Mismatched bundle hash continues to return `invalid("purchase ID already binds another bundle")`.
+     - Completed purchases return existing context.
+     - Unexpired challenges (`now_ms < expires_at_ms && now_ms < root_valid_until`) return existing context.
+     - If the challenge expired but the root voucher is still unexpired (`now_ms < root_valid_until`), a fresh CSPRNG `recipient_nonce` is generated, `expires_at_ms` is extended to `now_ms + 30_000` (capped at `root_valid_until`), and the updated context is saved and returned. The expired challenge is atomically retired.
+     - If the root voucher itself expired (`now_ms >= root_valid_until`), `invalid("purchase root expired")` is returned.
+2. **Active vs. Completed Capacity Decoupling & Pruning (`human-money-core/src/models/profile.rs`):**
+   - Added `prune_expired_checkout_purchases(now_ms)`: retains completed purchases and unexpired active reservations. Expired incomplete reservations are pruned.
+   - Added `active_checkout_purchase_count(now_ms)`: counts only incomplete, unexpired reservations.
+   - The capacity limit `MAX_ACTIVE_CHECKOUT_PURCHASES` (256) now applies strictly to *active incomplete* purchases. Completed purchases remain retained for durable replay protection without consuming active capacity.
+3. **UI Purchase ID Stabilization (`human-money-app/src/components/ReceiveView.tsx`):**
+   - Stabilized the generated `activePurchaseId` by updating component state `setPurchaseId(activePurchaseId)` upon first creation, ensuring retries and protected action password prompts preserve the stable purchase ID instead of minting a new `pos-${Date.now()}` on every attempt.
+
+### Maintained regressions and verification
+
+- In `human-money-core`:
+  - `more_than_256_completed_purchases_remain_replayable_without_capacity_exhaustion`: Verifies that 258 sequential completed purchases succeed, all remain replayable (`newly_committed = false`), and new purchases continue to be accepted.
+  - `expired_active_reservation_renews_with_new_nonce_and_extended_expiry`: Verifies that retrying an expired reservation generates a fresh nonce, extends expiry, and rejects expired root attempts.
+  - `unexpired_active_reservations_are_bounded_and_expired_entries_are_pruned`: Verifies that 256 truly concurrent active unexpired reservations trigger bounded capacity rejection, and setting an expired timestamp allows bounded pruning to immediately admit a new reservation.
+  - Full Core test suite: **Passed** (all unit tests, integration tests, doctests pass).
+  - Core Clippy: `cargo clippy --workspace --all-targets -- -D warnings`: **0 warnings**.
+- In `human-money-app`:
+  - Backend tests: `cargo test` in `src-tauri`: **18 passed, 0 failed**.
+  - App Clippy: `cargo clippy --workspace --all-targets -- -D warnings`: **0 warnings**.
+
+**Verdict:** R04 / F04 is completed and verified. Package closed.
 

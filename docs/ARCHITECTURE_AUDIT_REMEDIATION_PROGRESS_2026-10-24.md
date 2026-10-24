@@ -248,3 +248,51 @@ The final acceptance run for R03 completed with:
 
 **Verdict:** R05 / F05 is completed and verified. Package closed.
 
+## R06 increment — make intent reconciliation a real supervised lifecycle
+
+### Implemented changes
+
+1. **Unresolved Intent Enumeration & Quorum Conflict Verification (`human-money-core/src/app_service/l2_intents.rs`):**
+   - Added `unresolved_l2_send_intents(&self) -> Result<Vec<L2SendIntent>, Error>`: returns all pending intents whose `terminal_resolution.is_none()`, deterministically sorted by `created_at_ms` and `local_instance_id`.
+   - Updated `complete_intent_reconciliation`: supports both `Confirmed` (matching `child_lock`) and `Conflicted` terminal resolutions. When `proof.context.child_lock != request.transaction_hash`, it verifies the 14/20 quorum proof against `expected_conflict_context` (preserving parent, root, network, shard, and stored challenge constraints). On valid quorum for an alternative child spend, marks the intent `Conflicted { resolved_at_ms, observed_child }`, clears `stored_challenge`, and resets `retained_original_observed = false`.
+   - Hardened `record_intent_conflict`: takes a full `LiveStateProof` and regional mesh views rather than an unvalidated string, delegating verification to `complete_intent_reconciliation` and strictly requiring a `Conflicted` outcome.
+2. **Host-Owned Background Intent Reconciliation Supervisor (`human-money-app/src-tauri/src/intent_reconciliation.rs`):**
+   - Implemented `reconcile_due_intents(state, in_flight)`:
+     - Safely suspends/skips when the wallet is locked or logged out.
+     - Enumerates unresolved intents via `service.unresolved_l2_send_intents()`.
+     - Enforces the $T_0 + 30\,\text{s}$ delay requirement (skips intents younger than 30 seconds).
+     - Detects physical root voucher expiry (`now >= root_valid_until_ms`), marks expired via `expire_intent_if_overdue`, and cleans up terminal records.
+     - Guards concurrent work per intent with an in-flight set.
+     - Observes retained originals best-effort without treating missing/mismatched single-node observations as terminal.
+     - Ensures fresh authenticated regional mesh views, strictly verifying wallet ownership across async boundaries.
+     - Begins intent reconciliation (generating a fresh unpredictable recipient challenge in Core), fetches live proof, and completes reconciliation atomically.
+     - Performs delayed journal cleanup of terminal intents older than 60 seconds (`cleanup_terminal_intents`).
+   - Implemented `spawn_intent_reconciliation_worker(app: tauri::AppHandle)` running an async task every 15 seconds.
+   - Initialized in Tauri's application setup in `src-tauri/src/lib.rs`.
+3. **Early-Return Terminal Cleanup (`human-money-app/src-tauri/src/commands/transfers.rs`):**
+   - In `submit_l2_send_intent`, added explicit calls to `service.cleanup_terminal_intents(60_000, now_ms, password.as_deref())` in both the existing-terminal-resolution and expired early-return branches.
+
+### Maintained regressions and verification
+
+- In `human-money-core`:
+  - Unit tests in `src/app_service/l2_intents.rs`:
+    - `unresolved_intents_are_enumerated_until_terminal_resolution`: Verifies enumeration and empty result after terminal completion.
+    - `verified_conflicting_live_state_proof_resolves_conflicted`: Verifies that a valid 14/20 quorum proof for a conflicting child spend marks the intent `Conflicted`, clears challenge, and clears retained observation.
+    - `forged_conflicting_live_state_proof_is_rejected`: Verifies that an invalid/forged proof context is rejected and keeps the intent unresolved.
+    - `record_intent_conflict_resolves_verified_conflicting_proof`: Verifies that `record_intent_conflict` succeeds with a verified conflicting proof and is idempotent.
+  - Test suites:
+    - `cargo test --lib app_service::l2_intents`: **6 passed, 0 failed**.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: **0 warnings**.
+    - `cargo test --doc`: **4 passed, 0 failed**.
+- In `human-money-app`:
+  - Unit tests in `src-tauri/src/intent_reconciliation.rs`:
+    - `skips_locked_wallets`: Verifies that reconciliation is a clean no-op when the wallet is locked.
+    - `skips_intents_younger_than_thirty_seconds`: Verifies that unresolved intents under 30s old are not reconciled prematurely.
+    - `handles_expired_intents`: Verifies that overdue intents are transitioned to `Expired` and cleaned up.
+  - Test suites:
+    - `cargo test` in `src-tauri`: **23 passed, 0 failed** (3 new unit tests).
+    - `cargo clippy --workspace --all-targets -- -D warnings` in `src-tauri`: **0 warnings**.
+    - `npm test -- --run` in `human-money-app`: **184 passed, 0 failed** across 23 test suites.
+
+**Verdict:** R06 / F06 is completed and verified. Package closed.
+

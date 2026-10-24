@@ -3,6 +3,8 @@ use super::*;
 use crate::{api::hmc::{L2LockEntry, verify_l2_lock_entry_signature}, network::framing::SyncPayload};
 const PROJECTION: TableDefinition<&[u8;32], &[u8]> = TableDefinition::new("sync_projection");
 const PAGE: usize = 500;
+const MAX_STAGE_ENTRIES: usize = 50_000;
+const MAX_STAGE_BYTES: u64 = 32 * 1024 * 1024;
 fn invalid(message: &str) -> StorageError { StorageError::DurableCommitFailed(message.into()) }
 /// A temporary redb cut with a small cache. Drop removes it, including on cancellation.
 pub struct ShardStage {
@@ -11,6 +13,8 @@ pub struct ShardStage {
     pub(crate) shard: u16,
     now: u64,
     cuts: snapshot::SnapshotCuts,
+    total_entries: std::sync::atomic::AtomicUsize,
+    total_bytes: std::sync::atomic::AtomicU64,
 }
 impl ShardStage {
     pub fn new(shard: u16, now: u64) -> Result<Self, StorageError> {
@@ -22,7 +26,15 @@ impl ShardStage {
         let tx = storage.db.begin_write()?;
         tx.open_table(PROJECTION)?;
         tx.commit()?;
-        Ok(Self { storage, _file: file, shard, now, cuts: snapshot::SnapshotCuts::default() })
+        Ok(Self {
+            storage,
+            _file: file,
+            shard,
+            now,
+            cuts: snapshot::SnapshotCuts::default(),
+            total_entries: std::sync::atomic::AtomicUsize::new(0),
+            total_bytes: std::sync::atomic::AtomicU64::new(0),
+        })
     }
     /// Returns the path to the temporary database backing this stage.
     pub fn storage_path(&self) -> &std::path::Path {
@@ -30,8 +42,15 @@ impl ShardStage {
     }
     /// Validate one bounded page and spill immediately. No whole-cut RAM vectors.
     pub fn append(&self, page: SyncPayload) -> Result<(), StorageError> {
-        if page.support.len() > PAGE || page.locks.len() + page.hmc_locks.len() > PAGE || bincode::serialized_size(&page)? > 64*1024 {
+        let page_entries = page.support.len() + page.locks.len() + page.hmc_locks.len();
+        let page_bytes = bincode::serialized_size(&page)?;
+        if page.support.len() > PAGE || page.locks.len() + page.hmc_locks.len() > PAGE || page_bytes > 64*1024 {
             return Err(invalid("staging page ceiling exceeded"));
+        }
+        let prev_entries = self.total_entries.fetch_add(page_entries, std::sync::atomic::Ordering::SeqCst);
+        let prev_bytes = self.total_bytes.fetch_add(page_bytes, std::sync::atomic::Ordering::SeqCst);
+        if prev_entries + page_entries > MAX_STAGE_ENTRIES || prev_bytes + page_bytes > MAX_STAGE_BYTES {
+            return Err(invalid("staging total ceiling exceeded"));
         }
         let tx = self.storage.db.begin_write()?;
         for (kind,key,fact) in page.support {
@@ -109,8 +128,10 @@ impl RedbStorage {
     /// The caller owns a drained per-shard admission fence and a frozen live
     /// quorum witness. Current quorum agreement establishes support; source
     /// status fields or historical signature bundles do not establish it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_shard_cut(&self, stage: &ShardStage, expected: [u8;32], class: u8,
-        context: [u8;32], witnesses: usize, inherited: Option<&support::VerifiedInheritedCut>) -> Result<(), StorageError> {
+        context: [u8;32], witnesses: usize, inherited: Option<&support::VerifiedInheritedCut>,
+        deadline: Option<std::time::Instant>) -> Result<(), StorageError> {
         let support_is_quorum_verified = if let Some(proof) = inherited { proof.validate(stage,expected)? }
         else if stage.storage.db.begin_read()?.open_table(support::TABLE_CONFIRMATION_SUPPORT)?.len()? != 0 || stage.storage.db.begin_read()?.open_table(support::TABLE_NATIVE_SUPPORT)?.len()? != 0 { return Err(invalid("inherited support lacks qualified admission")); }
         else { false };
@@ -182,8 +203,17 @@ impl RedbStorage {
                 after = Some(tag.clone());
                 let old: L2LockEntry = serde_json::from_slice(&bytes)?;
                 let roots = tx.open_table(roots::TABLE_VOUCHER_ROOTS)?;
-                let root = roots.get(old.layer2_voucher_id.as_str())?.ok_or_else(|| invalid("local spend lacks root"))?;
-                let root: L2LockEntry = serde_json::from_slice(root.value())?;
+                let root_opt = roots.get(old.layer2_voucher_id.as_str())?;
+                let root: L2LockEntry = match root_opt {
+                    Some(r) => serde_json::from_slice(r.value())?,
+                    None => {
+                        warn!("Orphaned HMC spend {} lacks voucher root anchor; isolating into provisional storage", tag);
+                        tx.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?.insert(tag.as_str(), bytes.as_slice())?;
+                        tx.open_table(TABLE_HMC_LOCKS)?.remove(tag.as_str())?;
+                        tx.open_table(TABLE_HMC_VOUCHER_INDEX)?.remove((old.layer2_voucher_id.as_str(), tag.as_str()))?;
+                        continue;
+                    }
+                };
                 let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&bs58::encode(root.t_id).into_string());
                 if humoco_sim_core::types::canonical_voucher_shard(&parent) != stage.shard { continue; }
                 let incoming = source.open_table(TABLE_HMC_LOCKS)?.get(tag.as_str())?.map(|v| serde_json::from_slice::<L2LockEntry>(v.value())).transpose()?;
@@ -264,6 +294,11 @@ impl RedbStorage {
             let bytes = serde_json::to_vec(&fact)?;
             tx.open_table(support::TABLE_CONFIRMATION_SUPPORT)?.insert(tag.value(), bytes.as_slice())?;
         }
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                return Err(invalid("installation aborted: source lease deadline expired"));
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -342,7 +377,7 @@ mod tests {
         db.put_lock(&old,600_000).unwrap();
         let stage = ShardStage::new(shard,1_000).unwrap();
         stage.append(SyncPayload { locks:vec![],hmc_locks:vec![(tag,root.clone())],support:vec![] }).unwrap();
-        assert!(db.install_shard_cut(&stage,stage.digest().unwrap(),2,[1;32],14,None).is_err());
+        assert!(db.install_shard_cut(&stage,stage.digest().unwrap(),2,[1;32],14,None,None).is_err());
         assert!(db.voucher_root(&root.layer2_voucher_id).unwrap().is_none());
         assert_eq!(db.get_lock(&parent).unwrap().unwrap().0.id,old.id);
         assert!(db.get_provisional_lock(&parent).unwrap().is_none());
@@ -358,7 +393,7 @@ mod tests {
         let stage = ShardStage::new(shard,1_000).unwrap();
         let mut incoming = old.clone(); incoming.status = humoco_sim_core::types::LockStatus::Pending;
         stage.append(SyncPayload { locks:vec![(incoming,600_000)],hmc_locks:vec![],support:vec![] }).unwrap();
-        db.install_shard_cut(&stage,stage.digest().unwrap(),1,[1;32],3,None).unwrap();
+        db.install_shard_cut(&stage,stage.digest().unwrap(),1,[1;32],3,None,None).unwrap();
         assert_eq!(db.get_lock(&old.parent_lock).unwrap().unwrap().0.status.confirmation_class(),2);
         // Conservative legacy local exclusion remains protected, but cannot be
         // laundered into exportable class2 provenance by current island votes.
@@ -412,7 +447,7 @@ mod tests {
         let sources:Vec<_>=(0..3).map(|_|NodeIdentity::generate()).collect();
         let support_digests=[staged_support,[8;32],[8;32]];
         let inherited=inherited_cut(&stage,objective,&receiver,&sources,&support_digests,&[]);
-        db.install_shard_cut(&stage,objective,1,[1;32],3,Some(&inherited)).unwrap();
+        db.install_shard_cut(&stage,objective,1,[1;32],3,Some(&inherited),None).unwrap();
         assert_eq!(db.native_confirmation_support(&row.parent_lock).unwrap().unwrap().class,1);
         assert_eq!(db.get_lock(&row.parent_lock).unwrap().unwrap().0.status.confirmation_class(),1);
     }
@@ -428,8 +463,67 @@ mod tests {
         let support_digests=[staged_support;3];
         let inherited=inherited_cut(&stage,objective,&receiver,&sources,&support_digests,
             &[staged_support]);
-        db.install_shard_cut(&stage,objective,1,[1;32],3,Some(&inherited)).unwrap();
+        db.install_shard_cut(&stage,objective,1,[1;32],3,Some(&inherited),None).unwrap();
         assert_eq!(db.native_confirmation_support(&row.parent_lock).unwrap().unwrap().class,2);
         assert_eq!(db.get_lock(&row.parent_lock).unwrap().unwrap().0.status.confirmation_class(),2);
+    }
+    #[test]
+    fn test_orphaned_hmc_spend_does_not_poison_other_shards() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RedbStorage::open(&dir.path().join("node.redb")).unwrap();
+        // Insert an unanchored/corrupt spend into TABLE_HMC_LOCKS that lacks a voucher root
+        {
+            let tx = db.db.begin_write().unwrap();
+            let orphan_entry = L2LockEntry {
+                causal_output: None,
+                layer2_voucher_id: "missing-root-uuid".into(),
+                t_id: [88; 32],
+                sender_ephemeral_pub: [99; 32],
+                receiver_ephemeral_pub_hash: None,
+                change_ephemeral_pub_hash: None,
+                layer2_signature: [0; 64],
+                trap_r: None,
+                trap_s: None,
+                encrypted_timestamp: 0,
+                created_at_ms: 1_000,
+                deletable_at: Some("600000".into()),
+                privacy_guard: None,
+            };
+            let bytes = serde_json::to_vec(&orphan_entry).unwrap();
+            tx.open_table(TABLE_HMC_LOCKS)
+                .unwrap()
+                .insert("orphan-tag", bytes.as_slice())
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Now install a completely normal cut for shard 5
+        let shard = 5u16;
+        let now = 1_000u64;
+        let stage = ShardStage::new(shard, now).unwrap();
+        let digest = stage.digest().unwrap();
+
+        let res = db.install_shard_cut(&stage, digest, 1, [0; 32], 3, None, None);
+        assert!(
+            res.is_ok(),
+            "install_shard_cut must not fail on orphaned foreign HMC spends without root: {:?}",
+            res.err()
+        );
+    }
+    #[test]
+    fn test_install_shard_cut_with_expired_deadline_aborts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RedbStorage::open(&dir.path().join("node.redb")).unwrap();
+        let shard = 5u16;
+        let now = 1_000u64;
+        let stage = ShardStage::new(shard, now).unwrap();
+        let digest = stage.digest().unwrap();
+
+        let expired = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        let res = db.install_shard_cut(&stage, digest, 1, [0; 32], 3, None, Some(expired));
+        assert!(
+            res.is_err(),
+            "install_shard_cut must abort with error when lease deadline expired before commit"
+        );
     }
 }

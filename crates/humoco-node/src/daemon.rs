@@ -126,6 +126,12 @@ impl ShardReadinessManager {
         }
     }
 
+    pub fn mark_syncing(&self, shard_id: u16) {
+        if let Ok(mut states) = self.shard_states.lock() {
+            states.insert(shard_id, ShardStatus::Syncing);
+        }
+    }
+
     pub fn mark_shard_ready(&self, shard_id: u16) {
         if self.cancel.is_cancelled()
             || !self
@@ -141,7 +147,9 @@ impl ShardReadinessManager {
 
     pub fn mark_sync_failed(&self, shard_id: u16) {
         if let Ok(mut states) = self.shard_states.lock() {
-            states.remove(&shard_id);
+            if matches!(states.get(&shard_id), Some(ShardStatus::Syncing)) {
+                states.remove(&shard_id);
+            }
         }
     }
 }
@@ -1167,7 +1175,7 @@ pub async fn sync_single_shard(
     use std::collections::{HashMap,HashSet};
     use std::sync::Arc;
     use std::time::{Duration,Instant};
-    readiness_manager.invalidate_shard(shard_id);
+    readiness_manager.mark_syncing(shard_id);
     if !engine.is_signing_healthy() || !readiness_manager.storage_healthy.load(std::sync::atomic::Ordering::Acquire) {
         return Ok(false);
     }
@@ -1176,6 +1184,10 @@ pub async fn sync_single_shard(
     let frozen_keys: Vec<_> = committee.iter().map(|member|member.node_pubkey).collect();
     let (needed,_) = humoco_sim_core::types::required_quorum(total);
     if needed == 0 { return Ok(false); }
+    if total == 1 && remote.is_empty() {
+        readiness_manager.mark_shard_ready(shard_id);
+        return Ok(true);
+    }
     // Freeze in parallel: sequential twenty-peer timeouts cannot consume the
     // absolute no-gap lease before the complete cut is even requested.
     let mut requests = tokio::task::JoinSet::new();
@@ -1215,35 +1227,65 @@ pub async fn sync_single_shard(
                 .filter(|(key,_,_,expires)|frozen_keys.contains(key)&&Instant::now()<*expires).collect();
             if viable.len() < needed { return Ok(false); }
             let recon_now = peer_manager.net_time_ms();
+            let mut download_tasks = tokio::task::JoinSet::new();
+            for (_,conn,reply,expires) in viable {
+                let conn = conn.clone();
+                let reply_digest = reply.digest;
+                let expires = *expires;
+                let transport = transport.clone();
+                let engine_work = engine.recovery_work.clone();
+                let readiness_manager = readiness_manager.clone();
+                let cancel_token = cancel_token.clone();
+                download_tasks.spawn(async move {
+                    if Instant::now() >= expires || cancel_token.is_cancelled() { return None; }
+                    let stage = Arc::new(engine_work.spawn_blocking(move || ShardStage::new(shard_id, recon_now)).await.ok()?.ok()?);
+                    let mut cursor = 0;
+                    let mut sequence = 2;
+                    let mut complete = false;
+                    loop {
+                        if cancel_token.is_cancelled() || Instant::now() >= expires { break; }
+                        let (Ok(_bytes), Ok(_entries)) = (
+                            readiness_manager.sync_bytes.clone().try_acquire_many_owned(512 * 1024),
+                            readiness_manager.sync_entries.clone().try_acquire_many_owned(500),
+                        ) else { break; };
+                        let page = match tokio::time::timeout(
+                            Duration::from_secs(3),
+                            transport.request_active_sync_page_for_shard(&conn, sequence, cursor, 500, shard_id),
+                        ).await {
+                            Ok(Ok(page)) => page,
+                            _ => break,
+                        };
+                        sequence += 1;
+                        let next = page.next_cursor;
+                        let more = page.has_more;
+                        let cut = stage.clone();
+                        let appended = engine_work.spawn_blocking(move || cut.append(page.payload)).await.ok()?;
+                        if appended.is_err() { break; }
+                        if !more { complete = true; break; }
+                        match next {
+                            Some(next) if next > cursor => cursor = next,
+                            _ => break,
+                        }
+                    }
+                    if complete && Instant::now() < expires {
+                        let cut = stage.clone();
+                        let Ok(staged_digest_res) = engine_work.spawn_blocking(move || cut.digest()).await else { return None; };
+                        let Ok(staged_digest) = staged_digest_res else { return None; };
+                        if staged_digest != reply_digest {
+                            return None;
+                        }
+                        Some((stage, expires))
+                    } else {
+                        None
+                    }
+                });
+            }
             let mut downloaded = Vec::new();
             let mut downloaded_deadlines = Vec::new();
-            for (_,conn,_,expires) in viable {
-                let stage = Arc::new(engine.recovery_work.spawn_blocking(move ||ShardStage::new(shard_id,recon_now)).await
-                    .map_err(|e|NodeError::Daemon(format!("staging worker: {e}")))??);
-                let mut cursor = 0;
-                let mut sequence = 2;
-                let mut complete = false;
-                loop {
-                    if cancel_token.is_cancelled() || Instant::now() >= *expires { break; }
-                    let (Ok(_bytes),Ok(_entries)) = (
-                        readiness_manager.sync_bytes.clone().try_acquire_many_owned(512*1024),
-                        readiness_manager.sync_entries.clone().try_acquire_many_owned(500)) else { break; };
-                    let page = match tokio::time::timeout(Duration::from_secs(3),transport.request_active_sync_page_for_shard(conn,sequence,cursor,500,shard_id)).await {
-                        Ok(Ok(page)) => page, _ => break,
-                    };
-                    sequence += 1;
-                    let next = page.next_cursor;
-                    let more = page.has_more;
-                    let cut = stage.clone();
-                    let appended = engine.recovery_work.spawn_blocking(move ||cut.append(page.payload)).await
-                        .map_err(|e|NodeError::Daemon(format!("staging worker: {e}")))?;
-                    if appended.is_err() { break; }
-                    if !more { complete = true; break; }
-                    match next { Some(next) if next > cursor => cursor = next, _ => break }
-                }
-                if complete && Instant::now() < *expires {
+            while let Some(res) = download_tasks.join_next().await {
+                if let Ok(Some((stage, expires))) = res {
                     downloaded.push(stage);
-                    downloaded_deadlines.push(*expires);
+                    downloaded_deadlines.push(expires);
                 }
             }
             if downloaded.len() < needed { return Ok(false); }
@@ -1269,7 +1311,7 @@ pub async fn sync_single_shard(
             context.update(&[class]);
             for key in &frozen_keys { context.update(key); }
             let context = *context.finalize().as_bytes();
-            engine.install_shard_snapshot(stage,digest,class,context,witnesses_count,None).await?;
+            engine.install_shard_snapshot(stage,digest,class,context,witnesses_count,None,Some(deadline)).await?;
             if cancel_token.is_cancelled() || Instant::now() >= deadline || !engine.is_signing_healthy() { return Ok(false); }
             let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
             if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys { return Ok(false); }
@@ -1346,7 +1388,7 @@ pub async fn sync_single_shard(
             let Ok(staged_support_res) = engine.recovery_work.spawn_blocking(move ||cut.support_digest()).await else { continue; };
             let Ok(staged_support) = staged_support_res else { continue; };
             if !compatible_supports.contains(&staged_support) { continue; }
-            engine.install_shard_snapshot(stage,digest,class,context,witnesses_count,Some(inherited.clone())).await?;
+            engine.install_shard_snapshot(stage,digest,class,context,witnesses_count,Some(inherited.clone()),Some(deadline)).await?;
             if cancel_token.is_cancelled() || Instant::now() >= deadline || !engine.is_signing_healthy() { return Ok(false); }
             let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
             if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys { return Ok(false); }
@@ -1368,8 +1410,8 @@ pub async fn sync_single_shard(
 }
 
 type ReconciledRootFacts = std::collections::HashMap<(String, [u8; 32]), (crate::api::hmc::L2LockEntry, std::collections::HashSet<usize>)>;
-type ReconciledNativeFacts = std::collections::HashMap<([u8; 32], [u8; 32]), ((LockRecord, u64), std::collections::HashSet<usize>)>;
-type ReconciledHmcFacts = std::collections::HashMap<(String, [u8; 32]), ((String, crate::api::hmc::L2LockEntry), std::collections::HashSet<usize>)>;
+type ReconciledNativeFacts = std::collections::HashMap<([u8; 32], [u8; 32]), ((LockRecord, u64, u8), std::collections::HashSet<usize>)>;
+type ReconciledHmcFacts = std::collections::HashMap<(String, [u8; 32]), ((String, crate::api::hmc::L2LockEntry, u8), std::collections::HashSet<usize>)>;
 type ReconciledStage = (Arc<crate::storage::db::install::ShardStage>, [u8; 32], usize);
 
 struct ReconciledCutFacts {
@@ -1455,9 +1497,7 @@ fn append_reconciled_hmc(
 
 /// Rebuilds one shard cut from facts held by at least `needed` members of the
 /// frozen committee (remote downloaded source cuts plus `target`'s own committed
-/// storage when `target` already holds that exact fact). Unquorated local facts
-/// (`witnesses.len() < needed`) are retained only when already confirmed locally
-/// (`confirmation_class() > 0`) and not displaced by a remote quorum choice.
+/// storage when `target` already holds that exact fact).
 fn reconcile_distributed_stage(
     shard_id: u16,
     now: u64,
@@ -1481,10 +1521,22 @@ fn reconcile_distributed_stage(
             root_facts.entry((root.layer2_voucher_id.clone(), digest)).or_insert_with(|| (root, HashSet::new())).1.insert(index);
         }
         for (row, root) in facts.native {
-            native_facts.entry((row.parent_lock, row.id)).or_insert_with(|| ((row, root), HashSet::new())).1.insert(index);
+            let class = storage.native_confirmation_support(&row.parent_lock)?
+                .filter(|s| s.child == row.id)
+                .map_or(row.status.confirmation_class(), |s| s.class.max(row.status.confirmation_class()));
+            let entry = native_facts.entry((row.parent_lock, row.id))
+                .or_insert_with(|| ((row.clone(), root, class), HashSet::new()));
+            entry.0 .2 = entry.0 .2.max(class);
+            entry.1.insert(index);
         }
         for (tag, entry) in facts.hmc {
-            hmc_facts.entry((tag.clone(), entry.t_id)).or_insert_with(|| ((tag, entry), HashSet::new())).1.insert(index);
+            let class = storage.confirmation_support(&tag)?
+                .filter(|s| s.child == entry.t_id)
+                .map_or(0, |s| s.class);
+            let map_entry = hmc_facts.entry((tag.clone(), entry.t_id))
+                .or_insert_with(|| ((tag.clone(), entry.clone(), class), HashSet::new()));
+            map_entry.0 .2 = map_entry.0 .2.max(class);
+            map_entry.1.insert(index);
         }
         Ok(())
     };
@@ -1503,53 +1555,44 @@ fn reconcile_distributed_stage(
         }
     }
 
-    let mut selected_native: HashMap<[u8; 32], (LockRecord, u64, usize)> = HashMap::new();
-    for ((parent, _), ((row, root), witnesses)) in &native_facts {
+    let mut selected_native: HashMap<[u8; 32], (LockRecord, u64, usize, u8)> = HashMap::new();
+    for ((parent, _), ((row, root, class), witnesses)) in &native_facts {
         if witnesses.len() < needed { continue; }
-        if let Some((old, _, _)) = selected_native.get(parent) {
-            let new_hash = humoco_sim_core::crypto::compute_canonical_hash(parent, &row.receiver_pub, &row.nonce);
-            let old_hash = humoco_sim_core::crypto::compute_canonical_hash(parent, &old.receiver_pub, &old.nonce);
-            if new_hash >= old_hash { continue; }
-        }
-        selected_native.insert(*parent, (row.clone(), *root, witnesses.len()));
-    }
-
-    let mut selected_hmc: HashMap<String, (String, L2LockEntry, usize)> = HashMap::new();
-    for ((tag, _), ((stored_tag, entry), witnesses)) in &hmc_facts {
-        if witnesses.len() < needed { continue; }
-        if !selected_roots.contains_key(&entry.layer2_voucher_id) { continue; }
-        if let Some((_, old, _)) = selected_hmc.get(tag) {
-            let parent = *blake3::hash(tag.as_bytes()).as_bytes();
-            let new_hash = crate::storage::compute_hmc_canonical_hash(&parent, &entry.sender_ephemeral_pub, &entry.t_id);
-            let old_hash = crate::storage::compute_hmc_canonical_hash(&parent, &old.sender_ephemeral_pub, &old.t_id);
-            if new_hash >= old_hash { continue; }
-        }
-        selected_hmc.insert(tag.clone(), (stored_tag.clone(), entry.clone(), witnesses.len()));
-    }
-
-    let local_facts = read_reconciled_cut_facts(target.as_ref(), shard_id, now)?;
-    for (row, root) in local_facts.native {
-        if row.status.confirmation_class() > 0 && !selected_native.contains_key(&row.parent_lock) {
-            selected_native.insert(row.parent_lock, (row, root, needed));
-        }
-    }
-    for (tag, entry) in local_facts.hmc {
-        let confirmed = target.confirmation_support(&tag)?.is_some_and(|s| s.child == entry.t_id && s.class > 0);
-        if confirmed && !selected_hmc.contains_key(&tag) {
-            if let Some(root) = local_facts.roots.iter().find(|r| r.layer2_voucher_id == entry.layer2_voucher_id) {
-                let root_bytes = serde_json::to_vec(root).map_err(crate::storage::StorageError::from)?;
-                selected_roots.entry(entry.layer2_voucher_id.clone()).or_insert_with(|| (root.clone(), *blake3::hash(&root_bytes).as_bytes(), needed));
-                selected_hmc.insert(tag.clone(), (tag, entry, needed));
+        if let Some((old, _, _, old_class)) = selected_native.get(parent) {
+            if *class < *old_class {
+                continue;
+            } else if *class == *old_class {
+                let new_hash = humoco_sim_core::crypto::compute_canonical_hash(parent, &row.receiver_pub, &row.nonce);
+                let old_hash = humoco_sim_core::crypto::compute_canonical_hash(parent, &old.receiver_pub, &old.nonce);
+                if new_hash >= old_hash { continue; }
             }
         }
+        selected_native.insert(*parent, (row.clone(), *root, witnesses.len(), *class));
+    }
+
+    let mut selected_hmc: HashMap<String, (String, L2LockEntry, usize, u8)> = HashMap::new();
+    for ((tag, _), ((stored_tag, entry, class), witnesses)) in &hmc_facts {
+        if witnesses.len() < needed { continue; }
+        if !selected_roots.contains_key(&entry.layer2_voucher_id) { continue; }
+        if let Some((_, old, _, old_class)) = selected_hmc.get(tag) {
+            if *class < *old_class {
+                continue;
+            } else if *class == *old_class {
+                let parent = *blake3::hash(tag.as_bytes()).as_bytes();
+                let new_hash = crate::storage::compute_hmc_canonical_hash(&parent, &entry.sender_ephemeral_pub, &entry.t_id);
+                let old_hash = crate::storage::compute_hmc_canonical_hash(&parent, &old.sender_ephemeral_pub, &old.t_id);
+                if new_hash >= old_hash { continue; }
+            }
+        }
+        selected_hmc.insert(tag.clone(), (stored_tag.clone(), entry.clone(), witnesses.len(), *class));
     }
 
     if selected_roots.is_empty() && selected_native.is_empty() && selected_hmc.is_empty() {
         return Ok(None);
     }
 
-    let min_witnesses = selected_native.values().map(|(_, _, w)| *w)
-        .chain(selected_hmc.values().map(|(_, _, w)| *w))
+    let min_witnesses = selected_native.values().map(|(_, _, w, _)| *w)
+        .chain(selected_hmc.values().map(|(_, _, w, _)| *w))
         .chain(selected_roots.values().map(|(_, _, w)| *w))
         .min()
         .unwrap_or(needed);
@@ -1559,10 +1602,10 @@ fn reconcile_distributed_stage(
         .map(|(entry, _, _)| (bs58::encode(entry.t_id).into_string(), entry)).collect();
     roots.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     append_reconciled_hmc(&stage, &roots)?;
-    let mut native: Vec<(LockRecord, u64)> = selected_native.into_values().map(|(row, root, _)| (row, root)).collect();
+    let mut native: Vec<(LockRecord, u64)> = selected_native.into_values().map(|(row, root, _, _)| (row, root)).collect();
     native.sort_unstable_by(|a, b| a.0.parent_lock.cmp(&b.0.parent_lock));
     append_reconciled_native(&stage, &native)?;
-    let mut hmc: Vec<(String, L2LockEntry)> = selected_hmc.into_values().map(|(tag, entry, _)| (tag, entry)).collect();
+    let mut hmc: Vec<(String, L2LockEntry)> = selected_hmc.into_values().map(|(tag, entry, _, _)| (tag, entry)).collect();
     hmc.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     append_reconciled_hmc(&stage, &hmc)?;
     let digest = stage.digest()?;
@@ -1655,5 +1698,132 @@ mod tests {
         assert!(!mgr.is_shard_ready(other_shard));
         // After failure reset, active task is cleared so demand sync can be triggered again
         assert!(mgr.try_trigger_demand_sync(other_shard));
+    }
+
+    #[test]
+    fn test_reconcile_prefers_higher_confirmation_class_over_lower_hash() {
+        use crate::network::framing::SyncPayload;
+        use crate::storage::db::install::ShardStage;
+        use crate::storage::db::support::{native_key, ConfirmationSupport};
+        use crate::storage::RedbStorage;
+        use humoco_sim_core::types::{LockRecord, SimTime};
+
+        let temp = tempdir().unwrap();
+        let target = Arc::new(RedbStorage::open(&temp.path().join("target.redb")).unwrap());
+        let shard = 4u16;
+        let now = 1_000u64;
+
+        let mut parent = [4u8; 32];
+        parent[..2].copy_from_slice(&shard.to_be_bytes());
+
+        // Find two different receiver_pub / nonces such that one has lower hash than the other
+        let row_low_hash = LockRecord::new(parent, [1u8; 32], vec![1], SimTime(now), SimTime(600_000));
+        let row_high_hash = LockRecord::new(parent, [2u8; 32], vec![2], SimTime(now), SimTime(600_000));
+
+        let hash_1 = humoco_sim_core::crypto::compute_canonical_hash(&parent, &row_low_hash.receiver_pub, &row_low_hash.nonce);
+        let hash_2 = humoco_sim_core::crypto::compute_canonical_hash(&parent, &row_high_hash.receiver_pub, &row_high_hash.nonce);
+
+        let (winner_class2, loser_class1) = if hash_1 > hash_2 {
+            // row_low_hash has higher hash -> give it class 2!
+            (row_low_hash, row_high_hash)
+        } else {
+            (row_high_hash, row_low_hash)
+        };
+
+        // stage_a has class 2 for winner_class2
+        let stage_a = Arc::new(ShardStage::new(shard, now).unwrap());
+        let fact_a = ConfirmationSupport {
+            parent,
+            child: winner_class2.id,
+            class: 2,
+            root_valid_until_ms: 600_000,
+            verified_context: [77; 32],
+        };
+        stage_a.append(SyncPayload {
+            locks: vec![(winner_class2.clone(), 600_000)],
+            hmc_locks: vec![],
+            support: vec![(0, native_key(&parent), fact_a)],
+        }).unwrap();
+
+        // stage_b has class 1 for loser_class1 (which has smaller hash!)
+        let stage_b = Arc::new(ShardStage::new(shard, now).unwrap());
+        let fact_b = ConfirmationSupport {
+            parent,
+            child: loser_class1.id,
+            class: 1,
+            root_valid_until_ms: 600_000,
+            verified_context: [88; 32],
+        };
+        stage_b.append(SyncPayload {
+            locks: vec![(loser_class1.clone(), 600_000)],
+            hmc_locks: vec![],
+            support: vec![(0, native_key(&parent), fact_b)],
+        }).unwrap();
+
+        let stages = vec![stage_a, stage_b];
+        let reconciled = reconcile_distributed_stage(shard, now, 1, &stages, &target).unwrap().expect("reconciled stage");
+        let (reconciled_stage, _, _) = reconciled;
+
+        // Verify which row was selected: by DEC-064 & DEC-022, Class 2 MUST beat Class 1 regardless of hash!
+        let page = reconciled_stage.page(0).unwrap();
+        assert_eq!(page.payload.locks.len(), 1);
+        assert_eq!(
+            page.payload.locks[0].0.id, winner_class2.id,
+            "Reconciliation must prefer higher confirmation class over lower canonical hash"
+        );
+    }
+
+    #[test]
+    fn test_unquorated_local_fact_is_not_laundered_into_stage() {
+        use crate::network::framing::SyncPayload;
+        use crate::storage::db::install::ShardStage;
+        use crate::storage::RedbStorage;
+        use humoco_sim_core::types::{LockRecord, SimTime};
+
+        let temp = tempdir().unwrap();
+        let target = Arc::new(RedbStorage::open(&temp.path().join("target.redb")).unwrap());
+        let shard = 4u16;
+        let now = 1_000u64;
+
+        // Local node holds a solitary lock that has no remote quorum witnesses
+        let mut parent_local = [4u8; 32];
+        parent_local[..2].copy_from_slice(&shard.to_be_bytes());
+        parent_local[2] = 0xAA;
+        let mut local_row = LockRecord::new(parent_local, [9u8; 32], vec![9], SimTime(now), SimTime(600_000));
+        local_row.status = humoco_sim_core::types::LockStatus::Provisional { sigs: 3, required: 3 };
+        target.put_lock(&local_row, 600_000).unwrap();
+
+        // Remote stages hold a completely different lock with quorum (needed = 2)
+        let mut parent_remote = [4u8; 32];
+        parent_remote[..2].copy_from_slice(&shard.to_be_bytes());
+        parent_remote[2] = 0xBB;
+        let remote_row = LockRecord::new(parent_remote, [8u8; 32], vec![8], SimTime(now), SimTime(600_000));
+
+        let stage_1 = Arc::new(ShardStage::new(shard, now).unwrap());
+        stage_1.append(SyncPayload {
+            locks: vec![(remote_row.clone(), 600_000)],
+            hmc_locks: vec![],
+            support: vec![],
+        }).unwrap();
+
+        let stage_2 = Arc::new(ShardStage::new(shard, now).unwrap());
+        stage_2.append(SyncPayload {
+            locks: vec![(remote_row.clone(), 600_000)],
+            hmc_locks: vec![],
+            support: vec![],
+        }).unwrap();
+
+        let stages = vec![stage_1, stage_2];
+        let reconciled = reconcile_distributed_stage(shard, now, 2, &stages, &target).unwrap().expect("reconciled stage");
+        let (reconciled_stage, _, _) = reconciled;
+
+        let page = reconciled_stage.page(0).unwrap();
+        // The quorated remote row MUST be present
+        assert!(page.payload.locks.iter().any(|(r, _)| r.parent_lock == parent_remote));
+        // The unquorated local row MUST NOT be injected into the network-reconciled stage
+        assert!(
+            !page.payload.locks.iter().any(|(r, _)| r.parent_lock == parent_local),
+            "Unquorated local lock must not be laundered into the quorated stage"
+        );
     }
 }

@@ -88,22 +88,32 @@ impl DualTierEngine {
     }
     /// Current distinct ready committee witnesses justify compact support for the
     /// complete objective cut. Never accept a source's claimed class or signers.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn install_shard_snapshot(&self, stage: Arc<ShardStage>, expected: [u8;32],
-        class: u8, context: [u8;32], witnesses: usize, inherited: Option<super::super::db::support::VerifiedInheritedCut>) -> Result<(), StorageError> {
+        class: u8, context: [u8;32], witnesses: usize, inherited: Option<super::super::db::support::VerifiedInheritedCut>,
+        deadline: Option<Instant>) -> Result<(), StorageError> {
         self.expire_source_leases();
         let admission = self.activity.close(stage.shard).await.ok_or_else(|| error("target shard busy"))?;
         let mut installation = Installation { _admission: admission, health: self.stats.clone(), uncertain: true };
-        let result = self.install_closed_snapshot(stage,expected,class,context,witnesses,inherited).await;
+        let result = self.install_closed_snapshot(stage,expected,class,context,witnesses,inherited,deadline).await;
         // An ordinary failed transaction rolled back; cancellation is different.
         // A publication failure AFTER commit remains fail-closed until restart.
         if result.is_ok() { installation.uncertain = false; }
         result
     }
+    #[allow(clippy::too_many_arguments)]
     async fn install_closed_snapshot(&self, stage: Arc<ShardStage>, expected: [u8;32],
-        class: u8, context: [u8;32], witnesses: usize, inherited: Option<super::super::db::support::VerifiedInheritedCut>) -> Result<(), StorageError> {
+        class: u8, context: [u8;32], witnesses: usize, inherited: Option<super::super::db::support::VerifiedInheritedCut>,
+        deadline: Option<Instant>) -> Result<(), StorageError> {
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl { return Err(error("source lease deadline expired before persistence fence")); }
+        }
         self.persistence_fence().await?;
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl { return Err(error("source lease deadline expired before installation worker")); }
+        }
         let db = self.db.clone(); let cut = stage.clone();
-        self.recovery_work.spawn_blocking(move || db.install_shard_cut(&cut, expected, class, context, witnesses,inherited.as_ref()))
+        self.recovery_work.spawn_blocking(move || db.install_shard_cut(&cut, expected, class, context, witnesses, inherited.as_ref(), deadline))
             .await.map_err(|e| error(&format!("installation worker: {e}")))??;
         // Bounded RAM publication. Only this shard is gated; no index guard is
         // retained over disk work. Existing root metadata remains immutable.

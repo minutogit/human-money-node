@@ -40,9 +40,8 @@ modules={'settings':app/'src-tauri/src/settings.rs','models':app/'src-tauri/src/
 head='\n'.join('#[path='+q(path)+'] mod '+name+';' for name,path in modules.items())+'\nuse state::AppState;\n'
 
 fixture=(node/'crates/humoco-node/tests/common/recovery.rs').read_text()
-fixture=fixture.replace('for identity in &identities {','for (audit_index,identity) in identities.iter().enumerate() {')
-fixture=fixture.replace('inner: handler, corrupt, support_fault, identity:', 'inner: handler, db: db.clone(), audit_bad: audit_index == 0, corrupt, support_fault, identity:')
-fixture=fixture.replace('struct CorruptSnapshot {','struct CorruptSnapshot {\n    db: Arc<RedbStorage>,\n    audit_bad: bool,')
+fixture=fixture.replace('inner: handler, db: db.clone(), corrupt, support_fault: peer_fault, identity:identity.clone(), pages:', 'inner: handler, db: db.clone(), audit_bad: peer_index == 0, corrupt, support_fault: peer_fault, identity:identity.clone(), pages:')
+fixture=fixture.replace('struct CorruptSnapshot {','struct CorruptSnapshot {\n    audit_bad: bool,')
 fixture=fixture.replace('let reply = self.inner.handle_authenticated(header,payload,owner);', '''let db=self.db.clone(); let audit_bad=self.audit_bad;
         let reply = self.inner.handle_authenticated(header,payload,owner);''')
 fixture=fixture.replace('if freeze && support_fault > 0', '''if freeze && header.flags == 0 {

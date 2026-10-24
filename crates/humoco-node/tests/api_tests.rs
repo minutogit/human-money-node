@@ -663,6 +663,10 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     assert!(legacy_bytes.is_empty());
 
     // 1b. Valid Hmc LockVerifyRequest (epoch-bound envelope, fresh timestamp).
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let sender = NodeIdentity::generate();
     let root_valid_until = now_ms + 600_000;
     let mut hmc_req = humoco_node::api::hmc::L2LockRequest {

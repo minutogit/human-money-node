@@ -3,7 +3,7 @@
 > **Credo:** *"In decentralization there is no trust, only mathematical proofs."*  
 > **Principle:** *"Subtraction before Construction"*
 
-This prompt suite contains **20 highly specialized, reusable AI audits** covering the full spectrum of modern software engineering: from **macro architecture (Adlerperspektive)**, **mutation testing**, and **memory safety** to **Byzantine hardening**, **clean code**, **adversarial wire verification**, and **performance tuning**.
+This prompt suite contains **25 highly specialized, reusable AI audits** covering the full spectrum of modern software engineering: from **macro architecture (Adlerperspektive)**, **mutation testing**, and **memory safety** to **Byzantine hardening**, **clean code**, **adversarial wire verification**, and **performance tuning**.
 
 ---
 
@@ -107,6 +107,17 @@ Current execution status and unresolved semantic architecture conflicts are reco
 |---|---|---|
 | **[06_chaos_und_fuzz_test_generator.md](06_chaos_und_fuzz_test_generator.md)** | **Chaos & Test Generator** | Directly writes new executable Rust test code for extreme Jepsen/DST scenarios. |
 | **[19_wire_level_quota_and_adversarial_verification_audit.md](19_wire_level_quota_and_adversarial_verification_audit.md)** | **Wire Quotas & Adversarial P2P** | Eliminates unit-test illusions; verifies that quotas, backpressure, and rate limits are enforced in `transport.rs` and proven via negative wire tests. |
+
+---
+
+### 🔬 6. Core Consensus, Recovery & Persistence Audits
+| File | Focus | Primary Goal |
+|---|---|---|
+| **[21_distributed_recovery_and_shard_sync_audit.md](21_distributed_recovery_and_shard_sync_audit.md)** | **Distributed Recovery & Sync** | Reconcile fragmented cuts (`AB:8, A:6, B:6`), verify fact quorums ($\ge Q$), atomic multi-table `redb` commits. |
+| **[22_monotonic_confirmation_and_merge_quarantine_audit.md](22_monotonic_confirmation_and_merge_quarantine_audit.md)** | **Monotonic Classes & Quarantine** | Enforce DEC-022 (class 2 > 1 > 0), reject forged inherited support (F01), village merge quarantine isolation. |
+| **[23_dual_tier_concurrency_and_signing_history_audit.md](23_dual_tier_concurrency_and_signing_history_audit.md)** | **Dual-Tier & Signing History** | DEC-029 Durable-before-Vote, in-RAM CAS races, anti-equivocation fail-closed signing (`META_SIGNING_LOCKED`). |
+| **[24_pos_checkout_hotpath_and_cancellation_safety_audit.md](24_pos_checkout_hotpath_and_cancellation_safety_audit.md)** | **Checkout Hot-Path & Cancellation** | 800 ms SLA, 14/20 fast-exit, Tokio cancellation safety (`JoinSet::abort_all`), remote status discovery (F04). |
+| **[25_ingress_defense_and_stateless_pow_audit.md](25_ingress_defense_and_stateless_pow_audit.md)** | **Ingress & Dynamic PoW** | Cheap-filters-first, stateless BLAKE3 Hashcash, network thermometer EMA, 64 KiB framing caps, INV-0310. |
 
 ---
 

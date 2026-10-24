@@ -21,7 +21,7 @@ pub struct VerifiedSupport {
 }
 impl VerifiedSupport {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn verify(
+    pub fn verify(
         tag: String,
         child: [u8; 32],
         root: u64,
@@ -105,7 +105,7 @@ impl VerifiedSupport {
     }
 }
 impl RedbStorage {
-    pub(crate) fn commit_confirmation_support(
+    pub fn commit_confirmation_support(
         &self,
         verified: VerifiedSupport,
     ) -> Result<ConfirmationSupport, StorageError> {

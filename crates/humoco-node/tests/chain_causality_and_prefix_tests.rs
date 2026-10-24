@@ -376,3 +376,296 @@ fn receiver_and_change_consume_independent_sst_slots_and_sidecars_are_authentica
     forged.chain[0].causal_output.as_mut().unwrap().state_hash = [99; 32];
     assert!(DualTierEngine::verify_chain_causality(&forged).is_err());
 }
+
+#[tokio::test]
+async fn historical_prefix_requires_complete_authentic_path_to_fresh_wallet_tip() {
+    for invalid in 0..=2 {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(RedbStorage::open(&dir.path().join("node.redb")).unwrap());
+        let cancel = CancellationToken::new();
+        let (engine,worker) = DualTierEngine::new_with_token(db.clone(),cancel.clone());
+        let author = NodeIdentity::generate();
+        let now = 1_000_000;
+        let mut request = chain(&author,&format!("historical-{invalid}"),now,0);
+        request.chain[1].created_at_ms = now - 120_000;
+        request.chain[1].layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&request.chain[1])).to_bytes();
+        if invalid == 1 { request.chain[2].created_at_ms = now - 31_000; request.chain[2].layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&request.chain[2])).to_bytes(); }
+        if invalid == 2 { request.chain[2].layer2_signature = [0;64]; }
+        let (verdict,_) = engine.ingress_hmc_chain_lock_durable(request.clone(),humoco_node::storage::IngressOrigin::ClientApi,Some(now)).await;
+        let prefix_tag = request.chain[1].ds_tag.as_ref().unwrap();
+        let tip_tag = request.chain[2].ds_tag.as_ref().unwrap();
+        if invalid == 0 {
+            assert!(matches!(verdict,L2Verdict::Verified { .. }));
+            assert_eq!(db.get_hmc_lock(prefix_tag).unwrap().unwrap().created_at_ms,now-120_000);
+            assert!(db.get_hmc_lock(tip_tag).unwrap().is_some());
+        } else {
+            assert!(matches!(verdict,L2Verdict::Rejected { .. }));
+            assert!(db.get_hmc_lock(prefix_tag).unwrap().is_none(),"stale history needs the entire authentic fresh descendant path");
+            assert!(db.get_hmc_lock(tip_tag).unwrap().is_none());
+        }
+        cancel.cancel(); worker.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn http_future_terminal_is_rejected_and_valid_prefix_retained() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.redb");
+    let db = Arc::new(RedbStorage::open(&path).unwrap());
+    let cancel = CancellationToken::new();
+    let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
+    let id = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*id.node_id(), 8));
+    let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
+    tiers.register_f2f_peer("future-test");
+    let state = AppState::new(engine.clone(), db.clone(), id.clone(), tiers, pow);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let now = state.net_time_ms();
+    let mut req = chain(&id, "future-terminal-test", now, 0);
+    // Future terminal: created_at_ms is 35 seconds in the future
+    req.chain[2].created_at_ms = now + 35_000;
+    req.chain[2].layer2_signature = id
+        .signing_key()
+        .sign(&calculate_l2_payload_hash(&req.chain[2]))
+        .to_bytes();
+
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+        &bs58::encode(req.chain[0].transaction_hash).into_string(),
+    );
+    state
+        .readiness_manager
+        .mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&parent));
+    let server =
+        tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap() });
+
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/lock/chain"))
+        .header("X-Peer-Token", "future-test")
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+    let envelope: L2ResponseEnvelope = res.json().await.unwrap();
+    assert!(
+        matches!(envelope.verdict, L2Verdict::Rejected { ref reason } if reason.contains("step 2") && reason.contains("accepted prefix retained")),
+        "{:?}",
+        envelope.verdict
+    );
+
+    // Verify prefix: Genesis (step 0) and Step 1 are retained, Step 2 is not
+    server.abort();
+    let _ = server.await;
+    cancel.cancel();
+    worker.await.unwrap();
+    drop(engine);
+    drop(db);
+
+    // Verify persistence across restart
+    let reopened = RedbStorage::open(&path).unwrap();
+    assert_prefix(&reopened, &req, false);
+}
+
+#[tokio::test]
+async fn http_historical_predecessor_fresh_terminal_and_rfc3339_root_ttl() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.redb");
+    let db = Arc::new(RedbStorage::open(&path).unwrap());
+    let cancel = CancellationToken::new();
+    let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
+    let author = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*author.node_id(), 8));
+    let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
+    tiers.register_f2f_peer("historical-http-token");
+    let state = AppState::new(engine.clone(), db.clone(), author.clone(), tiers, pow);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let now = state.net_time_ms();
+
+    // Build chain with RFC3339 root TTL (e.g. 2028-10-24T12:00:00Z)
+    let rfc3339_expiry = "2028-10-24T12:00:00Z";
+    let expected_expiry_ms = chrono::DateTime::parse_from_rfc3339(rfc3339_expiry)
+        .unwrap()
+        .timestamp_millis() as u64;
+
+    let voucher = "rfc3339-historical-voucher";
+    let mut root = hop(&author, voucher, 1, None, now);
+    root.deletable_at = Some(rfc3339_expiry.to_string());
+    if let Some(proof) = root.causal_output.as_mut() {
+        proof.root_valid_until_ms = expected_expiry_ms;
+        proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+    }
+    root.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&root)).to_bytes();
+
+    // Historical predecessor created 2 minutes ago
+    let mut pred = hop(&author, voucher, 2, Some(root.transaction_hash), now - 120_000);
+    if let Some(proof) = pred.causal_output.as_mut() {
+        proof.root_valid_until_ms = expected_expiry_ms;
+        proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+    }
+    pred.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&pred)).to_bytes();
+
+    // Fresh terminal created right now (fresh within 30s)
+    let mut tip = hop(&author, voucher, 3, Some(pred.transaction_hash), now);
+    if let Some(proof) = tip.causal_output.as_mut() {
+        proof.root_valid_until_ms = expected_expiry_ms;
+        proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+    }
+    tip.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&tip)).to_bytes();
+
+    let chain_req = L2ChainLockRequest {
+        auth: root.auth.clone(),
+        layer2_voucher_id: voucher.into(),
+        chain: vec![root.clone(), pred.clone(), tip.clone()],
+    };
+
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+        &bs58::encode(root.transaction_hash).into_string(),
+    );
+    state
+        .readiness_manager
+        .mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&parent));
+    let server =
+        tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap() });
+
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/lock/chain"))
+        .header("X-Peer-Token", "historical-http-token")
+        .json(&chain_req)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::CREATED);
+    let envelope: L2ResponseEnvelope = res.json().await.unwrap();
+    assert!(matches!(envelope.verdict, L2Verdict::Verified { .. }));
+
+    // Genesis is in voucher_roots and NOT in locks
+    let genesis_tag = bs58::encode(root.transaction_hash).into_string();
+    assert!(db.get_hmc_lock(&genesis_tag).unwrap().is_none(), "genesis must never occupy a collision lock");
+    let stored_root = db.voucher_root(voucher).unwrap().expect("root must be registered");
+    assert_eq!(stored_root.t_id, root.transaction_hash);
+    let stored_validity = humoco_node::storage::db::roots::root_valid_until(&stored_root).unwrap();
+    assert_eq!(stored_validity, expected_expiry_ms, "RFC3339 root TTL parsed exactly");
+
+    // Historical predecessor and fresh terminal are durably committed in locks
+    let pred_tag = pred.ds_tag.as_ref().unwrap();
+    let tip_tag = tip.ds_tag.as_ref().unwrap();
+    let pred_lock = db.get_hmc_lock(pred_tag).unwrap().expect("pred lock committed");
+    assert_eq!(pred_lock.created_at_ms, now - 120_000);
+    assert_eq!(pred_lock.t_id, pred.transaction_hash);
+    let tip_lock = db.get_hmc_lock(tip_tag).unwrap().expect("tip lock committed");
+    assert_eq!(tip_lock.t_id, tip.transaction_hash);
+
+    server.abort();
+    let _ = server.await;
+    cancel.cancel();
+    worker.await.unwrap();
+    drop(engine);
+    drop(db);
+
+    // Verify all records survive restart
+    let reopened = RedbStorage::open(&path).unwrap();
+    assert!(reopened.get_hmc_lock(&genesis_tag).unwrap().is_none());
+    assert!(reopened.voucher_root(voucher).unwrap().is_some());
+    assert!(reopened.get_hmc_lock(pred_tag).unwrap().is_some());
+    assert!(reopened.get_hmc_lock(tip_tag).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn http_independent_receiver_and_change_branches_do_not_collide() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.redb");
+    let db = Arc::new(RedbStorage::open(&path).unwrap());
+    let cancel = CancellationToken::new();
+    let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
+    let author = NodeIdentity::generate();
+    let receiver = NodeIdentity::generate();
+    let change = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*author.node_id(), 8));
+    let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
+    tiers.register_f2f_peer("split-http-token");
+    let state = AppState::new(engine.clone(), db.clone(), author.clone(), tiers, pow);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let now = state.net_time_ms();
+
+    let voucher = "split-output-http";
+    let mut root = hop(&author, voucher, 21, None, now);
+    let proof = root.causal_output.as_mut().unwrap();
+    proof.receiver_pubkey_hash = Some(sha3::Sha3_256::digest(receiver.node_pubkey()).into());
+    proof.change_pubkey_hash = Some(sha3::Sha3_256::digest(change.node_pubkey()).into());
+    proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+    root.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&root)).to_bytes();
+
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+        &bs58::encode(root.transaction_hash).into_string(),
+    );
+    state
+        .readiness_manager
+        .mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&parent));
+    let server =
+        tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap() });
+
+    // 1. Receiver branch chain
+    let receive_spend = hop(&receiver, voucher, 22, Some(root.transaction_hash), now);
+    let receive_chain = L2ChainLockRequest {
+        auth: root.auth.clone(),
+        layer2_voucher_id: voucher.into(),
+        chain: vec![root.clone(), receive_spend.clone()],
+    };
+    let res_rec = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/lock/chain"))
+        .header("X-Peer-Token", "split-http-token")
+        .json(&receive_chain)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_rec.status(), reqwest::StatusCode::CREATED, "receiver branch must succeed");
+
+    // 2. Change branch chain on the SAME voucher root
+    let change_spend = hop(&change, voucher, 23, Some(root.transaction_hash), now);
+    assert_ne!(receive_spend.ds_tag, change_spend.ds_tag, "independent ds_tags");
+    let change_chain = L2ChainLockRequest {
+        auth: root.auth.clone(),
+        layer2_voucher_id: voucher.into(),
+        chain: vec![root.clone(), change_spend.clone()],
+    };
+    let res_chg = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/lock/chain"))
+        .header("X-Peer-Token", "split-http-token")
+        .json(&change_chain)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_chg.status(), reqwest::StatusCode::CREATED, "change branch must succeed without colliding with receiver");
+
+    // 3. Double-spend on receiver branch must produce 409 Conflict
+    let mut double_spend = receive_spend.clone();
+    double_spend.transaction_hash = [77; 32];
+    let proof = double_spend.causal_output.as_mut().unwrap();
+    proof.transaction_id = double_spend.transaction_hash;
+    proof.state_hash = double_spend.transaction_hash;
+    proof.signature = receiver.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+    double_spend.layer2_signature = receiver.signing_key().sign(&calculate_l2_payload_hash(&double_spend)).to_bytes();
+
+    let conflict_chain = L2ChainLockRequest {
+        auth: root.auth.clone(),
+        layer2_voucher_id: voucher.into(),
+        chain: vec![root.clone(), double_spend],
+    };
+    let res_conf = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/lock/chain"))
+        .header("X-Peer-Token", "split-http-token")
+        .json(&conflict_chain)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_conf.status(), reqwest::StatusCode::CONFLICT, "double-spend on receiver branch must collide");
+
+    server.abort();
+    let _ = server.await;
+    cancel.cancel();
+    worker.await.unwrap();
+}

@@ -1560,6 +1560,44 @@ impl RequestHandler for NodeRequestHandler {
                 );
                 return Ok((resp_header, Vec::new()));
             } else if msg_type == MsgType::ShardDigestRequest as u16 {
+                // Versioned cold recovery fence shares the existing shard RPC.
+                // Only a current authenticated committee member may pause this shard.
+                if payload.len() != 2 {
+                    if payload.len() != 20 || payload[0] != 1 || payload[1] > 1 {
+                        return Err(NodeError::Network("invalid frozen-shard request".into()));
+                    }
+                    let shard = u16::from_le_bytes([payload[2],payload[3]]);
+                    let token: [u8;16] = payload[4..20].try_into().map_err(|_|NodeError::Network("invalid fence token".into()))?;
+                    let owner = peer_identity.ok_or_else(||NodeError::Network("source fence requires authenticated peer".into()))?;
+                    if payload[1] == 1 {
+                        if !engine.release_source_shard(shard,owner,token) { return Err(NodeError::Network("foreign source lease".into())); }
+                        return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,0,0),Vec::new()));
+                    }
+                    let manager = peer_manager.as_ref().ok_or_else(||NodeError::Network("source fence lacks mesh authority".into()))?;
+                    let (committee,_,_) = manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard).await;
+                    if !readiness_manager.is_shard_ready(shard) || !engine.is_signing_healthy()
+                        || !committee.iter().any(|member|member.node_pubkey == owner)
+                        || !committee.iter().any(|member|member.node_pubkey == *identity.node_pubkey()) {
+                        return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,humoco_sim_core::wire::FLAG_NOT_READY,0),Vec::new()));
+                    }
+                    let token = match engine.freeze_source_shard(shard,owner).await {
+                        Ok(token) => token,
+                        Err(error) => {
+                            debug!(shard,error=%error,"Cold source fence unavailable");
+                            return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,humoco_sim_core::wire::FLAG_NOT_READY,0),Vec::new()));
+                        }
+                    };
+                    let now = manager.net_time_ms();
+                    let db = storage.clone();
+                    let digest_result = engine.recovery_work.spawn_blocking(move ||db.committed_shard_digest(shard,now)).await
+                        .map_err(|e|NodeError::Network(format!("frozen digest worker: {e}")))?;
+                    let (digest,_) = match digest_result { Ok(value) => value, Err(error) => {
+                        engine.release_source_shard(shard,owner,token); return Err(error.into());
+                    }};
+                    let reply = crate::network::framing::FrozenShardReply { version: 1,token,digest,lease_ms:25_000 };
+                    let bytes = bincode::serialize(&reply).map_err(|e|NodeError::Network(format!("frozen reply: {e}")))?;
+                    return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,0,checked_payload_len(bytes.len())?),bytes));
+                }
                 let shard_id = if payload.len() >= 2 {
                     u16::from_le_bytes([payload[0], payload[1]])
                 } else {
@@ -1586,16 +1624,9 @@ impl RequestHandler for NodeRequestHandler {
                     return Ok((resp_header, Vec::new()));
                 }
                 let db = storage.clone();
-                let shard_locks = tokio::task::spawn_blocking(move || db.committed_shard_records(shard_id, now_ms)).await
-                    .map_err(|e| NodeError::Network(format!("digest worker: {e}")))?
-                    .map_err(|e| NodeError::Network(format!("committed digest unavailable: {e}")))?;
+                let (digest, lock_count) = engine.recovery_work.spawn_blocking(move || db.committed_shard_digest(shard_id, now_ms)).await
+                    .map_err(|e| NodeError::Network(format!("digest worker: {e}")))??;
                 if let Some(pm) = peer_manager.as_ref() { pm.register_active_shard(shard_id).await; }
-                let digest = humoco_sim_core::crypto::compute_selected_shard_digest_at(
-                    shard_id,
-                    &shard_locks,
-                    humoco_sim_core::types::SimTime(now_ms),
-                );
-                let lock_count = shard_locks.len() as u64;
                 let resp_bytes = bincode::serialize(&(digest, lock_count)).unwrap_or_default();
                 let payload_len = checked_payload_len(resp_bytes.len())?;
                 let is_ready = readiness_manager.is_shard_ready(shard_id);
@@ -2522,6 +2553,31 @@ impl QuicTransport {
                     .await;
             });
         }
+    }
+
+    /// Network domain of this authenticated transport.
+    pub(crate) fn network_id(&self) -> humoco_sim_core::types::NetworkId { self.network_id }
+
+    /// Acquire a short absolute source fence before cold state transfer.
+    pub async fn request_frozen_shard(&self, conn: &quinn::Connection, shard: u16, seq: u64)
+        -> Result<crate::network::framing::FrozenShardReply,NodeError> {
+        let payload = [vec![1,0],shard.to_le_bytes().to_vec(),vec![0;16]].concat();
+        let header = WireHeader::new(MsgType::ShardDigestRequest as u16,seq,0,0,20);
+        let (header,bytes) = self.send_request(conn,&header,&payload).await?;
+        if header.msg_type != MsgType::ShardDigestResponse as u16 || header.flags != 0 || bytes.len() != 57 {
+            return Err(NodeError::Network("source is not ready for a no-gap cut".into()));
+        }
+        let reply: crate::network::framing::FrozenShardReply = bincode::deserialize(&bytes).map_err(|e|NodeError::Network(format!("frozen reply: {e}")))?;
+        if reply.version != 1 || reply.lease_ms != 25_000 { return Err(NodeError::Network("unsupported source fence".into())); }
+        Ok(reply)
+    }
+    /// Release only the exact authenticated source lease; expiry is the fallback.
+    pub async fn release_frozen_shard(&self, conn: &quinn::Connection, shard: u16, seq: u64, token: [u8;16]) -> Result<(),NodeError> {
+        let payload = [vec![1,1],shard.to_le_bytes().to_vec(),token.to_vec()].concat();
+        let header = WireHeader::new(MsgType::ShardDigestRequest as u16,seq,0,0,20);
+        let (header,_) = self.send_request(conn,&header,&payload).await?;
+        if header.msg_type != MsgType::ShardDigestResponse as u16 || header.flags != 0 { return Err(NodeError::Network("source release rejected".into())); }
+        Ok(())
     }
 
     /// Requests a shard digest from a peer (ShardDigestRequest -> ShardDigestResponse).

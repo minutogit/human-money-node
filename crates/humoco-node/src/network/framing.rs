@@ -1043,3 +1043,12 @@ mod tests {
         );
     }
 }
+
+/// Fresh authenticated no-gap source fence, independent of old quorum bundles.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FrozenShardReply {
+    pub version: u8,
+    pub token: [u8; 16],
+    pub digest: [u8; 32],
+    pub lease_ms: u64,
+}

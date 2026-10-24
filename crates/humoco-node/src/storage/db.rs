@@ -1,3 +1,4 @@
+pub mod install;
 mod projection;
 pub mod roots;
 mod signing;

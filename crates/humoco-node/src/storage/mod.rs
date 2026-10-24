@@ -1,3 +1,4 @@
+mod activity;
 pub mod db;
 pub mod engine;
 pub mod filter;

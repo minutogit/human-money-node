@@ -9,7 +9,6 @@ use tracing::{debug, error, info, warn};
 use crate::config::NodeConfig;
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
-use crate::storage::IngressOrigin;
 use ed25519_dalek::Signer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +160,7 @@ struct RunCleanup {
     transports: parking_lot::Mutex<Vec<crate::network::QuicTransport>>,
     flush: parking_lot::Mutex<Option<(CancellationToken, tokio::task::AbortHandle)>>,
     quota_failed: parking_lot::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+    recovery_work: parking_lot::Mutex<Option<tokio_util::task::TaskTracker>>,
 }
 
 impl RunCleanup {
@@ -184,6 +184,8 @@ impl RunCleanup {
         while producers.iter().any(|handle| !handle.is_finished()) {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
+        let recovery_work = self.recovery_work.lock().clone();
+        if let Some(work) = recovery_work { work.close(); work.wait().await; }
         let flush = self.flush.lock().clone();
         if let Some((cancel, handle)) = flush {
             cancel.cancel();
@@ -399,6 +401,7 @@ impl NodeDaemon {
             flush_cancel_token.clone(),
         );
         *cleanup.flush.lock() = Some((flush_cancel_token.clone(), flush_handle.abort_handle()));
+        *cleanup.recovery_work.lock() = Some(engine.recovery_work.clone());
         // Cold-boot recovery: Load all records into RAM index without premature pruning.
         // Unverified host SystemTime must not be trusted before P2P median synchronization (Spec 07 / INV-1203).
         engine
@@ -1137,13 +1140,13 @@ impl NodeDaemon {
 async fn compute_local_shard_digest(
     shard_id: u16,
     now_ms: u64,
-    _engine: &crate::storage::DualTierEngine,
+    engine: &crate::storage::DualTierEngine,
     storage: &std::sync::Arc<crate::storage::RedbStorage>,
 ) -> Result<[u8; 32], NodeError> {
     let storage = storage.clone();
-    let records = tokio::task::spawn_blocking(move || storage.committed_shard_records(shard_id, now_ms)).await
+    let (digest, _) = engine.recovery_work.spawn_blocking(move || storage.committed_shard_digest(shard_id, now_ms)).await
         .map_err(|e| NodeError::Daemon(format!("digest worker: {e}")))??;
-    Ok(humoco_sim_core::crypto::compute_selected_shard_digest_at(shard_id, &records, SimTime(now_ms)))
+    Ok(digest)
 }
 
 /// Repairs active state from the frozen current full-key committee on demand.
@@ -1160,415 +1163,118 @@ pub async fn sync_single_shard(
     readiness_manager: &std::sync::Arc<ShardReadinessManager>,
     cancel_token: &CancellationToken,
 ) -> Result<bool, NodeError> {
-    // DEC-057/F05: a degraded signing or storage state must never activate readiness.
-    if !engine.is_signing_healthy()
-        || !readiness_manager
-            .storage_healthy
-            .load(std::sync::atomic::Ordering::Acquire)
-    {
-        debug!(
-            shard_id,
-            "Shard recovery skipped: signing or storage unhealthy"
-        );
-        readiness_manager.mark_sync_failed(shard_id);
+    use crate::storage::db::install::ShardStage;
+    use std::collections::{HashMap,HashSet};
+    use std::sync::Arc;
+    use std::time::{Duration,Instant};
+    readiness_manager.invalidate_shard(shard_id);
+    if !engine.is_signing_healthy() || !readiness_manager.storage_healthy.load(std::sync::atomic::Ordering::Acquire) {
         return Ok(false);
     }
-    let candidate_addrs = peer_manager.shard_sync_addrs().await;
-    if candidate_addrs.is_empty() {
-        debug!(
-            shard_id,
-            "Shard recovery has no sources; readiness remains closed"
-        );
-        readiness_manager.mark_sync_failed(shard_id);
-        return Ok(false);
+    let (committee, remote, total) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
+    if !committee.iter().any(|member|member.node_pubkey == *identity.node_pubkey()) { return Ok(false); }
+    let frozen_keys: Vec<_> = committee.iter().map(|member|member.node_pubkey).collect();
+    let (needed,_) = humoco_sim_core::types::required_quorum(total);
+    if needed == 0 { return Ok(false); }
+    // Freeze in parallel: sequential twenty-peer timeouts cannot consume the
+    // absolute no-gap lease before the complete cut is even requested.
+    let mut requests = tokio::task::JoinSet::new();
+    for (member,addr) in remote {
+        let transport = transport.clone();
+        requests.spawn(async move {
+            let started = Instant::now();
+            let conn = transport.connect_peer(addr).await.ok()?;
+            let (_,key) = crate::network::tls::extract_peer_identity_from_connection(&conn)?;
+            if key.to_bytes() != member.node_pubkey { return None; }
+            let reply = transport.request_frozen_shard(&conn,shard_id,1).await.ok()?;
+            Some((member.node_pubkey,conn,reply,started+Duration::from_millis(25_000)))
+        });
     }
-    let now_ms = peer_manager.net_time_ms();
-
-    let local_digest = compute_local_shard_digest(shard_id, now_ms, engine, storage).await?;
-
-    // One frozen full-key committee; unavailable members are never replaced.
-    let (committee, remote, total_known) = peer_manager
-        .shard_committee(
-            *identity.node_pubkey(),
-            *identity.hrw_routing_id(),
-            shard_id,
-        )
-        .await;
-    // DEC-057/F05: never activate readiness for a shard we do not sit in.
-    let self_in_committee = committee
-        .iter()
-        .any(|member| member.node_pubkey == *identity.node_pubkey());
-    if !self_in_committee {
-        debug!(
-            shard_id,
-            "Shard recovery skipped: self not in frozen shard committee"
-        );
-        readiness_manager.mark_sync_failed(shard_id);
-        return Ok(false);
-    }
-    let mut peer_digests: Vec<([u8; 32], [u8; 32], SocketAddr)> = Vec::new();
-    let mut seen_identities = std::collections::HashSet::new();
-    let mut seq: u64 = 1;
-
-    for (member, addr) in &remote {
-        if cancel_token.is_cancelled() {
-            readiness_manager.mark_sync_failed(shard_id);
-            return Ok(false);
-        }
-        let conn = match tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            transport.connect_peer(*addr),
-        )
-        .await
-        {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                debug!(peer=%addr, error=%e, "Shard digest: connect failed");
-                continue;
-            }
-            Err(_) => {
-                debug!(peer=%addr, "Shard digest: connect timeout");
-                continue;
-            }
-        };
-
-        let Some((_, verifying_key)) =
-            crate::network::tls::extract_peer_identity_from_connection(&conn)
-        else {
-            continue;
-        };
-        let authenticated_key = verifying_key.to_bytes();
-        if authenticated_key != member.node_pubkey || !seen_identities.insert(authenticated_key) {
-            continue;
-        }
-
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            transport.request_shard_digest(&conn, shard_id, seq),
-        )
-        .await
-        {
-            Ok(Ok((digest, _count))) => {
-                peer_digests.push((authenticated_key, digest, *addr));
-            }
-            Ok(Err(e)) => {
-                debug!(peer=%addr, error=%e, "Shard digest request failed");
-            }
-            Err(_) => {
-                debug!(peer=%addr, "Shard digest request timeout");
+    let mut sources = Vec::new();
+    let collect_until = tokio::time::Instant::now()+Duration::from_secs(8);
+    while !requests.is_empty() {
+        tokio::select! {
+            _ = cancel_token.cancelled() => break,
+            _ = tokio::time::sleep_until(collect_until) => break,
+            result = requests.join_next() => {
+                if let Some(Ok(Some(source))) = result { sources.push(source); }
             }
         }
-        seq = seq.wrapping_add(1);
     }
-
-    if peer_digests.is_empty() {
-        readiness_manager.mark_sync_failed(shard_id);
-        return Ok(false);
-    }
-
-    let (needed, _) = humoco_sim_core::types::required_quorum(total_known);
-    let mut groups: std::collections::HashMap<[u8; 32], Vec<SocketAddr>> =
-        std::collections::HashMap::new();
-    for (key, digest, addr) in peer_digests {
-        if committee.iter().any(|member| member.node_pubkey == key) {
-            groups.entry(digest).or_default().push(addr);
+    requests.abort_all();
+    while requests.join_next().await.is_some() {}
+    let result = async {
+        if cancel_token.is_cancelled() { return Ok(false); }
+        let mut groups: HashMap<[u8;32],HashSet<[u8;32]>> = HashMap::new();
+        for (key,_,reply,expires) in &sources {
+            if frozen_keys.contains(key) && Instant::now() < *expires { groups.entry(reply.digest).or_default().insert(*key); }
         }
-    }
-    let Some((dominant_digest, dominant_addrs)) = groups.into_iter().find(|(_, addresses)| {
-        let count = addresses.len();
-        count >= needed && needed > 0
-    }) else {
-        readiness_manager.mark_sync_failed(shard_id);
-        return Ok(false);
-    };
-
-    if dominant_digest == local_digest {
-        // DEC-057/F05: convergence alone is insufficient — re-verify both
-        // activation guards before marking readiness.
-        let (committee_now, _, _) = peer_manager
-            .shard_committee(
-                *identity.node_pubkey(),
-                *identity.hrw_routing_id(),
-                shard_id,
-            )
-            .await;
-        if committee_now
-            .iter()
-            .map(|member| member.node_pubkey)
-            .collect::<Vec<_>>()
-            != committee
-                .iter()
-                .map(|member| member.node_pubkey)
-                .collect::<Vec<_>>()
-            || !engine.is_signing_healthy()
-            || !readiness_manager
-                .storage_healthy
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            warn!(
-                shard_id,
-                "Digest converged but activation guards failed; refusing readiness"
-            );
-            readiness_manager.mark_sync_failed(shard_id);
-            return Ok(false);
-        }
-        debug!(
-            shard_id,
-            "Shard digest sync: converged via dominant quorum, no pull needed"
-        );
-        readiness_manager.mark_shard_ready(shard_id);
-        return Ok(true);
-    }
-
-    info!(shard_id, divergent = dominant_addrs.len(), "Shard digest divergence detected via evaluate_digest_clusters, pulling bucketted active sync");
-
-    // 5-Minuten Bucket Shard Sync (docs/PLAN_BUCKETED_SHARD_SYNC.md & DEC-085/DEC-086):
-    let mut shard_pull_ok = false;
-    let mut synced_native_parents: std::collections::HashSet<[u8; 32]> =
-        std::collections::HashSet::new();
-    let mut synced_hmc_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for addr in dominant_addrs {
-        if cancel_token.is_cancelled() {
-            break;
-        }
-        let conn = match transport.connect_peer(addr).await {
-            Ok(c) => c,
-            Err(e) => {
-                debug!(peer=%addr, error=%e, "ActiveSync connect failed");
-                continue;
-            }
-        };
-
-        // Full active-state transfer covers unknown old roots; local creation-time
-        // heuristics cannot bound a remote voucher's remaining validity.
-        let buckets_to_sync: [Option<u64>; 1] = [None];
-
-        let mut peer_pull_ok = true;
-        let mut cur_peer_native = std::collections::HashSet::new();
-        let mut cur_peer_hmc = std::collections::HashSet::new();
-        let mut staged_native = Vec::new();
-        let mut staged_hmc = Vec::new();
-        // Global admission, not per-job multiplication of the RAM budget.
-        // Conservative charge includes deserialized records, serialization and
-        // duplicate/index bookkeeping until installation has actually finished.
-        let mut staging_permits = Vec::new();
-
-        for target_b in buckets_to_sync {
-            let mut cursor: u64 = 0;
-            let limit: usize = 500;
+        let Some((digest,witnesses)) = groups.into_iter().find(|(_,keys)|keys.len() >= needed) else { return Ok(false); };
+        let witnesses_count = witnesses.len();
+        let class = if total >= 20 && peer_manager.is_network_stable_ge20_for_24h(peer_manager.net_time_ms()) { 2 } else { 1 };
+        let mut context = blake3::Hasher::new();
+        let domain = b"HUMOCO_V1_LIVE_CUT_SUPPORT";
+        context.update(&[domain.len() as u8]); context.update(domain);
+        context.update(&[match transport.network_id() { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 }]);
+        context.update(&shard_id.to_le_bytes()); context.update(&digest); context.update(&[class]);
+        for key in &frozen_keys { context.update(key); }
+        let context = *context.finalize().as_bytes();
+        let minimum_deadline = sources.iter().filter(|(key,_,_,_)|witnesses.contains(key)).map(|(_,_,_,deadline)|*deadline).min();
+        let Some(deadline) = minimum_deadline else { return Ok(false); };
+        // Hold only a small cache per disk cut. Page reservations cover wire,
+        // deserialization, validation and write buffers BEFORE requesting bytes.
+        let Ok(_cache) = readiness_manager.sync_bytes.clone().try_acquire_many_owned(128*1024) else { return Ok(false); };
+        for (key,conn,reply,_) in &sources {
+            if !witnesses.contains(key) || reply.digest != digest { continue; }
+            let now = peer_manager.net_time_ms();
+            let stage = Arc::new(engine.recovery_work.spawn_blocking(move ||ShardStage::new(shard_id,now)).await
+                .map_err(|e|NodeError::Daemon(format!("staging worker: {e}")))??);
+            let mut cursor = 0;
+            let mut sequence = 2;
+            let mut complete = false;
             loop {
-                if cancel_token.is_cancelled() {
-                    break;
-                }
-                let page_res = match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    transport
-                        .request_active_sync_page_for_shard(&conn, seq, cursor, limit, shard_id),
-                )
-                .await
-                {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) => {
-                        debug!(peer=%addr, target_b=?target_b, error=%e, "ActiveSync page request failed");
-                        peer_pull_ok = false;
-                        break;
-                    }
-                    Err(_) => {
-                        debug!(peer=%addr, target_b=?target_b, "ActiveSync page request timeout");
-                        peer_pull_ok = false;
-                        break;
-                    }
+                if cancel_token.is_cancelled() || Instant::now() >= deadline { break; }
+                let (Ok(_bytes),Ok(_entries)) = (
+                    readiness_manager.sync_bytes.clone().try_acquire_many_owned(512*1024),
+                    readiness_manager.sync_entries.clone().try_acquire_many_owned(500)) else { break; };
+                let page = match tokio::time::timeout(Duration::from_secs(3),transport.request_active_sync_page_for_shard(conn,sequence,cursor,500,shard_id)).await {
+                    Ok(Ok(page)) => page, _ => break,
                 };
-                seq = seq.wrapping_add(1);
-
-                let entries = page_res.payload.locks.len() + page_res.payload.hmc_locks.len();
-                let bytes = bincode::serialized_size(&page_res.payload)
-                    .ok()
-                    .and_then(|size| size.checked_mul(8))
-                    .and_then(|size| size.checked_add((entries as u64).saturating_mul(512)))
-                    .and_then(|size| u32::try_from(size).ok());
-                let Some(bytes) = bytes else {
-                    peer_pull_ok = false;
-                    break;
-                };
-                let (Ok(bytes_permit), Ok(entries_permit)) = (
-                    readiness_manager
-                        .sync_bytes
-                        .clone()
-                        .try_acquire_many_owned(bytes),
-                    readiness_manager
-                        .sync_entries
-                        .clone()
-                        .try_acquire_many_owned(entries as u32),
-                ) else {
-                    peer_pull_ok = false;
-                    break;
-                };
-                staging_permits.push((bytes_permit, entries_permit));
-
-                for (rec, root_valid) in page_res.payload.locks {
-                    if cancel_token.is_cancelled() {
-                        break;
-                    }
-                    let sid = u16::from_be_bytes([rec.parent_lock[0], rec.parent_lock[1]]);
-                    if sid == shard_id {
-                        cur_peer_native.insert(rec.parent_lock);
-                    }
-                    staged_native.push((rec, root_valid));
-                }
-                for (tag, entry) in page_res.payload.hmc_locks {
-                    if cancel_token.is_cancelled() {
-                        break;
-                    }
-                    // The fixed server cut is filtered by canonical root shard.
-                    // Root metadata is transferred first but never a spend tag.
-                    if !crate::storage::db::roots::is_root(&tag, &entry) {
-                        cur_peer_hmc.insert(tag.clone());
-                    }
-                    staged_hmc.push((tag, entry));
-                }
-
-                if !peer_pull_ok || cancel_token.is_cancelled() {
-                    peer_pull_ok = false;
-                    break;
-                }
-                if !page_res.has_more {
-                    break;
-                }
-                if let Some(next) = page_res.next_cursor {
-                    if next <= cursor {
-                        peer_pull_ok = false;
-                        break;
-                    }
-                    cursor = next;
-                } else {
-                    peer_pull_ok = false;
-                    break;
-                }
+                sequence += 1;
+                let next = page.next_cursor;
+                let more = page.has_more;
+                let cut = stage.clone();
+                let appended = engine.recovery_work.spawn_blocking(move ||cut.append(page.payload)).await
+                    .map_err(|e|NodeError::Daemon(format!("staging worker: {e}")))?;
+                if appended.is_err() { break; }
+                if !more { complete = true; break; }
+                match next { Some(next) if next > cursor => cursor = next, _ => break }
             }
-            if !peer_pull_ok {
-                break;
-            }
+            if !complete { continue; }
+            let cut = stage.clone();
+            if engine.recovery_work.spawn_blocking(move ||cut.digest()).await.map_err(|e|NodeError::Daemon(format!("staging digest: {e}")))?? != digest { continue; }
+            let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
+            if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys || cancel_token.is_cancelled() || Instant::now() >= deadline { return Ok(false); }
+            let Ok(_installation_memory) = readiness_manager.sync_bytes.clone().try_acquire_many_owned(512*1024) else { return Ok(false); };
+            engine.install_shard_snapshot(stage,digest,class,context,witnesses_count).await?;
+            if cancel_token.is_cancelled() || Instant::now() >= deadline || !engine.is_signing_healthy() { return Ok(false); }
+            let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
+            if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys { return Ok(false); }
+            if compute_local_shard_digest(shard_id,peer_manager.net_time_ms(),engine,storage).await? != digest || Instant::now() >= deadline { return Ok(false); }
+            // Quorum sources remain fenced THROUGH target publication. No valid
+            // quorum can commit an omitted write in the cut-to-activation gap.
+            readiness_manager.mark_shard_ready(shard_id);
+            return Ok(true);
         }
-
-        // DEC-059/F07 Staged validation: only commit transferred records to productive
-        // engine and redb after the entire snapshot stream from this peer has arrived intact.
-        if peer_pull_ok && !cancel_token.is_cancelled() {
-            let now_ms2 = peer_manager.net_time_ms();
-            let mut apply_ok = true;
-            for (rec, root_valid) in staged_native {
-                if cancel_token.is_cancelled() {
-                    apply_ok = false;
-                    break;
-                }
-                if engine
-                    .ingress_lock_with_origin(
-                        rec,
-                        SimTime(now_ms2),
-                        SimTime(root_valid),
-                        IngressOrigin::PartitionSync,
-                    )
-                    .await
-                    .is_err()
-                {
-                    apply_ok = false;
-                    break;
-                }
-            }
-            if apply_ok {
-                for (tag, entry) in staged_hmc {
-                    if cancel_token.is_cancelled() {
-                        apply_ok = false;
-                        break;
-                    }
-                    let (verdict, _) = engine
-                        .ingress_hmc_lock_durable(
-                            tag,
-                            entry,
-                            IngressOrigin::PartitionSync,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
-                    if !matches!(verdict, crate::api::hmc::L2Verdict::Verified { .. }) {
-                        apply_ok = false;
-                        break;
-                    }
-                }
-            }
-            if apply_ok {
-                synced_native_parents = cur_peer_native;
-                synced_hmc_tags = cur_peer_hmc;
-                shard_pull_ok = true;
-                break;
-            }
-        }
+        Ok(false)
+    }.await;
+    // Release explicitly on all normal outcomes. Cancellation/disconnect uses
+    // the source's absolute expiry; neither retries nor repeated signals renew it.
+    for (_,conn,reply,_) in &sources {
+        let _ = tokio::time::timeout(Duration::from_millis(100),transport.release_frozen_shard(conn,shard_id,999,reply.token)).await;
     }
-
-    if shard_pull_ok {
-        // DEC-057/F05: quarantine failure is a sync failure — must never activate.
-        if let Err(e) = engine
-            .quarantine_subquorum_locks(shard_id, &synced_native_parents, &synced_hmc_tags)
-            .await
-        {
-            warn!(shard_id, error=%e, "Failed to quarantine subquorum locks; aborting shard activation");
-            readiness_manager.mark_sync_failed(shard_id);
-            return Ok(false);
-        }
-
-        // DEC-057/F05: re-verify live committee membership and signing health
-        // after the pull; the mesh may have shifted while state was transferred.
-        let (committee_post, _, _) = peer_manager
-            .shard_committee(
-                *identity.node_pubkey(),
-                *identity.hrw_routing_id(),
-                shard_id,
-            )
-            .await;
-        if committee_post
-            .iter()
-            .map(|member| member.node_pubkey)
-            .collect::<Vec<_>>()
-            != committee
-                .iter()
-                .map(|member| member.node_pubkey)
-                .collect::<Vec<_>>()
-            || !engine.is_signing_healthy()
-            || !readiness_manager
-                .storage_healthy
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            warn!(shard_id, "Post-pull guard tripped: not in committee or unhealthy signing; refusing readiness");
-            readiness_manager.mark_sync_failed(shard_id);
-            return Ok(false);
-        }
-
-        let now_ms_post = peer_manager.net_time_ms();
-        if let Ok(post_digest) =
-            compute_local_shard_digest(shard_id, now_ms_post, engine, storage).await
-        {
-            if post_digest == dominant_digest {
-                info!(
-                    shard_id,
-                    "Transferred active state converged to dominant digest; activating shard"
-                );
-                readiness_manager.mark_shard_ready(shard_id);
-                return Ok(true);
-            } else {
-                warn!(
-                    shard_id,
-                    ?post_digest,
-                    ?dominant_digest,
-                    "Post-sync digest mismatch with dominant quorum"
-                );
-            }
-        }
-    }
-    readiness_manager.mark_sync_failed(shard_id);
-    Ok(false)
+    if !matches!(result,Ok(true)) { readiness_manager.mark_sync_failed(shard_id); }
+    result
 }
 
 #[cfg(test)]

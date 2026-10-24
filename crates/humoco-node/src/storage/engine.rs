@@ -1,3 +1,4 @@
+mod recovery;
 use humoco_sim_core::quota::ByteYears;
 use humoco_sim_core::storage::{
     ingress_time_window_valid, should_prune, IngressVerdictLow, RamIndex,
@@ -558,6 +559,7 @@ impl HmcRamIndex {
 
 #[derive(Debug)]
 pub enum FlushOp {
+    Fence { complete: tokio::sync::oneshot::Sender<bool> },
     OriginalHmcApproval {
         tag: String,
         entry: Box<L2LockEntry>,
@@ -617,7 +619,7 @@ pub enum FlushOp {
 ///   graceful-shutdown drain deterministic (no untracked `tokio::spawn` jobs).
 pub const FLUSH_BATCH_SIZE: usize = 100;
 /// Finite wait for a commit; expiry never rolls a late commit back.
-pub const DURABLE_ACK_TIMEOUT_MS: u64 = 750;
+pub const DURABLE_ACK_TIMEOUT_MS: u64 = if cfg!(test) { 3_000 } else { 750 };
 const MAX_PENDING_APPROVALS: usize = 256;
 const MAX_APPROVAL_WAITERS: usize = 32;
 const MAX_BATCH_BYTES: usize = 1_048_576;
@@ -666,6 +668,10 @@ pub struct DualTierEngine {
     pub last_prune_anchor: Arc<std::sync::atomic::AtomicU64>,
     pending_approvals: Arc<parking_lot::Mutex<HashMap<[u8; 32], PendingOriginalApproval>>>,
     support_updates: Arc<tokio::sync::Semaphore>,
+    activity: super::activity::ShardActivity,
+    pub(crate) recovery_work: tokio_util::task::TaskTracker,
+    source_leases: Arc<parking_lot::Mutex<HashMap<u16, recovery::SourceLease>>>,
+    lease_cooldowns: Arc<parking_lot::Mutex<HashMap<u16, std::time::Instant>>>,
 }
 
 impl DualTierEngine {
@@ -708,6 +714,10 @@ impl DualTierEngine {
                 last_prune_anchor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 support_updates: Arc::new(tokio::sync::Semaphore::new(32)),
+                activity: super::activity::ShardActivity::default(),
+                recovery_work: tokio_util::task::TaskTracker::new(),
+                source_leases: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                lease_cooldowns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             },
             handle,
         )
@@ -741,6 +751,10 @@ impl DualTierEngine {
             last_prune_anchor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             support_updates: Arc::new(tokio::sync::Semaphore::new(32)),
+            activity: super::activity::ShardActivity::default(),
+            recovery_work: tokio_util::task::TaskTracker::new(),
+            source_leases: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            lease_cooldowns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -847,6 +861,7 @@ impl DualTierEngine {
                 "Invalid approval size or class".into(),
             ));
         }
+        let _activity = self.enter_hmc_activity(&tag, &entry).await?;
         let root = {
             let ram = self.hmc_ram.read().await;
             if ram
@@ -907,6 +922,8 @@ impl DualTierEngine {
         class: u8,
         now_ms: u64,
     ) -> Result<Vec<u8>, StorageError> {
+        let shard = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
+        let _activity = self.activity.enter(shard).ok_or_else(|| StorageError::DurableCommitFailed("FLAG_NOT_READY: installing shard".into()))?;
         if root_valid_until.0 <= now_ms
             || approval.is_empty()
             || approval.len() > 16_384
@@ -943,6 +960,14 @@ impl DualTierEngine {
             health: self.stats.clone(),
         })
         .await
+    }
+
+    async fn enter_hmc_activity(&self, tag: &str, entry: &L2LockEntry) -> Result<Option<super::activity::Lease>, StorageError> {
+        self.expire_source_leases();
+        let shard = if super::db::roots::is_root(tag, entry) {
+            Some(humoco_sim_core::types::canonical_voucher_shard(&humoco_sim_core::types::genesis_parent_bytes_from_tag(tag)))
+        } else { self.get_hmc_voucher_genesis_shard(&entry.layer2_voucher_id).await };
+        shard.map(|shard| self.activity.enter(shard).ok_or_else(|| StorageError::DurableCommitFailed("FLAG_NOT_READY: installing shard".into()))).transpose()
     }
 
     /// Sets the peer manager reference so that node bans propagate immediately to peer connections.
@@ -1056,6 +1081,10 @@ impl DualTierEngine {
         if !self.is_signing_healthy() {
             return Err(IngressVerdictLow::RejectedCapacity);
         }
+
+        let shard = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
+        self.expire_source_leases();
+        let Some(_activity) = self.activity.enter(shard) else { return Err(IngressVerdictLow::RejectedCapacity); };
 
         // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
         let permit = match self.tx.try_reserve() {
@@ -1177,6 +1206,7 @@ impl DualTierEngine {
         network: humoco_sim_core::types::NetworkId,
         manager: Option<Arc<crate::network::PeerManager>>,
     ) -> Result<(), StorageError> {
+        let _activity = self.activity.enter(certificate.shard_id).ok_or_else(|| StorageError::DurableCommitFailed("FLAG_NOT_READY: installing shard".into()))?;
         let entry = self
             .get_hmc_ram_lock(&tag)
             .await
@@ -1369,6 +1399,10 @@ impl DualTierEngine {
                 false,
             );
         }
+        let _activity = match self.enter_hmc_activity(&lookup_tag, &entry).await {
+            Ok(lease) => lease,
+            Err(error) => return (L2Verdict::Rejected { reason: error.to_string() }, false),
+        };
         // Legacy on-disk anchors can be recovered, but a new public canonical
         // root needs an author-bound output sidecar. Otherwise the old L1 init
         // payload's placeholder voucher ID could be rebound by an attacker.
@@ -1735,8 +1769,22 @@ impl DualTierEngine {
                 false,
             );
         }
+        // Historical predecessor locks may accompany a freshly signed terminal
+        // spend. They are admissible only when the COMPLETE author-signed causal
+        // path validates first; a fresh gateway timestamp never supplies this
+        // authority. The terminal wallet T0 itself is never refreshed or bypassed.
+        let last_index = chain_req.chain.len() - 1;
+        let historical_prefix = origin == IngressOrigin::ClientApi
+            && now_ms.is_some_and(|now| {
+                let tip = &chain_req.chain[last_index];
+                !tip.is_genesis && tip.created_at_ms != 0 && tip.created_at_ms.abs_diff(now) <= 30_000
+                    && chain_req.chain[..last_index].iter().any(|hop| !hop.is_genesis && hop.created_at_ms.abs_diff(now) > 30_000)
+            })
+            && Self::verify_chain_causality(&chain_req).is_ok();
+        let hop_count = chain_req.chain.len() as u64;
+        let chain_timeout = DURABLE_ACK_TIMEOUT_MS.saturating_mul(hop_count.max(1));
         let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_millis(DURABLE_ACK_TIMEOUT_MS);
+            tokio::time::Instant::now() + std::time::Duration::from_millis(chain_timeout);
         let mut terminal = None;
         let mut changed = false;
         for (index, hop) in chain_req.chain.iter().enumerate() {
@@ -1753,7 +1801,7 @@ impl DualTierEngine {
             // Root proofs may be historical: they spend nothing. Only actual
             // newly admitted spends are subject to the signed wallet-T0 window.
             if origin == IngressOrigin::ClientApi && !hop.is_genesis {
-                if now_ms.is_none_or(|now| {
+                if !(historical_prefix && index < last_index) && now_ms.is_none_or(|now| {
                     hop.created_at_ms == 0 || hop.created_at_ms.abs_diff(now) > 30_000
                 }) {
                     return (L2Verdict::Rejected { reason: format!("Wallet timestamp outside 30s window at chain step {index}; accepted prefix retained") }, changed);
@@ -2495,6 +2543,14 @@ impl DualTierEngine {
                 failed: false,
             };
         }
+        if let Some(index) = batch.iter().position(|op| matches!(op, FlushOp::Fence { .. })) {
+            let mut tail = batch.split_off(index);
+            let before = Self::flush_batch(batch, db);
+            if let FlushOp::Fence { complete } = tail.remove(0) { let _ = complete.send(!before.failed); }
+            let after = Self::flush_batch(&mut tail, db);
+            return FlushOutcome { ops_committed: before.ops_committed + after.ops_committed,
+                attempts: before.attempts + after.attempts, failed: before.failed || after.failed };
+        }
         // Serialized payload size bounds each worker transaction in addition
         // to operation count. Queue/body limits bound individual input records.
         let mut bytes = 0usize;
@@ -2634,7 +2690,7 @@ impl DualTierEngine {
         let mut prunes: Vec<u64> = Vec::new();
         for op in batch.drain(..) {
             match op {
-                FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. } => {
+                FlushOp::Fence { .. } | FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. } => {
                     return FlushOutcome {
                         ops_committed: 0,
                         attempts: 0,

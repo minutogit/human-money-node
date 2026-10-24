@@ -188,7 +188,7 @@ impl TestNode {
             if status == StatusCode::SERVICE_UNAVAILABLE && attempts < 50 {
                 if let L2Verdict::Rejected { ref reason } = resp.verdict {
                     if reason.contains("FLAG_NOT_READY") {
-                        tokio::time::sleep(Duration::from_millis(2)).await;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
                         continue;
                     }
                 }

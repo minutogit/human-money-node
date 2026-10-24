@@ -2528,14 +2528,12 @@ async fn submit_hmc_chain_lock_inner(
         .engine
         .get_hmc_voucher_root_valid(&chain_req.layer2_voucher_id)
         .await;
-    let chain_genesis_root = chain_req.chain.iter().find(|h| h.is_genesis).and_then(|h| {
-        h.deletable_at
-            .as_deref()
-            .and_then(|s| s.parse::<u64>().ok())
-    });
-    let root_valid_until = stored_root
-        .or(chain_genesis_root)
-        .unwrap_or(now_ms + 600_000);
+    let chain_genesis_root = chain_req.chain.iter().find(|hop|hop.is_genesis)
+        .and_then(|hop|crate::storage::db::roots::root_valid_until(&L2LockEntry::from(hop)).ok());
+    let Some(root_valid_until) = stored_root.or(chain_genesis_root) else {
+        let envelope = wrap_and_sign_verdict(&state.identity,L2Verdict::Rejected { reason:"Unknown voucher root: signed Root Anchor required".into() });
+        return (StatusCode::BAD_REQUEST,Json(envelope)).into_response();
+    };
     let ttl_seconds = root_valid_until.saturating_sub(now_ms) / 1000;
 
     // 3-Tier Access Evaluation (single charge for whole batch)

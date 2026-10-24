@@ -561,6 +561,65 @@ async fn asymmetric_partition_8_6_6_blocks_finality_until_14_quorum_reunited() {
     stop_recovery_peers(peers).await;
 }
 
+#[tokio::test]
+async fn distributed_compatible_state_ab8_a6_b6_reconciles_per_fact_and_quarantines_unconfirmed_local() {
+    let peers = recovery_peers(20).await;
+    let now = peers[0].manager.net_time_ms();
+    let shard = 42u16;
+    let mut p_a = [7; 32]; p_a[..2].copy_from_slice(&shard.to_be_bytes());
+    let mut p_b = [8; 32]; p_b[..2].copy_from_slice(&shard.to_be_bytes());
+    let mut p_rogue = [9; 32]; p_rogue[..2].copy_from_slice(&shard.to_be_bytes());
+    let lock_a = LockRecord::new(p_a, [8; 32], vec![1], SimTime(now), SimTime(now + 600_000));
+    let lock_b = LockRecord::new(p_b, [9; 32], vec![2], SimTime(now), SimTime(now + 600_000));
+    let unconfirmed_local = LockRecord::new(p_rogue, [10; 32], vec![3], SimTime(now), SimTime(now + 600_000));
+
+    // AB: 8 (peers 0..8), A-only: 6 (peers 8..14), B-only: 6 (peers 14..20).
+    // Both A and B have 14 committee holders, but no whole-cut digest has >= 14 matches.
+    for (i, peer) in peers.iter().enumerate() {
+        peer.manager.set_ge20_anchor_for_test(now - 86_400_001);
+        if i < 14 {
+            peer.db.put_lock(&lock_a, now + 600_000).unwrap();
+        }
+        if !(8..14).contains(&i) {
+            peer.db.put_lock(&lock_b, now + 600_000).unwrap();
+        }
+        if i == 0 {
+            // Unconfirmed Class-0 local singleton lock on target must NOT be promoted
+            peer.db.put_lock(&unconfirmed_local, now + 600_000).unwrap();
+        }
+        peer.engine.recover_from_disk(SimTime(now)).await.unwrap();
+        peer.readiness.mark_shard_ready(shard);
+    }
+
+    let target = &peers[0];
+    let synced = humoco_node::daemon::sync_single_shard(
+        shard,
+        &target.network,
+        &target.manager,
+        &target.engine,
+        &target.db,
+        &target.identity,
+        &target.readiness,
+        &target.cancel,
+    )
+    .await
+    .unwrap();
+    assert!(synced, "AB:8, A:6, B:6 must reconcile per-fact distributed witnesses and reach READY");
+    assert!(target.readiness.is_shard_ready(shard));
+    assert_eq!(target.db.get_lock(&p_a).unwrap().unwrap().0.status.confirmation_class(), 2);
+    assert_eq!(target.db.get_lock(&p_b).unwrap().unwrap().0.status.confirmation_class(), 2);
+    assert!(
+        target.db.get_lock(&p_rogue).unwrap().is_none(),
+        "unconfirmed local singleton lock must not be promoted into active locks"
+    );
+    assert!(
+        target.db.get_provisional_lock(&p_rogue).unwrap().is_some(),
+        "unconfirmed local singleton lock must be quarantined into provisional storage"
+    );
+
+    stop_recovery_peers(peers).await;
+}
+
 #[path="common/recovery.rs"]
 mod recovery;
 use recovery::*;

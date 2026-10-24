@@ -111,8 +111,9 @@ impl RedbStorage {
     /// status fields or historical signature bundles do not establish it.
     pub(crate) fn install_shard_cut(&self, stage: &ShardStage, expected: [u8;32], class: u8,
         context: [u8;32], witnesses: usize, inherited: Option<&support::VerifiedInheritedCut>) -> Result<(), StorageError> {
-        if let Some(proof) = inherited { proof.validate(stage,expected)?; }
+        let support_is_quorum_verified = if let Some(proof) = inherited { proof.validate(stage,expected)? }
         else if stage.storage.db.begin_read()?.open_table(support::TABLE_CONFIRMATION_SUPPORT)?.len()? != 0 || stage.storage.db.begin_read()?.open_table(support::TABLE_NATIVE_SUPPORT)?.len()? != 0 { return Err(invalid("inherited support lacks qualified admission")); }
+        else { false };
         if !self.is_signing_history_healthy() || !(1..=2).contains(&class)
             || witnesses == 0 || (class == 2 && witnesses < 14) || stage.digest()? != expected {
             return Err(invalid("unqualified shard installation"));
@@ -145,8 +146,11 @@ impl RedbStorage {
                 if incoming.as_ref().is_some_and(|(_,root)|*root != old_root) { return Err(invalid("native root lifetime changed")); }
                 let old_class = old.status.confirmation_class();
                 let key_support = support::native_key(&key);
+                let incoming_id = incoming.as_ref().map(|(new,_)| new.id);
                 let new_class = source.open_table(support::TABLE_NATIVE_SUPPORT)?.get(key_support.as_str())?
-                    .map(|v|serde_json::from_slice::<support::ConfirmationSupport>(v.value())).transpose()?.map_or(class,|f|class.max(f.class));
+                    .map(|v|serde_json::from_slice::<support::ConfirmationSupport>(v.value())).transpose()?
+                    .filter(|f|f.parent == key && incoming_id.as_ref().is_some_and(|id| f.child == *id) && f.root_valid_until_ms == old_root)
+                    .map_or(class,|f|class.max(if support_is_quorum_verified { f.class } else { 0 }));
                 if old.valid_until.0 > stage.now && !old.status.is_void() {
                     if incoming.as_ref().is_none_or(|(new,_)| new.valid_until.0 <= stage.now || new.status.is_void()) && old_class > 0 {
                         return Err(invalid("quorum cut omits confirmed native choice"));
@@ -186,8 +190,11 @@ impl RedbStorage {
                 let support = tx.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
                 let old_fact = support.get(tag.as_str())?.map(|v| serde_json::from_slice::<support::ConfirmationSupport>(v.value())).transpose()?;
                 let old_class = old_fact.as_ref().filter(|f| f.child == old.t_id).map_or(0, |f| f.class);
+                let incoming_id = incoming.as_ref().map(|new| new.t_id);
                 let new_class = source.open_table(support::TABLE_CONFIRMATION_SUPPORT)?.get(tag.as_str())?
-                    .map(|v|serde_json::from_slice::<support::ConfirmationSupport>(v.value())).transpose()?.map_or(class,|f|class.max(f.class));
+                    .map(|v|serde_json::from_slice::<support::ConfirmationSupport>(v.value())).transpose()?
+                    .filter(|f|incoming_id.as_ref().is_some_and(|id| f.child == *id))
+                    .map_or(class,|f|class.max(if support_is_quorum_verified { f.class } else { 0 }));
                 if roots::root_valid_until(&root)? > stage.now {
                     if incoming.is_none() && old_class > 0 { return Err(invalid("quorum cut omits verified support")); }
                     if let Some(new) = &incoming {
@@ -211,7 +218,9 @@ impl RedbStorage {
             let support_key = support::native_key(&row.parent_lock);
             let incoming = source.open_table(support::TABLE_NATIVE_SUPPORT)?.get(support_key.as_str())?
                 .map(|v|serde_json::from_slice::<support::ConfirmationSupport>(v.value())).transpose()?;
-            let inherited = incoming.filter(|f| f.parent == row.parent_lock && f.child == row.id && f.root_valid_until_ms == root).map_or(0,|f|f.class);
+            let inherited = if support_is_quorum_verified {
+                incoming.filter(|f| f.parent == row.parent_lock && f.child == row.id && f.root_valid_until_ms == root).map_or(0,|f|f.class)
+            } else { 0 };
             let old_verified = tx.open_table(support::TABLE_NATIVE_SUPPORT)?.get(support_key.as_str())?
                 .map(|v|serde_json::from_slice::<support::ConfirmationSupport>(v.value())).transpose()?
                 .filter(|f|f.parent == row.parent_lock && f.child == row.id && f.root_valid_until_ms == root).map_or(0,|f|f.class);
@@ -241,10 +250,13 @@ impl RedbStorage {
             tx.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?.remove(tag.value())?;
             tx.open_table(TABLE_HMC_VOUCHER_INDEX)?.insert((row.layer2_voucher_id.as_str(),tag.value()),())?;
             tx.open_table(TABLE_HMC_TTL_INDEX)?.insert((validity.saturating_add(30_000)/1000,tag.value()),())?;
-            let mut fact = support::ConfirmationSupport { child: row.t_id, parent: *blake3::hash(tag.value().as_bytes()).as_bytes(),
-                class: class.max(source.open_table(support::TABLE_CONFIRMATION_SUPPORT)?.get(tag.value())?
+            let inherited = if support_is_quorum_verified {
+                source.open_table(support::TABLE_CONFIRMATION_SUPPORT)?.get(tag.value())?
                     .map(|v|serde_json::from_slice::<support::ConfirmationSupport>(v.value())).transpose()?
-                    .filter(|f|f.child == row.t_id && f.root_valid_until_ms == validity).map_or(0,|f|f.class)), root_valid_until_ms: validity, verified_context: context };
+                    .filter(|f|f.child == row.t_id && f.root_valid_until_ms == validity).map_or(0,|f|f.class)
+            } else { 0 };
+            let mut fact = support::ConfirmationSupport { child: row.t_id, parent: *blake3::hash(tag.value().as_bytes()).as_bytes(),
+                class: class.max(inherited), root_valid_until_ms: validity, verified_context: context };
             if let Some(old) = tx.open_table(support::TABLE_CONFIRMATION_SUPPORT)?.get(tag.value())? {
                 let old: support::ConfirmationSupport = serde_json::from_slice(old.value())?;
                 if old.child == fact.child && old.class > fact.class { fact = old; }
@@ -307,6 +319,7 @@ impl RedbStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::NodeIdentity;
     use ed25519_dalek::Signer;
     #[test]
     fn confirmed_omission_rolls_back_root_registration_and_all_state() {
@@ -354,5 +367,69 @@ mod tests {
         let value=table.get(support::native_key(&old.parent_lock).as_str()).unwrap().unwrap();
         let fact:support::ConfirmationSupport=serde_json::from_slice(value.value()).unwrap();
         assert_eq!(fact.class,1);
+    }
+    fn stage_with_class_two_support(now:u64) -> (ShardStage,LockRecord,u64) {
+        let parent=[17;32];
+        let shard=u16::from_be_bytes([17,17]);
+        let root=now+600_000;
+        let row=LockRecord::new(parent,[18;32],vec![19],SimTime(now),SimTime(root));
+        let key=support::native_key(&parent);
+        let fact=support::ConfirmationSupport { parent,child:row.id,class:2,
+            root_valid_until_ms:root,verified_context:[77;32] };
+        let stage=ShardStage::new(shard,now).unwrap();
+        stage.append(SyncPayload { locks:vec![(row.clone(),root)],hmc_locks:vec![],
+            support:vec![(0,key,fact)] }).unwrap();
+        (stage,row,root)
+    }
+    fn inherited_cut(stage:&ShardStage,objective:[u8;32],receiver:&NodeIdentity,
+        source_identities:&[NodeIdentity],support_digests:&[[u8;32]],qualified:&[[u8;32]])
+        -> support::VerifiedInheritedCut {
+        let committee:Vec<_> = std::iter::once(*receiver.node_pubkey())
+            .chain(source_identities.iter().map(|identity|*identity.node_pubkey())).collect();
+        let proofs:Vec<_> = source_identities.iter().zip(support_digests).enumerate()
+            .map(|(index,(identity,support_digest))|{
+                let mut reply=crate::network::framing::FrozenShardReply { version:2,
+                    token:[index as u8;16],digest:objective,lease_ms:25_000,
+                    support_digest:*support_digest,signature:Vec::new() };
+                reply.signature=identity.signing_key().sign(&reply.signing_digest(
+                    humoco_sim_core::types::NetworkId::Mainnet,stage.shard,
+                    identity.node_pubkey(),receiver.node_pubkey())).to_bytes().to_vec();
+                (*identity.node_pubkey(),reply)
+            }).collect();
+        support::VerifiedInheritedCut::verify(humoco_sim_core::types::NetworkId::Mainnet,
+            stage.shard,*receiver.node_pubkey(),&committee,3,objective,
+            &support_digests.iter().copied().collect::<std::collections::HashSet<_>>()
+                .into_iter().collect::<Vec<_>>(),qualified,&proofs).unwrap()
+    }
+    #[test]
+    fn support_digest_without_quorum_cannot_promote_class_two() {
+        let dir=tempfile::tempdir().unwrap();
+        let db=RedbStorage::open(&dir.path().join("node.redb")).unwrap();
+        let (stage,row,_)=stage_with_class_two_support(1_000);
+        let objective=stage.digest().unwrap();
+        let staged_support=stage.support_digest().unwrap();
+        let receiver=NodeIdentity::generate();
+        let sources:Vec<_>=(0..3).map(|_|NodeIdentity::generate()).collect();
+        let support_digests=[staged_support,[8;32],[8;32]];
+        let inherited=inherited_cut(&stage,objective,&receiver,&sources,&support_digests,&[]);
+        db.install_shard_cut(&stage,objective,1,[1;32],3,Some(&inherited)).unwrap();
+        assert_eq!(db.native_confirmation_support(&row.parent_lock).unwrap().unwrap().class,1);
+        assert_eq!(db.get_lock(&row.parent_lock).unwrap().unwrap().0.status.confirmation_class(),1);
+    }
+    #[test]
+    fn support_digest_with_quorum_can_inherit_class_two() {
+        let dir=tempfile::tempdir().unwrap();
+        let db=RedbStorage::open(&dir.path().join("node.redb")).unwrap();
+        let (stage,row,_)=stage_with_class_two_support(1_000);
+        let objective=stage.digest().unwrap();
+        let staged_support=stage.support_digest().unwrap();
+        let receiver=NodeIdentity::generate();
+        let sources:Vec<_>=(0..3).map(|_|NodeIdentity::generate()).collect();
+        let support_digests=[staged_support;3];
+        let inherited=inherited_cut(&stage,objective,&receiver,&sources,&support_digests,
+            &[staged_support]);
+        db.install_shard_cut(&stage,objective,1,[1;32],3,Some(&inherited)).unwrap();
+        assert_eq!(db.native_confirmation_support(&row.parent_lock).unwrap().unwrap().class,2);
+        assert_eq!(db.get_lock(&row.parent_lock).unwrap().unwrap().0.status.confirmation_class(),2);
     }
 }

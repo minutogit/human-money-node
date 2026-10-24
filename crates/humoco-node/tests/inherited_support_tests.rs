@@ -159,6 +159,29 @@ async fn mixed_known_and_unknown_support_on_identical_objective_state_recovers_r
  recovery::stop_recovery_peers(peers).await;
 }
 
+#[tokio::test]
+async fn single_byzantine_source_forged_final_support_is_downgraded_over_real_quic() {
+ let peers=recovery::recovery_peers_fault(4,false,8).await;
+ let now=peers[0].manager.net_time_ms();
+ let row=LockRecord::new([21;32],[22;32],vec![23],SimTime(now),SimTime(now+600_000));
+ let shard=u16::from_be_bytes([21;2]);
+ // Peers 0..3 hold the identical objective lock with unknown support (class 0),
+ // while peer 0 (Byzantine source via support_fault == 8) signs a FrozenShardReply
+ // and ActiveSyncResponse claiming inherited class 2 (FINAL).
+ for peer in &peers[..3] {
+  peer.db.put_lock(&row,now+600_000).unwrap();
+  peer.engine.recover_from_disk(SimTime(now)).await.unwrap();
+  peer.readiness.mark_shard_ready(shard);
+  assert!(peer.db.native_confirmation_support(&row.parent_lock).unwrap().is_none());
+ }
+ assert!(sync(&peers[3],shard).await);
+ assert!(peers[3].readiness.is_shard_ready(shard));
+ assert_eq!(peers[3].db.native_confirmation_support(&row.parent_lock).unwrap().unwrap().class,1,
+  "single unquorated source must never elevate inherited support to class 2");
+ assert_eq!(peers[3].engine.get_ram_lock(&row.parent_lock).await.unwrap().status.confirmation_class(),1);
+ recovery::stop_recovery_peers(peers).await;
+}
+
 async fn restart(peer:recovery::RecoveryPeer) -> recovery::RecoveryPeer {
  use humoco_node::network::{NodeRequestHandler,QuicTransport};
  let recovery::RecoveryPeer { identity,manager,engine,db,network,readiness,cancel,worker,_dir }=peer;

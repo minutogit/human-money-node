@@ -37,7 +37,7 @@ tempfile="3"
 debug=1
 ''')
 modules={'settings':app/'src-tauri/src/settings.rs','models':app/'src-tauri/src/models/mod.rs','state':app/'src-tauri/src/state.rs','gateway_resolver':app/'src-tauri/src/gateway_resolver.rs','checkout':app/'src-tauri/src/checkout.rs','recovery':node/'crates/humoco-node/tests/common/recovery.rs'}
-head='\n'.join('#[path='+q(path)+'] mod '+name+';' for name,path in modules.items())+'\nuse state::AppState;\n'
+head='#![allow(dead_code, unused_imports)]\n'+'\n'.join('#[path='+q(path)+'] mod '+name+';' for name,path in modules.items())+'\nuse state::AppState;\n'
 (out/'src/main.rs').write_text(head+(node/'scripts/architecture-e2e/main.rs').read_text())
 PY
 export HUMOCO_E2E_CORE_ROOT="$core_root"

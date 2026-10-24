@@ -396,3 +396,69 @@ async fn test_conflicting_child_request_acquires_proof_for_canonical_stored_chil
     assert!(verify_live_state_proof(&proof, &stale_context).is_err(), "losing child A must not be attested");
     cancel.cancel();gateway_transport.close();for shard in shards {shard.transport.close();}
 }
+
+#[tokio::test]
+async fn test_stateless_gateway_acquires_conflicting_child_proof_via_remote_quic_committee() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_live_proof_cluster(&temp).await;
+    let LiveProofCluster { app, shards, context, shard_id, gateway_transport, cancel, .. } = cluster;
+    let owner = SigningKey::from_bytes(&[77; 32]);
+    let now = shards[0].pm.net_time_ms();
+    // Spend a parent tag ONLY on the remote shard nodes, NOT on the local HTTP gateway!
+    let remote_only_tag = "remote-only-spent-parent";
+    let remote_spend = make_hmc_spend(&context.voucher_id, remote_only_tag, [0xCC; 32], now + 800_000, &owner);
+    let remote_entry = L2LockEntry::from(&remote_spend);
+    for shard in &shards {
+        let (verdict, _) = shard.engine.ingress_hmc_lock_durable(
+            remote_only_tag.into(),
+            remote_entry.clone(),
+            humoco_node::storage::IngressOrigin::PartitionSync,
+            Some(now),
+            None,
+            None,
+            Some(context.voucher_id.clone()),
+        ).await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+        shard.ready.mark_shard_ready(shard_id);
+    }
+
+    let mut stale_context = context.clone();
+    stale_context.lookup_tag = remote_only_tag.into();
+    stale_context.parent_lock = *blake3::hash(remote_only_tag.as_bytes()).as_bytes();
+    stale_context.child_lock = [0xBB; 32];
+    stale_context.state_digest = *blake3::hash(b"losing-child-on-stateless-gateway").as_bytes();
+    stale_context.recipient_nonce = [74; 32];
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/verify-current")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&stale_context).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        proof.context.child_lock,
+        remote_entry.t_id,
+        "stateless gateway must discover canonical child B from remote shard committee"
+    );
+    assert_eq!(
+        proof.context.state_digest,
+        *blake3::hash(&serde_json::to_vec(&remote_entry).unwrap()).as_bytes()
+    );
+    assert_eq!(proof.context.recipient_nonce, stale_context.recipient_nonce);
+    assert!(proof.votes.len() >= 14);
+    verify_live_state_proof(&proof, &proof.context).expect("valid 14/20 proof for remote child B");
+    cancel.cancel();
+    gateway_transport.close();
+    for shard in shards {
+        shard.transport.close();
+    }
+}

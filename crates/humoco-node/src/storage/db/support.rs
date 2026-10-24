@@ -2,7 +2,7 @@
 use super::*;
 use crate::api::dto::QuorumCertificateDto;
 use humoco_sim_core::types::NetworkId;
-use std::collections::HashSet;
+use std::collections::{HashMap,HashSet};
 
 pub(crate) const TABLE_NATIVE_SUPPORT: TableDefinition<&str, &[u8]> = TableDefinition::new("native_confirmation_support");
 pub const TABLE_CONFIRMATION_SUPPORT: TableDefinition<&str, &[u8]> =
@@ -369,30 +369,46 @@ fn hash_fact(h: &mut blake3::Hasher,kind:u8,key:&str,parent:&[u8;32],child:&[u8;
 pub(crate) struct VerifiedInheritedCut {
     objective: [u8;32],
     supports: Vec<[u8;32]>,
+    qualified_supports: Vec<[u8;32]>,
     shard: u16,
 }
 impl VerifiedInheritedCut {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn verify(network: NetworkId,shard:u16,receiver:[u8;32],committee:&[[u8;32]],quorum:usize,
-        objective:[u8;32],supports:&[[u8;32]],sources:&[([u8;32],crate::network::framing::FrozenShardReply)]) -> Result<Self,StorageError> {
+        objective:[u8;32],supports:&[[u8;32]],qualified_supports:&[[u8;32]],
+        sources:&[([u8;32],crate::network::framing::FrozenShardReply)]) -> Result<Self,StorageError> {
         let invalid = || StorageError::DurableCommitFailed("unsupported inherited cut".into());
         if committee.is_empty() || committee.len() > 20 || quorum == 0 || quorum > committee.len()
             || !committee.contains(&receiver) || committee.iter().collect::<HashSet<_>>().len() != committee.len() || sources.len() > 20 { return Err(invalid()); }
         let mut seen = HashSet::new();
+        let mut support_counts: HashMap<[u8;32],usize> = HashMap::new();
         for (key,reply) in sources {
             if !committee.contains(key) || *key == receiver || !seen.insert(*key) || reply.version != 2 || reply.lease_ms != 25_000
-                || reply.digest != objective || !supports.contains(&reply.support_digest) { return Err(invalid()); }
+                || reply.digest != objective { return Err(invalid()); }
             let vk = ed25519_dalek::VerifyingKey::from_bytes(key).map_err(|_|invalid())?;
             let sig = ed25519_dalek::Signature::from_slice(&reply.signature).map_err(|_|invalid())?;
             vk.verify_strict(&reply.signing_digest(network,shard,key,&receiver),&sig).map_err(|_|invalid())?;
+            *support_counts.entry(reply.support_digest).or_insert(0) += 1;
         }
         if seen.len() < quorum { return Err(invalid()); }
-        Ok(Self { objective,supports:supports.to_vec(),shard })
+        let mut observed_supports: Vec<_> = support_counts.keys().copied().collect();
+        observed_supports.sort_unstable();
+        let mut supplied_supports = supports.to_vec();
+        supplied_supports.sort_unstable();
+        if supplied_supports != observed_supports { return Err(invalid()); }
+        let mut derived_qualified: Vec<_> = support_counts.into_iter()
+            .filter(|(_,count)| *count >= quorum).map(|(support,_)| support).collect();
+        derived_qualified.sort_unstable();
+        let mut supplied_qualified = qualified_supports.to_vec();
+        supplied_qualified.sort_unstable();
+        if supplied_qualified != derived_qualified { return Err(invalid()); }
+        Ok(Self { objective,supports:observed_supports,qualified_supports:derived_qualified,shard })
     }
-    pub(crate) fn validate(&self,stage:&super::install::ShardStage,objective:[u8;32]) -> Result<(),StorageError> {
-        if self.objective != objective || self.shard != stage.shard || !self.supports.contains(&stage.support_digest()?) {
+    pub(crate) fn validate(&self,stage:&super::install::ShardStage,objective:[u8;32]) -> Result<bool,StorageError> {
+        let staged_support = stage.support_digest()?;
+        if self.objective != objective || self.shard != stage.shard || !self.supports.contains(&staged_support) {
             return Err(StorageError::DurableCommitFailed("inherited cut commitment mismatch".into()));
         }
-        Ok(())
+        Ok(self.qualified_supports.contains(&staged_support))
     }
 }

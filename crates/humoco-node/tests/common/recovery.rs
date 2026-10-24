@@ -22,7 +22,7 @@ pub(crate) async fn recovery_peers_mode(count: usize, corrupt: bool) -> Vec<Reco
 pub(crate) async fn recovery_peers_fault(count: usize, corrupt: bool,support_fault:u8) -> Vec<RecoveryPeer> {
     let identities: Vec<_> = (0..count).map(|_|NodeIdentity::generate()).collect();
     let mut peers = Vec::new();
-    for identity in &identities {
+    for (peer_index, identity) in identities.iter().enumerate() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(RedbStorage::open(&dir.path().join("node.redb")).unwrap());
         let cancel = CancellationToken::new();
@@ -31,7 +31,8 @@ pub(crate) async fn recovery_peers_fault(count: usize, corrupt: bool,support_fau
         let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
         let handler = Arc::new(NodeRequestHandler::with_peer_manager(engine.clone(),db.clone(),identity.clone(),manager.clone())
             .with_readiness_manager(readiness.clone()));
-        let handler = Arc::new(CorruptSnapshot { inner: handler, corrupt, support_fault, identity:identity.clone(), pages: std::sync::atomic::AtomicUsize::new(0) });
+        let peer_fault = if support_fault == 8 && peer_index != 0 { 9 } else { support_fault };
+        let handler = Arc::new(CorruptSnapshot { inner: handler, db: db.clone(), corrupt, support_fault: peer_fault, identity:identity.clone(), pages: std::sync::atomic::AtomicUsize::new(0) });
         let network = QuicTransport::bind_with_options("127.0.0.1:0".parse().unwrap(),identity,manager.clone(),handler,cancel.clone()).unwrap();
         network.spawn_accept_loop();
         peers.push(RecoveryPeer { identity:identity.clone(),manager,engine,db,network,readiness,cancel,worker,_dir:dir });
@@ -53,6 +54,7 @@ pub(crate) async fn stop_recovery_peers(peers: Vec<RecoveryPeer>) {
 
 struct CorruptSnapshot {
     inner: Arc<NodeRequestHandler>,
+    db: Arc<RedbStorage>,
     corrupt: bool,
     support_fault:u8,
     identity:NodeIdentity,
@@ -71,6 +73,7 @@ impl humoco_node::network::RequestHandler for CorruptSnapshot {
         let corrupt = self.corrupt && header.msg_type == MsgType::ActiveSyncRequest as u16
             && self.pages.fetch_add(1,std::sync::atomic::Ordering::Relaxed) == 1;
         let support_fault = self.support_fault;
+        let db = self.db.clone();
         let identity = self.identity.clone();
         let shard = if payload.len() >= 4 {u16::from_le_bytes([payload[2],payload[3]])} else {0};
         let freeze = header.msg_type == MsgType::ShardDigestRequest as u16 && payload.len() == 20 && payload[1] == 0;
@@ -78,6 +81,34 @@ impl humoco_node::network::RequestHandler for CorruptSnapshot {
         let reply = self.inner.handle_authenticated(header,payload,owner);
         Box::pin(async move {
             let (mut header,mut bytes) = reply.await?;
+            if freeze && header.flags == 0 && (support_fault == 8 || support_fault == 9) {
+                if support_fault == 8 {
+                    use ed25519_dalek::Signer;
+                    let (row,root) = db.get_lock(&[21;32]).unwrap().unwrap();
+                    let key = format!("native:{}", row.parent_lock.iter().map(|b|format!("{b:02x}")).collect::<String>());
+                    let mut hash = blake3::Hasher::new();
+                    let domain = b"HUMOCO_V1_INHERITED_SUPPORT_STATE";
+                    hash.update(&[domain.len() as u8]); hash.update(domain); hash.update(&[1]); hash.update(&shard.to_le_bytes());
+                    hash.update(&[0]); hash.update(&(key.len() as u16).to_le_bytes()); hash.update(key.as_bytes());
+                    hash.update(&row.parent_lock); hash.update(&row.id); hash.update(&[0;32]); hash.update(&root.to_le_bytes()); hash.update(&[2]);
+                    let mut reply: humoco_node::network::framing::FrozenShardReply = bincode::deserialize(&bytes).unwrap();
+                    reply.support_digest = *hash.finalize().as_bytes();
+                    reply.signature = identity.signing_key().sign(&reply.signing_digest(humoco_sim_core::types::NetworkId::Mainnet,shard,identity.node_pubkey(),&owner.unwrap())).to_bytes().to_vec();
+                    bytes = bincode::serialize(&reply).unwrap(); header.payload_len = bytes.len() as u32;
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+            if active && support_fault == 8 {
+                let mut page = humoco_node::network::framing::ActiveSyncResponse::from_bytes(&bytes).unwrap();
+                for (row,root) in &page.payload.locks {
+                    let key = format!("native:{}",row.parent_lock.iter().map(|b|format!("{b:02x}")).collect::<String>());
+                    page.payload.support.push((0,key,humoco_node::storage::db::support::ConfirmationSupport {
+                        parent:row.parent_lock,child:row.id,class:2,root_valid_until_ms:*root,verified_context:[77;32],
+                    }));
+                }
+                bytes = page.to_bytes().unwrap(); header.payload_len = bytes.len() as u32;
+            }
             if freeze && support_fault > 0 && support_fault <= 4 && header.flags == 0 {
                 use ed25519_dalek::Signer;
                 let mut reply: humoco_node::network::framing::FrozenShardReply = bincode::deserialize(&bytes).unwrap();
@@ -88,7 +119,7 @@ impl humoco_node::network::RequestHandler for CorruptSnapshot {
                 if support_fault == 1 {reply.signature[0] ^= 1;}
                 bytes = bincode::serialize(&reply).unwrap(); header.payload_len=bytes.len() as u32;
             }
-            if active && support_fault >= 5 {
+            if active && (5..=7).contains(&support_fault) {
                 let mut page=humoco_node::network::framing::ActiveSyncResponse::from_bytes(&bytes).unwrap();
                 if let Some((_,_,fact))=page.payload.support.first_mut() {
                     if support_fault == 5 {fact.class=2;} else if support_fault == 7 {fact.parent[0]^=1;} else {fact.root_valid_until_ms=1;}

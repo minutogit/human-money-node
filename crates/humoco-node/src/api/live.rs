@@ -83,6 +83,105 @@ pub async fn sign_current_state(
     })
 }
 
+/// Queries shard committee peers for the full lock entry behind a parent tag.
+/// A stateless gateway has no local shard state, so the winning conflicting
+/// child can only be discovered from the shard custodians themselves.
+async fn fetch_remote_entry_for_tag(
+    state: &AppState,
+    context: &LiveStateContext,
+    remotes: &[(humoco_sim_core::types::CommitteeMember, std::net::SocketAddr)],
+) -> Option<crate::api::hmc::L2LockEntry> {
+    let transport = state.transport.as_ref()?;
+    let now_ms = state.net_time_ms();
+    let declared_read_ema = state.tier_controller.current_read_ema_credits();
+    let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+    let sender_pubkey = *state.identity.node_pubkey();
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        &sender_pubkey,
+        0,
+        0,
+        now_ms,
+        declared_write_ema,
+        declared_read_ema,
+        0,
+        true,
+        &[0u8; 32],
+    );
+    let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+    let query = crate::network::framing::StatusQueryPayload {
+        lock_id: [0u8; 32],
+        parent_lock: context.parent_lock,
+        shard_id: context.shard_id,
+        sender_pubkey,
+        declared_write_ema_micro_bj: declared_write_ema,
+        current_read_ema_credits: declared_read_ema,
+        timestamp_ms: now_ms,
+        sender_signature,
+    };
+    let payload = bincode::serialize(&query).ok()?;
+    let header = humoco_sim_core::wire::WireHeader::new(
+        humoco_sim_core::wire::MsgType::StatusQuery as u16,
+        1,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    let mut jobs = tokio::task::JoinSet::new();
+    for (member, addr) in remotes {
+        let transport = transport.clone();
+        let payload = payload.clone();
+        let voucher_id = context.voucher_id.clone();
+        let lookup_tag = context.lookup_tag.clone();
+        let expected_pubkey = member.node_pubkey;
+        let addr = *addr;
+        jobs.spawn(async move {
+            let conn = transport.connect_peer(addr).await.ok()?;
+            let actual = crate::network::tls::extract_peer_identity_from_connection(&conn)?.0;
+            if actual != expected_pubkey {
+                return None;
+            }
+            let fut = transport.send_request(&conn, &header, &payload);
+            let (resp_header, resp_payload) =
+                tokio::time::timeout(std::time::Duration::from_millis(800), fut)
+                    .await
+                    .ok()?
+                    .ok()?;
+            if resp_header.msg_type != humoco_sim_core::wire::MsgType::StatusResponse as u16
+                || resp_payload.is_empty()
+                || (resp_header.flags
+                    & (humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
+                        | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                        | humoco_sim_core::wire::FLAG_NOT_READY))
+                    != 0
+            {
+                return None;
+            }
+            let entry = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&resp_payload)
+                .ok()
+                .or_else(|| bincode::deserialize(&resp_payload).ok())?;
+            if entry.layer2_voucher_id != voucher_id
+                || !crate::api::hmc::verify_l2_lock_entry_signature(&entry, &lookup_tag)
+            {
+                return None;
+            }
+            Some(entry)
+        });
+    }
+    let entry = tokio::time::timeout(std::time::Duration::from_millis(800), async {
+        while let Some(result) = jobs.join_next().await {
+            if let Ok(Some(entry)) = result {
+                return Some(entry);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    jobs.abort_all();
+    entry
+}
+
 /// Collects a FINAL live proof; supplied roster is checked locally and must be independently justified by the recipient.
 pub async fn verify_current(
     State(state): State<AppState>,
@@ -120,7 +219,9 @@ pub async fn verify_current(
     // A client may still name the losing child A after a merge has made the
     // canonical conflicting child B durable here. Acquire the proof for our
     // own durable child B instead of refusing to attest the current state.
-    let effective_context = {
+    // A stateless gateway holds no local shard state, so it asks the committee
+    // custodians for the winning child behind this parent tag.
+    let (effective_context, needs_remote_lookup) = {
         let ram = state.engine.hmc_ram.read().await;
         match ram.locks.get(&context.lookup_tag) {
             Some(entry)
@@ -134,7 +235,7 @@ pub async fn verify_current(
                         .map(humoco_sim_core::types::extract_shard_id)
                         == Some(context.shard_id) =>
             {
-                serde_json::to_vec(entry)
+                let effective = serde_json::to_vec(entry)
                     .ok()
                     .map(|state| *blake3::hash(&state).as_bytes())
                     .filter(|state_digest| {
@@ -146,10 +247,45 @@ pub async fn verify_current(
                         effective.child_lock = entry.t_id;
                         effective.state_digest = state_digest;
                         effective
-                    })
+                    });
+                let needs_remote_lookup = effective.is_none();
+                (effective, needs_remote_lookup)
             }
-            _ => None,
+            Some(entry)
+                if entry.t_id == context.child_lock
+                    && entry.layer2_voucher_id == context.voucher_id
+                    && ram.voucher_roots.get(&context.voucher_id).copied()
+                        == Some(context.root_valid_until)
+                    && ram
+                        .voucher_genesis_parents
+                        .get(&context.voucher_id)
+                        .map(humoco_sim_core::types::extract_shard_id)
+                        == Some(context.shard_id) =>
+            {
+                (None, false)
+            }
+            _ => (None, true),
         }
+    };
+    let effective_context = match effective_context {
+        Some(effective) => Some(effective),
+        None if needs_remote_lookup => {
+            match fetch_remote_entry_for_tag(&state, &context, &remotes).await {
+                Some(entry)
+                    if entry.t_id != context.child_lock
+                        && entry.layer2_voucher_id == context.voucher_id =>
+                {
+                    serde_json::to_vec(&entry).ok().map(|state| {
+                        let mut effective = context.clone();
+                        effective.child_lock = entry.t_id;
+                        effective.state_digest = *blake3::hash(&state).as_bytes();
+                        effective
+                    })
+                }
+                _ => None,
+            }
+        }
+        None => None,
     };
     let context = effective_context.unwrap_or(context);
     let Ok(digest) = live_state_digest(&context) else {

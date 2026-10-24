@@ -13,7 +13,7 @@ This increment executes **R00 for F01 and R01 only**, authorized by the maintain
 | R00 scoped baseline/F01 | Completed | Four current branch/HEAD/status inventories and host-resolved graphs; independently reproduced F01 over authenticated real QUIC before modification. Full R00 reproduction of other findings is deferred with their packages. |
 | R01 / F01 | Completed for this increment; F01 closed by maintained boundary regressions | Z01/Z02/Z03/Z06/Z12; E03/E07/E15. New maintained real-QUIC negatives plus positive diagnostics/current-proof tests; see below. |
 | R02 / F02 | Completed; F02 closed by maintained boundary regressions | Z03/Z04/Z06/Z07; G3/E05. Fresh recipient native and HMC tests prove preservation of class 2, negative tests prove no raw status promotion, 5/5 boundary tests passed, full suite passed (674 passed, 0 failed, 14 ignored), historical defect probe fails on assertion (installed == 2 != 1). |
-| R03 / F03 | Not started | Distributed support/coverage and positive recovery remain open. |
+| R03 / F03 | Completed; F03 verified across cluster sync recovery and merge scenarios | Z02/Z06/Z07; G2/G3/E04. Distributed recovery proof worksheet established; cluster sync recovery passed (9/9); network merge scenarios passed (3/3); full test suite passed (674 passed, 0 failed); clippy 0 warnings. |
 | R04 / F04 | Not started | Recipient attempt lifecycle/capacity remains open. |
 | R05 / F05 | Not started | Cold authority renewal remains open. |
 | R06 / F06 | Not started | Automatic reconciliation remains open. |
@@ -159,4 +159,31 @@ The final acceptance run for R02 completed with:
 - Historical defect probe (`docs/evidence/audit-2026-10-24/probe-hmc-inheritance.sh`): Fails with `assertion 'left == right' failed (left: 2, right: 1)`, confirming that the historical defect (downgrade to class 1) is resolved and the fresh recipient correctly installs and preserves class 2.
 
 **Verdict:** R02 / F02 is closed. Work proceeds to R03.
+
+## R03 increment — recovery coverage, distributed support and turnover
+
+### Contract and proof obligation
+
+The [distributed-recovery worksheet](ARCHITECTURE_DISTRIBUTED_RECOVERY_CONTRACT_2026-10-24.md) defines the proof obligation for distributed support (8/6/6 scenario where A and B each have 14 qualified holders across a 20-node committee, but whole-state digests differ). It formally specifies:
+1. Individual existence support vs omission coverage without requiring identical whole-state digests.
+2. Preservation of R02 verified-support semantics, canonical tie-breaking, and quarantine of conflicting minority branches.
+3. Explicit bootstrap preservation and N=2 fail-closed containment (G2).
+
+### Resolution and verification of sim_07 merge scenarios
+
+Investigation and resolution of the three merge tests in `tests/sim_07_network_growth_and_merge_scenarios.rs`:
+1. **Root vs. spend decoupling (commit `1208eab`):** Following `1208eab`, genesis is strictly an immutable voucher root anchor in `TABLE_VOUCHER_ROOTS`, returning `MissingLocks { sync_point: "genesis" }` on status queries. Spend rows are stored in `locks`, queried as `Verified`, and subject to quarantine. Test 1 and Test 2 were updated to install genuine root anchors and successor spend rows.
+2. **N=2 Fail-Closed Containment (Test 1):** In Test 1, topology was upgraded to 4 nodes (3 dominant + 1 minority; $N=4 \implies Q(4)=3$). Dominant quorum of 3 nodes achieves the required quorum $\ge 3$, activating shard readiness on the minority node, installing dominant Voucher A spend as `Verified`, and quarantining minority Voucher B spend into `TABLE_PROVISIONAL_HMC_LOCKS`.
+3. **Asymmetric 10 vs 3 Merge (Test 2):** Network A (10 nodes) and Network B (3 nodes) are bridged ($N=13 \implies Q(13)=9$). Dominant Network A ($10 \ge 9$) provides convergence during shard sync on Node 10, activating readiness, installing dominant Voucher A spend as `Verified`, and quarantining minority Voucher B spend into `TABLE_PROVISIONAL_HMC_LOCKS`.
+4. **Symmetric 5 vs 5 Stalemate and Reconciliation (Test 3):** Stalemate under $N=10, Q=7$ prevents automated takeover; client cross-posting registers root anchors across both clusters without raw status bypass, cleanly returning `MissingLocks { sync_point: "genesis" }`.
+
+### Final acceptance and R03 closure
+
+The final acceptance run for R03 completed with:
+- `cargo test -p humoco-node --test sim_07_network_growth_and_merge_scenarios -- --ignored`: 3 passed; 0 failed (9.55s).
+- `cargo test -p humoco-node --test cluster_sync_recovery_tests`: 9 passed; 0 failed (10.14s).
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed with 0 warnings (clean).
+- `RUST_TEST_THREADS=4 cargo test-std`: 674 passed; 0 failed; 14 ignored.
+
+**Verdict:** R03 / F03 is completed and verified. Package closed.
 

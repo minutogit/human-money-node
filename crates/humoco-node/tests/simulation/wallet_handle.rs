@@ -178,6 +178,53 @@ impl SimWallet {
         }
     }
 
+    /// Creates a successor (is_genesis = false) that spends `parent_ds_tag` with a valid `created_at_ms`.
+    pub fn create_successor_lock_with_time(
+        &self,
+        voucher_id: &str,
+        parent_ds_tag: &str,
+        created_at_ms: u64,
+    ) -> L2LockRequest {
+        let mut rng = OsRng;
+        let mut t_id = [0u8; 32];
+        rng.fill_bytes(&mut t_id);
+        let sender_pub = self.pubkey();
+        let payload_hash = calculate_l2_payload_hash_raw(
+            voucher_id,
+            parent_ds_tag,
+            &t_id,
+            &sender_pub,
+            TRAP_NONE_PLACEHOLDER,
+            TRAP_NONE_PLACEHOLDER,
+            0,
+            created_at_ms,
+            None,
+            "",
+        );
+        let sig = self.signing_key.sign(&payload_hash);
+        L2LockRequest {
+            causal_output: None,
+            auth: L2AuthPayload {
+                ephemeral_pubkey: sender_pub,
+                auth_signature: None,
+            },
+            layer2_voucher_id: voucher_id.to_string(),
+            ds_tag: Some(parent_ds_tag.to_string()),
+            transaction_hash: t_id,
+            is_genesis: false,
+            sender_ephemeral_pub: sender_pub,
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: sig.to_bytes(),
+            trap_r: Some(TRAP_NONE_PLACEHOLDER.to_string()),
+            trap_s: Some(TRAP_NONE_PLACEHOLDER.to_string()),
+            encrypted_timestamp: 0,
+            created_at_ms,
+            deletable_at: None,
+            privacy_guard: None,
+        }
+    }
+
     /// Creates a chain lock request that contains `count` sequential successor hops
     /// starting from `parent_ds_tag`. Each hop gets a strictly increasing
     /// `encrypted_timestamp` (monotonicity requirement).

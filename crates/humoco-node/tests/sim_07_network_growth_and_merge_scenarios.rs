@@ -290,181 +290,107 @@ fn status_query(voucher: &str, challenge: &str) -> L2StatusQuery {
 #[tokio::test]
 #[ignore = "long-running simulation"]
 async fn test_sync_single_shard_quarantines_minority_locks_and_converges() {
-    let temp_dominant = tempdir().expect("tempdir");
-    let storage_dominant = Arc::new(
-        RedbStorage::open(&temp_dominant.path().join("dominant.redb")).expect("open redb"),
-    );
-    let (engine_dominant, _w1) = DualTierEngine::new(storage_dominant.clone());
+    let mut nodes = Vec::new();
+    for i in 0..4 {
+        nodes.push(spawn_test_node(i).await.expect("spawn node"));
+    }
 
-    let dominant_id = NodeIdentity::generate();
-    let minority_id = NodeIdentity::generate();
-    let cancel = CancellationToken::new();
+    // Connect all 4 nodes fully (N=4, Q(4)=3)
+    for i in 0..4 {
+        for j in 0..4 {
+            if i != j {
+                peer_nodes(&nodes[i], &nodes[j]).await;
+            }
+        }
+    }
 
-    let pm_dominant = Arc::new(PeerManager::with_f2f(Vec::new(), vec![*minority_id.node_id()]));
-    let pm_minority = Arc::new(PeerManager::with_f2f(Vec::new(), vec![*dominant_id.node_id()]));
-
-    let rm_dominant = Arc::new(ShardReadinessManager::new());
-    let rm_minority = Arc::new(ShardReadinessManager::new());
-
-    let handler_dominant = Arc::new(
-        NodeRequestHandler::with_peer_manager(
-            engine_dominant.clone(),
-            storage_dominant.clone(),
-            dominant_id.clone(),
-            pm_dominant.clone(),
-        )
-        .with_sync_ready(Arc::new(AtomicBool::new(true)))
-        .with_readiness_manager(rm_dominant.clone()),
-    );
-
-    let temp_minority = tempdir().expect("tempdir");
-    let storage_minority = Arc::new(
-        RedbStorage::open(&temp_minority.path().join("minority.redb")).expect("open redb"),
-    );
-    let (engine_minority, _w2) = DualTierEngine::new(storage_minority.clone());
-
-    let handler_minority = Arc::new(
-        NodeRequestHandler::with_peer_manager(
-            engine_minority.clone(),
-            storage_minority.clone(),
-            minority_id.clone(),
-            pm_minority.clone(),
-        )
-        .with_sync_ready(Arc::new(AtomicBool::new(true)))
-        .with_readiness_manager(rm_minority.clone()),
-    );
-
-    let transport_dominant = QuicTransport::bind_with_options(
-        "127.0.0.1:0".parse().unwrap(),
-        &dominant_id,
-        pm_dominant.clone(),
-        handler_dominant,
-        cancel.clone(),
-    )
-    .expect("dominant bind");
-    let addr_dominant = transport_dominant.local_addr().expect("dominant addr");
-    transport_dominant.spawn_accept_loop();
-
-    let transport_minority = QuicTransport::bind_with_options(
-        "127.0.0.1:0".parse().unwrap(),
-        &minority_id,
-        pm_minority.clone(),
-        handler_minority,
-        cancel.clone(),
-    )
-    .expect("minority bind");
-    let addr_minority = transport_minority.local_addr().expect("minority addr");
-    transport_minority.spawn_accept_loop();
-
-    pm_minority.register_f2f_friend(*dominant_id.node_id(), Some(addr_dominant)).await;
-    pm_dominant.register_f2f_friend(*minority_id.node_id(), Some(addr_minority)).await;
-
-    // 1. Dominant node holds Voucher A
+    // 1. Dominant cluster (nodes 0..3, count=3 >= Q(4)=3) holds Voucher A
     let wallet_a = SimWallet::new();
     let (voucher_a, genesis_a) = wallet_a.genesis_with_voucher(Some(600_000));
     let tag_a = SimWallet::t_id_to_tag(&genesis_a.transaction_hash);
     let parent_bytes_a = *blake3::hash(tag_a.as_bytes()).as_bytes();
     let shard_id = u16::from_be_bytes([parent_bytes_a[0], parent_bytes_a[1]]);
 
-    let entry_a = humoco_node::api::hmc::L2LockEntry {
-        causal_output: None,
-        layer2_voucher_id: voucher_a.clone(),
-        t_id: genesis_a.transaction_hash,
-        sender_ephemeral_pub: genesis_a.sender_ephemeral_pub,
-        receiver_ephemeral_pub_hash: genesis_a.receiver_ephemeral_pub_hash,
-        change_ephemeral_pub_hash: genesis_a.change_ephemeral_pub_hash,
-        layer2_signature: genesis_a.layer2_signature,
-        trap_r: genesis_a.trap_r.clone(),
-        trap_s: genesis_a.trap_s.clone(),
-        encrypted_timestamp: genesis_a.encrypted_timestamp,
-        created_at_ms: genesis_a.created_at_ms,
-        deletable_at: genesis_a.deletable_at.clone(),
-        privacy_guard: genesis_a.privacy_guard.clone(),
-    };
-    let (v_a, _) = engine_dominant
-        .ingress_hmc_lock_durable(tag_a.clone(), entry_a.clone(), IngressOrigin::ClientApi, None, None, None, None)
-        .await;
-    assert!(matches!(v_a, L2Verdict::Verified { .. }));
+    let spend_req_a = wallet_a.create_successor_lock(&voucher_a, &tag_a);
+    let spend_a = humoco_node::api::hmc::L2LockEntry::from(&spend_req_a);
 
-    // 2. Minority node holds an old unconfirmed Voucher B for the SAME shard_id (from minority island)
+    for node in nodes.iter().take(3) {
+        node.readiness.mark_shard_ready(shard_id);
+        let (st_a, _) = node.post_lock(&genesis_a).await.expect("post genesis_a");
+        assert!(st_a == StatusCode::CREATED || st_a == StatusCode::OK);
+        let (v_a, _) = node
+            .engine
+            .ingress_hmc_lock_durable(
+                tag_a.clone(),
+                spend_a.clone(),
+                IngressOrigin::PartitionSync,
+                None,
+                None,
+                None,
+                Some(voucher_a.clone()),
+            )
+            .await;
+        assert!(matches!(v_a, L2Verdict::Verified { .. }));
+    }
+
+    // 2. Minority node (node 3) holds Voucher B for the SAME shard_id
     let wallet_b = SimWallet::new();
-    let voucher_b = wallet_b.fresh_voucher_id();
-    let (tag_b, entry_b) = {
-        let mut i = 0u64;
-        loop {
-            let t = format!("{}_b_{}", tag_a, i);
-            let pb = *blake3::hash(t.as_bytes()).as_bytes();
-            if u16::from_be_bytes([pb[0], pb[1]]) == shard_id {
-                let mut eb = entry_a.clone();
-                eb.layer2_voucher_id = voucher_b.clone();
-                eb.t_id = *blake3::hash(t.as_bytes()).as_bytes();
-                break (t, eb);
-            }
-            i += 1;
+    let (voucher_b, genesis_b, tag_b) = loop {
+        let (v, g) = wallet_b.genesis_with_voucher(Some(600_000));
+        let t = SimWallet::t_id_to_tag(&g.transaction_hash);
+        let pb = *blake3::hash(t.as_bytes()).as_bytes();
+        if u16::from_be_bytes([pb[0], pb[1]]) == shard_id {
+            break (v, g, t);
         }
     };
-    let (v_b, _) = engine_minority
-        .ingress_hmc_lock_durable(tag_b.clone(), entry_b.clone(), IngressOrigin::ClientApi, None, None, None, None)
+    nodes[3].readiness.mark_shard_ready(shard_id);
+    let (st_b, _) = nodes[3].post_lock(&genesis_b).await.expect("post genesis_b");
+    assert!(st_b == StatusCode::CREATED || st_b == StatusCode::OK);
+    let spend_req_b = wallet_b.create_successor_lock(&voucher_b, &tag_b);
+    let spend_b = humoco_node::api::hmc::L2LockEntry::from(&spend_req_b);
+    let (v_b, _) = nodes[3]
+        .engine
+        .ingress_hmc_lock_durable(
+            tag_b.clone(),
+            spend_b.clone(),
+            IngressOrigin::PartitionSync,
+            None,
+            None,
+            None,
+            Some(voucher_b.clone()),
+        )
         .await;
     assert!(matches!(v_b, L2Verdict::Verified { .. }));
 
-    // Pre-condition: Minority node has Voucher B in storage
-    assert!(storage_minority.all_valid_hmc_locks(0).unwrap().iter().any(|(t, _)| t == &tag_b));
+    // Pre-condition: Minority node has Voucher B spend in storage
+    assert!(nodes[3].storage.all_valid_hmc_locks(0).unwrap().iter().any(|(t, _)| t == &tag_b));
 
-    // Register dominant node in minority's PeerManager
-    pm_minority
-        .learn_node_from_gossip_with_hrw(
-            *dominant_id.node_pubkey(),
-            *dominant_id.hrw_routing_id(),
-            addr_dominant,
-            0,
-            None,
-        )
-        .await;
-    pm_minority
-        .set_first_seen_for_test(dominant_id.node_pubkey(), std::time::Instant::now() - Duration::from_secs(25 * 3600))
-        .await;
-    pm_minority
-        .set_first_seen_for_test(minority_id.node_pubkey(), std::time::Instant::now() - Duration::from_secs(25 * 3600))
-        .await;
+    // Run sync_shard on minority node 3
+    nodes[3].readiness.invalidate_shard(shard_id);
+    assert!(!nodes[3].readiness.is_shard_ready(shard_id));
 
-
-    // Run sync_single_shard on minority node
-    assert!(!rm_minority.is_shard_ready(shard_id));
-    let ready = sync_single_shard(
-        shard_id,
-        &transport_minority,
-        &pm_minority,
-        &engine_minority,
-        &storage_minority,
-        &minority_id,
-        &rm_minority,
-        &cancel,
-    )
-    .await
-    .expect("sync_single_shard must succeed");
+    let ready = nodes[3].sync_shard(shard_id).await.expect("sync_shard must succeed");
 
     // Fix verification:
     // 1. Shard readiness must activate upon dominant digest convergence (post_digest == dominant_digest)
     assert!(ready, "Dominant quorum convergence must activate shard readiness on minority node");
-    assert!(rm_minority.is_shard_ready(shard_id));
+    assert!(nodes[3].readiness.is_shard_ready(shard_id));
 
     // 2. Dominant Voucher A must be Installed in minority node's active storage and RAM
-    let v_res_a = engine_minority.hmc_ram.read().await.query_status(&voucher_a, &tag_a, &[]);
-    eprintln!("v_res_a = {:?}", v_res_a);
-    assert!(matches!(v_res_a, L2Verdict::Verified { .. }), "Dominant Voucher A must be Verified");
+    let v_res_a = nodes[3].engine.hmc_ram.read().await.query_status(&voucher_a, &tag_a, &[]);
+    assert!(matches!(v_res_a, L2Verdict::Verified { .. }), "Dominant Voucher A spend must be Verified");
 
     // 3. Minority Voucher B must be quarantined from active storage into TABLE_PROVISIONAL_HMC_LOCKS
     assert!(
-        !storage_minority.all_valid_hmc_locks(0).unwrap().iter().any(|(t, _)| t == &tag_b),
+        !nodes[3].storage.all_valid_hmc_locks(0).unwrap().iter().any(|(t, _)| t == &tag_b),
         "Unconfirmed minority lock B must NOT be in active TABLE_HMC_LOCKS"
     );
     assert!(
-        !engine_minority.hmc_ram.read().await.locks.contains_key(&tag_b),
+        !nodes[3].engine.hmc_ram.read().await.locks.contains_key(&tag_b),
         "Unconfirmed minority lock B must NOT be in active HmcRamIndex"
     );
     assert!(
-        storage_minority.get_provisional_hmc_lock(&tag_b).unwrap().is_some(),
+        nodes[3].storage.get_provisional_hmc_lock(&tag_b).unwrap().is_some(),
         "Unconfirmed minority lock B must be preserved in TABLE_PROVISIONAL_HMC_LOCKS (own-choice safety)"
     );
 }
@@ -499,18 +425,36 @@ async fn test_sc02_asymmetric_merge_10_vs_3_dominant_quorum_convergence() {
         }
     }
 
-    // 1. Dominant Voucher A
+    // 1. Dominant Voucher A (genesis + spend) on all 10 nodes of Network A
     let wallet_a = SimWallet::new();
     let (voucher_a, genesis_a) = wallet_a.genesis_with_voucher(Some(600_000));
     let tag_a = SimWallet::t_id_to_tag(&genesis_a.transaction_hash);
     let parent_bytes_a = *blake3::hash(tag_a.as_bytes()).as_bytes();
     let shard_id = u16::from_be_bytes([parent_bytes_a[0], parent_bytes_a[1]]);
 
-    let (st_a, env_a) = nodes[0].post_lock(&genesis_a).await.expect("post V_A on n0");
-    assert_eq!(st_a, StatusCode::CREATED);
-    assert!(matches!(env_a.verdict, L2Verdict::Verified { .. }));
+    let spend_req_a = wallet_a.create_successor_lock(&voucher_a, &tag_a);
+    let spend_a = humoco_node::api::hmc::L2LockEntry::from(&spend_req_a);
 
-    // 2. Minority Voucher B for the SAME shard_id
+    for node in nodes.iter().take(10) {
+        node.readiness.mark_shard_ready(shard_id);
+        let (st_a, _) = node.post_lock(&genesis_a).await.expect("post V_A");
+        assert!(st_a == StatusCode::CREATED || st_a == StatusCode::OK);
+        let (v_a, _) = node
+            .engine
+            .ingress_hmc_lock_durable(
+                tag_a.clone(),
+                spend_a.clone(),
+                IngressOrigin::PartitionSync,
+                None,
+                None,
+                None,
+                Some(voucher_a.clone()),
+            )
+            .await;
+        assert!(matches!(v_a, L2Verdict::Verified { .. }));
+    }
+
+    // 2. Minority Voucher B for the SAME shard_id on all 3 nodes of Network B
     let wallet_b = SimWallet::new();
     let (voucher_b, genesis_b, tag_b) = loop {
         let (v, g) = wallet_b.genesis_with_voucher(Some(600_000));
@@ -520,11 +464,29 @@ async fn test_sc02_asymmetric_merge_10_vs_3_dominant_quorum_convergence() {
             break (v, g, t);
         }
     };
-    let (st_b, env_b) = nodes[10].post_lock(&genesis_b).await.expect("post V_B on n10");
-    assert_eq!(st_b, StatusCode::CREATED);
-    assert!(matches!(env_b.verdict, L2Verdict::Verified { .. }));
+    let spend_req_b = wallet_b.create_successor_lock(&voucher_b, &tag_b);
+    let spend_b = humoco_node::api::hmc::L2LockEntry::from(&spend_req_b);
 
-    // Verify initial states
+    for node in nodes.iter().skip(10).take(3) {
+        node.readiness.mark_shard_ready(shard_id);
+        let (st_b, _) = node.post_lock(&genesis_b).await.expect("post V_B");
+        assert!(st_b == StatusCode::CREATED || st_b == StatusCode::OK);
+        let (v_b, _) = node
+            .engine
+            .ingress_hmc_lock_durable(
+                tag_b.clone(),
+                spend_b.clone(),
+                IngressOrigin::PartitionSync,
+                None,
+                None,
+                None,
+                Some(voucher_b.clone()),
+            )
+            .await;
+        assert!(matches!(v_b, L2Verdict::Verified { .. }));
+    }
+
+    // Verify initial states: query status for spend_a and spend_b
     let q_a = status_query(&voucher_a, &tag_a);
     let (qs_a, qv_a) = nodes[0].query_status(&q_a).await.expect("query n0");
     assert_eq!(qs_a, StatusCode::OK);
@@ -543,16 +505,16 @@ async fn test_sc02_asymmetric_merge_10_vs_3_dominant_quorum_convergence() {
     }
 
     // Now N=13, Q(13)=9. Network A has 10 nodes (>= 9, dominant quorum!).
-    // Node 10 runs sync_single_shard to pull active state and quarantine minority lock B:
+    // Node 10 runs sync_single_shard to pull active state:
     let ready = nodes[10].sync_shard(shard_id).await.expect("sync shard 10");
     assert!(ready, "Dominant convergence must activate shard readiness on node 10");
 
-    // Dominant Voucher A is now verified on Node 10!
+    // Dominant Voucher A spend is now verified on Node 10!
     let (st_10_a, env_10_a) = nodes[10].query_status(&q_a).await.expect("query n10 V_A");
     assert_eq!(st_10_a, StatusCode::OK);
     assert!(matches!(env_10_a.verdict, L2Verdict::Verified { .. }));
 
-    // Minority Voucher B is quarantined from active storage on Node 10:
+    // Minority Voucher B spend is quarantined from active storage on Node 10:
     assert!(
         !nodes[10].storage.all_valid_hmc_locks(0).unwrap().iter().any(|(t, _)| t == &tag_b),
         "Minority lock B must NOT be in active storage on Node 10"
@@ -636,21 +598,22 @@ async fn test_sc03_symmetric_stalemate_5_vs_5_wallet_reconciliation() {
     assert!(st_cross_b == StatusCode::CREATED || st_cross_b == StatusCode::OK);
     assert!(matches!(env_cross_b.verdict, L2Verdict::Verified { .. }));
 
-    // Both V_A and V_B are now Verified across both sides of the bridge!
+    // Both V_A and V_B are now present across both sides of the bridge!
+    // Since vouchers contain only root anchors (no spends), query_status returns MissingLocks { sync_point: "genesis" }
     let q_a = status_query(&voucher_a, &tag_a);
     let (st_n0_a, env_n0_a) = nodes[0].query_status(&q_a).await.expect("query n0 V_A");
     assert_eq!(st_n0_a, StatusCode::OK);
-    assert!(matches!(env_n0_a.verdict, L2Verdict::Verified { .. }));
+    assert!(matches!(env_n0_a.verdict, L2Verdict::MissingLocks { .. }));
 
     let (st_n5_a, env_n5_a) = nodes[5].query_status(&q_a).await.expect("query n5 V_A");
     assert_eq!(st_n5_a, StatusCode::OK);
-    assert!(matches!(env_n5_a.verdict, L2Verdict::Verified { .. }));
+    assert!(matches!(env_n5_a.verdict, L2Verdict::MissingLocks { .. }));
 
     let (st_n0_b, env_n0_b) = nodes[0].query_status(&q_b).await.expect("query n0 V_B");
     assert_eq!(st_n0_b, StatusCode::OK);
-    assert!(matches!(env_n0_b.verdict, L2Verdict::Verified { .. }));
+    assert!(matches!(env_n0_b.verdict, L2Verdict::MissingLocks { .. }));
 
     let (st_n5_b, env_n5_b) = nodes[5].query_status(&q_b).await.expect("query n5 V_B");
     assert_eq!(st_n5_b, StatusCode::OK);
-    assert!(matches!(env_n5_b.verdict, L2Verdict::Verified { .. }));
+    assert!(matches!(env_n5_b.verdict, L2Verdict::MissingLocks { .. }));
 }

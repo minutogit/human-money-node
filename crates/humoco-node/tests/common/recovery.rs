@@ -17,7 +17,9 @@ pub(crate) struct RecoveryPeer {
 /// Established source availability and mature tickets are explicit premises;
 /// target readiness is NEVER set by this fixture or an automatic empty fallback.
 pub(crate) async fn recovery_peers(count: usize) -> Vec<RecoveryPeer> { recovery_peers_mode(count,false).await }
-pub(crate) async fn recovery_peers_mode(count: usize, corrupt: bool) -> Vec<RecoveryPeer> {
+pub(crate) async fn recovery_peers_mode(count: usize, corrupt: bool) -> Vec<RecoveryPeer> { recovery_peers_fault(count,corrupt,0).await }
+#[allow(dead_code)]
+pub(crate) async fn recovery_peers_fault(count: usize, corrupt: bool,support_fault:u8) -> Vec<RecoveryPeer> {
     let identities: Vec<_> = (0..count).map(|_|NodeIdentity::generate()).collect();
     let mut peers = Vec::new();
     for identity in &identities {
@@ -29,7 +31,7 @@ pub(crate) async fn recovery_peers_mode(count: usize, corrupt: bool) -> Vec<Reco
         let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
         let handler = Arc::new(NodeRequestHandler::with_peer_manager(engine.clone(),db.clone(),identity.clone(),manager.clone())
             .with_readiness_manager(readiness.clone()));
-        let handler = Arc::new(CorruptSnapshot { inner: handler, corrupt, pages: std::sync::atomic::AtomicUsize::new(0) });
+        let handler = Arc::new(CorruptSnapshot { inner: handler, corrupt, support_fault, identity:identity.clone(), pages: std::sync::atomic::AtomicUsize::new(0) });
         let network = QuicTransport::bind_with_options("127.0.0.1:0".parse().unwrap(),identity,manager.clone(),handler,cancel.clone()).unwrap();
         network.spawn_accept_loop();
         peers.push(RecoveryPeer { identity:identity.clone(),manager,engine,db,network,readiness,cancel,worker,_dir:dir });
@@ -52,19 +54,47 @@ pub(crate) async fn stop_recovery_peers(peers: Vec<RecoveryPeer>) {
 struct CorruptSnapshot {
     inner: Arc<NodeRequestHandler>,
     corrupt: bool,
+    support_fault:u8,
+    identity:NodeIdentity,
     pages: std::sync::atomic::AtomicUsize,
 }
 impl humoco_node::network::RequestHandler for CorruptSnapshot {
     fn handle(&self, header: WireHeader, payload: Vec<u8>) -> humoco_node::network::BoxFuture<Result<(WireHeader,Vec<u8>),humoco_node::error::NodeError>> {
         self.handle_authenticated(header,payload,None)
     }
+    fn handle_unidirectional_authenticated(&self, header: WireHeader, payload: Vec<u8>, owner: Option<[u8; 32]>)
+        -> humoco_node::network::BoxFuture<Result<(), humoco_node::error::NodeError>> {
+        self.inner.handle_unidirectional_authenticated(header, payload, owner)
+    }
     fn handle_authenticated(&self,header:WireHeader,payload:Vec<u8>,owner:Option<[u8;32]>)
         -> humoco_node::network::BoxFuture<Result<(WireHeader,Vec<u8>),humoco_node::error::NodeError>> {
         let corrupt = self.corrupt && header.msg_type == MsgType::ActiveSyncRequest as u16
             && self.pages.fetch_add(1,std::sync::atomic::Ordering::Relaxed) == 1;
+        let support_fault = self.support_fault;
+        let identity = self.identity.clone();
+        let shard = if payload.len() >= 4 {u16::from_le_bytes([payload[2],payload[3]])} else {0};
+        let freeze = header.msg_type == MsgType::ShardDigestRequest as u16 && payload.len() == 20 && payload[1] == 0;
+        let active = header.msg_type == MsgType::ActiveSyncRequest as u16;
         let reply = self.inner.handle_authenticated(header,payload,owner);
         Box::pin(async move {
             let (mut header,mut bytes) = reply.await?;
+            if freeze && support_fault > 0 && support_fault <= 4 && header.flags == 0 {
+                use ed25519_dalek::Signer;
+                let mut reply: humoco_node::network::framing::FrozenShardReply = bincode::deserialize(&bytes).unwrap();
+                let network = if support_fault == 2 {humoco_sim_core::types::NetworkId::Testnet} else {humoco_sim_core::types::NetworkId::Mainnet};
+                let shard = if support_fault == 3 {shard.wrapping_add(1)} else {shard};
+                let receiver = if support_fault == 4 {[99;32]} else {owner.unwrap()};
+                reply.signature = identity.signing_key().sign(&reply.signing_digest(network,shard,identity.node_pubkey(),&receiver)).to_bytes().to_vec();
+                if support_fault == 1 {reply.signature[0] ^= 1;}
+                bytes = bincode::serialize(&reply).unwrap(); header.payload_len=bytes.len() as u32;
+            }
+            if active && support_fault >= 5 {
+                let mut page=humoco_node::network::framing::ActiveSyncResponse::from_bytes(&bytes).unwrap();
+                if let Some((_,_,fact))=page.payload.support.first_mut() {
+                    if support_fault == 5 {fact.class=2;} else if support_fault == 7 {fact.parent[0]^=1;} else {fact.root_valid_until_ms=1;}
+                }
+                bytes=page.to_bytes().unwrap(); header.payload_len=bytes.len() as u32;
+            }
             if corrupt {
                 let mut page = humoco_node::network::framing::ActiveSyncResponse::from_bytes(&bytes)
                     .map_err(|e|humoco_node::error::NodeError::Network(e.to_string()))?;

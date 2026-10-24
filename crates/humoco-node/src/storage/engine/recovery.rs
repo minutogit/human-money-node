@@ -73,6 +73,9 @@ impl DualTierEngine {
         leases.insert(shard, SourceLease { owner, token, expires: Instant::now()+Duration::from_millis(SOURCE_LEASE_MS), _admission: admission });
         Ok(token)
     }
+    pub(crate) fn source_shard_lease_valid(&self,shard:u16,owner:[u8;32],token:[u8;16]) -> bool {
+        self.source_leases.lock().get(&shard).is_some_and(|lease|lease.owner == owner && lease.token == token && lease.expires > Instant::now())
+    }
     pub(crate) fn release_source_shard(&self, shard: u16, owner: [u8;32], token: [u8;16]) -> bool {
         let mut leases = self.source_leases.lock();
         if leases.get(&shard).is_some_and(|lease| lease.owner == owner && lease.token == token) {
@@ -86,21 +89,21 @@ impl DualTierEngine {
     /// Current distinct ready committee witnesses justify compact support for the
     /// complete objective cut. Never accept a source's claimed class or signers.
     pub(crate) async fn install_shard_snapshot(&self, stage: Arc<ShardStage>, expected: [u8;32],
-        class: u8, context: [u8;32], witnesses: usize) -> Result<(), StorageError> {
+        class: u8, context: [u8;32], witnesses: usize, inherited: super::super::db::support::VerifiedInheritedCut) -> Result<(), StorageError> {
         self.expire_source_leases();
         let admission = self.activity.close(stage.shard).await.ok_or_else(|| error("target shard busy"))?;
         let mut installation = Installation { _admission: admission, health: self.stats.clone(), uncertain: true };
-        let result = self.install_closed_snapshot(stage,expected,class,context,witnesses).await;
+        let result = self.install_closed_snapshot(stage,expected,class,context,witnesses,inherited).await;
         // An ordinary failed transaction rolled back; cancellation is different.
         // A publication failure AFTER commit remains fail-closed until restart.
         if result.is_ok() { installation.uncertain = false; }
         result
     }
     async fn install_closed_snapshot(&self, stage: Arc<ShardStage>, expected: [u8;32],
-        class: u8, context: [u8;32], witnesses: usize) -> Result<(), StorageError> {
+        class: u8, context: [u8;32], witnesses: usize, inherited: super::super::db::support::VerifiedInheritedCut) -> Result<(), StorageError> {
         self.persistence_fence().await?;
         let db = self.db.clone(); let cut = stage.clone();
-        self.recovery_work.spawn_blocking(move || db.install_shard_cut(&cut, expected, class, context, witnesses))
+        self.recovery_work.spawn_blocking(move || db.install_shard_cut(&cut, expected, class, context, witnesses,Some(&inherited)))
             .await.map_err(|e| error(&format!("installation worker: {e}")))??;
         // Bounded RAM publication. Only this shard is gated; no index guard is
         // retained over disk work. Existing root metadata remains immutable.

@@ -360,6 +360,7 @@ async fn pre_allocation_rejection_above_64_kib() {
     let mut oversize_page = humoco_node::network::framing::SyncPayload {
         locks: Vec::new(),
         hmc_locks: Vec::new(),
+        support: Vec::new(),
     };
     // Exceed max 500 records per page
     for i in 0..501 {

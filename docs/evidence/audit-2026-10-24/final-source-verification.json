@@ -1,0 +1,22 @@
+{
+  "human-money-node": {
+    "head": "c6813ee2d9d9b0a3c99dee08729423a4919176c6",
+    "changed_tracked_files": [],
+    "status": "?? docs/ARCHITECTURE_IMPLEMENTATION_AUDIT_2026-10-24.md\n?? docs/evidence/audit-2026-10-24/\n"
+  },
+  "human-money-core": {
+    "head": "a5709b0f9df0e40121faa1bd122238bd7bb3dc59",
+    "changed_tracked_files": [],
+    "status": "?? fuzz/corpus/\n?? fuzz/target/\n?? tools/simulations/offline-gossip/__pycache__/\n"
+  },
+  "human-money-app": {
+    "head": "1b32ff7deaebe901cb8d522a447bceaa39ef7dc6",
+    "changed_tracked_files": [],
+    "status": ""
+  },
+  "humoco-proto": {
+    "head": "3fc5dd87c82b91e7b682eabcf88e5b5ce23e7c32",
+    "changed_tracked_files": [],
+    "status": ""
+  }
+}

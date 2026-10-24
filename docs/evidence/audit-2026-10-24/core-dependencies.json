@@ -1,0 +1,1331 @@
+{
+  "platform": "x86_64-unknown-linux-gnu",
+  "packages": [
+    {
+      "name": "human_money_core",
+      "version": "0.4.1",
+      "manifest": "/home/basti/Coding/humoco/human-money-core/Cargo.toml",
+      "source": null,
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.99",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "argon2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.5",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "base64",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.21",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "bincode",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.3",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "bip39",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.1.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "std",
+            "all-languages"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "blake3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.5",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "bs58",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.5",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "cel-interpreter",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.10.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "cel-parser",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.10",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "chacha20poly1305",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.10.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "chrono",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.4",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "serde"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "clap",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^4.5",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "curve25519-dalek",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^4.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "group",
+            "digest",
+            "rand_core"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "ed25519-dalek",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.1.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "rand_core"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "hex",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.4.3",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "hkdf",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.12",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "hmac",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.12",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "humoco-proto",
+          "source": null,
+          "req": "*",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null,
+          "path": "/home/basti/Coding/humoco/humoco-proto"
+        },
+        {
+          "name": "lazy_static",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.4.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "log",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.4",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "pbkdf2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.12",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rand",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.8",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rand_core",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.6.4",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "regex",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.10.4",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rust_decimal",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.35",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rust_decimal_macros",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.35",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.219",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde_json",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.140",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde_json_canonicalizer",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.3.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "sha2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.10",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "sha3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.10",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "thiserror",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "toml",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.8.14",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "uuid",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.8.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "v4",
+            "serde"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "x25519-dalek",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.0.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "static_secrets"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "zeroize",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.7",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "aes-gcm",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.10.3",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "bs58",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.5",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "ed25519-dalek",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.1",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "hkdf",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.12",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "human_money_core",
+          "source": null,
+          "req": "^0.4.1",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "test-utils"
+          ],
+          "target": null,
+          "registry": null,
+          "path": "/home/basti/Coding/humoco/human-money-core"
+        },
+        {
+          "name": "lazy_static",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.4.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "proptest",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.11",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rand",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.8",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "regex",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.10.4",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "sha2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.10",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "tempfile",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^3.10.1",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "x25519-dalek",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.0.1",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "static_secrets"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "reqwest",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.13.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "json"
+          ],
+          "target": "cfg(not(target_arch = \"wasm32\"))",
+          "registry": null
+        },
+        {
+          "name": "sysinfo",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.30",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": "cfg(not(target_arch = \"wasm32\"))",
+          "registry": null
+        },
+        {
+          "name": "tokio",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.49.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "rt-multi-thread",
+            "macros"
+          ],
+          "target": "cfg(not(target_arch = \"wasm32\"))",
+          "registry": null
+        },
+        {
+          "name": "getrandom",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "js"
+          ],
+          "target": "cfg(target_arch = \"wasm32\")",
+          "registry": null
+        },
+        {
+          "name": "uuid",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.8.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "v4",
+            "serde",
+            "js"
+          ],
+          "target": "cfg(target_arch = \"wasm32\")",
+          "registry": null
+        }
+      ]
+    },
+    {
+      "name": "humoco-proto",
+      "version": "0.1.0",
+      "manifest": "/home/basti/Coding/humoco/humoco-proto/Cargo.toml",
+      "source": null,
+      "dependencies": [
+        {
+          "name": "bincode",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.3",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "blake3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.5",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "ed25519-dalek",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rand",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.8",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ]
+    }
+  ],
+  "features": [
+    {
+      "id": "path+file:///home/basti/Coding/humoco/human-money-core#human_money_core@0.4.1",
+      "dependencies": [
+        "registry+https://github.com/rust-lang/crates.io-index#aes-gcm@0.10.3",
+        "registry+https://github.com/rust-lang/crates.io-index#anyhow@1.0.102",
+        "registry+https://github.com/rust-lang/crates.io-index#argon2@0.5.3",
+        "registry+https://github.com/rust-lang/crates.io-index#base64@0.21.7",
+        "registry+https://github.com/rust-lang/crates.io-index#bincode@1.3.3",
+        "registry+https://github.com/rust-lang/crates.io-index#bip39@2.2.2",
+        "registry+https://github.com/rust-lang/crates.io-index#blake3@1.8.7",
+        "registry+https://github.com/rust-lang/crates.io-index#bs58@0.5.1",
+        "registry+https://github.com/rust-lang/crates.io-index#cel-interpreter@0.10.0",
+        "registry+https://github.com/rust-lang/crates.io-index#cel-parser@0.10.1",
+        "registry+https://github.com/rust-lang/crates.io-index#chacha20poly1305@0.10.1",
+        "registry+https://github.com/rust-lang/crates.io-index#chrono@0.4.44",
+        "registry+https://github.com/rust-lang/crates.io-index#clap@4.6.1",
+        "registry+https://github.com/rust-lang/crates.io-index#curve25519-dalek@4.1.3",
+        "registry+https://github.com/rust-lang/crates.io-index#ed25519-dalek@2.2.0",
+        "registry+https://github.com/rust-lang/crates.io-index#hex@0.4.3",
+        "registry+https://github.com/rust-lang/crates.io-index#hkdf@0.12.4",
+        "registry+https://github.com/rust-lang/crates.io-index#hmac@0.12.1",
+        "path+file:///home/basti/Coding/humoco/human-money-core#human_money_core@0.4.1",
+        "path+file:///home/basti/Coding/humoco/humoco-proto#0.1.0",
+        "registry+https://github.com/rust-lang/crates.io-index#lazy_static@1.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#log@0.4.29",
+        "registry+https://github.com/rust-lang/crates.io-index#pbkdf2@0.12.2",
+        "registry+https://github.com/rust-lang/crates.io-index#proptest@1.11.0",
+        "registry+https://github.com/rust-lang/crates.io-index#rand@0.8.6",
+        "registry+https://github.com/rust-lang/crates.io-index#rand_core@0.6.4",
+        "registry+https://github.com/rust-lang/crates.io-index#regex@1.12.3",
+        "registry+https://github.com/rust-lang/crates.io-index#reqwest@0.13.4",
+        "registry+https://github.com/rust-lang/crates.io-index#rust_decimal@1.41.0",
+        "registry+https://github.com/rust-lang/crates.io-index#rust_decimal_macros@1.40.0",
+        "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.228",
+        "registry+https://github.com/rust-lang/crates.io-index#serde_json@1.0.149",
+        "registry+https://github.com/rust-lang/crates.io-index#serde_json_canonicalizer@0.3.2",
+        "registry+https://github.com/rust-lang/crates.io-index#sha2@0.10.9",
+        "registry+https://github.com/rust-lang/crates.io-index#sha3@0.10.9",
+        "registry+https://github.com/rust-lang/crates.io-index#sysinfo@0.30.13",
+        "registry+https://github.com/rust-lang/crates.io-index#tempfile@3.27.0",
+        "registry+https://github.com/rust-lang/crates.io-index#thiserror@1.0.69",
+        "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.1",
+        "registry+https://github.com/rust-lang/crates.io-index#toml@0.8.23",
+        "registry+https://github.com/rust-lang/crates.io-index#uuid@1.23.1",
+        "registry+https://github.com/rust-lang/crates.io-index#x25519-dalek@2.0.1",
+        "registry+https://github.com/rust-lang/crates.io-index#zeroize@1.8.2"
+      ],
+      "deps": [
+        {
+          "name": "aes_gcm",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#aes-gcm@0.10.3",
+          "dep_kinds": [
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "anyhow",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#anyhow@1.0.102",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "argon2",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#argon2@0.5.3",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "base64",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#base64@0.21.7",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "bincode",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#bincode@1.3.3",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "bip39",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#bip39@2.2.2",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "blake3",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#blake3@1.8.7",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "bs58",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#bs58@0.5.1",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "cel_interpreter",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#cel-interpreter@0.10.0",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "cel_parser",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#cel-parser@0.10.1",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "chacha20poly1305",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#chacha20poly1305@0.10.1",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "chrono",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#chrono@0.4.44",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "clap",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#clap@4.6.1",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "curve25519_dalek",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#curve25519-dalek@4.1.3",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "ed25519_dalek",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#ed25519-dalek@2.2.0",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "hex",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#hex@0.4.3",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "hkdf",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#hkdf@0.12.4",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "hmac",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#hmac@0.12.1",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "human_money_core",
+          "pkg": "path+file:///home/basti/Coding/humoco/human-money-core#human_money_core@0.4.1",
+          "dep_kinds": [
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "humoco_proto",
+          "pkg": "path+file:///home/basti/Coding/humoco/humoco-proto#0.1.0",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "lazy_static",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#lazy_static@1.5.0",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "log",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#log@0.4.29",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "pbkdf2",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#pbkdf2@0.12.2",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "proptest",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#proptest@1.11.0",
+          "dep_kinds": [
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "rand",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#rand@0.8.6",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "rand_core",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#rand_core@0.6.4",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "regex",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#regex@1.12.3",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "reqwest",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#reqwest@0.13.4",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": "cfg(not(target_arch = \"wasm32\"))"
+            }
+          ]
+        },
+        {
+          "name": "rust_decimal",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#rust_decimal@1.41.0",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "rust_decimal_macros",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#rust_decimal_macros@1.40.0",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "serde",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.228",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "serde_json",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#serde_json@1.0.149",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "serde_json_canonicalizer",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#serde_json_canonicalizer@0.3.2",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "sha2",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#sha2@0.10.9",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "sha3",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#sha3@0.10.9",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "sysinfo",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#sysinfo@0.30.13",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": "cfg(not(target_arch = \"wasm32\"))"
+            }
+          ]
+        },
+        {
+          "name": "tempfile",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#tempfile@3.27.0",
+          "dep_kinds": [
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "thiserror",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#thiserror@1.0.69",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "tokio",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.1",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": "cfg(not(target_arch = \"wasm32\"))"
+            }
+          ]
+        },
+        {
+          "name": "toml",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#toml@0.8.23",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "uuid",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#uuid@1.23.1",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": null,
+              "target": "cfg(target_arch = \"wasm32\")"
+            }
+          ]
+        },
+        {
+          "name": "x25519_dalek",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#x25519-dalek@2.0.1",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            },
+            {
+              "kind": "dev",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "zeroize",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#zeroize@1.8.2",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        }
+      ],
+      "features": [
+        "test-utils"
+      ]
+    },
+    {
+      "id": "path+file:///home/basti/Coding/humoco/humoco-proto#0.1.0",
+      "dependencies": [
+        "registry+https://github.com/rust-lang/crates.io-index#bincode@1.3.3",
+        "registry+https://github.com/rust-lang/crates.io-index#blake3@1.8.7",
+        "registry+https://github.com/rust-lang/crates.io-index#ed25519-dalek@2.2.0",
+        "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.228"
+      ],
+      "deps": [
+        {
+          "name": "bincode",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#bincode@1.3.3",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "blake3",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#blake3@1.8.7",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "ed25519_dalek",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#ed25519-dalek@2.2.0",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "serde",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.228",
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ]
+        }
+      ],
+      "features": []
+    }
+  ]
+}

@@ -4,6 +4,7 @@ use crate::api::dto::QuorumCertificateDto;
 use humoco_sim_core::types::NetworkId;
 use std::collections::HashSet;
 
+pub(crate) const TABLE_NATIVE_SUPPORT: TableDefinition<&str, &[u8]> = TableDefinition::new("native_confirmation_support");
 pub const TABLE_CONFIRMATION_SUPPORT: TableDefinition<&str, &[u8]> =
     TableDefinition::new("confirmation_support");
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -136,6 +137,12 @@ impl RedbStorage {
         }
         txn.commit()?;
         Ok(fact)
+    }
+    /// Compact admitted native support, separate from legacy row status.
+    pub fn native_confirmation_support(&self,parent:&[u8;32]) -> Result<Option<ConfirmationSupport>,StorageError> {
+        let tx=self.db.begin_read()?;
+        let table=tx.open_table(TABLE_NATIVE_SUPPORT)?;
+        table.get(native_key(parent).as_str())?.map(|value|serde_json::from_slice(value.value()).map_err(StorageError::from)).transpose()
     }
     pub fn confirmation_support(
         &self,
@@ -300,5 +307,92 @@ mod tests {
         assert!(db.confirmation_support(tag).unwrap().is_none());
         cancel.cancel();
         worker.await.unwrap();
+    }
+}
+
+/// Disjoint from base58 HMC collision tags. Native status fields are not provenance.
+pub(crate) fn native_key(parent: &[u8;32]) -> String { format!("native:{}",hex::encode(parent)) }
+
+impl RedbStorage {
+    /// Bounded streaming commitment over both objective identities and admitted support.
+    /// Unknown provenance commits to class zero, including legacy native FINAL rows.
+    pub(crate) fn inherited_support_digest(&self, shard: u16, now: u64) -> Result<[u8;32],StorageError> {
+        let tx = self.db.begin_read()?;
+        let mut h = blake3::Hasher::new();
+        let domain = b"HUMOCO_V1_INHERITED_SUPPORT_STATE";
+        h.update(&[domain.len() as u8]); h.update(domain); h.update(&[1]);
+        h.update(&shard.to_le_bytes());
+        let support = tx.open_table(TABLE_CONFIRMATION_SUPPORT)?;
+        for item in tx.open_table(TABLE_LOCKS)?.iter()? {
+            let (_,bytes) = item?;
+            let (row,root): (LockRecord,u64) = bincode::deserialize(bytes.value())?;
+            if u16::from_be_bytes([row.parent_lock[0],row.parent_lock[1]]) != shard || row.valid_until.0 <= now || row.status.is_void() { continue; }
+            let key = native_key(&row.parent_lock);
+            let fact = tx.open_table(TABLE_NATIVE_SUPPORT)?.get(key.as_str())?.map(|v|serde_json::from_slice::<ConfirmationSupport>(v.value())).transpose()?;
+            hash_fact(&mut h,0,&key,&row.parent_lock,&row.id,&[0;32],root,
+                admitted_class(fact.as_ref(),&row.parent_lock,&row.id,root)?)?;
+        }
+        for item in tx.open_table(TABLE_HMC_LOCKS)?.iter()? {
+            let (key,bytes) = item?;
+            let row: crate::api::hmc::L2LockEntry = serde_json::from_slice(bytes.value())?;
+            let roots = tx.open_table(roots::TABLE_VOUCHER_ROOTS)?;
+            let root = roots.get(row.layer2_voucher_id.as_str())?.ok_or_else(||StorageError::DurableCommitFailed("support root missing".into()))?;
+            let root: crate::api::hmc::L2LockEntry = serde_json::from_slice(root.value())?;
+            let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&bs58::encode(root.t_id).into_string());
+            let ttl = roots::root_valid_until(&root)?;
+            if humoco_sim_core::types::canonical_voucher_shard(&parent) != shard || ttl <= now { continue; }
+            let parent = *blake3::hash(key.value().as_bytes()).as_bytes();
+            let fact = support.get(key.value())?.map(|v|serde_json::from_slice::<ConfirmationSupport>(v.value())).transpose()?;
+            hash_fact(&mut h,1,key.value(),&parent,&row.t_id,&root.t_id,ttl,
+                admitted_class(fact.as_ref(),&parent,&row.t_id,ttl)?)?;
+        }
+        Ok(*h.finalize().as_bytes())
+    }
+}
+fn admitted_class(fact: Option<&ConfirmationSupport>,parent: &[u8;32],child: &[u8;32],ttl:u64) -> Result<u8,StorageError> {
+    match fact {
+        None => Ok(0),
+        Some(fact) if fact.parent == *parent && fact.child == *child && fact.root_valid_until_ms == ttl && (1..=2).contains(&fact.class) => Ok(fact.class),
+        _ => Err(StorageError::DurableCommitFailed("inconsistent inherited support".into())),
+    }
+}
+#[allow(clippy::too_many_arguments)]
+fn hash_fact(h: &mut blake3::Hasher,kind:u8,key:&str,parent:&[u8;32],child:&[u8;32],root:&[u8;32],ttl:u64,class:u8) -> Result<(),StorageError> {
+    if key.len() > 128 { return Err(StorageError::DurableCommitFailed("support key too long".into())); }
+    h.update(&[kind]); h.update(&(key.len() as u16).to_le_bytes()); h.update(key.as_bytes());
+    h.update(parent); h.update(child); h.update(root); h.update(&ttl.to_le_bytes()); h.update(&[class]); Ok(())
+}
+
+/// Constructible only after independent authentication of the qualified source set.
+/// Its class claims concern inherited exclusions, never current checkout authority.
+#[derive(Clone)]
+pub(crate) struct VerifiedInheritedCut {
+    objective: [u8;32],
+    support: [u8;32],
+    shard: u16,
+}
+impl VerifiedInheritedCut {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn verify(network: NetworkId,shard:u16,receiver:[u8;32],committee:&[[u8;32]],quorum:usize,
+        objective:[u8;32],support:[u8;32],sources:&[([u8;32],crate::network::framing::FrozenShardReply)]) -> Result<Self,StorageError> {
+        let invalid = || StorageError::DurableCommitFailed("unsupported inherited cut".into());
+        if committee.is_empty() || committee.len() > 20 || quorum == 0 || quorum > committee.len()
+            || !committee.contains(&receiver) || committee.iter().collect::<HashSet<_>>().len() != committee.len() || sources.len() > 20 { return Err(invalid()); }
+        let mut seen = HashSet::new();
+        for (key,reply) in sources {
+            if !committee.contains(key) || *key == receiver || !seen.insert(*key) || reply.version != 2 || reply.lease_ms != 25_000
+                || reply.digest != objective || reply.support_digest != support { return Err(invalid()); }
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(key).map_err(|_|invalid())?;
+            let sig = ed25519_dalek::Signature::from_slice(&reply.signature).map_err(|_|invalid())?;
+            vk.verify_strict(&reply.signing_digest(network,shard,key,&receiver),&sig).map_err(|_|invalid())?;
+        }
+        if seen.len() < quorum { return Err(invalid()); }
+        Ok(Self { objective,support,shard })
+    }
+    pub(crate) fn validate(&self,stage:&super::install::ShardStage,objective:[u8;32]) -> Result<(),StorageError> {
+        if self.objective != objective || self.shard != stage.shard || stage.support_digest()? != self.support {
+            return Err(StorageError::DurableCommitFailed("inherited cut commitment mismatch".into()));
+        }
+        Ok(())
     }
 }

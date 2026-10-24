@@ -144,6 +144,7 @@ impl RedbStorage {
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
+            let _ = write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
             let _ = write_txn.open_table(TABLE_OWN_CHOICES)?;
             let _ = write_txn.open_table(TABLE_OWN_CHOICE_TTL)?;
             let _ = write_txn.open_table(TABLE_LOCKS)?;
@@ -430,6 +431,7 @@ impl RedbStorage {
                 if sec <= now_sec {
                     table_ttl.remove(&(sec, &parent))?;
                     table_locks.remove(&parent)?;
+                    write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?.remove(support::native_key(&parent).as_str())?;
                     // Quarantined minority copies (TABLE_PROVISIONAL_LOCKS) share
                     // the same TTL and are purged together here (F09, DEC-035).
                     table_prov_locks.remove(&parent)?;
@@ -997,6 +999,7 @@ impl RedbStorage {
             if sec <= now_sec {
                 table_ttl.remove(&(sec, &parent))?;
                 table_locks.remove(&parent)?;
+                write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?.remove(support::native_key(&parent).as_str())?;
                 // Quarantined minority copies (TABLE_PROVISIONAL_LOCKS) share the
                 // same TTL and are purged together here (F09, DEC-035).
                 table_prov_locks.remove(&parent)?;
@@ -1280,6 +1283,11 @@ impl RedbStorage {
                 dst_banned.insert(k.value(), v.value())?;
             }
 
+            {
+                let source = read_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
+                let mut destination = write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
+                for row in source.iter()? { let (key,value) = row?; destination.insert(key.value(),value.value())?; }
+            }
             let support_src = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
             let mut support_dst = write_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
             for row in support_src.iter()? {

@@ -1,0 +1,88 @@
+{
+  "human-money-node": {
+    "exit": 0,
+    "local_or_git_packages": [
+      {
+        "name": "clap_complete",
+        "version": "4.5.66",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/human-money-node/crates/clap_complete/Cargo.toml"
+      },
+      {
+        "name": "humoco-node",
+        "version": "0.1.3",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/human-money-node/crates/humoco-node/Cargo.toml"
+      },
+      {
+        "name": "humoco-proto",
+        "version": "0.1.0",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/humoco-proto/Cargo.toml"
+      },
+      {
+        "name": "humoco-sim-core",
+        "version": "0.1.3",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/human-money-node/crates/humoco-sim-core/Cargo.toml"
+      }
+    ]
+  },
+  "human-money-core": {
+    "exit": 0,
+    "local_or_git_packages": [
+      {
+        "name": "human_money_core",
+        "version": "0.4.1",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/human-money-core/Cargo.toml"
+      },
+      {
+        "name": "human_money_wasm",
+        "version": "0.3.2",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/human-money-core/bindings/wasm/Cargo.toml"
+      },
+      {
+        "name": "humoco-proto",
+        "version": "0.1.0",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/humoco-proto/Cargo.toml"
+      }
+    ]
+  },
+  "human-money-app": {
+    "exit": 0,
+    "local_or_git_packages": [
+      {
+        "name": "human_money_app",
+        "version": "0.2.1",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/human-money-app/src-tauri/Cargo.toml"
+      },
+      {
+        "name": "human_money_core",
+        "version": "0.4.1",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/human-money-core/Cargo.toml"
+      },
+      {
+        "name": "humoco-proto",
+        "version": "0.1.0",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/humoco-proto/Cargo.toml"
+      }
+    ]
+  },
+  "humoco-proto": {
+    "exit": 0,
+    "local_or_git_packages": [
+      {
+        "name": "humoco-proto",
+        "version": "0.1.0",
+        "source": null,
+        "manifest_path": "/home/basti/Coding/humoco/humoco-proto/Cargo.toml"
+      }
+    ]
+  }
+}

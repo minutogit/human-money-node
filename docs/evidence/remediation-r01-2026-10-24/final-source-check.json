@@ -1,0 +1,30 @@
+{
+  "human-money-node": {
+    "head": "c6813ee2d9d9b0a3c99dee08729423a4919176c6",
+    "tracked_changed_since_baseline": [
+      "crates/humoco-node/src/api/routes.rs",
+      "crates/humoco-node/src/network/framing.rs",
+      "crates/humoco-node/src/network/transport.rs",
+      "crates/humoco-node/tests/common/recovery.rs"
+    ]
+  },
+  "human-money-core": {
+    "head": "a5709b0f9df0e40121faa1bd122238bd7bb3dc59",
+    "tracked_changed_since_baseline": []
+  },
+  "human-money-app": {
+    "head": "1b32ff7deaebe901cb8d522a447bceaa39ef7dc6",
+    "tracked_changed_since_baseline": []
+  },
+  "humoco-proto": {
+    "head": "3fc5dd87c82b91e7b682eabcf88e5b5ce23e7c32",
+    "tracked_changed_since_baseline": []
+  },
+  "tested_sources_sha256": {
+    "crates/humoco-node/src/api/routes.rs": "5307ea6ae7bd586488a0952b80426fd1a711d29b3aece9619f211673a7aa89b9",
+    "crates/humoco-node/src/network/framing.rs": "b7263fc3373da1c32e9f4862c73afa3b2d87825e3c90df4a898a10fc0936af25",
+    "crates/humoco-node/src/network/transport.rs": "531e2871ef0f549f2df9e51b4d4752a4849737b62963029a00eec1179b20b0ed",
+    "crates/humoco-node/tests/common/recovery.rs": "2a85604b7afcc106e9b7ac84bb52122b415be4702be024fd482dfa99e6dc6e12",
+    "crates/humoco-node/tests/status_read_only_tests.rs": "c45677c596918c5d367e6c49393c44e284d03c6e02235495e570e6396ddd2ec8"
+  }
+}

@@ -536,6 +536,17 @@ impl LockWirePayload {
     }
 }
 
+/// Versioned, unsigned existence observation for an exact status lookup.
+/// This is diagnostic only: it carries no original approval or live-state vote.
+/// Tag-only HMC queries retain their full `L2LockEntry` response format.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatusObservation {
+    pub version: u8,
+    pub lock_id: [u8; 32],
+    pub parent_lock: [u8; 32],
+    pub shard_id: u16,
+}
+
 /// Wire payload for StatusQuery carrying lock identifiers and declared read EMA metrics (Spec 09/10).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StatusQueryPayload {
@@ -595,6 +606,7 @@ pub struct SyncPayload {
     pub locks: Vec<(humoco_sim_core::types::LockRecord, u64)>,
     #[serde(with = "hmc_locks_json")]
     pub hmc_locks: Vec<(String, crate::api::hmc::L2LockEntry)>,
+    pub support: Vec<(u8, String, crate::storage::db::support::ConfirmationSupport)>,
 }
 
 impl SyncPayload {
@@ -602,7 +614,7 @@ impl SyncPayload {
         locks: Vec<(humoco_sim_core::types::LockRecord, u64)>,
         hmc_locks: Vec<(String, crate::api::hmc::L2LockEntry)>,
     ) -> Self {
-        Self { locks, hmc_locks }
+        Self { locks, hmc_locks, support: Vec::new() }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
@@ -614,6 +626,7 @@ impl SyncPayload {
             Ok(SyncPayload {
                 locks,
                 hmc_locks: Vec::new(),
+                support: Vec::new(),
             })
         }
     }
@@ -685,7 +698,7 @@ pub struct ActiveSyncResponse {
 impl ActiveSyncResponse {
     pub fn new(payload: SyncPayload, has_more: bool, next_cursor: Option<u64>) -> Self {
         Self {
-            version: 2,
+            version: 3,
             payload,
             has_more,
             next_cursor,
@@ -698,7 +711,7 @@ impl ActiveSyncResponse {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
         let response: Self = bincode::deserialize(bytes)?;
-        if response.version != 2 {
+        if response.version != 3 {
             return Err(Box::new(bincode::ErrorKind::Custom(
                 "fixed snapshot response required".into(),
             )));
@@ -1051,4 +1064,20 @@ pub struct FrozenShardReply {
     pub token: [u8; 16],
     pub digest: [u8; 32],
     pub lease_ms: u64,
+    pub support_digest: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+impl FrozenShardReply {
+    /// A cold-transfer assertion, never an original approval or checkout proof.
+    pub fn signing_digest(&self, network: humoco_sim_core::types::NetworkId, shard: u16,
+        source: &[u8;32], receiver: &[u8;32]) -> [u8;32] {
+        let mut h = blake3::Hasher::new();
+        let tag = b"HUMOCO_V1_INHERITED_SUPPORT_CUT";
+        h.update(&[tag.len() as u8]); h.update(tag); h.update(&[self.version]);
+        h.update(&[match network { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 }]);
+        h.update(&shard.to_le_bytes()); h.update(source); h.update(receiver);
+        h.update(&self.token); h.update(&self.digest); h.update(&self.support_digest);
+        h.update(&self.lease_ms.to_le_bytes()); *h.finalize().as_bytes()
+    }
 }

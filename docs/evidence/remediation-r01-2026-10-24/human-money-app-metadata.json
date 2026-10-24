@@ -1,0 +1,4 @@
+error: failed to download `android_log-sys v0.3.2`
+
+Caused by:
+  attempting to make an HTTP request, but --offline was specified

@@ -27,6 +27,8 @@ serde_json="1"
 reqwest={version="0.13.2",features=["json"]}
 axum="0.7"
 blake3="1.5"
+bincode="1.3"
+ed25519-dalek="2.1"
 chrono="0.4"
 log="0.4"
 uuid={version="1",features=["v4","serde"]}

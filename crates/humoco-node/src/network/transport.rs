@@ -1437,7 +1437,7 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 }
 
-                // Strict Lock & Shard & Validity Verification (INV: Close StatusQuery Signature Hole)
+                // Diagnostic observations never create original approvals or live votes.
                 // INV-0302: HMC shard matching uses the canonical genesis anchor when
                 // known; tag-only queries (lock_id == [0;32], INV-0310 gateway
                 // fallback) return the full L2LockEntry so a stateless gateway can
@@ -1445,15 +1445,8 @@ impl RequestHandler for NodeRequestHandler {
                 let (matching_and_valid, tag_only_entry) = {
                     let mut is_match = false;
                     let mut tag_entry: Option<crate::api::hmc::L2LockEntry> = None;
-                    // Check Pure L2 Lock in RAM or Disk
-                    let ram_lock = engine.get_ram_lock(&parent_lock).await;
-                    let stored = ram_lock.or_else(|| {
-                        storage
-                            .get_lock(&parent_lock)
-                            .ok()
-                            .flatten()
-                            .map(|(rec, _)| rec)
-                    });
+                    // Cheap native lookup stays in RAM; pending data is only an observation.
+                    let stored = engine.get_ram_lock(&parent_lock).await;
                     if let Some(rec) = stored {
                         let expected_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
                         if rec.id == lock_id
@@ -1515,9 +1508,13 @@ impl RequestHandler for NodeRequestHandler {
                 };
 
                 // Tag-only fallback returns the full entry so the gateway can
-                // build a Verified verdict with first-party signature evidence.
+                // build a diagnostic verdict with the existing sender signature.
+                // It is neither a node original approval nor a current-state proof.
                 if let Some(entry) = tag_only_entry {
-                    let resp_bytes = bincode::serialize(&entry).unwrap_or_default();
+                    // JSON preserves omitted optional DTO fields; positional
+                    // bincode cannot round-trip skip_serializing_if fields.
+                    let resp_bytes = serde_json::to_vec(&entry)
+                        .map_err(|e| NodeError::Network(e.to_string()))?;
                     let payload_len = checked_payload_len(resp_bytes.len())?;
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
@@ -1530,17 +1527,14 @@ impl RequestHandler for NodeRequestHandler {
                 }
 
                 if matching_and_valid {
-                    let target_status = (header.flags & 0xFF) as u8;
-                    let attestation = crate::api::routes::create_attestation_for_network(
-                        &identity,
+                    let observation = crate::network::framing::StatusObservation {
+                        version: 1,
                         lock_id,
                         parent_lock,
                         shard_id,
-                        target_status,
-                        now_ms,
-                        network_id,
-                    );
-                    let resp_bytes = bincode::serialize(&attestation).unwrap_or_default();
+                    };
+                    let resp_bytes = bincode::serialize(&observation)
+                        .map_err(|e| NodeError::Network(e.to_string()))?;
                     let payload_len = checked_payload_len(resp_bytes.len())?;
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
@@ -1589,12 +1583,18 @@ impl RequestHandler for NodeRequestHandler {
                     };
                     let now = manager.net_time_ms();
                     let db = storage.clone();
-                    let digest_result = engine.recovery_work.spawn_blocking(move ||db.committed_shard_digest(shard,now)).await
+                    let digest_result = engine.recovery_work.spawn_blocking(move || { let (digest,count) = db.committed_shard_digest(shard,now)?; let support = db.inherited_support_digest(shard,now)?; Ok::<_,crate::storage::StorageError>((digest,count,support)) }).await
                         .map_err(|e|NodeError::Network(format!("frozen digest worker: {e}")))?;
-                    let (digest,_) = match digest_result { Ok(value) => value, Err(error) => {
+                    let (digest,_,support_digest) = match digest_result { Ok(value) => value, Err(error) => {
                         engine.release_source_shard(shard,owner,token); return Err(error.into());
                     }};
-                    let reply = crate::network::framing::FrozenShardReply { version: 1,token,digest,lease_ms:25_000 };
+                    if !engine.is_signing_healthy() || !readiness_manager.is_shard_ready(shard) || !engine.source_shard_lease_valid(shard,owner,token) {
+                        engine.release_source_shard(shard,owner,token);
+                        return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,humoco_sim_core::wire::FLAG_NOT_READY,0),Vec::new()));
+                    }
+                    let mut reply = crate::network::framing::FrozenShardReply { version: 2,token,digest,lease_ms:25_000,support_digest,signature:Vec::new() };
+                    use ed25519_dalek::Signer;
+                    reply.signature = identity.signing_key().sign(&reply.signing_digest(network_id,shard,identity.node_pubkey(),&owner)).to_bytes().to_vec();
                     let bytes = bincode::serialize(&reply).map_err(|e|NodeError::Network(format!("frozen reply: {e}")))?;
                     return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,0,checked_payload_len(bytes.len())?),bytes));
                 }
@@ -2564,11 +2564,15 @@ impl QuicTransport {
         let payload = [vec![1,0],shard.to_le_bytes().to_vec(),vec![0;16]].concat();
         let header = WireHeader::new(MsgType::ShardDigestRequest as u16,seq,0,0,20);
         let (header,bytes) = self.send_request(conn,&header,&payload).await?;
-        if header.msg_type != MsgType::ShardDigestResponse as u16 || header.flags != 0 || bytes.len() != 57 {
+        if header.msg_type != MsgType::ShardDigestResponse as u16 || header.flags != 0 || bytes.len() != 161 {
             return Err(NodeError::Network("source is not ready for a no-gap cut".into()));
         }
         let reply: crate::network::framing::FrozenShardReply = bincode::deserialize(&bytes).map_err(|e|NodeError::Network(format!("frozen reply: {e}")))?;
-        if reply.version != 1 || reply.lease_ms != 25_000 { return Err(NodeError::Network("unsupported source fence".into())); }
+        if reply.version != 2 || reply.lease_ms != 25_000 { return Err(NodeError::Network("unsupported source fence".into())); }
+        let (_,source) = crate::network::tls::extract_peer_identity_from_connection(conn).ok_or_else(||NodeError::Network("unauthenticated support source".into()))?;
+        let signature = ed25519_dalek::Signature::from_slice(&reply.signature).map_err(|_|NodeError::Network("invalid support signature".into()))?;
+        source.verify_strict(&reply.signing_digest(self.network_id,shard,&source.to_bytes(),self.identity.node_pubkey()),&signature)
+            .map_err(|_|NodeError::Network("foreign or forged support assertion".into()))?;
         Ok(reply)
     }
     /// Release only the exact authenticated source lease; expiry is the fallback.

@@ -1633,44 +1633,18 @@ async fn query_status(
                     }
                     // Tag-only fallback returns the full L2LockEntry with
                     // first-party signature evidence.
-                    if let Ok(entry) =
-                        bincode::deserialize::<crate::api::hmc::L2LockEntry>(&resp_payload)
+                    if let Some(entry) =
+                        serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&resp_payload)
+                            .ok()
+                            .or_else(|| bincode::deserialize(&resp_payload).ok())
                     {
                         if entry.layer2_voucher_id == payload.layer2_voucher_id {
                             return Some(L2Verdict::Verified { lock_entry: entry });
                         }
                     }
-                    // Standard path returns an attestation; existence proves the
-                    // lock lives on the shard (full entry sync via digest-pull).
-                    if let Ok(att) =
-                        bincode::deserialize::<crate::api::dto::AttestationDto>(&resp_payload)
-                    {
-                        // Attestation alone proves shard custody; report as
-                        // MissingLocks would hide it, so surface as Verified
-                        // with a minimal entry carrying the proven t_id. The
-                        // client cross-checks t_id for double-spend (Spec 06).
-                        let lock_id_bytes = hex::decode(&att.lock_id)
-                            .ok()
-                            .and_then(|b| <[u8; 32]>::try_from(b).ok())?;
-                        let minimal = crate::api::hmc::L2LockEntry {
-                            causal_output: None,
-                            layer2_voucher_id: payload.layer2_voucher_id.clone(),
-                            t_id: lock_id_bytes,
-                            sender_ephemeral_pub: [0u8; 32],
-                            receiver_ephemeral_pub_hash: None,
-                            change_ephemeral_pub_hash: None,
-                            layer2_signature: [0u8; 64],
-                            trap_r: None,
-                            trap_s: None,
-                            encrypted_timestamp: 0,
-                            created_at_ms: 0,
-                            deletable_at: None,
-                            privacy_guard: None,
-                        };
-                        return Some(L2Verdict::Verified {
-                            lock_entry: minimal,
-                        });
-                    }
+                    // Unsigned exact observations and legacy originals are not a
+                    // substitute for the requested full voucher entry, and never
+                    // establish challenge-bound current checkout authority.
                     None
                 }
                 .await;

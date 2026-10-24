@@ -1,0 +1,43 @@
+{
+  "human-money-node": {
+    "path": "/home/basti/Coding/humoco/human-money-node",
+    "branch": "dev",
+    "head": "c6813ee2d9d9b0a3c99dee08729423a4919176c6",
+    "cargo_configs": {
+      "/home/basti/Coding/humoco/human-money-node/.cargo/config.toml": "[alias]\n# Fast inner-loop testing for quick developer feedback (< 3 seconds)\nt-fast = \"test --workspace --lib\"\ntest-fast = \"test --workspace --lib\"\n\n# Standard full test suite (runs all unit, spec, wire & cluster tests)\nt = \"test --workspace\"\nt-std = \"test --workspace\"\ntest-std = \"test --workspace\"\n\n# Deep test suite including #[ignore] long-running cluster simulations\nt-deep = \"test --workspace -- --ignored\"\ntest-deep = \"test --workspace -- --ignored\"\n"
+    },
+    "status": "?? docs/evidence/audit-2026-10-24/\n",
+    "tracked_file_count": 402,
+    "changed_since_capture": []
+  },
+  "human-money-core": {
+    "path": "/home/basti/Coding/humoco/human-money-core",
+    "branch": "live",
+    "head": "a5709b0f9df0e40121faa1bd122238bd7bb3dc59",
+    "cargo_configs": {},
+    "status": "?? fuzz/corpus/\n?? fuzz/target/\n?? tools/simulations/offline-gossip/__pycache__/\n",
+    "tracked_file_count": 381,
+    "changed_since_capture": []
+  },
+  "human-money-app": {
+    "path": "/home/basti/Coding/humoco/human-money-app",
+    "branch": "dev",
+    "head": "1b32ff7deaebe901cb8d522a447bceaa39ef7dc6",
+    "cargo_configs": {
+      "/home/basti/Coding/humoco/human-money-app/.cargo/config.toml": "[patch.\"https://github.com/minutogit/human-money-core.git\"]\nhuman_money_core = { path = \"../human-money-core\" }\n",
+      "/home/basti/Coding/humoco/human-money-app/src-tauri/.cargo/config.toml": "[patch.crates-io]\n# (Empty for now)\n\n[patch.'https://github.com/minutogit/human-money-core.git']\nhuman_money_core = { path = \"../../human-money-core\" }\n"
+    },
+    "status": "",
+    "tracked_file_count": 263,
+    "changed_since_capture": []
+  },
+  "humoco-proto": {
+    "path": "/home/basti/Coding/humoco/humoco-proto",
+    "branch": "dev",
+    "head": "3fc5dd87c82b91e7b682eabcf88e5b5ce23e7c32",
+    "cargo_configs": {},
+    "status": "",
+    "tracked_file_count": 9,
+    "changed_since_capture": []
+  }
+}

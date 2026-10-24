@@ -15,7 +15,7 @@ This increment executes **R00 for F01 and R01 only**, authorized by the maintain
 | R02 / F02 | Completed; F02 closed by maintained boundary regressions | Z03/Z04/Z06/Z07; G3/E05. Fresh recipient native and HMC tests prove preservation of class 2, negative tests prove no raw status promotion, 5/5 boundary tests passed, full suite passed (674 passed, 0 failed, 14 ignored), historical defect probe fails on assertion (installed == 2 != 1). |
 | R03 / F03 | Completed; F03 verified across cluster sync recovery and merge scenarios | Z02/Z06/Z07; G2/G3/E04. Distributed recovery proof worksheet established; cluster sync recovery passed (9/9); network merge scenarios passed (3/3); full test suite passed (674 passed, 0 failed); clippy 0 warnings. |
 | R04 / F04 | Completed; F04 closed by maintained checkout regressions | Z08/Z13; E02/E12. Challenge renewal for live root vouchers on expired pending reservations, bounded active reservation pruning, decoupling of completed replay storage from 256 active capacity, UI purchase ID stabilization; all Core and App tests and clippy pass. |
-| R05 / F05 | Not started | Cold authority renewal remains open. |
+| R05 / F05 | Completed; F05 closed by host lifecycle renewal and fail-closed cache expiry | Z08/Z11; G1/G4/E10. Regional view cache records earliest expiry, cached_views rejects expired cache fail-closed, checkout ensures fresh views on-demand, settings save triggers proactive refresh, host-owned 30s background renewal worker keeps active session fresh; all tests pass. |
 | R06 / F06 | Not started | Automatic reconciliation remains open. |
 | R07 / F07 | Not started | Full fault/resource/IPC acceptance remains open. |
 | R08 | Not started | Global final acceptance remains open; this increment runs its applicable Node checks. |
@@ -218,4 +218,33 @@ The final acceptance run for R03 completed with:
   - App Clippy: `cargo clippy --workspace --all-targets -- -D warnings`: **0 warnings**.
 
 **Verdict:** R04 / F04 is completed and verified. Package closed.
+
+## R05 increment — renew authenticated regional views on the cold path
+
+### Implemented changes
+
+1. **Signed Expiry & Fail-Closed Cache (`human-money-app/src-tauri/src/checkout.rs`):**
+   - Extended `RegionalViewCache` with `pub expires_at_ms: u64`, set to the earliest `valid_until_ms` across all configured and verified source views (`views.iter().map(|v| v.valid_until_ms).min()`).
+   - `cached_views` checks `if cache.is_expired(now()?) { return Err(fail("Authenticated regional view cache expired")); }` before returning, ensuring fail-closed rejection of stale authority.
+2. **On-Demand Proactive Refresh (`ensure_cached_views`):**
+   - Implemented `ensure_cached_views(state)`: checks if cache is missing or expiring within a 10-second window (`cache.is_expiring_within(now_ms, 10_000)`). If so, it proactively attempts `refresh_views(state)` on the cold path before returning `cached_views(state)`.
+   - `checkout_bundle` now calls `ensure_cached_views(state).await?` instead of raw `cached_views`.
+3. **Settings Invalidation with Proactive Refresh (`human-money-app/src-tauri/src/commands/settings_cmd.rs`):**
+   - In `save_app_settings`, after clearing `*state.regional_views.lock() = None` and saving settings, the wallet lock is released and a proactive `refresh_views(state.inner()).await` is triggered immediately, keeping the cache populated without waiting for checkout.
+4. **Host-Owned Background Renewal Loop (`human-money-app/src-tauri/src/lib.rs`):**
+   - In `checkout.rs`, implemented `spawn_regional_view_renewal_worker(app: tauri::AppHandle)` running an async task every 30 seconds.
+   - The worker verifies the wallet is unlocked (`service.with_wallet(|_| ()).is_ok()`) before attempting renewal, avoiding unnecessary network traffic when logged out.
+   - Initialized in Tauri's application setup in `src-tauri/src/lib.rs`.
+
+### Maintained regressions and verification
+
+- Unit tests in `src-tauri/src/checkout.rs`:
+  - `cached_views_rejects_expired_cache`: Verifies that a cache whose `expires_at_ms` is in the past is rejected fail-closed with `"Authenticated regional view cache expired"`.
+  - `is_expiring_within_detects_impending_expiry`: Verifies that impending expiry within the 10-second renewal window is accurately detected.
+- Test suites:
+  - Backend tests: `cargo test` in `src-tauri`: **20 passed, 0 failed** (2 new unit tests).
+  - Backend Clippy: `cargo clippy --workspace --all-targets -- -D warnings`: **0 warnings**.
+  - Frontend tests: `npm test -- --run`: **184 passed, 0 failed** across 23 test suites.
+
+**Verdict:** R05 / F05 is completed and verified. Package closed.
 

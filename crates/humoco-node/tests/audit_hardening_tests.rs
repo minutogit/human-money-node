@@ -125,8 +125,15 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
     // Only stale passive presence excludes identities; RPC malus is diagnostic.
     for i in 0..5u64 {
         let dummy_id = *blake3::hash(&i.to_le_bytes()).as_bytes();
-        peer_mgr.set_last_seen_for_test(&dummy_id,
-            std::time::Instant::now() - std::time::Duration::from_secs(3 * 3600 + 1)).await;
+        peer_mgr
+            .set_last_seen_for_test(
+                &dummy_id,
+                std::time::Instant::now()
+                    - std::time::Duration::from_secs(
+                        humoco_node::network::PRESENCE_FRESHNESS_SECS + 1,
+                    ),
+            )
+            .await;
     }
 
     // Active count is now 16 < 20

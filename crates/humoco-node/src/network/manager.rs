@@ -26,11 +26,11 @@ pub const QUORUM_GLOBAL_TIMEOUT: Duration = Duration::from_millis(1000);
 pub const HRW_INCUBATION_SECS: u64 = 24 * 60 * 60;
 pub const HRW_INCUBATION_DURATION: Duration = Duration::from_secs(HRW_INCUBATION_SECS);
 
-/// Presence freshness window for phase-transition counting (Spec 08/11 Phase 9 P1).
+/// Presence freshness window for phase-transition counting (Spec 08/11 Phase 9 P1, DEC-056).
 /// A gossip-learned node counts toward `N_active` only while its last heartbeat
-/// is fresh. Three consecutive missing hourly heartbeats exclude the identity from
-/// future snapshots. RPC failures do not change this passive presence clock.
-pub const PRESENCE_FRESHNESS_SECS: u64 = 3 * 60 * 60;
+/// is fresh. Three consecutive missing hourly heartbeats (3 * max 65m = 3h 15m) exclude
+/// the identity from future snapshots. RPC failures do not change this passive presence clock.
+pub const PRESENCE_FRESHNESS_SECS: u64 = (3 * 60 + 15) * 60; // 3h 15m (11,700s)
 pub const PRESENCE_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(PRESENCE_FRESHNESS_SECS);
 
 /// 24h merge/quota moratorium after a partition merge (Spec 09 INV-0908 / Spec 08 INV-0802).
@@ -2567,10 +2567,11 @@ impl PeerManager {
         result
     }
 
-    /// Computes an hourly jitter interval (50min + 0..20min = avg 60min).
+    /// Computes an hourly jitter interval (55min + 0..10min = avg 60min).
+    /// Enforces a >= 5 minute (300s) safety margin over the 50-minute (3000s) heartbeat spam threshold.
     pub fn heartbeat_jitter_secs() -> u64 {
-        let base: u64 = 3000;
-        let max_jitter: u64 = 1200;
+        let base: u64 = 3300; // 55 minutes
+        let max_jitter: u64 = 600; // 0..10 minutes
         let jitter: u64 = rand::thread_rng().gen_range(0..=max_jitter);
         base + jitter
     }
@@ -2822,6 +2823,40 @@ mod tests {
         assert_eq!(
             banned_res.unwrap_err(),
             "Peer is permanently banned due to equivocation fraud"
+        );
+    }
+
+    #[test]
+    fn test_heartbeat_jitter_secs_safety_bounds() {
+        // Enforces that heartbeat interval is in [3300, 3900] seconds (55..=65 min),
+        // guaranteeing at least 300s (5 minutes) safety buffer above the 3000s (50 min)
+        // heartbeat spam threshold (Fraud Pillar 3 / Spec 10 & 11).
+        for _ in 0..1000 {
+            let secs = PeerManager::heartbeat_jitter_secs();
+            assert!(
+                secs >= 3300,
+                "Heartbeat interval must be >= 55 minutes (3300s), got {}",
+                secs
+            );
+            assert!(
+                secs <= 3900,
+                "Heartbeat interval must be <= 65 minutes (3900s), got {}",
+                secs
+            );
+        }
+    }
+
+    #[test]
+    fn test_presence_freshness_timeout_exceeds_three_max_jitter_intervals() {
+        // DEC-056: 3 consecutive missed hourly heartbeats lead to suspension.
+        // With max jitter (65 min per interval = 3900s), 3 intervals take 3 * 3900s = 11,700s (3h 15m).
+        // PRESENCE_FRESHNESS_SECS must be >= 11,700s to avoid prematurely marking honest nodes as stale.
+        let three_max_jitter_intervals = 3 * 3900;
+        assert!(
+            PRESENCE_FRESHNESS_SECS >= three_max_jitter_intervals,
+            "PRESENCE_FRESHNESS_SECS ({}) must accommodate 3 max-jitter intervals ({})",
+            PRESENCE_FRESHNESS_SECS,
+            three_max_jitter_intervals
         );
     }
 }

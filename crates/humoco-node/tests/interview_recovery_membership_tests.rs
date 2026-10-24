@@ -117,7 +117,8 @@ async fn committee_uses_three_missed_heartbeats_not_rpc_failure_score() {
     manager
         .set_last_seen_for_test(
             remote.node_pubkey(),
-            Instant::now() - Duration::from_secs(3 * 3600 + 1),
+            Instant::now()
+                - Duration::from_secs(humoco_node::network::PRESENCE_FRESHNESS_SECS + 1),
         )
         .await;
     let selected = manager

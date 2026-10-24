@@ -13,8 +13,10 @@ use std::time::Duration;
 use ed25519_dalek::Signer;
 use humoco_node::{
     api::{build_router, hmc::*, AppState},
+    control::{ControlClient, ControlRequest, ControlResponse, ControlServer},
     identity::NodeIdentity,
     ingress::{PowEngine, TierController},
+    network::PeerManager,
     storage::{
         db::install::ShardStage,
         db::support,
@@ -466,6 +468,56 @@ async fn ttl_cleanup_of_support_and_staging_records() {
     assert!(stage_file_path.exists());
     drop(stage);
     assert!(!stage_file_path.exists(), "temporary staging file must be unlinked upon drop");
+}
+
+#[tokio::test]
+async fn test_repeated_control_socket_shutdown_requests_release_database_and_cleanup_socket() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("control_shutdown.redb");
+    let socket_path = temp.path().join("control_shutdown.sock");
+
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let peer_manager = Arc::new(PeerManager::new(vec![]));
+    let cancel_token = CancellationToken::new();
+
+    let server = ControlServer::new(
+        socket_path.clone(),
+        storage.clone(),
+        engine.clone(),
+        peer_manager.clone(),
+        identity.clone(),
+        temp.path().to_path_buf(),
+        cancel_token.clone(),
+    );
+    let server_handle = tokio::spawn(async move { server.run().await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let client = ControlClient::new(socket_path.clone());
+
+    let first_response = client
+        .send_request(ControlRequest::Shutdown)
+        .await
+        .expect("first shutdown request must be accepted");
+    assert!(matches!(
+        first_response,
+        ControlResponse::Ok | ControlResponse::ShutdownAccepted { .. }
+    ));
+
+    let _ = client.send_request(ControlRequest::Shutdown).await;
+
+    let server_result = tokio::time::timeout(Duration::from_secs(5), server_handle)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(server_result.is_ok());
+    assert!(!socket_path.exists());
+
+    drop(engine);
+    drop(storage);
+    flush_handle.await.unwrap();
+    assert!(RedbStorage::open(&db_path).is_ok());
 }
 
 #[tokio::test]

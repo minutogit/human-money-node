@@ -443,46 +443,382 @@ async fn test_a19_01_root_derived_receiver_accounting_over_quic() {
 }
 
 // ---------------------------------------------------------------------------
-// A19-03: Neutral quota feedback (FLAG_QUOTA_EXCEEDED does not increase missing_count)
+// A19-03 & A07-02: Neutral quota and readiness feedback via real QUIC collector
+// (FLAG_QUOTA_EXCEEDED in all 3 zones + merge moratorium and FLAG_NOT_READY
+// remain strictly neutral with missing_count == 0, is_suspended == false,
+// while a forged signature triggers missing_count == 1 as control case).
 // ---------------------------------------------------------------------------
+struct QuotaCollectorMockHandler {
+    mode: std::sync::atomic::AtomicU8,
+    peer_identity: NodeIdentity,
+    lock_id: [u8; 32],
+    parent_lock: [u8; 32],
+    shard_id: u16,
+}
+
+impl QuotaCollectorMockHandler {
+    const MODE_QUOTA_EXCEEDED: u8 = 0;
+    const MODE_NOT_READY: u8 = 1;
+    const MODE_FORGED_SIGNATURE: u8 = 2;
+}
+
+impl humoco_node::network::RequestHandler for QuotaCollectorMockHandler {
+    fn handle_authenticated(
+        &self,
+        _header: WireHeader,
+        _payload: Vec<u8>,
+        _peer_identity: Option<[u8; 32]>,
+    ) -> humoco_node::network::BoxFuture<Result<(WireHeader, Vec<u8>), humoco_node::NodeError>> {
+        let mode = self.mode.load(std::sync::atomic::Ordering::SeqCst);
+        let peer_pubkey = *self.peer_identity.node_pubkey();
+        let lock_id = self.lock_id;
+        let parent_lock = self.parent_lock;
+        let shard_id = self.shard_id;
+        Box::pin(async move {
+            match mode {
+                Self::MODE_QUOTA_EXCEEDED => {
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        1,
+                        0,
+                        FLAG_QUOTA_EXCEEDED,
+                        0,
+                    );
+                    Ok((resp_header, Vec::new()))
+                }
+                Self::MODE_NOT_READY => {
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        1,
+                        0,
+                        humoco_sim_core::wire::FLAG_NOT_READY,
+                        0,
+                    );
+                    Ok((resp_header, Vec::new()))
+                }
+                Self::MODE_FORGED_SIGNATURE => {
+                    let fake_att = humoco_node::AttestationDto {
+                        lock_id: hex::encode(lock_id),
+                        parent_lock: hex::encode(parent_lock),
+                        node_id: u16::from_le_bytes([peer_pubkey[0], peer_pubkey[1]]),
+                        node_pubkey: hex::encode(peer_pubkey),
+                        timestamp: 1_000,
+                        signature: hex::encode([0xee; 64]), // forged invalid signature
+                        shard_id,
+                    };
+                    let wire_bytes = bincode::serialize(&fake_att)
+                        .map_err(|e| humoco_node::NodeError::Network(e.to_string()))?;
+                    let resp_header = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        1,
+                        0,
+                        0,
+                        wire_bytes.len() as u32,
+                    );
+                    Ok((resp_header, wire_bytes))
+                }
+                _ => Err(humoco_node::NodeError::Network("unsupported mode".into())),
+            }
+        })
+    }
+}
+
 #[tokio::test]
 async fn test_a19_03_neutral_quota_feedback_does_not_penalize_peer() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
-    let peer_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
-    let peer_identity = NodeIdentity::generate();
-    let peer_addr: std::net::SocketAddr = "127.0.0.1:9099".parse().unwrap();
+    let client_id = NodeIdentity::generate();
+    let client_cancel = CancellationToken::new();
+    let client_pm = Arc::new(PeerManager::new(Vec::new()));
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &client_id,
+        client_pm.clone(),
+        Arc::new(humoco_node::network::DefaultRequestHandler),
+        client_cancel.clone(),
+    )
+    .expect("bind client transport");
+    let client_addr = client_transport.local_addr().expect("client addr");
+    client_transport.set_sync_ready(true);
+    client_transport.spawn_accept_loop();
+
+    let peer_id = NodeIdentity::generate();
+    let peer_cancel = CancellationToken::new();
+    let peer_pm = Arc::new(PeerManager::new(Vec::new()));
+    let parent_lock = [0x22; 32];
+    let lock_id = [0x33; 32];
+    let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+    let mock_handler = Arc::new(QuotaCollectorMockHandler {
+        mode: std::sync::atomic::AtomicU8::new(QuotaCollectorMockHandler::MODE_QUOTA_EXCEEDED),
+        peer_identity: peer_id.clone(),
+        lock_id,
+        parent_lock,
+        shard_id,
+    });
+    let peer_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &peer_id,
+        peer_pm.clone(),
+        mock_handler.clone(),
+        peer_cancel.clone(),
+    )
+    .expect("bind peer transport");
+    let peer_addr = peer_transport.local_addr().expect("peer addr");
+    peer_transport.set_sync_ready(true);
+    peer_transport.spawn_accept_loop();
+
+    // Mutual F2F friendship enables TLS-authenticated QUIC connection
+    client_pm
+        .register_f2f_friend(*peer_id.node_pubkey(), Some(peer_addr))
+        .await;
     peer_pm
-        .register_f2f_friend(*peer_identity.node_pubkey(), Some(peer_addr))
+        .register_f2f_friend(*client_id.node_pubkey(), Some(client_addr))
         .await;
 
-    // Verify initial missing_count is 0
-    let initial_missing = peer_pm
-        .get_peer(&peer_addr)
-        .await
-        .map(|p| p.missing_count)
-        .unwrap_or(0);
-    assert_eq!(initial_missing, 0);
+    // Verify initial peer failure metrics
+    let initial_peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
+    assert_eq!(initial_peer.missing_count, 0);
+    assert!(!initial_peer.is_suspended());
 
-    // Simulate quota refusal evaluation outside merge hysteresis
-    let my_load = 100u64;
-    let quota_limit = 10_000u64;
-    let verdict = humoco_sim_core::quota::evaluate_quota_exceeded_claim(my_load, quota_limit);
-    assert!(matches!(
-        verdict,
-        humoco_sim_core::quota::QuotaPlausibilityVerdict::FraudulentRejection { .. }
-    ));
-
-    // Verify invariant: quota feedback MUST NEVER call record_failure.
-    let current_missing = peer_pm
-        .get_peer(&peer_addr)
-        .await
-        .map(|p| p.missing_count)
-        .unwrap_or(0);
-    assert_eq!(
-        current_missing, 0,
-        "A19-03: Peer missing_count must remain 0 after quota feedback"
+    let dummy_req = make_test_genesis(
+        "v_quota_test",
+        test_now_ms() + 10_000_000,
+        &SigningKey::from_bytes(&[12u8; 32]),
     );
+    let dummy_payload = bincode::serialize(&LockWirePayload::Hmc {
+        req: dummy_req,
+        chain: None,
+        root_valid_until: test_now_ms() + 10_000_000,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: [0u8; 32],
+        sender_signature: [0u8; 64],
+        timestamp_ms: 0,
+    })
+    .expect("payload serialize");
+
+    let candidates = [(*peer_id.node_pubkey(), peer_addr)];
+    let expected_members = [*peer_id.node_pubkey()];
+
+    // 1. Zone 1: Apparent under-load / FraudulentRejection outside merge moratorium
+    // my_load = 100 < 75% of 10_000 -> evaluate_quota_exceeded_claim yields FraudulentRejection
+    mock_handler
+        .mode
+        .store(QuotaCollectorMockHandler::MODE_QUOTA_EXCEEDED, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut collected = Vec::new();
+        let query = humoco_node::PeerAttestationQuery {
+            transport: &client_transport,
+            peer_mgr: &client_pm,
+            candidate_nodes: &candidates,
+            expected_members: Some(&expected_members),
+            parent_lock,
+            lookup_tag: None,
+            voucher_id: None,
+            msg_type: MsgType::LockVerifyRequest,
+            resp_msg_type: MsgType::LockVerifyResponse,
+            payload: &dummy_payload,
+            target_status: 1,
+            lock_id,
+            shard_id,
+            required_q: 1,
+            shard_query_depth: 1,
+            my_load: 100,
+            quota_limit: 10_000,
+            network_id: humoco_sim_core::types::NetworkId::Testnet,
+            checkout_deadline: None,
+        };
+        let _ = humoco_node::collect_peer_attestations(query, &mut collected).await;
+        let peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
+        assert_eq!(
+            peer.missing_count, 0,
+            "Zone 1 (FraudulentRejection): quota feedback must remain strictly neutral"
+        );
+        assert!(!peer.is_suspended());
+    }
+
+    // 2. Zone 2: BoundaryCutoff (75%..125% of quota_limit)
+    // my_load = 8_000 (80% of 10_000) -> evaluate_quota_exceeded_claim yields BoundaryCutoff
+    {
+        let mut collected = Vec::new();
+        let query = humoco_node::PeerAttestationQuery {
+            transport: &client_transport,
+            peer_mgr: &client_pm,
+            candidate_nodes: &candidates,
+            expected_members: Some(&expected_members),
+            parent_lock,
+            lookup_tag: None,
+            voucher_id: None,
+            msg_type: MsgType::LockVerifyRequest,
+            resp_msg_type: MsgType::LockVerifyResponse,
+            payload: &dummy_payload,
+            target_status: 1,
+            lock_id,
+            shard_id,
+            required_q: 1,
+            shard_query_depth: 1,
+            my_load: 8_000,
+            quota_limit: 10_000,
+            network_id: humoco_sim_core::types::NetworkId::Testnet,
+            checkout_deadline: None,
+        };
+        let _ = humoco_node::collect_peer_attestations(query, &mut collected).await;
+        let peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
+        assert_eq!(
+            peer.missing_count, 0,
+            "Zone 2 (BoundaryCutoff): quota feedback must remain strictly neutral"
+        );
+        assert!(!peer.is_suspended());
+    }
+
+    // 3. Zone 3: LegitimateOverload (> 125% of quota_limit)
+    // my_load = 15_000 (150% of 10_000) -> evaluate_quota_exceeded_claim yields LegitimateOverload
+    {
+        let mut collected = Vec::new();
+        let query = humoco_node::PeerAttestationQuery {
+            transport: &client_transport,
+            peer_mgr: &client_pm,
+            candidate_nodes: &candidates,
+            expected_members: Some(&expected_members),
+            parent_lock,
+            lookup_tag: None,
+            voucher_id: None,
+            msg_type: MsgType::LockVerifyRequest,
+            resp_msg_type: MsgType::LockVerifyResponse,
+            payload: &dummy_payload,
+            target_status: 1,
+            lock_id,
+            shard_id,
+            required_q: 1,
+            shard_query_depth: 1,
+            my_load: 15_000,
+            quota_limit: 10_000,
+            network_id: humoco_sim_core::types::NetworkId::Testnet,
+            checkout_deadline: None,
+        };
+        let _ = humoco_node::collect_peer_attestations(query, &mut collected).await;
+        let peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
+        assert_eq!(
+            peer.missing_count, 0,
+            "Zone 3 (LegitimateOverload): quota feedback must remain strictly neutral"
+        );
+        assert!(!peer.is_suspended());
+    }
+
+    // 4. Merge-Moratorium: 24h window post-partition-merge (INV-0908)
+    client_pm.note_merge_detected(client_pm.net_time_ms());
+    assert!(
+        client_pm.is_in_merge_hysteresis(client_pm.net_time_ms()),
+        "Merge moratorium must be active"
+    );
+    {
+        let mut collected = Vec::new();
+        let query = humoco_node::PeerAttestationQuery {
+            transport: &client_transport,
+            peer_mgr: &client_pm,
+            candidate_nodes: &candidates,
+            expected_members: Some(&expected_members),
+            parent_lock,
+            lookup_tag: None,
+            voucher_id: None,
+            msg_type: MsgType::LockVerifyRequest,
+            resp_msg_type: MsgType::LockVerifyResponse,
+            payload: &dummy_payload,
+            target_status: 1,
+            lock_id,
+            shard_id,
+            required_q: 1,
+            shard_query_depth: 1,
+            my_load: 100,
+            quota_limit: 10_000,
+            network_id: humoco_sim_core::types::NetworkId::Testnet,
+            checkout_deadline: None,
+        };
+        let _ = humoco_node::collect_peer_attestations(query, &mut collected).await;
+        let peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
+        assert_eq!(
+            peer.missing_count, 0,
+            "Merge Moratorium: quota rejection must not penalize peer"
+        );
+        assert!(!peer.is_suspended());
+    }
+
+    // 5. FLAG_NOT_READY: Shard is recovering or unready (neutral abstention)
+    mock_handler
+        .mode
+        .store(QuotaCollectorMockHandler::MODE_NOT_READY, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut collected = Vec::new();
+        let query = humoco_node::PeerAttestationQuery {
+            transport: &client_transport,
+            peer_mgr: &client_pm,
+            candidate_nodes: &candidates,
+            expected_members: Some(&expected_members),
+            parent_lock,
+            lookup_tag: None,
+            voucher_id: None,
+            msg_type: MsgType::LockVerifyRequest,
+            resp_msg_type: MsgType::LockVerifyResponse,
+            payload: &dummy_payload,
+            target_status: 1,
+            lock_id,
+            shard_id,
+            required_q: 1,
+            shard_query_depth: 1,
+            my_load: 100,
+            quota_limit: 10_000,
+            network_id: humoco_sim_core::types::NetworkId::Testnet,
+            checkout_deadline: None,
+        };
+        let _ = humoco_node::collect_peer_attestations(query, &mut collected).await;
+        let peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
+        assert_eq!(
+            peer.missing_count, 0,
+            "FLAG_NOT_READY must remain strictly neutral (missing_count == 0)"
+        );
+        assert!(!peer.is_suspended());
+    }
+
+    // 6. Control Case: Forged signature MUST trigger record_failure -> missing_count == 1
+    mock_handler
+        .mode
+        .store(QuotaCollectorMockHandler::MODE_FORGED_SIGNATURE, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut collected = Vec::new();
+        let query = humoco_node::PeerAttestationQuery {
+            transport: &client_transport,
+            peer_mgr: &client_pm,
+            candidate_nodes: &candidates,
+            expected_members: Some(&expected_members),
+            parent_lock,
+            lookup_tag: None,
+            voucher_id: None,
+            msg_type: MsgType::LockVerifyRequest,
+            resp_msg_type: MsgType::LockVerifyResponse,
+            payload: &dummy_payload,
+            target_status: 1,
+            lock_id,
+            shard_id,
+            required_q: 1,
+            shard_query_depth: 1,
+            my_load: 100,
+            quota_limit: 10_000,
+            network_id: humoco_sim_core::types::NetworkId::Testnet,
+            checkout_deadline: None,
+        };
+        let _ = humoco_node::collect_peer_attestations(query, &mut collected).await;
+        let peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
+        assert_eq!(
+            peer.missing_count, 1,
+            "Control case: forged signature MUST increment missing_count to 1"
+        );
+        assert!(!peer.is_suspended());
+    }
 }
 
 // ---------------------------------------------------------------------------

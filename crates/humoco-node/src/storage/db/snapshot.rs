@@ -1,4 +1,17 @@
-//! Bounded active-state cursors over an immutable redb read transaction.
+//! # Proof-Gate G2: Source-Complete State Transfer & Safe Activation (Contract G2 / S3 / S4)
+//!
+//! Architectural Invariants: INV-0304, INV-0307, INV-1605 (Demand-Triggered State Recovery)
+//!
+//! - BOUNDED MVCC CUTS: Fixed, short-lived (30s) snapshot cuts over an immutable read transaction.
+//! - MONOTONIC STREAMING: Pages stream strictly monotonically (cursor_next > cursor_curr),
+//!   capped at 48 KiB per page and 16 KiB per row to prevent memory exhaustion and DoS.
+//! - ZERO STATE BLOAT: Synchronizes strictly objective active state (non-expired locks within
+//!   root.valid_until + 30s grace horizon); legacy signatures or historical certificates are never streamed.
+//! - SAFE ACTIVATION BARRIER: Shards remain `NOT_READY` until complete snapshot transfer finishes,
+//!   atomic redb commit succeeds, and the local post-sync digest matches the dominant quorum digest
+//!   (D_local(S) == D_dominant(S) attested by >= 14 committee members).
+//! - ANTI-EMPTY-REPLICA RULE: Agreeing empty replicas or unready peers can NEVER establish completeness;
+//!   explicit dominant quorum confirmation is mandatory.
 use super::*;
 use crate::network::framing::{ActiveSyncRequest, ActiveSyncResponse, SyncPayload};
 use std::{

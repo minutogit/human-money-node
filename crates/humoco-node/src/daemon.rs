@@ -978,6 +978,7 @@ impl NodeDaemon {
             health_tracker: Arc::new(crate::api::health::HealthStateTracker::default()),
             readiness_manager: readiness_manager.clone(),
             retained_choice_reads: Arc::new(tokio::sync::Semaphore::new(8)),
+            voucher_root_reads: Arc::new(tokio::sync::Semaphore::new(16)),
         };
 
         // Spawn history sampling task (60s tick in normal mode, 5s in simulation mode)

@@ -1,8 +1,8 @@
 use crate::crypto::{
     compute_attestation_payload_digest, compute_sig_digest, verify_attestation,
-    DOMAIN_APPROVE_FINAL, DOMAIN_APPROVE_PROV, DOMAIN_INGRESS_DECL,
+    DOMAIN_INGRESS_DECL,
 };
-use crate::types::{Attestation, NodeId, SimTime};
+use crate::types::{Attestation, NetworkId, NodeId, SimTime};
 
 // ---------------------------------------------------------------------------
 // Constants per spec 11 + 05
@@ -826,6 +826,85 @@ impl FraudProofPayload {
         }
     }
 
+    /// Verifies the fraud proof under the designated network universe (A02-01).
+    pub fn verify_network(&self, network_id: NetworkId) -> bool {
+        match self.proof_pillar {
+            FraudProofPillar::ShardEquivocation => self.verify_shard_equivocation_network(network_id),
+            FraudProofPillar::HeartbeatSpam => self.verify_heartbeat_spam(),
+            FraudProofPillar::IngressCounterConflict => self.verify_ingress_counter_conflict(),
+        }
+    }
+
+    /// Verifies shard equivocation for a specific network (Testnet or Mainnet) (A02-01).
+    ///
+    /// # Architectural Invariant: A02-01 (Spec 10, Pillar 1)
+    /// Both attestations MUST belong to the specified network domain.
+    pub fn verify_shard_equivocation_network(&self, network_id: NetworkId) -> bool {
+        let a = match decode_attestation(&self.evidence_packet_a) {
+            Some(v) => v,
+            None => return false,
+        };
+        let b = match decode_attestation(&self.evidence_packet_b) {
+            Some(v) => v,
+            None => return false,
+        };
+        // Same signer == perpetrator
+        if a.node_id != b.node_id {
+            return false;
+        }
+        // Must be same parent_lock (INV: double-spend on same voucher/parent)
+        if a.parent_lock != b.parent_lock {
+            return false;
+        }
+        // Must be different lock_ids (L3A != L3B)
+        if a.lock_id == b.lock_id {
+            return false;
+        }
+
+        let prov_domain = crate::crypto::domain_approve_prov(network_id);
+        let final_domain = crate::crypto::domain_approve_final(network_id);
+
+        if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.perpetrator_node_id) {
+            let verify_one = |att: &Attestation| -> bool {
+                let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
+                    Ok(s) => s,
+                    Err(_) => return false,
+                };
+                let shard_candidates = [
+                    att.shard_id,
+                    crate::types::extract_shard_id(&att.parent_lock),
+                ];
+                let payload_digest =
+                    compute_attestation_payload_digest(&att.parent_lock, &att.lock_id);
+                shard_candidates.iter().any(|&shard_id| {
+                    let d_prov = compute_sig_digest(
+                        prov_domain,
+                        0,
+                        0,
+                        0,
+                        shard_id,
+                        0,
+                        &payload_digest,
+                    );
+                    let d_final = compute_sig_digest(
+                        final_domain,
+                        0,
+                        0,
+                        0,
+                        shard_id,
+                        1,
+                        &payload_digest,
+                    );
+                    vk.verify_strict(&d_prov, &sig).is_ok()
+                        || vk.verify_strict(&d_final, &sig).is_ok()
+                })
+            };
+            verify_one(&a) && verify_one(&b)
+        } else {
+            false
+        }
+    }
+
     fn verify_shard_equivocation(&self) -> bool {
         let a = match decode_attestation(&self.evidence_packet_a) {
             Some(v) => v,
@@ -849,48 +928,10 @@ impl FraudProofPayload {
         }
 
         // Verify signatures of both attestations using genuine Ed25519 if valid key.
-        // Phase 1 P0: the signed payload digest binds (parent_lock, lock_id) so a
-        // signature cannot be transplanted across vouchers.
-        let is_ed25519_valid =
-            if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.perpetrator_node_id) {
-                let verify_one = |att: &Attestation| -> bool {
-                    let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
-                        Ok(s) => s,
-                        Err(_) => return false,
-                    };
-                    let shard_candidates = [
-                        att.shard_id,
-                        crate::types::extract_shard_id(&att.parent_lock),
-                    ];
-                    let payload_digest =
-                        compute_attestation_payload_digest(&att.parent_lock, &att.lock_id);
-                    shard_candidates.iter().any(|&shard_id| {
-                        let d_prov = compute_sig_digest(
-                            DOMAIN_APPROVE_PROV,
-                            0,
-                            0,
-                            0,
-                            shard_id,
-                            0,
-                            &payload_digest,
-                        );
-                        let d_final = compute_sig_digest(
-                            DOMAIN_APPROVE_FINAL,
-                            0,
-                            0,
-                            0,
-                            shard_id,
-                            1,
-                            &payload_digest,
-                        );
-                        vk.verify_strict(&d_prov, &sig).is_ok()
-                            || vk.verify_strict(&d_final, &sig).is_ok()
-                    })
-                };
-                verify_one(&a) && verify_one(&b)
-            } else {
-                false
-            };
+        // Network-aware (A02-01): both attestations must belong to the SAME network universe.
+        // Mixed-network pairs (one Mainnet, one Testnet) return false.
+        let is_ed25519_valid = self.verify_shard_equivocation_network(NetworkId::Mainnet)
+            || self.verify_shard_equivocation_network(NetworkId::Testnet);
 
         if is_ed25519_valid {
             return true;

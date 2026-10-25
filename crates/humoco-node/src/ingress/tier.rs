@@ -75,8 +75,25 @@ pub enum IngressError {
 
     #[error("Read quota exceeded: required {required} reads, available {available}")]
     ReadQuotaExceeded { available: u64, required: u64 },
+
+    #[error("VIP Quota persistence queue is full or closed")]
+    QuotaPersistenceUnavailable,
 }
 
+/// # Architectural Invariant: Reservation-First VIP Quota Durability & Lock Elimination (A02-02 & A05-01)
+///
+/// Ingress admission control on the PoS checkout hot-path (`POST /v1/lock`) must satisfy:
+/// 1. Sub-microsecond RAM operations: Cache write locks MUST NEVER perform blocking storage
+///    I/O (`A05-01`). Cold quota misses are hydrated asynchronously before acquiring write locks.
+/// 2. Reservation-First Capacity: Before decrementing or mutating in-memory quota balances,
+///    the persistence channel capacity MUST be reserved via `try_reserve()`. If the queue is
+///    full or closed, admission is rejected immediately with `IngressError::QuotaPersistenceUnavailable`
+///    WITHOUT deducting credit (`A02-02`). No unpersisted debits are ever accepted.
+/// 3. Strict FIFO Serialization: The reserved permit MUST be sent (`permit.send(...)`) BEFORE
+///    releasing the in-memory cache write lock. This guarantees that concurrent top-up and debit
+///    operations enqueue their absolute balances into the FIFO persistence worker in the exact same
+///    order as their memory mutations, preventing out-of-order state overwrites.
+///
 /// # Architectural Invariant: Ingress vs. Peer Telemetry Decoupling (INV-1701 & Spec 13/17)
 ///
 /// `TierController` is intentionally **not** coupled to `PeerManager` or peer telemetry
@@ -140,18 +157,31 @@ impl TierController {
         let vip_persist_failed = Arc::new(AtomicBool::new(false));
         let worker_failed = vip_persist_failed.clone();
         let worker = tokio::spawn(async move {
-            while let Some(op) = vip_persist_rx.recv().await {
+            while let Some(first_op) = vip_persist_rx.recv().await {
+                let mut latest_balances: HashMap<[u8; 32], u64> = HashMap::new();
+                latest_balances.insert(first_op.account_tag, first_op.remaining);
+                while let Ok(next_op) = vip_persist_rx.try_recv() {
+                    latest_balances.insert(next_op.account_tag, next_op.remaining);
+                }
+                let batch: Vec<([u8; 32], u64)> = latest_balances.into_iter().collect();
                 let storage = persist_storage.clone();
                 let res = tokio::task::spawn_blocking(move || {
-                    storage.set_quota(&op.account_tag, op.remaining)
+                    storage.set_quotas_batch(&batch)
                 })
                 .await;
                 if !matches!(res, Ok(Ok(()))) {
                     worker_failed.store(true, Ordering::Release);
-                    tracing::warn!(?res, "FIFO VIP quota persistence failed");
+                    tracing::warn!(?res, "FIFO VIP quota persistence batch failed");
                 }
             }
         });
+
+        let mut initial_cache = HashMap::new();
+        if let Ok(all) = storage.all_quotas() {
+            for (tag, bal) in all {
+                initial_cache.insert(tag, bal);
+            }
+        }
 
         Self {
             storage,
@@ -161,7 +191,7 @@ impl TierController {
             f2f_tokens: Arc::new(RwLock::new(HashSet::new())),
             f2f_clients: Arc::new(RwLock::new(HashMap::new())),
             thermometer: Arc::new(RwLock::new(NetworkThermometer::new())),
-            vip_quota_cache: Arc::new(PlRwLock::new(HashMap::new())),
+            vip_quota_cache: Arc::new(PlRwLock::new(initial_cache)),
             vip_writes_today: Arc::new(AtomicU64::new(0)),
             f2f_writes_today: Arc::new(AtomicU64::new(0)),
             free_writes_today: Arc::new(AtomicU64::new(0)),
@@ -241,20 +271,36 @@ impl TierController {
         self.vip_quota_cache.write().insert(account_tag, balance);
     }
 
-    /// Tops up VIP quota for an account, updating cache and persisting asynchronously.
+    /// Tops up VIP quota for an account, updating cache and persisting with strict FIFO ordering (A02-02).
+    /// Resolves cold misses outside the write lock, reserves persistence capacity, and sends
+    /// the updated balance before releasing the cache write lock.
     pub fn topup_vip_quota(
         &self,
         account_tag: [u8; 32],
         byte_years: u64,
     ) -> Result<u64, IngressError> {
+        let pre_bal = if !self.vip_quota_cache.read().contains_key(&account_tag) {
+            Some(self.storage.get_quota(&account_tag).unwrap_or(0))
+        } else {
+            None
+        };
+
         let mut cache = self.vip_quota_cache.write();
-        let bal = cache
-            .entry(account_tag)
-            .or_insert_with(|| self.storage.get_quota(&account_tag).unwrap_or(0));
+        if let Some(bal) = pre_bal {
+            cache.entry(account_tag).or_insert(bal);
+        }
+        let permit = self
+            .vip_persist_tx
+            .try_reserve()
+            .map_err(|_| IngressError::QuotaPersistenceUnavailable)?;
+        let bal = cache.entry(account_tag).or_insert(0);
         *bal = bal.saturating_add(byte_years);
         let new_balance = *bal;
+        permit.send(VipQuotaPersistOp {
+            account_tag,
+            remaining: new_balance,
+        });
         drop(cache);
-        self.persist_vip_quota_async(account_tag, new_balance);
         Ok(new_balance)
     }
 
@@ -296,41 +342,52 @@ impl TierController {
         Ok(bal)
     }
 
-    /// Flushes a single cached balance to durable storage asynchronously without blocking hot-path.
-    ///
-    /// Uses a FIFO channel to sequence writes, preventing out-of-order write races
-    /// that could occur with unsequenced `tokio::spawn` calls.
-    fn persist_vip_quota_async(&self, account_tag: [u8; 32], remaining: u64) {
-        let op = VipQuotaPersistOp {
-            account_tag,
-            remaining,
-        };
-        if let Err(e) = self.vip_persist_tx.try_send(op) {
-            tracing::warn!("FIFO VIP quota persist channel send failed: {:?}", e);
+    /// Ensures that the specified VIP account tag is hydrated in the in-memory cache.
+    /// If not present (cold miss), loads it asynchronously from durable storage via spawn_blocking,
+    /// avoiding synchronous disk I/O under the cache write lock (A05-01).
+    pub async fn ensure_vip_quota_cached(&self, account_tag: &[u8; 32]) -> Result<(), IngressError> {
+        if self.vip_quota_cache.read().contains_key(account_tag) {
+            return Ok(());
         }
+        let storage = self.storage.clone();
+        let tag = *account_tag;
+        let bal = tokio::task::spawn_blocking(move || storage.get_quota(&tag))
+            .await
+            .map_err(|e| {
+                IngressError::Storage(StorageError::Io(std::io::Error::other(e.to_string())))
+            })?
+            .map_err(IngressError::Storage)?;
+        self.vip_quota_cache.write().insert(*account_tag, bal);
+        Ok(())
     }
 
     /// In-memory atomic check-and-charge for VIP quota (hot-path, <1µs, no fsync stall).
-    /// Returns remaining balance after deduction or QuotaExceeded.
+    /// Enforces Reservation-First: reserves persistence capacity BEFORE mutating RAM balance (A02-02).
+    /// Dispatches permit into FIFO channel BEFORE dropping cache write lock to preserve strict ordering.
     pub fn try_charge_vip_in_memory(
         &self,
         account_tag: &[u8; 32],
         required: u64,
     ) -> Result<u64, IngressError> {
         let mut cache = self.vip_quota_cache.write();
-        let bal = cache
-            .entry(*account_tag)
-            .or_insert_with(|| self.storage.get_quota(account_tag).unwrap_or(0));
+        let bal = cache.entry(*account_tag).or_insert(0);
         if *bal < required {
             return Err(IngressError::QuotaExceeded {
                 available: *bal,
                 required,
             });
         }
+        let permit = self
+            .vip_persist_tx
+            .try_reserve()
+            .map_err(|_| IngressError::QuotaPersistenceUnavailable)?;
         *bal -= required;
         let remaining = *bal;
+        permit.send(VipQuotaPersistOp {
+            account_tag: *account_tag,
+            remaining,
+        });
         drop(cache);
-        self.persist_vip_quota_async(*account_tag, remaining);
         Ok(remaining)
     }
 
@@ -716,10 +773,7 @@ impl TierController {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(token_str, account_tag);
-        self.vip_tags
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(account_tag);
+        self.register_vip_tag(account_tag);
     }
 
     /// Registers an authorized VIP account tag directly.
@@ -728,6 +782,11 @@ impl TierController {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(account_tag);
+        if let Ok(bal) = self.storage.get_quota(&account_tag) {
+            if bal > 0 {
+                self.vip_quota_cache.write().insert(account_tag, bal);
+            }
+        }
     }
 
     /// Registers a trusted F2F client with optional friendly label and stores metadata.
@@ -870,6 +929,8 @@ impl TierController {
         // 1. Check Tier 1 (VIP) - in-memory atomic cache, no synchronous fsync stall (INV-0929 hot-path)
         if let Some(token) = auth_token {
             let account_tag = self.resolve_account_tag(token)?;
+            // Hydrate cold miss asynchronously before acquiring write lock (A05-01)
+            self.ensure_vip_quota_cached(&account_tag).await?;
             let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
             self.try_charge_vip_in_memory(&account_tag, required_byte_years)?;
             self.vip_writes_today.fetch_add(1, Ordering::Relaxed);
@@ -1303,5 +1364,154 @@ mod tests {
 
         // Non-existent returns false
         assert!(!controller.remove_f2f_client("non_existent"));
+    }
+
+    #[tokio::test]
+    async fn test_a02_02_vip_quota_saturation_no_credit_loss() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test_a02_02.redb");
+        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+        let pow = Arc::new(PowEngine::new([0x11; 32], 8));
+
+        let account_tag = [0x42u8; 32];
+        let initial_balance = 2000u64;
+        storage.set_quota(&account_tag, initial_balance).unwrap();
+
+        let controller = TierController::new(storage.clone(), pow);
+        controller.register_vip_tag(account_tag);
+
+        // Channel capacity is 1,024. Without yielding to the background persistence worker,
+        // synchronously attempt 1,025 charges of 1 unit each.
+        let mut success_count = 0;
+        let mut saturated = false;
+        for _ in 0..1025 {
+            match controller.try_charge_vip_in_memory(&account_tag, 1) {
+                Ok(_) => success_count += 1,
+                Err(IngressError::QuotaPersistenceUnavailable) => {
+                    saturated = true;
+                    break;
+                }
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        assert!(saturated, "1025th charge must trigger QuotaPersistenceUnavailable");
+        assert_eq!(success_count, 1024, "Exactly 1,024 charges must succeed before saturation");
+
+        // Crucial invariant: Rejected debit must NOT decrement RAM balance!
+        let ram_balance = controller.get_cached_vip_quota(&account_tag).unwrap();
+        assert_eq!(
+            ram_balance,
+            initial_balance - 1024,
+            "RAM balance must reflect only accepted debits (2000 - 1024 = 976)"
+        );
+
+        // Allow FIFO persistence worker to drain
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if storage.get_quota(&account_tag).unwrap() == ram_balance {
+                break;
+            }
+        }
+
+        let disk_balance = storage.get_quota(&account_tag).unwrap();
+        assert_eq!(
+            disk_balance, ram_balance,
+            "Persisted balance must match RAM balance exactly; no debits lost!"
+        );
+
+        // Restarting controller from same database must hydrate the exact balance
+        let restored_pow = Arc::new(PowEngine::new([0x11; 32], 8));
+        let restored_controller = TierController::new(storage.clone(), restored_pow);
+        assert_eq!(
+            restored_controller.get_cached_vip_quota(&account_tag),
+            Some(ram_balance),
+            "Startup hydration must restore exact persisted balance"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a02_02_strict_fifo_ordering_under_concurrency() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test_fifo.redb");
+        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+        let pow = Arc::new(PowEngine::new([0x11; 32], 8));
+
+        let account_tag = [0x99u8; 32];
+        storage.set_quota(&account_tag, 10_000).unwrap();
+
+        let controller = Arc::new(TierController::new(storage.clone(), pow));
+        controller.register_vip_tag(account_tag);
+
+        let mut tasks = Vec::new();
+        // Spawn 20 tasks: 10 performing debits, 10 performing top-ups
+        for i in 0..20 {
+            let tc = controller.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..20 {
+                    if i % 2 == 0 {
+                        let _ = tc.try_charge_vip_in_memory(&account_tag, 5);
+                    } else {
+                        let _ = tc.topup_vip_quota(account_tag, 5);
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let ram_balance = controller.get_cached_vip_quota(&account_tag).unwrap();
+
+        // Wait for FIFO worker to drain
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if storage.get_quota(&account_tag).unwrap() == ram_balance {
+                break;
+            }
+        }
+
+        let disk_balance = storage.get_quota(&account_tag).unwrap();
+        assert_eq!(
+            disk_balance, ram_balance,
+            "FIFO ordering guarantees persisted balance matches RAM balance after concurrent mutations"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a05_01_startup_hydration_and_cold_miss_async() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test_hydration.redb");
+        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+        let pow = Arc::new(PowEngine::new([0x11; 32], 8));
+
+        let tag1 = [0x01u8; 32];
+        let tag2 = [0x02u8; 32];
+        let tag3 = [0x03u8; 32];
+        storage.set_quota(&tag1, 100).unwrap();
+        storage.set_quota(&tag2, 200).unwrap();
+        storage.set_quota(&tag3, 300).unwrap();
+
+        // Startup hydration: all 3 accounts must be present in RAM immediately
+        let controller = TierController::new(storage.clone(), pow);
+        assert_eq!(controller.get_cached_vip_quota(&tag1), Some(100));
+        assert_eq!(controller.get_cached_vip_quota(&tag2), Some(200));
+        assert_eq!(controller.get_cached_vip_quota(&tag3), Some(300));
+
+        // Cold miss: tag4 is added to storage directly, bypassing controller
+        let tag4 = [0x04u8; 32];
+        storage.set_quota(&tag4, 500).unwrap();
+        assert_eq!(controller.get_cached_vip_quota(&tag4), None);
+
+        // ensure_vip_quota_cached hydrates asynchronously via spawn_blocking without write-lock stall
+        controller.ensure_vip_quota_cached(&tag4).await.unwrap();
+        assert_eq!(controller.get_cached_vip_quota(&tag4), Some(500));
+
+        // Normal charge succeeds
+        let remaining = controller.try_charge_vip_in_memory(&tag4, 50).unwrap();
+        assert_eq!(remaining, 450);
+        assert_eq!(controller.get_cached_vip_quota(&tag4), Some(450));
     }
 }

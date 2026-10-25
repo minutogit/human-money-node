@@ -106,21 +106,41 @@ impl RequestHandler for DefaultRequestHandler {
     }
 }
 
-/// # Architectural Invariant: First-Party Evidence & Anti-Framing (Phase 1 P0, Spec 10)
+/// # Architectural Invariant: A02-01 / Spec 10 Pillar 1 — Network-Aware First-Party Verification & Anti-Framing
 ///
 /// A node is slashed ONLY on irrefutable cryptographic self-proof: two genuine
-/// Ed25519 signatures by the accused key itself. Simulator BLAKE3 mocks, hearsay
-/// gossip, or third-party claims NEVER trigger a ban. Each pillar enforces:
+/// Ed25519 signatures by the accused key within the same network universe (Testnet or Mainnet).
+/// Simulator BLAKE3 mocks, hearsay gossip, or third-party claims NEVER trigger a ban. Each pillar enforces:
 /// - ShardEquivocation: both attestations verify under `vk` against the
 ///   parent_lock-bound payload digest (`compute_attestation_payload_digest`).
+///   Anti-framing: `proof.perpetrator_node_id` MUST equal `vk.to_bytes()`.
+///   Network-awareness: both signatures must belong to the SAME network universe (Testnet or Mainnet).
 /// - IngressCounterConflict: both envelopes verify under `vk`, and both
-///   `gateway_pubkey` fields MUST equal `vk` (framing with foreign packets fails).
+///   `gateway_pubkey` fields as well as `proof.perpetrator_node_id` MUST equal `vk` (framing with foreign packets fails).
 /// - HeartbeatSpam: simulator heartbeats carry no Ed25519 self-proof, so this
 ///   strict path always returns `false` (no ban on hearsay timing claims).
 pub fn verify_equivocation_first_party(
     vk: &ed25519_dalek::VerifyingKey,
     proof: &humoco_sim_core::fraud::FraudProofPayload,
 ) -> bool {
+    verify_equivocation_first_party_network(None, vk, proof)
+}
+
+/// Network-aware strict first-party verifier (A02-01).
+///
+/// When `expected_network` is `Some(net)`, restricts verification to that network domain.
+/// When `None`, accepts genuine proofs from either network, provided both signatures
+/// belong to the SAME network universe.
+pub fn verify_equivocation_first_party_network(
+    expected_network: Option<humoco_sim_core::types::NetworkId>,
+    vk: &ed25519_dalek::VerifyingKey,
+    proof: &humoco_sim_core::fraud::FraudProofPayload,
+) -> bool {
+    let vk_bytes = vk.to_bytes();
+    if proof.perpetrator_node_id != vk_bytes {
+        return false;
+    }
+
     match proof.proof_pillar {
         humoco_sim_core::fraud::FraudProofPillar::IngressCounterConflict => {
             // Anti-framing: never accept unsecured simulator mocks. Both envelopes
@@ -135,7 +155,6 @@ pub fn verify_equivocation_first_party(
                 Some(e) => e,
                 None => return false,
             };
-            let vk_bytes = vk.to_bytes();
             if a.gateway_pubkey != vk_bytes || b.gateway_pubkey != vk_bytes {
                 return false;
             }
@@ -195,20 +214,31 @@ pub fn verify_equivocation_first_party(
                         vk.verify_strict(&digest, &sig).is_ok()
                     })
             };
+
             // Both signatures must belong to ONE network. Independent existential
             // checks would combine lawful originals from unrelated networks.
-            [
-                (
+            let networks: &[(&[u8], &[u8])] = match expected_network {
+                Some(humoco_sim_core::types::NetworkId::Mainnet) => &[(
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
-                ),
-                (
+                )],
+                Some(humoco_sim_core::types::NetworkId::Testnet) => &[(
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
-                ),
-            ]
-            .into_iter()
-            .any(|(provisional, final_domain)| {
+                )],
+                None => &[
+                    (
+                        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+                        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+                    ),
+                    (
+                        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
+                        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
+                    ),
+                ],
+            };
+
+            networks.iter().any(|(provisional, final_domain)| {
                 verify_att(&a, provisional, final_domain)
                     && verify_att(&b, provisional, final_domain)
             })
@@ -320,6 +350,88 @@ impl NodeRequestHandler {
         self.network_id = network_id;
         self
     }
+
+    /// Consolidated handler for both bidirectional and unidirectional incoming EquivocationProof messages.
+    ///
+    /// # Architectural Invariant: A02-01 & A20-01 (Spec 10, Spec 14, INV-1402)
+    /// - Structural and cryptographic production verification: verifies Ed25519 self-proof of the
+    ///   perpetrator directly, eliminating simulator fallbacks and illegal fallbacks to the node's own key.
+    /// - Network-aware: requires a valid same-network proof (Testnet or Mainnet), rejecting mixed-network
+    ///   or forged evidence without mutation.
+    /// - Atomic persistence: commits evidence and ban in a single redb transaction before returning success.
+    pub async fn handle_incoming_equivocation_proof(
+        &self,
+        payload: &[u8],
+        peer_identity: Option<[u8; 32]>,
+    ) -> Result<bool, NodeError> {
+        let now_ms = self.net_time_ms();
+
+        let proof = match bincode::deserialize::<humoco_sim_core::fraud::FraudProofPayload>(payload) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("EquivocationProof rejected: deserialize failed: {}", e);
+                return Ok(false);
+            }
+        };
+
+        let offender = proof.perpetrator_node_id;
+        let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&offender) else {
+            warn!(
+                offender = %hex::encode(offender),
+                "EquivocationProof rejected: perpetrator_node_id is not a valid Ed25519 key"
+            );
+            return Ok(false);
+        };
+
+        let is_first_party_valid = verify_equivocation_first_party(&vk, &proof);
+        if !is_first_party_valid {
+            warn!(
+                offender = %hex::encode(offender),
+                "EquivocationProof rejected: cryptographic Ed25519 signature verification failed for perpetrator (framing prevented)"
+            );
+            return Ok(false);
+        }
+
+        // Atomic persistence of evidence + ban in redb (A20-01 / INV-1402)
+        let evidence_hash = *blake3::hash(payload).as_bytes();
+        if let Err(e) = self
+            .storage
+            .commit_slashing_evidence_and_ban(&evidence_hash, payload, &offender, now_ms)
+        {
+            warn!(
+                offender = %hex::encode(offender),
+                error = %e,
+                "Failed to commit slashing evidence and ban atomically to redb"
+            );
+            // Local containment in RAM even if disk persistence fails
+            self.engine.ban_node_ram(&offender).await;
+            if let Some(pm) = self.peer_manager.as_ref() {
+                let _ = pm.ban_node(&offender).await;
+            }
+            return Err(NodeError::Storage(e));
+        }
+
+        // Apply in-memory bans and disconnect peers
+        self.engine.ban_node_ram(&offender).await;
+        if let Some(pm) = self.peer_manager.as_ref() {
+            let affected = pm.ban_node(&offender).await;
+            // Phase 10: dedup via LRU seen-set + echo protection —
+            // never send the proof back to the immediate sender.
+            pm.broadcast_fraud_proof_with_sender(proof, peer_identity);
+            info!(
+                offender = %hex::encode(offender),
+                affected,
+                "Slashing: offender banned and peers disconnected"
+            );
+        } else {
+            info!(
+                offender = %hex::encode(offender),
+                "Slashing: offender banned (no peer_manager)"
+            );
+        }
+
+        Ok(true)
+    }
 }
 
 impl RequestHandler for NodeRequestHandler {
@@ -382,6 +494,7 @@ impl RequestHandler for NodeRequestHandler {
         let network_id = self.network_id;
         let readiness_manager = self.readiness_manager.clone();
         let snapshot_cuts = self.snapshot_cuts.clone();
+        let this = self.clone();
         Box::pin(async move {
             let msg_type = header.msg_type;
 
@@ -399,58 +512,9 @@ impl RequestHandler for NodeRequestHandler {
                 }
             }
 
-            // --- Phase 4: Real slashing on EquivocationProof (Spec 10 Pillar 1) ---
+            // --- Phase 4: Real slashing on EquivocationProof (Spec 10 Pillar 1, A02-01, A20-01) ---
             if msg_type == MsgType::EquivocationProof as u16 {
-                let now_ms = peer_manager
-                    .as_ref()
-                    .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| clock.net_time_ms());
-                match bincode::deserialize::<humoco_sim_core::fraud::FraudProofPayload>(&payload) {
-                    Ok(proof) => {
-                        let offender = proof.perpetrator_node_id;
-                        let is_first_party_valid = if !proof.verify() {
-                            false
-                        } else if let Some(pm) = peer_manager.as_ref() {
-                            if let Some(vk) = pm.get_peer_verifying_key_by_node_id(&offender).await
-                            {
-                                verify_equivocation_first_party(&vk, &proof)
-                            } else if let Ok(vk) =
-                                ed25519_dalek::VerifyingKey::from_bytes(&offender)
-                            {
-                                verify_equivocation_first_party(&vk, &proof)
-                            } else {
-                                verify_equivocation_first_party(identity.verifying_key(), &proof)
-                            }
-                        } else if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&offender) {
-                            verify_equivocation_first_party(&vk, &proof)
-                        } else {
-                            verify_equivocation_first_party(identity.verifying_key(), &proof)
-                        };
-
-                        if !is_first_party_valid {
-                            warn!(offender = %hex::encode(offender), "EquivocationProof rejected: cryptographic Ed25519 signature verification failed for perpetrator (framing prevented)");
-                        } else {
-                            // Persist raw evidence best-effort (bounded, never panic on external input)
-                            let evidence_hash = *blake3::hash(&payload).as_bytes();
-                            if let Err(e) = storage.put_evidence(&evidence_hash, &payload) {
-                                warn!("Failed to persist slashing evidence: {}", e);
-                            }
-                            engine.ban_node(offender, now_ms).await;
-                            if let Some(pm) = peer_manager.as_ref() {
-                                let affected = pm.ban_node(&offender).await;
-                                // Phase 10: dedup via LRU seen-set + echo protection —
-                                // never send the proof back to the immediate sender.
-                                pm.broadcast_fraud_proof_with_sender(proof, peer_identity);
-                                info!(offender = %hex::encode(offender), affected, "Slashing: offender banned and peers disconnected");
-                            } else {
-                                info!(offender = %hex::encode(offender), "Slashing: offender banned (no peer_manager)");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("EquivocationProof rejected: deserialize failed: {}", e);
-                    }
-                }
+                this.handle_incoming_equivocation_proof(&payload, peer_identity).await?;
                 let resp_header = WireHeader::new(
                     MsgType::EquivocationAck as u16,
                     header.session_seq.wrapping_add(1),
@@ -2042,6 +2106,7 @@ impl RequestHandler for NodeRequestHandler {
             humoco_sim_core::types::NetworkId::Mainnet => 0,
             humoco_sim_core::types::NetworkId::Testnet => 1,
         };
+        let this = self.clone();
         Box::pin(async move {
             if header.msg_type == MsgType::HeartbeatAck as u16 {
                 if (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0 {
@@ -2052,55 +2117,7 @@ impl RequestHandler for NodeRequestHandler {
                 return Ok(());
             }
             if header.msg_type == MsgType::EquivocationProof as u16 {
-                let now_ms = peer_manager
-                    .as_ref()
-                    .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| clock.net_time_ms());
-                match bincode::deserialize::<humoco_sim_core::fraud::FraudProofPayload>(&payload) {
-                    Ok(proof) => {
-                        let offender = proof.perpetrator_node_id;
-                        let is_first_party_valid = if !proof.verify() {
-                            false
-                        } else if let Some(pm) = peer_manager.as_ref() {
-                            if let Some(vk) = pm.get_peer_verifying_key_by_node_id(&offender).await
-                            {
-                                verify_equivocation_first_party(&vk, &proof)
-                            } else if let Ok(vk) =
-                                ed25519_dalek::VerifyingKey::from_bytes(&offender)
-                            {
-                                verify_equivocation_first_party(&vk, &proof)
-                            } else {
-                                verify_equivocation_first_party(identity.verifying_key(), &proof)
-                            }
-                        } else if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&offender) {
-                            verify_equivocation_first_party(&vk, &proof)
-                        } else {
-                            verify_equivocation_first_party(identity.verifying_key(), &proof)
-                        };
-
-                        if !is_first_party_valid {
-                            warn!(offender = %hex::encode(offender), "EquivocationProof (uni) rejected: cryptographic Ed25519 verification failed (framing prevented)");
-                        } else {
-                            let evidence_hash = *blake3::hash(&payload).as_bytes();
-                            if let Err(e) = storage.put_evidence(&evidence_hash, &payload) {
-                                warn!("Failed to persist slashing evidence (uni): {}", e);
-                            }
-                            engine.ban_node(offender, now_ms).await;
-                            if let Some(pm) = peer_manager.as_ref() {
-                                let _ = pm.ban_node(&offender).await;
-                                // Phase 10: dedup + echo protection (never back to sender).
-                                pm.broadcast_fraud_proof_with_sender(proof, sender);
-                            }
-                            info!(offender = %hex::encode(offender), "Slashing (uni): offender banned and proof broadcast");
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "EquivocationProof (uni) rejected: deserialize failed: {}",
-                            e
-                        );
-                    }
-                }
+                let _ = this.handle_incoming_equivocation_proof(&payload, sender).await;
                 return Ok(());
             }
             if header.msg_type == MsgType::Heartbeat as u16 {

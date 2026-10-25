@@ -1081,43 +1081,40 @@ impl DualTierEngine {
         self.banned_nodes.read().await.contains(node_key)
     }
 
-    /// Bans a node in memory, disconnects it across active peers, and queues persistence to redb.
-    ///
-    /// Hot-path safe (Rule 1): never blocks on I/O and never spawns untracked
-    /// background jobs. RAM is authoritative immediately; if the bounded flush
-    /// queue is full the disk write is counted as a telemetry error (never silent)
-    /// and reconciled via the next ban refresh or digest-pull sync.
-    pub async fn ban_node(&self, node_key: [u8; 32], timestamp_ms: u64) {
-        self.banned_nodes.write().await.insert(node_key);
+    /// Immediately bans a node in RAM and PeerManager without disk I/O.
+    pub async fn ban_node_ram(&self, node_key: &[u8; 32]) {
+        self.banned_nodes.write().await.insert(*node_key);
         if let Some(pm) = self.peer_manager.read().await.as_ref() {
-            pm.ban_node(&node_key).await;
+            pm.ban_node(node_key).await;
         }
+    }
+
+    /// Bans a node across RAM, PeerManager, and durable disk storage.
+    ///
+    /// # Architectural Invariant: A20-01 / Rule 1 (Durable-before-Vote / Zero Hearsay)
+    /// RAM is authoritative immediately; if the bounded flush queue is full or closed,
+    /// the ban is synchronously persisted to redb so that bans are never lost across restarts.
+    pub async fn ban_node(&self, node_key: [u8; 32], timestamp_ms: u64) {
+        self.ban_node_ram(&node_key).await;
         match self.tx.try_send(FlushOp::BanNode {
             node_key,
             timestamp_ms,
         }) {
             Ok(_) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(_) => {
                 self.stats
                     .flush_errors_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                warn!("Persistence queue full: BanNode kept authoritative in RAM, disk flush dropped (counted in flush_errors_total)");
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                self.stats
-                    .flush_errors_total
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                warn!("Persistence worker closed: BanNode active in RAM only");
+                warn!("Persistence worker closed or queue full: persisting ban synchronously to redb (A20-01)");
+                if let Err(e) = self.db.ban_node(&node_key, timestamp_ms) {
+                    warn!("Failed synchronous fallback ban: {e}");
+                }
             }
         }
     }
 
-    /// Processes an incoming EquivocationProof: verifies proof, queues raw evidence for
-    /// the async flush worker, and bans the offender.
-    ///
-    /// Hot-path safe (Rule 1): performs zero synchronous disk I/O. Evidence is
-    /// enqueued via `try_send` and committed atomically by the flush worker; a full
-    /// queue is counted in telemetry instead of blocking the caller.
+    /// Processes an incoming EquivocationProof: verifies proof, commits raw evidence + ban
+    /// atomically to redb, and applies immediate local containment in RAM.
     pub async fn process_equivocation_proof(
         &self,
         proof: &humoco_sim_core::fraud::FraudProofPayload,
@@ -1132,17 +1129,8 @@ impl DualTierEngine {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        match self.tx.try_send(FlushOp::PutEvidence {
-            hash: evidence_hash,
-            raw: raw_payload.to_vec(),
-        }) {
-            Ok(_) => {}
-            Err(_) => {
-                self.stats
-                    .flush_errors_total
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                warn!("Persistence queue full: equivocation evidence kept in RAM ban only (counted in flush_errors_total)");
-            }
+        if let Err(e) = self.db.commit_slashing_evidence_and_ban(&evidence_hash, raw_payload, &offender, now_ms) {
+            warn!("Failed to commit slashing evidence and ban atomically to redb: {e}");
         }
         self.ban_node(offender, now_ms).await;
         true
@@ -2758,7 +2746,8 @@ impl DualTierEngine {
             };
         }
         // Original decisions form transaction barriers. Process preceding writes
-        // first, then atomically persist lock+choice, preserving worker FIFO.
+        // first, then atomically persist compatible original approvals in one group commit,
+        // preserving worker FIFO and Durable-before-Vote (DEC-029 / A05-02).
         if let Some(index) = batch.iter().position(|op| {
             matches!(
                 op,
@@ -2767,77 +2756,129 @@ impl DualTierEngine {
         }) {
             let mut tail = batch.split_off(index);
             let before = Self::flush_batch(batch, db);
-            let op = tail.remove(0);
-            let (result, complete, health) = match op {
-                FlushOp::OriginalHmcApproval {
-                    tag,
-                    entry,
-                    node,
-                    approval,
-                    class,
-                    root,
-                    complete,
-                    health,
-                } => {
-                    let result = if before.failed
-                        || health
-                            .signing_failed
-                            .load(std::sync::atomic::Ordering::Acquire)
-                    {
-                        Err(StorageError::DurableCommitFailed(
-                            "Store signing unavailable".into(),
-                        ))
-                    } else {
-                        db.commit_original_approval(&tag, &entry, &node, &approval, class, root)
-                    };
-                    (result, complete, health)
+
+            // Group all contiguous OriginalHmcApproval / OriginalRecordApproval operations (A05-02)
+            let group_len = tail
+                .iter()
+                .take_while(|op| {
+                    matches!(
+                        op,
+                        FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. }
+                    )
+                })
+                .count();
+
+            let original_ops: Vec<FlushOp> = tail.drain(0..group_len).collect();
+
+            let signing_unavailable = before.failed
+                || original_ops.iter().any(|op| match op {
+                    FlushOp::OriginalHmcApproval { health, .. }
+                    | FlushOp::OriginalRecordApproval { health, .. } => {
+                        health.signing_failed.load(std::sync::atomic::Ordering::Acquire)
+                    }
+                    _ => false,
+                });
+
+            let mut batch_entries = Vec::with_capacity(original_ops.len());
+            let mut completions = Vec::with_capacity(original_ops.len());
+
+            for op in original_ops {
+                match op {
+                    FlushOp::OriginalHmcApproval {
+                        tag,
+                        entry,
+                        node,
+                        approval,
+                        class,
+                        root,
+                        complete,
+                        health,
+                    } => {
+                        batch_entries.push(crate::storage::OriginalApprovalBatchEntry {
+                            target: crate::storage::OriginalApprovalTarget::Hmc { tag, entry },
+                            node,
+                            approval,
+                            class,
+                            root_valid_until_ms: root,
+                        });
+                        completions.push((complete, health));
+                    }
+                    FlushOp::OriginalRecordApproval {
+                        record,
+                        node,
+                        approval,
+                        class,
+                        root,
+                        complete,
+                        health,
+                    } => {
+                        batch_entries.push(crate::storage::OriginalApprovalBatchEntry {
+                            target: crate::storage::OriginalApprovalTarget::Record { record },
+                            node,
+                            approval,
+                            class,
+                            root_valid_until_ms: root,
+                        });
+                        completions.push((complete, health));
+                    }
+                    _ => {}
                 }
-                FlushOp::OriginalRecordApproval {
-                    record,
-                    node,
-                    approval,
-                    class,
-                    root,
-                    complete,
-                    health,
-                } => {
-                    let result = if before.failed
-                        || health
-                            .signing_failed
-                            .load(std::sync::atomic::Ordering::Acquire)
-                    {
-                        Err(StorageError::DurableCommitFailed(
-                            "Store signing unavailable".into(),
-                        ))
-                    } else {
-                        db.commit_original_record_approval(&record, root, &node, &approval, class)
-                    };
-                    (result, complete, health)
+            }
+
+            let (committed_count, group_failed) = if signing_unavailable {
+                for (complete, health) in completions {
+                    health
+                        .signing_failed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let _ = complete.send(Some(Err("Store signing unavailable".into())));
                 }
-                _ => {
-                    return FlushOutcome {
-                        ops_committed: before.ops_committed,
-                        attempts: before.attempts,
-                        failed: true,
+                (0, true)
+            } else {
+                match db.commit_original_approvals_group(&batch_entries) {
+                    Ok(results) => {
+                        let mut committed = 0;
+                        let mut failed = false;
+
+                        for ((complete, health), res) in completions.into_iter().zip(results) {
+                            let is_ok = res.is_ok();
+                            if is_ok {
+                                committed += 1;
+                            }
+                            let is_fatal_fail = res.as_ref().err().is_some_and(|error| {
+                                !matches!(error, StorageError::OwnChoiceConflict)
+                            });
+                            if is_fatal_fail {
+                                failed = true;
+                                health
+                                    .signing_failed
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
+                            // Durable-before-Vote (DEC-029): Notification sent strictly AFTER durable redb commit
+                            let _ = complete.send(Some(res.map_err(|e| e.to_string())));
+                        }
+                        (committed, failed)
+                    }
+                    Err(group_err) => {
+                        let fatal_fail = !matches!(group_err, StorageError::OwnChoiceConflict);
+                        let err_str = group_err.to_string();
+                        for (complete, health) in completions {
+                            if fatal_fail {
+                                health
+                                    .signing_failed
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
+                            let _ = complete.send(Some(Err(err_str.clone())));
+                        }
+                        (0, fatal_fail)
                     }
                 }
             };
-            let committed = usize::from(result.is_ok());
-            let failed = result
-                .as_ref()
-                .err()
-                .is_some_and(|error| !matches!(error, StorageError::OwnChoiceConflict));
-            if failed {
-                health
-                    .signing_failed
-                    .store(true, std::sync::atomic::Ordering::Release);
-            }
-            let _ = complete.send(Some(result.map_err(|e| e.to_string())));
+
             let after = Self::flush_batch(&mut tail, db);
             return FlushOutcome {
-                ops_committed: before.ops_committed + committed + after.ops_committed,
+                ops_committed: before.ops_committed + committed_count + after.ops_committed,
                 attempts: before.attempts + 1 + after.attempts,
-                failed: before.failed || failed || after.failed,
+                failed: before.failed || group_failed || after.failed,
             };
         }
         let ops_committed = batch.len();

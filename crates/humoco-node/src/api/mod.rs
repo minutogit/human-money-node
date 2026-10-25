@@ -38,7 +38,7 @@ pub use hmc::{
 };
 pub use keys::{normalize_pubkey_display, parse_client_token, parse_pubkey};
 pub use metrics::prometheus_metrics;
-pub use routes::{build_router, AppState};
+pub use routes::{build_router, collect_peer_attestations, AppState, PeerAttestationQuery};
 pub use system_stats::{SparklinesDto, SystemStatsCollector, SystemStatsDto};
 
 pub mod history_retention;

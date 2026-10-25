@@ -1,4 +1,19 @@
-//! Durable verified support facts, never historical signature archives.
+//! # Proof-Gate G3: Authenticated Support Inheritance & Merge Composition (Contract G3 / S5)
+//!
+//! Architectural Invariants: INV-0201, INV-0801, INV-0804, DEC-064 (Confirmation Class Hierarchy)
+//!
+//! - CLASS PRECEDENCE FIRST: Conflicting locks resolve deterministically by monotonic confirmation class:
+//!   Class 2 (Final / RegionalConfirmed, 14/20 BFT quorum) > Class 1 (Provisional, island mesh Q(N)) > Class 0 (Unconfirmed).
+//!   Unconfirmed singleton/rogue locks can NEVER displace confirmed locks regardless of hash value (DEC-022).
+//! - DETERMINISTIC TIE-BREAKING: min(H_canon) acts strictly as a tie-breaker within the same confirmed class.
+//!   Equal canonical hashes resolve via deterministic ID comparison (compare_native_precedence / A22-01).
+//! - SUB-QUORUM QUARANTINE (Village Merge): During asymmetric partition merges, minority unconfirmed locks
+//!   are isolated into TABLE_PROVISIONAL_HMC_LOCKS so they do not poison the dominant shard digest.
+//! - IMMUTABLE ORIGINAL-CHOICE DURABILITY: A node's local original vote commits immediately with
+//!   Durability::Immediate before vote release (DEC-029). Subsequent class displacement updates the index
+//!   without constituting equivocation.
+//! - ZERO STATE BLOAT: Verified support stores strictly current class facts and context digests,
+//!   never historical signature archives or retired node quorum certificates.
 use super::*;
 use crate::api::dto::QuorumCertificateDto;
 use humoco_sim_core::types::NetworkId;

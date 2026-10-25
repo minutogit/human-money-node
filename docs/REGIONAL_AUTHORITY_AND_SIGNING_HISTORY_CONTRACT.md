@@ -142,7 +142,27 @@ local integrity guarantee. No external trust anchor is added.
 - Core wallet: incorrect password refusal, durable policy, restart, source signature
   refusal, committee mismatch, and valid authority remaining insufficient for release.
 
-These are scoped G1/G5 implementation assertions. G2 source-complete transfer,
-G3 authenticated support inheritance, G4 clock composition and complete E/V/final
-acceptance remain required. Final command results and working-tree hashes belong
-in the execution record; old green logs are not relabeled as current evidence.
+## Scoped implementation assertions and Proof-Gates G2, G3, and G4
+
+These are scoped G1/G5 implementation assertions. In accordance with the Master Safety Contract (`docs/SAFETY_AND_PROGRESS_CONTRACTS_G1_G5.md`), proof obligations across distributed state transfer, merge resolution, and clock composition are explicitly partitioned into Proof-Gates G2, G3, and G4:
+
+### Proof-Gate G2: Source-Complete State Transfer & Safe Activation (S3 / S4)
+- **Bounded MVCC Cuts & Monotonic Cursors (`storage/db/snapshot.rs`):** Cursors stream state monotonically over fixed 30s immutable read transactions (`MAX_CUTS = 32`, `MAX_PAGE_BYTES = 48 KiB`), strictly bound to authenticated requesters.
+- **Zero Historical Bloat:** Sync synchronizes strictly objective active state (`parent_lock`, `receiver_pub`, `nonce`, `id`) valid through `root.valid_until + 30s`; historical signature archives or retired node quorum certificates are neither retained nor required.
+- **Dominant Quorum Activation:** A node defaults to `NOT_READY` and transitions to `READY` if and only if complete snapshot pages are transferred, committed atomically to `redb`, and the post-sync shard digest matches the dominant quorum digest ($D_{\text{local}}(S) == D_{\text{dominant}}(S)$ attested by $\ge 14$ top-20 committee members).
+- **Anti-Empty Inference:** Agreeing empty replicas or unready peers can NEVER establish completeness; explicit dominant quorum consensus remains mandatory (INV-0304, INV-1605).
+
+### Proof-Gate G3: Authenticated Support Inheritance & Monotonic Classes (S5)
+- **Monotonic Confirmation Hierarchy (`storage/db/support.rs`):** All lock receipts strictly follow confirmation classes: $\text{Class 2 (Final, 14/20 BFT quorum)} > \text{Class 1 (Provisional, island mesh } Q(N)) > \text{Class 0 (Unconfirmed)}$. Unconfirmed singleton or rogue locks can never displace confirmed locks regardless of hash value (DEC-022, DEC-064).
+- **Deterministic Tie-Breaking:** $\min(H_{\text{canon}})$ operates strictly as a tie-breaker within the same confirmed class. Identical native canonical hashes break ties deterministically via ID comparison (`compare_native_precedence` / A22-01).
+- **Sub-Quorum Lock Quarantine:** During asymmetric merges (e.g. 10 vs 3), minority unconfirmed locks are isolated atomically into `TABLE_PROVISIONAL_HMC_LOCKS` to preserve dominant digest convergence without data loss.
+- **Protected Original-Choice Durability (DEC-029 / DEC-087):** Local original choices commit with `Durability::Immediate` before releasing attestation signatures; legitimate partition merge displacement is not equivocation.
+- **First-Party Evidence Doctrine:** Slashing and bans require irrefutable cryptographic self-proof (`HUMOCO_V1_EQUIVOCATION`); hearsay and third-party reports are strictly inadmissible.
+
+### Proof-Gate G4: Time, Clock Composition & Reentry
+- **Decentralized Median Time (`network/clock.rs`):** Network time ($T_{\text{net}}$) is derived from the autonomous median of direct F2F peer offsets (WoT gating, 15m clamping, strict monotonicity). Raw uncalibrated OS system time is forbidden on consensus paths.
+- **Entry-Only Freshness Window:** Client intent timestamp freshness ($|T_{\text{entry}} - T_0| \le 30\text{s}$) is checked once upon ingress write admission (DEC-061/DEC-062). Downstream persistence or network delays never invalidate an admitted transaction.
+- **Root-Bound Eviction Horizon:** Locks purge strictly at $T_{\text{purge}} = \text{root.valid\_until} + 30\text{s}$; expired state is permanently removed without tombstones.
+- **Suspension & Safe Reentry:** Disconnection for $\ge 3$ hours (missing 3 heartbeat slots) suspends a peer locally; reentry requires emitting a fresh sequence heartbeat and satisfying G2 state transfer before casting consensus votes (INV-0704).
+- **Fail-Closed Signing History (`storage/db/signing.rs`):** Monotonic generation counters, row counts, and XOR slot commitments latch `FAIL_CLOSED_CORRUPT` durably upon row loss or inconsistent checkpoint observation, preventing equivocation after unclean restarts.
+

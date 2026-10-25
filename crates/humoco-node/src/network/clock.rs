@@ -1,3 +1,19 @@
+//! # Proof-Gate G4: Time, Slots & Reentry (Contract G4 / Spec 07, Spec 11)
+//!
+//! Architectural Invariants: INV-0701, INV-0704, INV-1203, INV-1206 (Decentralized Time & Slot Composition)
+//!
+//! - DECENTRALIZED MEDIAN TIME (net_time): Network time is derived strictly from the median of time
+//!   offsets from trusted direct F2F friends (WoT gating, clamp |offset| <= 15m, strict monotonicity).
+//!   Consensus paths NEVER query raw uncalibrated OS system time (INV-1202).
+//! - ANTI-JUMP GUARD (INV-1203): Uncorroborated forward time jumps > 24h are rejected; TTL pruning
+//!   is frozen until multi-peer consensus validates time advancement.
+//! - ENTRY-ONLY WALLET FRESHNESS (DEC-061 / DEC-062): Wallet intent timestamps T0 are validated
+//!   strictly upon ingress write admission (|T_entry - T0| <= 30s). Transport latency, fsync delays,
+//!   or persistence queues NEVER invalidate an already-admitted transaction.
+//! - ROOT TTL HORIZON & REENTRY: State validity is tied to root.valid_until + 30s grace window.
+//!   Suspended nodes (3 missed hourly slots) must emit fresh sequence heartbeats and complete G2 shard
+//!   recovery before resuming consensus voting.
+//!
 //! # Spec 11 (Section 7): P2P Network-Adjusted Time (`net_time`)
 //!
 //! Autonomous F2F median of time offsets from direct F2F peers with 3 security barriers:

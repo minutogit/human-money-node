@@ -1074,7 +1074,19 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
 }
 
 // ---------------------------------------------------------------------------
-// f) 100-node validation: HRW quorum math + wire spot-check
+// f) 100-node validation: HRW quorum math + wire spot-check (A20-02 Scoped Evidence)
+//
+// 🔬 SCOPE & EVIDENCE BOUNDARIES (A20-02):
+// - WHAT THIS TEST PROVES:
+//   1. In-memory PeerManager HRW mathematical determinism across 100 distinct mature identities.
+//   2. Shard ticket maturation wall: 5 fresh immature newcomers (<24h) are strictly excluded from N.
+//   3. Fixed BFT quorum calculation: N=101 yields Q=14 (FINAL=true); N=19 yields Q=13; N=7 yields Q=5.
+//   4. Distinct shard IDs produce diverse, deterministic Top-20 committee permutations.
+//   5. 2-node QUIC wire spot-check verifies that live digest pull functions within the configured topology.
+// - WHAT THIS TEST DOES NOT PROVE (Explicit Non-Claims / Out of Scope):
+//   This test does NOT deploy 100 concurrent OS daemon processes or 100 independent redb instances.
+//   It does NOT simulate concurrent 100-node network bootstrap, full churn recovery under partition merges,
+//   mixed-traffic QUIC stream isolation under adversarial flood, or 100-node tail-latency SLAs (<800ms).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

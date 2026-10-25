@@ -5186,3 +5186,76 @@ async fn signed_missing_or_stale_wallet_time_is_rejected_without_rewriting() {
         assert!(storage.get_hmc_lock(&tag).unwrap().is_none());
     }
 }
+
+#[tokio::test]
+async fn test_a05_01_non_blocking_voucher_root_reads() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(RedbStorage::open(&dir.path().join("roots_nb.redb")).unwrap());
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let state = AppState::new(engine.clone(), storage.clone(), identity, tiers, pow);
+
+    // 1. Fast-Path: In-memory RAM index hit (<1µs)
+    let ram_vid = "voucher-in-ram-123";
+    let ram_valid_until = 1_800_000_000_000u64;
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_voucher_root_for_test(ram_vid.to_string(), ram_valid_until);
+
+    // Verify lookup returns without needing or exhausting any semaphore permits
+    let ram_result = humoco_node::api::routes::lookup_local_voucher_root(&state, ram_vid).await;
+    assert_eq!(ram_result, Some(ram_valid_until));
+    assert_eq!(
+        state.voucher_root_reads.available_permits(),
+        16,
+        "RAM index hit must not consume any disk read permits"
+    );
+
+    // 2. Slow-Path: RAM index miss, but found on disk via spawn_blocking
+    let disk_valid_until = 1_900_000_000_000u64;
+    let sender_key = SigningKey::from_bytes(&[0x11; 32]);
+    let genesis_req = make_test_hmc_genesis("on-disk-456", disk_valid_until, &sender_key);
+    let disk_vid = genesis_req.layer2_voucher_id.clone();
+    let entry = humoco_node::api::hmc::L2LockEntry::from(&genesis_req);
+    let tag = bs58::encode(entry.t_id).into_string();
+    storage.put_hmc_lock(&tag, &entry).unwrap();
+
+    let disk_result = humoco_node::api::routes::lookup_local_voucher_root(&state, &disk_vid).await;
+    assert_eq!(disk_result, Some(disk_valid_until));
+    assert_eq!(
+        state.voucher_root_reads.available_permits(),
+        16,
+        "Disk read permit must be released after completion"
+    );
+
+    // 3. Semaphore saturation: When all 16 permits are held, cold disk lookups refuse immediately
+    let held_permits = state
+        .voucher_root_reads
+        .clone()
+        .try_acquire_many_owned(16)
+        .unwrap();
+
+    let saturated_result =
+        humoco_node::api::routes::lookup_local_voucher_root(&state, "unknown-voucher").await;
+    assert_eq!(
+        saturated_result, None,
+        "Saturated disk reader semaphore must return None immediately without blocking worker threads"
+    );
+
+    // RAM lookups still succeed even when disk permits are saturated!
+    let ram_still_works =
+        humoco_node::api::routes::lookup_local_voucher_root(&state, ram_vid).await;
+    assert_eq!(
+        ram_still_works,
+        Some(ram_valid_until),
+        "RAM index fast-path must remain functional even under total disk permit exhaustion"
+    );
+
+    drop(held_permits);
+    assert_eq!(state.voucher_root_reads.available_permits(), 16);
+}
+

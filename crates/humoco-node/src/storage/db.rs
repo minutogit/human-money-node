@@ -13,7 +13,7 @@ use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Canonical grace horizon ceiling bucket formula (A22-R1):
 /// Converts a millisecond expiry horizon to an integer second bucket with ceiling rounding,
@@ -118,6 +118,28 @@ pub const TABLE_OWN_CHOICE_COMMITMENTS: TableDefinition<&str, &[u8; 32]> =
 pub const TABLE_OWN_CHOICE_TTL: TableDefinition<(u64, &str), ()> =
     TableDefinition::new("own_signing_choice_ttl");
 
+/// Target specification for an original approval within an atomic group commit (A05-02).
+#[derive(Clone, Debug)]
+pub enum OriginalApprovalTarget {
+    Hmc {
+        tag: String,
+        entry: Box<crate::api::hmc::L2LockEntry>,
+    },
+    Record {
+        record: Box<LockRecord>,
+    },
+}
+
+/// An individual approval entry submitted as part of a group-commit batch (A05-02).
+#[derive(Clone, Debug)]
+pub struct OriginalApprovalBatchEntry {
+    pub target: OriginalApprovalTarget,
+    pub node: [u8; 32],
+    pub approval: Vec<u8>,
+    pub class: u8,
+    pub root_valid_until_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct RedbStorage {
     db: Arc<Database>,
@@ -186,6 +208,187 @@ impl RedbStorage {
         })
     }
 
+    /// Commits a batch of compatible original approvals in a single atomic transaction with `Durability::Immediate` (A05-02).
+    ///
+    /// # Architectural Invariant: Atomic Group-Commit for Original Approvals (A05-02 / DEC-029)
+    /// Under concurrent PoS checkout load, contiguous original spend approvals are grouped
+    /// into a single `redb::WriteTransaction` with `Durability::Immediate` to avoid serializing N
+    /// separate fsync barriers.
+    ///
+    /// 1. Strict Durable-before-Vote (DEC-029): The caller releases completion acknowledgments ONLY
+    ///    after this function returns `Ok(...)`, guaranteeing durable redb commit of the entire group.
+    /// 2. Failure Isolation: Individual `StorageError::OwnChoiceConflict` errors (conflicting parent spend)
+    ///    are isolated to the conflicting entry; they do NOT poison or roll back valid sibling approvals.
+    /// 3. Fail-Closed History Integrity: If signing history corruption is detected, the transaction
+    ///    is latched corrupt, uncommitted entries are discarded, and `StorageError::SigningHistoryCorrupt` is returned.
+    pub fn commit_original_approvals_group(
+        &self,
+        entries: &[OriginalApprovalBatchEntry],
+    ) -> Result<Vec<Result<Vec<u8>, StorageError>>, StorageError> {
+        if !self.is_signing_history_healthy() {
+            return Err(StorageError::SigningHistoryCorrupt);
+        }
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut txn = self.db.begin_write()?;
+        txn.set_durability(redb::Durability::Immediate);
+
+        let mut results = Vec::with_capacity(entries.len());
+
+        for entry in entries {
+            if entry.class > 1 || entry.approval.is_empty() || entry.approval.len() > 16_384 || entry.root_valid_until_ms == 0 {
+                results.push(Err(StorageError::DurableCommitFailed(
+                    "Invalid original approval context".into(),
+                )));
+                continue;
+            }
+
+            match &entry.target {
+                OriginalApprovalTarget::Hmc { tag, entry: hmc_entry } => {
+                    if roots::is_root(tag, hmc_entry) {
+                        results.push(Err(StorageError::DurableCommitFailed(
+                            "genesis is a root proof, not an original spend approval".into(),
+                        )));
+                        continue;
+                    }
+
+                    let slot = format!("{}:{}", hex::encode(entry.node), tag);
+                    let mut choice = match self.validate_and_prepare_own_choice(
+                        &txn,
+                        slot.as_str(),
+                        hmc_entry.t_id,
+                        entry.root_valid_until_ms,
+                        entry.class,
+                        &entry.approval,
+                    ) {
+                        Ok(c) => c,
+                        Err(StorageError::OwnChoiceConflict) => {
+                            results.push(Err(StorageError::OwnChoiceConflict));
+                            continue;
+                        }
+                        Err(StorageError::SigningHistoryCorrupt) => {
+                            self.latch_corruption_in_txn(&txn);
+                            let _ = txn.commit();
+                            return Err(StorageError::SigningHistoryCorrupt);
+                        }
+                        Err(e) => {
+                            results.push(Err(e));
+                            continue;
+                        }
+                    };
+
+                    let mut locks = txn.open_table(TABLE_HMC_LOCKS)?;
+                    if let Some(old) = locks.get(tag.as_str())? {
+                        let old: crate::api::hmc::L2LockEntry = serde_json::from_slice(old.value())?;
+                        if old.t_id != hmc_entry.t_id {
+                            results.push(Err(StorageError::OwnChoiceConflict));
+                            continue;
+                        }
+                    }
+
+                    if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
+                        drop(locks);
+                        self.latch_corruption_in_txn(&txn);
+                        let _ = txn.commit();
+                        return Err(e);
+                    }
+
+                    let lock_bytes = serde_json::to_vec(hmc_entry)?;
+                    locks.insert(tag.as_str(), lock_bytes.as_slice())?;
+                    drop(locks);
+
+                    txn.open_table(TABLE_HMC_VOUCHER_INDEX)?
+                        .insert((hmc_entry.layer2_voucher_id.as_str(), tag.as_str()), ())?;
+                    let expires_sec = grace_expiry_bucket_sec(entry.root_valid_until_ms);
+                    txn.open_table(TABLE_HMC_TTL_INDEX)?
+                        .insert(&(expires_sec, tag.as_str()), ())?;
+                    txn.open_table(TABLE_OWN_CHOICE_TTL)?
+                        .insert(&(expires_sec, slot.as_str()), ())?;
+
+                    let retained = match choice.approvals[usize::from(entry.class)].clone() {
+                        Some(a) => a,
+                        None => {
+                            results.push(Err(StorageError::DurableCommitFailed(
+                                "Missing retained approval".into(),
+                            )));
+                            continue;
+                        }
+                    };
+                    results.push(Ok(retained));
+                }
+                OriginalApprovalTarget::Record { record } => {
+                    let tag = hex::encode(record.parent_lock);
+                    let slot = format!("{}:{}", hex::encode(entry.node), tag);
+                    let mut choice = match self.validate_and_prepare_own_choice(
+                        &txn,
+                        slot.as_str(),
+                        record.id,
+                        entry.root_valid_until_ms,
+                        entry.class,
+                        &entry.approval,
+                    ) {
+                        Ok(c) => c,
+                        Err(StorageError::OwnChoiceConflict) => {
+                            results.push(Err(StorageError::OwnChoiceConflict));
+                            continue;
+                        }
+                        Err(StorageError::SigningHistoryCorrupt) => {
+                            self.latch_corruption_in_txn(&txn);
+                            let _ = txn.commit();
+                            return Err(StorageError::SigningHistoryCorrupt);
+                        }
+                        Err(e) => {
+                            results.push(Err(e));
+                            continue;
+                        }
+                    };
+
+                    let mut locks = txn.open_table(TABLE_LOCKS)?;
+                    if let Some(old) = locks.get(&record.parent_lock)? {
+                        let (old, _): (LockRecord, u64) = bincode::deserialize(old.value())?;
+                        if old.id != record.id {
+                            results.push(Err(StorageError::OwnChoiceConflict));
+                            continue;
+                        }
+                    }
+
+                    if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
+                        drop(locks);
+                        self.latch_corruption_in_txn(&txn);
+                        let _ = txn.commit();
+                        return Err(e);
+                    }
+
+                    let bytes = bincode::serialize(&(record.as_ref(), entry.root_valid_until_ms))?;
+                    locks.insert(&record.parent_lock, bytes.as_slice())?;
+                    drop(locks);
+
+                    let expires_sec = grace_expiry_bucket_sec(entry.root_valid_until_ms);
+                    txn.open_table(TABLE_TTL_INDEX)?
+                        .insert(&(expires_sec, &record.parent_lock), ())?;
+                    txn.open_table(TABLE_OWN_CHOICE_TTL)?
+                        .insert(&(expires_sec, slot.as_str()), ())?;
+
+                    let retained = match choice.approvals[usize::from(entry.class)].clone() {
+                        Some(a) => a,
+                        None => {
+                            results.push(Err(StorageError::DurableCommitFailed(
+                                "Missing retained approval".into(),
+                            )));
+                            continue;
+                        }
+                    };
+                    results.push(Ok(retained));
+                }
+            }
+        }
+
+        txn.commit()?;
+        Ok(results)
+    }
+
     /// Atomically commits the exact collision entry and immutable own choice.
     /// The slot spans time buckets and provisional/final promotion. A canonical
     /// merge can replace a lock, but it can never rewrite this private choice.
@@ -199,69 +402,20 @@ impl RedbStorage {
         class: u8,
         valid_until_ms: u64,
     ) -> Result<Vec<u8>, StorageError> {
-        if !self.is_signing_history_healthy() {
-            return Err(StorageError::SigningHistoryCorrupt);
-        }
-        if roots::is_root(tag, entry) {
-            return Err(StorageError::DurableCommitFailed(
-                "genesis is a root proof, not an original spend approval".into(),
-            ));
-        }
-        if class > 1 || approval.is_empty() || approval.len() > 16_384 || valid_until_ms == 0 {
-            return Err(StorageError::DurableCommitFailed(
-                "Invalid original approval context".into(),
-            ));
-        }
-        let slot = format!("{}:{}", hex::encode(node), tag);
-        let mut txn = self.db.begin_write()?;
-        txn.set_durability(redb::Durability::Immediate);
-        let mut choice = match self.validate_and_prepare_own_choice(
-            &txn,
-            slot.as_str(),
-            entry.t_id,
-            valid_until_ms,
+        let batch = [OriginalApprovalBatchEntry {
+            target: OriginalApprovalTarget::Hmc {
+                tag: tag.to_string(),
+                entry: Box::new(entry.clone()),
+            },
+            node: *node,
+            approval: approval.to_vec(),
             class,
-            approval,
-        ) {
-            Ok(c) => c,
-            Err(StorageError::SigningHistoryCorrupt) => {
-                self.latch_corruption_in_txn(&txn);
-                let _ = txn.commit();
-                return Err(StorageError::SigningHistoryCorrupt);
-            }
-            Err(e) => return Err(e),
-        };
-        let retained = {
-            let mut locks = txn.open_table(TABLE_HMC_LOCKS)?;
-            if let Some(old) = locks.get(tag)? {
-                let old: crate::api::hmc::L2LockEntry = serde_json::from_slice(old.value())?;
-                if old.t_id != entry.t_id {
-                    return Err(StorageError::OwnChoiceConflict);
-                }
-            }
-            if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
-                drop(locks);
-                self.latch_corruption_in_txn(&txn);
-                let _ = txn.commit();
-                return Err(e);
-            }
-            let lock_bytes = serde_json::to_vec(entry)?;
-            locks.insert(tag, lock_bytes.as_slice())?;
-            txn.open_table(TABLE_HMC_VOUCHER_INDEX)?
-                .insert((entry.layer2_voucher_id.as_str(), tag), ())?;
-            let expires_sec = grace_expiry_bucket_sec(valid_until_ms);
-            txn.open_table(TABLE_HMC_TTL_INDEX)?
-                .insert(&(expires_sec, tag), ())?;
-            txn.open_table(TABLE_OWN_CHOICE_TTL)?
-                .insert(&(expires_sec, slot.as_str()), ())?;
-            choice.approvals[usize::from(class)]
-                .clone()
-                .ok_or_else(|| {
-                    StorageError::DurableCommitFailed("Missing retained approval".into())
-                })?
-        };
-        txn.commit()?;
-        Ok(retained)
+            root_valid_until_ms: valid_until_ms,
+        }];
+        let mut results = self.commit_original_approvals_group(&batch)?;
+        results
+            .pop()
+            .unwrap_or(Err(StorageError::DurableCommitFailed("No result".into())))
     }
 
     /// Pure collision-record variant of the same private durable decision gate.
@@ -274,63 +428,19 @@ impl RedbStorage {
         approval: &[u8],
         class: u8,
     ) -> Result<Vec<u8>, StorageError> {
-        if !self.is_signing_history_healthy() {
-            return Err(StorageError::SigningHistoryCorrupt);
-        }
-        if class > 1 || approval.is_empty() || approval.len() > 16_384 || root_valid_until_ms == 0 {
-            return Err(StorageError::DurableCommitFailed(
-                "Invalid original approval context".into(),
-            ));
-        }
-        let tag = hex::encode(record.parent_lock);
-        let slot = format!("{}:{}", hex::encode(node), tag);
-        let mut txn = self.db.begin_write()?;
-        txn.set_durability(redb::Durability::Immediate);
-        let mut choice = match self.validate_and_prepare_own_choice(
-            &txn,
-            slot.as_str(),
-            record.id,
-            root_valid_until_ms,
+        let batch = [OriginalApprovalBatchEntry {
+            target: OriginalApprovalTarget::Record {
+                record: Box::new(record.clone()),
+            },
+            node: *node,
+            approval: approval.to_vec(),
             class,
-            approval,
-        ) {
-            Ok(c) => c,
-            Err(StorageError::SigningHistoryCorrupt) => {
-                self.latch_corruption_in_txn(&txn);
-                let _ = txn.commit();
-                return Err(StorageError::SigningHistoryCorrupt);
-            }
-            Err(e) => return Err(e),
-        };
-        let retained = {
-            let mut locks = txn.open_table(TABLE_LOCKS)?;
-            if let Some(old) = locks.get(&record.parent_lock)? {
-                let (old, _): (LockRecord, u64) = bincode::deserialize(old.value())?;
-                if old.id != record.id {
-                    return Err(StorageError::OwnChoiceConflict);
-                }
-            }
-            if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
-                drop(locks);
-                self.latch_corruption_in_txn(&txn);
-                let _ = txn.commit();
-                return Err(e);
-            }
-            let bytes = bincode::serialize(&(record, root_valid_until_ms))?;
-            locks.insert(&record.parent_lock, bytes.as_slice())?;
-            let expires_sec = grace_expiry_bucket_sec(root_valid_until_ms);
-            txn.open_table(TABLE_TTL_INDEX)?
-                .insert(&(expires_sec, &record.parent_lock), ())?;
-            txn.open_table(TABLE_OWN_CHOICE_TTL)?
-                .insert(&(expires_sec, slot.as_str()), ())?;
-            choice.approvals[usize::from(class)]
-                .clone()
-                .ok_or_else(|| {
-                    StorageError::DurableCommitFailed("Missing retained approval".into())
-                })?
-        };
-        txn.commit()?;
-        Ok(retained)
+            root_valid_until_ms,
+        }];
+        let mut results = self.commit_original_approvals_group(&batch)?;
+        results
+            .pop()
+            .unwrap_or(Err(StorageError::DurableCommitFailed("No result".into())))
     }
 
     /// Reconciles and validates own choice table cardinality, existing choice row encoding,
@@ -680,9 +790,106 @@ impl RedbStorage {
         Ok(table.get(node_key)?.is_some())
     }
 
+    /// Atomically persists fraud slashing evidence and the corresponding node ban in a single redb transaction (A20-01).
+    ///
+    /// # Architectural Invariant: A20-01 / INV-1402 — Atomic Persistence of Slashing Evidence & Sanctions
+    /// Slashing evidence and the perpetrator's permanent ban MUST be committed in one atomic transaction.
+    /// If storage fails, neither is stored; if successful, both are guaranteed to be durable.
+    pub fn commit_slashing_evidence_and_ban(
+        &self,
+        evidence_hash: &[u8; 32],
+        evidence_raw: &[u8],
+        offender_node_key: &[u8; 32],
+        timestamp_ms: u64,
+    ) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table_evidence = write_txn.open_table(TABLE_SLASHING_EVIDENCE)?;
+            table_evidence.insert(evidence_hash, evidence_raw)?;
+            let mut table_banned = write_txn.open_table(TABLE_BANNED_NODES)?;
+            table_banned.insert(offender_node_key, timestamp_ms)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Reconstructs any missing node bans from persisted slashing evidence (A20-01).
+    ///
+    /// Iterates `TABLE_SLASHING_EVIDENCE`, deserializes each proof payload, and validates
+    /// its first-party Ed25519 signatures (anti-framing protection). If a valid evidence
+    /// entry has no corresponding ban in `TABLE_BANNED_NODES`, the ban is committed.
+    /// Returns the list of reconstructed banned node keys.
+    pub fn reconstruct_missing_bans_from_evidence(&self) -> Result<Vec<[u8; 32]>, StorageError> {
+        let mut to_ban: Vec<([u8; 32], u64)> = Vec::new();
+
+        {
+            let read_txn = self.db.begin_read()?;
+            let table_evidence = read_txn.open_table(TABLE_SLASHING_EVIDENCE)?;
+            let table_banned = read_txn.open_table(TABLE_BANNED_NODES)?;
+
+            for item in table_evidence.iter()? {
+                let (_hash_guard, payload_guard) = match item {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        warn!("Corrupt entry in TABLE_SLASHING_EVIDENCE iterator: {}", err);
+                        continue;
+                    }
+                };
+                let raw = payload_guard.value();
+                let Ok(proof) =
+                    bincode::deserialize::<humoco_sim_core::fraud::FraudProofPayload>(raw)
+                else {
+                    warn!("Failed to deserialize evidence packet in TABLE_SLASHING_EVIDENCE during boot reconstruction");
+                    continue;
+                };
+
+                let offender = proof.perpetrator_node_id;
+                let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&offender) else {
+                    continue;
+                };
+
+                // Anti-framing check: verify that the evidence contains genuine Ed25519 signatures from the accused key
+                if !crate::network::transport::verify_equivocation_first_party(&vk, &proof) {
+                    warn!(
+                        offender = %hex::encode(offender),
+                        "Skipping unverified or forged evidence packet during ban reconstruction"
+                    );
+                    continue;
+                }
+
+                // Check if already in TABLE_BANNED_NODES
+                if table_banned.get(&offender)?.is_none() {
+                    to_ban.push((offender, 0));
+                }
+            }
+        }
+
+        if to_ban.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let write_txn = self.db.begin_write()?;
+        let mut reconstructed = Vec::with_capacity(to_ban.len());
+        {
+            let mut table_banned = write_txn.open_table(TABLE_BANNED_NODES)?;
+            for (offender, ts) in to_ban {
+                table_banned.insert(&offender, ts)?;
+                reconstructed.push(offender);
+            }
+        }
+        write_txn.commit()?;
+        info!(
+            reconstructed_count = reconstructed.len(),
+            "Reconstructed missing node bans from durable slashing evidence (A20-01)"
+        );
+        Ok(reconstructed)
+    }
+
     /// Retrieves all banned node keys.
     /// Defensive against corrupted entries: catches iterator errors, logs a warning, and skips defective entries.
+    /// Reconstructs any missing bans from slashing evidence before returning (A20-01).
     pub fn all_banned_nodes(&self) -> Result<Vec<[u8; 32]>, StorageError> {
+        let _ = self.reconstruct_missing_bans_from_evidence();
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_BANNED_NODES)?;
         let mut results = Vec::new();
@@ -716,12 +923,47 @@ impl RedbStorage {
         }
     }
 
+    /// Retrieves all persisted VIP quota accounts and their balances from TABLE_QUOTA_ACCOUNTS.
+    /// Defensive against corrupted entries: catches iterator errors, logs a warning, and skips defective entries.
+    pub fn all_quotas(&self) -> Result<Vec<([u8; 32], u64)>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_QUOTA_ACCOUNTS)?;
+        let mut results = Vec::new();
+        for item in table.iter()? {
+            let (k_guard, v_guard) = match item {
+                Ok(g) => g,
+                Err(err) => {
+                    warn!("Corrupt entry in TABLE_QUOTA_ACCOUNTS iterator: {}", err);
+                    continue;
+                }
+            };
+            results.push((*k_guard.value(), v_guard.value()));
+        }
+        Ok(results)
+    }
+
     /// Sets quota remaining byte years for an account tag.
     pub fn set_quota(&self, account_tag: &[u8; 32], byte_years: u64) -> Result<(), StorageError> {
         let write_txn = self.db.begin_write()?;
         {
             let mut table_quota = write_txn.open_table(TABLE_QUOTA_ACCOUNTS)?;
             table_quota.insert(account_tag, byte_years)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Sets quota remaining byte years for multiple account tags in a single atomic transaction.
+    pub fn set_quotas_batch(&self, quotas: &[([u8; 32], u64)]) -> Result<(), StorageError> {
+        if quotas.is_empty() {
+            return Ok(());
+        }
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table_quota = write_txn.open_table(TABLE_QUOTA_ACCOUNTS)?;
+            for (tag, byte_years) in quotas {
+                table_quota.insert(tag, *byte_years)?;
+            }
         }
         write_txn.commit()?;
         Ok(())

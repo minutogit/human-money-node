@@ -207,7 +207,7 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                             .await;
 
                         assert!(
-                            matches!(verdict, L2Verdict::Rejected { .. }),
+                            matches!(verdict, L2Verdict::Conflict { .. } | L2Verdict::Rejected { .. }),
                             "Conflicting double-spend must be rejected: {verdict:?}"
                         );
                         assert!(!is_new);

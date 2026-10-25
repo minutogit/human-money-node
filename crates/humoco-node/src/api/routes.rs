@@ -70,6 +70,8 @@ pub struct AppState {
     pub readiness_manager: Arc<crate::daemon::ShardReadinessManager>,
     /// Bound exceptional disk reads independently of checkout persistence.
     pub retained_choice_reads: Arc<tokio::sync::Semaphore>,
+    /// Bound fallback disk reads for voucher roots independently of hot-path (A05-01).
+    pub voucher_root_reads: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -131,6 +133,7 @@ impl AppState {
             health_tracker,
             readiness_manager,
             retained_choice_reads: Arc::new(tokio::sync::Semaphore::new(8)),
+            voucher_root_reads: Arc::new(tokio::sync::Semaphore::new(16)),
         }
     }
 
@@ -740,12 +743,34 @@ pub fn create_attestation(
 // JoinSet fanout / attestation verification logic.
 // ---------------------------------------------------------------------------
 
-/// Resolves a voucher root for a stateless gateway (Phase 2 P1):
-/// RAM already missed; check persistent disk for the signed genesis TTL
-/// Look up local voucher root from disk storage (A25-04). Returns the immutable
-/// `root.valid_until` in ms when the genesis lock is known on disk.
-async fn lookup_local_voucher_root(state: &AppState, voucher_id: &str) -> Option<u64> {
-    if let Ok(Some(root)) = state.storage.voucher_root(voucher_id) {
+/// # Architectural Invariant: Non-Blocking Hot-Path Voucher Root Resolution (A05-01)
+///
+/// Under the PoS checkout hot-path (`POST /v1/lock`), checking voucher root validity
+/// must never stall Tokio runtime worker threads on synchronous redb I/O.
+/// 1. Fast-Path: Checks the in-memory RAM index first (`<1 µs`).
+/// 2. Slow-Path: If missing in RAM, falls back to disk via `tokio::task::spawn_blocking`
+///    governed by a bounded permit semaphore (`voucher_root_reads`) to prevent disk
+///    saturation or thread starvation under mass ingress.
+pub async fn lookup_local_voucher_root(state: &AppState, voucher_id: &str) -> Option<u64> {
+    // 1. Fast-path: Check in-memory RAM index first (<1µs)
+    if let Some(valid_until) = state.engine.get_hmc_voucher_root_valid(voucher_id).await {
+        return Some(valid_until);
+    }
+
+    // 2. Slow-path: Bounded non-blocking disk fallback via spawn_blocking (A05-01)
+    let Ok(permit) = state.voucher_root_reads.clone().try_acquire_owned() else {
+        tracing::warn!(voucher_id, "Voucher root read permit saturated");
+        return None;
+    };
+    let storage = state.storage.clone();
+    let vid = voucher_id.to_string();
+    let read_res = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        storage.voucher_root(&vid)
+    })
+    .await;
+
+    if let Ok(Ok(Some(root))) = read_res {
         return crate::storage::db::roots::root_valid_until(&root).ok();
     }
     None
@@ -925,26 +950,26 @@ async fn verify_peer_attestation(
 }
 
 /// Parameters for querying peer attestations via QUIC.
-struct PeerAttestationQuery<'a> {
-    transport: &'a crate::network::QuicTransport,
-    peer_mgr: &'a crate::network::PeerManager,
-    candidate_nodes: &'a [([u8; 32], std::net::SocketAddr)],
-    expected_members: Option<&'a [[u8; 32]]>,
-    parent_lock: [u8; 32],
-    lookup_tag: Option<&'a str>,
-    voucher_id: Option<&'a str>,
-    msg_type: humoco_sim_core::wire::MsgType,
-    resp_msg_type: humoco_sim_core::wire::MsgType,
-    payload: &'a [u8],
-    target_status: u8,
-    lock_id: [u8; 32],
-    shard_id: u16,
-    required_q: usize,
-    shard_query_depth: usize,
-    my_load: u64,
-    quota_limit: u64,
-    network_id: humoco_sim_core::types::NetworkId,
-    checkout_deadline: Option<tokio::time::Instant>,
+pub struct PeerAttestationQuery<'a> {
+    pub transport: &'a crate::network::QuicTransport,
+    pub peer_mgr: &'a crate::network::PeerManager,
+    pub candidate_nodes: &'a [([u8; 32], std::net::SocketAddr)],
+    pub expected_members: Option<&'a [[u8; 32]]>,
+    pub parent_lock: [u8; 32],
+    pub lookup_tag: Option<&'a str>,
+    pub voucher_id: Option<&'a str>,
+    pub msg_type: humoco_sim_core::wire::MsgType,
+    pub resp_msg_type: humoco_sim_core::wire::MsgType,
+    pub payload: &'a [u8],
+    pub target_status: u8,
+    pub lock_id: [u8; 32],
+    pub shard_id: u16,
+    pub required_q: usize,
+    pub shard_query_depth: usize,
+    pub my_load: u64,
+    pub quota_limit: u64,
+    pub network_id: humoco_sim_core::types::NetworkId,
+    pub checkout_deadline: Option<tokio::time::Instant>,
 }
 
 enum PeerQueryError {
@@ -1027,11 +1052,18 @@ fn validate_remote_collision(
     Some(entry)
 }
 
+/// # Architectural Invariant: Zero-Copy Request-Payload Quorum Fan-Out (A05-03)
+///
+/// In the parallel checkout fan-out across up to 20 committee nodes, the serialized
+/// request payload is wrapped in an `Arc<[u8]>` once and shared across all spawned tasks.
+/// Tasks borrow the slice (`&p[..]`) when sending wire frames via QUIC without cloning
+/// or reallocating up to 20 * 64 KiB = 1.28 MiB per request.
+///
 /// Collects only the immutable write committee in parallel, with an 800ms
 /// deadline and fast exit once quorum is met or cannot be reached. Cancelled
 /// stragglers and explicit readiness refusals never count as peer failures.
 /// Status reads retain their existing timeout and query depth.
-async fn collect_peer_attestations(
+pub async fn collect_peer_attestations(
     query: PeerAttestationQuery<'_>,
     collected_signatures: &mut Vec<AttestationDto>,
 ) -> Option<crate::api::hmc::L2LockEntry> {
@@ -1042,6 +1074,9 @@ async fn collect_peer_attestations(
         query.target_status as u32,
         query.payload.len() as u32,
     );
+
+    // Wrap payload in an Arc<[u8]> once for zero-copy sharing across all committee tasks (A05-03)
+    let shared_payload: Arc<[u8]> = Arc::from(query.payload);
 
     let mut timeout_addrs = Vec::new();
     let mut candidate_idx = 0;
@@ -1065,7 +1100,7 @@ async fn collect_peer_attestations(
 
                 let t = query.transport.clone();
                 let h = header;
-                let p = query.payload.to_vec();
+                let p = shared_payload.clone();
                 let exp_resp = query.resp_msg_type as u16;
                 join_set.spawn(async move {
                     let query_peer = async {
@@ -1235,9 +1270,26 @@ async fn collect_peer_attestations(
                 }
                 Ok((_nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)) => {
                     in_flight.remove(&rank_idx);
-                    // Phase 9 P1 (Spec 09 INV-0908): 24h quota moratorium after a partition merge.
-                    // During merge hysteresis no quota-driven peer penalty may be applied,
-                    // preventing cascade bans from divergent thermometers.
+                    // =========================================================================
+                    // ARCHITECTURE GUARD: Spec 09 §5.2 / INV-0909 / INV-1701 / INV-1703
+                    // (Non-Authoritative Telemetry, Quota Isolation & Strict Neutral Feedback)
+                    //
+                    // 1. NEUTRAL PROTOCOL FEEDBACK: `FLAG_QUOTA_EXCEEDED` is a cooperative capacity
+                    //    and overload signal, NOT a transport error, crash, or Byzantine equivocation.
+                    // 2. NON-AUTHORITATIVE TELEMETRY (INV-1701): Local load and thermometer estimates
+                    //    are subjective observations. Subjective load discrepancies must NEVER trigger
+                    //    automated bans or peer failure penalties (`record_failure` is strictly forbidden).
+                    // 3. THREE-ZONE IMMUNITY (Spec 09 §5.2 / INV-0909):
+                    //    - Zone 1 (FraudulentRejection / apparent load divergence): Even if our local
+                    //      load estimate appears lower than the peer's declared limit, dynamic network
+                    //      jitter or regional traffic bursts prevent proving malicious intent.
+                    //    - Zone 2 (BoundaryCutoff 75%..125%): Expected boundary fluctuation band.
+                    //    - Zone 3 (LegitimateOverload > 125%): Acknowledged network-wide saturation.
+                    // 4. 24H MERGE MORATORIUM (INV-0908): After a partition merge (Village Merge),
+                    //    divergent regional thermometers are reconciled; no quota malus may be applied.
+                    // 5. FIRST-PARTY EVIDENCE DOCTRINE: Sanctions require irrefutable cryptographic
+                    //    self-proof (EquivocationProof). Quota exhaustion never affects `missing_count`.
+                    // =========================================================================
                     let in_moratorium = query.peer_mgr.is_in_merge_hysteresis(query.peer_mgr.net_time_ms());
                     let verdict = humoco_sim_core::quota::evaluate_quota_exceeded_claim(query.my_load, query.quota_limit);
                     match verdict {
@@ -2368,6 +2420,10 @@ async fn submit_hmc_lock_with_deadline(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Storage error: {}", e),
                 ),
+                IngressError::QuotaPersistenceUnavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "VIP Quota persistence queue is full or closed".into(),
+                ),
             };
             match &err {
                 IngressError::QuotaExceeded { .. } | IngressError::ReadQuotaExceeded { .. } => {
@@ -2395,6 +2451,9 @@ async fn submit_hmc_lock_with_deadline(
                     IngressError::PoWRequired { .. } => "PoWRequired".to_string(),
                     IngressError::InvalidAuthToken => "InvalidAuthToken".to_string(),
                     IngressError::InvalidPeerToken => "InvalidPeerToken".to_string(),
+                    IngressError::QuotaPersistenceUnavailable => {
+                        "QuotaPersistenceUnavailable".to_string()
+                    }
                     _ => "AdmissionDenied".to_string(),
                 },
                 message: reason,
@@ -2990,6 +3049,10 @@ async fn submit_hmc_chain_lock_inner(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Storage error: {}", e),
                 ),
+                IngressError::QuotaPersistenceUnavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "VIP Quota persistence queue is full or closed".into(),
+                ),
             };
             match &err {
                 IngressError::QuotaExceeded { .. } | IngressError::ReadQuotaExceeded { .. } => {
@@ -3017,6 +3080,9 @@ async fn submit_hmc_chain_lock_inner(
                     IngressError::PoWRequired { .. } => "PoWRequired".to_string(),
                     IngressError::InvalidAuthToken => "InvalidAuthToken".to_string(),
                     IngressError::InvalidPeerToken => "InvalidPeerToken".to_string(),
+                    IngressError::QuotaPersistenceUnavailable => {
+                        "QuotaPersistenceUnavailable".to_string()
+                    }
                     _ => "AdmissionDenied".to_string(),
                 },
                 message: reason,

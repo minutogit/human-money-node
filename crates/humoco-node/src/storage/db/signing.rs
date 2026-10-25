@@ -1,4 +1,16 @@
-//! Local signing-history integrity. No independent hardware or remote authority.
+//! # Proof-Gate G4 / G5: Fail-Closed Monotonic Signing History & Clock Slot Integrity
+//!
+//! Architectural Invariants: INV-1402, G5 Local Signing Latch, Audit 23 Concurrency Hardening
+//!
+//! - FAIL-CLOSED SIGNING LATCH: Local signing history integrity is guarded by atomic commit metadata
+//!   (generation, row count, XOR slot fingerprint). Any row loss, metadata corruption, or generation
+//!   rollback latches `FAIL_CLOSED_CORRUPT` durably and halts further signature releases.
+//! - MONOTONIC ADVANCEMENT IN SAME TRANSACTION: Generation and row fingerprints advance with checked
+//!   arithmetic in the exact same redb transaction as the original approval / record change.
+//! - REAL-TIME CHECKPOINT VALIDATION: QUIC heartbeats carry signed checkpoints; observing a newer
+//!   generation or conflicting fingerprint for our own identity latches the node immediately.
+//! - CLOCK SLOT COMPOSITION (Contract G4): Signing decisions bind strictly to slot-bound roots and
+//!   median network time offsets; replay across slots or after root TTL grace expiry is prevented.
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 

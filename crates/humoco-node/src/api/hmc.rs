@@ -34,7 +34,7 @@ use crate::identity::NodeIdentity;
 macro_rules! impl_base58_array {
     ($mod_name:ident, $N:literal) => {
         pub mod $mod_name {
-            use serde::{de, Deserialize, Deserializer, Serializer};
+            use serde::{Deserialize, Deserializer, Serializer, de};
             use std::convert::TryInto;
 
             pub fn serialize<S>(data: &[u8; $N], serializer: S) -> Result<S::Ok, S::Error>
@@ -62,7 +62,7 @@ macro_rules! impl_base58_array {
     };
     ($mod_name:ident, $N:literal, opt) => {
         pub mod $mod_name {
-            use serde::{de, Deserialize, Deserializer, Serializer};
+            use serde::{Deserialize, Deserializer, Serializer, de};
             use std::convert::TryInto;
 
             pub fn serialize<S>(data: &Option<[u8; $N]>, serializer: S) -> Result<S::Ok, S::Error>
@@ -70,7 +70,7 @@ macro_rules! impl_base58_array {
                 S: Serializer,
             {
                 match data {
-                    Some(d) => serializer.serialize_str(&bs58::encode(d).into_string()),
+                    Some(d) => serializer.serialize_some(&bs58::encode(d).into_string()),
                     None => serializer.serialize_none(),
                 }
             }
@@ -105,7 +105,7 @@ impl_base58_array!(base58_64, 64);
 impl_base58_array!(base58_64_opt, 64, opt);
 
 pub mod base58_u128 {
-    use serde::{de, Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de};
     use std::convert::TryInto;
 
     pub fn serialize<S>(data: &u128, serializer: S) -> Result<S::Ok, S::Error>
@@ -192,12 +192,59 @@ pub struct L2LockRequest {
 /// This entry contains NO monetary amounts, NO account balances, and NO user identities.
 /// It is purely a double-spend prevention record. The Layer-1 Voucher document (`ProofChain`)
 /// custodies the actual transactional deed, ownership state, and monetary value.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct L2LockEntry {
     /// Separate authenticated L2 output commitment; never part of L1/SST bytes.
-    #[serde(default)]
     pub causal_output: Option<humoco_proto::causal::CausalOutputProof>,
 
+    pub layer2_voucher_id: String,
+    pub t_id: [u8; 32],
+    pub sender_ephemeral_pub: [u8; 32],
+    pub receiver_ephemeral_pub_hash: Option<[u8; 32]>,
+    pub change_ephemeral_pub_hash: Option<[u8; 32]>,
+    /// Client request authorization signature, distinct from a shard node attestation.
+    pub layer2_signature: [u8; 64],
+    pub trap_r: Option<String>,
+    pub trap_s: Option<String>,
+    pub encrypted_timestamp: u128,
+    pub created_at_ms: u64,
+    pub deletable_at: Option<String>,
+    pub privacy_guard: Option<String>,
+}
+
+#[derive(Serialize)]
+struct L2LockEntryJsonRef<'a> {
+    #[serde(default)]
+    pub causal_output: &'a Option<humoco_proto::causal::CausalOutputProof>,
+    pub layer2_voucher_id: &'a str,
+    #[serde(with = "base58_32")]
+    pub t_id: &'a [u8; 32],
+    #[serde(with = "base58_32")]
+    pub sender_ephemeral_pub: &'a [u8; 32],
+    #[serde(with = "base58_32_opt", default)]
+    pub receiver_ephemeral_pub_hash: &'a Option<[u8; 32]>,
+    #[serde(with = "base58_32_opt", default)]
+    pub change_ephemeral_pub_hash: &'a Option<[u8; 32]>,
+    #[serde(with = "base58_64")]
+    pub layer2_signature: &'a [u8; 64],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trap_r: &'a Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trap_s: &'a Option<String>,
+    #[serde(with = "base58_u128", default)]
+    pub encrypted_timestamp: u128,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletable_at: &'a Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_guard: &'a Option<String>,
+}
+
+#[derive(Deserialize)]
+struct L2LockEntryJsonOwned {
+    #[serde(default)]
+    pub causal_output: Option<humoco_proto::causal::CausalOutputProof>,
     pub layer2_voucher_id: String,
     #[serde(with = "base58_32")]
     pub t_id: [u8; 32],
@@ -207,7 +254,6 @@ pub struct L2LockEntry {
     pub receiver_ephemeral_pub_hash: Option<[u8; 32]>,
     #[serde(with = "base58_32_opt", default)]
     pub change_ephemeral_pub_hash: Option<[u8; 32]>,
-    /// Client request authorization signature, distinct from a shard node attestation.
     #[serde(with = "base58_64")]
     pub layer2_signature: [u8; 64],
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,6 +268,150 @@ pub struct L2LockEntry {
     pub deletable_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy_guard: Option<String>,
+}
+
+#[derive(Serialize)]
+struct L2LockEntryBinaryRef<'a> {
+    #[serde(default)]
+    pub causal_output: &'a Option<humoco_proto::causal::CausalOutputProof>,
+    pub layer2_voucher_id: &'a str,
+    #[serde(with = "base58_32")]
+    pub t_id: &'a [u8; 32],
+    #[serde(with = "base58_32")]
+    pub sender_ephemeral_pub: &'a [u8; 32],
+    #[serde(with = "base58_32_opt", default)]
+    pub receiver_ephemeral_pub_hash: &'a Option<[u8; 32]>,
+    #[serde(with = "base58_32_opt", default)]
+    pub change_ephemeral_pub_hash: &'a Option<[u8; 32]>,
+    #[serde(with = "base58_64")]
+    pub layer2_signature: &'a [u8; 64],
+    #[serde(default)]
+    pub trap_r: &'a Option<String>,
+    #[serde(default)]
+    pub trap_s: &'a Option<String>,
+    #[serde(with = "base58_u128", default)]
+    pub encrypted_timestamp: u128,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub deletable_at: &'a Option<String>,
+    #[serde(default)]
+    pub privacy_guard: &'a Option<String>,
+}
+
+#[derive(Deserialize)]
+struct L2LockEntryBinaryOwned {
+    #[serde(default)]
+    pub causal_output: Option<humoco_proto::causal::CausalOutputProof>,
+    pub layer2_voucher_id: String,
+    #[serde(with = "base58_32")]
+    pub t_id: [u8; 32],
+    #[serde(with = "base58_32")]
+    pub sender_ephemeral_pub: [u8; 32],
+    #[serde(with = "base58_32_opt", default)]
+    pub receiver_ephemeral_pub_hash: Option<[u8; 32]>,
+    #[serde(with = "base58_32_opt", default)]
+    pub change_ephemeral_pub_hash: Option<[u8; 32]>,
+    #[serde(with = "base58_64")]
+    pub layer2_signature: [u8; 64],
+    #[serde(default)]
+    pub trap_r: Option<String>,
+    #[serde(default)]
+    pub trap_s: Option<String>,
+    #[serde(with = "base58_u128", default)]
+    pub encrypted_timestamp: u128,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub deletable_at: Option<String>,
+    #[serde(default)]
+    pub privacy_guard: Option<String>,
+}
+
+impl Serialize for L2LockEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            let rep = L2LockEntryJsonRef {
+                causal_output: &self.causal_output,
+                layer2_voucher_id: &self.layer2_voucher_id,
+                t_id: &self.t_id,
+                sender_ephemeral_pub: &self.sender_ephemeral_pub,
+                receiver_ephemeral_pub_hash: &self.receiver_ephemeral_pub_hash,
+                change_ephemeral_pub_hash: &self.change_ephemeral_pub_hash,
+                layer2_signature: &self.layer2_signature,
+                trap_r: &self.trap_r,
+                trap_s: &self.trap_s,
+                encrypted_timestamp: self.encrypted_timestamp,
+                created_at_ms: self.created_at_ms,
+                deletable_at: &self.deletable_at,
+                privacy_guard: &self.privacy_guard,
+            };
+            rep.serialize(serializer)
+        } else {
+            let rep = L2LockEntryBinaryRef {
+                causal_output: &self.causal_output,
+                layer2_voucher_id: &self.layer2_voucher_id,
+                t_id: &self.t_id,
+                sender_ephemeral_pub: &self.sender_ephemeral_pub,
+                receiver_ephemeral_pub_hash: &self.receiver_ephemeral_pub_hash,
+                change_ephemeral_pub_hash: &self.change_ephemeral_pub_hash,
+                layer2_signature: &self.layer2_signature,
+                trap_r: &self.trap_r,
+                trap_s: &self.trap_s,
+                encrypted_timestamp: self.encrypted_timestamp,
+                created_at_ms: self.created_at_ms,
+                deletable_at: &self.deletable_at,
+                privacy_guard: &self.privacy_guard,
+            };
+            rep.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for L2LockEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let rep = L2LockEntryJsonOwned::deserialize(deserializer)?;
+            Ok(Self {
+                causal_output: rep.causal_output,
+                layer2_voucher_id: rep.layer2_voucher_id,
+                t_id: rep.t_id,
+                sender_ephemeral_pub: rep.sender_ephemeral_pub,
+                receiver_ephemeral_pub_hash: rep.receiver_ephemeral_pub_hash,
+                change_ephemeral_pub_hash: rep.change_ephemeral_pub_hash,
+                layer2_signature: rep.layer2_signature,
+                trap_r: rep.trap_r,
+                trap_s: rep.trap_s,
+                encrypted_timestamp: rep.encrypted_timestamp,
+                created_at_ms: rep.created_at_ms,
+                deletable_at: rep.deletable_at,
+                privacy_guard: rep.privacy_guard,
+            })
+        } else {
+            let rep = L2LockEntryBinaryOwned::deserialize(deserializer)?;
+            Ok(Self {
+                causal_output: rep.causal_output,
+                layer2_voucher_id: rep.layer2_voucher_id,
+                t_id: rep.t_id,
+                sender_ephemeral_pub: rep.sender_ephemeral_pub,
+                receiver_ephemeral_pub_hash: rep.receiver_ephemeral_pub_hash,
+                change_ephemeral_pub_hash: rep.change_ephemeral_pub_hash,
+                layer2_signature: rep.layer2_signature,
+                trap_r: rep.trap_r,
+                trap_s: rep.trap_s,
+                encrypted_timestamp: rep.encrypted_timestamp,
+                created_at_ms: rep.created_at_ms,
+                deletable_at: rep.deletable_at,
+                privacy_guard: rep.privacy_guard,
+            })
+        }
+    }
 }
 
 impl From<&L2LockRequest> for L2LockEntry {
@@ -644,5 +834,59 @@ pub fn wrap_and_sign_verdict_with_quorum(
         verdict,
         server_signature: signature.to_bytes(),
         quorum_certificate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_l2_lock_entry_bincode_roundtrip_optional_fields() {
+        let entry_full = L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "voucher1".into(),
+            t_id: [1; 32],
+            sender_ephemeral_pub: [2; 32],
+            receiver_ephemeral_pub_hash: Some([3; 32]),
+            change_ephemeral_pub_hash: Some([4; 32]),
+            layer2_signature: [5; 64],
+            trap_r: Some("trap_r_val".into()),
+            trap_s: Some("trap_s_val".into()),
+            encrypted_timestamp: 42,
+            created_at_ms: 100,
+            deletable_at: Some("1000".into()),
+            privacy_guard: Some("guard_val".into()),
+        };
+        let bytes_full = bincode::serialize(&entry_full).unwrap();
+        let decoded_full: L2LockEntry = bincode::deserialize(&bytes_full).unwrap();
+        assert_eq!(entry_full, decoded_full);
+
+        let json_full = serde_json::to_vec(&entry_full).unwrap();
+        let decoded_json_full: L2LockEntry = serde_json::from_slice(&json_full).unwrap();
+        assert_eq!(entry_full, decoded_json_full);
+
+        let entry_none = L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "voucher1".into(),
+            t_id: [1; 32],
+            sender_ephemeral_pub: [2; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [5; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 42,
+            created_at_ms: 100,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+        let bytes_none = bincode::serialize(&entry_none).unwrap();
+        let decoded_none: L2LockEntry = bincode::deserialize(&bytes_none).unwrap();
+        assert_eq!(entry_none, decoded_none);
+
+        let json_none = serde_json::to_vec(&entry_none).unwrap();
+        let decoded_json_none: L2LockEntry = serde_json::from_slice(&json_none).unwrap();
+        assert_eq!(entry_none, decoded_json_none);
     }
 }

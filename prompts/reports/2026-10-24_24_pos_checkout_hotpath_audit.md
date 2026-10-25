@@ -3,7 +3,17 @@
 Date: 2026-10-24  
 Auditor: Codex  
 Repository HEAD: `76ef71f530b24daca56a84f02e5461da18837772`  
-Result: **4 open findings: 3 HIGH (P2), 1 MEDIUM (P3).** No production code was changed.
+Remediated: 2026-10-25 (Remediation Plan W0–W5 completed)  
+Result: **🟢 Clean (0 open findings: 4/4 remediated & verified).**
+
+## Remediation summary (2026-10-25)
+
+All 4 findings (A24-01 through A24-04) have been fully remediated and verified with permanent wire-level and status-reconciliation regression tests:
+- **A24-01 (Fixed in `api/live.rs`):** Implemented per-member live verification pipeline (`query_member_live_vote`) grouping candidate contexts by `live_state_digest` with fast exit on 14 matching verified votes. Removed the single first-response-wins helper `fetch_remote_entry_for_tag`. Verified by `test_remediation_a24_01_fast_minority_answer_cannot_deny_live_proof` and `test_remediation_a24_01_split_opinion_without_quorum_fails_closed` in `crates/humoco-node/tests/status_reconciliation_tests.rs`.
+- **A24-02 (Fixed in `api/live.rs` and `api/routes.rs`):** Bound live proof verification to a single absolute server deadline (750 ms `LIVE_PROOF_SERVER_BUDGET`) initiated in `live_deadline_middleware` before JSON extraction and passed via `LiveDeadline` through candidate discovery, connection waits, local signing, and vote collection via `timeout_at`. Verified by `test_remediation_a24_02_shared_live_deadline_prevents_late_proof` in `crates/humoco-node/tests/status_reconciliation_tests.rs`.
+- **A24-03 (Fixed in `api/routes.rs` and `api/hmc.rs`):** Introduced strict `validate_remote_collision` enforcing header type, 64 KiB framing bound, TLS identity matching expected committee member, lookup tag binding, voucher ID match, child divergence, and valid client signature. Fixed Serde serialization with dual human-readable/binary representation in `L2LockEntry` so bincode roundtrips optional fields while JSON matches `human-money-core` state digest. Quorum gating now applies strictly to `Verified` outcomes, preserving HTTP 409 `Conflict` for both single-lock (`submit_lock`) and chain (`submit_hmc_chain_lock`) routes. Verified by `test_remediation_a24_03_remote_valid_collision_returns_409_wire`, `test_remediation_a24_03_remote_valid_collision_on_chain_lock_returns_409_wire`, `test_remediation_a24_03_remote_invalid_collision_evidence_never_returns_409_wire`, and `test_remediation_a24_03_valid_quorum_takes_precedence_over_isolated_collision_wire` in `crates/humoco-node/tests/phase11_wire_level_adversarial_tests.rs`.
+- **A24-04 (Fixed in `api/routes.rs`):** Replaced nested retry branches in `collect_peer_attestations` with bounded loop (`max_attempts = 3` for writes, 1 for reads). A successful third transport response enters the exact same validation path and is returned instead of converting to Generic failure. Explicit neutral responses (`FLAG_NOT_READY`, `FLAG_NOT_IN_SHARD`, `FLAG_PEER_SUSPENDED`) are handled once without retry or malus. Counts one peer outcome per request. Verified by `test_remediation_a24_04_two_reset_streams_then_third_attestation_completes_quorum_wire`, `test_remediation_a24_04_two_failed_streams_then_not_ready_is_neutral_wire`, and `test_remediation_a24_04_three_genuine_failures_counts_single_peer_failure_wire` in `crates/humoco-node/tests/phase11_wire_level_adversarial_tests.rs`.
+- **Integration & Invariant Verification:** `scripts/run-architecture-e2e.sh` passes 100% (App transport -> atomic Core intent -> real HTTP ingress -> real QUIC committee -> stored recipient challenge -> atomic L1 purchase -> idempotent restart). `RUST_TEST_THREADS=4 cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` pass cleanly.
 
 ## Scope and evidence
 

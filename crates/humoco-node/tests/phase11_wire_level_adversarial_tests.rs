@@ -12,8 +12,8 @@
 //! f) 100-node HRW/quorum validation.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -24,28 +24,28 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use humoco_node::api::hmc::{
-    calculate_l2_payload_hash, L2AuthPayload, L2LockRequest, L2ResponseEnvelope, L2Verdict,
+    L2AuthPayload, L2ChainLockRequest, L2LockEntry, L2LockRequest, L2ResponseEnvelope, L2Verdict,
+    calculate_l2_payload_hash,
 };
-use humoco_node::api::{build_router, AppState};
+use humoco_node::api::{AppState, build_router};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::ingress::{PowEngine, TierController};
-use humoco_node::network::{
-    DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport,
-};
+use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
-use humoco_sim_core::types::{required_quorum, LockRecord, SimTime};
+use humoco_sim_core::types::{LockRecord, SimTime, required_quorum};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-
 /// Explicit isolated fixture premises: mature tickets and installed shard state.
 /// These transport/collector tests do not prove bootstrap or recovery completeness.
 fn prepared_readiness() -> Arc<humoco_node::daemon::ShardReadinessManager> {
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
-    for shard in 0..=u16::MAX { readiness.mark_shard_ready(shard); }
+    for shard in 0..=u16::MAX {
+        readiness.mark_shard_ready(shard);
+    }
     readiness
 }
 
@@ -53,12 +53,28 @@ async fn prepare_mature_fixture(pm: &PeerManager, local: &NodeIdentity) {
     for peer in pm.list_peers().await {
         if let Some(key) = peer.node_id {
             let ticket = pm.get_hrw_routing_id(&key).await.unwrap_or(key);
-            pm.learn_node_from_gossip_with_hrw(key, ticket, peer.addr, 0, None).await;
-            pm.set_first_seen_for_test(&key, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+            pm.learn_node_from_gossip_with_hrw(key, ticket, peer.addr, 0, None)
+                .await;
+            pm.set_first_seen_for_test(
+                &key,
+                std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+            )
+            .await;
         }
     }
-    pm.learn_node_from_gossip_with_hrw(*local.node_pubkey(), *local.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
-    pm.set_first_seen_for_test(local.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    pm.learn_node_from_gossip_with_hrw(
+        *local.node_pubkey(),
+        *local.hrw_routing_id(),
+        "127.0.0.1:1".parse().unwrap(),
+        0,
+        None,
+    )
+    .await;
+    pm.set_first_seen_for_test(
+        local.node_pubkey(),
+        std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+    )
+    .await;
 }
 
 fn test_now_ms() -> u64 {
@@ -105,8 +121,10 @@ fn spend_root(root: &L2LockRequest, sender: &SigningKey) -> L2LockRequest {
     use sha3::{Digest, Sha3_256};
     let mut req = root.clone();
     let mut hash = Sha3_256::new();
-    hash.update(32u32.to_le_bytes()); hash.update(root.transaction_hash);
-    hash.update(32u32.to_le_bytes()); hash.update(sender.verifying_key().as_bytes());
+    hash.update(32u32.to_le_bytes());
+    hash.update(root.transaction_hash);
+    hash.update(32u32.to_le_bytes());
+    hash.update(sender.verifying_key().as_bytes());
     req.ds_tag = Some(bs58::encode(hash.finalize()).into_string());
     req.transaction_hash = *blake3::hash(req.ds_tag.as_ref().unwrap().as_bytes()).as_bytes();
     req.is_genesis = false;
@@ -116,7 +134,17 @@ fn spend_root(root: &L2LockRequest, sender: &SigningKey) -> L2LockRequest {
     req
 }
 async fn anchor_fixture(engine: &DualTierEngine, root: &L2LockRequest) {
-    let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.transaction_hash).into_string(), root.into(), IngressOrigin::ClientApi, Some(root.created_at_ms), None, None, None).await;
+    let (verdict, _) = engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root.transaction_hash).into_string(),
+            root.into(),
+            IngressOrigin::ClientApi,
+            Some(root.created_at_ms),
+            None,
+            None,
+            None,
+        )
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }), "{verdict:?}");
 }
 
@@ -128,10 +156,13 @@ fn fake_addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{port}").parse().expect("valid addr")
 }
 
-async fn response_json<T: serde::de::DeserializeOwned>(
-    res: axum::response::Response,
-) -> T {
-    let body_bytes = res.into_body().collect().await.expect("collect body").to_bytes();
+async fn response_json<T: serde::de::DeserializeOwned>(res: axum::response::Response) -> T {
+    let body_bytes = res
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
     serde_json::from_slice(&body_bytes).expect("deserialize response")
 }
 
@@ -156,9 +187,7 @@ async fn force_stable_ge20(pm: &PeerManager) {
 #[tokio::test]
 async fn test_phase11a_quorum_gating_wire_returns_503_never_200_201() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(
-        RedbStorage::open(&temp.path().join("p11a.redb")).expect("open redb"),
-    );
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("p11a.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     let gateway_id = NodeIdentity::generate();
@@ -169,7 +198,8 @@ async fn test_phase11a_quorum_gating_wire_returns_503_never_200_201() {
     // listener exists -> every LockVerifyRequest fanout fails fast.
     for i in 0u64..6 {
         let nid = fake_pubkey(1000 + i);
-        pm.register_f2f_friend(nid, Some(fake_addr(59901 + i as u16))).await;
+        pm.register_f2f_friend(nid, Some(fake_addr(59901 + i as u16)))
+            .await;
     }
     // N = 1 + 6 = 7 => Q(7) = floor(14/3)+1 = 5. Self alone can never reach it.
     prepare_mature_fixture(&pm, &gateway_id).await;
@@ -199,13 +229,7 @@ async fn test_phase11a_quorum_gating_wire_returns_503_never_200_201() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("phase11_friend_token");
 
-    let mut state = AppState::new(
-        engine,
-        storage,
-        gateway_id,
-        tier_controller,
-        pow_engine,
-    );
+    let mut state = AppState::new(engine, storage, gateway_id, tier_controller, pow_engine);
     state.peer_manager = Some(pm);
     state.transport = Some(transport.clone());
     let sender_key = SigningKey::from_bytes(&[7u8; 32]);
@@ -220,7 +244,9 @@ async fn test_phase11a_quorum_gating_wire_returns_503_never_200_201() {
         .uri("/v1/lock")
         .header("content-type", "application/json")
         .header("x-peer-token", "phase11_friend_token")
-        .body(Body::from(serde_json::to_vec(&lock_req).expect("serialize")))
+        .body(Body::from(
+            serde_json::to_vec(&lock_req).expect("serialize"),
+        ))
         .expect("request");
     let resp = app.oneshot(req).await.expect("oneshot");
     let status = resp.status();
@@ -253,9 +279,8 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
     const NUM_FAKE_GW: u64 = 3;
 
     let gw_temp = tempdir().expect("tempdir");
-    let gw_storage = Arc::new(
-        RedbStorage::open(&gw_temp.path().join("p11b_gw.redb")).expect("open redb"),
-    );
+    let gw_storage =
+        Arc::new(RedbStorage::open(&gw_temp.path().join("p11b_gw.redb")).expect("open redb"));
     let (gw_engine, _gw_worker) = DualTierEngine::new(gw_storage.clone());
     let gateway_id = NodeIdentity::generate();
     let gw_cancel = CancellationToken::new();
@@ -274,8 +299,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
     for s in 0..NUM_REAL_SHARDS {
         let tmp = tempdir().expect("tempdir");
         let storage = Arc::new(
-            RedbStorage::open(&tmp.path().join(format!("p11b_shard{s}.redb")))
-                .expect("open redb"),
+            RedbStorage::open(&tmp.path().join(format!("p11b_shard{s}.redb"))).expect("open redb"),
         );
         // Keep tempdir alive via leaked path: storage file already created,
         // engine holds no dir handle, so we leak tmp intentionally for test.
@@ -374,14 +398,14 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
     }
 
     for sh in &shards {
-        gw_transport.connect_peer(sh.addr).await.expect("preconnect shard");
+        gw_transport
+            .connect_peer(sh.addr)
+            .await
+            .expect("preconnect shard");
     }
 
     let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
-    let tier_controller = Arc::new(TierController::new(
-        gw_storage.clone(),
-        pow_engine.clone(),
-    ));
+    let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("phase11b_token");
     let mut state = AppState::new(
         gw_engine,
@@ -396,7 +420,9 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
     let now = test_now_ms();
     let root = make_hmc_genesis(&"cd".repeat(32), now + 900_000, &sender_key);
     anchor_fixture(&state.engine, &root).await;
-    for shard in &shards { anchor_fixture(&shard.engine, &root).await; }
+    for shard in &shards {
+        anchor_fixture(&shard.engine, &root).await;
+    }
     let lock_req = spend_root(&root, &sender_key);
     let lookup_tag = bs58::encode(&root.transaction_hash).into_string();
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
@@ -409,7 +435,9 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
         .uri("/v1/lock")
         .header("content-type", "application/json")
         .header("x-peer-token", "phase11b_token")
-        .body(Body::from(serde_json::to_vec(&lock_req).expect("serialize")))
+        .body(Body::from(
+            serde_json::to_vec(&lock_req).expect("serialize"),
+        ))
         .expect("request");
     let resp = app.oneshot(req).await.expect("oneshot");
     let status = resp.status();
@@ -417,7 +445,8 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
     eprintln!("test_phase11b verdict: {:?}", envelope.verdict);
     assert!(
         status == StatusCode::CREATED || status == StatusCode::OK,
-        "FINAL quorum over wire must yield 200/201, got {status}: {:?}", envelope.verdict
+        "FINAL quorum over wire must yield 200/201, got {status}: {:?}",
+        envelope.verdict
     );
     let cert = envelope
         .quorum_certificate
@@ -457,9 +486,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
         for att in &cert.signatures {
             let sig_bytes = hex::decode(&att.signature).expect("sig hex");
             assert_eq!(sig_bytes.len(), 64);
-            let sig = Signature::from_bytes(
-                sig_bytes.as_slice().try_into().expect("64 bytes"),
-            );
+            let sig = Signature::from_bytes(sig_bytes.as_slice().try_into().expect("64 bytes"));
             let att_lock = decode32(&att.lock_id);
             assert_eq!(att_lock, lock_id, "quorum lock_id must match");
             let vk = if att.node_id == gateway_id.node_id_u16() {
@@ -484,7 +511,8 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
                 1,
                 &payload_digest,
             );
-            vk.verify_strict(&digest, &sig).expect("FINAL attestation signature must verify");
+            vk.verify_strict(&digest, &sig)
+                .expect("FINAL attestation signature must verify");
         }
     }
 
@@ -507,9 +535,8 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
     let server_cancel = CancellationToken::new();
     let pm_server = Arc::new(PeerManager::new(Vec::new()));
     let temp_s = tempdir().expect("tempdir");
-    let storage_s = Arc::new(
-        RedbStorage::open(&temp_s.path().join("p11c.redb")).expect("open redb"),
-    );
+    let storage_s =
+        Arc::new(RedbStorage::open(&temp_s.path().join("p11c.redb")).expect("open redb"));
     let (engine_s, _worker_s) = DualTierEngine::new(storage_s.clone());
     let handler_s = Arc::new(NodeRequestHandler::with_peer_manager(
         engine_s.clone(),
@@ -641,11 +668,11 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
     // Genuine signatures from different networks are not conflicting promises
     // in one protected context. Sending them must not frame the signing key.
     let sign_original = |lock_id: [u8; 32], domain: &[u8], status: u8| {
-        let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent, &lock_id);
+        let payload =
+            humoco_sim_core::crypto::compute_attestation_payload_digest(&parent, &lock_id);
         let shard = u16::from_be_bytes([parent[0], parent[1]]);
-        let digest = humoco_sim_core::crypto::compute_sig_digest(
-            domain, 0, 0, 0, shard, status, &payload,
-        );
+        let digest =
+            humoco_sim_core::crypto::compute_sig_digest(domain, 0, 0, 0, shard, status, &payload);
         humoco_sim_core::types::Attestation {
             node_id: victim_u16,
             lock_id,
@@ -655,32 +682,86 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
             shard_id: shard,
         }
     };
-    let original_a = sign_original(lock_a, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET, 0);
-    let cross_network_b = sign_original(lock_b, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET, 1);
-    let cross_network = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
-        original_a.clone(), cross_network_b, victim_pubkey,
+    let original_a = sign_original(
+        lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
     );
-    assert!(!humoco_node::network::transport::verify_equivocation_first_party(victim_id.verifying_key(), &cross_network), "cross-network originals are not self-proof");
+    let cross_network_b = sign_original(
+        lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
+        1,
+    );
+    let cross_network =
+        humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+            original_a.clone(),
+            cross_network_b,
+            victim_pubkey,
+        );
+    assert!(
+        !humoco_node::network::transport::verify_equivocation_first_party(
+            victim_id.verifying_key(),
+            &cross_network
+        ),
+        "cross-network originals are not self-proof"
+    );
     let payload = bincode::serialize(&cross_network).expect("serialize cross-network proof");
-    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 8, 0, 0, payload.len() as u32);
-    let (reply, _) = transport_stranger.send_request(&conn2, &hdr, &payload).await.expect("cross-network proof response");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        8,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    let (reply, _) = transport_stranger
+        .send_request(&conn2, &hdr, &payload)
+        .await
+        .expect("cross-network proof response");
     assert_eq!(reply.msg_type, MsgType::EquivocationAck as u16);
-    assert!(!engine_s.is_node_banned(&victim_pubkey).await, "different network originals must not ban");
+    assert!(
+        !engine_s.is_node_banned(&victim_pubkey).await,
+        "different network originals must not ban"
+    );
     assert!(!pm_server.is_banned(&victim_pubkey).await);
-    assert!(storage_s.get_evidence(blake3::hash(&payload).as_bytes()).expect("evidence lookup").is_none());
+    assert!(
+        storage_s
+            .get_evidence(blake3::hash(&payload).as_bytes())
+            .expect("evidence lookup")
+            .is_none()
+    );
 
     // A provisional-to-final transition still protects the original spend slot
     // within the same network. A conflicting original is genuine self-proof.
-    let original_b = sign_original(lock_b, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET, 1);
+    let original_b = sign_original(
+        lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+        1,
+    );
     let genuine = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
-        original_a, original_b, victim_pubkey,
+        original_a,
+        original_b,
+        victim_pubkey,
     );
     let payload = bincode::serialize(&genuine).expect("serialize genuine proof");
-    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 9, 0, 0, payload.len() as u32);
-    transport_stranger.send_request(&conn2, &hdr, &payload).await.expect("genuine proof response");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        9,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    transport_stranger
+        .send_request(&conn2, &hdr, &payload)
+        .await
+        .expect("genuine proof response");
     assert!(engine_s.is_node_banned(&victim_pubkey).await);
     assert!(pm_server.is_banned(&victim_pubkey).await);
-    assert_eq!(storage_s.get_evidence(blake3::hash(&payload).as_bytes()).expect("evidence lookup"), Some(payload));
+    assert_eq!(
+        storage_s
+            .get_evidence(blake3::hash(&payload).as_bytes())
+            .expect("evidence lookup"),
+        Some(payload)
+    );
 
     server_cancel.cancel();
     stranger_cancel.cancel();
@@ -711,9 +792,8 @@ async fn test_phase11d_shard_digest_isolation_wire() {
         Arc<RedbStorage>,
     ) {
         let tmp = tempdir().expect("tempdir");
-        let storage = Arc::new(
-            RedbStorage::open(&tmp.path().join("p11d.redb")).expect("open redb"),
-        );
+        let storage =
+            Arc::new(RedbStorage::open(&tmp.path().join("p11d.redb")).expect("open redb"));
         std::mem::forget(tmp);
         let (engine, _worker) = DualTierEngine::new(storage.clone());
         // Identical locks for SHARD_SAME on both nodes.
@@ -731,7 +811,9 @@ async fn test_phase11d_shard_digest_isolation_wire() {
             );
             // This fixture describes committed source state, not an async
             // pending write. A witness must never depend on worker scheduling.
-            storage.put_lock(&rec, now_ms + 50_000_000).expect("committed fixture lock");
+            storage
+                .put_lock(&rec, now_ms + 50_000_000)
+                .expect("committed fixture lock");
         }
         // Divergent locks for SHARD_OTHER.
         for i in 0..other_count {
@@ -749,7 +831,9 @@ async fn test_phase11d_shard_digest_isolation_wire() {
             );
             // This fixture describes committed source state, not an async
             // pending write. A witness must never depend on worker scheduling.
-            storage.put_lock(&rec, now_ms + 50_000_000).expect("committed fixture lock");
+            storage
+                .put_lock(&rec, now_ms + 50_000_000)
+                .expect("committed fixture lock");
         }
 
         let identity = NodeIdentity::generate();
@@ -800,14 +884,16 @@ async fn test_phase11d_shard_digest_isolation_wire() {
     .expect("bind client");
     let client_addr = client.local_addr().expect("client addr");
     client.spawn_accept_loop();
-    pm_a
-        .register_f2f_friend(*client_id.node_id(), Some(client_addr))
+    pm_a.register_f2f_friend(*client_id.node_id(), Some(client_addr))
         .await;
-    pm_b
-        .register_f2f_friend(*client_id.node_id(), Some(client_addr))
+    pm_b.register_f2f_friend(*client_id.node_id(), Some(client_addr))
         .await;
-    pm_client.register_f2f_friend(*id_a.node_id(), Some(addr_a)).await;
-    pm_client.register_f2f_friend(*id_b.node_id(), Some(addr_b)).await;
+    pm_client
+        .register_f2f_friend(*id_a.node_id(), Some(addr_a))
+        .await;
+    pm_client
+        .register_f2f_friend(*id_b.node_id(), Some(addr_b))
+        .await;
 
     let conn_a = client.connect_peer(addr_a).await.expect("connect A");
     let conn_b = client.connect_peer(addr_b).await.expect("connect B");
@@ -859,9 +945,7 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
     const PAGE: usize = 100;
 
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(
-        RedbStorage::open(&temp.path().join("p11e.redb")).expect("open redb"),
-    );
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("p11e.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let now = SimTime(1_000);
     let root_valid = SimTime(1_000_000);
@@ -869,8 +953,16 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
         let mut parent = [0u8; 32];
         parent[0] = 0x02;
         parent[2..6].copy_from_slice(&i.to_be_bytes());
-        let rec = LockRecord::new(parent, [0xAA; 32], i.to_le_bytes().to_vec(), now, SimTime(500_000));
-        storage.put_lock(&rec, root_valid.0).expect("durable snapshot fixture");
+        let rec = LockRecord::new(
+            parent,
+            [0xAA; 32],
+            i.to_le_bytes().to_vec(),
+            now,
+            SimTime(500_000),
+        );
+        storage
+            .put_lock(&rec, root_valid.0)
+            .expect("durable snapshot fixture");
     }
 
     let server_id = NodeIdentity::generate();
@@ -892,7 +984,7 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
             pm_server.clone(),
         )
         .with_sync_ready(Arc::new(AtomicBool::new(true)))
-            .with_readiness_manager(prepared_readiness()),
+        .with_readiness_manager(prepared_readiness()),
     );
     let server = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().expect("addr"),
@@ -950,12 +1042,19 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
             break;
         }
         let next = page.next_cursor.expect("has_more requires next_cursor");
-        assert!(next > prev_cursor, "wire cursors must advance monotonically");
+        assert!(
+            next > prev_cursor,
+            "wire cursors must advance monotonically"
+        );
         prev_cursor = next;
         cursor = next;
         assert!(pages < 50, "sync must terminate");
     }
-    assert_eq!(all.len(), TOTAL, "paginated wire sync must deliver every lock");
+    assert_eq!(
+        all.len(),
+        TOTAL,
+        "paginated wire sync must deliver every lock"
+    );
     // No duplicates: parent_lock is the unique key.
     let mut seen = std::collections::HashSet::new();
     for (rec, _) in &all {
@@ -1028,9 +1127,7 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
 
     // Wire spot-check inside the 100-node world: digest pull still works.
     let tmp = tempdir().expect("tempdir");
-    let storage = Arc::new(
-        RedbStorage::open(&tmp.path().join("p11f.redb")).expect("open redb"),
-    );
+    let storage = Arc::new(RedbStorage::open(&tmp.path().join("p11f.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let server_id = NodeIdentity::generate();
     let client_id = NodeIdentity::generate();
@@ -1081,13 +1178,13 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
         .await
         .expect("spot digest");
     assert_eq!(count, 0, "empty shard must report zero locks");
-    assert_eq!(digest, humoco_sim_core::crypto::compute_shard_digest(shard, &[]));
+    assert_eq!(
+        digest,
+        humoco_sim_core::crypto::compute_shard_digest(shard, &[])
+    );
 
     // Quorum liveness math: 14/20 FINAL fast-exit leaves 6 straggler budget.
-    assert!(
-        14 <= top1.len(),
-        "top-20 must cover the 14/20 FINAL quorum"
-    );
+    assert!(14 <= top1.len(), "top-20 must cover the 14/20 FINAL quorum");
     let _ = Ordering::SeqCst;
     server.close();
     client.close();
@@ -1105,6 +1202,8 @@ struct ObservedShardHandler {
     forged: Arc<std::sync::atomic::AtomicUsize>,
     requests: Arc<std::sync::atomic::AtomicUsize>,
     delay: Arc<std::sync::atomic::AtomicU64>,
+    fail_attempts: Arc<std::sync::atomic::AtomicUsize>,
+    collision_entry: Arc<std::sync::Mutex<Option<L2LockEntry>>>,
 }
 
 impl humoco_node::network::RequestHandler for ObservedShardHandler {
@@ -1120,6 +1219,8 @@ impl humoco_node::network::RequestHandler for ObservedShardHandler {
         let identity = self.identity.clone();
         let attack = self.attack.load(Ordering::SeqCst);
         let forged = self.forged.clone();
+        let fail_attempts = self.fail_attempts.clone();
+        let collision_entry = self.collision_entry.clone();
         let delay = if header.msg_type == MsgType::LockVerifyRequest as u16 {
             self.requests.fetch_add(1, Ordering::SeqCst);
             self.delay.load(Ordering::SeqCst)
@@ -1130,8 +1231,40 @@ impl humoco_node::network::RequestHandler for ObservedShardHandler {
             if delay > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
+            if header.msg_type == MsgType::LockVerifyRequest as u16 {
+                if fail_attempts.load(Ordering::SeqCst) > 0 {
+                    fail_attempts.fetch_sub(1, Ordering::SeqCst);
+                    return Err(humoco_node::NodeError::Io(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "simulated quic stream reset",
+                    )));
+                }
+                if let Some(mut entry) = collision_entry.lock().unwrap().clone() {
+                    if attack == 10 {
+                        entry.layer2_signature[0] ^= 1;
+                    }
+                    let bytes = bincode::serialize(&entry).expect("serialize collision entry");
+                    let resp = WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_COLLISION_DETECTED,
+                        bytes.len() as u32,
+                    );
+                    return Ok((resp, bytes));
+                }
+            }
             if header.msg_type == MsgType::LockVerifyRequest as u16 && !available {
-                return Ok((WireHeader::new(MsgType::LockVerifyResponse as u16, header.session_seq.wrapping_add(1), header.epoch_id, humoco_sim_core::wire::FLAG_NOT_READY, 0), Vec::new()));
+                return Ok((
+                    WireHeader::new(
+                        MsgType::LockVerifyResponse as u16,
+                        header.session_seq.wrapping_add(1),
+                        header.epoch_id,
+                        humoco_sim_core::wire::FLAG_NOT_READY,
+                        0,
+                    ),
+                    Vec::new(),
+                ));
             }
             let (mut response, bytes) = humoco_node::network::RequestHandler::handle_authenticated(
                 &*inner, header, payload, peer,
@@ -1213,6 +1346,8 @@ struct QuorumWireNode {
     forged: Arc<std::sync::atomic::AtomicUsize>,
     requests: Arc<std::sync::atomic::AtomicUsize>,
     delay: Arc<std::sync::atomic::AtomicU64>,
+    fail_attempts: Arc<std::sync::atomic::AtomicUsize>,
+    collision_entry: Arc<std::sync::Mutex<Option<L2LockEntry>>>,
     engine: DualTierEngine,
     storage: Arc<RedbStorage>,
     tier: Arc<TierController>,
@@ -1247,6 +1382,8 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
         let forged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let delay = Arc::new(std::sync::atomic::AtomicU64::new(20));
+        let fail_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let collision_entry = Arc::new(std::sync::Mutex::new(None));
         let inner = Arc::new(
             NodeRequestHandler::with_peer_manager(
                 engine.clone(),
@@ -1265,6 +1402,8 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             forged: forged.clone(),
             requests: requests.clone(),
             delay: delay.clone(),
+            fail_attempts: fail_attempts.clone(),
+            collision_entry: collision_entry.clone(),
         });
         let transport = QuicTransport::bind_with_options(
             "127.0.0.1:0".parse().expect("addr"),
@@ -1288,6 +1427,8 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             forged,
             requests,
             delay,
+            fail_attempts,
+            collision_entry,
             engine,
             storage,
             tier,
@@ -1339,16 +1480,14 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             .await
             == Some(gateway_rank)
         {
-            selected = Some(make_hmc_genesis(
-                &tag,
-                test_now_ms() + 600_000,
-                &sender,
-            ));
+            selected = Some(make_hmc_genesis(&tag, test_now_ms() + 600_000, &sender));
             break;
         }
     }
     let root = selected.expect("find gateway rank");
-    for node in &nodes { anchor_fixture(&node.engine, &root).await; }
+    for node in &nodes {
+        anchor_fixture(&node.engine, &root).await;
+    }
     let req = spend_root(&root, &sender);
     // Remove handshake scheduling from quorum timing assertions.
     for node in nodes.iter().skip(1) {
@@ -1379,7 +1518,11 @@ async fn post_committee_lock(
     );
     state.peer_manager = Some(gw.pm.clone());
     state.transport = Some(gw.transport.clone());
-    let shard_id = gw.engine.get_hmc_voucher_genesis_shard(&req.layer2_voucher_id).await.expect("root shard");
+    let shard_id = gw
+        .engine
+        .get_hmc_voucher_genesis_shard(&req.layer2_voucher_id)
+        .await
+        .expect("root shard");
     state.readiness_manager.mark_shard_ready(shard_id);
     let app = build_router(state);
     let started = std::time::Instant::now();
@@ -1399,11 +1542,55 @@ async fn post_committee_lock(
     (response.status(), response_json(response).await, elapsed)
 }
 
+async fn post_committee_chain_lock(
+    nodes: &[QuorumWireNode],
+    req: &L2ChainLockRequest,
+) -> (StatusCode, L2ResponseEnvelope, std::time::Duration) {
+    let gw = &nodes[0];
+    let pow = gw.pow.clone();
+    let tier = gw.tier.clone();
+    let mut state = AppState::new(
+        gw.engine.clone(),
+        gw.storage.clone(),
+        gw.identity.clone(),
+        tier,
+        pow,
+    );
+    state.peer_manager = Some(gw.pm.clone());
+    state.transport = Some(gw.transport.clone());
+    let shard_id = gw
+        .engine
+        .get_hmc_voucher_genesis_shard(&req.layer2_voucher_id)
+        .await
+        .expect("root shard");
+    state.readiness_manager.mark_shard_ready(shard_id);
+    let app = build_router(state);
+    let started = std::time::Instant::now();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock/chain")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "committee_wire_token")
+                .body(Body::from(serde_json::to_vec(req).expect("serialize")))
+                .expect("request"),
+        )
+        .await
+        .expect("post");
+    let elapsed = started.elapsed();
+    (response.status(), response_json(response).await, elapsed)
+}
+
 #[tokio::test]
 async fn test_exact_committee_includes_self_and_never_queries_rank21_wire() {
     let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
     let (nodes, req) = quorum_wire_cluster(1).await;
-    let shard = nodes[0].engine.get_hmc_voucher_genesis_shard(&req.layer2_voucher_id).await.expect("root shard");
+    let shard = nodes[0]
+        .engine
+        .get_hmc_voucher_genesis_shard(&req.layer2_voucher_id)
+        .await
+        .expect("root shard");
     let mut rank21 = None;
     for (i, n) in nodes.iter().enumerate().skip(1) {
         if n.pm
@@ -1539,7 +1726,11 @@ async fn test_rank21_receiving_server_rejects_over_real_quic() {
     let client = &nodes[1];
     let server = &nodes[0];
     let now = server.pm.net_time_ms();
-    let root_valid_until = server.engine.get_hmc_voucher_root_valid(&req.layer2_voucher_id).await.expect("root validity");
+    let root_valid_until = server
+        .engine
+        .get_hmc_voucher_root_valid(&req.layer2_voucher_id)
+        .await
+        .expect("root validity");
     let entry = humoco_node::api::hmc::L2LockEntry::from(&req);
     let footprint =
         humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds((root_valid_until - now) / 1000);
@@ -1612,7 +1803,10 @@ async fn test_valid_signatures_for_wrong_request_or_tls_context_never_form_quoru
         // the frozen committee while avoiding a previous local signing slot.
         let mut req = genesis.clone();
         req.created_at_ms = test_now_ms();
-        req.ds_tag = Some(format!("{}_attack_{attack}", genesis.ds_tag.as_deref().unwrap()));
+        req.ds_tag = Some(format!(
+            "{}_attack_{attack}",
+            genesis.ds_tag.as_deref().unwrap()
+        ));
         req.transaction_hash = *blake3::hash(req.ds_tag.as_ref().unwrap().as_bytes()).as_bytes();
         let sender = SigningKey::from_bytes(&[171; 32]);
         req.layer2_signature = sender.sign(&calculate_l2_payload_hash(&req)).to_bytes();
@@ -1621,7 +1815,8 @@ async fn test_valid_signatures_for_wrong_request_or_tls_context_never_form_quoru
         assert_eq!(
             nodes[1].forged.load(Ordering::SeqCst),
             forged_before + 1,
-            "attack {attack}: actually sent a genuinely signed wrong-context answer over QUIC; status={status}, verdict={:?}", body.verdict
+            "attack {attack}: actually sent a genuinely signed wrong-context answer over QUIC; status={status}, verdict={:?}",
+            body.verdict
         );
         assert_eq!(
             status,
@@ -1639,4 +1834,283 @@ async fn test_valid_signatures_for_wrong_request_or_tls_context_never_form_quoru
         );
         assert!(matches!(body.verdict, L2Verdict::Rejected { .. }));
     }
+}
+
+#[tokio::test]
+async fn test_remediation_a24_04_two_reset_streams_then_third_attestation_completes_quorum_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    // Nodes 1..=13 are ready and normal (13 remote votes)
+    for (i, node) in nodes.iter().enumerate().skip(1) {
+        if i <= 13 {
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else if i == 14 {
+            // Node 14 will fail 2 streams and succeed on attempt 3
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+            node.fail_attempts.store(2, Ordering::SeqCst);
+        } else {
+            // Nodes 15..=20 are NOT ready (making node 14 essential for 14th vote)
+            node.ready.store(false, Ordering::SeqCst);
+            node.delay.store(0, Ordering::SeqCst);
+        }
+    }
+    let (status, body, _) = post_committee_lock(&nodes, &req).await;
+    // Remediated code: attempt 3 succeeds and is NOT discarded as Generic.
+    // Supplies 14th vote -> 201 Created!
+    assert_eq!(status, StatusCode::CREATED);
+    let qc = body.quorum_certificate.expect("quorum certificate");
+    assert_eq!(qc.signer_count, 14);
+    assert_eq!(
+        nodes[14].requests.load(Ordering::SeqCst),
+        3,
+        "node 14 must receive exactly 3 attempts"
+    );
+    assert!(
+        qc.signatures
+            .iter()
+            .any(|s| s.node_pubkey_bytes() == Some(*nodes[14].identity.node_pubkey())),
+        "node 14's third attempt attestation must be included in the certificate"
+    );
+}
+
+#[tokio::test]
+async fn test_remediation_a24_04_two_failed_streams_then_not_ready_is_neutral_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    // Node 1 fails 2 streams, and attempt 3 returns NOT_READY
+    nodes[1].ready.store(false, Ordering::SeqCst);
+    nodes[1].fail_attempts.store(2, Ordering::SeqCst);
+    // Nodes 2..=14 supply 13 votes, so node 1 is needed as 14th vote and not aborted early
+    for node in &nodes[2..=14] {
+        node.ready.store(true, Ordering::SeqCst);
+        node.delay.store(20, Ordering::SeqCst);
+    }
+    // Nodes 15..=20 fail fast
+    for node in &nodes[15..=20] {
+        node.ready.store(false, Ordering::SeqCst);
+        node.delay.store(0, Ordering::SeqCst);
+    }
+    let (status, _, _) = post_committee_lock(&nodes, &req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        nodes[1].requests.load(Ordering::SeqCst),
+        3,
+        "must stop retrying after transport response on attempt 3"
+    );
+    let peer = nodes[0]
+        .pm
+        .get_peer(&nodes[1].transport.local_addr().expect("addr"))
+        .await
+        .expect("peer");
+    assert_eq!(
+        peer.missing_count, 0,
+        "NOT_READY received on attempt 3 must be treated as neutral (no malus)"
+    );
+}
+
+#[tokio::test]
+async fn test_remediation_a24_04_three_genuine_failures_counts_single_peer_failure_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    // Node 1 fails all attempts (fail_attempts = 5 > max_attempts 3)
+    nodes[1].fail_attempts.store(5, Ordering::SeqCst);
+    // Nodes 2..=14 supply 13 votes, so node 1 is needed as 14th vote and not aborted early
+    for node in &nodes[2..=14] {
+        node.ready.store(true, Ordering::SeqCst);
+        node.delay.store(20, Ordering::SeqCst);
+    }
+    // Nodes 15..=20 fail fast
+    for node in &nodes[15..=20] {
+        node.ready.store(false, Ordering::SeqCst);
+        node.delay.store(0, Ordering::SeqCst);
+    }
+    let (status, _, _) = post_committee_lock(&nodes, &req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        nodes[1].requests.load(Ordering::SeqCst),
+        3,
+        "must bound retries at exactly 3 attempts"
+    );
+    let peer = nodes[0]
+        .pm
+        .get_peer(&nodes[1].transport.local_addr().expect("addr"))
+        .await
+        .expect("peer");
+    assert_eq!(
+        peer.missing_count, 1,
+        "three failed transport attempts in one query must count as exactly one peer miss"
+    );
+}
+
+fn make_conflicting_spend(
+    req: &L2LockRequest,
+    child_tx_hash: [u8; 32],
+    sender: &SigningKey,
+) -> L2LockRequest {
+    let mut conflict = req.clone();
+    conflict.transaction_hash = child_tx_hash;
+    conflict.created_at_ms = test_now_ms();
+    conflict.layer2_signature = sender
+        .sign(&calculate_l2_payload_hash(&conflict))
+        .to_bytes();
+    conflict
+}
+
+#[tokio::test]
+async fn test_remediation_a24_03_remote_valid_collision_returns_409_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    let sender = SigningKey::from_bytes(&[171; 32]);
+    let tag = req.ds_tag.clone().unwrap();
+
+    // Create a valid conflicting spend for the same parent tag with child Y
+    let conflicting_spend = make_conflicting_spend(&req, [0xEE; 32], &sender);
+    let conflicting_entry = L2LockEntry::from(&conflicting_spend);
+    assert!(humoco_node::api::hmc::verify_l2_lock_entry_signature(
+        &conflicting_entry,
+        &tag
+    ));
+
+    // Nodes 1..=13 are ready and attest child X (13 votes, < 14 required)
+    for (i, node) in nodes.iter().enumerate().skip(1) {
+        if i <= 13 {
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else if i == 14 {
+            // Node 14 returns valid collision payload for child Y
+            node.collision_entry
+                .lock()
+                .unwrap()
+                .replace(conflicting_entry.clone());
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else {
+            // Nodes 15..=20 are NOT ready
+            node.ready.store(false, Ordering::SeqCst);
+            node.delay.store(0, Ordering::SeqCst);
+        }
+    }
+
+    let (status, body, _) = post_committee_lock(&nodes, &req).await;
+    // Finding A24-03 remediation assertion:
+    // Remote validated collision must return HTTP 409 Conflict, NOT 503 Rejected!
+    assert_eq!(status, StatusCode::CONFLICT);
+    match body.verdict {
+        L2Verdict::Conflict { existing_lock } => {
+            assert_eq!(
+                existing_lock.t_id, conflicting_entry.t_id,
+                "must carry conflicting child Y"
+            );
+        }
+        other => panic!("expected L2Verdict::Conflict, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_remediation_a24_03_remote_valid_collision_on_chain_lock_returns_409_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    let sender = SigningKey::from_bytes(&[171; 32]);
+
+    let conflicting_spend = make_conflicting_spend(&req, [0xEE; 32], &sender);
+    let conflicting_entry = L2LockEntry::from(&conflicting_spend);
+
+    for (i, node) in nodes.iter().enumerate().skip(1) {
+        if i <= 13 {
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else if i == 14 {
+            node.collision_entry
+                .lock()
+                .unwrap()
+                .replace(conflicting_entry.clone());
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else {
+            node.ready.store(false, Ordering::SeqCst);
+            node.delay.store(0, Ordering::SeqCst);
+        }
+    }
+
+    let chain_req = humoco_node::api::hmc::L2ChainLockRequest {
+        auth: req.auth.clone(),
+        layer2_voucher_id: req.layer2_voucher_id.clone(),
+        chain: vec![req.clone()],
+    };
+
+    let (status, body, _) = post_committee_chain_lock(&nodes, &chain_req).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(matches!(body.verdict, L2Verdict::Conflict { .. }));
+}
+
+#[tokio::test]
+async fn test_remediation_a24_03_remote_invalid_collision_evidence_never_returns_409_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    let sender = SigningKey::from_bytes(&[171; 32]);
+
+    let conflicting_spend = make_conflicting_spend(&req, [0xEE; 32], &sender);
+    let conflicting_entry = L2LockEntry::from(&conflicting_spend);
+
+    for (i, node) in nodes.iter().enumerate().skip(1) {
+        if i <= 13 {
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else if i == 14 {
+            node.collision_entry
+                .lock()
+                .unwrap()
+                .replace(conflicting_entry.clone());
+            // attack = 10 modifies the client signature so validation fails!
+            node.attack.store(10, Ordering::SeqCst);
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else {
+            node.ready.store(false, Ordering::SeqCst);
+            node.delay.store(0, Ordering::SeqCst);
+        }
+    }
+
+    let (status, body, _) = post_committee_lock(&nodes, &req).await;
+    // Invalid collision evidence must NEVER produce 409 Conflict.
+    // Since approval quorum (13 < 14) is also not met, must return 503 Rejected!
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(matches!(body.verdict, L2Verdict::Rejected { .. }));
+}
+
+#[tokio::test]
+async fn test_remediation_a24_03_valid_quorum_takes_precedence_over_isolated_collision_wire() {
+    let _guard = COMMITTEE_WIRE_TEST_LOCK.lock().await;
+    let (nodes, req) = quorum_wire_cluster(21).await;
+    let sender = SigningKey::from_bytes(&[171; 32]);
+
+    let conflicting_spend = make_conflicting_spend(&req, [0xEE; 32], &sender);
+    let conflicting_entry = L2LockEntry::from(&conflicting_spend);
+
+    // 14 nodes (1..=14) supply valid attestations for child X
+    for (i, node) in nodes.iter().enumerate().skip(1) {
+        if i <= 14 {
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else if i == 15 {
+            // Node 15 reports collision for child Y
+            node.collision_entry
+                .lock()
+                .unwrap()
+                .replace(conflicting_entry.clone());
+            node.ready.store(true, Ordering::SeqCst);
+            node.delay.store(20, Ordering::SeqCst);
+        } else {
+            node.ready.store(false, Ordering::SeqCst);
+            node.delay.store(0, Ordering::SeqCst);
+        }
+    }
+
+    let (status, body, _) = post_committee_lock(&nodes, &req).await;
+    // Quorum of 14 for Child X takes precedence over isolated collision -> 201 Created!
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(matches!(body.verdict, L2Verdict::Verified { .. }));
+    assert_eq!(body.quorum_certificate.expect("qc").signer_count, 14);
 }

@@ -160,10 +160,19 @@ async fn pow_positive_exact_retry_and_adversarial_tamper_rejection() {
 
     // 6. Insufficient difficulty / bad nonce check
     let bad_pow_req = make_root_request(&id, "fresh-bad-pow-voucher", now);
+    let mut challenge_bytes = [0u8; 32];
+    challenge_bytes.copy_from_slice(&hex::decode(&challenge).unwrap());
+    let bad_nonce = (0..1000)
+        .find(|&n| {
+            humoco_node::ingress::pow::count_leading_zero_bits(
+                &humoco_node::ingress::pow::compute_solution_hash(&challenge_bytes, n),
+            ) < difficulty
+        })
+        .unwrap_or(99999999999);
     let bad_nonce_res = client
         .post(format!("http://{addr}/v1/lock"))
         .header("X-PoW-Challenge", &challenge)
-        .header("X-PoW-Nonce", "99999999999")
+        .header("X-PoW-Nonce", bad_nonce.to_string())
         .json(&bad_pow_req)
         .send()
         .await

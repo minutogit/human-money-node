@@ -23,15 +23,15 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use humoco_node::api::hmc::{
-    calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest, L2ResponseEnvelope,
-    L2StatusQuery, L2Verdict,
+    L2AuthPayload, L2LockEntry, L2LockRequest, L2ResponseEnvelope, L2StatusQuery, L2Verdict,
+    calculate_l2_payload_hash,
 };
-use humoco_node::api::{build_router, AppState};
+use humoco_node::api::{AppState, build_router};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::ingress::{PowEngine, TierController};
 use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, RedbStorage};
-use humoco_proto::live::{verify_live_state_proof, LiveStateContext, LiveStateProof};
+use humoco_proto::live::{LiveStateContext, LiveStateProof, verify_live_state_proof};
 
 fn test_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -140,7 +140,8 @@ fn make_status_query(
 #[tokio::test]
 async fn test_status_query_unspent_and_spent_reconciliation() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("status_node.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("status_node.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
     let pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
@@ -148,13 +149,7 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
     tc.register_f2f_peer("status_test_token");
 
-    let mut state = AppState::new(
-        engine.clone(),
-        storage,
-        identity,
-        tc,
-        pow,
-    );
+    let mut state = AppState::new(engine.clone(), storage, identity, tc, pow);
     state.peer_manager = Some(pm);
     let app = build_router(state);
 
@@ -181,7 +176,9 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
         .uri("/v1/status")
         .header("content-type", "application/json")
         .header("x-peer-token", "status_test_token")
-        .body(axum::body::Body::from(serde_json::to_vec(&query_unspent).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&query_unspent).unwrap(),
+        ))
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.expect("oneshot /v1/status");
@@ -190,7 +187,10 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).unwrap();
     match env.verdict {
         L2Verdict::MissingLocks { sync_point } => {
-            assert_eq!(sync_point, "genesis", "Unspent query without matching locators must sync from genesis");
+            assert_eq!(
+                sync_point, "genesis",
+                "Unspent query without matching locators must sync from genesis"
+            );
         }
         other => panic!("Expected MissingLocks, got {:?}", other),
     }
@@ -206,7 +206,9 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
         .uri("/v1/status")
         .header("content-type", "application/json")
         .header("x-peer-token", "status_test_token")
-        .body(axum::body::Body::from(serde_json::to_vec(&query_locator).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&query_locator).unwrap(),
+        ))
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.expect("oneshot /v1/status");
@@ -215,9 +217,15 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).unwrap();
     match env.verdict {
         L2Verdict::MissingLocks { sync_point } => {
-            assert_eq!(sync_point, prefix, "Unspent query with matching locator prefix must return that sync point");
+            assert_eq!(
+                sync_point, prefix,
+                "Unspent query with matching locator prefix must return that sync point"
+            );
         }
-        other => panic!("Expected MissingLocks with matching prefix, got {:?}", other),
+        other => panic!(
+            "Expected MissingLocks with matching prefix, got {:?}",
+            other
+        ),
     }
 
     // -----------------------------------------------------------------------
@@ -226,7 +234,13 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     // -----------------------------------------------------------------------
     let parent_spent = "spent_parent_output_tag";
     let child_tx_hash = *blake3::hash(b"child_spend_tx_payload").as_bytes();
-    let spend_req = make_hmc_spend(&voucher_id, parent_spent, child_tx_hash, now + 800_000, &genesis_key);
+    let spend_req = make_hmc_spend(
+        &voucher_id,
+        parent_spent,
+        child_tx_hash,
+        now + 800_000,
+        &genesis_key,
+    );
 
     let (v_spend, is_new_spend) = engine
         .ingress_hmc_lock(parent_spent.to_string(), L2LockEntry::from(&spend_req))
@@ -241,7 +255,9 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
         .uri("/v1/status")
         .header("content-type", "application/json")
         .header("x-peer-token", "status_test_token")
-        .body(axum::body::Body::from(serde_json::to_vec(&query_spent).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&query_spent).unwrap(),
+        ))
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.expect("oneshot /v1/status");
@@ -250,10 +266,16 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).unwrap();
     match env.verdict {
         L2Verdict::Verified { lock_entry } => {
-            assert_eq!(lock_entry.t_id, child_tx_hash, "Verified verdict must carry child transaction hash");
+            assert_eq!(
+                lock_entry.t_id, child_tx_hash,
+                "Verified verdict must carry child transaction hash"
+            );
             assert_eq!(lock_entry.layer2_voucher_id, voucher_id);
         }
-        other => panic!("Expected Verified child lock for spent output, got {:?}", other),
+        other => panic!(
+            "Expected Verified child lock for spent output, got {:?}",
+            other
+        ),
     }
 }
 
@@ -275,7 +297,56 @@ struct LiveProofCluster {
     cancel: CancellationToken,
 }
 
+struct ConfigurableDelayHandler {
+    inner: Arc<NodeRequestHandler>,
+    index: usize,
+    delays: Arc<[std::sync::atomic::AtomicU64; 20]>,
+}
+
+impl humoco_node::network::RequestHandler for ConfigurableDelayHandler {
+    fn handle_authenticated(
+        &self,
+        header: humoco_sim_core::wire::WireHeader,
+        payload: Vec<u8>,
+        peer: Option<[u8; 32]>,
+    ) -> humoco_node::network::transport::BoxFuture<
+        Result<(humoco_sim_core::wire::WireHeader, Vec<u8>), humoco_node::NodeError>,
+    > {
+        let inner = self.inner.clone();
+        let delay = self.delays[self.index].load(std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            use humoco_sim_core::wire::MsgType;
+            if delay > 0
+                && (header.msg_type == MsgType::StatusQuery as u16
+                    || header.msg_type == MsgType::LiveStateRequest as u16)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            humoco_node::network::RequestHandler::handle_authenticated(
+                inner.as_ref(),
+                header,
+                payload,
+                peer,
+            )
+            .await
+        })
+    }
+}
+
 async fn setup_live_proof_cluster(temp: &tempfile::TempDir) -> LiveProofCluster {
+    setup_live_proof_cluster_with_custom_handlers(temp, None).await
+}
+
+type CustomHandlerFactory = Arc<
+    dyn Fn(usize, Arc<NodeRequestHandler>) -> Arc<dyn humoco_node::network::RequestHandler>
+        + Send
+        + Sync,
+>;
+
+async fn setup_live_proof_cluster_with_custom_handlers(
+    temp: &tempfile::TempDir,
+    custom_handler: Option<CustomHandlerFactory>,
+) -> LiveProofCluster {
     use humoco_node::daemon::ShardReadinessManager;
     use std::time::{Duration, Instant};
     const NUM_SHARDS: usize = 20;
@@ -284,140 +355,366 @@ async fn setup_live_proof_cluster(temp: &tempfile::TempDir) -> LiveProofCluster 
     let gateway_pm = Arc::new(PeerManager::new(Vec::new()));
     let storage = Arc::new(RedbStorage::open(&temp.path().join("gateway.redb")).unwrap());
     let (gateway_engine, _worker) = DualTierEngine::new(storage.clone());
-    let gateway_transport = QuicTransport::bind_with_options("127.0.0.1:0".parse().unwrap(), &gateway, gateway_pm.clone(), Arc::new(humoco_node::network::DefaultRequestHandler), cancel.clone()).unwrap();
+    let gateway_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &gateway,
+        gateway_pm.clone(),
+        Arc::new(humoco_node::network::DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
     let gateway_addr = gateway_transport.local_addr().unwrap();
     let mut shards = Vec::new();
     for index in 0..NUM_SHARDS {
-        let disk = Arc::new(RedbStorage::open(&temp.path().join(format!("shard{index}.redb"))).unwrap());
+        let disk =
+            Arc::new(RedbStorage::open(&temp.path().join(format!("shard{index}.redb"))).unwrap());
         let (engine, _worker) = DualTierEngine::new(disk.clone());
         let id = NodeIdentity::generate();
         let pm = Arc::new(PeerManager::new(Vec::new()));
         let ready = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
-        let handler = Arc::new(NodeRequestHandler::with_peer_manager(engine.clone(), disk, id.clone(), pm.clone()).with_readiness_manager(ready.clone()));
-        let transport = QuicTransport::bind_with_options("127.0.0.1:0".parse().unwrap(), &id, pm.clone(), handler, cancel.clone()).unwrap();
-        pm.register_f2f_friend(*gateway.node_pubkey(), Some(gateway_addr)).await;
-        gateway_pm.register_f2f_friend(*id.node_pubkey(), Some(transport.local_addr().unwrap())).await;
-        shards.push(LiveShard {id, pm, transport, engine, ready});
+        let base_handler = Arc::new(
+            NodeRequestHandler::with_peer_manager(engine.clone(), disk, id.clone(), pm.clone())
+                .with_readiness_manager(ready.clone()),
+        );
+        let handler: Arc<dyn humoco_node::network::RequestHandler> =
+            if let Some(ref factory) = custom_handler {
+                factory(index, base_handler)
+            } else {
+                base_handler
+            };
+        let transport = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            &id,
+            pm.clone(),
+            handler,
+            cancel.clone(),
+        )
+        .unwrap();
+        pm.register_f2f_friend(*gateway.node_pubkey(), Some(gateway_addr))
+            .await;
+        gateway_pm
+            .register_f2f_friend(*id.node_pubkey(), Some(transport.local_addr().unwrap()))
+            .await;
+        shards.push(LiveShard {
+            id,
+            pm,
+            transport,
+            engine,
+            ready,
+        });
     }
     // Every observer receives the same authenticated full-key/ticket fixture.
     // Explicit maturity/readiness below is test setup, never a recovery proof.
-    let mut roster: Vec<_> = shards.iter().map(|sh| (sh.id.clone(), sh.transport.local_addr().unwrap())).collect();
+    let mut roster: Vec<_> = shards
+        .iter()
+        .map(|sh| (sh.id.clone(), sh.transport.local_addr().unwrap()))
+        .collect();
     roster.push((gateway.clone(), gateway_addr));
     for pm in std::iter::once(gateway_pm.clone()).chain(shards.iter().map(|sh| sh.pm.clone())) {
         for (id, addr) in &roster {
-            pm.learn_node_from_gossip_with_hrw(*id.node_pubkey(), *id.hrw_routing_id(), *addr, 0, None).await;
-            pm.set_first_seen_for_test(id.node_pubkey(), Instant::now() - Duration::from_secs(25*3600)).await;
+            pm.learn_node_from_gossip_with_hrw(
+                *id.node_pubkey(),
+                *id.hrw_routing_id(),
+                *addr,
+                0,
+                None,
+            )
+            .await;
+            pm.set_first_seen_for_test(
+                id.node_pubkey(),
+                Instant::now() - Duration::from_secs(25 * 3600),
+            )
+            .await;
         }
         force_stable_ge20(&pm).await;
     }
-    let owner = SigningKey::from_bytes(&[77;32]);
+    let owner = SigningKey::from_bytes(&[77; 32]);
     let now = gateway_pm.net_time_ms();
     let mut selected = None;
     for index in 0..1000 {
         let req = make_hmc_genesis(&format!("live_status_{index}"), now + 1_000_000, &owner);
         let tag = bs58::encode(req.transaction_hash).into_string();
         let sid = humoco_sim_core::types::extract_shard_id(blake3::hash(tag.as_bytes()).as_bytes());
-        let (committee, _, _) = gateway_pm.shard_committee(*gateway.node_pubkey(), *gateway.hrw_routing_id(), sid).await;
-        if !committee.iter().any(|member| member.node_pubkey == *gateway.node_pubkey()) {
-            selected = Some((sid, req, committee.iter().map(|member| member.node_pubkey).collect::<Vec<_>>())); break;
+        let (committee, _, _) = gateway_pm
+            .shard_committee(*gateway.node_pubkey(), *gateway.hrw_routing_id(), sid)
+            .await;
+        if !committee
+            .iter()
+            .any(|member| member.node_pubkey == *gateway.node_pubkey())
+        {
+            selected = Some((
+                sid,
+                req,
+                committee
+                    .iter()
+                    .map(|member| member.node_pubkey)
+                    .collect::<Vec<_>>(),
+            ));
+            break;
         }
     }
     let (shard_id, genesis, committee) = selected.expect("find committee excluding gateway");
     let genesis_tag = bs58::encode(genesis.transaction_hash).into_string();
     let anchor = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
     let root = now + 1_000_000;
-    let spend = make_hmc_spend(&genesis.layer2_voucher_id, "spent-parent", [91;32], now + 800_000, &owner);
+    let spend = make_hmc_spend(
+        &genesis.layer2_voucher_id,
+        "spent-parent",
+        [91; 32],
+        now + 800_000,
+        &owner,
+    );
     let entry = L2LockEntry::from(&spend);
     for shard in &shards {
-        let (verdict, _) = shard.engine.ingress_hmc_lock_durable(genesis_tag.clone(), L2LockEntry::from(&genesis), humoco_node::storage::IngressOrigin::PartitionSync, Some(now), None, None, Some(genesis.layer2_voucher_id.clone())).await;
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                genesis_tag.clone(),
+                L2LockEntry::from(&genesis),
+                humoco_node::storage::IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(genesis.layer2_voucher_id.clone()),
+            )
+            .await;
         assert!(matches!(verdict, L2Verdict::Verified { .. }));
-        let (verdict, _) = shard.engine.ingress_hmc_lock_durable("spent-parent".into(), entry.clone(), humoco_node::storage::IngressOrigin::PartitionSync, Some(now), None, None, Some(genesis.layer2_voucher_id.clone())).await;
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                "spent-parent".into(),
+                entry.clone(),
+                humoco_node::storage::IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(genesis.layer2_voucher_id.clone()),
+            )
+            .await;
         assert!(matches!(verdict, L2Verdict::Verified { .. }));
-        shard.engine.record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor).await;
+        shard
+            .engine
+            .record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor)
+            .await;
         shard.ready.mark_shard_ready(shard_id);
         shard.transport.spawn_accept_loop();
     }
     // The gateway itself may also be a stateful mesh member. Give it the same
     // durable canonical child so conflicting-choice detection has local state.
-    let (verdict, _) = gateway_engine.ingress_hmc_lock_durable(genesis_tag.clone(), L2LockEntry::from(&genesis), humoco_node::storage::IngressOrigin::PartitionSync, Some(now), None, None, Some(genesis.layer2_voucher_id.clone())).await;
+    let (verdict, _) = gateway_engine
+        .ingress_hmc_lock_durable(
+            genesis_tag.clone(),
+            L2LockEntry::from(&genesis),
+            humoco_node::storage::IngressOrigin::PartitionSync,
+            Some(now),
+            None,
+            None,
+            Some(genesis.layer2_voucher_id.clone()),
+        )
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
-    let (verdict, _) = gateway_engine.ingress_hmc_lock_durable("spent-parent".into(), entry.clone(), humoco_node::storage::IngressOrigin::PartitionSync, Some(now), None, None, Some(genesis.layer2_voucher_id.clone())).await;
+    let (verdict, _) = gateway_engine
+        .ingress_hmc_lock_durable(
+            "spent-parent".into(),
+            entry.clone(),
+            humoco_node::storage::IngressOrigin::PartitionSync,
+            Some(now),
+            None,
+            None,
+            Some(genesis.layer2_voucher_id.clone()),
+        )
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
-    gateway_engine.record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor).await;
+    gateway_engine
+        .record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor)
+        .await;
     gateway_transport.spawn_accept_loop();
     let pow = Arc::new(PowEngine::new(*gateway.node_id(), 1));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let mut state = AppState::new(gateway_engine, storage, gateway, tiers, pow);
-    state.peer_manager = Some(gateway_pm); state.transport = Some(gateway_transport.clone());
+    state.peer_manager = Some(gateway_pm);
+    state.transport = Some(gateway_transport.clone());
     let app = build_router(state);
-    let context = LiveStateContext {version:1,network:0,shard_id,voucher_id:genesis.layer2_voucher_id.clone(),lookup_tag:"spent-parent".into(),parent_lock:*blake3::hash(b"spent-parent").as_bytes(),child_lock:entry.t_id,root_valid_until:root,state_digest:*blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes(),recipient_nonce:[71;32],committee};
-    LiveProofCluster { app, shards, context, entry, shard_id, gateway_transport, cancel }
+    let context = LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id,
+        voucher_id: genesis.layer2_voucher_id.clone(),
+        lookup_tag: "spent-parent".into(),
+        parent_lock: *blake3::hash(b"spent-parent").as_bytes(),
+        child_lock: entry.t_id,
+        root_valid_until: root,
+        state_digest: *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes(),
+        recipient_nonce: [71; 32],
+        committee,
+    };
+    LiveProofCluster {
+        app,
+        shards,
+        context,
+        entry,
+        shard_id,
+        gateway_transport,
+        cancel,
+    }
 }
 
 #[tokio::test]
 async fn test_current_state_quorum_requires_real_fourteen_distinct_live_votes() {
     let temp = tempdir().unwrap();
     let cluster = setup_live_proof_cluster(&temp).await;
-    let LiveProofCluster { app, shards, context, shard_id, gateway_transport, cancel, .. } = cluster;
-    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/verify-current").header("content-type","application/json").body(axum::body::Body::from(serde_json::to_vec(&context).unwrap())).unwrap()).await.unwrap();
+    let LiveProofCluster {
+        app,
+        shards,
+        context,
+        shard_id,
+        gateway_transport,
+        cancel,
+        ..
+    } = cluster;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/verify-current")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&context).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
     verify_live_state_proof(&proof, &context).expect("real 14/20 current proof");
-    assert_eq!(proof.votes.len(),14);
+    assert_eq!(proof.votes.len(), 14);
     // Seven unavailable shards make FINAL impossible; the endpoint never lowers 14.
-    for shard in shards.iter().take(7) {shard.ready.invalidate_shard(shard_id);}
-    let mut next=context.clone(); next.recipient_nonce=[72;32];
-    let response = app.oneshot(Request::builder().method("POST").uri("/v1/verify-current").header("content-type","application/json").body(axum::body::Body::from(serde_json::to_vec(&next).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
-    assert!(verify_live_state_proof(&proof,&next).is_err(),"old nonce cannot satisfy next checkout");
-    cancel.cancel();gateway_transport.close();for shard in shards {shard.transport.close();}
+    for shard in shards.iter().take(7) {
+        shard.ready.invalidate_shard(shard_id);
+    }
+    let mut next = context.clone();
+    next.recipient_nonce = [72; 32];
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/verify-current")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&next).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        verify_live_state_proof(&proof, &next).is_err(),
+        "old nonce cannot satisfy next checkout"
+    );
+    cancel.cancel();
+    gateway_transport.close();
+    for shard in shards {
+        shard.transport.close();
+    }
 }
 
 #[tokio::test]
 async fn test_conflicting_child_request_acquires_proof_for_canonical_stored_child() {
     let temp = tempdir().unwrap();
     let cluster = setup_live_proof_cluster(&temp).await;
-    let LiveProofCluster { app, shards, context, entry, gateway_transport, cancel, .. } = cluster;
+    let LiveProofCluster {
+        app,
+        shards,
+        context,
+        entry,
+        gateway_transport,
+        cancel,
+        ..
+    } = cluster;
     let mut stale_context = context.clone();
     stale_context.child_lock = [0xAA; 32];
     stale_context.state_digest = *blake3::hash(b"losing-child-a").as_bytes();
     stale_context.recipient_nonce = [73; 32];
     assert_ne!(stale_context.child_lock, entry.t_id);
-    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/verify-current").header("content-type","application/json").body(axum::body::Body::from(serde_json::to_vec(&stale_context).unwrap())).unwrap()).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/verify-current")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&stale_context).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(proof.context.child_lock, entry.t_id, "proof must name the durable canonical child B");
-    assert_eq!(proof.context.state_digest, *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes());
+    assert_eq!(
+        proof.context.child_lock, entry.t_id,
+        "proof must name the durable canonical child B"
+    );
+    assert_eq!(
+        proof.context.state_digest,
+        *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes()
+    );
     assert_eq!(proof.context.recipient_nonce, stale_context.recipient_nonce);
     assert!(proof.votes.len() >= 14);
     verify_live_state_proof(&proof, &proof.context).expect("valid 14/20 proof for child B");
-    assert!(verify_live_state_proof(&proof, &stale_context).is_err(), "losing child A must not be attested");
-    cancel.cancel();gateway_transport.close();for shard in shards {shard.transport.close();}
+    assert!(
+        verify_live_state_proof(&proof, &stale_context).is_err(),
+        "losing child A must not be attested"
+    );
+    cancel.cancel();
+    gateway_transport.close();
+    for shard in shards {
+        shard.transport.close();
+    }
 }
 
 #[tokio::test]
 async fn test_stateless_gateway_acquires_conflicting_child_proof_via_remote_quic_committee() {
     let temp = tempdir().unwrap();
     let cluster = setup_live_proof_cluster(&temp).await;
-    let LiveProofCluster { app, shards, context, shard_id, gateway_transport, cancel, .. } = cluster;
+    let LiveProofCluster {
+        app,
+        shards,
+        context,
+        shard_id,
+        gateway_transport,
+        cancel,
+        ..
+    } = cluster;
     let owner = SigningKey::from_bytes(&[77; 32]);
     let now = shards[0].pm.net_time_ms();
     // Spend a parent tag ONLY on the remote shard nodes, NOT on the local HTTP gateway!
     let remote_only_tag = "remote-only-spent-parent";
-    let remote_spend = make_hmc_spend(&context.voucher_id, remote_only_tag, [0xCC; 32], now + 800_000, &owner);
+    let remote_spend = make_hmc_spend(
+        &context.voucher_id,
+        remote_only_tag,
+        [0xCC; 32],
+        now + 800_000,
+        &owner,
+    );
     let remote_entry = L2LockEntry::from(&remote_spend);
     for shard in &shards {
-        let (verdict, _) = shard.engine.ingress_hmc_lock_durable(
-            remote_only_tag.into(),
-            remote_entry.clone(),
-            humoco_node::storage::IngressOrigin::PartitionSync,
-            Some(now),
-            None,
-            None,
-            Some(context.voucher_id.clone()),
-        ).await;
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                remote_only_tag.into(),
+                remote_entry.clone(),
+                humoco_node::storage::IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(context.voucher_id.clone()),
+            )
+            .await;
         assert!(matches!(verdict, L2Verdict::Verified { .. }));
         shard.ready.mark_shard_ready(shard_id);
     }
@@ -436,7 +733,9 @@ async fn test_stateless_gateway_acquires_conflicting_child_proof_via_remote_quic
                 .method("POST")
                 .uri("/v1/verify-current")
                 .header("content-type", "application/json")
-                .body(axum::body::Body::from(serde_json::to_vec(&stale_context).unwrap()))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&stale_context).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -445,8 +744,7 @@ async fn test_stateless_gateway_acquires_conflicting_child_proof_via_remote_quic
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
-        proof.context.child_lock,
-        remote_entry.t_id,
+        proof.context.child_lock, remote_entry.t_id,
         "stateless gateway must discover canonical child B from remote shard committee"
     );
     assert_eq!(
@@ -456,6 +754,284 @@ async fn test_stateless_gateway_acquires_conflicting_child_proof_via_remote_quic
     assert_eq!(proof.context.recipient_nonce, stale_context.recipient_nonce);
     assert!(proof.votes.len() >= 14);
     verify_live_state_proof(&proof, &proof.context).expect("valid 14/20 proof for remote child B");
+    cancel.cancel();
+    gateway_transport.close();
+    for shard in shards {
+        shard.transport.close();
+    }
+}
+
+#[tokio::test]
+async fn test_remediation_a24_01_fast_minority_answer_cannot_deny_live_proof() {
+    let temp = tempdir().unwrap();
+    let delays = Arc::new(std::array::from_fn(|_| {
+        std::sync::atomic::AtomicU64::new(0)
+    }));
+    // Shard 0 responds immediately; shards 1..19 have a 150ms delay
+    delays[0].store(0, std::sync::atomic::Ordering::SeqCst);
+    for d in delays.iter().skip(1) {
+        d.store(150, std::sync::atomic::Ordering::SeqCst);
+    }
+    let delays_clone = delays.clone();
+    let cluster = setup_live_proof_cluster_with_custom_handlers(
+        &temp,
+        Some(Arc::new(move |index, base| {
+            Arc::new(ConfigurableDelayHandler {
+                inner: base,
+                index,
+                delays: delays_clone.clone(),
+            })
+        })),
+    )
+    .await;
+    let LiveProofCluster {
+        app,
+        shards,
+        context,
+        shard_id,
+        gateway_transport,
+        cancel,
+        ..
+    } = cluster;
+    let owner = SigningKey::from_bytes(&[77; 32]);
+    let now = shards[0].pm.net_time_ms();
+    let tag = "contested-parent-live-proof";
+
+    // Shard 0 holds minority spend D:
+    let spend_d = make_hmc_spend(&context.voucher_id, tag, [0xDD; 32], now + 800_000, &owner);
+    let entry_d = L2LockEntry::from(&spend_d);
+    let (v, _) = shards[0]
+        .engine
+        .ingress_hmc_lock_durable(
+            tag.into(),
+            entry_d.clone(),
+            humoco_node::storage::IngressOrigin::PartitionSync,
+            Some(now),
+            None,
+            None,
+            Some(context.voucher_id.clone()),
+        )
+        .await;
+    assert!(matches!(v, L2Verdict::Verified { .. }));
+    shards[0].ready.mark_shard_ready(shard_id);
+
+    // Shards 1..19 (19 nodes) hold majority spend C:
+    let spend_c = make_hmc_spend(&context.voucher_id, tag, [0xCC; 32], now + 800_000, &owner);
+    let entry_c = L2LockEntry::from(&spend_c);
+    for shard in shards.iter().skip(1) {
+        let (v, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                tag.into(),
+                entry_c.clone(),
+                humoco_node::storage::IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(context.voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(v, L2Verdict::Verified { .. }));
+        shard.ready.mark_shard_ready(shard_id);
+    }
+
+    // Client requests verification for this tag with an arbitrary stale guess:
+    let mut stale_context = context.clone();
+    stale_context.lookup_tag = tag.into();
+    stale_context.parent_lock = *blake3::hash(tag.as_bytes()).as_bytes();
+    stale_context.child_lock = [0xBB; 32];
+    stale_context.state_digest = *blake3::hash(b"stale-guess").as_bytes();
+    stale_context.recipient_nonce = [88; 32];
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/verify-current")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&stale_context).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Finding A24-01 remediation assertion:
+    // Even though Shard 0 answered first with child D, candidate grouping aggregates
+    // 19 votes for Child C >= 14 quorum, returning 200 OK with valid proof for Child C!
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        proof.context.child_lock, entry_c.t_id,
+        "must attest majority child C, never minority child D"
+    );
+    assert_eq!(
+        proof.context.state_digest,
+        *blake3::hash(&serde_json::to_vec(&entry_c).unwrap()).as_bytes()
+    );
+    assert_eq!(proof.context.recipient_nonce, stale_context.recipient_nonce);
+    assert!(proof.votes.len() >= 14);
+    verify_live_state_proof(&proof, &proof.context).expect("valid 14/20 proof for child C");
+
+    cancel.cancel();
+    gateway_transport.close();
+    for shard in shards {
+        shard.transport.close();
+    }
+}
+
+#[tokio::test]
+async fn test_remediation_a24_02_shared_live_deadline_prevents_late_proof() {
+    let temp = tempdir().unwrap();
+    let delays = Arc::new(std::array::from_fn(|_| {
+        std::sync::atomic::AtomicU64::new(450)
+    }));
+    let delays_clone = delays.clone();
+    let cluster = setup_live_proof_cluster_with_custom_handlers(
+        &temp,
+        Some(Arc::new(move |index, base| {
+            Arc::new(ConfigurableDelayHandler {
+                inner: base,
+                index,
+                delays: delays_clone.clone(),
+            })
+        })),
+    )
+    .await;
+    let LiveProofCluster {
+        app,
+        shards,
+        context,
+        gateway_transport,
+        cancel,
+        ..
+    } = cluster;
+
+    // Both discovery (450ms) and voting (450ms) delayed:
+    // Stale child forces discovery first (450ms) followed by voting (450ms).
+    // Total required: 900ms > 750ms server deadline.
+    let mut stale_context = context.clone();
+    stale_context.child_lock = [0xBB; 32];
+    stale_context.state_digest = *blake3::hash(b"stale-guess-forcing-discovery").as_bytes();
+
+    let start = std::time::Instant::now();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/verify-current")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&stale_context).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    // Finding A24-02 remediation assertion:
+    // Shared 750ms server deadline must expire and return 503 within bounded time,
+    // NEVER returning a late 200 OK after 800+ ms.
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        elapsed < std::time::Duration::from_millis(1200),
+        "deadline exhaustion must abort promptly, took {elapsed:?}"
+    );
+
+    cancel.cancel();
+    gateway_transport.close();
+    for shard in shards {
+        shard.transport.close();
+    }
+}
+
+#[tokio::test]
+async fn test_remediation_a24_01_split_opinion_without_quorum_fails_closed() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_live_proof_cluster(&temp).await;
+    let LiveProofCluster {
+        app,
+        shards,
+        context,
+        shard_id,
+        gateway_transport,
+        cancel,
+        ..
+    } = cluster;
+    let owner = SigningKey::from_bytes(&[77; 32]);
+    let now = shards[0].pm.net_time_ms();
+    let tag = "split-opinion-parent";
+
+    // 13 shards hold child C (shards 0..13):
+    let spend_c = make_hmc_spend(&context.voucher_id, tag, [0xCC; 32], now + 800_000, &owner);
+    let entry_c = L2LockEntry::from(&spend_c);
+    for shard in &shards[0..13] {
+        let (v, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                tag.into(),
+                entry_c.clone(),
+                humoco_node::storage::IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(context.voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(v, L2Verdict::Verified { .. }));
+        shard.ready.mark_shard_ready(shard_id);
+    }
+
+    // 7 shards hold child D (shards 13..20):
+    let spend_d = make_hmc_spend(&context.voucher_id, tag, [0xDD; 32], now + 800_000, &owner);
+    let entry_d = L2LockEntry::from(&spend_d);
+    for shard in &shards[13..20] {
+        let (v, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                tag.into(),
+                entry_d.clone(),
+                humoco_node::storage::IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(context.voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(v, L2Verdict::Verified { .. }));
+        shard.ready.mark_shard_ready(shard_id);
+    }
+
+    let mut split_context = context.clone();
+    split_context.lookup_tag = tag.into();
+    split_context.parent_lock = *blake3::hash(tag.as_bytes()).as_bytes();
+    split_context.child_lock = [0xBB; 32];
+    split_context.state_digest = *blake3::hash(b"split-guess").as_bytes();
+    split_context.recipient_nonce = [99; 32];
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/verify-current")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&split_context).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 13 vs 7 split: neither reaches 14 quorum -> must fail closed with 503
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
     cancel.cancel();
     gateway_transport.close();
     for shard in shards {

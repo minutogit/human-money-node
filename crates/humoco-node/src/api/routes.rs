@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
+    Json, Router,
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
-    Json, Router,
 };
 use ed25519_dalek::Signer;
 use tower_http::cors::CorsLayer;
@@ -38,8 +38,8 @@ use crate::api::dto::{
     PowChallengeResponse, QuorumCertificateDto, SyncRequest, SyncResponse,
 };
 use crate::api::hmc::{
-    verify_l2_lock_signature, wrap_and_sign_verdict, wrap_and_sign_verdict_with_quorum,
     L2ChainLockRequest, L2LockEntry, L2LockRequest, L2StatusQuery, L2Verdict,
+    verify_l2_lock_signature, wrap_and_sign_verdict, wrap_and_sign_verdict_with_quorum,
 };
 use crate::identity::NodeIdentity;
 use crate::ingress::{IngressError, PowEngine, TierController};
@@ -221,6 +221,19 @@ impl AppState {
 /// - Slashing occurs strictly via Tier-2 QUIC P2P equivocation gossip (`HUMOCO_V1_EQUIVOCATION`).
 /// - PoS checkout trust is achieved entirely offline by clients computing HRW committees against
 ///   their cold-path synchronized peer roster and verifying Ed25519 threshold signatures.
+pub async fn live_deadline_middleware(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let deadline = tokio::time::Instant::now() + crate::api::live::LIVE_PROOF_SERVER_BUDGET;
+    req.extensions_mut()
+        .insert(crate::api::live::LiveDeadline(deadline));
+    match tokio::time::timeout_at(deadline, next.run(req)).await {
+        Ok(resp) => resp,
+        Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
 pub fn public_router(state: AppState) -> Router {
     let sync_router = Router::new()
         .route("/v1/sync", post(sync_locks))
@@ -236,7 +249,11 @@ pub fn public_router(state: AppState) -> Router {
         .route("/v1/pow-challenge", get(get_pow_challenge))
         .route("/healthz", get(health_ok))
         .route("/v1/node-status", get(public_node_status))
-        .route("/v1/verify-current", post(crate::api::live::verify_current))
+        .route(
+            "/v1/verify-current",
+            post(crate::api::live::verify_current)
+                .layer(axum::middleware::from_fn(live_deadline_middleware)),
+        )
         .route("/v1/gateways", get(public_gateways))
         .route("/v1/retained-choice/:tag", get(get_retained_choice))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -914,6 +931,8 @@ struct PeerAttestationQuery<'a> {
     candidate_nodes: &'a [([u8; 32], std::net::SocketAddr)],
     expected_members: Option<&'a [[u8; 32]]>,
     parent_lock: [u8; 32],
+    lookup_tag: Option<&'a str>,
+    voucher_id: Option<&'a str>,
     msg_type: humoco_sim_core::wire::MsgType,
     resp_msg_type: humoco_sim_core::wire::MsgType,
     payload: &'a [u8],
@@ -931,7 +950,7 @@ enum PeerQueryError {
     LocalCapacity,
     QuotaExceeded,
     NotInShard,
-    Collision(Vec<u8>),
+    Collision(humoco_sim_core::wire::WireHeader, Vec<u8>, Option<[u8; 32]>),
     Generic,
 }
 
@@ -940,7 +959,7 @@ enum PeerQueryResult {
     Success(AttestationDto, Option<[u8; 32]>),
     QuotaExceeded,
     NotInShard,
-    Collision(Vec<u8>),
+    Collision(humoco_sim_core::wire::WireHeader, Vec<u8>, Option<[u8; 32]>),
     Failure,
 }
 
@@ -952,6 +971,59 @@ impl From<crate::error::NodeError> for PeerQueryError {
             Self::Generic
         }
     }
+}
+
+/// Validates that a remote collision response genuinely proves a diverging double-spend
+/// for the exact request context before granting work credit or returning HTTP 409.
+fn validate_remote_collision(
+    header: &humoco_sim_core::wire::WireHeader,
+    payload: &[u8],
+    tls_pubkey: Option<[u8; 32]>,
+    expected_member: Option<[u8; 32]>,
+    query: &PeerAttestationQuery<'_>,
+) -> Option<crate::api::hmc::L2LockEntry> {
+    if header.msg_type != query.resp_msg_type as u16
+        || (header.flags & humoco_sim_core::wire::FLAG_COLLISION_DETECTED) == 0
+        || payload.is_empty()
+        || payload.len() > 64 * 1024
+    {
+        return None;
+    }
+
+    // Require TLS identity of queried frozen member
+    if expected_member.is_some() && tls_pubkey != expected_member {
+        return None;
+    }
+
+    let lookup_tag = query.lookup_tag?;
+    let voucher_id = query.voucher_id?;
+
+    // Parent lock binding to lookup tag
+    if *blake3::hash(lookup_tag.as_bytes()).as_bytes() != query.parent_lock {
+        return None;
+    }
+
+    // Bounded decode: bincode with JSON fallback
+    let entry = bincode::deserialize::<crate::api::hmc::L2LockEntry>(payload)
+        .ok()
+        .or_else(|| serde_json::from_slice::<crate::api::hmc::L2LockEntry>(payload).ok())?;
+
+    // Validate voucher consistency
+    if entry.layer2_voucher_id != voucher_id {
+        return None;
+    }
+
+    // Require a DIFFERENT child (diverging transaction id)
+    if entry.t_id == query.lock_id {
+        return None;
+    }
+
+    // Verify client's lock signature against the exact lookup tag
+    if !crate::api::hmc::verify_l2_lock_entry_signature(&entry, lookup_tag) {
+        return None;
+    }
+
+    Some(entry)
 }
 
 /// Collects only the immutable write committee in parallel, with an 800ms
@@ -1006,39 +1078,36 @@ async fn collect_peer_attestations(
                         // queried peer so the attestation signer can be bound to it.
                         let tls_pubkey = crate::network::tls::extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
 
-                        // 1. Initial Send
-                        let res = t.send_request(&conn, &h, &p).await;
+                        // Bounded attempt loop: writes attempt at most 3 sends on transport failures;
+                        // reads perform a single attempt. Any successful response stops retries.
+                        let max_attempts = if is_write { 3 } else { 1 };
+                        let mut last_error = PeerQueryError::Generic;
+                        let mut response_pair = None;
 
-                        // Triple-Send Heuristik für Schreibpfade (docs/PLAN_BUCKETED_SHARD_SYNC.md):
-                        // Falls der 1. Versuch fehlschlägt, erfolgt ein 2. synchroner Retry mit identischem Payload (T_0)
-                        let (resp_header, resp_payload) = match res {
-                            Ok(pair) => pair,
-                            Err(error) if error.is_local_capacity() => return Err(PeerQueryError::LocalCapacity),
-                            Err(_) if is_write => {
-                                // 2. Versuch: Sofortiger Retry mit bitgenau identischem Byte-Paket
-                                let retry_res = t.send_request(&conn, &h, &p).await;
-                                match retry_res {
-                                    Ok(pair) => pair,
-                                    Err(error) if error.is_local_capacity() => return Err(PeerQueryError::LocalCapacity),
-                                    Err(_) => {
-                                        // 3. Versuch: Asynchroner Fire-and-Forget Versand ohne Warten auf ACK,
-                                        // um UDP-Paketverlust auf 0.0001% (1 zu 1.000.000) zu drücken.
-                                        // The final identical attempt belongs to this bounded
-                                        // collector task and is cancelled on quorum/deadline.
-                                        if let Err(error) = t.send_request(&conn, &h, &p).await {
-                                            return Err(error.into());
-                                        }
-                                        return Err(PeerQueryError::Generic);
-                                    }
+                        for _ in 0..max_attempts {
+                            match t.send_request(&conn, &h, &p).await {
+                                Ok(pair) => {
+                                    response_pair = Some(pair);
+                                    break;
+                                }
+                                Err(error) if error.is_local_capacity() => {
+                                    return Err(PeerQueryError::LocalCapacity);
+                                }
+                                Err(error) => {
+                                    last_error = error.into();
                                 }
                             }
-                            Err(_) => return Err(PeerQueryError::Generic),
+                        }
+
+                        let (resp_header, resp_payload) = match response_pair {
+                            Some(pair) => pair,
+                            None => return Err(last_error),
                         };
 
                         // Phase 2 P1 (INV-0604): genuine HMC double-spend carries
                         // FLAG_COLLISION_DETECTED + colliding lock payload for 409.
                         if (resp_header.flags & humoco_sim_core::wire::FLAG_COLLISION_DETECTED) != 0 {
-                            return Err(PeerQueryError::Collision(resp_payload));
+                            return Err(PeerQueryError::Collision(resp_header, resp_payload, tls_pubkey));
                         }
                         if (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0 {
                             return Err(PeerQueryError::QuotaExceeded);
@@ -1065,7 +1134,9 @@ async fn collect_peer_attestations(
                         Err(PeerQueryError::LocalCapacity) => (nid, addr, rank_idx, PeerQueryResult::LocalCapacity),
                         Err(PeerQueryError::QuotaExceeded) => (nid, addr, rank_idx, PeerQueryResult::QuotaExceeded),
                         Err(PeerQueryError::NotInShard) => (nid, addr, rank_idx, PeerQueryResult::NotInShard),
-                        Err(PeerQueryError::Collision(payload)) => (nid, addr, rank_idx, PeerQueryResult::Collision(payload)),
+                        Err(PeerQueryError::Collision(hdr, payload, tls_pk)) => {
+                            (nid, addr, rank_idx, PeerQueryResult::Collision(hdr, payload, tls_pk))
+                        }
                         Err(PeerQueryError::Generic) => (nid, addr, rank_idx, PeerQueryResult::Failure),
                     }
                 });
@@ -1147,13 +1218,20 @@ async fn collect_peer_attestations(
                     in_flight.remove(&rank_idx);
                     spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
                 }
-                Ok((_nid, addr, rank_idx, PeerQueryResult::Collision(payload))) => {
+                Ok((_nid, addr, rank_idx, PeerQueryResult::Collision(hdr, payload, tls_pk))) => {
                     in_flight.remove(&rank_idx);
-                    // Genuine shard work (conflict lookup) decays malus; the
-                    // colliding lock is first-party double-spend evidence.
-                    query.peer_mgr.record_shard_work(addr).await;
-                    if collision_entry.is_none() {
-                        if let Ok(entry) = bincode::deserialize::<crate::api::hmc::L2LockEntry>(&payload) {
+                    let expected_member = query.expected_members.and_then(|members| members.get(rank_idx)).copied();
+                    if let Some(entry) = validate_remote_collision(
+                        &hdr,
+                        &payload,
+                        tls_pk,
+                        expected_member,
+                        &query,
+                    ) {
+                        // Genuine shard work (verified conflict lookup) decays malus; the
+                        // colliding lock is first-party double-spend evidence.
+                        query.peer_mgr.record_shard_work(addr).await;
+                        if collision_entry.is_none() {
                             collision_entry = Some(entry);
                         }
                     }
@@ -1390,6 +1468,22 @@ pub async fn assemble_quorum_certificate_with_override(
         .iter()
         .map(|(member, _)| member.node_pubkey)
         .collect();
+    let (query_lookup_tag, query_voucher_id) = if let Some(payload) = record_payload.as_deref() {
+        if let Ok(crate::network::framing::LockWirePayload::Hmc { req, .. }) =
+            bincode::deserialize(payload)
+        {
+            let tag = if req.is_genesis {
+                Some(bs58::encode(req.transaction_hash).into_string())
+            } else {
+                req.ds_tag.clone()
+            };
+            (tag, Some(req.layer2_voucher_id.clone()))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
     let mut collision = None;
     if collected_signatures.len() < required_q {
         if let (Some(transport), Some(pm), Some(payload)) = (
@@ -1404,6 +1498,8 @@ pub async fn assemble_quorum_certificate_with_override(
                     candidate_nodes: &candidates,
                     expected_members: Some(&expected_members),
                     parent_lock,
+                    lookup_tag: query_lookup_tag.as_deref(),
+                    voucher_id: query_voucher_id.as_deref(),
                     msg_type: humoco_sim_core::wire::MsgType::LockVerifyRequest,
                     resp_msg_type: humoco_sim_core::wire::MsgType::LockVerifyResponse,
                     payload,
@@ -1959,11 +2055,36 @@ async fn submit_hmc_lock(
 
     // A root retry is metadata idempotency, not a new PoW purchase or vote.
     // Await an exact durable acknowledgment even if its first commit is pending.
-    if req.is_genesis && state.engine.hmc_ram.read().await.root_anchors.contains_key(&req.layer2_voucher_id) {
+    if req.is_genesis
+        && state
+            .engine
+            .hmc_ram
+            .read()
+            .await
+            .root_anchors
+            .contains_key(&req.layer2_voucher_id)
+    {
         if !verify_l2_lock_signature(&req) {
-            return (StatusCode::BAD_REQUEST, Json(wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason: "Invalid cryptographic signature".into() }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(wrap_and_sign_verdict(
+                    &state.identity,
+                    L2Verdict::Rejected {
+                        reason: "Invalid cryptographic signature".into(),
+                    },
+                )),
+            )
+                .into_response();
         }
-        return commit_root_registration(&state, lookup_tag, entry, now_ms, ("Idempotent", 0), should_warn).await;
+        return commit_root_registration(
+            &state,
+            lookup_tag,
+            entry,
+            now_ms,
+            ("Idempotent", 0),
+            should_warn,
+        )
+        .await;
     }
 
     // 4. Fast-path idempotency check: if identical lock already verified in RAM, return 200 OK immediately
@@ -1976,7 +2097,8 @@ async fn submit_hmc_lock(
             hmc.locks.get(&lookup_tag).cloned()
         };
         if let Some(existing) = existing_opt {
-            if existing.t_id == entry.t_id {
+            if existing.t_id == entry.t_id && existing.layer2_voucher_id == entry.layer2_voucher_id
+            {
                 // Verify signature on idempotent retry so caller cannot forge verdicts with invalid signatures
                 if !verify_l2_lock_signature(&req) {
                     let envelope = wrap_and_sign_verdict(
@@ -2132,7 +2254,10 @@ async fn submit_hmc_lock(
                         required_diff_hdr = Some(*required);
                         (
                             StatusCode::TOO_MANY_REQUESTS,
-                            format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
+                            format!(
+                                "Gateway under load: insufficient PoW difficulty (provided: {}, required: {})",
+                                provided, required
+                            ),
                         )
                     } else {
                         (
@@ -2232,7 +2357,15 @@ async fn submit_hmc_lock(
     // Genesis is only a durable Root Anchor. No exclusion is inserted, no
     // original spend approval or quorum certificate may be minted for it.
     if req.is_genesis {
-        return commit_root_registration(&state, lookup_tag, entry, now_ms, (tier_str, byte_years), should_warn).await;
+        return commit_root_registration(
+            &state,
+            lookup_tag,
+            entry,
+            now_ms,
+            (tier_str, byte_years),
+            should_warn,
+        )
+        .await;
     }
 
     // 4. Ingress: Local shard storage vs. Stateless Gateway routing
@@ -2389,28 +2522,34 @@ async fn submit_hmc_lock(
         }
     };
 
-    // 5. Quorum-Gating: No HTTP 200/201 without reaching quorum
-    if let Some(ref cert) = quorum_certificate {
-        if !cert.is_quorum_reached() {
-            let reason = format!(
-                "Quorum not reached: required {} signatures, collected {}",
-                cert.required_quorum(),
-                cert.signatures.len()
-            );
-            let rej_verdict = L2Verdict::Rejected { reason };
-            let envelope =
-                wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert.clone()));
-            state.metrics.record_e2e_latency(start.elapsed());
-            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
-            if should_warn {
-                resp.headers_mut().insert(
-                    axum::http::HeaderName::from_static("x-deprecation-warning"),
-                    axum::http::HeaderValue::from_static(
-                        "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-                    ),
+    // 5. Quorum-Gating: No HTTP 200/201 without reaching quorum.
+    // Apply quorum gating to successful Verified outcomes; validated Conflict returns 409.
+    if matches!(&verdict, L2Verdict::Verified { .. }) {
+        if let Some(ref cert) = quorum_certificate {
+            if !cert.is_quorum_reached() {
+                let reason = format!(
+                    "Quorum not reached: required {} signatures, collected {}",
+                    cert.required_quorum(),
+                    cert.signatures.len()
                 );
+                let rej_verdict = L2Verdict::Rejected { reason };
+                let envelope = wrap_and_sign_verdict_with_quorum(
+                    &state.identity,
+                    rej_verdict,
+                    Some(cert.clone()),
+                );
+                state.metrics.record_e2e_latency(start.elapsed());
+                let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+                if should_warn {
+                    resp.headers_mut().insert(
+                        axum::http::HeaderName::from_static("x-deprecation-warning"),
+                        axum::http::HeaderValue::from_static(
+                            "Suite 1 (Ed25519) deprecated - migrate to suite 2",
+                        ),
+                    );
+                }
+                return resp;
             }
-            return resp;
         }
     }
 
@@ -2502,11 +2641,19 @@ async fn submit_hmc_chain_lock_inner(
         .engine
         .get_hmc_voucher_root_valid(&chain_req.layer2_voucher_id)
         .await;
-    let chain_genesis_root = chain_req.chain.iter().find(|hop|hop.is_genesis)
-        .and_then(|hop|crate::storage::db::roots::root_valid_until(&L2LockEntry::from(hop)).ok());
+    let chain_genesis_root = chain_req
+        .chain
+        .iter()
+        .find(|hop| hop.is_genesis)
+        .and_then(|hop| crate::storage::db::roots::root_valid_until(&L2LockEntry::from(hop)).ok());
     let Some(root_valid_until) = stored_root.or(chain_genesis_root) else {
-        let envelope = wrap_and_sign_verdict(&state.identity,L2Verdict::Rejected { reason:"Unknown voucher root: signed Root Anchor required".into() });
-        return (StatusCode::BAD_REQUEST,Json(envelope)).into_response();
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: "Unknown voucher root: signed Root Anchor required".into(),
+            },
+        );
+        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
     };
     let ttl_seconds = root_valid_until.saturating_sub(now_ms) / 1000;
 
@@ -2550,7 +2697,10 @@ async fn submit_hmc_chain_lock_inner(
                     {
                         (
                             StatusCode::TOO_MANY_REQUESTS,
-                            format!("Gateway under load: insufficient PoW difficulty (provided: {}, required: {})", provided, required),
+                            format!(
+                                "Gateway under load: insufficient PoW difficulty (provided: {}, required: {})",
+                                provided, required
+                            ),
                         )
                     } else {
                         (
@@ -2827,19 +2977,25 @@ async fn submit_hmc_chain_lock_inner(
         }
     };
 
-    // Quorum-Gating: No HTTP 200/201 without reaching quorum
-    if let Some(ref cert) = quorum_certificate {
-        if !cert.is_quorum_reached() {
-            let reason = format!(
-                "Quorum not reached: required {} signatures, collected {}",
-                cert.required_quorum(),
-                cert.signatures.len()
-            );
-            let rej_verdict = L2Verdict::Rejected { reason };
-            let envelope =
-                wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert.clone()));
-            state.metrics.record_e2e_latency(start.elapsed());
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+    // Quorum-Gating: No HTTP 200/201 without reaching quorum.
+    // Apply quorum gating to successful Verified outcomes; validated Conflict returns 409.
+    if matches!(&verdict, L2Verdict::Verified { .. }) {
+        if let Some(ref cert) = quorum_certificate {
+            if !cert.is_quorum_reached() {
+                let reason = format!(
+                    "Quorum not reached: required {} signatures, collected {}",
+                    cert.required_quorum(),
+                    cert.signatures.len()
+                );
+                let rej_verdict = L2Verdict::Rejected { reason };
+                let envelope = wrap_and_sign_verdict_with_quorum(
+                    &state.identity,
+                    rej_verdict,
+                    Some(cert.clone()),
+                );
+                state.metrics.record_e2e_latency(start.elapsed());
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+            }
         }
     }
 
@@ -3116,6 +3272,8 @@ mod local_capacity_collector_tests {
                     candidate_nodes: &candidates,
                     expected_members: None,
                     parent_lock: [1; 32],
+                    lookup_tag: None,
+                    voucher_id: None,
                     msg_type,
                     resp_msg_type,
                     payload: &[],
@@ -3323,15 +3481,44 @@ async fn operator_regional_mesh_view(State(state): State<AppState>) -> Response 
 
 /// Root registration publishes metadata only after the exact redb commit.
 /// Never route this result through original-spend or quorum-vote assembly.
-async fn commit_root_registration(state: &AppState, tag: String, entry: L2LockEntry, now_ms: u64, accounting: (&str, u64), should_warn: bool) -> Response {
-    let (verdict, is_new) = state.engine.ingress_hmc_lock_durable(tag, entry, IngressOrigin::ClientApi, Some(now_ms), Some(accounting.0), Some(accounting.1), None).await;
+async fn commit_root_registration(
+    state: &AppState,
+    tag: String,
+    entry: L2LockEntry,
+    now_ms: u64,
+    accounting: (&str, u64),
+    should_warn: bool,
+) -> Response {
+    let (verdict, is_new) = state
+        .engine
+        .ingress_hmc_lock_durable(
+            tag,
+            entry,
+            IngressOrigin::ClientApi,
+            Some(now_ms),
+            Some(accounting.0),
+            Some(accounting.1),
+            None,
+        )
+        .await;
     let status = match &verdict {
         L2Verdict::Verified { .. } if is_new => StatusCode::CREATED,
         L2Verdict::Verified { .. } => StatusCode::OK,
         L2Verdict::Rejected { reason } => write_rejection_status(reason),
         _ => StatusCode::BAD_REQUEST,
     };
-    let mut response = (status, Json(wrap_and_sign_verdict(&state.identity, verdict))).into_response();
-    if should_warn { response.headers_mut().insert(axum::http::HeaderName::from_static("x-deprecation-warning"), axum::http::HeaderValue::from_static("Suite 1 (Ed25519) deprecated - migrate to suite 2")); }
+    let mut response = (
+        status,
+        Json(wrap_and_sign_verdict(&state.identity, verdict)),
+    )
+        .into_response();
+    if should_warn {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-deprecation-warning"),
+            axum::http::HeaderValue::from_static(
+                "Suite 1 (Ed25519) deprecated - migrate to suite 2",
+            ),
+        );
+    }
     response
 }

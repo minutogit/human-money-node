@@ -1,6 +1,6 @@
 # Audit 24 remediation plan
 
-Status: planned; implementation has not started.  
+Status: completed; all work packages W0-W5 implemented and verified.  
 Source: [Audit 24 report](2026-10-24_24_pos_checkout_hotpath_audit.md).  
 Scope: A24-01 through A24-04; preserve the fixed committee, durable-before-vote,
 cryptographic recipient binding, bounded resource admission and neutral cancellation.

@@ -197,3 +197,18 @@ This document supplies the requirement/scenario mapping only. Existing test name
 in Spec16 are inspection candidates; concurrent source edits have no coverage
 status here. Material open proof gates block unconditional acceptance even if a
 narrow test passes.
+
+## Executed delivery records: Audit 24 PoS Checkout Hotpath Remediation (2026-10-25)
+
+Basis: [Audit 24 Report](../prompts/reports/2026-10-24_24_pos_checkout_hotpath_audit.md) and [Fix Plan](../prompts/reports/2026-10-24_24_pos_checkout_fix_plan.md).  
+Scope: A24-01 through A24-04.  
+Executed suite: `RUST_TEST_THREADS=4 cargo test --workspace` (exit 0) and `bash scripts/run-architecture-e2e.sh` (exit 0).
+
+| Finding / Rule | Implemented Call Path | Executed Permanent Regressions | Status |
+| --- | --- | --- | --- |
+| **A24-01** (INV-0605 / DEC-080–084) | `api/live.rs:query_member_live_vote`, `verify_current` grouping by `live_state_digest` | `test_remediation_a24_01_fast_minority_answer_cannot_deny_live_proof`, `test_remediation_a24_01_split_opinion_without_quorum_fails_closed` in `status_reconciliation_tests.rs` | **Executed / Passed** |
+| **A24-02** (INV-0303 / DEC-026, 080) | `api/live.rs:LIVE_PROOF_SERVER_BUDGET`, `LiveDeadline`, `api/routes.rs:live_deadline_middleware` | `test_remediation_a24_02_shared_live_deadline_prevents_late_proof` in `status_reconciliation_tests.rs` | **Executed / Passed** |
+| **A24-03** (INV-0205, 0604) | `api/routes.rs:validate_remote_collision`, quorum gate isolation in `submit_lock` / `submit_hmc_chain_lock`, dual Serde in `api/hmc.rs` | `test_remediation_a24_03_remote_valid_collision_returns_409_wire`, `test_remediation_a24_03_remote_valid_collision_on_chain_lock_returns_409_wire`, `test_remediation_a24_03_remote_invalid_collision_evidence_never_returns_409_wire`, `test_remediation_a24_03_valid_quorum_takes_precedence_over_isolated_collision_wire` in `phase11_wire_level_adversarial_tests.rs` | **Executed / Passed** |
+| **A24-04** (INV-0309, 1008) | `api/routes.rs:collect_peer_attestations` bounded attempt loop (3 for write, 1 for read), neutral handling of NOT_READY/NOT_IN_SHARD/SUSPENDED | `test_remediation_a24_04_two_reset_streams_then_third_attestation_completes_quorum_wire`, `test_remediation_a24_04_two_failed_streams_then_not_ready_is_neutral_wire`, `test_remediation_a24_04_three_genuine_failures_counts_single_peer_failure_wire` in `phase11_wire_level_adversarial_tests.rs` | **Executed / Passed** |
+| **E2E Hotpath** (DEC-060, 068, 084) | Full wallet purchase flow with live proof verification, atomic store, and idempotent restart | `bash scripts/run-architecture-e2e.sh` | **Executed / Passed** |
+

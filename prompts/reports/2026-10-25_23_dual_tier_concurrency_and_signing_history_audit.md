@@ -47,3 +47,29 @@ The exact general row-corruption guarantee remains a design obligation. Do not a
 `prompts/reports/evidence/2026-10-25_audits_22_23/audit23_runtime_unit_probes.rs` contains the audit-only internal unit module. It was temporarily appended to signing.rs to reach private tables, then removed. `signing_original.sha256` verifies byte-for-byte restoration. Both tests failed at their intended assertions on unfixed code; see `audit23_runtime_probes.log`.
 
 The first test demonstrates contradictory approval bytes passing the storage gate under the explicit logical-row-loss premise. No real wire double-signature/slashing test was performed for that injected state; the fix plan requires it before claiming network protection. The initial `RUST_TEST_THREADS=4 cargo test-std --offline` run stopped with two failures in `cluster_e2e_tests` (bootstrap status and PoS latency checkout). A subsequent complete `RUST_TEST_THREADS=4 cargo test-std --offline --no-fail-fast` run passed: **700 passed, 0 failed, 14 ignored** across 93 result groups. Both logs are retained as `test_std.log` and `test_std_no_fail_fast.log`; the initial failure cause was not established. Audit defect probes are separate, deliberately failing safe-behavior assertions and were removed before the standard suite. No Clippy run was required for the documentation-only output; the fix plans require Clippy after implementation. No production fixes were implemented.
+
+## Resolution (2026-10-25)
+
+Finding A23-01 resolved via the strict regression-first (TDD) workflow:
+
+1. **Permanent regression suite (`crates/humoco-node/tests/audit23_regressions.rs`)**:
+   - `test_a23_01_runtime_missing_choice_must_fail_closed_and_latch`: verifies that injected loss of a logical own-choice row rejects contradictory approvals (`SigningHistoryCorrupt`), latches `is_signing_history_healthy() == false`, and writes no conflicting approval.
+   - `test_a23_01_real_quic_signing_release_refuses_double_signature_under_fault`: verifies over live authenticated QUIC that a node suffering logical choice row loss refuses to sign or release a conflicting attestation, closes engine signing readiness, returns local unavailability (`FLAG_NOT_READY`), and does not ban the client.
+   - `test_a23_01_runtime_malformed_state_and_row_integrity_latches`: verifies that malformed `TABLE_SIGNING_STATE` JSON, corrupted own-choice rows, and invalid generation relationships fail closed and latch in memory.
+   - `test_a23_01_persisted_latch_survives_reopen_and_backup`: verifies that the corruption latch persists durably across reopening and backup restoration.
+2. **Red Baseline captured**: All 4 permanent regression tests failed against the unfixed code at their exact intended assertions (`0 passed; 4 failed`).
+3. **Implementation**:
+   - `validate_and_prepare_own_choice` in `crates/humoco-node/src/storage/db.rs` enforces:
+     - `choices.len()? == state.count` table cardinality check inside the serialized write transaction before admitting any new choice or exact-retry return.
+     - Strict generation monotonicity (`choice.generation <= state.generation`).
+     - Consistent TTL index mapping in `TABLE_OWN_CHOICE_TTL`.
+     - Valid JSON decoding of stored choices (failing closed on corrupted entries).
+   - `RedbStorage::latch_corruption(&self)` atomically sets the in-memory `signing_corrupt` flag and persists `corrupt = true` into `TABLE_SIGNING_STATE` in an explicit immediate write transaction that survives rollbacks of failed caller transactions.
+   - Exact idempotent retries remain byte-identical without creating phantom choices.
+   - Ordinary `OwnChoiceConflict` remains distinct from corruption and does not falsely trip the latch.
+4. **Green Verification**:
+   - `audit23_regressions`: 4 passed, 0 failed.
+   - Adjacent suites (`own_decision_durability`, `signing_history_loss_tests`, `anti_self_slashing_wire_tests`, `storage_tests`, `current_proof_boundaries_tests`, `audit22_regressions`): 100% passed.
+   - `cargo test-std --no-fail-fast`: 100% passed.
+   - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, clean pass.
+

@@ -2,6 +2,7 @@ pub mod install;
 mod projection;
 pub mod roots;
 mod signing;
+pub use signing::TABLE_SIGNING_STATE;
 pub mod snapshot;
 pub mod support;
 
@@ -203,21 +204,23 @@ impl RedbStorage {
         let slot = format!("{}:{}", hex::encode(node), tag);
         let mut txn = self.db.begin_write()?;
         txn.set_durability(redb::Durability::Immediate);
-        let retained = {
-            let choices = txn.open_table(TABLE_OWN_CHOICES)?;
-            let previous = choices
-                .get(slot.as_str())?
-                .map(|v| serde_json::from_slice::<OwnSigningChoice>(v.value()))
-                .transpose()?;
-            let mut choice = previous.unwrap_or(OwnSigningChoice {
-                generation: 0,
-                child: entry.t_id,
-                valid_until_ms,
-                approvals: [None, None],
-            });
-            if choice.child != entry.t_id || choice.valid_until_ms != valid_until_ms {
-                return Err(StorageError::OwnChoiceConflict);
+        let mut choice = match self.validate_and_prepare_own_choice(
+            &txn,
+            slot.as_str(),
+            entry.t_id,
+            valid_until_ms,
+            class,
+            approval,
+        ) {
+            Ok(c) => c,
+            Err(StorageError::SigningHistoryCorrupt) => {
+                drop(txn);
+                self.latch_corruption();
+                return Err(StorageError::SigningHistoryCorrupt);
             }
+            Err(e) => return Err(e),
+        };
+        let retained = {
             let mut locks = txn.open_table(TABLE_HMC_LOCKS)?;
             if let Some(old) = locks.get(tag)? {
                 let old: crate::api::hmc::L2LockEntry = serde_json::from_slice(old.value())?;
@@ -225,9 +228,12 @@ impl RedbStorage {
                     return Err(StorageError::OwnChoiceConflict);
                 }
             }
-            choice.approvals[usize::from(class)].get_or_insert_with(|| approval.to_vec());
-            drop(choices);
-            signing::put_choice(&txn, slot.as_str(), &mut choice)?;
+            if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
+                drop(locks);
+                drop(txn);
+                self.latch_corruption();
+                return Err(e);
+            }
             let lock_bytes = serde_json::to_vec(entry)?;
             locks.insert(tag, lock_bytes.as_slice())?;
             txn.open_table(TABLE_HMC_VOUCHER_INDEX)?
@@ -269,21 +275,23 @@ impl RedbStorage {
         let slot = format!("{}:{}", hex::encode(node), tag);
         let mut txn = self.db.begin_write()?;
         txn.set_durability(redb::Durability::Immediate);
-        let retained = {
-            let choices = txn.open_table(TABLE_OWN_CHOICES)?;
-            let mut choice = choices
-                .get(slot.as_str())?
-                .map(|v| serde_json::from_slice::<OwnSigningChoice>(v.value()))
-                .transpose()?
-                .unwrap_or(OwnSigningChoice {
-                    generation: 0,
-                    child: record.id,
-                    valid_until_ms: root_valid_until_ms,
-                    approvals: [None, None],
-                });
-            if choice.child != record.id || choice.valid_until_ms != root_valid_until_ms {
-                return Err(StorageError::OwnChoiceConflict);
+        let mut choice = match self.validate_and_prepare_own_choice(
+            &txn,
+            slot.as_str(),
+            record.id,
+            root_valid_until_ms,
+            class,
+            approval,
+        ) {
+            Ok(c) => c,
+            Err(StorageError::SigningHistoryCorrupt) => {
+                drop(txn);
+                self.latch_corruption();
+                return Err(StorageError::SigningHistoryCorrupt);
             }
+            Err(e) => return Err(e),
+        };
+        let retained = {
             let mut locks = txn.open_table(TABLE_LOCKS)?;
             if let Some(old) = locks.get(&record.parent_lock)? {
                 let (old, _): (LockRecord, u64) = bincode::deserialize(old.value())?;
@@ -291,9 +299,12 @@ impl RedbStorage {
                     return Err(StorageError::OwnChoiceConflict);
                 }
             }
-            choice.approvals[usize::from(class)].get_or_insert_with(|| approval.to_vec());
-            drop(choices);
-            signing::put_choice(&txn, slot.as_str(), &mut choice)?;
+            if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
+                drop(locks);
+                drop(txn);
+                self.latch_corruption();
+                return Err(e);
+            }
             let bytes = bincode::serialize(&(record, root_valid_until_ms))?;
             locks.insert(&record.parent_lock, bytes.as_slice())?;
             let expires_sec = root_valid_until_ms.saturating_add(30_999) / 1_000;
@@ -311,6 +322,62 @@ impl RedbStorage {
         Ok(retained)
     }
 
+    /// Reconciles and validates own choice table cardinality, existing choice row encoding,
+    /// generation monotonicity, and TTL index consistency before admitting an original decision.
+    fn validate_and_prepare_own_choice(
+        &self,
+        txn: &redb::WriteTransaction,
+        slot: &str,
+        expected_child: [u8; 32],
+        expected_valid_until_ms: u64,
+        class: u8,
+        approval: &[u8],
+    ) -> Result<OwnSigningChoice, StorageError> {
+        let state = signing::read(txn)?;
+        if state.corrupt {
+            return Err(StorageError::SigningHistoryCorrupt);
+        }
+        let choices = txn.open_table(TABLE_OWN_CHOICES)?;
+        let table_len = choices.len()?;
+        if table_len != state.count {
+            return Err(StorageError::SigningHistoryCorrupt);
+        }
+        let previous = match choices.get(slot)? {
+            Some(v) => {
+                let choice: OwnSigningChoice = serde_json::from_slice(v.value())
+                    .map_err(|_| StorageError::SigningHistoryCorrupt)?;
+                if choice.generation > state.generation {
+                    return Err(StorageError::SigningHistoryCorrupt);
+                }
+                let expiry = choice.valid_until_ms.saturating_add(30_999) / 1_000;
+                let ttl_ok = txn
+                    .open_table(TABLE_OWN_CHOICE_TTL)
+                    .map(|ttl| {
+                        ttl.get(&(expiry, slot))
+                            .map(|opt| opt.is_some())
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if !ttl_ok {
+                    return Err(StorageError::SigningHistoryCorrupt);
+                }
+                Some(choice)
+            }
+            None => None,
+        };
+        let mut choice = previous.unwrap_or(OwnSigningChoice {
+            generation: 0,
+            child: expected_child,
+            valid_until_ms: expected_valid_until_ms,
+            approvals: [None, None],
+        });
+        if choice.child != expected_child || choice.valid_until_ms != expected_valid_until_ms {
+            return Err(StorageError::OwnChoiceConflict);
+        }
+        choice.approvals[usize::from(class)].get_or_insert_with(|| approval.to_vec());
+        Ok(choice)
+    }
+
     /// Reads retained local approvals for recovery; never a source of remote authority.
     pub fn own_signing_choice(
         &self,
@@ -324,6 +391,22 @@ impl RedbStorage {
             .get(slot.as_str())?
             .map(|v| serde_json::from_slice(v.value()).map_err(StorageError::from))
             .transpose()
+    }
+
+    /// Test-only hook to inject simulated fault/corruption without public API exposure.
+    #[doc(hidden)]
+    pub fn raw_database_for_test(&self) -> &Arc<Database> {
+        &self.db
+    }
+
+    /// Test-only hook to simulate logical choice row loss.
+    #[doc(hidden)]
+    pub fn inject_remove_own_choice_for_test(&self, slot: &str) -> Result<(), StorageError> {
+        let mut txn = self.db.begin_write()?;
+        txn.set_durability(redb::Durability::Immediate);
+        txn.open_table(TABLE_OWN_CHOICES)?.remove(slot)?;
+        txn.commit()?;
+        Ok(())
     }
 
     /// Returns database storage statistics: (active_locks, db_size_bytes, page_allocations).

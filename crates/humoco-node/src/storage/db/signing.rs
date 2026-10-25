@@ -2,7 +2,7 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(super) const TABLE_SIGNING_STATE: TableDefinition<u8, &[u8]> =
+pub const TABLE_SIGNING_STATE: TableDefinition<u8, &[u8]> =
     TableDefinition::new("signing_commit_state");
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -29,10 +29,10 @@ fn xor(dst: &mut [u8; 32], value: [u8; 32]) {
         *a ^= b;
     }
 }
-fn read(txn: &redb::WriteTransaction) -> Result<SigningState, StorageError> {
+pub(super) fn read(txn: &redb::WriteTransaction) -> Result<SigningState, StorageError> {
     let table = txn.open_table(TABLE_SIGNING_STATE)?;
     let bytes = table.get(0)?.ok_or(StorageError::SigningHistoryCorrupt)?;
-    serde_json::from_slice(bytes.value()).map_err(StorageError::from)
+    serde_json::from_slice(bytes.value()).map_err(|_| StorageError::SigningHistoryCorrupt)
 }
 fn write(txn: &redb::WriteTransaction, state: &SigningState) -> Result<(), StorageError> {
     let bytes = serde_json::to_vec(state)?;
@@ -112,6 +112,10 @@ pub(super) fn put_choice(
         return Err(StorageError::SigningHistoryCorrupt);
     }
     let mut choices = txn.open_table(TABLE_OWN_CHOICES)?;
+    let actual_len = choices.len()?;
+    if actual_len != state.count {
+        return Err(StorageError::SigningHistoryCorrupt);
+    }
     let old = choices.get(slot)?.map(|v| v.value().to_vec());
     let candidate = serde_json::to_vec(choice)?;
     if old.as_deref() == Some(candidate.as_slice()) {
@@ -137,13 +141,17 @@ pub(super) fn put_choice(
 }
 
 pub(super) fn remove_choice(txn: &redb::WriteTransaction, slot: &str) -> Result<(), StorageError> {
+    let mut state = read(txn)?;
+    if state.corrupt {
+        return Err(StorageError::SigningHistoryCorrupt);
+    }
     let mut choices = txn.open_table(TABLE_OWN_CHOICES)?;
+    let actual_len = choices.len()?;
+    if actual_len != state.count {
+        return Err(StorageError::SigningHistoryCorrupt);
+    }
     let old = choices.remove(slot)?.map(|v| v.value().to_vec());
     if let Some(old) = old {
-        let mut state = read(txn)?;
-        if state.corrupt {
-            return Err(StorageError::SigningHistoryCorrupt);
-        }
         state.generation = state
             .generation
             .checked_add(1)
@@ -163,13 +171,66 @@ impl RedbStorage {
         !self.signing_corrupt.load(Ordering::Acquire)
     }
 
+    /// Latches corruption both in memory and durably on disk across reopen/backups.
+    pub fn latch_corruption(&self) {
+        self.signing_corrupt.store(true, Ordering::Release);
+        if let Ok(mut txn) = self.db.begin_write() {
+            txn.set_durability(redb::Durability::Immediate);
+            let state = {
+                let table = txn.open_table(TABLE_SIGNING_STATE);
+                match table {
+                    Ok(table) => match table.get(0) {
+                        Ok(Some(bytes)) => {
+                            let mut s: SigningState =
+                                serde_json::from_slice(bytes.value()).unwrap_or_default();
+                            s.corrupt = true;
+                            s
+                        }
+                        _ => SigningState {
+                            corrupt: true,
+                            ..Default::default()
+                        },
+                    },
+                    _ => SigningState {
+                        corrupt: true,
+                        ..Default::default()
+                    },
+                }
+            };
+            let committed = if let Ok(mut table) = txn.open_table(TABLE_SIGNING_STATE) {
+                if let Ok(bytes) = serde_json::to_vec(&state) {
+                    let _ = table.insert(0, bytes.as_slice());
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if committed {
+                let _ = txn.commit();
+            }
+        }
+        tracing::error!(
+            "FAIL_CLOSED_CORRUPT: signing history corruption latched in-memory and persisted"
+        );
+    }
+
     /// Read in a blocking worker; never required on the checkout path.
-    pub(crate) fn signing_checkpoint(&self) -> Result<(u64, [u8; 32]), StorageError> {
+    pub fn signing_checkpoint(&self) -> Result<(u64, [u8; 32]), StorageError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(TABLE_SIGNING_STATE)?;
         let value = table.get(0)?.ok_or(StorageError::SigningHistoryCorrupt)?;
-        let state: SigningState = serde_json::from_slice(value.value())?;
+        let state: SigningState = match serde_json::from_slice(value.value()) {
+            Ok(s) => s,
+            Err(_) => {
+                drop(txn);
+                self.latch_corruption();
+                return Err(StorageError::SigningHistoryCorrupt);
+            }
+        };
         if state.corrupt {
+            self.signing_corrupt.store(true, Ordering::Release);
             return Err(StorageError::SigningHistoryCorrupt);
         }
         Ok((state.generation, state.fingerprint))
@@ -184,14 +245,24 @@ impl RedbStorage {
     ) -> Result<bool, StorageError> {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(redb::Durability::Immediate);
-        let mut state = read(&txn)?;
+        let state = match read(&txn) {
+            Ok(s) => s,
+            Err(_) => {
+                drop(txn);
+                self.latch_corruption();
+                return Err(StorageError::SigningHistoryCorrupt);
+            }
+        };
+        if state.corrupt {
+            drop(txn);
+            self.latch_corruption();
+            return Err(StorageError::SigningHistoryCorrupt);
+        }
         if generation > state.generation
             || (generation == state.generation && fingerprint != state.fingerprint)
         {
-            self.signing_corrupt.store(true, Ordering::Release);
-            state.corrupt = true;
-            write(&txn, &state)?;
-            txn.commit()?;
+            drop(txn);
+            self.latch_corruption();
             tracing::error!(
                 generation,
                 "FAIL_CLOSED_CORRUPT: verified own checkpoint contradicts local signing history"

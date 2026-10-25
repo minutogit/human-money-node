@@ -946,6 +946,24 @@ async fn verify_peer_attestation(
         );
         return false;
     }
+
+    // A10-02: Bounded original-vote observation for automatic ShardEquivocation detection.
+    if let Some(signer_pk) = att.node_pubkey_bytes() {
+        if let Some(core_att) = att.to_core() {
+            if peer_mgr
+                .observe_verified_original_attestation(signer_pk, core_att, network_id)
+                .is_some()
+            {
+                tracing::warn!(
+                    node_id = att.node_id,
+                    offender = %hex::encode(signer_pk),
+                    "Dropped attestation: detected conflicting original attestation (ShardEquivocation)! Perpetrator slashed."
+                );
+                return false;
+            }
+        }
+    }
+
     true
 }
 

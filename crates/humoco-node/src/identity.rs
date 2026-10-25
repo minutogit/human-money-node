@@ -316,6 +316,15 @@ impl NodeIdentity {
         format!("did:key:z{}", bs58::encode(bytes).into_string())
     }
 
+    /// Builds a genuine first-party self-revocation fraud proof for this identity (A09-01).
+    pub fn build_self_revocation_fraud_proof(
+        &self,
+        network_id: humoco_sim_core::types::NetworkId,
+        now_ms: u64,
+    ) -> humoco_sim_core::fraud::FraudProofPayload {
+        build_self_revocation_fraud_proof(self, network_id, now_ms)
+    }
+
     /// Saves the private key to a file with restricted POSIX permissions (0600 on Unix).
     /// Format: 32B SigningKey + 8B nonce_le + 8B t0_le + 32B HrwRoutingId = 80 Bytes.
     pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<(), NodeError> {
@@ -430,6 +439,63 @@ impl NodeIdentity {
             ))),
         }
     }
+}
+
+/// Constructs a genuine first-party cryptographic self-revocation proof (A09-01).
+///
+/// Signs two distinct original attestations with the node's Ed25519 signing key
+/// for the canonical self-revocation parent lock `BLAKE3("HUMOCO_V1_SELF_REVOKE_SLOT")`
+/// and different lock IDs, forming an irrefutable ShardEquivocation FraudProof.
+pub fn build_self_revocation_fraud_proof(
+    identity: &NodeIdentity,
+    network_id: humoco_sim_core::types::NetworkId,
+    now_ms: u64,
+) -> humoco_sim_core::fraud::FraudProofPayload {
+    use ed25519_dalek::Signer;
+    use humoco_sim_core::crypto::{
+        compute_attestation_payload_digest, compute_sig_digest, domain_approve_prov,
+    };
+    use humoco_sim_core::fraud::FraudProofPayload;
+    use humoco_sim_core::types::{Attestation, SimTime};
+
+    let parent_lock = *blake3::hash(b"HUMOCO_V1_SELF_REVOKE_SLOT").as_bytes();
+    let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+    let node_id = identity.node_id_u16();
+    let timestamp = SimTime(now_ms);
+    let domain_tag = domain_approve_prov(network_id);
+    let status_tag = 0u8;
+
+    let lock_a = [1u8; 32];
+    let payload_a = compute_attestation_payload_digest(&parent_lock, &lock_a);
+    let digest_a = compute_sig_digest(domain_tag, 0, 0, 0, shard_id, status_tag, &payload_a);
+    let sig_a = identity.signing_key().sign(&digest_a).to_bytes();
+    let att_a = Attestation {
+        lock_id: lock_a,
+        parent_lock,
+        node_id,
+        timestamp,
+        signature: sig_a,
+        shard_id,
+    };
+
+    let lock_b = [2u8; 32];
+    let payload_b = compute_attestation_payload_digest(&parent_lock, &lock_b);
+    let digest_b = compute_sig_digest(domain_tag, 0, 0, 0, shard_id, status_tag, &payload_b);
+    let sig_b = identity.signing_key().sign(&digest_b).to_bytes();
+    let att_b = Attestation {
+        lock_id: lock_b,
+        parent_lock,
+        node_id,
+        timestamp,
+        signature: sig_b,
+        shard_id,
+    };
+
+    FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        *identity.node_pubkey(),
+    )
 }
 
 #[cfg(test)]
@@ -646,4 +712,23 @@ mod tests {
         let decoded_pk = bs58::decode(&pk_bs58).into_vec().expect("valid base58");
         assert_eq!(&decoded_pk[..], identity.verifying_key().as_bytes());
     }
+
+    #[test]
+    fn test_build_self_revocation_fraud_proof() {
+        let identity = NodeIdentity::generate();
+        let now_ms = 1_700_000_000_000u64;
+        let proof = build_self_revocation_fraud_proof(
+            &identity,
+            humoco_sim_core::types::NetworkId::Mainnet,
+            now_ms,
+        );
+
+        assert_eq!(proof.perpetrator_node_id, *identity.node_pubkey());
+        assert!(proof.verify());
+        assert!(crate::network::transport::verify_equivocation_first_party(
+            identity.verifying_key(),
+            &proof
+        ));
+    }
 }
+

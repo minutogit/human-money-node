@@ -488,6 +488,62 @@ impl ControlServer {
                         }
                     }
                 }
+                ControlRequest::RevokeIdentity { proof_bytes } => {
+                    let proof_res: Result<humoco_sim_core::fraud::FraudProofPayload, _> =
+                        bincode::deserialize(&proof_bytes);
+                    match proof_res {
+                        Err(err) => ControlResponse::Error {
+                            message: format!("Failed to deserialize fraud proof: {}", err),
+                        },
+                        Ok(proof) => {
+                            if proof.perpetrator_node_id != *state.identity.node_pubkey() {
+                                ControlResponse::Error {
+                                    message: "Perpetrator public key does not match daemon identity".into(),
+                                }
+                            } else if !crate::network::transport::verify_equivocation_first_party(
+                                state.identity.verifying_key(),
+                                &proof,
+                            ) {
+                                ControlResponse::Error {
+                                    message: "Cryptographic verification of self-revocation proof failed".into(),
+                                }
+                            } else {
+                                let now_ms = state.peer_manager.net_time_ms();
+                                let evidence_hash = *blake3::hash(&proof_bytes).as_bytes();
+
+                                if let Err(e) = state.storage.commit_slashing_evidence_and_ban(
+                                    &evidence_hash,
+                                    &proof_bytes,
+                                    state.identity.node_pubkey(),
+                                    now_ms,
+                                ) {
+                                    ControlResponse::Error {
+                                        message: format!("Failed to commit slashing evidence and ban: {}", e),
+                                    }
+                                } else {
+                                    state.engine.ban_node_ram(state.identity.node_pubkey()).await;
+                                    state.peer_manager.ban_node(state.identity.node_pubkey()).await;
+                                    state
+                                        .engine
+                                        .stats
+                                        .signing_failed
+                                        .store(true, std::sync::atomic::Ordering::Release);
+
+                                    let broadcast_peers = state.peer_manager.connected_peer_count().await;
+                                    state.peer_manager.broadcast_fraud_proof(proof);
+
+                                    let cancel = state.cancel_token.clone();
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                        cancel.cancel();
+                                    });
+
+                                    ControlResponse::IdentityRevoked { broadcast_peers }
+                                }
+                            }
+                        }
+                    }
+                }
             };
 
             let mut resp_str = serde_json::to_string(&response).unwrap_or_default();

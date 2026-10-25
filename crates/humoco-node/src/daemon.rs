@@ -671,8 +671,14 @@ impl NodeDaemon {
                         let declared_write_ema = hb_tc.current_write_ema_micro_bj();
                         let declared_read_ema = hb_tc.current_read_ema_credits();
                         let now_ms = hb_pm.net_time_ms();
-                        // Epoch-bound envelope (Phase 1 P0); heartbeat carries no
-                        // lock epoch state so it binds epoch (0, 0).
+                        // Epoch-bound envelope (Phase 1 P0); heartbeat binds
+                        // origin announcement hash (local_addr, nonce, hrw_routing_id, t0).
+                        let announcement_hash = humoco_sim_core::fraud::compute_heartbeat_announcement_hash(
+                            &hb_local_addr,
+                            hb_identity.nonce(),
+                            hb_identity.hrw_routing_id(),
+                            hb_identity.t0(),
+                        );
                         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
                             &node_id,
                             0,
@@ -682,7 +688,7 @@ impl NodeDaemon {
                             declared_read_ema,
                             0,
                             false,
-                            &[0u8; 32],
+                            &announcement_hash,
                         );
                         let signature = hb_identity.signing_key().sign(&digest).to_bytes();
                         let piggyback = hb_pm.sample_piggyback_evidences(2).await;

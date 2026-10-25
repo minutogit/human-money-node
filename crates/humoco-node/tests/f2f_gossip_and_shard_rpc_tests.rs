@@ -83,11 +83,11 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
         .await
         .expect("B connects to A");
 
-    // B sends a Heartbeat advertising Node C's existence to A
-    let hb_payload = humoco_node::network::framing::HeartbeatWirePayload {
+    // B sends a Heartbeat advertising Node C's existence to A (origin signed by Node C)
+    let mut hb_payload = humoco_node::network::framing::HeartbeatWirePayload {
         gateway_advertisement: None,
         signing_checkpoint: None,
-        node_id: *identity_c.node_id(),
+        node_id: *identity_c.node_pubkey(),
         addr: actual_addr_c,
         timestamp_ms: 0,
         declared_write_ema_micro_bj: 0,
@@ -96,10 +96,11 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
         supported_suites_mask: 0,
         piggyback_observations: Vec::new(),
         pow_nonce: 0,
-        hrw_routing_id: *identity_c.node_id(),
+        hrw_routing_id: *identity_c.hrw_routing_id(),
         ticket_epoch_t0: 0,
         ttl: 16,
     };
+    hb_payload.sign_origin(&identity_c, 0);
     let heartbeat_payload = bincode::serialize(&hb_payload).expect("serialize heartbeat");
     let mut heartbeat_hdr = WireHeader::new(
         MsgType::Heartbeat as u16,
@@ -395,11 +396,11 @@ async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
         .await
         .unwrap();
 
-    // Node A sends Heartbeat with TTL=16 and Argon2d routing ID
-    let hb_a = humoco_node::network::framing::HeartbeatWirePayload {
+    // Node A sends Heartbeat with TTL=16 and Argon2d routing ID (origin signed by Node A)
+    let mut hb_a = humoco_node::network::framing::HeartbeatWirePayload {
         gateway_advertisement: None,
         signing_checkpoint: None,
-        node_id: *identity_a.node_id(),
+        node_id: *identity_a.node_pubkey(),
         addr: actual_addr_a,
         timestamp_ms: 50_000,
         declared_write_ema_micro_bj: 0,
@@ -408,10 +409,11 @@ async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
         supported_suites_mask: 0,
         piggyback_observations: Vec::new(),
         pow_nonce: 0,
-        hrw_routing_id: *identity_a.node_id(),
+        hrw_routing_id: *identity_a.hrw_routing_id(),
         ticket_epoch_t0: 0,
         ttl: 16,
     };
+    hb_a.sign_origin(&identity_a, 50_000);
     let payload = bincode::serialize(&hb_a).unwrap();
     let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
     hdr.reserved = 0; // hops = 0

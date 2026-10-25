@@ -1,0 +1,21 @@
+# Audit 02 — Byzantine security and hardening
+
+2026-10-25 · Stage 4 · Source: `/home/basti/Coding/humoco/human-money-node` · Commit `9a28517d0a02e34721c102bccbf786b8443c3664` (clean at start).
+Audit only; no implementation or registry edits. Paths below are relative to that source root.
+
+## Findings
+
+- **A02-01 [HIGH] — Genuine Testnet equivocation does not trigger slashing.** `crates/humoco-node/src/network/transport.rs:411` and `:2063` reject `!proof.verify()` before the network-aware strict verifier. `crates/humoco-sim-core/src/fraud.rs:869` / `:878` use Mainnet aliases (`crypto.rs:17`). Two genuine conflicting Testnet originals therefore fail the outer gate. **Executed real-QUIC reproduction:** an authorized sender submitted conflicting Testnet signatures to a Testnet handler: `generic_verify=false`, `strict_verify=true`, ACK `262`, engine and PeerManager bans both `false`. The Mainnet-signature control produced `true/true` and both bans `true`. Impact: the first-party punishment path is ineffective for this Testnet proof class; this does not demonstrate a double-spend or loss of client funds.
+- **A02-02 [MEDIUM] — Full VIP persistence queue silently loses accepted debits.** `crates/humoco-node/src/ingress/tier.rs:303` logs a failed `try_send`, while `:315` has already decremented RAM and still returns success. **Executed isolated reproduction:** on a current-thread runtime, initialize balance 2,000, accept 1,025 synchronous one-unit charges before yielding, then drop the controller and wait for its worker to drain. RAM balance: `975`; persisted balance: `976`; worker failure flag: `false`. Restart can restore credit already spent. This is a component-level billing/resource-control finding, not a reproduced HTTP exploit or consensus failure.
+
+## Integrated fix plan
+
+1. **A02-01:** Add permanent real-QUIC regressions for both bi-/unidirectional genuine Testnet proofs, Mainnet controls, forged proofs and mixed-network pairs. Replace the simulator-oriented outer gate with one structural and cryptographic production verifier; explicitly define the receiving network policy and keep perpetrator, parent, purpose and shard binding. Require valid same-network proofs to persist evidence and ban the actual signer; reject mixed-network/forged evidence without mutation.
+2. **A02-02:** Reserve bounded persistence capacity before changing/accepting quota state. Propagate full/closed queue errors; serialize RAM mutation and persistence ordering so concurrent debit/top-up operations cannot publish stale absolute balances. Define crash-safe debit semantics for successful paid service. Add saturation, worker-loss, restart and concurrent top-up/debit regressions; accepted debits must survive the required durability boundary, rejected debits must not reduce credit. Do not merely enlarge the queue.
+3. Run `cargo test-std` and targeted QUIC/billing regressions after implementation. No finding is closed by this report.
+
+## Coverage and qualifications
+
+Reviewed collision admission/reservation and durable acknowledgment, signature domains and identity checks, stateless parent-bound BLAKE3 work, quota accounting, framing, UDS bounds and fraud handling. Frame allocation is capped at 64 KiB before body allocation, frame reads have a 5s timeout, UDS lines have a 16 KiB bound and timeout. Old Argon2 ingress and mandatory used-work replay-table assumptions were discarded; valid stateless retries are intentional. No new double-spend race was established. Source review and the executed probes are evidence, not a general security certification. Probe build/run details and aggregate standard-test results are recorded in this file's validation note below.
+
+Validation: `cargo test-std --offline` completed with **755 passed, 0 failed, 14 ignored**, 99 harness summaries, exit 0. The two additional observation probes reproduced the findings despite that green baseline. Probes were compiled with `rustc --edition=2021` against the freshly checked project's debug libraries, ran on temporary redb databases and localhost QUIC, and changed no repository files. The first sandboxed QUIC attempt could not bind a socket; the subsequent authorized local run succeeded. No public network, monetary assets or production node were used.

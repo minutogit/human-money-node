@@ -1072,6 +1072,8 @@ impl DualTierEngine {
 
     /// Sets the peer manager reference so that node bans propagate immediately to peer connections.
     pub async fn set_peer_manager(&self, pm: Arc<crate::network::PeerManager>) {
+        pm.set_storage(Arc::downgrade(&self.db));
+        pm.set_engine(self);
         let mut guard = self.peer_manager.write().await;
         *guard = Some(pm);
     }
@@ -1113,17 +1115,22 @@ impl DualTierEngine {
         }
     }
 
-    /// Processes an incoming EquivocationProof: verifies proof, commits raw evidence + ban
-    /// atomically to redb, and applies immediate local containment in RAM.
+    /// Processes an incoming EquivocationProof: verifies proof with first-party strictness,
+    /// commits raw evidence + ban atomically to redb, and applies immediate local containment in RAM.
     pub async fn process_equivocation_proof(
         &self,
         proof: &humoco_sim_core::fraud::FraudProofPayload,
         raw_payload: &[u8],
     ) -> bool {
-        if !proof.verify() {
+        let offender = proof.perpetrator_node_id;
+        let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&offender) else {
+            warn!("EquivocationProof rejected: perpetrator_node_id is not a valid Ed25519 key");
+            return false;
+        };
+        if !crate::network::transport::verify_equivocation_first_party(&vk, proof) {
+            warn!("EquivocationProof rejected: first-party verification failed");
             return false;
         }
-        let offender = proof.perpetrator_node_id;
         let evidence_hash = *blake3::hash(raw_payload).as_bytes();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1131,8 +1138,10 @@ impl DualTierEngine {
             .unwrap_or(0);
         if let Err(e) = self.db.commit_slashing_evidence_and_ban(&evidence_hash, raw_payload, &offender, now_ms) {
             warn!("Failed to commit slashing evidence and ban atomically to redb: {e}");
+            self.ban_node_ram(&offender).await;
+            return false;
         }
-        self.ban_node(offender, now_ms).await;
+        self.ban_node_ram(&offender).await;
         true
     }
 

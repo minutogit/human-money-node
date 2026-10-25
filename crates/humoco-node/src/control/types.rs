@@ -46,6 +46,9 @@ pub enum ControlRequest {
     CreateBackup {
         destination_path: String,
     },
+    RevokeIdentity {
+        proof_bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +172,9 @@ pub enum ControlResponse {
     BackupCreated {
         path: String,
         locks_count: usize,
+    },
+    IdentityRevoked {
+        broadcast_peers: usize,
     },
     Ok,
     Error {

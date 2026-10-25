@@ -67,6 +67,39 @@ impl AttestationDto {
                 shard_id: 0,
             })
     }
+
+    /// Converts this DTO into humoco_sim_core::types::Attestation if hex strings are valid.
+    pub fn to_core(&self) -> Option<humoco_sim_core::types::Attestation> {
+        let lock_id_vec = hex::decode(&self.lock_id).ok()?;
+        if lock_id_vec.len() != 32 {
+            return None;
+        }
+        let mut lock_id = [0u8; 32];
+        lock_id.copy_from_slice(&lock_id_vec);
+
+        let parent_vec = hex::decode(&self.parent_lock).ok()?;
+        if parent_vec.len() != 32 {
+            return None;
+        }
+        let mut parent_lock = [0u8; 32];
+        parent_lock.copy_from_slice(&parent_vec);
+
+        let sig_vec = hex::decode(&self.signature).ok()?;
+        if sig_vec.len() != 64 {
+            return None;
+        }
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&sig_vec);
+
+        Some(humoco_sim_core::types::Attestation {
+            lock_id,
+            parent_lock,
+            node_id: self.node_id,
+            timestamp: humoco_sim_core::types::SimTime(self.timestamp),
+            signature,
+            shard_id: self.shard_id,
+        })
+    }
 }
 
 /// Assembled quorum certificate containing individual node attestations (Ed25519 signatures) from shard committee members.

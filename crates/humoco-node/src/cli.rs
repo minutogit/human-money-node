@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::api::qr::generate_qr_ansi;
 use crate::config::NodeConfig;
-use crate::control::{parse_account_tag, ControlClient, ControlResponse};
+use crate::control::{parse_account_tag, ControlClient, ControlRequest, ControlResponse};
 use crate::daemon::NodeDaemon;
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
@@ -2088,38 +2088,89 @@ pub async fn execute_revoke(
         return Ok(());
     }
 
-    // Generate deliberate equivocation proof (2 valid signed heartbeats within 1 second < 50 min)
-    let node_id = identity.node_id_u16();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let hb1 =
-        humoco_sim_core::fraud::sign_heartbeat(node_id, humoco_sim_core::types::SimTime(now_ms));
-    let hb2 = humoco_sim_core::fraud::sign_heartbeat(
-        node_id,
-        humoco_sim_core::types::SimTime(now_ms + 1000),
+    // Generate genuine first-party equivocation proof (Pillar 1 Shard Equivocation, A09-01)
+    let proof = crate::identity::build_self_revocation_fraud_proof(
+        &identity,
+        config.network.network_id,
+        now_ms,
     );
-    let proof = humoco_sim_core::fraud::FraudProofPayload::new_heartbeat_spam(hb1, hb2);
 
-    // Save banned state to local database if present
-    if config.storage.data_dir.exists() {
-        let db_path = config.storage.data_dir.join("humoco.redb");
-        if db_path.exists() {
-            if let Ok(storage) = RedbStorage::open(&db_path) {
-                let _ = storage.ban_node(identity.node_pubkey(), now_ms);
-                let proof_raw = bincode::serialize(&proof).unwrap_or_default();
-                let evidence_hash = *blake3::hash(&proof_raw).as_bytes();
-                let _ = storage.put_evidence(&evidence_hash, &proof_raw);
+    if !crate::network::transport::verify_equivocation_first_party(identity.verifying_key(), &proof) {
+        return Err(NodeError::Crypto(
+            "Self-revocation proof failed local first-party verification".into(),
+        ));
+    }
+
+    let proof_raw = bincode::serialize(&proof)
+        .map_err(|e| NodeError::Cli(format!("Failed to serialize fraud proof: {e}")))?;
+    let evidence_hash = *blake3::hash(&proof_raw).as_bytes();
+
+    let socket_path = config.control_socket_path();
+    let mut remote_revoked = false;
+    let mut broadcast_count = 0;
+
+    if socket_path.exists() {
+        let client = ControlClient::new(socket_path);
+        match client
+            .send_request(ControlRequest::RevokeIdentity {
+                proof_bytes: proof_raw.clone(),
+            })
+            .await
+        {
+            Ok(ControlResponse::IdentityRevoked { broadcast_peers }) => {
+                remote_revoked = true;
+                broadcast_count = broadcast_peers;
+            }
+            Ok(ControlResponse::Error { message }) => {
+                return Err(NodeError::Cli(format!(
+                    "Control server rejected self-revocation: {}",
+                    message
+                )));
+            }
+            Ok(_) => {
+                return Err(NodeError::Cli("Unexpected response from control server".into()));
+            }
+            Err(_) => {
+                // Control socket exists but daemon is not reachable (or stale socket), fall through to offline DB path
             }
         }
     }
 
+    if !remote_revoked {
+        let db_path = config.storage.data_dir.join("humoco.redb");
+        if !config.storage.data_dir.exists() {
+            std::fs::create_dir_all(&config.storage.data_dir).map_err(|err| NodeError::IoWithPath {
+                path: config.storage.data_dir.clone(),
+                source: err,
+            })?;
+        }
+        let storage = RedbStorage::open(&db_path)?;
+        storage.commit_slashing_evidence_and_ban(
+            &evidence_hash,
+            &proof_raw,
+            identity.node_pubkey(),
+            now_ms,
+        )?;
+    }
+
     println!("\n✅ KNOTEN WURDE ERFOLGREICH SELBST-VERBANNT.");
-    println!("Beweis-Payload (Pillar 3 Heartbeat Equivocation) generiert.");
-    println!("Perpetrator: {}", identity.public_key_hex());
-    println!("Status: PERMANENT BANNED & WoT SEVERED.");
+    println!("Beweis-Payload: Säule 1 Shard Equivocation (Ed25519 First-Party Self-Proof).");
+    println!("Perpetrator:    {}", identity.public_key_hex());
+    println!("Lokale DB:      DURABLE COMMITTED (Evidence + Ban atomar persistiert).");
+    if remote_revoked {
+        println!(
+            "Remote-Mesh:    Erfolgreich an {} aktive Peer(s) übertragen. Daemon fährt herunter.",
+            broadcast_count
+        );
+    } else {
+        println!("Remote-Mesh:    0 Peers erreichbar (Offline-Widerruf; Daemon lief nicht).");
+    }
+    println!("Status:         PERMANENT BANNED & WoT SEVERED.");
     Ok(())
 }
 

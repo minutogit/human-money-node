@@ -7,6 +7,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::network::peer::{PeerConnectionType, PeerInfo, PeerStatus};
 
@@ -246,6 +247,8 @@ pub struct DnsPeerState {
 /// locally detected (broadcast to all F2F friends).
 pub type FraudProofForwardMsg = (humoco_sim_core::fraud::FraudProofPayload, Option<[u8; 32]>);
 
+pub type EngineBannedNodesHandle = Arc<tokio::sync::RwLock<std::collections::HashSet<[u8; 32]>>>;
+
 pub const MAX_HEARTBEATS_PER_MINUTE_SLOT: usize = 10;
 
 /// Bounded LRU-style deduplication cache for seen heartbeats (Spec 11).
@@ -325,9 +328,53 @@ impl HeartbeatDedupCache {
     }
 }
 
+/// Bounded LRU cache of observed original shard attestations for equivocation detection (A10-02).
+#[derive(Debug)]
+pub struct ObservedVoteCache {
+    map: HashMap<([u8; 32], [u8; 32]), humoco_sim_core::types::Attestation>,
+    queue: std::collections::VecDeque<([u8; 32], [u8; 32])>,
+    capacity: usize,
+}
+
+impl ObservedVoteCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity(capacity.min(4096)),
+            queue: std::collections::VecDeque::with_capacity(capacity.min(4096)),
+            capacity,
+        }
+    }
+
+    /// Inserts an original vote for `(signer_pubkey, parent_lock)`.
+    /// Returns `Err(prev_att)` if an existing attestation on the same parent_lock
+    /// has a DIFFERENT `lock_id` (double-signing equivocation).
+    #[allow(clippy::result_large_err)]
+    pub fn insert_or_detect_equivocation(
+        &mut self,
+        signer_pubkey: [u8; 32],
+        att: humoco_sim_core::types::Attestation,
+    ) -> Result<(), humoco_sim_core::types::Attestation> {
+        let key = (signer_pubkey, att.parent_lock);
+        if let Some(prev) = self.map.get(&key) {
+            if prev.lock_id != att.lock_id {
+                return Err(prev.clone());
+            }
+            return Ok(());
+        }
+        if self.queue.len() >= self.capacity {
+            if let Some(oldest) = self.queue.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(key, att);
+        self.queue.push_back(key);
+        Ok(())
+    }
+}
+
 type LocalTicketObservation = Arc<std::sync::Mutex<Option<([u8; 32], [u8; 32], Instant)>>>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PeerManager {
     gateway_advertisements: Arc<
         parking_lot::RwLock<
@@ -366,6 +413,18 @@ pub struct PeerManager {
     seen_fraud_proofs: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
     known_active_shards: Arc<RwLock<std::collections::BTreeSet<u16>>>,
     local_ticket_observation: LocalTicketObservation,
+    observed_votes: Arc<parking_lot::Mutex<ObservedVoteCache>>,
+    storage: Arc<parking_lot::RwLock<Option<std::sync::Weak<crate::storage::RedbStorage>>>>,
+    engine_banned_nodes: Arc<parking_lot::RwLock<Option<EngineBannedNodesHandle>>>,
+}
+
+impl std::fmt::Debug for PeerManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerManager")
+            .field("base_backoff_ms", &self.base_backoff_ms)
+            .field("max_backoff_ms", &self.max_backoff_ms)
+            .finish()
+    }
 }
 
 impl PeerManager {
@@ -463,6 +522,121 @@ impl PeerManager {
             seen_fraud_proofs: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(1024))),
             local_ticket_observation: Arc::new(std::sync::Mutex::new(None)),
             known_active_shards: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
+            observed_votes: Arc::new(parking_lot::Mutex::new(ObservedVoteCache::new(4096))),
+            storage: Arc::new(parking_lot::RwLock::new(None)),
+            engine_banned_nodes: Arc::new(parking_lot::RwLock::new(None)),
+        }
+    }
+
+    /// Sets the persistent storage handle for atomic slashing evidence and ban commits.
+    pub fn set_storage(&self, storage: std::sync::Weak<crate::storage::RedbStorage>) {
+        let mut guard = self.storage.write();
+        *guard = Some(storage);
+    }
+
+    /// Sets the dual-tier engine handle for immediate in-RAM ban containment.
+    pub fn set_engine(&self, engine: &crate::storage::DualTierEngine) {
+        let mut guard = self.engine_banned_nodes.write();
+        *guard = Some(engine.banned_nodes.clone());
+    }
+
+    /// Observes a verified original attestation for equivocation / cartel detection (A10-02).
+    ///
+    /// If a differing original vote (`lock_a != lock_b`) is detected for the same `(signer_pubkey, parent_lock)`
+    /// under `expected_network`, this automatically constructs `FraudProofPayload::new_shard_equivocation_with_pubkey`,
+    /// atomically commits the slashing evidence and ban to storage (if available), bans the peer in RAM and PeerManager,
+    /// broadcasts the fraud proof to all F2F friends, and returns `Some(proof)`.
+    pub fn observe_verified_original_attestation(
+        &self,
+        signer_pubkey: [u8; 32],
+        att: humoco_sim_core::types::Attestation,
+        expected_network: humoco_sim_core::types::NetworkId,
+    ) -> Option<humoco_sim_core::fraud::FraudProofPayload> {
+        let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&signer_pubkey) else {
+            return None;
+        };
+        let shard = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
+        if att.shard_id != 0 && att.shard_id != shard {
+            return None;
+        }
+        let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(
+            &att.parent_lock,
+            &att.lock_id,
+        );
+        let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        let prov_domain = humoco_sim_core::crypto::domain_approve_prov(expected_network);
+        let final_domain = humoco_sim_core::crypto::domain_approve_final(expected_network);
+        let is_valid = [(prov_domain, 0u8), (final_domain, 1u8)]
+            .into_iter()
+            .any(|(domain, status)| {
+                let digest = humoco_sim_core::crypto::compute_sig_digest(
+                    domain, 0, 0, 0, shard, status, &payload,
+                );
+                vk.verify_strict(&digest, &sig).is_ok()
+            });
+        if !is_valid {
+            return None;
+        }
+
+        let mut cache = self.observed_votes.lock();
+        match cache.insert_or_detect_equivocation(signer_pubkey, att.clone()) {
+            Ok(()) => None,
+            Err(prev_att) => {
+                warn!(
+                    offender = %hex::encode(signer_pubkey),
+                    parent_lock = %hex::encode(att.parent_lock),
+                    lock_a = %hex::encode(prev_att.lock_id),
+                    lock_b = %hex::encode(att.lock_id),
+                    "CRITICAL FRAUD: Conflicting original shard attestations detected! Automatic ShardEquivocation proof generated."
+                );
+                let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+                    prev_att,
+                    att,
+                    signer_pubkey,
+                );
+                if !crate::network::transport::verify_equivocation_first_party_network(
+                    Some(expected_network),
+                    &vk,
+                    &proof,
+                ) {
+                    warn!("Generated ShardEquivocation self-proof failed first-party verification");
+                    return None;
+                }
+
+                let proof_bytes = bincode::serialize(&proof).unwrap_or_default();
+                let evidence_hash = *blake3::hash(&proof_bytes).as_bytes();
+                let now_ms = self.net_time_ms();
+
+                if let Some(storage) = self.storage.read().as_ref().and_then(|w| w.upgrade()) {
+                    if let Err(e) = storage.commit_slashing_evidence_and_ban(
+                        &evidence_hash,
+                        &proof_bytes,
+                        &signer_pubkey,
+                        now_ms,
+                    ) {
+                        warn!("Failed to atomically commit slashing evidence and ban in redb: {e}");
+                    }
+                }
+
+                if let Some(engine_banned) = self.engine_banned_nodes.read().as_ref().cloned() {
+                    let pk = signer_pubkey;
+                    tokio::spawn(async move {
+                        engine_banned.write().await.insert(pk);
+                    });
+                }
+
+                let pm = self.clone();
+                let pk = signer_pubkey;
+                tokio::spawn(async move {
+                    pm.ban_node(&pk).await;
+                });
+
+                self.broadcast_fraud_proof(proof.clone());
+                Some(proof)
+            }
         }
     }
 
@@ -1249,6 +1423,31 @@ impl PeerManager {
         ingress_peer: Option<SocketAddr>,
         work_score: u64,
     ) {
+        self.learn_node_from_gossip_with_hrw_work_and_auth(
+            node_pubkey,
+            hrw_routing_id,
+            addr,
+            hops,
+            ingress_peer,
+            work_score,
+            hops == 0,
+        )
+        .await;
+    }
+
+    /// Extended variant that accepts an explicit origin authorization flag.
+    /// Relayed gossip (`hops > 0`) cannot overwrite an existing address unless `origin_authorized` is true.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn learn_node_from_gossip_with_hrw_work_and_auth(
+        &self,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        addr: SocketAddr,
+        hops: u8,
+        ingress_peer: Option<SocketAddr>,
+        work_score: u64,
+        origin_authorized: bool,
+    ) {
         let (is_acceptable, _median) = self.is_ticket_acceptable(work_score);
         if !is_acceptable {
             return;
@@ -1273,8 +1472,24 @@ impl PeerManager {
                     entry.incubated_until = None;
                 }
             }
-            // Always update address and last seen timestamp
-            entry.addr = addr;
+            // Protect direct or stronger addresses from unauthorized relay downgrade:
+            // An address overwrite from a relay (hops > 0) is only permitted if origin_authorized is true.
+            if entry.addr != addr {
+                if hops > 0 && !origin_authorized {
+                    warn!(
+                        node = %hex::encode(node_pubkey),
+                        hops,
+                        existing = %entry.addr,
+                        attempted = %addr,
+                        "GOSSIP BARRIER: Rejected unauthorized address overwrite from relay"
+                    );
+                } else {
+                    entry.addr = addr;
+                    if hops <= entry.min_hops || origin_authorized {
+                        entry.min_hops = hops;
+                    }
+                }
+            }
             entry.last_seen = now;
 
             if entry.hrw_routing_id != hrw_routing_id {
@@ -2947,4 +3162,82 @@ mod tests {
             "Next minute slot must allow new heartbeats for node_a"
         );
     }
+
+    #[tokio::test]
+    async fn test_observe_verified_original_attestation_detects_equivocation() {
+        use ed25519_dalek::Signer;
+        use humoco_sim_core::crypto::{
+            compute_attestation_payload_digest, compute_sig_digest, HUMOCO_V1_APPROVE_PROV_MAINNET,
+        };
+        use humoco_sim_core::types::{Attestation, NetworkId, SimTime};
+        use crate::identity::NodeIdentity;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::storage::RedbStorage::open(&temp.path().join("equiv.redb")).unwrap());
+        let (engine, worker) = crate::storage::DualTierEngine::new(db.clone());
+        let pm = Arc::new(PeerManager::new(vec![]));
+        pm.set_storage(Arc::downgrade(&db));
+        pm.set_engine(&engine);
+
+        let signer = NodeIdentity::generate();
+        let parent_lock = [0x55u8; 32];
+        let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+        let node_id = signer.node_id_u16();
+
+        let sign_vote = |lock_id: [u8; 32]| -> Attestation {
+            let payload = compute_attestation_payload_digest(&parent_lock, &lock_id);
+            let digest = compute_sig_digest(
+                HUMOCO_V1_APPROVE_PROV_MAINNET,
+                0, 0, 0, shard_id, 0, &payload,
+            );
+            Attestation {
+                lock_id,
+                parent_lock,
+                node_id,
+                timestamp: SimTime(1000),
+                signature: signer.signing_key().sign(&digest).to_bytes(),
+                shard_id,
+            }
+        };
+
+        let att1 = sign_vote([1u8; 32]);
+        let att1_retry = sign_vote([1u8; 32]);
+        let att2_conflict = sign_vote([2u8; 32]);
+
+        // First vote: accepted, no fraud
+        assert!(pm
+            .observe_verified_original_attestation(
+                *signer.node_pubkey(),
+                att1,
+                NetworkId::Mainnet,
+            )
+            .is_none());
+        assert!(!db.is_node_banned(signer.node_pubkey()).unwrap());
+
+        // Identical retry: accepted without fraud
+        assert!(pm
+            .observe_verified_original_attestation(
+                *signer.node_pubkey(),
+                att1_retry,
+                NetworkId::Mainnet,
+            )
+            .is_none());
+        assert!(!db.is_node_banned(signer.node_pubkey()).unwrap());
+
+        // Conflicting vote on same parent_lock: detected as equivocation!
+        let proof = pm
+            .observe_verified_original_attestation(
+                *signer.node_pubkey(),
+                att2_conflict,
+                NetworkId::Mainnet,
+            )
+            .expect("must detect equivocation");
+
+        assert_eq!(proof.perpetrator_node_id, *signer.node_pubkey());
+        assert!(db.is_node_banned(signer.node_pubkey()).unwrap());
+
+        worker.abort();
+        let _ = worker.await;
+    }
 }
+

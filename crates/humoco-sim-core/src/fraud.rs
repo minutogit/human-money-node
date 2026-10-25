@@ -2,6 +2,7 @@ use crate::crypto::{
     compute_attestation_payload_digest, compute_sig_digest, verify_attestation,
     DOMAIN_INGRESS_DECL,
 };
+pub use crate::crypto::DOMAIN_HB_ANNOUNCE;
 use crate::types::{Attestation, NetworkId, NodeId, SimTime};
 
 // ---------------------------------------------------------------------------
@@ -322,6 +323,38 @@ pub fn compute_ingress_envelope_digest_v2(
     hasher.update(&footprint_micro_bj.to_le_bytes());
     hasher.update(&[if is_read { 1u8 } else { 0u8 }]);
     hasher.update(op_hash);
+    *hasher.finalize().as_bytes()
+}
+
+/// Computes the canonical announcement hash for an authentic node presence heartbeat.
+///
+/// Binds `(addr, pow_nonce, hrw_routing_id, ticket_epoch_t0)` under domain tag `HUMOCO_V1_HB_ANNOUNCE`.
+/// Digest = BLAKE3(len || "HUMOCO_V1_HB_ANNOUNCE" || addr_bytes || pow_nonce_le || hrw_routing_id || ticket_epoch_t0_le)
+pub fn compute_heartbeat_announcement_hash(
+    addr: &std::net::SocketAddr,
+    pow_nonce: u64,
+    hrw_routing_id: &[u8; 32],
+    ticket_epoch_t0: u64,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    let tag_len = (DOMAIN_HB_ANNOUNCE.len() as u8).to_le_bytes();
+    hasher.update(&tag_len);
+    hasher.update(DOMAIN_HB_ANNOUNCE);
+    match addr {
+        std::net::SocketAddr::V4(v4) => {
+            hasher.update(&[4u8]);
+            hasher.update(&v4.ip().octets());
+            hasher.update(&v4.port().to_le_bytes());
+        }
+        std::net::SocketAddr::V6(v6) => {
+            hasher.update(&[6u8]);
+            hasher.update(&v6.ip().octets());
+            hasher.update(&v6.port().to_le_bytes());
+        }
+    }
+    hasher.update(&pow_nonce.to_le_bytes());
+    hasher.update(hrw_routing_id);
+    hasher.update(&ticket_epoch_t0.to_le_bytes());
     *hasher.finalize().as_bytes()
 }
 
@@ -1731,5 +1764,25 @@ mod tests {
                 path, expected_fraud, verified
             );
         }
+    }
+
+    #[test]
+    fn test_compute_heartbeat_announcement_hash_determinism_and_domain() {
+        let addr_v4: std::net::SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let addr_v4_other: std::net::SocketAddr = "127.0.0.1:9091".parse().unwrap();
+        let addr_v6: std::net::SocketAddr = "[::1]:9090".parse().unwrap();
+        let routing_id = [0x42u8; 32];
+        let h1 = compute_heartbeat_announcement_hash(&addr_v4, 12345, &routing_id, 1_700_000_000);
+        let h2 = compute_heartbeat_announcement_hash(&addr_v4, 12345, &routing_id, 1_700_000_000);
+        assert_eq!(h1, h2, "Announcement hash must be deterministic");
+
+        let h_diff_port = compute_heartbeat_announcement_hash(&addr_v4_other, 12345, &routing_id, 1_700_000_000);
+        assert_ne!(h1, h_diff_port, "Changing address port must change announcement hash");
+
+        let h_v6 = compute_heartbeat_announcement_hash(&addr_v6, 12345, &routing_id, 1_700_000_000);
+        assert_ne!(h1, h_v6, "IPv4 vs IPv6 must yield different announcement hash");
+
+        let h_diff_nonce = compute_heartbeat_announcement_hash(&addr_v4, 12346, &routing_id, 1_700_000_000);
+        assert_ne!(h1, h_diff_nonce, "Different nonce must change announcement hash");
     }
 }

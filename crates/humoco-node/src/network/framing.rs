@@ -271,6 +271,97 @@ impl HeartbeatWirePayload {
             }
         }
     }
+
+    /// Computes the canonical announcement hash binding `(addr, pow_nonce, hrw_routing_id, ticket_epoch_t0)`.
+    pub fn compute_announcement_hash(&self) -> [u8; 32] {
+        humoco_sim_core::fraud::compute_heartbeat_announcement_hash(
+            &self.addr,
+            self.pow_nonce,
+            &self.hrw_routing_id,
+            self.ticket_epoch_t0,
+        )
+    }
+
+    /// Signs this heartbeat as the origin node, cryptographically binding its announced
+    /// endpoint address, PoW parameters, and EMA declarations into `signature`.
+    pub fn sign_origin(&mut self, identity: &crate::identity::NodeIdentity, now_ms: u64) {
+        use ed25519_dalek::Signer;
+        self.node_id = *identity.node_pubkey();
+        self.timestamp_ms = now_ms;
+        self.pow_nonce = identity.nonce();
+        self.hrw_routing_id = *identity.hrw_routing_id();
+        self.ticket_epoch_t0 = identity.t0();
+
+        let op_hash = self.compute_announcement_hash();
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+            &self.node_id,
+            0,
+            0,
+            self.timestamp_ms,
+            self.declared_write_ema_micro_bj,
+            self.declared_read_ema_credits,
+            0,
+            false,
+            &op_hash,
+        );
+        self.signature = identity.signing_key().sign(&digest).to_bytes();
+    }
+
+    /// Verifies that the heartbeat signature is valid and strictly binds `self.addr`
+    /// (via `op_hash = announcement_hash`). Required for relayed multi-hop gossip (`hops > 0`).
+    pub fn verify_origin_address_binding(&self) -> bool {
+        if self.signature == [0u8; 64] {
+            return false;
+        }
+        let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.node_id) else {
+            return false;
+        };
+        let sig = ed25519_dalek::Signature::from_bytes(&self.signature);
+        let op_hash = self.compute_announcement_hash();
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+            &self.node_id,
+            0,
+            0,
+            self.timestamp_ms,
+            self.declared_write_ema_micro_bj,
+            self.declared_read_ema_credits,
+            0,
+            false,
+            &op_hash,
+        );
+        use ed25519_dalek::Verifier;
+        vk.verify(&digest, &sig).is_ok()
+    }
+
+    /// Verifies the origin signature.
+    /// First checks for canonical address-binding signature; if not matched, falls back to
+    /// legacy `op_hash = [0u8; 32]` for backward compatibility on direct connections.
+    pub fn verify_origin_signature(&self) -> bool {
+        if self.verify_origin_address_binding() {
+            return true;
+        }
+        if self.signature == [0u8; 64] {
+            return false;
+        }
+        let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.node_id) else {
+            return false;
+        };
+        let sig = ed25519_dalek::Signature::from_bytes(&self.signature);
+        let legacy_op_hash = [0u8; 32];
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+            &self.node_id,
+            0,
+            0,
+            self.timestamp_ms,
+            self.declared_write_ema_micro_bj,
+            self.declared_read_ema_credits,
+            0,
+            false,
+            &legacy_op_hash,
+        );
+        use ed25519_dalek::Verifier;
+        vk.verify(&digest, &sig).is_ok()
+    }
 }
 
 pub fn default_signature() -> [u8; 64] {
@@ -1058,6 +1149,70 @@ mod tests {
             2,
             "JSON must cap at 2 entries"
         );
+    }
+
+    #[test]
+    fn test_heartbeat_origin_signature_and_tamper_detection() {
+        let identity = crate::identity::NodeIdentity::generate();
+        let addr: std::net::SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let mut hb = HeartbeatWirePayload {
+            gateway_advertisement: None,
+            signing_checkpoint: None,
+            node_id: *identity.node_pubkey(),
+            addr,
+            timestamp_ms: 12345,
+            declared_write_ema_micro_bj: 100,
+            declared_read_ema_credits: 200,
+            signature: [0; 64],
+            supported_suites_mask: 0,
+            piggyback_observations: vec![],
+            pow_nonce: identity.nonce(),
+            hrw_routing_id: *identity.hrw_routing_id(),
+            ticket_epoch_t0: identity.t0(),
+            ttl: 16,
+        };
+
+        // Unsigned initially
+        assert!(!hb.verify_origin_address_binding());
+        assert!(!hb.verify_origin_signature());
+
+        // Origin-signed
+        hb.sign_origin(&identity, 12345);
+        assert!(hb.verify_origin_address_binding(), "Must verify address binding");
+        assert!(hb.verify_origin_signature(), "Must verify origin signature");
+
+        // Tamper with address: forged relay attempt
+        let mut tampered_addr = hb.clone();
+        tampered_addr.addr = "127.0.0.1:31338".parse().unwrap();
+        assert!(!tampered_addr.verify_origin_address_binding(), "Tampered address must fail address binding");
+
+        // Tamper with timestamp
+        let mut tampered_ts = hb.clone();
+        tampered_ts.timestamp_ms = 99999;
+        assert!(!tampered_ts.verify_origin_address_binding(), "Tampered timestamp must fail");
+
+        // Tamper with EMA
+        let mut tampered_ema = hb.clone();
+        tampered_ema.declared_write_ema_micro_bj = 9999;
+        assert!(!tampered_ema.verify_origin_address_binding(), "Tampered EMA must fail");
+
+        // Legacy signature with op_hash = [0; 32]
+        use ed25519_dalek::Signer;
+        let legacy_digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+            identity.node_pubkey(),
+            0,
+            0,
+            12345,
+            100,
+            200,
+            0,
+            false,
+            &[0u8; 32],
+        );
+        let mut legacy_hb = hb.clone();
+        legacy_hb.signature = identity.signing_key().sign(&legacy_digest).to_bytes();
+        assert!(!legacy_hb.verify_origin_address_binding(), "Legacy signature must NOT satisfy address binding");
+        assert!(legacy_hb.verify_origin_signature(), "Legacy signature must satisfy backward-compatible origin signature");
     }
 }
 

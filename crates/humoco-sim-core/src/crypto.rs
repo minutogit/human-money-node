@@ -23,6 +23,7 @@ pub const DOMAIN_BRIDGE_LOCK: &[u8] = b"HUMOCO_V1_BRIDGE_LOCK";
 pub const DOMAIN_HYBRID_NODE_ID: &[u8] = b"HUMOCO_V2_HYBRID_NODE_ID";
 pub const DOMAIN_HRW_ROUTING_TICKET: &[u8] = b"HUMOCO_V1_HRW_ROUTING_TICKET";
 pub const DOMAIN_ATTESTATION_PAYLOAD: &[u8] = b"HUMOCO_V1_ATTESTATION_PAYLOAD";
+pub const DOMAIN_HB_ANNOUNCE: &[u8] = b"HUMOCO_V1_HB_ANNOUNCE";
 
 /// Computes the deterministic work score W from a 32-byte PoW proof hash.
 ///

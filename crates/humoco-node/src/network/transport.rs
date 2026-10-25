@@ -289,6 +289,8 @@ impl NodeRequestHandler {
         identity: NodeIdentity,
         peer_manager: Arc<crate::network::PeerManager>,
     ) -> Self {
+        peer_manager.set_storage(Arc::downgrade(&storage));
+        peer_manager.set_engine(&engine);
         let clock = peer_manager.clock().clone();
         Self {
             engine,
@@ -1068,8 +1070,13 @@ impl RequestHandler for NodeRequestHandler {
                             let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
                             let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
                             let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                            let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
-                            engine.ban_node(sender_pubkey, now_ms).await;
+                            let _ = storage.commit_slashing_evidence_and_ban(
+                                &evidence_hash,
+                                &evidence_bytes,
+                                &sender_pubkey,
+                                now_ms,
+                            );
+                            engine.ban_node_ram(&sender_pubkey).await;
                             pm.ban_node(&sender_pubkey).await;
                             pm.broadcast_fraud_proof(proof);
 
@@ -1640,8 +1647,13 @@ impl RequestHandler for NodeRequestHandler {
                                 let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
                                 let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
                                 let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
-                                engine.ban_node(sender_pubkey, now_ms).await;
+                                let _ = storage.commit_slashing_evidence_and_ban(
+                                    &evidence_hash,
+                                    &evidence_bytes,
+                                    &sender_pubkey,
+                                    now_ms,
+                                );
+                                engine.ban_node_ram(&sender_pubkey).await;
                                 pm.ban_node(&sender_pubkey).await;
                                 pm.broadcast_fraud_proof(proof);
 
@@ -2164,6 +2176,7 @@ impl RequestHandler for NodeRequestHandler {
                     }
 
                     if hb.signature != [0u8; 64] {
+                        let announcement_hash = hb.compute_announcement_hash();
                         let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                             hb.node_id,
                             0,
@@ -2173,10 +2186,26 @@ impl RequestHandler for NodeRequestHandler {
                             hb.declared_read_ema_credits,
                             0,
                             false,
-                            [0u8; 32],
+                            announcement_hash,
                             hb.signature,
                         );
-                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write) {
+                        let valid = humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write)
+                            || {
+                                let legacy_ev = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                                    hb.node_id,
+                                    0,
+                                    0,
+                                    hb.timestamp_ms,
+                                    hb.declared_write_ema_micro_bj,
+                                    hb.declared_read_ema_credits,
+                                    0,
+                                    false,
+                                    [0u8; 32],
+                                    hb.signature,
+                                );
+                                humoco_sim_core::fraud::verify_ingress_envelope_signature(&legacy_ev)
+                            };
+                        if !valid {
                             warn!(node = %hex::encode(hb.node_id), "Heartbeat rejected: invalid signature");
                             return Ok(());
                         }
@@ -2191,8 +2220,13 @@ impl RequestHandler for NodeRequestHandler {
                                     let evidence_bytes =
                                         bincode::serialize(&proof).unwrap_or_default();
                                     let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                    let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
-                                    engine.ban_node(hb.node_id, now_ms).await;
+                                    let _ = storage.commit_slashing_evidence_and_ban(
+                                        &evidence_hash,
+                                        &evidence_bytes,
+                                        &hb.node_id,
+                                        now_ms,
+                                    );
+                                    engine.ban_node_ram(&hb.node_id).await;
                                     pm.ban_node(&hb.node_id).await;
                                     pm.broadcast_fraud_proof_with_sender(proof, sender);
                                     return Ok(());
@@ -2221,8 +2255,13 @@ impl RequestHandler for NodeRequestHandler {
                                     let evidence_bytes =
                                         bincode::serialize(&proof).unwrap_or_default();
                                     let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                    let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
-                                    engine.ban_node(hb.node_id, now_ms).await;
+                                    let _ = storage.commit_slashing_evidence_and_ban(
+                                        &evidence_hash,
+                                        &evidence_bytes,
+                                        &hb.node_id,
+                                        now_ms,
+                                    );
+                                    engine.ban_node_ram(&hb.node_id).await;
                                     pm.ban_node(&hb.node_id).await;
                                     pm.broadcast_fraud_proof_with_sender(proof, sender);
                                     return Ok(());
@@ -2247,8 +2286,13 @@ impl RequestHandler for NodeRequestHandler {
                                         let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev.clone());
                                         let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
                                         let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                        let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
-                                        engine.ban_node(gw_pub, now_ms).await;
+                                        let _ = storage.commit_slashing_evidence_and_ban(
+                                            &evidence_hash,
+                                            &evidence_bytes,
+                                            &gw_pub,
+                                            now_ms,
+                                        );
+                                        engine.ban_node_ram(&gw_pub).await;
                                         pm.ban_node(&gw_pub).await;
                                         pm.broadcast_fraud_proof_with_sender(proof, sender);
                                         continue;
@@ -2269,8 +2313,13 @@ impl RequestHandler for NodeRequestHandler {
                                         let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev.clone());
                                         let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
                                         let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                        let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
-                                        engine.ban_node(gw_pub, now_ms).await;
+                                        let _ = storage.commit_slashing_evidence_and_ban(
+                                            &evidence_hash,
+                                            &evidence_bytes,
+                                            &gw_pub,
+                                            now_ms,
+                                        );
+                                        engine.ban_node_ram(&gw_pub).await;
                                         pm.ban_node(&gw_pub).await;
                                         pm.broadcast_fraud_proof_with_sender(proof, sender);
                                         continue;
@@ -2684,7 +2733,7 @@ impl QuicTransport {
         timestamp_ms: u64,
         piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     ) -> Result<(), NodeError> {
-        let hb = crate::network::framing::HeartbeatWirePayload {
+        let mut hb = crate::network::framing::HeartbeatWirePayload {
             gateway_advertisement: self.handler.gateway_advertisement(),
             signing_checkpoint: self.handler.signing_checkpoint().await?,
             node_id,
@@ -2700,6 +2749,9 @@ impl QuicTransport {
             ticket_epoch_t0: self.identity.t0(),
             ttl: 16,
         };
+        if hb.signature == [0u8; 64] {
+            hb.sign_origin(&self.identity, timestamp_ms);
+        }
         let payload = bincode::serialize(&hb)
             .map_err(|e| NodeError::Network(format!("heartbeat serialize: {}", e)))?;
         let payload_len = checked_payload_len(payload.len())?;
@@ -3411,35 +3463,10 @@ impl QuicTransport {
                                                     let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
 
                                                     if let Ok(hb) = res1 {
-                                                        // Check deduplication cache to prevent gossip loops (Spec 11)
-                                                        if !pm.check_and_record_heartbeat(&hb.node_id, hb.pow_nonce, hb.timestamp_ms).await {
-                                                            debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped duplicate heartbeat (already seen)");
-                                                            return;
-                                                        }
-
-                                                        // TTL drop check
+                                                        // 1. TTL drop check
                                                         if hb.ttl == 0 {
                                                             debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with TTL == 0");
                                                             return;
-                                                        }
-
-                                                        if hb.signature != [0u8; 64] {
-                                                            let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
-                                                                hb.node_id,
-                                                                0,
-                                                                0,
-                                                                hb.timestamp_ms,
-                                                                hb.declared_write_ema_micro_bj,
-                                                                hb.declared_read_ema_credits,
-                                                                0,
-                                                                false,
-                                                                [0u8; 32],
-                                                                hb.signature,
-                                                            );
-                                                            if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write) {
-                                                                warn!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with invalid signature");
-                                                                return;
-                                                            }
                                                         }
 
                                                         let node_id = hb.node_id;
@@ -3454,6 +3481,21 @@ impl QuicTransport {
                                                         }
                                                         if !is_direct && hops == 0 {
                                                             warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
+                                                            return;
+                                                        }
+
+                                                        // Cryptographic origin signature check
+                                                        if hops > 0 {
+                                                            if !hb.verify_origin_address_binding() {
+                                                                warn!(
+                                                                    node = %hex::encode(node_id),
+                                                                    hops,
+                                                                    "GOSSIP BARRIER: Dropped relayed heartbeat without valid origin address binding"
+                                                                );
+                                                                return;
+                                                            }
+                                                        } else if hb.signature != [0u8; 64] && !hb.verify_origin_signature() {
+                                                            warn!(node = %hex::encode(node_id), "GOSSIP BARRIER: Dropped direct heartbeat with invalid signature");
                                                             return;
                                                         }
 
@@ -3472,6 +3514,12 @@ impl QuicTransport {
                                                                 );
                                                                 return;
                                                             }
+                                                        }
+
+                                                        // Check deduplication cache to prevent gossip loops (Spec 11) - ONLY AFTER signature & freshness
+                                                        if !pm.check_and_record_heartbeat(&hb.node_id, hb.pow_nonce, hb.timestamp_ms).await {
+                                                            debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped duplicate heartbeat (already seen)");
+                                                            return;
                                                         }
 
                                                         // Verify Argon2d Shard Ticket PoW & HRW routing ID

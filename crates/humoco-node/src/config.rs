@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
@@ -360,15 +360,16 @@ pub struct QuotasConfig {
     pub default_byte_years: u64,
 }
 
+/// Well-known default P2P listen address (0.0.0.0:9090)
+pub const DEFAULT_P2P: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9090);
+/// Well-known default RPC listen address (127.0.0.1:8080)
+pub const DEFAULT_RPC: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            p2p_listen_addr: DEFAULT_P2P_LISTEN_ADDR
-                .parse()
-                .expect("Valid default P2P socket address"),
-            rpc_listen_addr: DEFAULT_RPC_LISTEN_ADDR
-                .parse()
-                .expect("Valid default RPC socket address"),
+            p2p_listen_addr: DEFAULT_P2P,
+            rpc_listen_addr: DEFAULT_RPC,
             operator_listen_addr: None,
             shutdown_timeout_secs: default_shutdown_timeout_secs(),
             advertised_addr: None,

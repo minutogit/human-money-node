@@ -297,7 +297,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("\x1b[1;36m║        HuMoCo Layer-2 Multi-Node Cluster & Live Dashboard Simulation         ║\x1b[0m");
     println!("\x1b[1;36m╚══════════════════════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
-    let num_nodes = 4;
+    let num_nodes = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .or_else(|| std::env::var("SIM_NODES").ok().and_then(|s| s.parse::<usize>().ok()))
+        .unwrap_or(4);
     println!(
         "\x1b[1;33m🚀 Initialisiere {} HuMoCo Knoten im echten F2F Mesh...\x1b[0m",
         num_nodes
@@ -323,12 +327,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut instances = Vec::with_capacity(num_nodes);
     let mut join_handles = Vec::new();
 
+    let ephemeral_addr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+
     for (i, identity, key_path, control_socket, temp) in node_defs {
         let mut config = NodeConfig::default();
         config.network.simulation_mode = true;
         config.network.fast_ticker_interval_secs = Some(5);
-        config.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
-        config.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+        config.network.p2p_listen_addr = ephemeral_addr;
+        config.network.rpc_listen_addr = ephemeral_addr;
         config.storage.data_dir = temp.path().join("data");
         config.identity.key_path = key_path;
         config.network.control_socket = Some(control_socket.clone());

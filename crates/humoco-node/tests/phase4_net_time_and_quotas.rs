@@ -399,6 +399,135 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
 }
 
 #[tokio::test]
+async fn test_phase4_adversarial_5x_whale_limit_flooding() {
+use humoco_node::DualTierEngine;
+use humoco_node::identity::NodeIdentity;
+use humoco_node::network::{NodeRequestHandler, RequestHandler};
+use humoco_sim_core::wire::{FLAG_QUOTA_EXCEEDED, MsgType};
+
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("adversarial_whale.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _drain) = DualTierEngine::new(storage.clone());
+    let pow = Arc::new(humoco_node::ingress::pow::PowEngine::new([0x55; 32], 8));
+    let tier_controller = Arc::new(humoco_node::ingress::tier::TierController::new(storage.clone(), pow));
+
+    let identity_shard = NodeIdentity::generate();
+    let identity_client = NodeIdentity::generate();
+
+    let pm_shard = Arc::new(humoco_node::network::manager::PeerManager::with_f2f(
+        Vec::new(),
+        vec![*identity_client.node_pubkey()],
+    ));
+    pm_shard.learn_node_from_gossip(
+        *identity_client.node_pubkey(),
+        "127.0.0.1:9001".parse().unwrap(),
+        0,
+        None,
+    )
+    .await;
+
+    admit_mature_local(&pm_shard, &identity_shard).await;
+    let handler_shard = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            identity_shard.clone(),
+            pm_shard.clone(),
+        )
+        .with_tier_controller(tier_controller.clone())
+        .with_readiness_manager(isolated_ready()),
+    );
+
+    // The hard floor NCB_eff is 960_000, so 5.0 * 960_000 = 4_800_000 is the 5x whale brake
+    let _quota_limit = 4_800_000u64;
+
+    // Flood the shard with LockVerifyRequests having extremely high declared write EMA,
+    // far exceeding the 5x whale brake limit. Each request should be rejected with FLAG_QUOTA_EXCEEDED.
+    for attempt in 0..10u32 {
+        // Use EMA value that guarantees daily rate > 5.0 * ncb_eff (4.8M).
+        // From quota.rs: Rate = (EMA * 693_147) / 1_000_000, then / 1_000_000 for daily rate.
+        // For daily_rate > 4_800_000: need EMA > ~3.5 * 10^15
+        let extremely_high_ema = 50_000_000_000_000u64; // 50 trillion µBJ → daily rate >> 4.8M
+
+        let hmc_req = humoco_node::api::hmc::L2LockRequest {
+            causal_output: None,
+            auth: humoco_node::api::hmc::L2AuthPayload {
+                ephemeral_pubkey: *identity_client.node_pubkey(),
+                auth_signature: None,
+            },
+            layer2_voucher_id: "test_voucher_flood".into(),
+            ds_tag: None,
+            transaction_hash: [1; 32],
+            is_genesis: true,
+            sender_ephemeral_pub: *identity_client.node_pubkey(),
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+
+        let hmc_payload = bincode::serialize(&humoco_node::network::framing::LockWirePayload::Hmc {
+            req: hmc_req,
+            chain: None,
+            root_valid_until: 86_400_000,
+            epoch_day: 0,
+            epoch_seq: 0,
+            cumulative_micro_byte_years: 0,
+            prev_day_final_bytes: 0,
+            current_anl_24h: extremely_high_ema,
+            declared_write_ema_micro_bj: extremely_high_ema,
+            declared_read_ema_credits: 0,
+            sender_pubkey: *identity_client.node_pubkey(),
+            sender_signature: [0; 64],
+            timestamp_ms: 1000,
+        })
+        .unwrap();
+
+        let req_header = humoco_sim_core::WireHeader::new(
+            MsgType::LockVerifyRequest as u16,
+            1,
+            0,
+            0,
+            hmc_payload.len() as u32,
+        );
+
+        let (resp_header, resp_payload) = handler_shard
+            .handle_authenticated(
+                req_header,
+                hmc_payload,
+                Some(*identity_client.node_pubkey()),
+            )
+            .await
+            .expect("handle");
+
+        assert_eq!(
+            resp_header.msg_type,
+            MsgType::LockVerifyResponse as u16,
+            "Attempt {}: expected LockVerifyResponse", attempt
+        );
+        assert_eq!(
+            resp_header.flags & FLAG_QUOTA_EXCEEDED,
+            FLAG_QUOTA_EXCEEDED,
+            "Attempt {}: shard must return FLAG_QUOTA_EXCEEDED when write load far exceeds 5x whale brake", attempt
+        );
+assert!(
+            resp_payload.is_empty(),
+            "Attempt {}: payload must be empty on quota rejection",
+            attempt
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     use ed25519_dalek::Signer;
     use humoco_node::identity::NodeIdentity;

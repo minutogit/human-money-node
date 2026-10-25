@@ -217,6 +217,7 @@ pub struct NodeRequestHandler {
     pub storage: Arc<crate::storage::RedbStorage>,
     pub identity: NodeIdentity,
     pub peer_manager: Option<Arc<crate::network::PeerManager>>,
+    pub clock: Arc<crate::network::NetworkClock>,
     pub tier_controller: Option<Arc<crate::ingress::TierController>>,
     pub is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
     pub readiness_manager: Arc<crate::daemon::ShardReadinessManager>,
@@ -236,6 +237,7 @@ impl NodeRequestHandler {
             storage,
             identity,
             peer_manager: None,
+            clock: Arc::new(crate::network::NetworkClock::new()),
             tier_controller: None,
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             readiness_manager: Arc::new(crate::daemon::ShardReadinessManager::new()),
@@ -251,17 +253,34 @@ impl NodeRequestHandler {
         identity: NodeIdentity,
         peer_manager: Arc<crate::network::PeerManager>,
     ) -> Self {
+        let clock = peer_manager.clock().clone();
         Self {
             engine,
             storage,
             identity,
             peer_manager: Some(peer_manager),
+            clock,
             tier_controller: None,
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             readiness_manager: Arc::new(crate::daemon::ShardReadinessManager::new()),
             snapshot_cuts: Arc::new(crate::storage::db::snapshot::SnapshotCuts::default()),
             gateway_urls: Vec::new(),
             network_id: humoco_sim_core::types::NetworkId::default(),
+        }
+    }
+
+    pub fn with_clock(mut self, clock: Arc<crate::network::NetworkClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Returns the active P2P network-adjusted time in ms.
+    /// Uses peer manager median clock if available, falling back to monotonic NetworkClock.
+    pub fn net_time_ms(&self) -> u64 {
+        if let Some(pm) = &self.peer_manager {
+            pm.net_time_ms()
+        } else {
+            self.clock.net_time_ms()
         }
     }
 
@@ -353,6 +372,7 @@ impl RequestHandler for NodeRequestHandler {
         let identity = self.identity.clone();
         let peer_manager = self.peer_manager.clone();
         let tier_controller = self.tier_controller.clone();
+        let clock = self.clock.clone();
         let network_id = self.network_id;
         let readiness_manager = self.readiness_manager.clone();
         let snapshot_cuts = self.snapshot_cuts.clone();
@@ -378,12 +398,7 @@ impl RequestHandler for NodeRequestHandler {
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| clock.net_time_ms());
                 match bincode::deserialize::<humoco_sim_core::fraud::FraudProofPayload>(&payload) {
                     Ok(proof) => {
                         let offender = proof.perpetrator_node_id;
@@ -478,12 +493,7 @@ impl RequestHandler for NodeRequestHandler {
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| clock.net_time_ms());
 
                 let ncb_eff = if let Some(tc) = &tier_controller {
                     tc.effective_ncb()
@@ -990,7 +1000,10 @@ impl RequestHandler for NodeRequestHandler {
                                     return Ok((resp_header, bytes));
                                 }
                                 _ => {
-                                    let last_hop = chain_req.chain.last().unwrap();
+                                    let last_hop = match chain_req.chain.last() {
+                                        Some(h) => h,
+                                        None => return Err(NodeError::Network("Empty chain received on wire".into())),
+                                    };
                                     let lookup_tag = if last_hop.is_genesis {
                                         bs58::encode(&last_hop.transaction_hash).into_string()
                                     } else {
@@ -1219,12 +1232,7 @@ impl RequestHandler for NodeRequestHandler {
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| clock.net_time_ms());
 
                 let ncb_read_eff = if let Some(tc) = &tier_controller {
                     tc.effective_read_ncb()
@@ -1606,12 +1614,7 @@ impl RequestHandler for NodeRequestHandler {
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| clock.net_time_ms());
                 // DEC-057 / F06: Storage read errors must never default to an empty witness.
                 if !engine.is_signing_healthy() {
                     let resp_header = WireHeader::new(
@@ -1656,12 +1659,7 @@ impl RequestHandler for NodeRequestHandler {
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| clock.net_time_ms());
                 let db = storage.clone();
                 let locks = tokio::task::spawn_blocking(move || db.committed_shard_records(shard_id, now_ms)).await
                     .map_err(|e| NodeError::Network(format!("bucket worker: {e}")))?
@@ -1743,6 +1741,7 @@ impl RequestHandler for NodeRequestHandler {
         let engine = self.engine.clone();
         let storage = self.storage.clone();
         let peer_manager = self.peer_manager.clone();
+        let clock = self.clock.clone();
         let identity = self.identity.clone();
         let readiness = self.readiness_manager.clone();
         let network = match self.network_id {
@@ -1762,12 +1761,7 @@ impl RequestHandler for NodeRequestHandler {
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| clock.net_time_ms());
                 match bincode::deserialize::<humoco_sim_core::fraud::FraudProofPayload>(&payload) {
                     Ok(proof) => {
                         let offender = proof.perpetrator_node_id;
@@ -1819,12 +1813,7 @@ impl RequestHandler for NodeRequestHandler {
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
-                    .unwrap_or_else(|| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| clock.net_time_ms());
                 if let Ok(hb) = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload)
                 {
                     if let (Some(pm), Some(advertisement)) =

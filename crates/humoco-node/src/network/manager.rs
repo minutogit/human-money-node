@@ -917,8 +917,8 @@ impl PeerManager {
 
     /// Checks whether a peer address is currently under local temporary work
     /// suspension (Tit-for-Tat, `missing_count >= 3`). Suspended peers are
-    /// skipped via rank-21 replacement and must be refused on Shard-Direct RPC
-    /// until genuine shard work or hourly decay rehabilitates them.
+    /// refused on Shard-Direct RPC until genuine shard work or hourly decay
+    /// rehabilitates them.
     pub async fn is_peer_suspended_by_addr(&self, addr: &SocketAddr) -> bool {
         let peers = self.peers.read().await;
         peers.get(addr).map(|p| p.is_suspended()).unwrap_or(false)

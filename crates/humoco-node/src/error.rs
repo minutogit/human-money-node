@@ -58,6 +58,9 @@ pub enum NodeError {
 
     #[error("Quinn read to end error: {0}")]
     QuinnReadToEnd(#[from] quinn::ReadToEndError),
+
+    #[error("Crypto error: {0}")]
+    Crypto(String),
 }
 
 impl NodeError {

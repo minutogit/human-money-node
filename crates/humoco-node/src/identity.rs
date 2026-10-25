@@ -29,9 +29,9 @@ pub fn compute_hybrid_node_id(ed25519_pub: &[u8; 32], pqc_pub: &[u8]) -> [u8; 32
 }
 
 /// Computes the raw Argon2d PoW proof hash over NodePubKey || Nonce || T0.
-pub fn compute_pow_proof(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> [u8; 32] {
+pub fn compute_pow_proof(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> Result<[u8; 32], NodeError> {
     if nonce == 0 && t0 == 0 {
-        return *blake3::hash(node_pubkey).as_bytes();
+        return Ok(*blake3::hash(node_pubkey).as_bytes());
     }
     // Input: pubkey || nonce_le || t0_le
     let mut input = Vec::with_capacity(48);
@@ -41,13 +41,13 @@ pub fn compute_pow_proof(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> [u8; 32
 
     // Argon2d with 64MiB, 3 iterations, 1 lane
     let params = Params::new(ARGON2D_M_COST, ARGON2D_T_COST, ARGON2D_P_COST, Some(32))
-        .expect("valid argon2 params");
+        .map_err(|e| NodeError::Crypto(format!("invalid argon2 params: {e}")))?;
     let argon2 = Argon2::new(Algorithm::Argon2d, Version::V0x13, params);
     let mut out = [0u8; 32];
     argon2
         .hash_password_into(&input, HUMOCO_ARGON2D_SALT, &mut out)
-        .expect("argon2 hashing must succeed");
-    out
+        .map_err(|e| NodeError::Crypto(format!("argon2 hashing failed: {e}")))?;
+    Ok(out)
 }
 
 /// Computes the HRW routing ID via 2-stage PoW proof + BLAKE3 whitening (or BLAKE3 fast-path).
@@ -58,7 +58,10 @@ pub fn compute_hrw_routing_id(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> [u
     if nonce == 0 && t0 == 0 {
         return *blake3::hash(node_pubkey).as_bytes();
     }
-    let pow_proof = compute_pow_proof(node_pubkey, nonce, t0);
+    let pow_proof = compute_pow_proof(node_pubkey, nonce, t0).unwrap_or_else(|e| {
+        tracing::error!("compute_pow_proof failed: {e}");
+        [0u8; 32]
+    });
     humoco_sim_core::crypto::compute_whitened_hrw_id(node_pubkey, nonce, t0, &pow_proof)
 }
 
@@ -67,7 +70,10 @@ pub fn compute_work_score(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> u64 {
     if nonce == 0 && t0 == 0 {
         return 1;
     }
-    let pow_proof = compute_pow_proof(node_pubkey, nonce, t0);
+    let pow_proof = compute_pow_proof(node_pubkey, nonce, t0).unwrap_or_else(|e| {
+        tracing::error!("compute_pow_proof failed: {e}");
+        [0u8; 32]
+    });
     humoco_sim_core::crypto::compute_work_from_hash(&pow_proof)
 }
 

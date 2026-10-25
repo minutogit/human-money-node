@@ -473,7 +473,7 @@ Dorf B: Lock P→B mit H_canon(B)=0x1a...
 | Zeitbasis | Nutzung | Toleranz | Folge bei Drift |
 | :--- | :--- | :--- | :--- |
 | `T₀` Genesis | `epoch_day = (now-T₀)/86400` (`docs/10:299`) | keine | Falsche `epoch_day` → Epoch-Berechnungs-Diskrepanz |
-| `timestamp_ms` Envelope | `SignedIngressEnvelope.timestamp_ms` (`docs/10:321`), `cumulative_micro_byte_years` | Sättigungs-Arithmetik (undefiniert) | Klasse 2 Time-Warp/Amnesie False-Positive (`audit: H-03`) |
+| `timestamp_ms` Envelope | quotamessung und Token-Bucket laufen autonom und zustandslos pro Knoten, Dynamic PoW (Spec 09) pro Knoten — `SignedIngressEnvelope` entfällt für L2-Entgegennahme (Doktrin: *Subtraction before Construction*) | Keine Kreuz-Shard-Signaturen nötig |
 | `timestamp_unix` Heartbeat | Frischefilter `|Δt|≤60s` (`docs/11:129`) | Silent Drop, kein `R_soft` Verbrauch | Ehrlicher Knoten mit 70s Drift wird 1h ignoriert → `τ_on` verfehlt |
 | `valid_until` Lock | Ingress `now-30s < valid_until ≤ root.valid_until` (`docs/12:40`) | `400 Expired` | `valid_until=now+5s` während Merge → Resurrection (`audit: H-06`) |
 | `current_anl_24h` EMA | `EMA e^{-Δ/24h}` (`docs/10:359`) vs `deterministic_decay` (`docs/04:254`) | Transzendente vs Bit-Shift Divergenz (`audit: H-03`) | Gradienten-Slashing False-Positive |

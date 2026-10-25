@@ -2799,8 +2799,11 @@ async fn submit_hmc_chain_lock_inner(
         return (StatusCode::BAD_REQUEST, "unknown voucher root").into_response();
     };
 
-    let last_hop = chain_req.chain.last().unwrap();
-    let lookup_tag = if last_hop.is_genesis {
+    let last_hop = match chain_req.chain.last() {
+                Some(h) => h,
+                None => return (StatusCode::BAD_REQUEST, "empty chain").into_response(),
+            };
+            let lookup_tag = if last_hop.is_genesis {
         bs58::encode(&last_hop.transaction_hash).into_string()
     } else {
         last_hop.ds_tag.clone().unwrap_or_default()

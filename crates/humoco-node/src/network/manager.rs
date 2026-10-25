@@ -246,12 +246,16 @@ pub struct DnsPeerState {
 /// locally detected (broadcast to all F2F friends).
 pub type FraudProofForwardMsg = (humoco_sim_core::fraud::FraudProofPayload, Option<[u8; 32]>);
 
+pub const MAX_HEARTBEATS_PER_MINUTE_SLOT: usize = 10;
+
 /// Bounded LRU-style deduplication cache for seen heartbeats (Spec 11).
 #[derive(Debug)]
 pub struct HeartbeatDedupCache {
     set: HashSet<[u8; 32]>,
     queue: std::collections::VecDeque<[u8; 32]>,
     capacity: usize,
+    slot_counts: HashMap<([u8; 32], u64), usize>,
+    slot_queue: std::collections::VecDeque<([u8; 32], u64)>,
 }
 
 impl HeartbeatDedupCache {
@@ -260,6 +264,8 @@ impl HeartbeatDedupCache {
             set: HashSet::with_capacity(capacity.min(4096)),
             queue: std::collections::VecDeque::with_capacity(capacity.min(4096)),
             capacity,
+            slot_counts: HashMap::with_capacity(capacity.min(4096)),
+            slot_queue: std::collections::VecDeque::with_capacity(capacity.min(4096)),
         }
     }
 
@@ -267,6 +273,47 @@ impl HeartbeatDedupCache {
         if self.set.contains(&id) {
             return false;
         }
+        if self.queue.len() >= self.capacity {
+            if let Some(oldest) = self.queue.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+        self.set.insert(id);
+        self.queue.push_back(id);
+        true
+    }
+
+    pub fn check_and_insert_slotted(
+        &mut self,
+        id: [u8; 32],
+        node_id: [u8; 32],
+        timestamp_ms: u64,
+    ) -> bool {
+        if self.set.contains(&id) {
+            return false;
+        }
+
+        let slot = timestamp_ms / 60_000;
+        let slot_key = (node_id, slot);
+        let count = self.slot_counts.entry(slot_key).or_insert(0);
+        if *count >= MAX_HEARTBEATS_PER_MINUTE_SLOT {
+            return false;
+        }
+        *count += 1;
+
+        if self.slot_queue.len() >= self.capacity {
+            if let Some(oldest_slot) = self.slot_queue.pop_front() {
+                if let Some(c) = self.slot_counts.get_mut(&oldest_slot) {
+                    if *c > 1 {
+                        *c -= 1;
+                    } else {
+                        self.slot_counts.remove(&oldest_slot);
+                    }
+                }
+            }
+        }
+        self.slot_queue.push_back(slot_key);
+
         if self.queue.len() >= self.capacity {
             if let Some(oldest) = self.queue.pop_front() {
                 self.set.remove(&oldest);
@@ -431,7 +478,7 @@ impl PeerManager {
         shards.iter().copied().collect()
     }
 
-    /// Checks if a heartbeat has already been seen; if not, records it. Returns true if new, false if duplicate.
+    /// Checks if a heartbeat has already been seen; if not, records it. Returns true if new, false if duplicate or flooded.
     pub async fn check_and_record_heartbeat(
         &self,
         node_id: &[u8; 32],
@@ -444,7 +491,7 @@ impl PeerManager {
         hasher.update(&timestamp_ms.to_le_bytes());
         let id = *hasher.finalize().as_bytes();
         let mut guard = self.seen_heartbeats.write().await;
-        guard.check_and_insert(id)
+        guard.check_and_insert_slotted(id, *node_id, timestamp_ms)
     }
 
     /// Resolves all known socket addresses for a node identity (F2F slot,
@@ -2857,6 +2904,47 @@ mod tests {
             "PRESENCE_FRESHNESS_SECS ({}) must accommodate 3 max-jitter intervals ({})",
             PRESENCE_FRESHNESS_SECS,
             three_max_jitter_intervals
+        );
+    }
+
+    #[test]
+    fn test_heartbeat_dedup_slotted_rate_limiting() {
+        let mut cache = HeartbeatDedupCache::new(100);
+        let node_a = [0x11u8; 32];
+        let base_timestamp = 1_700_000_000_000u64; // arbitrary ms
+
+        // Send 10 distinct heartbeats for node_a in the same minute slot (base_timestamp + 0..10)
+        for i in 0..10 {
+            let mut id = [0u8; 32];
+            id[0] = i as u8;
+            assert!(
+                cache.check_and_insert_slotted(id, node_a, base_timestamp + i * 100),
+                "Heartbeat {i} within burst limit of 10 should be accepted"
+            );
+        }
+
+        // 11th heartbeat in the same minute slot from node_a must be dropped (flood protection)
+        let mut id_11 = [0u8; 32];
+        id_11[0] = 11;
+        assert!(
+            !cache.check_and_insert_slotted(id_11, node_a, base_timestamp + 1100),
+            "11th heartbeat from same node in same minute slot must be dropped"
+        );
+
+        // A different node in the same minute slot can still send
+        let node_b = [0x22u8; 32];
+        assert!(
+            cache.check_and_insert_slotted(id_11, node_b, base_timestamp + 1100),
+            "Different node should not be affected by node_a rate limit"
+        );
+
+        // In the next minute slot (+60_000 ms), node_a can send again
+        let next_minute = base_timestamp + 60_000;
+        let mut id_next = [0u8; 32];
+        id_next[0] = 12;
+        assert!(
+            cache.check_and_insert_slotted(id_next, node_a, next_minute),
+            "Next minute slot must allow new heartbeats for node_a"
         );
     }
 }

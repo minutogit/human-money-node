@@ -469,11 +469,13 @@ async fn sync_locks(
         };
 
     let sync_read_credits = 5;
-    if let Err(ingress_err) =
-        state
-            .tier_controller
-            .evaluate_read_quota(client_node_id, sync_read_credits, epoch_day, 1.0)
-    {
+    if let Err(ingress_err) = state.tier_controller.evaluate_read_quota_with_time(
+        client_node_id,
+        sync_read_credits,
+        epoch_day,
+        1.0,
+        Some(now_ms),
+    ) {
         let reason = match ingress_err {
             IngressError::ReadQuotaExceeded {
                 available,
@@ -1660,11 +1662,13 @@ async fn query_status(
         };
 
     let read_credits = 1;
-    if let Err(ingress_err) =
-        state
-            .tier_controller
-            .evaluate_read_quota(client_node_id, read_credits, epoch_day, 1.0)
-    {
+    if let Err(ingress_err) = state.tier_controller.evaluate_read_quota_with_time(
+        client_node_id,
+        read_credits,
+        epoch_day,
+        1.0,
+        Some(now_ms),
+    ) {
         let reason = match ingress_err {
             IngressError::ReadQuotaExceeded {
                 available,

@@ -50,7 +50,7 @@ impl ByteYears {
         let total_byte_seconds = (STORED_LOCK_BYTES as u128) * (ttl_seconds as u128);
         let byte_years =
             (total_byte_seconds + (SECONDS_PER_YEAR as u128 / 2)) / (SECONDS_PER_YEAR as u128);
-        (byte_years as u64).max(1)
+        u64::try_from(byte_years).unwrap_or(u64::MAX).max(1)
     }
 
     /// Computes micro-Byte-Years (µBJ) from TTL in seconds: (STORED_LOCK_BYTES * ttl_seconds * 1_000_000) / SECONDS_PER_YEAR
@@ -63,7 +63,7 @@ impl ByteYears {
             (STORED_LOCK_BYTES as u128) * (ttl_seconds as u128) * 1_000_000u128;
         let micro_byte_years = (total_micro_byte_seconds + (SECONDS_PER_YEAR as u128 / 2))
             / (SECONDS_PER_YEAR as u128);
-        (micro_byte_years as u64).max(1)
+        u64::try_from(micro_byte_years).unwrap_or(u64::MAX).max(1)
     }
 
     /// Computes Byte-Years from days

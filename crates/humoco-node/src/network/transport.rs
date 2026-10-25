@@ -11,6 +11,12 @@ use tracing::{debug, error, info, warn};
 pub const STREAM_CONCURRENCY_LIMIT: usize = 1024;
 /// Maximum number of concurrent QUIC handshake / connection handler tasks (DoS/OOM protection).
 pub const CONNECTION_CONCURRENCY_LIMIT: usize = 256;
+/// Spec 11 Freshness window for gossip heartbeats (+/- 60 seconds)
+pub const HEARTBEAT_FRESHNESS_WINDOW_MS: u64 = 60_000;
+/// Default timeout for incoming RPC request handlers (10 seconds)
+pub const DEFAULT_HANDLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Grace period given to handlers on cancellation during shutdown (100 ms)
+pub const SHUTDOWN_HANDLER_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
@@ -3192,6 +3198,7 @@ impl QuicTransport {
                                 let sem = stream_semaphore.clone();
                                 let sync_pool = transport.sync_streams.clone();
                                 let shard_pool = transport.shard_streams.clone();
+                                let cancel_token = transport.cancel_token.clone();
                                 transport.tasks.spawn(async move {
                                     let _lease = lease;
                                     let _permit = match sem.try_acquire_owned() {
@@ -3204,7 +3211,16 @@ impl QuicTransport {
                                             return;
                                         }
                                     };
-                                    match crate::network::framing::read_frame_admitted(&mut recv, crate::network::framing::DEFAULT_STREAM_READ_TIMEOUT, Some((sync_pool, shard_pool))).await {
+                                    let read_res = tokio::select! {
+                                        biased;
+                                        _ = cancel_token.cancelled() => return,
+                                        res = crate::network::framing::read_frame_admitted(
+                                            &mut recv,
+                                            crate::network::framing::DEFAULT_STREAM_READ_TIMEOUT,
+                                            Some((sync_pool, shard_pool))
+                                        ) => res,
+                                    };
+                                    match read_res {
                                         Ok(((header, payload), _service_permit)) => {
                                             // Shard-Direct RPC Authorization:
                                             // LockVerifyRequest, ActiveSyncRequest, and ShardDigestRequest are only allowed if peer is F2F friend or known via gossip
@@ -3257,15 +3273,35 @@ impl QuicTransport {
                                                 return;
                                             }
 
-                                            match h.handle_authenticated(header, payload, remote_node_id).await {
-                                                Ok((resp_header, resp_payload)) => {
-                                                    if let Err(e) = write_frame(&mut send, &resp_header, &resp_payload).await {
-                                                        debug!(error = %e, "Failed to write frame response");
+                                            let handler_fut = async {
+                                                match h.handle_authenticated(header, payload, remote_node_id).await {
+                                                    Ok((resp_header, resp_payload)) => {
+                                                        if let Err(e) = write_frame(&mut send, &resp_header, &resp_payload).await {
+                                                            debug!(error = %e, "Failed to write frame response");
+                                                        }
+                                                        let _ = send.finish();
                                                     }
-                                                    let _ = send.finish();
+                                                    Err(e) => {
+                                                        error!(error = %e, "Request handler failed");
+                                                    }
                                                 }
-                                                Err(e) => {
-                                                    error!(error = %e, "Request handler failed");
+                                            };
+                                            tokio::pin!(handler_fut);
+
+                                            tokio::select! {
+                                                biased;
+                                                _ = cancel_token.cancelled() => {
+                                                    tokio::select! {
+                                                        _ = &mut handler_fut => {}
+                                                        _ = tokio::time::sleep(SHUTDOWN_HANDLER_GRACE) => {
+                                                            debug!("Bi-stream handler aborted due to shutdown grace expiry");
+                                                        }
+                                                    }
+                                                }
+                                                res = tokio::time::timeout(DEFAULT_HANDLER_TIMEOUT, &mut handler_fut) => {
+                                                    if res.is_err() {
+                                                        warn!(remote = %remote_addr, "Bi-stream request handler timed out after 10s");
+                                                    }
                                                 }
                                             }
                                         }
@@ -3297,6 +3333,7 @@ impl QuicTransport {
                                 let sem = stream_semaphore.clone();
                                 let conn_clone = conn.clone();
                                 let transport_clone = transport.clone();
+                                let cancel_token = transport.cancel_token.clone();
                                 transport.tasks.spawn(async move {
                                     let _lease = lease;
                                     let _permit = match sem.try_acquire_owned() {
@@ -3309,187 +3346,229 @@ impl QuicTransport {
                                             return;
                                         }
                                     };
-                                    match read_frame(&mut recv).await {
+                                    let read_res = tokio::select! {
+                                        biased;
+                                        _ = cancel_token.cancelled() => return,
+                                        res = read_frame(&mut recv) => res,
+                                    };
+                                    match read_res {
                                         Ok((header, payload)) => {
-                                            // GOSSIP BARRIER:
-                                            // GOSSIP BARRIER:
-                                            // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
-                                            let is_gossip = header.msg_type == MsgType::Heartbeat as u16
-                                                || header.msg_type == MsgType::EquivocationProof as u16;
+                                            let uni_fut = async {
+                                                // GOSSIP BARRIER:
+                                                // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
+                                                let is_gossip = header.msg_type == MsgType::Heartbeat as u16
+                                                    || header.msg_type == MsgType::EquivocationProof as u16;
 
-                                            if is_gossip && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await {
-                                                warn!(
-                                                    remote = %remote_addr,
-                                                    node_id = ?remote_node_id.map(hex::encode),
-                                                    msg_type = header.msg_type,
-                                                    "GOSSIP BARRIER: Dropped gossip from non-F2F connection"
-                                                );
-                                                return;
-                                            }
-
-                                            // HeartbeatAck handling:
-                                            if header.msg_type == MsgType::HeartbeatAck as u16
-                                                && (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0
-                                            {
-                                                pm.set_ticket_outdated(true);
-                                                warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from F2F peer: shard ticket is outdated");
-                                            }
-
-                                            // If an authentic Heartbeat is received from an F2F friend, update known_network_nodes and clock:
-                                            if header.msg_type == MsgType::Heartbeat as u16 {
-                                                let hops = header.reserved;
-                                                if (hops as u32) >= crate::network::manager::MAX_GOSSIP_HOPS {
-                                                    warn!(hops, "GOSSIP BARRIER: Dropped gossip, max hops exceeded");
+                                                if is_gossip && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await {
+                                                    warn!(
+                                                        remote = %remote_addr,
+                                                        node_id = ?remote_node_id.map(hex::encode),
+                                                        msg_type = header.msg_type,
+                                                        "GOSSIP BARRIER: Dropped gossip from non-F2F connection"
+                                                    );
                                                     return;
                                                 }
 
-                                                let is_f2f = if let Some(ref nid) = remote_node_id {
-                                                    pm.is_f2f_friend(nid).await
-                                                } else {
-                                                    pm.is_f2f_addr(&remote_addr).await
-                                                };
-                                                let res1 = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload);
-                                                let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
-
-                                                if let Ok(hb) = res1 {
-                                                    // Check deduplication cache to prevent gossip loops (Spec 11)
-                                                    if !pm.check_and_record_heartbeat(&hb.node_id, hb.pow_nonce, hb.timestamp_ms).await {
-                                                        debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped duplicate heartbeat (already seen)");
-                                                        return;
-                                                    }
-
-                                                    // TTL drop check
-                                                    if hb.ttl == 0 {
-                                                        debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with TTL == 0");
-                                                        return;
-                                                    }
-
-                                                    if hb.signature != [0u8; 64] {
-                                                        let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
-                                                            hb.node_id,
-                                                            0,
-                                                            0,
-                                                            hb.timestamp_ms,
-                                                            hb.declared_write_ema_micro_bj,
-                                                            hb.declared_read_ema_credits,
-                                                            0,
-                                                            false,
-                                                            [0u8; 32],
-                                                            hb.signature,
-                                                        );
-                                                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write) {
-                                                            warn!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with invalid signature");
-                                                            return;
-                                                        }
-                                                    }
-
-                                                    let node_id = hb.node_id;
-                                                    if pm.is_banned(&node_id).await {
-                                                        warn!(node = %hex::encode(node_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
-                                                        return;
-                                                    }
-                                                    let is_direct = remote_node_id == Some(node_id);
-                                                    if is_direct && hops > 0 {
-                                                        warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
-                                                        return;
-                                                    }
-                                                    if !is_direct && hops == 0 {
-                                                        warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
-                                                        return;
-                                                    }
-
-                                                    // Verify Argon2d Shard Ticket PoW & HRW routing ID
-                                                    let (verified_hrw, work_score) = if hb.pow_nonce != 0 || hb.ticket_epoch_t0 != 0 {
-                                                        let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
-                                                        if expected_hrw != hb.hrw_routing_id {
-                                                            warn!(
-                                                                node = %hex::encode(node_id),
-                                                                "GOSSIP BARRIER: Invalid Argon2d shard ticket PoW (hrw_routing_id mismatch)"
-                                                            );
-                                                            return;
-                                                        }
-                                                        let w = crate::identity::compute_work_score(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
-                                                        (expected_hrw, w)
-                                                    } else if hb.hrw_routing_id != [0u8; 32] {
-                                                        // Fast-path / legacy BLAKE3
-                                                        let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, 0, 0);
-                                                        if expected_hrw != hb.hrw_routing_id && node_id != hb.hrw_routing_id {
-                                                            warn!(
-                                                                node = %hex::encode(node_id),
-                                                                "GOSSIP BARRIER: Invalid fast-path shard ticket (hrw_routing_id mismatch)"
-                                                            );
-                                                            return;
-                                                        }
-                                                        (hb.hrw_routing_id, 1)
-                                                    } else {
-                                                        (node_id, 1)
-                                                    };
-
-                                                    // Check ticket PoW validity against network median
-                                                    let (is_acceptable, _median) = pm.is_ticket_acceptable(work_score);
-                                                    if !is_acceptable {
-                                                        if hops == 0 {
-                                                            warn!(
-                                                                node = %hex::encode(node_id),
-                                                                "Direct F2F friend has outdated shard ticket; sending FLAG_POW_OUTDATED feedback"
-                                                            );
-                                                            let ack_hdr = WireHeader::new(
-                                                                MsgType::HeartbeatAck as u16,
-                                                                header.session_seq.wrapping_add(1),
-                                                                header.epoch_id,
-                                                                humoco_sim_core::wire::FLAG_POW_OUTDATED,
-                                                                0,
-                                                            );
-                                                            let _ = send_unidirectional_frame(&conn_clone, &ack_hdr, &[]).await;
-                                                        } else {
-                                                            warn!(
-                                                                node = %hex::encode(node_id),
-                                                                hops,
-                                                                "GOSSIP BARRIER: Dropped multi-hop gossip with outdated PoW"
-                                                            );
-                                                        }
-                                                        return;
-                                                    }
-
-                                                    pm.learn_node_from_gossip_with_hrw_and_work(
-                                                        node_id,
-                                                        verified_hrw,
-                                                        hb.addr,
-                                                        hops as u8,
-                                                        Some(remote_addr),
-                                                        work_score,
-                                                    ).await;
-
-                                                    // Spec 07 / Spec 11: Clock samples fed to P2pClock must originate strictly from direct authenticated F2F peers,
-                                                    // never relayed third-party hops (Task 4: F2F-Only Clock Samples).
-                                                    if hops == 0 && is_f2f && is_direct {
-                                                        pm.clock().record_heartbeat(true, hb.timestamp_ms);
-                                                    }
-
-                                                    // Multi-hop forwarding to Dunbar fan-out subset of F2F peers (Spec 11)
-                                                    if hb.ttl > 1 && (hops as u32) + 1 < crate::network::manager::MAX_GOSSIP_HOPS {
-                                                        transport_clone.forward_heartbeat_gossip(&hb, hops, remote_addr).await;
-                                                    }
-                                                } else if let Ok((adv_id, adv_addr)) = res2 {
-                                                    if pm.is_banned(&adv_id).await {
-                                                        warn!(node = %hex::encode(adv_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
-                                                        return;
-                                                    }
-                                                    let is_direct = remote_node_id == Some(adv_id);
-                                                    if is_direct && hops > 0 {
-                                                        warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
-                                                        return;
-                                                    }
-                                                    if !is_direct && hops == 0 {
-                                                        warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
-                                                        return;
-                                                    }
-                                                    pm.learn_node_from_gossip(adv_id, adv_addr, hops as u8, Some(remote_addr)).await;
+                                                // HeartbeatAck handling:
+                                                if header.msg_type == MsgType::HeartbeatAck as u16
+                                                    && (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0
+                                                {
+                                                    pm.set_ticket_outdated(true);
+                                                    warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from F2F peer: shard ticket is outdated");
                                                 }
-                                            }
 
-                                            if let Err(e) = h.handle_unidirectional_authenticated(header, payload, remote_node_id).await {
-                                                debug!(error = %e, "Failed to handle unidirectional frame");
+                                                // If an authentic Heartbeat is received from an F2F friend, update known_network_nodes and clock:
+                                                if header.msg_type == MsgType::Heartbeat as u16 {
+                                                    let hops = header.reserved;
+                                                    if (hops as u32) >= crate::network::manager::MAX_GOSSIP_HOPS {
+                                                        warn!(hops, "GOSSIP BARRIER: Dropped gossip, max hops exceeded");
+                                                        return;
+                                                    }
+
+                                                    let is_f2f = if let Some(ref nid) = remote_node_id {
+                                                        pm.is_f2f_friend(nid).await
+                                                    } else {
+                                                        pm.is_f2f_addr(&remote_addr).await
+                                                    };
+                                                    let res1 = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload);
+                                                    let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
+
+                                                    if let Ok(hb) = res1 {
+                                                        // Check deduplication cache to prevent gossip loops (Spec 11)
+                                                        if !pm.check_and_record_heartbeat(&hb.node_id, hb.pow_nonce, hb.timestamp_ms).await {
+                                                            debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped duplicate heartbeat (already seen)");
+                                                            return;
+                                                        }
+
+                                                        // TTL drop check
+                                                        if hb.ttl == 0 {
+                                                            debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with TTL == 0");
+                                                            return;
+                                                        }
+
+                                                        if hb.signature != [0u8; 64] {
+                                                            let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                                                                hb.node_id,
+                                                                0,
+                                                                0,
+                                                                hb.timestamp_ms,
+                                                                hb.declared_write_ema_micro_bj,
+                                                                hb.declared_read_ema_credits,
+                                                                0,
+                                                                false,
+                                                                [0u8; 32],
+                                                                hb.signature,
+                                                            );
+                                                            if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write) {
+                                                                warn!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with invalid signature");
+                                                                return;
+                                                            }
+                                                        }
+
+                                                        let node_id = hb.node_id;
+                                                        if pm.is_banned(&node_id).await {
+                                                            warn!(node = %hex::encode(node_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
+                                                            return;
+                                                        }
+                                                        let is_direct = remote_node_id == Some(node_id);
+                                                        if is_direct && hops > 0 {
+                                                            warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
+                                                            return;
+                                                        }
+                                                        if !is_direct && hops == 0 {
+                                                            warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
+                                                            return;
+                                                        }
+
+                                                        // Spec 11 Freshness Window (A11-01): when local clock has quorum or sync is ready,
+                                                        // heartbeats deviating by > 60s from net_time_ms are dropped (no auto-ban).
+                                                        let clock_ready = pm.is_local_sync_ready() || pm.clock().has_quorum_samples();
+                                                        if clock_ready {
+                                                            let diff = hb.timestamp_ms.abs_diff(pm.net_time_ms());
+                                                            if diff > HEARTBEAT_FRESHNESS_WINDOW_MS {
+                                                                debug!(
+                                                                    node = %hex::encode(node_id),
+                                                                    hb_timestamp = hb.timestamp_ms,
+                                                                    net_time = pm.net_time_ms(),
+                                                                    diff_ms = diff,
+                                                                    "GOSSIP BARRIER: Dropped heartbeat outside +/-60s freshness window"
+                                                                );
+                                                                return;
+                                                            }
+                                                        }
+
+                                                        // Verify Argon2d Shard Ticket PoW & HRW routing ID
+                                                        let (verified_hrw, work_score) = if hb.pow_nonce != 0 || hb.ticket_epoch_t0 != 0 {
+                                                            let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
+                                                            if expected_hrw != hb.hrw_routing_id {
+                                                                warn!(
+                                                                    node = %hex::encode(node_id),
+                                                                    "GOSSIP BARRIER: Invalid Argon2d shard ticket PoW (hrw_routing_id mismatch)"
+                                                                );
+                                                                return;
+                                                            }
+                                                            let w = crate::identity::compute_work_score(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
+                                                            (expected_hrw, w)
+                                                        } else if hb.hrw_routing_id != [0u8; 32] {
+                                                            // Fast-path / legacy BLAKE3
+                                                            let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, 0, 0);
+                                                            if expected_hrw != hb.hrw_routing_id && node_id != hb.hrw_routing_id {
+                                                                warn!(
+                                                                    node = %hex::encode(node_id),
+                                                                    "GOSSIP BARRIER: Invalid fast-path shard ticket (hrw_routing_id mismatch)"
+                                                                );
+                                                                return;
+                                                            }
+                                                            (hb.hrw_routing_id, 1)
+                                                        } else {
+                                                            (node_id, 1)
+                                                        };
+
+                                                        // Check ticket PoW validity against network median
+                                                        let (is_acceptable, _median) = pm.is_ticket_acceptable(work_score);
+                                                        if !is_acceptable {
+                                                            if hops == 0 {
+                                                                warn!(
+                                                                    node = %hex::encode(node_id),
+                                                                    "Direct F2F friend has outdated shard ticket; sending FLAG_POW_OUTDATED feedback"
+                                                                );
+                                                                let ack_hdr = WireHeader::new(
+                                                                    MsgType::HeartbeatAck as u16,
+                                                                    header.session_seq.wrapping_add(1),
+                                                                    header.epoch_id,
+                                                                    humoco_sim_core::wire::FLAG_POW_OUTDATED,
+                                                                    0,
+                                                                );
+                                                                let _ = send_unidirectional_frame(&conn_clone, &ack_hdr, &[]).await;
+                                                            } else {
+                                                                warn!(
+                                                                    node = %hex::encode(node_id),
+                                                                    hops,
+                                                                    "GOSSIP BARRIER: Dropped multi-hop gossip with outdated PoW"
+                                                                );
+                                                            }
+                                                            return;
+                                                        }
+
+                                                        pm.learn_node_from_gossip_with_hrw_and_work(
+                                                            node_id,
+                                                            verified_hrw,
+                                                            hb.addr,
+                                                            hops as u8,
+                                                            Some(remote_addr),
+                                                            work_score,
+                                                        ).await;
+
+                                                        // Spec 07 / Spec 11: Clock samples fed to P2pClock must originate strictly from direct authenticated F2F peers,
+                                                        // never relayed third-party hops (Task 4: F2F-Only Clock Samples).
+                                                        // Each authenticated direct F2F friend contributes at most 1 current sample to the median pool (A11-01).
+                                                        if hops == 0 && is_f2f && is_direct {
+                                                            pm.clock().record_peer_heartbeat(node_id, true, hb.timestamp_ms);
+                                                        }
+
+                                                        // Multi-hop forwarding to Dunbar fan-out subset of F2F peers (Spec 11)
+                                                        if hb.ttl > 1 && (hops as u32) + 1 < crate::network::manager::MAX_GOSSIP_HOPS {
+                                                            transport_clone.forward_heartbeat_gossip(&hb, hops, remote_addr).await;
+                                                        }
+                                                    } else if let Ok((adv_id, adv_addr)) = res2 {
+                                                        if pm.is_banned(&adv_id).await {
+                                                            warn!(node = %hex::encode(adv_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
+                                                            return;
+                                                        }
+                                                        let is_direct = remote_node_id == Some(adv_id);
+                                                        if is_direct && hops > 0 {
+                                                            warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
+                                                            return;
+                                                        }
+                                                        if !is_direct && hops == 0 {
+                                                            warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
+                                                            return;
+                                                        }
+                                                        pm.learn_node_from_gossip(adv_id, adv_addr, hops as u8, Some(remote_addr)).await;
+                                                    }
+                                                }
+
+                                                if let Err(e) = h.handle_unidirectional_authenticated(header, payload, remote_node_id).await {
+                                                    debug!(error = %e, "Failed to handle unidirectional frame");
+                                                }
+                                            };
+                                            tokio::pin!(uni_fut);
+
+                                            tokio::select! {
+                                                biased;
+                                                _ = cancel_token.cancelled() => {
+                                                    tokio::select! {
+                                                        _ = &mut uni_fut => {}
+                                                        _ = tokio::time::sleep(SHUTDOWN_HANDLER_GRACE) => {
+                                                            debug!("Uni-stream handler aborted due to shutdown grace expiry");
+                                                        }
+                                                    }
+                                                }
+                                                res = tokio::time::timeout(DEFAULT_HANDLER_TIMEOUT, &mut uni_fut) => {
+                                                    if res.is_err() {
+                                                        warn!(remote = %remote_addr, "Uni-stream handler timed out after 10s");
+                                                    }
+                                                }
                                             }
                                         }
                                         Err(e) => {

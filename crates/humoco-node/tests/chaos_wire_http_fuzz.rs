@@ -7,7 +7,9 @@ use axum::{
     http::{Request, StatusCode},
 };
 use ed25519_dalek::{Signer, SigningKey};
-use humoco_node::network::framing::{read_frame, read_frame_with_timeout, write_frame};
+use humoco_node::network::framing::{
+    read_frame, read_frame_admitted, read_frame_with_timeout, write_frame,
+};
 use humoco_node::{
     api::{
         build_router,
@@ -185,14 +187,79 @@ async fn test_chaos_wire_malicious_payload_len_bounded() {
         err_str
     );
 
-    // Chunked growth test: Ensure allocation is min(payload_len, 64k) not blind Vec::with_capacity(wire_len)
-    for len in [0u32, 1, 64 * 1024, 65 * 1024, 1_000_000] {
-        let bounded = (len as usize).min(64 * 1024);
-        assert!(bounded <= 64 * 1024);
-        // simulate bounded allocation
-        let v = Vec::<u8>::with_capacity(bounded);
-        assert!(v.capacity() <= 64 * 1024);
-    }
+    // Actual framing checks across payload boundaries (0, 65_536, 65_537, u32::MAX),
+    // short headers, wrong magic, verifying bounded rejection without OOM (A06-01)
+
+    // Boundary 1: payload_len = 0
+    let hdr_zero = WireHeader::new(MsgType::Heartbeat as u16, 100, 0, 0, 0);
+    let mut cursor_zero = std::io::Cursor::new(hdr_zero.to_bytes());
+    let (hdr_out, payload_out) = read_frame(&mut cursor_zero)
+        .await
+        .expect("0-byte payload frame must be read successfully");
+    assert_eq!(hdr_out.payload_len, 0);
+    assert!(payload_out.is_empty());
+
+    // Boundary 2: payload_len = 65_536 (exact 64 KiB maximum standard limit)
+    let max_valid_payload = vec![0x42u8; 64 * 1024];
+    let hdr_max = WireHeader::new(
+        MsgType::Heartbeat as u16,
+        101,
+        0,
+        0,
+        max_valid_payload.len() as u32,
+    );
+    let mut valid_buf = Vec::new();
+    valid_buf.extend_from_slice(&hdr_max.to_bytes());
+    valid_buf.extend_from_slice(&max_valid_payload);
+    let mut cursor_max = std::io::Cursor::new(valid_buf);
+    let (hdr_out_max, payload_out_max) = read_frame(&mut cursor_max)
+        .await
+        .expect("64 KiB payload must succeed");
+    assert_eq!(hdr_out_max.payload_len, 65_536);
+    assert_eq!(payload_out_max.len(), 65_536);
+
+    // Boundary 3: payload_len = 65_537 (64 KiB + 1 byte -> must reject before allocation)
+    let hdr_over = WireHeader::new(MsgType::Heartbeat as u16, 102, 0, 0, 65_537);
+    let mut cursor_over = std::io::Cursor::new(hdr_over.to_bytes());
+    let res_over = read_frame(&mut cursor_over).await;
+    assert!(res_over.is_err(), "65_537 payload must be rejected");
+    assert!(
+        res_over.unwrap_err().to_string().contains("exceeds maximum limit"),
+        "error must indicate exceeded limit"
+    );
+
+    // Boundary 4: payload_len = u32::MAX with read_frame_admitted and semaphore checks
+    let sync_sem = Arc::new(tokio::sync::Semaphore::new(10));
+    let rpc_sem = Arc::new(tokio::sync::Semaphore::new(10));
+    let hdr_u32_max = WireHeader::new(MsgType::Heartbeat as u16, 103, 0, 0, u32::MAX);
+    let mut cursor_u32 = std::io::Cursor::new(hdr_u32_max.to_bytes());
+    let res_admitted = read_frame_admitted(
+        &mut cursor_u32,
+        Duration::from_secs(1),
+        Some((sync_sem.clone(), rpc_sem.clone())),
+    )
+    .await;
+    assert!(res_admitted.is_err(), "u32::MAX must be rejected by read_frame_admitted");
+    assert_eq!(rpc_sem.available_permits(), 10, "permits must not leak on header rejection");
+
+    // Boundary 5: Short header (< 32 bytes)
+    let short_header_bytes = vec![0x48, 0x4D, 0x43, 0x31, 0x01, 0x00];
+    let mut cursor_short = std::io::Cursor::new(short_header_bytes);
+    assert!(
+        read_frame(&mut cursor_short).await.is_err(),
+        "truncated header must fail with read error"
+    );
+
+    // Boundary 6: Wrong magic
+    let mut bad_magic_hdr = WireHeader::new(MsgType::Heartbeat as u16, 104, 0, 0, 0);
+    bad_magic_hdr.magic = [0xDE, 0xAD, 0xBE, 0xEF];
+    let mut cursor_magic = std::io::Cursor::new(bad_magic_hdr.to_bytes());
+    let res_magic = read_frame(&mut cursor_magic).await;
+    assert!(res_magic.is_err(), "invalid magic must be rejected");
+    assert!(
+        res_magic.unwrap_err().to_string().contains("Invalid wire magic"),
+        "error must identify invalid magic"
+    );
 }
 
 #[tokio::test]
@@ -464,6 +531,81 @@ async fn test_chaos_ingress_quota_exhaustion_under_flood() {
         successes, 2,
         "500 BY quota should allow exactly 2x 192 BY locks"
     );
+}
+
+#[tokio::test]
+async fn test_chaos_ingress_quota_exhaustion_concurrent_barrier_flood() {
+    let temp = tempdir().unwrap();
+    let dir = Box::leak(Box::new(temp));
+    let db_path = dir.path().join("quota_barrier_flood.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _fh) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*identity.node_id(), 0));
+    let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let tag = [0x88u8; 32];
+    let token = "barrier_vip";
+    tier.register_vip_token(token, tag);
+    storage.set_quota(&tag, 500).unwrap();
+    tier.hydrate_vip_quota(&tag).unwrap();
+    let state = AppState::new(engine, storage.clone(), identity, tier.clone(), pow.clone());
+    isolated_ready(&state);
+    let app = build_router(state);
+
+    let num_requests = 10;
+    let barrier = Arc::new(tokio::sync::Barrier::new(num_requests));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    let mut handles = Vec::new();
+    for i in 0..num_requests {
+        let app = app.clone();
+        let barrier = barrier.clone();
+        let k = SigningKey::from_bytes(&[(20 + i) as u8; 32]);
+        let req = make_genesis(&format!("{:02x}", i + 10).repeat(32), now + 31_536_000_000, &k);
+        let token_str = token.to_string();
+
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lock")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {}", token_str))
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }));
+    }
+
+    let mut created_count = 0;
+    let mut rate_limited_count = 0;
+    for handle in handles {
+        let res = handle.await.unwrap();
+        match res.status() {
+            StatusCode::CREATED => created_count += 1,
+            StatusCode::TOO_MANY_REQUESTS => rate_limited_count += 1,
+            other => panic!("Unexpected status code under concurrent flood: {other}"),
+        }
+    }
+
+    assert_eq!(created_count, 2, "exactly 2 requests must succeed (2 * 192 = 384 <= 500)");
+    assert_eq!(rate_limited_count, 8, "remaining 8 requests must be rate limited (429)");
+
+    // Give background VIP quota persistence worker time to flush to disk
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Assert quota converges to 500 - 384 = 116 BY in memory and on disk
+    let mem_quota = tier.get_cached_vip_quota(&tag).unwrap_or(0);
+    assert_eq!(mem_quota, 116, "in-memory quota must converge to 116 BY");
+
+    let disk_quota = storage.get_quota(&tag).unwrap();
+    assert_eq!(disk_quota, 116, "disk quota must converge to 116 BY");
 }
 
 // ---------------------------------------------------------------------------

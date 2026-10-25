@@ -21,7 +21,7 @@ use humoco_sim_core::{
     apply_attestation, calculate_integer_ema, compute_backoff, compute_canonical_hash,
     derive_account_tag, promote_to_final_if_eligible, resolve_split_brain,
     resolve_split_brain_canonical, sign_lock_attestation, AccessControl, AccessTier, ByteYears,
-    LockEntry144, LockRecord, NetworkThermometer, QuartileStats, RamIndex, SimTime,
+    LockEntry144, LockRecord, LockStatus, NetworkThermometer, QuartileStats, RamIndex, SimTime,
     SlottedMedianRingBuffer, WireHeader, CURRENT_PROTOCOL_VERSION, HARD_FLOOR_BASELINE_DAILY,
     HARD_FLOOR_READ_BASELINE_DAILY, MAX_WHALE_MULTIPLIER, WIRE_MAGIC,
 };
@@ -1108,6 +1108,220 @@ proptest! {
             if attempt >= 6 {
                 prop_assert!(b_next <= cap_ms);
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Extended Property-Based Tests (Audit 14 / A14-01)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    /// Prop 1: Arbitrary 32-byte WireHeader and LockRecord serialization round trips
+    #[test]
+    fn prop_arbitrary_wire_header_and_lock_record_serialization_roundtrips(
+        msg_type in any::<u16>(),
+        session_seq in any::<u64>(),
+        epoch_id in any::<u32>(),
+        flags in any::<u32>(),
+        payload_len in any::<u32>(),
+        crypto_suite in any::<u8>(),
+        min_compat_ver in any::<u8>(),
+        reserved in any::<u16>(),
+        rec in arb_lock_record(),
+    ) {
+        let mut hdr = WireHeader::new(msg_type, session_seq, epoch_id, flags, payload_len);
+        hdr.crypto_suite = crypto_suite;
+        hdr.min_compat_ver = min_compat_ver;
+        hdr.reserved = reserved;
+
+        let bytes = hdr.to_bytes();
+        prop_assert_eq!(bytes.len(), 32);
+        let decoded = WireHeader::from_bytes(&bytes);
+        prop_assert_eq!(decoded.magic, WIRE_MAGIC);
+        prop_assert_eq!(decoded.protocol_version, CURRENT_PROTOCOL_VERSION);
+        prop_assert_eq!(decoded.msg_type, msg_type);
+        prop_assert_eq!(decoded.session_seq, session_seq);
+        prop_assert_eq!(decoded.epoch_id, epoch_id);
+        prop_assert_eq!(decoded.flags, flags);
+        prop_assert_eq!(decoded.payload_len, payload_len);
+        prop_assert_eq!(decoded.crypto_suite, crypto_suite);
+        prop_assert_eq!(decoded.min_compat_ver, min_compat_ver);
+        prop_assert_eq!(decoded.reserved, reserved);
+
+        let rec_bytes = bincode::serialize(&rec).expect("serialize lock record");
+        let decoded_rec: LockRecord = bincode::deserialize(&rec_bytes).expect("deserialize lock record");
+        prop_assert_eq!(rec.id, decoded_rec.id);
+        prop_assert_eq!(rec.parent_lock, decoded_rec.parent_lock);
+        prop_assert_eq!(rec.receiver_pub, decoded_rec.receiver_pub);
+        prop_assert_eq!(rec.nonce, decoded_rec.nonce);
+        prop_assert_eq!(rec.created_at, decoded_rec.created_at);
+        prop_assert_eq!(rec.valid_until, decoded_rec.valid_until);
+        prop_assert_eq!(rec.status, decoded_rec.status);
+    }
+
+    /// Prop 2: RamIndex valid-window insert/replay idempotency across generated timestamps
+    #[test]
+    fn prop_ram_index_valid_window_insert_replay_idempotency(
+        parent in arb_hash(),
+        receiver in arb_hash(),
+        nonce in arb_nonce(),
+        now_ms in 0u64..10_000_000u64,
+        ttl_ms in 35_000u64..100_000_000u64,
+        extra_root_ms in 0u64..5_000_000u64,
+        replay_delta_ms in 0u64..2_000u64,
+    ) {
+        let now = SimTime(now_ms);
+        let valid_until = SimTime(now_ms.saturating_add(ttl_ms));
+        let root_valid = SimTime(valid_until.0.saturating_add(extra_root_ms));
+
+        prop_assume!(humoco_sim_core::storage::ingress_time_window_valid(now, valid_until, root_valid));
+
+        let rec = LockRecord::new(parent, receiver, nonce, now, valid_until);
+        let mut idx = RamIndex::new();
+
+        let res_first = idx.try_insert(rec.clone(), now, root_valid);
+        prop_assert_eq!(res_first, Ok(humoco_sim_core::storage::IngressVerdictLow::AcceptedNew));
+        prop_assert_eq!(idx.len(), 1);
+
+        let replay_now = SimTime(now_ms.saturating_add(replay_delta_ms));
+        if humoco_sim_core::storage::ingress_time_window_valid(replay_now, valid_until, root_valid) {
+            let res_replay = idx.try_insert(rec.clone(), replay_now, root_valid);
+            prop_assert_eq!(res_replay, Ok(humoco_sim_core::storage::IngressVerdictLow::IdempotentReplay));
+            prop_assert_eq!(idx.len(), 1);
+            prop_assert_eq!(idx.get(&parent).unwrap().id, rec.id);
+        }
+    }
+
+    /// Prop 3: Mixed confirmation class precedence (class 2 > 1 > 0) + deliberate canonical-hash tie generation
+    #[test]
+    fn prop_resolver_mixed_confirmation_classes_and_hash_ties(
+        parent in arb_hash(),
+        receiver in arb_hash(),
+        nonce in arb_nonce(),
+        c1 in 0u64..500_000u64,
+        v1 in 500_001u64..1_000_000u64,
+        c2 in 0u64..500_000u64,
+        v2 in 500_001u64..1_000_000u64,
+        class_a_num in 0u8..=2,
+        class_b_num in 0u8..=2,
+    ) {
+        prop_assume!((c1, v1) != (c2, v2));
+
+        let mut lock_a = LockRecord::new(parent, receiver, nonce.clone(), SimTime(c1), SimTime(v1));
+        let mut lock_b = LockRecord::new(parent, receiver, nonce.clone(), SimTime(c2), SimTime(v2));
+
+        prop_assume!(lock_a.id != lock_b.id);
+
+        let h_a = compute_canonical_hash(&lock_a.parent_lock, &lock_a.receiver_pub, &lock_a.nonce);
+        let h_b = compute_canonical_hash(&lock_b.parent_lock, &lock_b.receiver_pub, &lock_b.nonce);
+        prop_assert_eq!(h_a, h_b, "deliberate tie: parent, receiver, nonce are identical");
+
+        lock_a.status = match class_a_num {
+            2 => LockStatus::Final { sigs: 14 },
+            1 => LockStatus::Provisional { sigs: 4, required: 4 },
+            _ => LockStatus::Pending,
+        };
+        lock_b.status = match class_b_num {
+            2 => LockStatus::Final { sigs: 14 },
+            1 => LockStatus::Provisional { sigs: 4, required: 4 },
+            _ => LockStatus::Pending,
+        };
+
+        let expected_winner_is_a = if class_a_num != class_b_num {
+            class_a_num > class_b_num
+        } else {
+            lock_a.id < lock_b.id
+        };
+
+        let mut a_clone = lock_a.clone();
+        let mut b_clone = lock_b.clone();
+        let res = resolve_split_brain_canonical(&mut a_clone, &mut b_clone, None, None);
+
+        let is_winner_a = matches!(res, humoco_sim_core::resolver::ResolutionResult::WinnerA { .. });
+        let is_winner_b = matches!(res, humoco_sim_core::resolver::ResolutionResult::WinnerB { .. });
+
+        if expected_winner_is_a {
+            prop_assert!(is_winner_a);
+            prop_assert!(b_clone.status.is_void());
+            prop_assert!(!a_clone.status.is_void());
+        } else {
+            prop_assert!(is_winner_b);
+            prop_assert!(a_clone.status.is_void());
+            prop_assert!(!b_clone.status.is_void());
+        }
+
+        // Symmetry: argument swap elects identical winner lock
+        let mut a_swap = lock_b.clone();
+        let mut b_swap = lock_a.clone();
+        let res_swap = resolve_split_brain_canonical(&mut a_swap, &mut b_swap, None, None);
+        let winner_swap_id = match res_swap {
+            humoco_sim_core::resolver::ResolutionResult::WinnerA { .. } => a_swap.id,
+            humoco_sim_core::resolver::ResolutionResult::WinnerB { .. } => b_swap.id,
+            _ => panic!("expected winner"),
+        };
+        let expected_winner_id = if expected_winner_is_a { lock_a.id } else { lock_b.id };
+        prop_assert_eq!(winner_swap_id, expected_winner_id);
+    }
+
+    /// Prop 4: Per-entry RamIndex root-TTL retention model against a BTreeMap reference model
+    #[test]
+    fn prop_ram_index_per_entry_root_ttl_retention_against_btree_model(
+        entries in prop::collection::vec(
+            (arb_hash(), arb_hash(), arb_nonce(), 100_000u64..2_000_000u64), 1..25
+        ),
+        prune_times in prop::collection::vec(0u64..3_000_000u64, 1..5),
+    ) {
+        let mut idx = RamIndex::new();
+        let mut ref_map = std::collections::BTreeMap::<[u8; 32], (LockRecord, SimTime)>::new();
+        let now = SimTime(0);
+
+        for (parent, receiver, nonce, ttl_ms) in entries {
+            let root_valid = SimTime(100_000 + ttl_ms);
+            let valid_until = SimTime(root_valid.0.saturating_sub(1).max(31_000));
+            let rec = LockRecord::new(parent, receiver, nonce, now, valid_until);
+            if idx.try_insert(rec.clone(), now, root_valid).is_ok() {
+                ref_map.insert(parent, (rec, root_valid));
+            }
+        }
+
+        for &t_ms in &prune_times {
+            let t = SimTime(t_ms);
+            idx.prune_expired(t);
+            ref_map.retain(|_, (_, root_valid)| !humoco_sim_core::storage::should_prune(t, *root_valid));
+
+            prop_assert_eq!(idx.len(), ref_map.len(), "length must match reference model at t={}", t_ms);
+            for (parent, (expected_rec, _)) in &ref_map {
+                let actual = idx.get(parent);
+                prop_assert!(actual.is_some(), "retained key {:?} must exist in RamIndex", parent);
+                prop_assert_eq!(actual.unwrap().id, expected_rec.id);
+            }
+        }
+    }
+
+    /// Prop 5: ByteYears monotonicity across arbitrary u64 seconds
+    #[test]
+    fn prop_byteyears_monotonicity_across_arbitrary_seconds(
+        s1 in any::<u64>(),
+        delta in any::<u64>(),
+    ) {
+        let s2 = s1.saturating_add(delta);
+        prop_assert!(s1 <= s2);
+
+        let by1 = ByteYears::from_ttl_seconds(s1);
+        let by2 = ByteYears::from_ttl_seconds(s2);
+        prop_assert!(by1 <= by2, "ByteYears must be monotonic: by1={} <= by2={} for s1={} <= s2={}", by1, by2, s1, s2);
+        prop_assert!(by1 >= 1, "ByteYears non-zero floor");
+        prop_assert!(by2 >= 1, "ByteYears non-zero floor");
+
+        let uby1 = ByteYears::micro_from_ttl_seconds(s1);
+        let uby2 = ByteYears::micro_from_ttl_seconds(s2);
+        prop_assert!(uby1 <= uby2, "micro ByteYears must be monotonic: uby1={} <= uby2={}", uby1, uby2);
+        prop_assert!(uby1 >= 1, "micro ByteYears non-zero floor");
+        prop_assert!(uby2 >= 1, "micro ByteYears non-zero floor");
+
+        if s1 > 0 {
+            prop_assert!(uby1 >= by1, "micro ByteYears >= ByteYears for s1 > 0");
         }
     }
 }

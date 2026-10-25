@@ -289,12 +289,11 @@ pub async fn verify_current(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let client_bucket = u16::from_le_bytes([context.parent_lock[0], context.parent_lock[1]]);
-    let day = state
-        .tier_controller
-        .current_epoch_day_at(state.net_time_ms());
+    let now_ms = state.net_time_ms();
+    let day = state.tier_controller.current_epoch_day_at(now_ms);
     if state
         .tier_controller
-        .evaluate_read_quota(client_bucket, 60, day, 1.0)
+        .evaluate_read_quota_with_time(client_bucket, 60, day, 1.0, Some(now_ms))
         .is_err()
     {
         return StatusCode::TOO_MANY_REQUESTS.into_response();

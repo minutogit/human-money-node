@@ -743,7 +743,7 @@ impl NodeDaemon {
                     _ = interval.tick() => {
                         // Cold-start & sync barrier: if boot sync is still pending and the local clock
                         // has not received enough F2F median samples, defer destructive pruning.
-                        if !prune_pm.is_local_sync_ready() && !prune_pm.clock().is_time_corroborated(0) {
+                        if !prune_pm.is_local_sync_ready() && !prune_pm.clock().has_quorum_samples() {
                             debug!("TTL pruning ticker: deferred during boot sync / uncorroborated clock");
                             continue;
                         }

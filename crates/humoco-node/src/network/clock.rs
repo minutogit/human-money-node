@@ -5,7 +5,7 @@
 //! 2. Clamping: `|time_offset| <= 15 minutes` (900_000 ms).
 //! 3. Strict Monotonicity: `net_time = max(net_time, last_seen_time + 1 ms)`.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -24,7 +24,8 @@ pub const MAX_ROLLING_SAMPLES: usize = 128;
 
 #[derive(Debug, Clone)]
 struct ClockState {
-    samples: VecDeque<i64>,
+    peer_samples: HashMap<[u8; 32], i64>,
+    sample_order: VecDeque<[u8; 32]>,
     logical_offset: i64,
     /// Maximum allowed logical time offset clamp (default: 15 min, dynamically adapted on mesh merges)
     max_clamp_ms: i64,
@@ -64,7 +65,8 @@ impl NetworkClock {
 
         Self {
             inner: RwLock::new(ClockState {
-                samples: VecDeque::with_capacity(MAX_ROLLING_SAMPLES),
+                peer_samples: HashMap::with_capacity(MAX_ROLLING_SAMPLES),
+                sample_order: VecDeque::with_capacity(MAX_ROLLING_SAMPLES),
                 logical_offset: 0,
                 max_clamp_ms: MAX_TIME_OFFSET_CLAMP_MS,
             }),
@@ -125,10 +127,13 @@ impl NetworkClock {
     /// for > 15 minutes can converge deterministically.
     pub fn fast_reseed_on_merge(&self, target_offset_ms: i64) {
         let mut state = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        state.max_clamp_ms = state.max_clamp_ms.max(target_offset_ms.abs());
+        state.max_clamp_ms = state.max_clamp_ms.max(target_offset_ms.saturating_abs());
         state.logical_offset = target_offset_ms;
-        state.samples.clear();
-        state.samples.push_back(target_offset_ms);
+        state.peer_samples.clear();
+        state.sample_order.clear();
+        let reseed_key = [0xffu8; 32];
+        state.peer_samples.insert(reseed_key, target_offset_ms);
+        state.sample_order.push_back(reseed_key);
         self.time_offset.store(target_offset_ms, Ordering::Release);
         tracing::info!(
             target_offset_ms,
@@ -150,14 +155,17 @@ impl NetworkClock {
         self.base_epoch_ms.saturating_add(elapsed_ms)
     }
 
-    /// Records a heartbeat time sample:
+    /// Records a heartbeat time sample for an authenticated peer:
     /// `offset = t_peer_heartbeat - t_local_system_clock`.
     ///
     /// Security barriers:
     /// 1. WoT Gating: Discards samples immediately (`return false`) if `is_f2f_friend == false`.
-    /// 2. Clamping: Keeps logical `time_offset` strictly within `[-max_clamp, max_clamp]`.
-    pub fn record_sample(
+    /// 2. 1-Sample per F2F Friend: Each direct friend has at most 1 active sample in the median pool (A11-01).
+    /// 3. Overflow protection: Uses i128 difference and rejects out-of-domain offsets (A11-03).
+    /// 4. Clamping: Keeps logical `time_offset` strictly within `[-max_clamp, max_clamp]`.
+    pub fn record_sample_for_peer(
         &self,
+        peer_pubkey: [u8; 32],
         is_f2f_friend: bool,
         peer_heartbeat_time_ms: u64,
         local_system_clock_ms: u64,
@@ -167,29 +175,52 @@ impl NetworkClock {
             return false;
         }
 
-        let offset = peer_heartbeat_time_ms as i64 - local_system_clock_ms as i64;
+        // A11-03: Use i128 for raw offset calculation to avoid u64 as i64 overflow/wraparound
+        let raw_offset: i128 =
+            i128::from(peer_heartbeat_time_ms) - i128::from(local_system_clock_ms);
+
+        let Ok(offset) = i64::try_from(raw_offset) else {
+            return false;
+        };
+
+        // Reject extreme / out-of-domain offsets (e.g. > 365 days)
+        const MAX_SANE_CLOCK_OFFSET_MS: i64 = 365 * 86_400_000;
+        if offset.saturating_abs() > MAX_SANE_CLOCK_OFFSET_MS {
+            return false;
+        }
+
         let mut state = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
-        if state.samples.len() >= MAX_ROLLING_SAMPLES {
-            state.samples.pop_front();
+        // A11-01: 1 vote per authenticated F2F friend
+        if !state.peer_samples.contains_key(&peer_pubkey) {
+            if state.peer_samples.len() >= MAX_ROLLING_SAMPLES {
+                if let Some(oldest_peer) = state.sample_order.pop_front() {
+                    state.peer_samples.remove(&oldest_peer);
+                }
+            }
+            state.sample_order.push_back(peer_pubkey);
+        } else {
+            state.sample_order.retain(|k| k != &peer_pubkey);
+            state.sample_order.push_back(peer_pubkey);
         }
-        state.samples.push_back(offset);
+        state.peer_samples.insert(peer_pubkey, offset);
 
         // Check if >= 10 samples are available
-        if state.samples.len() >= MIN_SAMPLES_FOR_MEDIAN {
-            let offset_target = Self::calculate_median_from_slice(&state.samples);
+        if state.peer_samples.len() >= MIN_SAMPLES_FOR_MEDIAN {
+            let samples: Vec<i64> = state.peer_samples.values().copied().collect();
+            let offset_target = Self::calculate_median_from_slice(&samples);
             let clamp_limit = state.max_clamp_ms;
 
             // If |offset_target| > 45_000 ms, smoothly adjust logical time_offset
-            if offset_target.abs() > CLOCK_SKEW_THRESHOLD_MS {
+            if offset_target.saturating_abs() > CLOCK_SKEW_THRESHOLD_MS {
                 tracing::warn!(
                     peer_offset_median_ms = offset_target,
                     threshold_ms = CLOCK_SKEW_THRESHOLD_MS,
                     "F2F clock skew exceeds 45s threshold — median damping applied"
                 );
-                let diff: i64 = offset_target - state.logical_offset;
-                let step = if diff.abs() <= 1_000 { diff } else { diff / 2 };
-                let raw_offset = state.logical_offset + step;
+                let diff: i64 = offset_target.saturating_sub(state.logical_offset);
+                let step = if diff.saturating_abs() <= 1_000 { diff } else { diff / 2 };
+                let raw_offset = state.logical_offset.saturating_add(step);
                 // Barrier 2: Clamping to max_clamp_ms (default: 15 minutes, or adapted on merge)
                 state.logical_offset = raw_offset.clamp(-clamp_limit, clamp_limit);
                 self.time_offset
@@ -197,11 +228,11 @@ impl NetworkClock {
             } else if state.logical_offset != 0 {
                 // When peer clocks return within tolerance (<= 45s),
                 // smoothly decay any existing offset back to 0.
-                let diff: i64 = -state.logical_offset;
-                let step = if diff.abs() <= 1_000 { diff } else { diff / 2 };
+                let diff: i64 = 0i64.saturating_sub(state.logical_offset);
+                let step = if diff.saturating_abs() <= 1_000 { diff } else { diff / 2 };
                 state.logical_offset =
-                    (state.logical_offset + step).clamp(-clamp_limit, clamp_limit);
-                if state.logical_offset.abs() <= MAX_TIME_OFFSET_CLAMP_MS {
+                    (state.logical_offset.saturating_add(step)).clamp(-clamp_limit, clamp_limit);
+                if state.logical_offset.saturating_abs() <= MAX_TIME_OFFSET_CLAMP_MS {
                     state.max_clamp_ms = MAX_TIME_OFFSET_CLAMP_MS;
                 }
                 self.time_offset
@@ -212,28 +243,57 @@ impl NetworkClock {
         true
     }
 
+    /// Records a heartbeat time sample (assigns a unique synthetic peer ID for tests).
+    pub fn record_sample(
+        &self,
+        is_f2f_friend: bool,
+        peer_heartbeat_time_ms: u64,
+        local_system_clock_ms: u64,
+    ) -> bool {
+        static SYNTHETIC_PEER_SEQ: AtomicU64 = AtomicU64::new(1);
+        let id = SYNTHETIC_PEER_SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut synthetic_peer = [0u8; 32];
+        synthetic_peer[..8].copy_from_slice(&id.to_le_bytes());
+        self.record_sample_for_peer(
+            synthetic_peer,
+            is_f2f_friend,
+            peer_heartbeat_time_ms,
+            local_system_clock_ms,
+        )
+    }
+
+    /// Records a peer heartbeat for an authenticated F2F friend using the local physical clock.
+    pub fn record_peer_heartbeat(
+        &self,
+        peer_pubkey: [u8; 32],
+        is_f2f_friend: bool,
+        peer_heartbeat_time_ms: u64,
+    ) -> bool {
+        let local_now = self.physical_now_ms();
+        self.record_sample_for_peer(
+            peer_pubkey,
+            is_f2f_friend,
+            peer_heartbeat_time_ms,
+            local_now,
+        )
+    }
+
     /// Helper method to record a heartbeat using the current local physical clock.
-    ///
-    /// Uses `self.physical_now_ms()` (monotonic elapsed time) instead of
-    /// `SystemTime::now()` to avoid unanchored NTP step artifacts (Rule 2 & Spec 07).
-    /// NTP corrections can cause the wall clock to jump forward or backward, which would
-    /// corrupt the median offset calculation and potentially allow an attacker to manipulate
-    /// consensus time. The monotonic `Instant` guarantees strictly forward progression.
     pub fn record_heartbeat(&self, is_f2f_friend: bool, peer_heartbeat_time_ms: u64) -> bool {
         let local_now = self.physical_now_ms();
         self.record_sample(is_f2f_friend, peer_heartbeat_time_ms, local_now)
     }
 
-    /// Computes the median from a slice/VecDeque of samples
-    pub fn calculate_median_from_slice(samples: &VecDeque<i64>) -> i64 {
+    /// Computes the median from a slice of samples
+    pub fn calculate_median_from_slice(samples: &[i64]) -> i64 {
         if samples.is_empty() {
             return 0;
         }
-        let mut sorted: Vec<i64> = samples.iter().copied().collect();
+        let mut sorted: Vec<i64> = samples.to_vec();
         sorted.sort_unstable();
         let mid = sorted.len() / 2;
         if sorted.len().is_multiple_of(2) {
-            (sorted[mid - 1] + sorted[mid]) / 2
+            ((i128::from(sorted[mid - 1]) + i128::from(sorted[mid])) / 2) as i64
         } else {
             sorted[mid]
         }
@@ -244,25 +304,35 @@ impl NetworkClock {
         self.inner
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .samples
+            .peer_samples
             .len()
+    }
+
+    /// Returns true if at least MIN_SAMPLES_FOR_MEDIAN (>= 10) distinct peer samples are present
+    pub fn has_quorum_samples(&self) -> bool {
+        self.sample_count() >= MIN_SAMPLES_FOR_MEDIAN
     }
 
     /// Computes the current median offset of samples, if >= 10 samples are present
     pub fn current_median_offset(&self) -> Option<i64> {
         let state = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        if state.samples.len() >= MIN_SAMPLES_FOR_MEDIAN {
-            Some(Self::calculate_median_from_slice(&state.samples))
+        if state.peer_samples.len() >= MIN_SAMPLES_FOR_MEDIAN {
+            let samples: Vec<i64> = state.peer_samples.values().copied().collect();
+            Some(Self::calculate_median_from_slice(&samples))
         } else {
             None
         }
     }
 
-    /// Returns true if a forward clock jump of `jump_ms` is corroborated by the F2F network median offset.
-    pub fn is_time_corroborated(&self, jump_ms: u64) -> bool {
+    /// Returns true if a forward clock jump of `forward_jump_ms` is corroborated by the F2F network median offset.
+    /// A11-02: If forward_jump_ms == 0, returns whether quorum samples are present.
+    /// For forward_jump_ms > 0, ONLY a positive median offset can corroborate a forward jump.
+    pub fn is_time_corroborated(&self, forward_jump_ms: u64) -> bool {
+        if forward_jump_ms == 0 {
+            return self.has_quorum_samples();
+        }
         if let Some(median) = self.current_median_offset() {
-            let median_abs = median.unsigned_abs();
-            median_abs >= jump_ms
+            u64::try_from(median).is_ok_and(|pos_median| pos_median >= forward_jump_ms)
         } else {
             false
         }
@@ -290,18 +360,20 @@ impl NetworkClock {
     /// Performs an incremental adjustment step toward the median target
     pub fn step_adjustment(&self) {
         let mut state = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        if state.samples.len() >= MIN_SAMPLES_FOR_MEDIAN {
-            let offset_target = Self::calculate_median_from_slice(&state.samples);
-            let target = if offset_target.abs() > CLOCK_SKEW_THRESHOLD_MS {
+        if state.peer_samples.len() >= MIN_SAMPLES_FOR_MEDIAN {
+            let samples: Vec<i64> = state.peer_samples.values().copied().collect();
+            let offset_target = Self::calculate_median_from_slice(&samples);
+            let target = if offset_target.saturating_abs() > CLOCK_SKEW_THRESHOLD_MS {
                 offset_target
             } else {
                 0
             };
-            let diff: i64 = target - state.logical_offset;
-            let step = if diff.abs() <= 1_000 { diff } else { diff / 2 };
+            let diff: i64 = target.saturating_sub(state.logical_offset);
+            let step = if diff.saturating_abs() <= 1_000 { diff } else { diff / 2 };
             let clamp_limit = state.max_clamp_ms;
-            state.logical_offset = (state.logical_offset + step).clamp(-clamp_limit, clamp_limit);
-            if state.logical_offset.abs() <= MAX_TIME_OFFSET_CLAMP_MS {
+            state.logical_offset =
+                (state.logical_offset.saturating_add(step)).clamp(-clamp_limit, clamp_limit);
+            if state.logical_offset.saturating_abs() <= MAX_TIME_OFFSET_CLAMP_MS {
                 state.max_clamp_ms = MAX_TIME_OFFSET_CLAMP_MS;
             }
             self.time_offset
@@ -445,5 +517,104 @@ mod tests {
         // Subsequent samples adjust within the expanded clamp
         clock.set_offset_for_testing(two_hours_ms + 10_000);
         assert_eq!(clock.logical_offset_ms(), two_hours_ms);
+    }
+
+    #[test]
+    fn test_a11_01_single_friend_cannot_inflate_quorum() {
+        let clock = NetworkClock::new();
+        let friend = [0x42u8; 32];
+        let local_time = 1_000_000_000;
+
+        // Same friend sends 20 heartbeats with varying timestamps
+        for i in 0..20 {
+            let accepted = clock.record_sample_for_peer(friend, true, local_time + 60_000 + i, local_time);
+            assert!(accepted);
+        }
+
+        // Even though 20 heartbeats were sent, they all belong to 1 peer:
+        assert_eq!(clock.sample_count(), 1, "1 friend must only occupy 1 sample slot");
+        assert!(!clock.has_quorum_samples(), "1 friend must never establish quorum");
+        assert_eq!(clock.current_median_offset(), None);
+        assert_eq!(clock.logical_offset_ms(), 0);
+
+        // Now add 9 other distinct friends
+        for i in 1..10 {
+            let mut other_friend = [0x55u8; 32];
+            other_friend[0] = i as u8;
+            clock.record_sample_for_peer(other_friend, true, local_time + 60_000, local_time);
+        }
+
+        // Now we have 10 distinct friends -> Quorum reached!
+        assert_eq!(clock.sample_count(), 10);
+        assert!(clock.has_quorum_samples());
+        assert_eq!(clock.current_median_offset(), Some(60_000));
+    }
+
+    #[test]
+    fn test_a11_02_directional_forward_jump_corroboration() {
+        let clock = NetworkClock::new();
+        let local_time = 1_000_000_000;
+
+        // Quorum check with 0 jump: false when empty
+        assert!(!clock.is_time_corroborated(0));
+
+        // Add 10 peers with strong NEGATIVE offset (-100_000_000 ms, peers in past)
+        for i in 0..10 {
+            let mut friend = [0x11u8; 32];
+            friend[0] = i as u8;
+            clock.record_sample_for_peer(friend, true, local_time - 100_000_000, local_time);
+        }
+
+        assert!(clock.has_quorum_samples());
+        assert!(clock.is_time_corroborated(0));
+        assert_eq!(clock.current_median_offset(), Some(-100_000_000));
+
+        // A negative median must NEVER corroborate a positive forward jump (+86_400_000 ms)!
+        assert!(
+            !clock.is_time_corroborated(86_400_000),
+            "Negative median must NEVER corroborate a forward jump >24h"
+        );
+
+        // Reset with 10 peers with POSITIVE offset (+90_000_000 ms)
+        let clock_pos = NetworkClock::new();
+        for i in 0..10 {
+            let mut friend = [0x22u8; 32];
+            friend[0] = i as u8;
+            clock_pos.record_sample_for_peer(friend, true, local_time + 90_000_000, local_time);
+        }
+        assert_eq!(clock_pos.current_median_offset(), Some(90_000_000));
+        assert!(
+            clock_pos.is_time_corroborated(86_400_000),
+            "Positive median >= 86_400_000 must corroborate the forward jump"
+        );
+        assert!(
+            !clock_pos.is_time_corroborated(100_000_000),
+            "Forward jump greater than positive median must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_a11_03_extreme_timestamp_arithmetic_overflow_safety() {
+        let clock = NetworkClock::new();
+        let local_time = 1_700_000_000_000u64;
+
+        // 1. Extreme timestamp: 1 << 63
+        let extreme_1 = 1u64 << 63;
+        let accepted = clock.record_sample(true, extreme_1, local_time);
+        assert!(!accepted, "Extreme timestamp 1 << 63 must be rejected cleanly without panic");
+
+        // 2. u64::MAX
+        let extreme_max = u64::MAX;
+        let accepted_max = clock.record_sample(true, extreme_max, local_time);
+        assert!(!accepted_max, "u64::MAX timestamp must be rejected cleanly without panic");
+
+        // 3. calculate_median_from_slice with extreme values that would overflow i64 on addition
+        let samples = vec![i64::MAX - 10, i64::MAX - 2];
+        let median = NetworkClock::calculate_median_from_slice(&samples);
+        assert_eq!(median, i64::MAX - 6);
+
+        let samples_min = vec![i64::MIN + 2, i64::MIN + 10];
+        let median_min = NetworkClock::calculate_median_from_slice(&samples_min);
+        assert_eq!(median_min, i64::MIN + 6);
     }
 }

@@ -225,8 +225,8 @@ impl RedbStorage {
         ) {
             Ok(c) => c,
             Err(StorageError::SigningHistoryCorrupt) => {
-                drop(txn);
-                self.latch_corruption();
+                self.latch_corruption_in_txn(&txn);
+                let _ = txn.commit();
                 return Err(StorageError::SigningHistoryCorrupt);
             }
             Err(e) => return Err(e),
@@ -241,8 +241,8 @@ impl RedbStorage {
             }
             if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
                 drop(locks);
-                drop(txn);
-                self.latch_corruption();
+                self.latch_corruption_in_txn(&txn);
+                let _ = txn.commit();
                 return Err(e);
             }
             let lock_bytes = serde_json::to_vec(entry)?;
@@ -296,8 +296,8 @@ impl RedbStorage {
         ) {
             Ok(c) => c,
             Err(StorageError::SigningHistoryCorrupt) => {
-                drop(txn);
-                self.latch_corruption();
+                self.latch_corruption_in_txn(&txn);
+                let _ = txn.commit();
                 return Err(StorageError::SigningHistoryCorrupt);
             }
             Err(e) => return Err(e),
@@ -312,8 +312,8 @@ impl RedbStorage {
             }
             if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
                 drop(locks);
-                drop(txn);
-                self.latch_corruption();
+                self.latch_corruption_in_txn(&txn);
+                let _ = txn.commit();
                 return Err(e);
             }
             let bytes = bincode::serialize(&(record, root_valid_until_ms))?;

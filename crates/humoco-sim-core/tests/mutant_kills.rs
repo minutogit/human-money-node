@@ -3,7 +3,9 @@
 
 use humoco_sim_core::crypto::{sign_deterministic_sig, verify_deterministic_sig};
 use humoco_sim_core::quota::{ByteYears, HourlySlottedRingBuffer, NetworkThermometer};
-use humoco_sim_core::types::{order_statistics_threshold, verify_order_statistics_quorum};
+use humoco_sim_core::types::{
+    order_statistics_threshold, verify_order_statistics_quorum, NodeId,
+};
 
 // ---------------------------------------------------------------------------
 // M1-O5: ByteYears::from_ttl_seconds(0) must return 1 (commercial rounding)
@@ -232,26 +234,46 @@ fn test_mutant_m1o4_verify_order_statistics_quorum_boundary() {
         "duplicates must not be counted as distinct signers"
     );
 
-    // Verify threshold 0.5 case has at least one invalid and respects boundary
-    let k_mid = 2.5; // threshold = 1 -2.5/5=0.5
-    let thr_mid = order_statistics_threshold(5, k_mid);
-    assert!((thr_mid - 0.5).abs() < f64::EPSILON);
-    // Search across many shards for a valid quorum with this mid threshold to ensure logic holds
-    let mut found_valid = false;
-    let mut found_invalid = false;
-    for _ in 0u16..200 {
-        let (v, _) = verify_order_statistics_quorum(&[1, 2, 3, 4], &active_nodes);
-        if v {
-            found_valid = true;
-        } else {
-            found_invalid = true;
-        }
-        if found_valid && found_invalid {
-            break;
-        }
-    }
-    assert!(
-        found_valid || found_invalid,
-        "at least one of valid/invalid should be observable"
-    );
+    // Sharp deterministic assertions on verify_order_statistics_quorum (A12-01)
+    // 1. Sub-quorum boundary (N = 5 -> required_q = 4, is_final = false)
+    let (v_sub_ok, final_sub_ok) = verify_order_statistics_quorum(&[1, 2, 3, 4], &[1, 2, 3, 4, 5]);
+    assert!(v_sub_ok, "N=5 with 4 distinct members must be valid");
+    assert!(!final_sub_ok, "N=5 sub-quorum must not be final");
+
+    let (v_sub_fail, final_sub_fail) = verify_order_statistics_quorum(&[1, 2, 3], &[1, 2, 3, 4, 5]);
+    assert!(!v_sub_fail, "N=5 with 3 distinct members must be invalid (need 4)");
+    assert!(!final_sub_fail, "invalid sub-quorum must not be final");
+
+    // 2. Full committee boundary (N = 20 -> required_q = 14, is_final = true)
+    let full_committee: Vec<NodeId> = (1..=20).collect();
+    let signers_14: Vec<NodeId> = (1..=14).collect();
+    let signers_13: Vec<NodeId> = (1..=13).collect();
+
+    let (v_full_ok, final_full_ok) = verify_order_statistics_quorum(&signers_14, &full_committee);
+    assert!(v_full_ok, "N=20 with 14 distinct members must be valid");
+    assert!(final_full_ok, "N=20 with 14 distinct members must be final");
+
+    let (v_full_fail, final_full_fail) = verify_order_statistics_quorum(&signers_13, &full_committee);
+    assert!(!v_full_fail, "N=20 with 13 distinct members must be invalid (need 14)");
+    assert!(!final_full_fail, "invalid full quorum must not be final");
+
+    // 3. Outsider rejection
+    let (v_out, final_out) = verify_order_statistics_quorum(&[1, 2, 3, 99], &[1, 2, 3, 4, 5]);
+    assert!(!v_out, "outsider not in committee must be rejected");
+    assert!(!final_out, "rejected quorum cannot be final");
+
+    // 4. Duplicate signer rejection
+    let (v_dup_sign, final_dup_sign) = verify_order_statistics_quorum(&[1, 2, 3, 3], &[1, 2, 3, 4, 5]);
+    assert!(!v_dup_sign, "duplicate signers must be rejected");
+    assert!(!final_dup_sign, "duplicate signers cannot produce final quorum");
+
+    // 5. Invalid committee length (>20 or duplicates in committee)
+    let oversized_committee: Vec<NodeId> = (1..=21).collect();
+    let oversized_signers: Vec<NodeId> = (1..=14).collect();
+    let (v_over, _) = verify_order_statistics_quorum(&oversized_signers, &oversized_committee);
+    assert!(!v_over, "committee > 20 must be rejected");
+
+    let dup_committee = vec![1, 2, 3, 4, 4];
+    let (v_dup_comm, _) = verify_order_statistics_quorum(&[1, 2, 3, 4], &dup_committee);
+    assert!(!v_dup_comm, "committee with duplicate members must be rejected");
 }

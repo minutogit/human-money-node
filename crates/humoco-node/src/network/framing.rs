@@ -796,7 +796,7 @@ pub async fn read_frame_with_timeout<R: AsyncReadExt + Unpin>(
 
 /// Class-specific admission happens after the validated header and before reading
 /// or allocating the body. The owned permit lives through handler completion.
-pub(crate) async fn read_frame_admitted<R: AsyncReadExt + Unpin>(
+pub async fn read_frame_admitted<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     timeout_dur: Duration,
     pools: Option<(

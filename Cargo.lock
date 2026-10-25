@@ -798,6 +798,7 @@ dependencies = [
  "humoco-sim-core",
  "mimalloc",
  "parking_lot",
+ "proptest",
  "quinn",
  "rand 0.8.8",
  "rcgen",

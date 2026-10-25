@@ -313,3 +313,159 @@ async fn test_dns_peer_periodic_resolution() {
     assert_eq!(peer.unwrap().node_id, Some(pk));
     assert!(pm.is_f2f_friend(&pk).await);
 }
+
+#[tokio::test]
+async fn test_a03_01_handler_cancellation_and_clean_drain_tasks() {
+    struct HangingHandler;
+    impl RequestHandler for HangingHandler {
+        fn handle(
+            &self,
+            _header: WireHeader,
+            _payload: Vec<u8>,
+        ) -> BoxFuture<Result<(WireHeader, Vec<u8>), humoco_node::NodeError>> {
+            Box::pin(async move {
+                // Simulates a hanging or slow handler (e.g. 60s)
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok((WireHeader::new(MsgType::StatusResponse as u16, 1, 0, 0, 0), vec![]))
+            })
+        }
+    }
+
+    let cancel_token = CancellationToken::new();
+    let server_id = NodeIdentity::generate();
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        Arc::new(PeerManager::new(vec![])),
+        Arc::new(HangingHandler),
+        cancel_token.clone(),
+    )
+    .expect("Bind server");
+
+    let server_addr = server_transport.local_addr().expect("Local addr");
+    let _accept_loop = server_transport.spawn_accept_loop();
+
+    let client_id = NodeIdentity::generate();
+    let client_cancel = CancellationToken::new();
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        Arc::new(PeerManager::new(vec![])),
+        Arc::new(DefaultRequestHandler),
+        client_cancel,
+    )
+    .expect("Bind client");
+
+    let conn = client_transport
+        .connect_peer_unchecked(server_addr)
+        .await
+        .expect("Connect to server");
+
+    // Send a bi-stream request to server to trigger the hanging handler
+    let (mut send, _recv) = conn.open_bi().await.expect("Open bi-stream");
+    let req_header = WireHeader::new(
+        MsgType::StatusQuery as u16,
+        1,
+        0,
+        0,
+        0,
+    );
+    humoco_node::network::framing::write_frame(&mut send, &req_header, &[])
+        .await
+        .expect("Write frame");
+
+    // Give server a moment to read frame and enter the hanging handler
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Trigger shutdown cancellation
+    cancel_token.cancel();
+
+    // A03-01: drain_tasks() must finish promptly (within grace period ~100ms) and NOT hang for 60s
+    let drain_result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        server_transport.drain_tasks(),
+    )
+    .await;
+
+    assert!(
+        drain_result.is_ok(),
+        "drain_tasks() must cleanly complete within grace period on cancellation"
+    );
+}
+
+#[tokio::test]
+async fn test_a11_01_heartbeat_freshness_window_drop() {
+    let cancel_token = CancellationToken::new();
+    let id_a = NodeIdentity::generate();
+    let id_b = NodeIdentity::generate();
+
+    let pm_a = Arc::new(PeerManager::with_f2f(vec![], vec![*id_b.node_id()]));
+
+    // Seed Node A's clock with 10 quorum samples so has_quorum_samples() is true
+    let local_base = pm_a.net_time_ms();
+    for i in 0..10 {
+        let mut friend = [0x99u8; 32];
+        friend[0] = i as u8;
+        pm_a.clock().record_sample_for_peer(friend, true, local_base, local_base);
+    }
+    assert!(pm_a.clock().has_quorum_samples());
+
+    let transport_a = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &id_a,
+        pm_a.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("Bind transport A");
+    let addr_a = transport_a.local_addr().unwrap();
+    transport_a.spawn_accept_loop();
+
+    let pm_b = Arc::new(PeerManager::with_f2f(vec![], vec![*id_a.node_id()]));
+    let transport_b = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &id_b,
+        pm_b.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("Bind transport B");
+    let addr_b = transport_b.local_addr().unwrap();
+
+    pm_a.register_f2f_friend(*id_b.node_id(), Some(addr_b)).await;
+    pm_b.register_f2f_friend(*id_a.node_id(), Some(addr_a)).await;
+
+    let conn_b_to_a = transport_b.connect_peer_unchecked(addr_a).await.unwrap();
+
+    // Node B sends a heartbeat with timestamp +600s in the future (> 60s freshness window)
+    let hb_future = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *id_b.node_id(),
+        addr: addr_b,
+        timestamp_ms: local_base + 600_000, // +10 minutes
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *id_b.node_id(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    let payload = bincode::serialize(&hb_future).unwrap();
+    let mut header = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
+    header.reserved = 0; // hops = 0
+
+    transport_b.send_unidirectional(&conn_b_to_a, &header, &payload).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Node A must NOT have incorporated the stale/future heartbeat into clock:
+    assert_eq!(
+        pm_a.clock().sample_count(),
+        10,
+        "Heartbeat deviating by >60s must be dropped at ingress and not recorded in clock"
+    );
+}

@@ -514,13 +514,24 @@ impl TierController {
         epoch_day: u64,
         k_multiplier: f64,
     ) -> Result<(), IngressError> {
+        self.evaluate_read_quota_with_time(client_id, credits, epoch_day, k_multiplier, None)
+    }
+
+    pub fn evaluate_read_quota_with_time(
+        &self,
+        client_id: NodeId,
+        credits: u64,
+        epoch_day: u64,
+        k_multiplier: f64,
+        now_ms: Option<u64>,
+    ) -> Result<(), IngressError> {
         let daily_quota = self.calculate_daily_read_quota(k_multiplier, 1.0);
         let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
         if thermo.try_accept_read(epoch_day, client_id, credits, daily_quota) {
-            let now_sec = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(epoch_day * 86_400);
+            let now_sec = match now_ms {
+                Some(ms) => ms / 1000,
+                None => epoch_day * 86_400,
+            };
             thermo.record_read_ingress(now_sec, credits);
             Ok(())
         } else {

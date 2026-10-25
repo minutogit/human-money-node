@@ -916,14 +916,10 @@ impl FraudProofPayload {
                     }
                 } else {
                     // Since normalized: p2.epoch_seq > p1.epoch_seq
-                    let is_counter_rollback = p1.cumulative_micro_byte_years > 0
+                    // Path 4: counter rollback under sequence progression
+                    p1.cumulative_micro_byte_years > 0
                         && p2.cumulative_micro_byte_years > 0
-                        && p2.cumulative_micro_byte_years < p1.cumulative_micro_byte_years;
-                    let is_timestamp_rollback = p2.timestamp_ms < p1.timestamp_ms
-                        && p2.effective_op_hash() != p1.effective_op_hash();
-
-                    // Path 4: counter rollback or timestamp rollback under sequence progression
-                    is_counter_rollback || is_timestamp_rollback
+                        && p2.cumulative_micro_byte_years < p1.cumulative_micro_byte_years
                 }
             } else if p2.epoch_day == p1.epoch_day + 1 {
                 // Case 2 (next day: p2.epoch_day == p1.epoch_day + 1)
@@ -939,16 +935,8 @@ impl FraudProofPayload {
         }
 
         // Exact mathematical under-reporting fraud check:
-        // Given two signed evidences P1 and P2 with T1 <= T2, delta_secs = (T2 - T1) / 1000:
-        // If T2 < T1 with different contents -> fraud (timestamp rollback).
-        if b.timestamp_ms < a.timestamp_ms
-            && (b.effective_op_hash() != a.effective_op_hash()
-                || b.declared_write_ema_micro_bj != a.declared_write_ema_micro_bj
-                || b.declared_read_ema_credits != a.declared_read_ema_credits)
-        {
-            return true;
-        }
-
+        // Canonical normalization by timestamp_ms first: order of arrival (a, b) vs (b, a)
+        // must never alter the verdict (Order Invariance / Spec 10).
         let (p1, p2) = if a.timestamp_ms <= b.timestamp_ms {
             (a, b)
         } else {
@@ -956,19 +944,23 @@ impl FraudProofPayload {
         };
 
         if p1.timestamp_ms == p2.timestamp_ms {
-            if p1.effective_op_hash() != p2.effective_op_hash() {
-                return true;
-            }
+            // Concurrent operations within the same millisecond are normal for independent
+            // unsequenced reads/queries; an identical duplicate is not fraud.
             return false;
         }
 
         let delta_secs = (p2.timestamp_ms - p1.timestamp_ms) / 1000;
         if p2.is_read {
-            let min_allowed =
-                crate::quota::decay_integer_ema(p1.declared_read_ema_credits, delta_secs)
-                    .saturating_add(1);
-            if p2.declared_read_ema_credits < min_allowed {
-                return true;
+            // Unsequenced reads (seq = 0) have independent zero/ambient baselines;
+            // independent reads for different locks or reordered queries never constitute
+            // under-reporting fraud unless a non-zero sequence progression is declared.
+            if p1.epoch_seq > 0 || p2.epoch_seq > 0 {
+                let min_allowed =
+                    crate::quota::decay_integer_ema(p1.declared_read_ema_credits, delta_secs)
+                        .saturating_add(1);
+                if p2.declared_read_ema_credits < min_allowed {
+                    return true;
+                }
             }
         } else {
             let min_allowed =
@@ -1263,6 +1255,52 @@ mod tests {
             FraudProofPayload::new_ingress_counter_conflict(p_growth.clone(), p_day1.clone());
         assert!(!proof_growth_fwd.verify());
         assert!(!proof_growth_rev.verify());
+
+        // A19-R1: Unsequenced reads (epoch_day=0, epoch_seq=0):
+        // Reordered arrival (T=1000, T=999) and concurrent reads (T=1000, T=1000) for different locks
+        let read1 = sign_ingress_envelope(pk, 0, 0, 0, 0, 10, 1000, hash_a);
+        let read2_earlier = sign_ingress_envelope(pk, 0, 0, 0, 0, 11, 999, hash_b);
+        let proof_read_reordered_fwd =
+            FraudProofPayload::new_ingress_counter_conflict(read1.clone(), read2_earlier.clone());
+        let proof_read_reordered_rev =
+            FraudProofPayload::new_ingress_counter_conflict(read2_earlier.clone(), read1.clone());
+        assert!(
+            !proof_read_reordered_fwd.verify(),
+            "reordered reads must never be flagged as fraud"
+        );
+        assert!(
+            !proof_read_reordered_rev.verify(),
+            "reversed reordered reads must never be flagged as fraud"
+        );
+
+        let read3_concurrent = sign_ingress_envelope(pk, 0, 0, 0, 0, 10, 1000, hash_b);
+        let proof_read_concurrent =
+            FraudProofPayload::new_ingress_counter_conflict(read1.clone(), read3_concurrent.clone());
+        assert!(
+            !proof_read_concurrent.verify(),
+            "concurrent reads within same millisecond must not be flagged as fraud"
+        );
+
+        // Sequence progression with backwards clock correction (e.g. NTP / P2pClock step):
+        // seq progression 10 -> 11, cumulative byte-years monotonically grows, but timestamp 2000 -> 1998
+        let p_seq10 = sign_ingress_envelope(pk, 10, 10, 1000, 0, 100, 2000, hash_a);
+        let p_seq11_clock_step = sign_ingress_envelope(pk, 10, 11, 1100, 0, 100, 1998, hash_b);
+        let proof_clock_step_fwd = FraudProofPayload::new_ingress_counter_conflict(
+            p_seq10.clone(),
+            p_seq11_clock_step.clone(),
+        );
+        let proof_clock_step_rev = FraudProofPayload::new_ingress_counter_conflict(
+            p_seq11_clock_step.clone(),
+            p_seq10.clone(),
+        );
+        assert!(
+            !proof_clock_step_fwd.verify(),
+            "clock adjustment under monotonic sequence progression must not be flagged as fraud"
+        );
+        assert!(
+            !proof_clock_step_rev.verify(),
+            "reversed clock adjustment check must not be flagged as fraud"
+        );
     }
 
     #[test]

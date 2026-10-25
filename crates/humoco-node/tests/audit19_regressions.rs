@@ -654,3 +654,398 @@ async fn test_w4_p2p_quota_isolation_by_full_nodepubkey() {
         res_b
     );
 }
+
+// ---------------------------------------------------------------------------
+// A19-R1: Ordinary reordered and concurrent reads over QUIC never ban honest peer
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_a19_r1_quic_reordered_and_concurrent_reads_never_ban() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let (
+        engine,
+        _tier_controller,
+        readiness,
+        _shard_id,
+        _shard_trans,
+        _shard_addr,
+        client_id,
+        client_trans,
+        conn,
+        _sc,
+        _cc,
+    ) = setup_quic_shard_and_client().await;
+
+    let now = test_now_ms();
+    let auth_root_valid_until = now + 100_000_000;
+    let sender_key = SigningKey::from_bytes(&[12u8; 32]);
+    let genesis_req = make_test_genesis("v_a19_r1", auth_root_valid_until, &sender_key);
+    let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
+    let parent = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    let shard = humoco_sim_core::types::extract_shard_id(&parent);
+    engine
+        .record_hmc_voucher_genesis_parent(&genesis_req.layer2_voucher_id, parent)
+        .await;
+    readiness.mark_shard_ready(shard);
+
+    let _ = engine
+        .ingress_hmc_lock_durable(
+            genesis_tag.clone(),
+            L2LockEntry::from(&genesis_req),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    let lock_id_a = genesis_req.transaction_hash;
+    let lock_id_b = *blake3::hash(b"different_lock_id_b").as_bytes();
+
+    // 1. Send status read at T = now
+    let ev1 = sign_ingress_evidence_with_key(
+        client_id.signing_key(),
+        0,
+        0,
+        now,
+        0,
+        0,
+        0,
+        true,
+        lock_id_a,
+    );
+    let sq1 = humoco_node::network::framing::StatusQueryPayload {
+        lock_id: lock_id_a,
+        parent_lock: parent,
+        shard_id: shard,
+        sender_pubkey: *client_id.node_pubkey(),
+        declared_write_ema_micro_bj: 0,
+        current_read_ema_credits: 0,
+        timestamp_ms: now,
+        sender_signature: ev1.signature,
+    };
+    let payload1 = sq1.to_bytes().unwrap();
+    let (resp1, _) = client_trans
+        .send_request(
+            &conn,
+            &WireHeader::new(MsgType::StatusQuery as u16, 1, 0, 0, payload1.len() as u32),
+            &payload1,
+        )
+        .await
+        .expect("send read 1");
+    assert_eq!(resp1.flags, 0, "first read should succeed without error");
+    assert!(!engine.is_node_banned(client_id.node_pubkey()).await);
+
+    // 2. Send status read for a different lock at T = now - 1ms (reordered packet arrival)
+    let ev2_reordered = sign_ingress_evidence_with_key(
+        client_id.signing_key(),
+        0,
+        0,
+        now.saturating_sub(1),
+        0,
+        0,
+        0,
+        true,
+        lock_id_b,
+    );
+    let sq2 = humoco_node::network::framing::StatusQueryPayload {
+        lock_id: lock_id_b,
+        parent_lock: parent,
+        shard_id: shard,
+        sender_pubkey: *client_id.node_pubkey(),
+        declared_write_ema_micro_bj: 0,
+        current_read_ema_credits: 0,
+        timestamp_ms: now.saturating_sub(1),
+        sender_signature: ev2_reordered.signature,
+    };
+    let payload2 = sq2.to_bytes().unwrap();
+    let (resp2, _) = client_trans
+        .send_request(
+            &conn,
+            &WireHeader::new(MsgType::StatusQuery as u16, 2, 0, 0, payload2.len() as u32),
+            &payload2,
+        )
+        .await
+        .expect("send read 2");
+    assert_eq!(
+        resp2.flags, 0,
+        "reordered read must NOT trigger fraud ban flags (got {:x})",
+        resp2.flags
+    );
+    assert!(
+        !engine.is_node_banned(client_id.node_pubkey()).await,
+        "honest sender must not be banned on reordered read"
+    );
+
+    // 3. Send concurrent status read at T = now for different lock
+    let ev3_concurrent = sign_ingress_evidence_with_key(
+        client_id.signing_key(),
+        0,
+        0,
+        now,
+        0,
+        0,
+        0,
+        true,
+        lock_id_b,
+    );
+    let sq3 = humoco_node::network::framing::StatusQueryPayload {
+        lock_id: lock_id_b,
+        parent_lock: parent,
+        shard_id: shard,
+        sender_pubkey: *client_id.node_pubkey(),
+        declared_write_ema_micro_bj: 0,
+        current_read_ema_credits: 0,
+        timestamp_ms: now,
+        sender_signature: ev3_concurrent.signature,
+    };
+    let payload3 = sq3.to_bytes().unwrap();
+    let (resp3, _) = client_trans
+        .send_request(
+            &conn,
+            &WireHeader::new(MsgType::StatusQuery as u16, 3, 0, 0, payload3.len() as u32),
+            &payload3,
+        )
+        .await
+        .expect("send read 3");
+    assert_eq!(resp3.flags, 0);
+    assert!(!engine.is_node_banned(client_id.node_pubkey()).await);
+}
+
+// ---------------------------------------------------------------------------
+// A19-R2: Exact wire retries succeed idempotently and are not charged repeatedly
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let (
+        engine,
+        tier_controller,
+        readiness,
+        _shard_id,
+        _shard_trans,
+        _shard_addr,
+        client_id,
+        client_trans,
+        conn,
+        _sc,
+        _cc,
+    ) = setup_quic_shard_and_client().await;
+
+    let now = test_now_ms();
+    let auth_root_valid_until = now + 100_000_000;
+    let sender_key = SigningKey::from_bytes(&[15u8; 32]);
+    let genesis_req = make_test_genesis("v_a19_r2", auth_root_valid_until, &sender_key);
+    let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
+    let parent = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    let shard = humoco_sim_core::types::extract_shard_id(&parent);
+    engine
+        .record_hmc_voucher_genesis_parent(&genesis_req.layer2_voucher_id, parent)
+        .await;
+    readiness.mark_shard_ready(shard);
+
+    let ttl_s = auth_root_valid_until.saturating_sub(now) / 1000;
+    let op_by = ByteYears::from_ttl_seconds(ttl_s);
+    let daily_limit = tier_controller.calculate_daily_quota(5.0, 1.0);
+    let epoch_day = tier_controller.current_epoch_day_at(now);
+
+    // Pre-seed sender usage to limit minus exactly one operation
+    let initial_usage = daily_limit.saturating_sub(op_by);
+    let _ = tier_controller.evaluate_node_write_quota(client_id.node_pubkey(), initial_usage, epoch_day);
+
+    let fp = ByteYears::micro_from_ttl_seconds(ttl_s);
+    let ev = sign_ingress_evidence_with_key(
+        client_id.signing_key(),
+        epoch_day as u32,
+        1,
+        now,
+        0,
+        0,
+        fp,
+        false,
+        genesis_req.transaction_hash,
+    );
+
+    let payload = bincode::serialize(&LockWirePayload::Hmc {
+        req: genesis_req.clone(),
+        chain: None,
+        root_valid_until: auth_root_valid_until,
+        epoch_day: epoch_day as u32,
+        epoch_seq: 1,
+        cumulative_micro_byte_years: fp,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *client_id.node_pubkey(),
+        sender_signature: ev.signature,
+        timestamp_ms: now,
+    })
+    .unwrap();
+
+    // First attempt: should succeed and consume the remaining budget
+    let (resp1, _) = client_trans
+        .send_request(
+            &conn,
+            &WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, payload.len() as u32),
+            &payload,
+        )
+        .await
+        .expect("first send");
+    assert_eq!(resp1.flags, 0, "first write within limit must succeed");
+
+    // Identical retry: should succeed idempotently without FLAG_QUOTA_EXCEEDED
+    let (resp2, _) = client_trans
+        .send_request(
+            &conn,
+            &WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 0, payload.len() as u32),
+            &payload,
+        )
+        .await
+        .expect("retry send");
+    assert_eq!(
+        resp2.flags, 0,
+        "exact idempotent wire retry must succeed with flags 0 even at limit"
+    );
+
+    // Now try a different operation: budget is exhausted, so this MUST be rejected with FLAG_QUOTA_EXCEEDED
+    let genesis_req_2 = make_test_genesis("v_a19_r2_second", auth_root_valid_until, &sender_key);
+    let genesis_tag_2 = bs58::encode(&genesis_req_2.transaction_hash).into_string();
+    let parent_2 = *blake3::hash(genesis_tag_2.as_bytes()).as_bytes();
+    let shard_2 = humoco_sim_core::types::extract_shard_id(&parent_2);
+    engine
+        .record_hmc_voucher_genesis_parent(&genesis_req_2.layer2_voucher_id, parent_2)
+        .await;
+    readiness.mark_shard_ready(shard_2);
+
+    let ev2 = sign_ingress_evidence_with_key(
+        client_id.signing_key(),
+        epoch_day as u32,
+        2,
+        now,
+        0,
+        0,
+        fp,
+        false,
+        genesis_req_2.transaction_hash,
+    );
+    let payload_new = bincode::serialize(&LockWirePayload::Hmc {
+        req: genesis_req_2,
+        chain: None,
+        root_valid_until: auth_root_valid_until,
+        epoch_day: epoch_day as u32,
+        epoch_seq: 2,
+        cumulative_micro_byte_years: fp * 2,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *client_id.node_pubkey(),
+        sender_signature: ev2.signature,
+        timestamp_ms: now,
+    })
+    .unwrap();
+
+    let (resp3, _) = client_trans
+        .send_request(
+            &conn,
+            &WireHeader::new(MsgType::LockVerifyRequest as u16, 3, 0, 0, payload_new.len() as u32),
+            &payload_new,
+        )
+        .await
+        .expect("new spend send");
+    assert_ne!(
+        resp3.flags & FLAG_QUOTA_EXCEEDED,
+        0,
+        "new operation exceeding quota must be rejected with FLAG_QUOTA_EXCEEDED"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A19-R3: Full QUIC write budget exhaustion before database mutation
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_a19_r3_quic_write_budget_exhaustion_before_mutation() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let (
+        engine,
+        tier_controller,
+        readiness,
+        _shard_id,
+        _shard_trans,
+        _shard_addr,
+        client_id,
+        client_trans,
+        conn,
+        _sc,
+        _cc,
+    ) = setup_quic_shard_and_client().await;
+
+    let now = test_now_ms();
+    let auth_root_valid_until = now + 100_000_000;
+    let sender_key = SigningKey::from_bytes(&[19u8; 32]);
+    let genesis_req = make_test_genesis("v_a19_r3", auth_root_valid_until, &sender_key);
+    let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
+    let parent = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    let shard = humoco_sim_core::types::extract_shard_id(&parent);
+    engine
+        .record_hmc_voucher_genesis_parent(&genesis_req.layer2_voucher_id, parent)
+        .await;
+    readiness.mark_shard_ready(shard);
+
+    let epoch_day = tier_controller.current_epoch_day_at(now);
+    let daily_limit = tier_controller.calculate_daily_quota(5.0, 1.0);
+
+    // Completely exhaust sender's observed write budget
+    let _ = tier_controller.evaluate_node_write_quota(client_id.node_pubkey(), daily_limit, epoch_day);
+
+    let ttl_s = auth_root_valid_until.saturating_sub(now) / 1000;
+    let fp = ByteYears::micro_from_ttl_seconds(ttl_s);
+    let ev = sign_ingress_evidence_with_key(
+        client_id.signing_key(),
+        epoch_day as u32,
+        1,
+        now,
+        0,
+        0,
+        fp,
+        false,
+        genesis_req.transaction_hash,
+    );
+
+    let payload = bincode::serialize(&LockWirePayload::Hmc {
+        req: genesis_req.clone(),
+        chain: None,
+        root_valid_until: auth_root_valid_until,
+        epoch_day: epoch_day as u32,
+        epoch_seq: 1,
+        cumulative_micro_byte_years: fp,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *client_id.node_pubkey(),
+        sender_signature: ev.signature,
+        timestamp_ms: now,
+    })
+    .unwrap();
+
+    let (resp, _) = client_trans
+        .send_request(
+            &conn,
+            &WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, payload.len() as u32),
+            &payload,
+        )
+        .await
+        .expect("send request");
+    assert_ne!(
+        resp.flags & FLAG_QUOTA_EXCEEDED,
+        0,
+        "must be rejected with FLAG_QUOTA_EXCEEDED"
+    );
+
+    // Assert that the database remains unmutated (Reservation-First)
+    let stored = engine.get_hmc_voucher_root_valid(&genesis_req.layer2_voucher_id).await;
+    assert_eq!(stored, None, "RAM index and database must remain unmutated after quota denial");
+}
+

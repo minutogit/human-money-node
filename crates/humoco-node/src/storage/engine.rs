@@ -2051,6 +2051,11 @@ impl DualTierEngine {
             .map(|p| humoco_sim_core::types::extract_shard_id(&p))
     }
 
+    /// Checks if an exact HMC entry is already durable under the given root TTL.
+    pub async fn is_hmc_entry_durable(&self, tag: &str, entry: &L2LockEntry, root: u64) -> bool {
+        self.hmc_ram.read().await.is_entry_durable(tag, entry, root)
+    }
+
     /// Manually records the genesis parent lock for an HMC voucher.
     pub async fn record_hmc_voucher_genesis_parent(&self, voucher_id: &str, parent: [u8; 32]) {
         self.hmc_ram

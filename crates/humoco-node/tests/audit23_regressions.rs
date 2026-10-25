@@ -630,3 +630,94 @@ async fn test_a23_01_real_quic_signing_release_refuses_double_signature_under_fa
         "client must not be banned for local storage fault"
     );
 }
+
+/// A23-R1: Semantic row substitution (tampering with choice bytes or commitment hash)
+/// must be detected at runtime, immediately fail closed, and latch corruption persistently.
+#[test]
+fn test_a23_r1_semantic_row_substitution_detected_at_runtime_and_latches_corruption() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("row_substitution.redb");
+    let node = [42u8; 32];
+    let record_a = LockRecord::new([1; 32], [2; 32], vec![3], SimTime(1_000), SimTime(50_000));
+    let tag = hex::encode(record_a.parent_lock);
+    let slot = format!("{}:{}", hex::encode(node), tag);
+
+    {
+        let db = RedbStorage::open(&path).unwrap();
+        db.commit_original_record_approval(&record_a, 50_000, &node, b"approval_a", 0)
+            .unwrap();
+        assert!(db.is_signing_history_healthy());
+
+        // Perform semantic row substitution in TABLE_OWN_CHOICES behind the back of TABLE_OWN_CHOICE_COMMITMENTS:
+        // We replace the choice row with another valid JSON OwnSigningChoice that has a different child.
+        let substituted_choice = serde_json::json!({
+            "generation": 1,
+            "child": vec![99u8; 32],
+            "valid_until_ms": 50_000,
+            "approvals": [Some(b"approval_a".to_vec()), None::<Vec<u8>>]
+        });
+        let sub_bytes = serde_json::to_vec(&substituted_choice).unwrap();
+
+        {
+            let raw = db.raw_database_for_test();
+            let tx = raw.begin_write().unwrap();
+            tx.open_table(TABLE_OWN_CHOICES)
+                .unwrap()
+                .insert(slot.as_str(), sub_bytes.as_slice())
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Now attempt an operation on this slot:
+        let res = db.commit_original_record_approval(&record_a, 50_000, &node, b"retry", 0);
+        assert!(
+            matches!(res, Err(StorageError::SigningHistoryCorrupt)),
+            "semantic row substitution must be detected and return SigningHistoryCorrupt, got {res:?}"
+        );
+        assert!(
+            !db.is_signing_history_healthy(),
+            "corruption must latch in memory immediately"
+        );
+    }
+
+    // Latch must persist across reopen:
+    let reopened = RedbStorage::open(&path).unwrap();
+    assert!(
+        !reopened.is_signing_history_healthy(),
+        "persisted latch must survive reopen after row substitution"
+    );
+
+    // Case 2: Tampered commitment hash in TABLE_OWN_CHOICE_COMMITMENTS must also latch
+    let path2 = dir.path().join("commitment_substitution.redb");
+    {
+        let db = RedbStorage::open(&path2).unwrap();
+        db.commit_original_record_approval(&record_a, 50_000, &node, b"approval_a", 0)
+            .unwrap();
+        assert!(db.is_signing_history_healthy());
+
+        // Tamper with the commitment hash directly
+        {
+            let raw = db.raw_database_for_test();
+            let tx = raw.begin_write().unwrap();
+            tx.open_table(humoco_node::storage::TABLE_OWN_CHOICE_COMMITMENTS)
+                .unwrap()
+                .insert(slot.as_str(), &[0xee; 32])
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let res = db.commit_original_record_approval(&record_a, 50_000, &node, b"retry", 0);
+        assert!(
+            matches!(res, Err(StorageError::SigningHistoryCorrupt)),
+            "tampered commitment must fail closed with SigningHistoryCorrupt"
+        );
+        assert!(!db.is_signing_history_healthy());
+    }
+
+    let reopened2 = RedbStorage::open(&path2).unwrap();
+    assert!(
+        !reopened2.is_signing_history_healthy(),
+        "persisted latch must survive reopen after tampered commitment"
+    );
+}
+

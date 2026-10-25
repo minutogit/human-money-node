@@ -1,0 +1,30 @@
+# Audit 11 — Time warp and clock manipulation
+
+Date: 2026-10-25. Scope: current working tree; audit only.
+
+## Findings
+
+**A11-01 · P2 · One direct friend can advance consensus time with future heartbeats.** `transport.rs:3354–3466` checks identity, signatures, deduplication and ticket validity, but does not enforce the ±60s freshness envelope specified in `docs/11_organische_praesenz_und_dunbar_gossip.md:24`. `network/clock.rs:26–30,158–207` stores anonymous samples rather than one current observation per friend. Ten different, correctly signed timestamps from the same authenticated friend therefore establish a median. Real-QUIC reproduction: ten timestamps approximately 600,000 ms ahead produced `sample_count=10` and `logical_offset_ms=300001`. The safe-behavior assertion failed. This can move ingress/TTL decisions minutes ahead; the prune guard only challenges jumps above 24h (`daemon.rs:755`, `storage/engine.rs:3050`). The wire probe measured clock steering, not an actual deleted lock or double spend.
+
+**A11-02 · P2 · Backward skew can authorize a forward prune jump.** `network/clock.rs:263–270` corroborates a positive jump using `median.unsigned_abs()`. Ten samples of −100,000,000 ms make `is_time_corroborated(86_400_001)` return true. Both pruning guards consume this predicate. An isolated component probe failed the assertion that a negative median cannot authorize a forward purge. A complete daemon-level premature deletion has not been reproduced; this finding is the incorrect authorization predicate.
+
+**A11-03 · P2 · Extreme timestamps overflow before clamping.** `network/clock.rs:170` casts arbitrary `u64` timestamps to `i64` and subtracts; median averaging (line 238), `abs()` and offset differences also use unchecked signed arithmetic. `record_heartbeat(true, 1 << 63)` panics on subtraction in the test profile. Release wrapping can instead produce an incorrect offset. An isolated safe-behavior probe reproduced the panic. The direct signed-heartbeat route feeds this method, but this exact extreme value was not separately sent over QUIC.
+
+**A11-04 · P3 · Read-load accounting still uses OS time.** `ingress/tier.rs:524` calls `SystemTime::now()` inside `evaluate_read_quota`, even though production callers supply a network-derived epoch day (`api/routes.rs:475,1621`, `api/live.rs:297`). This timestamps `record_read_ingress` on a different clock from write accounting and day rollover. OS steps can distort time-based read-load decay. Confirmed by inspection; no NTP/EMA fault-injection run.
+
+Positive checks: normal post-startup OS clock steps do not directly change `NetworkClock`, which uses `Instant`; boot recovery uses `SimTime(0)`; ingress arithmetic uses saturation and signed root validity bounds; replaying a purged expired root cannot satisfy a fresh ingress window. A correctly anchored clock is still required. Initial OS time is not independently validated merely by constructing this clock.
+
+OS-time inventory (all paths below `crates/humoco-node/src`): `network/clock.rs:60` boot anchor; `ingress/pow.rs:135`, `api/routes.rs:209`, `ingress/tier.rs:547,856,906` fallbacks when no clock/time is supplied; `ingress/tier.rs:524` production read-load accounting; `ingress/tier.rs:734` client metadata; `storage/engine.rs:1065,1548` ban/evidence timestamps, `1624,2528` recent-lock/flush telemetry, `2111,2238,2373` private voucher presentation; `api/routes.rs:602`, `api/dashboard.rs:573,1558`, `api/metrics.rs:124,138,313`, `api/events.rs:106`, `alert/mod.rs:68` operator/events/alerts; `cli.rs:1555,2093`, `bin/cluster_sim.rs:24,123` CLI/simulation. These uses are not all consensus defects.
+
+## Integrated fix plan
+
+1. Preserve the signed QUIC reproduction as a regression. Add stale/future, exact ±60s boundary, duplicate, relayed and repeated-single-friend cases. Verify a still-valid durable lock survives the rejected samples and an independent healthy peer remains usable.
+2. Enforce the designed freshness envelope before learning/clock mutation. Define a separate fail-closed bootstrap correction policy for nodes whose initial clock is outside that envelope. Keep source identities and observation age in the clock input; repeated messages must not manufacture independent corroboration. Do not introduce automatic bans for skew.
+3. Replace absolute-median corroboration with directional, fresh evidence against the actual proposed corrected time. A negative median must never authorize a forward purge. Add backward-skew and cold-boot/restart cases; retain the monotonicity guarantee without trusting an initially future OS anchor for deletion.
+4. Compute timestamp differences and median sums in `i128` or checked arithmetic; reject out-of-domain offsets before conversion/absolute value. Test `0`, `i64::MAX`, `1 << 63`, `u64::MAX` and opposite extrema, including real signed QUIC frames and continued server usability.
+5. Pass network time into read-load accounting, as already done for write ingress. Use controlled time injection to test EMA under OS forward/backward steps; keep display/alert time separate.
+6. Run clock, TTL/root, ingress, real-wire and workspace suites. Treat the failed safe-behavior probes as open findings, not successful defenses.
+
+Evidence: temporary snapshot and probes under `/tmp/humoco-stufe2-audit`; measured QUIC clock shift above. No production source or permanent test files changed by this audit.
+
+Final shared validation: the bounded workspace run (`timeout 240s cargo test-std --no-fail-fast -- --skip test_a23_01_runtime_malformed_state_and_row_integrity_latches`) ended with exit 124 while running `status_reconciliation_tests`. Completed targets reported 415 passed, 1 failed and 14 ignored; the unfinished target and the explicitly skipped signing-history test are not included in those totals. The failure was `test_chaos_ingress_quota_exhaustion_under_flood` (503 versus 429). This is an incomplete run, not a clean baseline. The live workspace changed concurrently; the isolated probes/mutations used the earlier copied snapshot.

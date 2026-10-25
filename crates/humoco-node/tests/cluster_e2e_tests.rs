@@ -20,6 +20,8 @@ use humoco_node::{
     storage::compute_hmc_canonical_hash,
 };
 
+pub const E2E_F2F_TOKEN: &str = "f2f_0123456789abcdef0123456789abcdef";
+
 fn test_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -184,7 +186,7 @@ impl TestNode {
                     Some(&json_body),
                     &[
                         ("Content-Type", "application/json"),
-                        ("X-Peer-Token", "f2f_cluster_token"),
+                        ("X-Peer-Token", E2E_F2F_TOKEN),
                     ],
                 )
                 .await?;
@@ -257,7 +259,7 @@ impl ClusterHarness {
             config.identity.key_path = key_path;
             config.network.control_socket =
                 Some(temp.path().join(format!("humoco_node_{}.sock", i)));
-            config.f2f.tokens.push("f2f_cluster_token".into());
+            config.f2f.tokens.push(E2E_F2F_TOKEN.into());
 
             node_setups.push((temp, identity, config));
         }
@@ -340,7 +342,7 @@ impl ClusterHarness {
             transport.spawn_accept_loop();
             let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
             let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
-            tier.register_f2f_peer("f2f_cluster_token");
+            tier.register_f2f_peer(E2E_F2F_TOKEN);
             let mut state = AppState::new(engine, storage, identity.clone(), tier, pow);
             state.peer_manager = Some(manager.clone());
             state.transport = Some(transport.clone());
@@ -809,7 +811,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
             Some(&json_body),
             &[
                 ("Content-Type", "application/json"),
-                ("X-Peer-Token", "f2f_cluster_token"),
+                ("X-Peer-Token", E2E_F2F_TOKEN),
             ],
         )
         .await
@@ -854,7 +856,7 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     config_a.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
     config_a.storage.data_dir = temp_a.path().join("data");
     config_a.identity.key_path = key_path_a;
-    config_a.f2f.tokens.push("f2f_cluster_token".into());
+    config_a.f2f.tokens.push(E2E_F2F_TOKEN.into());
     config_a
         .f2f
         .trusted_pubkeys
@@ -921,7 +923,7 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     config_b.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
     config_b.storage.data_dir = temp_b.path().join("data");
     config_b.identity.key_path = key_path_b;
-    config_b.f2f.tokens.push("f2f_cluster_token".into());
+    config_b.f2f.tokens.push(E2E_F2F_TOKEN.into());
     config_b
         .f2f
         .trusted_pubkeys

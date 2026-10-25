@@ -17,6 +17,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ed25519_dalek::{Signer, SigningKey};
@@ -30,11 +32,15 @@ use humoco_node::api::hmc::{
     calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest, L2ResponseEnvelope,
     L2Verdict,
 };
+use humoco_node::api::routes::assemble_quorum_certificate_with_deadline;
 use humoco_node::api::{build_router, AppState};
+use humoco_node::error::NodeError;
 use humoco_node::identity::NodeIdentity;
 use humoco_node::ingress::{PowEngine, TierController};
+use humoco_node::network::transport::{BoxFuture, RequestHandler};
 use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
+use humoco_sim_core::wire::WireHeader;
 
 /// Explicit isolated fixture premises: mature tickets and installed shard state.
 /// These transport/collector tests do not prove bootstrap or recovery completeness.
@@ -472,3 +478,309 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
         sh.transport.close();
     }
 }
+
+struct DelayedHandler {
+    inner: Arc<NodeRequestHandler>,
+    delay: Duration,
+}
+
+impl RequestHandler for DelayedHandler {
+    fn handle_authenticated(
+        &self,
+        header: WireHeader,
+        payload: Vec<u8>,
+        peer_identity: Option<[u8; 32]>,
+    ) -> BoxFuture<Result<(WireHeader, Vec<u8>), NodeError>> {
+        let inner = self.inner.clone();
+        let delay = self.delay;
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            inner.handle_authenticated(header, payload, peer_identity).await
+        })
+    }
+}
+
+/// A24-R1: End-to-end checkout deadline enforcement across persistence and quorum assembly.
+/// When local persistence is delayed or peers respond slowly, the single 780ms checkout deadline
+/// bounds the total execution time, cleanly aborts stragglers without false peer failure penalties,
+/// and returns 503 Quorum Not Reached.
+#[tokio::test]
+async fn test_a24_r1_checkout_enforces_single_end_to_end_deadline_across_persistence_and_quorum() {
+    const NUM_SHARDS: usize = 20;
+
+    let gw_temp = tempdir().expect("gw tempdir");
+    let gw_storage =
+        Arc::new(RedbStorage::open(&gw_temp.path().join("quorum_gw_deadline.redb")).expect("open gw redb"));
+    let (gw_engine, _gw_worker) = DualTierEngine::new(gw_storage.clone());
+    let gateway_id = NodeIdentity::generate();
+    let gw_cancel = CancellationToken::new();
+    let pm_gw = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+
+    struct Shard {
+        identity: NodeIdentity,
+        addr: SocketAddr,
+        transport: QuicTransport,
+        cancel: CancellationToken,
+        engine: DualTierEngine,
+    }
+
+    let mut shards: Vec<Shard> = Vec::new();
+
+    // Spawn 20 shards with delayed responses (1200ms delay, exceeding the 780ms checkout deadline)
+    for s in 0..NUM_SHARDS {
+        let tmp = tempdir().expect("shard tempdir");
+        let storage = Arc::new(
+            RedbStorage::open(&tmp.path().join(format!("deadline_shard{s}.redb")))
+                .expect("open shard redb"),
+        );
+        std::mem::forget(tmp);
+        let (engine, _worker) = DualTierEngine::new(storage.clone());
+        let identity = NodeIdentity::generate();
+        let cancel = CancellationToken::new();
+        let pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+
+        pm.register_f2f_friend(
+            *gateway_id.node_pubkey(),
+            Some("127.0.0.1:1".parse().expect("addr")),
+        )
+        .await;
+
+        for i in 0u64..18 {
+            pm.register_f2f_friend(
+                fake_pubkey(80_000 + (s as u64) * 100 + i),
+                Some(fake_addr((56001 + i) as u16)),
+            )
+            .await;
+        }
+        prepare_mature_fixture(&pm, &identity).await;
+        force_stable_ge20(&pm).await;
+
+        let inner_handler = Arc::new(
+            NodeRequestHandler::with_peer_manager(
+                engine.clone(),
+                storage.clone(),
+                identity.clone(),
+                pm.clone(),
+            )
+            .with_sync_ready(Arc::new(AtomicBool::new(true)))
+            .with_readiness_manager(prepared_readiness()),
+        );
+
+        let delayed_handler = Arc::new(DelayedHandler {
+            inner: inner_handler,
+            delay: Duration::from_millis(1200),
+        });
+
+        let transport = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().expect("addr"),
+            &identity,
+            pm.clone(),
+            delayed_handler,
+            cancel.clone(),
+        )
+        .expect("bind shard transport");
+        transport.set_sync_ready(true);
+        let addr = transport.local_addr().expect("shard local addr");
+        transport.spawn_accept_loop();
+
+        shards.push(Shard {
+            identity,
+            addr,
+            transport,
+            cancel,
+            engine,
+        });
+    }
+
+    for sh in &shards {
+        pm_gw
+            .register_f2f_friend(*sh.identity.node_pubkey(), Some(sh.addr))
+            .await;
+    }
+    prepare_mature_fixture(&pm_gw, &gateway_id).await;
+    force_stable_ge20(&pm_gw).await;
+
+    let sender_key = SigningKey::from_bytes(&[43u8; 32]);
+    let now = test_now_ms();
+
+    let mut counter = 0u64;
+    let (target_shard_id, root_req) = loop {
+        counter += 1;
+        let req = make_hmc_genesis(
+            &format!("lock_deadline_{counter}"),
+            now + 900_000,
+            &sender_key,
+        );
+        let tag = bs58::encode(&req.transaction_hash).into_string();
+        let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+        let sid = humoco_sim_core::types::extract_shard_id(&p_bytes);
+        let (comm, rem, _) = pm_gw
+            .shard_committee(*gateway_id.node_pubkey(), *gateway_id.hrw_routing_id(), sid)
+            .await;
+        if rem.len() == 20
+            && !comm
+                .iter()
+                .any(|m| m.node_pubkey == *gateway_id.node_pubkey())
+        {
+            break (sid, req);
+        }
+        if counter > 10_000 {
+            panic!("Could not find shard committee outside gateway");
+        }
+    };
+
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    for engine in std::iter::once(&gw_engine).chain(shards.iter().map(|s| &s.engine)) {
+        let (verdict, _) = engine
+            .ingress_hmc_lock_with_origin(
+                root_tag.clone(),
+                L2LockEntry::from(&root_req),
+                IngressOrigin::ClientApi,
+                Some(now),
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+
+    use sha3::{Digest, Sha3_256};
+    let mut hash = Sha3_256::new();
+    hash.update(32u32.to_le_bytes());
+    hash.update(root_req.transaction_hash);
+    hash.update(32u32.to_le_bytes());
+    hash.update(sender_key.verifying_key().to_bytes());
+    let lookup_tag = bs58::encode(hash.finalize()).into_string();
+    let mut lock_req = root_req.clone();
+    lock_req.is_genesis = false;
+    lock_req.ds_tag = Some(lookup_tag.clone());
+    lock_req.transaction_hash = [92; 32];
+    lock_req.deletable_at = None;
+    lock_req.layer2_signature = sender_key
+        .sign(&calculate_l2_payload_hash(&lock_req))
+        .to_bytes();
+
+    let gw_handler = Arc::new(NodeRequestHandler::with_peer_manager(
+        gw_engine.clone(),
+        gw_storage.clone(),
+        gateway_id.clone(),
+        pm_gw.clone(),
+    ));
+
+    let gw_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &gateway_id,
+        pm_gw.clone(),
+        gw_handler,
+        gw_cancel.clone(),
+    )
+    .expect("bind gateway transport");
+    let gw_addr = gw_transport.local_addr().expect("gw addr");
+    gw_transport.spawn_accept_loop();
+
+    for sh in &shards {
+        sh.transport
+            .peer_manager()
+            .register_f2f_friend(*gateway_id.node_pubkey(), Some(gw_addr))
+            .await;
+        gw_transport
+            .connect_peer(sh.addr)
+            .await
+            .expect("preconnect shard");
+    }
+
+    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
+    tier_controller.register_f2f_peer("quorum_deadline_token");
+
+    let mut state = AppState::new(
+        gw_engine,
+        gw_storage,
+        gateway_id.clone(),
+        tier_controller,
+        pow_engine,
+    );
+    state.peer_manager = Some(pm_gw.clone());
+    state.transport = Some(gw_transport.clone());
+
+    // -----------------------------------------------------------------------
+    // Part 1: Direct assemble_quorum_certificate_with_deadline with simulated remaining budget
+    // (simulating that local persistence already consumed ~430ms of 780ms budget, leaving 350ms).
+    // -----------------------------------------------------------------------
+    let partial_deadline = tokio::time::Instant::now() + Duration::from_millis(350);
+    let start_partial = std::time::Instant::now();
+    let (cert_partial, _) = assemble_quorum_certificate_with_deadline(
+        &state,
+        lock_req.transaction_hash,
+        *blake3::hash(lookup_tag.as_bytes()).as_bytes(),
+        target_shard_id,
+        now,
+        None,
+        None,
+        Some(partial_deadline),
+    )
+    .await;
+    let elapsed_partial = start_partial.elapsed();
+    assert!(
+        elapsed_partial < Duration::from_millis(500),
+        "Partial deadline must abort at ~350ms, not 800ms default timeout! Elapsed: {elapsed_partial:?}"
+    );
+    assert!(
+        !cert_partial.is_quorum_reached(),
+        "Quorum must not be reached when peers delay"
+    );
+
+    // Verify peers were NOT penalized for being cancelled by the deadline
+    for sh in &shards {
+        if let Some(entry) = pm_gw.get_peer(&sh.addr).await {
+            assert_eq!(
+                entry.missing_count, 0,
+                "Aborted peers must not be penalized with failures"
+            );
+            assert!(
+                entry.last_failure.is_none(),
+                "Aborted peers must have no recorded failure timestamp"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Part 2: End-to-end /v1/lock HTTP route with 780ms checkout deadline
+    // -----------------------------------------------------------------------
+    let app = build_router(state);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "quorum_deadline_token")
+        .header("x-required-quorum", "14")
+        .body(Body::from(
+            serde_json::to_vec(&lock_req).expect("serialize lock request"),
+        ))
+        .expect("build request");
+
+    let start_http = std::time::Instant::now();
+    let resp = app.oneshot(req).await.expect("execute request");
+    let elapsed_http = start_http.elapsed();
+
+    assert!(
+        elapsed_http < Duration::from_millis(850),
+        "End-to-end HTTP request must respect 780ms deadline! Elapsed: {elapsed_http:?}"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Slow peers must trigger 503 Quorum Not Reached"
+    );
+
+    let body_bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).expect("envelope");
+    assert!(matches!(env.verdict, L2Verdict::Rejected { .. }));
+
+    // Cleanup
+    gw_cancel.cancel();
+    gw_transport.close();
+    for sh in shards {
+        sh.cancel.cancel();
+        sh.transport.close();
+    }
+}
+

@@ -101,7 +101,7 @@ pub(super) fn put(
         }
     }
     roots.insert(entry.layer2_voucher_id.as_str(), bytes.as_slice())?;
-    let expires_sec = expiry.saturating_add(30_999) / 1_000;
+    let expires_sec = super::grace_expiry_bucket_sec(expiry);
     txn.open_table(TABLE_VOUCHER_ROOT_TTL)?
         .insert((expires_sec, entry.layer2_voucher_id.as_str()), ())?;
     Ok(())

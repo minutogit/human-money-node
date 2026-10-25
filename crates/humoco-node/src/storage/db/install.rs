@@ -530,7 +530,7 @@ impl RedbStorage {
             tx.open_table(TABLE_PROVISIONAL_LOCKS)?
                 .remove(key.value())?;
             tx.open_table(TABLE_TTL_INDEX)?
-                .insert((root.saturating_add(30_000) / 1000, key.value()), ())?;
+                .insert((super::grace_expiry_bucket_sec(root), key.value()), ())?;
         }
         for item in source.open_table(TABLE_HMC_LOCKS)?.iter()? {
             let (tag, value) = item?;
@@ -551,7 +551,7 @@ impl RedbStorage {
             tx.open_table(TABLE_HMC_VOUCHER_INDEX)?
                 .insert((row.layer2_voucher_id.as_str(), tag.value()), ())?;
             tx.open_table(TABLE_HMC_TTL_INDEX)?
-                .insert((validity.saturating_add(30_000) / 1000, tag.value()), ())?;
+                .insert((super::grace_expiry_bucket_sec(validity), tag.value()), ())?;
             let inherited = if support_is_quorum_verified {
                 source
                     .open_table(support::TABLE_CONFIRMATION_SUPPORT)?

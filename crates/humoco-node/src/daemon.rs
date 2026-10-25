@@ -1744,18 +1744,18 @@ type ReconciledRootFacts = std::collections::HashMap<
     (String, [u8; 32]),
     (
         crate::api::hmc::L2LockEntry,
-        std::collections::HashSet<usize>,
+        u32,
     ),
 >;
 type ReconciledNativeFacts = std::collections::HashMap<
     ([u8; 32], [u8; 32]),
-    ((LockRecord, u64, u8), std::collections::HashSet<usize>),
+    ((LockRecord, u64, u8), u32),
 >;
 type ReconciledHmcFacts = std::collections::HashMap<
     (String, [u8; 32]),
     (
         (String, crate::api::hmc::L2LockEntry, u8),
-        std::collections::HashSet<usize>,
+        u32,
     ),
 >;
 type ReconciledStage = (
@@ -1775,9 +1775,7 @@ fn read_reconciled_cut_facts(
     shard: u16,
     now: u64,
 ) -> Result<ReconciledCutFacts, crate::storage::StorageError> {
-    use std::collections::HashMap;
     let mut roots = Vec::new();
-    let mut root_by_voucher = HashMap::new();
     for root in storage.all_voucher_roots()? {
         let Ok(validity) = crate::storage::db::roots::root_valid_until(&root) else {
             continue;
@@ -1790,22 +1788,10 @@ fn read_reconciled_cut_facts(
         if humoco_sim_core::types::canonical_voucher_shard(&parent) != shard {
             continue;
         }
-        root_by_voucher.insert(root.layer2_voucher_id.clone(), root.clone());
         roots.push(root);
     }
     let native = storage.active_locks_for_shard(shard, now)?;
-    let mut hmc = Vec::new();
-    for (tag, entry) in storage.all_valid_hmc_locks(now)? {
-        let Some(root) = root_by_voucher.get(&entry.layer2_voucher_id) else {
-            continue;
-        };
-        let root_tag = bs58::encode(root.t_id).into_string();
-        let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag);
-        if humoco_sim_core::types::canonical_voucher_shard(&parent) != shard {
-            continue;
-        }
-        hmc.push((tag, entry));
-    }
+    let hmc = storage.active_hmc_locks_for_shard(shard, now)?;
     Ok(ReconciledCutFacts { roots, native, hmc })
 }
 
@@ -1882,7 +1868,7 @@ fn reconcile_distributed_stage(
     target: &Arc<crate::storage::RedbStorage>,
 ) -> Result<Option<ReconciledStage>, NodeError> {
     use crate::api::hmc::L2LockEntry;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     let mut root_facts: ReconciledRootFacts = HashMap::new();
     let mut native_facts: ReconciledNativeFacts = HashMap::new();
     let mut hmc_facts: ReconciledHmcFacts = HashMap::new();
@@ -1897,9 +1883,8 @@ fn reconcile_distributed_stage(
             let digest = *blake3::hash(&serde_json::to_vec(&root)?).as_bytes();
             root_facts
                 .entry((root.layer2_voucher_id.clone(), digest))
-                .or_insert_with(|| (root, HashSet::new()))
-                .1
-                .insert(index);
+                .or_insert_with(|| (root, 0u32))
+                .1 |= 1u32 << (index.min(31));
         }
         for (row, root) in facts.native {
             let class = storage
@@ -1910,9 +1895,9 @@ fn reconcile_distributed_stage(
                 });
             let entry = native_facts
                 .entry((row.parent_lock, row.id))
-                .or_insert_with(|| ((row.clone(), root, class), HashSet::new()));
+                .or_insert_with(|| ((row.clone(), root, class), 0u32));
             entry.0 .2 = entry.0 .2.max(class);
-            entry.1.insert(index);
+            entry.1 |= 1u32 << (index.min(31));
         }
         for (tag, entry) in facts.hmc {
             let class = storage
@@ -1921,9 +1906,9 @@ fn reconcile_distributed_stage(
                 .map_or(0, |s| s.class);
             let map_entry = hmc_facts
                 .entry((tag.clone(), entry.t_id))
-                .or_insert_with(|| ((tag.clone(), entry.clone(), class), HashSet::new()));
+                .or_insert_with(|| ((tag.clone(), entry.clone(), class), 0u32));
             map_entry.0 .2 = map_entry.0 .2.max(class);
-            map_entry.1.insert(index);
+            map_entry.1 |= 1u32 << (index.min(31));
         }
         Ok(())
     };
@@ -1944,9 +1929,18 @@ fn reconcile_distributed_stage(
         &mut hmc_facts,
     )?;
 
+    // A21-R2: Cap reconciliation working memory against malicious/unbounded cuts
+    const MAX_RECONCILE_ENTRY_CAP: usize = 50_000;
+    if root_facts.len() + native_facts.len() + hmc_facts.len() > MAX_RECONCILE_ENTRY_CAP {
+        return Err(NodeError::Storage(crate::storage::StorageError::DurableCommitFailed(
+            "reconciliation fact memory budget exceeded".into(),
+        )));
+    }
+
     let mut selected_roots: HashMap<String, (L2LockEntry, [u8; 32], usize)> = HashMap::new();
     for ((voucher, digest), (entry, witnesses)) in &root_facts {
-        if witnesses.len() < needed {
+        let count = witnesses.count_ones() as usize;
+        if count < needed {
             continue;
         }
         if let Some((_, existing, _)) = selected_roots.get(voucher) {
@@ -1954,13 +1948,14 @@ fn reconcile_distributed_stage(
                 return Ok(None);
             }
         } else {
-            selected_roots.insert(voucher.clone(), (entry.clone(), *digest, witnesses.len()));
+            selected_roots.insert(voucher.clone(), (entry.clone(), *digest, count));
         }
     }
 
     let mut selected_native: HashMap<[u8; 32], (LockRecord, u64, usize, u8)> = HashMap::new();
     for ((parent, _), ((row, root, class), witnesses)) in &native_facts {
-        if witnesses.len() < needed {
+        let count = witnesses.count_ones() as usize;
+        if count < needed {
             continue;
         }
         if !row.has_valid_id() {
@@ -1984,12 +1979,13 @@ fn reconcile_distributed_stage(
                 continue;
             }
         }
-        selected_native.insert(*parent, (row.clone(), *root, witnesses.len(), *class));
+        selected_native.insert(*parent, (row.clone(), *root, count, *class));
     }
 
     let mut selected_hmc: HashMap<String, (String, L2LockEntry, usize, u8)> = HashMap::new();
     for ((tag, _), ((stored_tag, entry, class), witnesses)) in &hmc_facts {
-        if witnesses.len() < needed {
+        let count = witnesses.count_ones() as usize;
+        if count < needed {
             continue;
         }
         if !selected_roots.contains_key(&entry.layer2_voucher_id) {
@@ -2017,7 +2013,7 @@ fn reconcile_distributed_stage(
         }
         selected_hmc.insert(
             tag.clone(),
-            (stored_tag.clone(), entry.clone(), witnesses.len(), *class),
+            (stored_tag.clone(), entry.clone(), count, *class),
         );
     }
 

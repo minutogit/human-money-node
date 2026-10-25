@@ -13,7 +13,7 @@ pub(super) struct SigningState {
     pub corrupt: bool,
 }
 
-fn fingerprint(slot: &str, bytes: &[u8]) -> [u8; 32] {
+pub(super) fn fingerprint(slot: &str, bytes: &[u8]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     let domain = b"HUMOCO_V1_OWN_CHOICE_STORAGE";
     h.update(&[domain.len() as u8]);
@@ -55,26 +55,39 @@ pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<bool, StorageEr
     let mut measured = SigningState::default();
     let choices = txn.open_table(TABLE_OWN_CHOICES)?;
     let ttl = txn.open_table(TABLE_OWN_CHOICE_TTL)?;
+    let mut commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
     for item in choices.iter()? {
         let (slot, value) = item?;
         measured.count = measured
             .count
             .checked_add(1)
             .ok_or(StorageError::SigningHistoryCorrupt)?;
-        xor(
-            &mut measured.fingerprint,
-            fingerprint(slot.value(), value.value()),
-        );
+        let fp = fingerprint(slot.value(), value.value());
+        xor(&mut measured.fingerprint, fp);
+        let existing_fp = commitments.get(slot.value())?.map(|guard| *guard.value());
+        match existing_fp {
+            Some(stored_fp) => {
+                if stored_fp != fp {
+                    measured.corrupt = true;
+                }
+            }
+            None => {
+                commitments.insert(slot.value(), &fp)?;
+            }
+        }
         match serde_json::from_slice::<OwnSigningChoice>(value.value()) {
             Ok(choice) => {
                 measured.generation = measured.generation.max(choice.generation);
-                let expiry = choice.valid_until_ms.saturating_add(30_999) / 1_000;
+                let expiry = super::grace_expiry_bucket_sec(choice.valid_until_ms);
                 if ttl.get(&(expiry, slot.value()))?.is_none() {
                     measured.corrupt = true;
                 }
             }
             Err(_) => measured.corrupt = true,
         }
+    }
+    if commitments.len()? != measured.count {
+        measured.corrupt = true;
     }
     let state = match stored {
         Ok(Some(mut state)) => {
@@ -116,10 +129,19 @@ pub(super) fn put_choice(
     if actual_len != state.count {
         return Err(StorageError::SigningHistoryCorrupt);
     }
+    let mut commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+    if commitments.len()? != state.count {
+        return Err(StorageError::SigningHistoryCorrupt);
+    }
     let old = choices.get(slot)?.map(|v| v.value().to_vec());
     let candidate = serde_json::to_vec(choice)?;
     if old.as_deref() == Some(candidate.as_slice()) {
-        return Ok(());
+        let fp = fingerprint(slot, &candidate);
+        let stored_fp = commitments.get(slot)?.map(|guard| *guard.value());
+        match stored_fp {
+            Some(stored) if stored == fp => return Ok(()),
+            _ => return Err(StorageError::SigningHistoryCorrupt),
+        }
     }
     state.generation = state
         .generation
@@ -127,15 +149,26 @@ pub(super) fn put_choice(
         .ok_or(StorageError::SigningHistoryCorrupt)?;
     choice.generation = state.generation;
     let bytes = serde_json::to_vec(choice)?;
+    let new_fp = fingerprint(slot, &bytes);
     if let Some(old) = old {
-        xor(&mut state.fingerprint, fingerprint(slot, &old));
+        let expected_old_fp = fingerprint(slot, &old);
+        let stored_fp = commitments.get(slot)?.map(|guard| *guard.value());
+        match stored_fp {
+            Some(stored) if stored == expected_old_fp => {}
+            _ => return Err(StorageError::SigningHistoryCorrupt),
+        }
+        xor(&mut state.fingerprint, expected_old_fp);
     } else {
+        if commitments.get(slot)?.is_some() {
+            return Err(StorageError::SigningHistoryCorrupt);
+        }
         state.count = state
             .count
             .checked_add(1)
             .ok_or(StorageError::SigningHistoryCorrupt)?;
     }
-    xor(&mut state.fingerprint, fingerprint(slot, &bytes));
+    xor(&mut state.fingerprint, new_fp);
+    commitments.insert(slot, &new_fp)?;
     choices.insert(slot, bytes.as_slice())?;
     write(txn, &state)
 }
@@ -150,8 +183,18 @@ pub(super) fn remove_choice(txn: &redb::WriteTransaction, slot: &str) -> Result<
     if actual_len != state.count {
         return Err(StorageError::SigningHistoryCorrupt);
     }
+    let mut commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+    if commitments.len()? != state.count {
+        return Err(StorageError::SigningHistoryCorrupt);
+    }
     let old = choices.remove(slot)?.map(|v| v.value().to_vec());
     if let Some(old) = old {
+        let expected_fp = fingerprint(slot, &old);
+        let stored_fp = commitments.remove(slot)?.map(|guard| *guard.value());
+        match stored_fp {
+            Some(stored) if stored == expected_fp => {}
+            _ => return Err(StorageError::SigningHistoryCorrupt),
+        }
         state.generation = state
             .generation
             .checked_add(1)
@@ -160,8 +203,10 @@ pub(super) fn remove_choice(txn: &redb::WriteTransaction, slot: &str) -> Result<
             .count
             .checked_sub(1)
             .ok_or(StorageError::SigningHistoryCorrupt)?;
-        xor(&mut state.fingerprint, fingerprint(slot, &old));
+        xor(&mut state.fingerprint, expected_fp);
         write(txn, &state)?;
+    } else {
+        commitments.remove(slot)?;
     }
     Ok(())
 }

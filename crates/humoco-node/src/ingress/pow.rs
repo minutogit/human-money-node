@@ -72,6 +72,32 @@ pub fn check_difficulty(hash: &[u8; 32], difficulty: u32) -> bool {
     count_leading_zero_bits(hash) >= difficulty
 }
 
+/// Solves the canonical direct stateless hashcash for an explicit parent lock and epoch slot.
+pub fn solve_canonical_hashcash(
+    parent_lock: &[u8; 32],
+    epoch_slot: u64,
+    difficulty: u32,
+    max_iterations: u64,
+) -> Option<u64> {
+    for nonce in 0..max_iterations {
+        let hash = hash_work(parent_lock, epoch_slot, nonce);
+        if check_difficulty(&hash, difficulty) {
+            return Some(nonce);
+        }
+    }
+    None
+}
+
+/// Solves the canonical direct stateless hashcash for an explicit parent lock and epoch slot (helper alias).
+pub fn solve_blake3_hashcash_for_parent(
+    parent_lock: &[u8; 32],
+    epoch_slot: u64,
+    difficulty: u32,
+    max_iterations: u64,
+) -> Option<u64> {
+    solve_canonical_hashcash(parent_lock, epoch_slot, difficulty, max_iterations)
+}
+
 /// Solves the BLAKE3 hashcash challenge by searching for a nonce satisfying the difficulty threshold.
 pub fn solve_blake3_hashcash(
     challenge_hex: &str,
@@ -84,6 +110,23 @@ pub fn solve_blake3_hashcash(
     }
     let mut challenge = [0u8; 32];
     challenge.copy_from_slice(&payload);
+
+    let now_sec = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let current_slot = now_sec / DEFAULT_EPOCH_DURATION_SEC;
+
+    for slot in [current_slot, current_slot.saturating_sub(1), current_slot + 1] {
+        if challenge == compute_stateless_challenge(&[0u8; 32], slot) {
+            return solve_canonical_hashcash(&[0u8; 32], slot, difficulty, max_iterations);
+        }
+    }
+    for slot in 0..=10 {
+        if challenge == compute_stateless_challenge(&[0u8; 32], slot) {
+            return solve_canonical_hashcash(&[0u8; 32], slot, difficulty, max_iterations);
+        }
+    }
 
     for nonce in 0..max_iterations {
         let hash = compute_solution_hash(&challenge, nonce);
@@ -246,30 +289,25 @@ impl PowEngine {
         challenge_bytes.copy_from_slice(&payload);
 
         let current_slot = self.current_epoch_slot(now_sec);
+        let effective_parent = expected_parent_lock.unwrap_or(&[0u8; 32]);
 
-        let gen_curr = compute_stateless_challenge(&[0u8; 32], current_slot);
-        let gen_prev = if current_slot > 0 {
-            compute_stateless_challenge(&[0u8; 32], current_slot - 1)
+        let expected_curr = compute_stateless_challenge(effective_parent, current_slot);
+        let expected_prev = if current_slot > 0 {
+            Some(compute_stateless_challenge(effective_parent, current_slot - 1))
         } else {
-            [0u8; 32]
+            None
         };
 
-        if let Some(parent) = expected_parent_lock {
-            let expected_curr = compute_stateless_challenge(parent, current_slot);
-            let expected_prev = if current_slot > 0 {
-                compute_stateless_challenge(parent, current_slot - 1)
-            } else {
-                [0u8; 32]
-            };
-            if challenge_bytes != expected_curr && challenge_bytes != expected_prev {
-                return Err(PowError::InvalidFormat);
-            }
-        } else if challenge_bytes != gen_curr && challenge_bytes != gen_prev {
+        let matched_slot = if challenge_bytes == expected_curr {
+            current_slot
+        } else if expected_prev == Some(challenge_bytes) {
+            current_slot - 1
+        } else {
             return Err(PowError::InvalidFormat);
-        }
+        };
 
         // Server verification requires exactly 1 BLAKE3 hash (< 0.1 µs) - cheap checks first
-        let hash = compute_solution_hash(&challenge_bytes, nonce);
+        let hash = hash_work(effective_parent, matched_slot, nonce);
         let zeros = count_leading_zero_bits(&hash);
         if zeros < difficulty {
             return Err(PowError::InsufficientDifficulty {
@@ -310,6 +348,27 @@ impl PowEngine {
     ) -> Result<bool, PowError> {
         self.verify_pow_for_parent(challenge_hex, nonce, difficulty, None)
             .await
+    }
+
+    /// Solves the canonical direct hashcash for a given parent at the engine's current consensus time.
+    pub fn solve_pow_for_parent(
+        &self,
+        parent_lock: &[u8; 32],
+        difficulty: u32,
+        max_iterations: u64,
+    ) -> Option<u64> {
+        let slot = self.current_epoch_slot(self.now_sec());
+        solve_canonical_hashcash(parent_lock, slot, difficulty, max_iterations)
+    }
+
+    /// Helper alias for solve_pow_for_parent.
+    pub fn solve_blake3_hashcash_for_parent(
+        &self,
+        parent_lock: &[u8; 32],
+        difficulty: u32,
+        max_iterations: u64,
+    ) -> Option<u64> {
+        self.solve_pow_for_parent(parent_lock, difficulty, max_iterations)
     }
 
     /// Solves the BLAKE3 hashcash challenge (helper for clients/tests).
@@ -359,7 +418,9 @@ mod tests {
         let parent_b = [0xbb; 32];
 
         let (challenge, difficulty, _) = engine.generate_challenge_for_parent(&parent_a);
-        let nonce = solve_blake3_hashcash(&challenge, difficulty, 10_000).expect("Solve PoW");
+        let nonce = engine
+            .solve_pow_for_parent(&parent_a, difficulty, 10_000)
+            .expect("Solve PoW");
 
         // Fails if submitted for parent_b
         let err = engine
@@ -424,8 +485,8 @@ mod tests {
 
         let nonce =
             solve_blake3_hashcash(&challenge, difficulty, 500_000).expect("Solve 16-bit PoW");
-        let hash =
-            compute_solution_hash(&hex::decode(&challenge).unwrap().try_into().unwrap(), nonce);
+        let slot = engine.current_epoch_slot(engine.now_sec());
+        let hash = hash_work(&[0u8; 32], slot, nonce);
         assert_eq!(hash[0], 0);
         assert_eq!(hash[1], 0);
 

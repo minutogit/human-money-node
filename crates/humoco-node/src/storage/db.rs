@@ -15,6 +15,14 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing::warn;
 
+/// Canonical grace horizon ceiling bucket formula (A22-R1):
+/// Converts a millisecond expiry horizon to an integer second bucket with ceiling rounding,
+/// ensuring that records are never prematurely expired before their full +30s grace window passes.
+#[inline(always)]
+pub const fn grace_expiry_bucket_sec(root_valid_until_ms: u64) -> u64 {
+    root_valid_until_ms.saturating_add(30_999) / 1_000
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("FAIL_CLOSED_CORRUPT: signing history integrity unavailable")]
@@ -105,6 +113,8 @@ pub struct OwnSigningChoice {
 
 pub const TABLE_OWN_CHOICES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("own_signing_choices");
+pub const TABLE_OWN_CHOICE_COMMITMENTS: TableDefinition<&str, &[u8; 32]> =
+    TableDefinition::new("own_choice_commitments");
 pub const TABLE_OWN_CHOICE_TTL: TableDefinition<(u64, &str), ()> =
     TableDefinition::new("own_signing_choice_ttl");
 
@@ -151,6 +161,7 @@ impl RedbStorage {
             let _ = write_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
             let _ = write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
             let _ = write_txn.open_table(TABLE_OWN_CHOICES)?;
+            let _ = write_txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
             let _ = write_txn.open_table(TABLE_OWN_CHOICE_TTL)?;
             let _ = write_txn.open_table(TABLE_LOCKS)?;
             let _ = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
@@ -344,12 +355,18 @@ impl RedbStorage {
         }
         let previous = match choices.get(slot)? {
             Some(v) => {
+                let commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+                let fp = signing::fingerprint(slot, v.value());
+                match commitments.get(slot)? {
+                    Some(stored_fp) if stored_fp.value() == &fp => {}
+                    _ => return Err(StorageError::SigningHistoryCorrupt),
+                }
                 let choice: OwnSigningChoice = serde_json::from_slice(v.value())
                     .map_err(|_| StorageError::SigningHistoryCorrupt)?;
                 if choice.generation > state.generation {
                     return Err(StorageError::SigningHistoryCorrupt);
                 }
-                let expiry = choice.valid_until_ms.saturating_add(30_999) / 1_000;
+                let expiry = grace_expiry_bucket_sec(choice.valid_until_ms);
                 let ttl_ok = txn
                     .open_table(TABLE_OWN_CHOICE_TTL)
                     .map(|ttl| {
@@ -363,7 +380,13 @@ impl RedbStorage {
                 }
                 Some(choice)
             }
-            None => None,
+            None => {
+                let commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+                if commitments.get(slot)?.is_some() {
+                    return Err(StorageError::SigningHistoryCorrupt);
+                }
+                None
+            }
         };
         let mut choice = previous.unwrap_or(OwnSigningChoice {
             generation: 0,
@@ -431,7 +454,7 @@ impl RedbStorage {
     /// Stores a lock record and updates the TTL index.
     pub fn put_lock(&self, lock: &LockRecord, root_valid_until: u64) -> Result<(), StorageError> {
         let value_bytes = bincode::serialize(&(lock, root_valid_until))?;
-        let bucket_sec = root_valid_until.saturating_add(30_000) / 1_000;
+        let bucket_sec = grace_expiry_bucket_sec(root_valid_until);
 
         let write_txn = self.db.begin_write()?;
         {
@@ -460,7 +483,7 @@ impl RedbStorage {
 
             for (lock, root_valid_until) in locks {
                 let value_bytes = bincode::serialize(&(lock, root_valid_until))?;
-                let bucket_sec = root_valid_until.saturating_add(30_000) / 1_000;
+                let bucket_sec = grace_expiry_bucket_sec(root_valid_until);
 
                 table_locks.insert(&lock.parent_lock, value_bytes.as_slice())?;
                 table_ttl.insert(&(bucket_sec, &lock.parent_lock), ())?;
@@ -516,6 +539,17 @@ impl RedbStorage {
 
             for (sec, parent) in expired_entries {
                 if sec <= now_sec {
+                    if let Some(guard) = table_locks.get(&parent)? {
+                        let (_, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+                        if now_sec < grace_expiry_bucket_sec(root_valid_until) {
+                            continue;
+                        }
+                    } else if let Some(guard) = table_prov_locks.get(&parent)? {
+                        let (_, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+                        if now_sec < grace_expiry_bucket_sec(root_valid_until) {
+                            continue;
+                        }
+                    }
                     table_ttl.remove(&(sec, &parent))?;
                     table_locks.remove(&parent)?;
                     write_txn
@@ -533,6 +567,7 @@ impl RedbStorage {
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
             let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+            let roots_table = write_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
 
             let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
                 .range(..(now_sec.saturating_add(1), ""))?
@@ -541,6 +576,35 @@ impl RedbStorage {
                 .collect::<Result<Vec<_>, _>>()?;
 
             for (sec, tag) in expired_hmc_entries {
+                let mut root_valid_ms = None;
+                let voucher_id = if let Some(guard) = table_hmc.get(tag.as_str())? {
+                    serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
+                        .ok()
+                        .map(|e| e.layer2_voucher_id)
+                } else if let Some(guard) = table_prov_hmc.get(tag.as_str())? {
+                    serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
+                        .ok()
+                        .map(|e| e.layer2_voucher_id)
+                } else {
+                    None
+                };
+                if let Some(vid) = voucher_id {
+                    if let Some(r_guard) = roots_table.get(vid.as_str())? {
+                        if let Ok(root_entry) =
+                            serde_json::from_slice::<crate::api::hmc::L2LockEntry>(r_guard.value())
+                        {
+                            if let Ok(v) = roots::root_valid_until(&root_entry) {
+                                root_valid_ms = Some(v);
+                            }
+                        }
+                    }
+                }
+                if let Some(rv) = root_valid_ms {
+                    if now_sec < grace_expiry_bucket_sec(rv) {
+                        continue;
+                    }
+                }
+
                 table_hmc_ttl.remove(&(sec, tag.as_str()))?;
                 write_txn
                     .open_table(support::TABLE_CONFIRMATION_SUPPORT)?
@@ -769,6 +833,70 @@ impl RedbStorage {
         Ok(results)
     }
 
+    /// Scans active unexpired HMC locks whose canonical voucher root belongs to `shard_id`.
+    /// Skips scanning or deserializing locks for vouchers belonging to other shards (A21-R2).
+    pub fn active_hmc_locks_for_shard(
+        &self,
+        shard_id: u16,
+        now_ms: u64,
+    ) -> Result<Vec<(String, crate::api::hmc::L2LockEntry)>, StorageError> {
+        let mut shard_roots = std::collections::HashMap::new();
+        for root in self.all_voucher_roots()? {
+            let Ok(validity) = roots::root_valid_until(&root) else {
+                continue;
+            };
+            if validity <= now_ms {
+                continue;
+            }
+            let tag = bs58::encode(root.t_id).into_string();
+            let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+            if humoco_sim_core::types::canonical_voucher_shard(&parent) == shard_id {
+                shard_roots.insert(root.layer2_voucher_id.clone(), validity);
+            }
+        }
+        if shard_roots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let read_txn = self.db.begin_read()?;
+        let table_hmc = read_txn.open_table(TABLE_HMC_LOCKS)?;
+        let mut results = Vec::new();
+
+        for item in table_hmc.iter()? {
+            let (k_guard, v_guard) = match item {
+                Ok(g) => g,
+                Err(err) => {
+                    warn!(
+                        "Corrupt entry in TABLE_HMC_LOCKS iterator for shard {}: {}",
+                        shard_id, err
+                    );
+                    continue;
+                }
+            };
+            let entry: crate::api::hmc::L2LockEntry = match serde_json::from_slice(v_guard.value()) {
+                Ok(e) => e,
+                Err(err) => {
+                    warn!(
+                        "Failed to deserialize HMC lock in active_hmc_locks_for_shard: {}",
+                        err
+                    );
+                    continue;
+                }
+            };
+            if let Some(&root_v) = shard_roots.get(&entry.layer2_voucher_id) {
+                let owned_ttl = entry
+                    .deletable_at
+                    .as_deref()
+                    .and_then(|s| s.parse::<u64>().ok());
+                let effective_ttl = owned_ttl.unwrap_or(root_v);
+                if !should_prune(SimTime(now_ms), SimTime(effective_ttl)) {
+                    results.push((k_guard.value().to_string(), entry));
+                }
+            }
+        }
+        Ok(results)
+    }
+
     /// Quarantines unconfirmed local minority locks for a shard that are missing from
     /// the dominant quorum state (Spec 08, Pillar 4, DEC-064).
     ///
@@ -944,7 +1072,7 @@ impl RedbStorage {
                 StorageError::DurableCommitFailed("spend requires a committed Root Anchor".into())
             })?;
         let valid_until_ms = roots::root_valid_until(&root)?;
-        let bucket_sec = valid_until_ms.saturating_add(30_000) / 1_000;
+        let bucket_sec = grace_expiry_bucket_sec(valid_until_ms);
 
         let write_txn = self.db.begin_write()?;
         {
@@ -996,7 +1124,7 @@ impl RedbStorage {
                 let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
                 let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
                 for (lock, root_valid_until, bytes) in locks {
-                    let bucket_sec = root_valid_until.saturating_add(30_000) / 1_000;
+                    let bucket_sec = grace_expiry_bucket_sec(*root_valid_until);
                     table_locks.insert(&lock.parent_lock, *bytes)?;
                     table_ttl.insert(&(bucket_sec, &lock.parent_lock), ())?;
                 }
@@ -1025,7 +1153,7 @@ impl RedbStorage {
                             "spend root lifetime mismatch".into(),
                         ));
                     }
-                    let bucket_sec = inherited.saturating_add(30_000) / 1_000;
+                    let bucket_sec = grace_expiry_bucket_sec(inherited);
                     table_hmc.insert(*tag, *bytes)?;
                     table_vidx.insert((entry.layer2_voucher_id.as_str(), *tag), ())?;
                     table_ttl.insert(&(bucket_sec, *tag), ())?;
@@ -1139,6 +1267,17 @@ impl RedbStorage {
             .collect::<Result<Vec<_>, _>>()?;
         for (sec, parent) in expired_entries {
             if sec <= now_sec {
+                if let Some(guard) = table_locks.get(&parent)? {
+                    let (_, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+                    if now_sec < grace_expiry_bucket_sec(root_valid_until) {
+                        continue;
+                    }
+                } else if let Some(guard) = table_prov_locks.get(&parent)? {
+                    let (_, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+                    if now_sec < grace_expiry_bucket_sec(root_valid_until) {
+                        continue;
+                    }
+                }
                 table_ttl.remove(&(sec, &parent))?;
                 table_locks.remove(&parent)?;
                 write_txn
@@ -1157,12 +1296,42 @@ impl RedbStorage {
         let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
         let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
         let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+        let roots_table = write_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
         let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
             .range(..(now_sec.saturating_add(1), ""))?
             .take(256)
             .map(|row| row.map(|(k, _)| (k.value().0, k.value().1.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
         for (sec, tag) in expired_hmc_entries {
+            let mut root_valid_ms = None;
+            let voucher_id = if let Some(guard) = table_hmc.get(tag.as_str())? {
+                serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
+                    .ok()
+                    .map(|e| e.layer2_voucher_id)
+            } else if let Some(guard) = table_prov_hmc.get(tag.as_str())? {
+                serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
+                    .ok()
+                    .map(|e| e.layer2_voucher_id)
+            } else {
+                None
+            };
+            if let Some(vid) = voucher_id {
+                if let Some(r_guard) = roots_table.get(vid.as_str())? {
+                    if let Ok(root_entry) =
+                        serde_json::from_slice::<crate::api::hmc::L2LockEntry>(r_guard.value())
+                    {
+                        if let Ok(v) = roots::root_valid_until(&root_entry) {
+                            root_valid_ms = Some(v);
+                        }
+                    }
+                }
+            }
+            if let Some(rv) = root_valid_ms {
+                if now_sec < grace_expiry_bucket_sec(rv) {
+                    continue;
+                }
+            }
+
             table_hmc_ttl.remove(&(sec, tag.as_str()))?;
             write_txn
                 .open_table(support::TABLE_CONFIRMATION_SUPPORT)?
@@ -1468,6 +1637,12 @@ impl RedbStorage {
             for row in own.iter()? {
                 let (key, value) = row?;
                 own_dst.insert(key.value(), value.value())?;
+            }
+            let own_commitments = read_txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+            let mut own_commitments_dst = write_txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+            for row in own_commitments.iter()? {
+                let (key, value) = row?;
+                own_commitments_dst.insert(key.value(), value.value())?;
             }
             let own_ttl = read_txn.open_table(TABLE_OWN_CHOICE_TTL)?;
             let mut own_ttl_dst = write_txn.open_table(TABLE_OWN_CHOICE_TTL)?;

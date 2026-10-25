@@ -450,7 +450,7 @@ fn hash_fact(
 /// Constructible only after independent authentication of the qualified source set.
 /// Its class claims concern inherited exclusions, never current checkout authority.
 #[derive(Clone)]
-pub(crate) struct VerifiedInheritedCut {
+pub struct VerifiedInheritedCut {
     objective: [u8; 32],
     supports: Vec<[u8; 32]>,
     qualified_supports: Vec<[u8; 32]>,
@@ -458,7 +458,7 @@ pub(crate) struct VerifiedInheritedCut {
 }
 impl VerifiedInheritedCut {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn verify(
+    pub fn verify(
         network: NetworkId,
         shard: u16,
         receiver: [u8; 32],

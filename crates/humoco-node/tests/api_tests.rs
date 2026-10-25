@@ -2911,11 +2911,8 @@ async fn test_checkout_edge_case_empty_and_single_hop_chains() {
         .await
         .unwrap();
     assert_eq!(res_empty.status(), StatusCode::BAD_REQUEST);
-    let env_empty: L2ResponseEnvelope = response_json(res_empty).await;
-    match env_empty.verdict {
-        L2Verdict::Rejected { reason } => assert!(reason.contains("Empty")),
-        _ => panic!("empty chain should be Rejected"),
-    };
+    let err_empty: humoco_node::api::ErrorResponse = response_json(res_empty).await;
+    assert!(err_empty.message.contains("Empty"));
     // single hop chain via generic /v1/lock route (delegated)
     let genesis = make_genesis_hmc_req(&voucher_id, &k1, valid_until, 500);
     let single_chain = L2ChainLockRequest {
@@ -3506,7 +3503,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
                 .header("Authorization", "Bearer admin_secret_99")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"label": "Bob Wallet", "token": "f2f_custom_token_12345"}"#,
+                    r#"{"label": "Bob Wallet", "token": "f2f_0123456789abcdef0123456789abcdef"}"#,
                 ))
                 .unwrap(),
         )
@@ -3516,7 +3513,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let bob_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(bob_json["status"], "ok");
-    assert_eq!(bob_json["token"], "f2f_custom_token_12345");
+    assert_eq!(bob_json["token"], "f2f_0123456789abcdef0123456789abcdef");
     assert_eq!(bob_json["label"], "Bob Wallet");
     assert!(bob_json["wallet_uri"]
         .as_str()
@@ -3525,7 +3522,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     assert!(bob_json["wallet_uri"]
         .as_str()
         .unwrap()
-        .contains("token=f2f_custom_token_12345"));
+        .contains("token=f2f_0123456789abcdef0123456789abcdef"));
 
     // 4. POST /dashboard/admin/ingress/clients without token -> auto-generated f2f_... token
     let res = app
@@ -4418,7 +4415,7 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
         .header("Authorization", "Bearer qa_admin_secret")
         .header("Content-Type", "application/json")
         .body(Body::from(
-            r#"{"label": "Kasse-A", "token": "f2f_kasse_a_secret_token"}"#,
+            r#"{"label": "Kasse-A", "token": "f2f_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
         ))
         .unwrap();
     let res_client = app.clone().oneshot(req_add_client).await.unwrap();

@@ -942,6 +942,7 @@ struct PeerAttestationQuery<'a> {
     my_load: u64,
     quota_limit: u64,
     network_id: humoco_sim_core::types::NetworkId,
+    checkout_deadline: Option<tokio::time::Instant>,
 }
 
 enum PeerQueryError {
@@ -1048,12 +1049,7 @@ async fn collect_peer_attestations(
     let mut collision_entry: Option<crate::api::hmc::L2LockEntry> = None;
 
     let is_write = query.msg_type == humoco_sim_core::wire::MsgType::LockVerifyRequest;
-    let deadline = if is_write {
-        std::time::Duration::from_millis(800)
-    } else {
-        crate::network::manager::QUORUM_GLOBAL_TIMEOUT
-    };
-    let _ = tokio::time::timeout(deadline, async {
+    let peer_work = async {
         let mut join_set = tokio::task::JoinSet::new();
 
         let spawn_next = |join_set: &mut tokio::task::JoinSet<_>, idx: &mut usize, t_queried: &mut usize, in_flight: &mut std::collections::HashMap<usize, (std::net::SocketAddr, usize)>| {
@@ -1288,11 +1284,26 @@ async fn collect_peer_attestations(
                 Err(_) => continue,
             }
         }
-    }).await;
+    };
 
-    // Any in-flight tasks that didn't complete when global timeout hit are also timeouts
-    for (_, (addr, rank_idx)) in in_flight {
-        timeout_addrs.push((addr, rank_idx));
+    let timeout_res = if let Some(deadline) = query.checkout_deadline {
+        tokio::time::timeout_at(deadline, peer_work).await
+    } else {
+        let dur = if is_write {
+            std::time::Duration::from_millis(800)
+        } else {
+            crate::network::manager::QUORUM_GLOBAL_TIMEOUT
+        };
+        tokio::time::timeout(dur, peer_work).await
+    };
+
+    // Any in-flight tasks that didn't complete when a non-deadline timeout hit are timeouts.
+    // When the overall checkout deadline aborts the query, in-flight tasks are cleanly cancelled
+    // without peer penalties (AGENTS.md / Spec 11).
+    if timeout_res.is_ok() {
+        for (_, (addr, rank_idx)) in in_flight {
+            timeout_addrs.push((addr, rank_idx));
+        }
     }
 
     // 🛡️ Correlated failure protection (KISS / INV-1501):
@@ -1329,13 +1340,14 @@ pub async fn assemble_quorum_certificate(
     now_ms: u64,
     record_payload: Option<Vec<u8>>,
 ) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
-    assemble_quorum_certificate_with_override(
+    assemble_quorum_certificate_with_deadline(
         state,
         lock_id,
         parent_lock,
         shard_id,
         now_ms,
         record_payload,
+        None,
         None,
     )
     .await
@@ -1349,6 +1361,30 @@ pub async fn assemble_quorum_certificate_with_override(
     now_ms: u64,
     record_payload: Option<Vec<u8>>,
     quorum_override: Option<usize>,
+) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
+    assemble_quorum_certificate_with_deadline(
+        state,
+        lock_id,
+        parent_lock,
+        shard_id,
+        now_ms,
+        record_payload,
+        quorum_override,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn assemble_quorum_certificate_with_deadline(
+    state: &AppState,
+    lock_id: [u8; 32],
+    parent_lock: [u8; 32],
+    shard_id: u16,
+    now_ms: u64,
+    record_payload: Option<Vec<u8>>,
+    quorum_override: Option<usize>,
+    checkout_deadline: Option<tokio::time::Instant>,
 ) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
     use humoco_sim_core::types::CommitteeMember;
     let self_pubkey = *state.identity.node_pubkey();
@@ -1415,18 +1451,22 @@ pub async fn assemble_quorum_certificate_with_override(
                                 .await
                                 .filter(|e| e.t_id == lock_id)
                             {
-                                retained = state
-                                    .engine
-                                    .persist_original_approval(
-                                        tag,
-                                        entry,
-                                        self_pubkey,
-                                        bytes.clone(),
-                                        target_status,
-                                        now_ms,
-                                    )
-                                    .await
-                                    .ok();
+                                let fut = state.engine.persist_original_approval(
+                                    tag,
+                                    entry,
+                                    self_pubkey,
+                                    bytes.clone(),
+                                    target_status,
+                                    now_ms,
+                                );
+                                retained = if let Some(dl) = checkout_deadline {
+                                    match tokio::time::timeout_at(dl, fut).await {
+                                        Ok(res) => res.ok(),
+                                        Err(_) => None,
+                                    }
+                                } else {
+                                    fut.await.ok()
+                                };
                             }
                         }
                     }
@@ -1437,18 +1477,22 @@ pub async fn assemble_quorum_certificate_with_override(
                 .await
                 .filter(|r| r.id == lock_id)
             {
-                retained = state
-                    .engine
-                    .persist_original_record_approval(
-                        record.clone(),
-                        record.valid_until,
-                        self_pubkey,
-                        bytes,
-                        target_status,
-                        now_ms,
-                    )
-                    .await
-                    .ok();
+                let fut = state.engine.persist_original_record_approval(
+                    record.clone(),
+                    record.valid_until,
+                    self_pubkey,
+                    bytes,
+                    target_status,
+                    now_ms,
+                );
+                retained = if let Some(dl) = checkout_deadline {
+                    match tokio::time::timeout_at(dl, fut).await {
+                        Ok(res) => res.ok(),
+                        Err(_) => None,
+                    }
+                } else {
+                    fut.await.ok()
+                };
             }
             if let Some(att) = retained.and_then(|bytes| AttestationDto::from_wire_bytes(&bytes)) {
                 collected_signatures.push(att);
@@ -1507,6 +1551,7 @@ pub async fn assemble_quorum_certificate_with_override(
                     quota_limit: (5.0 * state.tier_controller.effective_ncb() as f64).round()
                         as u64,
                     network_id: state.network_id,
+                    checkout_deadline,
                 },
                 &mut collected_signatures,
             )
@@ -1764,6 +1809,17 @@ async fn submit_hmc_lock(
     headers: HeaderMap,
     req: L2LockRequest,
     start: std::time::Instant,
+) -> Response {
+    let checkout_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(780);
+    submit_hmc_lock_with_deadline(state, headers, req, start, checkout_deadline).await
+}
+
+async fn submit_hmc_lock_with_deadline(
+    state: AppState,
+    headers: HeaderMap,
+    req: L2LockRequest,
+    start: std::time::Instant,
+    checkout_deadline: tokio::time::Instant,
 ) -> Response {
     state.metrics.record_write();
     // 0. Check if submitter or ephemeral key is banned/slashed
@@ -2168,7 +2224,7 @@ async fn submit_hmc_lock(
                     })
                     .ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate_with_override(
+                let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
                     &state,
                     entry.t_id,
                     parent_bytes,
@@ -2176,6 +2232,7 @@ async fn submit_hmc_lock(
                     now_ms,
                     wire_payload,
                     req_q_override,
+                    Some(checkout_deadline),
                 )
                 .await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
@@ -2400,9 +2457,9 @@ async fn submit_hmc_lock(
     // 4. Ingress: Local shard storage vs. Stateless Gateway routing
     let (verdict, is_new, quorum_certificate) = if is_responsible {
         let start_local = std::time::Instant::now();
-        let (local_verdict, local_is_new) = state
-            .engine
-            .ingress_hmc_lock_durable(
+        let (local_verdict, local_is_new) = match tokio::time::timeout_at(
+            checkout_deadline,
+            state.engine.ingress_hmc_lock_durable(
                 lookup_tag.clone(),
                 entry.clone(),
                 IngressOrigin::ClientApi,
@@ -2410,8 +2467,20 @@ async fn submit_hmc_lock(
                 Some(tier_str),
                 Some(byte_years),
                 Some(req.layer2_voucher_id.clone()),
-            )
-            .await;
+            ),
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => {
+                let reason =
+                    "504 Gateway Timeout: Local durable persistence exceeded checkout budget"
+                        .to_string();
+                let rej_verdict = L2Verdict::Rejected { reason };
+                let envelope = wrap_and_sign_verdict(&state.identity, rej_verdict);
+                return (StatusCode::GATEWAY_TIMEOUT, Json(envelope)).into_response();
+            }
+        };
         state.metrics.record_local_latency(start_local.elapsed());
 
         let (q_cert, remote_collision) = match &local_verdict {
@@ -2461,7 +2530,7 @@ async fn submit_hmc_lock(
                     })
                     .ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate_with_override(
+                let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
                     &state,
                     entry.t_id,
                     parent_bytes,
@@ -2469,6 +2538,7 @@ async fn submit_hmc_lock(
                     now_ms,
                     wire_payload,
                     req_q_override,
+                    Some(checkout_deadline),
                 )
                 .await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
@@ -2528,7 +2598,7 @@ async fn submit_hmc_lock(
         })
         .ok();
         let start_quorum = std::time::Instant::now();
-        let (cert, remote_collision) = assemble_quorum_certificate_with_override(
+        let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
             &state,
             entry.t_id,
             parent_bytes,
@@ -2536,6 +2606,7 @@ async fn submit_hmc_lock(
             now_ms,
             wire_payload,
             req_q_override,
+            Some(checkout_deadline),
         )
         .await;
         state.metrics.record_quorum_latency(start_quorum.elapsed());
@@ -2631,19 +2702,175 @@ async fn submit_hmc_chain_lock_inner(
     chain_req: L2ChainLockRequest,
     start: std::time::Instant,
 ) -> Response {
+    let checkout_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(780);
     state.metrics.record_write();
     if chain_req.chain.is_empty() {
-        let envelope = wrap_and_sign_verdict(
-            &state.identity,
-            L2Verdict::Rejected {
-                reason: "Empty chain: at least one lock required".into(),
-            },
-        );
-        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "InvalidRequest".into(),
+                message: "Empty chain: at least one lock required".into(),
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            }),
+        )
+            .into_response();
     }
 
     if chain_req.chain.len() == 1 && chain_req.chain[0].is_genesis {
-        return submit_hmc_lock(state, headers, chain_req.chain[0].clone(), start).await;
+        return submit_hmc_lock_with_deadline(
+            state,
+            headers,
+            chain_req.chain[0].clone(),
+            start,
+            checkout_deadline,
+        )
+        .await;
+    }
+
+    let last_hop = match chain_req.chain.last() {
+        Some(h) => h,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "InvalidRequest".into(),
+                    message: "Empty chain: at least one lock required".into(),
+                    challenge: None,
+                    difficulty: None,
+                    expires_at: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+    let terminal_parent_for_pow_val = if last_hop.is_genesis {
+        None
+    } else {
+        let tag = last_hop.ds_tag.as_deref().unwrap_or_default();
+        Some(*blake3::hash(tag.as_bytes()).as_bytes())
+    };
+    let terminal_parent_for_pow = terminal_parent_for_pow_val.as_ref();
+
+    // Cheap filters first (A25-04 / A25-R3 / Rule 9):
+    // Validate credentials presence before any disk lookups (get_hmc_voucher_root_valid)
+    // or asymmetric signing operations.
+    let auth_token = headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s));
+    let peer_token = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok());
+    let pow_challenge = headers.get("X-PoW-Challenge").and_then(|h| h.to_str().ok());
+    let pow_nonce = headers
+        .get("X-PoW-Nonce")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let has_credentials = auth_token.is_some()
+        || peer_token.is_some()
+        || (pow_challenge.is_some() && pow_nonce.is_some());
+
+    let now_ms = state.net_time_ms();
+
+    if !has_credentials {
+        let (status, reason, req_diff, chal, exp) = match state
+            .tier_controller
+            .evaluate_and_charge_with_time(
+                None,
+                None,
+                None,
+                None,
+                0,
+                terminal_parent_for_pow,
+                Some(now_ms),
+            )
+            .await
+        {
+            Err(IngressError::PoWRequired {
+                challenge,
+                difficulty,
+                expires_at,
+            }) => {
+                state.metrics.record_rejected_bad_pow_400();
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Proof-of-Work challenge response required".to_string(),
+                    Some(difficulty),
+                    Some(challenge),
+                    Some(expires_at),
+                )
+            }
+            _ => (
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized: credentials or PoW required".to_string(),
+                None,
+                None,
+                None,
+            ),
+        };
+        let err_resp = ErrorResponse {
+            error: "PoWRequired".into(),
+            message: reason,
+            challenge: chal,
+            difficulty: req_diff,
+            expires_at: exp,
+        };
+        let mut resp = (status, Json(err_resp)).into_response();
+        if let Some(req_diff) = req_diff {
+            if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
+                resp.headers_mut().insert(
+                    axum::http::HeaderName::from_static("x-required-difficulty"),
+                    hdr_val,
+                );
+            }
+        }
+        return resp;
+    }
+
+    // Verify PoW in RAM before any disk lookup (A25-04 / A25-R3 / Rule 9)
+    if let (Some(challenge), Some(nonce)) = (pow_challenge, pow_nonce) {
+        let load_factor = (state.tier_controller.rolling_24h_average_at(now_ms / 1000) as f64
+            / state.tier_controller.effective_ncb().max(1) as f64)
+            .clamp(0.0, 1.0);
+        let dynamic_difficulty = state.pow_engine.required_difficulty_for_load(load_factor);
+
+        if let Err(err) = state
+            .pow_engine
+            .verify_pow_for_parent(challenge, nonce, dynamic_difficulty, terminal_parent_for_pow)
+            .await
+        {
+            state.metrics.record_rejected_bad_pow_400();
+            let (status, reason) = if let crate::ingress::pow::PowError::InsufficientDifficulty {
+                required,
+                provided,
+            } = err
+            {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Gateway under load: insufficient PoW difficulty (provided: {}, required: {})",
+                        provided, required
+                    ),
+                )
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid Proof of Work: {}", err),
+                )
+            };
+            return (
+                status,
+                Json(ErrorResponse {
+                    error: "InvalidPoW".into(),
+                    message: reason,
+                    challenge: None,
+                    difficulty: Some(dynamic_difficulty),
+                    expires_at: None,
+                }),
+            )
+                .into_response();
+        }
     }
 
     // Banned check for batch auth and each hop
@@ -2661,9 +2888,6 @@ async fn submit_hmc_chain_lock_inner(
         );
         return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
     }
-    // Freeze admission time once. Each step's signature, ban status, wallet T0
-    // and causal binding are checked immediately before its durable commit.
-    let now_ms = state.net_time_ms();
 
     // Derive root_valid_until for Byte-Years accounting (same logic as engine)
     let stored_root = state
@@ -2676,28 +2900,21 @@ async fn submit_hmc_chain_lock_inner(
         .find(|hop| hop.is_genesis)
         .and_then(|hop| crate::storage::db::roots::root_valid_until(&L2LockEntry::from(hop)).ok());
     let Some(root_valid_until) = stored_root.or(chain_genesis_root) else {
-        let envelope = wrap_and_sign_verdict(
-            &state.identity,
-            L2Verdict::Rejected {
-                reason: "Unknown voucher root: signed Root Anchor required".into(),
-            },
-        );
-        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "InvalidRequest".into(),
+                message: "Unknown voucher root: signed Root Anchor required".into(),
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            }),
+        )
+            .into_response();
     };
     let ttl_seconds = root_valid_until.saturating_sub(now_ms) / 1000;
 
-    // 3-Tier Access Evaluation (single charge for whole batch)
-    let auth_token = headers
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s));
-    let peer_token = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok());
-    let pow_challenge = headers.get("X-PoW-Challenge").and_then(|h| h.to_str().ok());
-    let pow_nonce = headers
-        .get("X-PoW-Nonce")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-
+    // 3-Tier Access Evaluation (single charge for whole batch, bound to terminal parent: A25-R2)
     let ingress_tier = match state
         .tier_controller
         .evaluate_and_charge_with_time(
@@ -2706,7 +2923,7 @@ async fn submit_hmc_chain_lock_inner(
             pow_challenge,
             pow_nonce,
             ttl_seconds,
-            None,
+            terminal_parent_for_pow,
             Some(now_ms),
         )
         .await
@@ -2885,16 +3102,28 @@ async fn submit_hmc_chain_lock_inner(
     let (verdict, is_new, quorum_certificate) = if is_responsible {
         // Atomares Ketten-Locking via engine
         let start_local = std::time::Instant::now();
-        let (local_verdict, local_is_new) = state
-            .engine
-            .ingress_hmc_chain_lock_durable_with_tier(
+        let (local_verdict, local_is_new) = match tokio::time::timeout_at(
+            checkout_deadline,
+            state.engine.ingress_hmc_chain_lock_durable_with_tier(
                 chain_req.clone(),
                 IngressOrigin::ClientApi,
                 Some(now_ms),
                 Some(tier_str),
                 Some(byte_years),
-            )
-            .await;
+            ),
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => {
+                let reason =
+                    "504 Gateway Timeout: Chain persistence exceeded checkout budget"
+                        .to_string();
+                let rej_verdict = L2Verdict::Rejected { reason };
+                let envelope = wrap_and_sign_verdict(&state.identity, rej_verdict);
+                return (StatusCode::GATEWAY_TIMEOUT, Json(envelope)).into_response();
+            }
+        };
         state.metrics.record_local_latency(start_local.elapsed());
 
         let (q_cert, remote_collision) = match &local_verdict {
@@ -2942,13 +3171,15 @@ async fn submit_hmc_chain_lock_inner(
                     })
                     .ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate(
+                let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
                     &state,
                     lock_entry.t_id,
                     parent_bytes,
                     shard_id,
                     now_ms,
                     wire_payload,
+                    None,
+                    Some(checkout_deadline),
                 )
                 .await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
@@ -3009,13 +3240,15 @@ async fn submit_hmc_chain_lock_inner(
         })
         .ok();
         let start_quorum = std::time::Instant::now();
-        let (cert, remote_collision) = assemble_quorum_certificate(
+        let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
             &state,
             entry.t_id,
             parent_bytes,
             shard_id,
             now_ms,
             wire_payload,
+            None,
+            Some(checkout_deadline),
         )
         .await;
         state.metrics.record_quorum_latency(start_quorum.elapsed());
@@ -3336,6 +3569,7 @@ mod local_capacity_collector_tests {
                     my_load: 0,
                     quota_limit: 1,
                     network_id: humoco_sim_core::types::NetworkId::Mainnet,
+                    checkout_deadline: None,
                 },
                 &mut signatures,
             )

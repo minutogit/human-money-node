@@ -1023,20 +1023,46 @@ impl RequestHandler for NodeRequestHandler {
                 // 8. Reservation-First backpressure (Rule 10): the sender quota MUST be
                 // reserved BEFORE any RAM-index or persistence mutation. If the queue
                 // is full the request is rejected here and RAM stays untouched.
+                // A19-R2: Deduplicate storage-time charging for exact operations already durable
+                // within root TTL. Retries of previously committed operations succeed idempotently
+                // without exhausting the sender's daily budget.
+                let is_exact_retry = match &wire_payload {
+                    crate::network::framing::LockWirePayload::Hmc { req, root_valid_until, chain, .. } => {
+                        if req.is_genesis && chain.as_ref().is_none_or(|c| c.chain.len() == 1) {
+                            let tag = bs58::encode(req.transaction_hash).into_string();
+                            let entry = crate::api::hmc::L2LockEntry::from(req);
+                            engine.is_hmc_entry_durable(&tag, &entry, *root_valid_until).await
+                        } else if chain.is_none() {
+                            let lookup_tag = req.ds_tag.clone().unwrap_or_default();
+                            if !lookup_tag.trim().is_empty() {
+                                let entry = crate::api::hmc::L2LockEntry::from(req);
+                                engine.is_hmc_entry_durable(&lookup_tag, &entry, *root_valid_until).await
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+
                 if let Some(tc) = &tier_controller {
-                    let epoch_day = tc.current_epoch_day_at(now_ms);
-                    if let Err(e) =
-                        tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day)
-                    {
-                        warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
+                    if !is_exact_retry {
+                        let epoch_day = tc.current_epoch_day_at(now_ms);
+                        if let Err(e) =
+                            tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day)
+                        {
+                            warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
+                            let resp_header = WireHeader::new(
+                                MsgType::LockVerifyResponse as u16,
+                                header.session_seq.wrapping_add(1),
+                                header.epoch_id,
+                                humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+                                0,
+                            );
+                            return Ok((resp_header, Vec::new()));
+                        }
                     }
                 }
 

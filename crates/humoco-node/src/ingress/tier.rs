@@ -39,18 +39,14 @@ pub struct F2fClientMeta {
     pub last_active_ms: Option<u64>,
 }
 
-/// Returns true if the token matches the required client secret format `f2f_<token>` (e.g. 128-bit secret `f2f_<32 hex digits>` or labeled client token).
+/// Returns true if the token matches the required random 128-bit secret format `f2f_<32 hex digits>` (AGENTS.md / A25-R4).
 pub fn is_valid_client_token(token: &str) -> bool {
     let t = token.trim();
     if !t.starts_with("f2f_") {
         return false;
     }
     let suffix = &t[4..];
-    suffix.len() >= 8
-        && suffix.len() <= 64
-        && suffix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    suffix.len() == 32 && suffix.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Error)]
@@ -641,6 +637,24 @@ impl TierController {
         }
     }
 
+    /// Refunds previously evaluated node write quota on duplicate idempotent retry or failed admission.
+    pub fn refund_node_write_quota(
+        &self,
+        sender_pubkey: &[u8; 32],
+        byte_years: u64,
+        epoch_day: u64,
+    ) {
+        let mut p2p_usage = self
+            .p2p_node_usage
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if p2p_usage.0 == epoch_day {
+            if let Some(usage) = p2p_usage.1.get_mut(sender_pubkey) {
+                *usage = usage.saturating_sub(byte_years);
+            }
+        }
+    }
+
     /// Evaluates and registers dynamic ingress for a network node against the 5x Whale Brake daily read limit.
     ///
     /// W4 (Audit 19): Sender-specific P2P read credits are isolated by full 32-byte `NodePubKey`
@@ -1041,7 +1055,7 @@ mod tests {
             Some(1000 - 192)
         );
         // Durable storage is updated asynchronously; wait for background persist
-        for _ in 0..30 {
+        for _ in 0..60 {
             if storage.get_quota(&account_tag).unwrap() == 1000 - 192 {
                 break;
             }

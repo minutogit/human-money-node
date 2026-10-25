@@ -144,7 +144,7 @@ impl DualTierEngine {
     /// Current distinct ready committee witnesses justify compact support for the
     /// complete objective cut. Never accept a source's claimed class or signers.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn install_shard_snapshot(
+    pub async fn install_shard_snapshot(
         &self,
         stage: Arc<ShardStage>,
         expected: [u8; 32],
@@ -163,23 +163,18 @@ impl DualTierEngine {
         let mut installation = Installation {
             _admission: admission,
             health: self.stats.clone(),
-            uncertain: true,
+            uncertain: false,
         };
-        let result = self
-            .install_closed_snapshot(
-                stage, expected, class, context, witnesses, inherited, deadline,
-            )
-            .await;
-        // An ordinary failed transaction rolled back; cancellation is different.
-        // A publication failure AFTER commit remains fail-closed until restart.
-        if result.is_ok() {
-            installation.uncertain = false;
-        }
-        result
+        self.install_closed_snapshot(
+            &mut installation,
+            stage, expected, class, context, witnesses, inherited, deadline,
+        )
+        .await
     }
     #[allow(clippy::too_many_arguments)]
     async fn install_closed_snapshot(
         &self,
+        installation: &mut Installation,
         stage: Arc<ShardStage>,
         expected: [u8; 32],
         class: u8,
@@ -205,7 +200,12 @@ impl DualTierEngine {
         }
         let db = self.db.clone();
         let cut = stage.clone();
-        self.recovery_work
+        // Mark uncertain while disk commit is running in worker.
+        // If the calling task is cancelled/aborted in flight, Drop for Installation
+        // will safely flag fail-closed since disk state may have committed out-of-band.
+        installation.uncertain = true;
+        let commit_res = self
+            .recovery_work
             .spawn_blocking(move || {
                 db.install_shard_cut(
                     &cut,
@@ -217,8 +217,26 @@ impl DualTierEngine {
                     deadline,
                 )
             })
-            .await
-            .map_err(|e| error(&format!("installation worker: {e}")))??;
+            .await;
+
+        match commit_res {
+            Ok(Ok(())) => {
+                // Disk commit succeeded. RAM publication MUST now complete;
+                // keep uncertain = true until all in-memory tables are fully updated.
+                installation.uncertain = true;
+            }
+            Ok(Err(storage_err)) => {
+                // Deterministic pre-commit validation rejection or rollback in install_shard_cut.
+                // The redb transaction was cleanly dropped and rolled back without committing.
+                // Node state and signing history remain healthy.
+                installation.uncertain = false;
+                return Err(storage_err);
+            }
+            Err(join_err) => {
+                // Worker task failed or runtime aborted; remain fail-closed.
+                return Err(error(&format!("installation worker: {join_err}")));
+            }
+        }
         // Bounded RAM publication. Only this shard is gated; no index guard is
         // retained over disk work. Existing root metadata remains immutable.
         loop {
@@ -321,6 +339,7 @@ impl DualTierEngine {
                 .next_cursor
                 .ok_or_else(|| error("publication cursor missing"))?;
         }
+        installation.uncertain = false;
         Ok(())
     }
 }

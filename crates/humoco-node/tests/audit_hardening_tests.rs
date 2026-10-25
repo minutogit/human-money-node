@@ -173,8 +173,7 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
         .hmc_ram
         .write()
         .await
-        .voucher_roots
-        .insert(voucher_id.clone(), root_valid);
+        .insert_voucher_root_for_test(voucher_id.clone(), root_valid);
 
     // 1. Root expiry within 30 seconds is rejected; child TTL cannot override it.
     let invalid_entry = L2LockEntry {

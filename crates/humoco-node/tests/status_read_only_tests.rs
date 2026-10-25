@@ -329,8 +329,7 @@ async fn hmc_tag_and_exact_diagnostics_return_no_new_node_signature() {
         .hmc_ram
         .write()
         .await
-        .locks
-        .insert(tag.into(), entry.clone());
+        .insert_lock_for_test(tag.into(), entry.clone());
     source
         .engine
         .stats
@@ -544,8 +543,7 @@ async fn gateway_full_entry_lookup_works_and_rejects_legacy_original_as_entry() 
         .hmc_ram
         .write()
         .await
-        .locks
-        .insert(tag.into(), entry.clone());
+        .insert_lock_for_test(tag.into(), entry.clone());
     let pow = Arc::new(PowEngine::new(*reader.identity.node_id(), 8));
     let tiers = Arc::new(TierController::new(reader.db.clone(), pow.clone()));
     let mut state = AppState::new(

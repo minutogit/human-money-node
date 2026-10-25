@@ -85,9 +85,13 @@ Once $N \ge 4$ active nodes are present in the mesh:
 
 Real economic traffic fluctuates over the day:
 1. **24-hour daily epoch (`epoch_day`):** Quotas are allocated as **daily budgets**.
-2. **Time-based integer EMA for burst damping:** To avoid millisecond spikes, the gateway computes the Exponential Moving Average time-based in $\mu\text{BJ}$ ($10^6$ fixed-point):
-   $$\text{decay} = \frac{\text{old\_ema} \times \min(\Delta t_{\text{sec}}, 86.400)}{86.400}, \quad \text{new\_ema} = (\text{old\_ema} - \text{decay}) + \text{footprint}$$
-   At $\Delta t = 0$ (burst in same second) no decay occurs; after 24h inactivity the value decays to 0.
+2. **Time-based integer EMA for burst damping (`decay_integer_ema`):** To avoid millisecond spikes and sudden cut-offs, the gateway computes the Exponential Moving Average with a continuous 24-hour exponential half-life ($T_{1/2} = 86.400\,\text{s}$) in $\mu\text{BJ}$ ($10^6$ fixed-point):
+   $$\text{decayed\_ema} = \text{decay\_integer\_ema}(\text{old\_ema}, \Delta t_{\text{sec}})$$
+   $$\text{new\_ema} = \text{decayed\_ema} + \text{footprint}$$
+   - **Continuous Half-Life:** Every 24 hours ($86.400\,\text{s}$), the EMA value decays by exactly 50% ($2^{-\Delta t / 86.400}$).
+   - **Pure Integer Arithmetic:** Implemented via a 64-step dyadic lookup table (`DYADIC_HALF_LIFE_TABLE`, step width $1.350\,\text{s}$) with linear interpolation (error $< 0{,}002\%$) and 128-bit fixed-point arithmetic (`u128`).
+   - **Boundary Conditions:** At $\Delta t = 0$, no decay occurs ($\text{decayed\_ema} = \text{old\_ema}$). After 64 half-lives ($\Delta t \ge 64 \times 86.400\,\text{s}$), the value decays completely to 0.
+   - **Equivalent Daily Rate:** The 24h half-life EMA accumulator converts to an equivalent daily rate via $\text{Rate}_{\text{daily}} = \lfloor \text{EMA} \cdot \ln(2) \rfloor \approx \lfloor \frac{\text{EMA} \times 693.147}{1.000.000} \rfloor$.
 3. **Organic inertia ($\tau$):** Smoothed via the 28-day low-pass filter.
 
 ---

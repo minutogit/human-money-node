@@ -11,6 +11,8 @@ use humoco_sim_core::{
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+static RECOVERY_20_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn fixed_snapshot_cursor_survives_concurrent_insert_delete_and_rejects_foreign_cursor() {
     let dir = tempfile::tempdir().unwrap();
@@ -584,6 +586,7 @@ fn signed_hmc_cut(
 async fn fourteen_live_cut_witnesses_establish_hmc_support_without_history_and_island_sync_preserves_class_two(
 ) {
     use std::time::{Duration, Instant};
+    let _guard = RECOVERY_20_TEST_LOCK.lock().await;
     let peers = recovery_peers(20).await;
     let now = peers[0].manager.net_time_ms();
     let (root_tag, root, spend_tag, spend, shard) = signed_hmc_cut(now);
@@ -802,6 +805,7 @@ async fn small_mesh_growth_two_nodes_fails_closed_without_automatic_empty_db_fal
 
 #[tokio::test]
 async fn asymmetric_partition_8_6_6_blocks_finality_until_14_quorum_reunited() {
+    let _guard = RECOVERY_20_TEST_LOCK.lock().await;
     // 20 peers: target is peer 0, remote peers 1..20 are all in the 20-node committee
     let peers = recovery_peers(20).await;
     let now = peers[0].manager.net_time_ms();
@@ -950,6 +954,7 @@ async fn asymmetric_partition_8_6_6_blocks_finality_until_14_quorum_reunited() {
 #[tokio::test]
 async fn distributed_compatible_state_ab8_a6_b6_reconciles_per_fact_and_quarantines_unconfirmed_local(
 ) {
+    let _guard = RECOVERY_20_TEST_LOCK.lock().await;
     let peers = recovery_peers(20).await;
     let now = peers[0].manager.net_time_ms();
     let shard = 42u16;

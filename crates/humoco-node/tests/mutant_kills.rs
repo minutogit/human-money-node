@@ -100,7 +100,7 @@ async fn test_mutant_m2s3_hmc_ram_filter_consistency_after_prune() {
     {
         let hmc = engine.hmc_ram.read().await;
         assert!(
-            hmc.filter.contains(&tag),
+            hmc.filter().contains(&tag),
             "filter must contain after ingress"
         );
     }
@@ -113,10 +113,10 @@ async fn test_mutant_m2s3_hmc_ram_filter_consistency_after_prune() {
     {
         let hmc = engine.hmc_ram.read().await;
         assert!(
-            !hmc.filter.contains(&tag),
+            !hmc.filter().contains(&tag),
             "filter must not contain pruned tag (mutant would fail)"
         );
-        assert!(!hmc.locks.contains_key(&tag));
+        assert!(!hmc.locks().contains_key(&tag));
     }
 
     drop(engine);
@@ -239,8 +239,13 @@ fn test_mutant_m2s6_hmc_disk_prune_retains_unexpired_until_grace() {
     assert_eq!(pruned1, 0, "before grace must retain");
     assert!(storage.get_hmc_lock("tag_grace").unwrap().is_some());
 
-    // Prune exactly at grace bucket (130) -> should delete (sec <= now_sec)
-    let (_, pruned2) = storage.prune_expired_buckets(130).unwrap();
-    assert_eq!(pruned2, 1, "at grace bucket must be pruned");
+    // Prune at now_sec=130 (130_000ms == root + 30s): grace period requires now > root + 30s (INV-1203/INV-0204)
+    let (_, pruned_at_grace) = storage.prune_expired_buckets(130).unwrap();
+    assert_eq!(pruned_at_grace, 0, "at exactly root+30s must still retain");
+    assert!(storage.get_hmc_lock("tag_grace").unwrap().is_some());
+
+    // Prune strictly after grace bucket (now_sec=131, 131_000ms > 130_000ms) -> must delete
+    let (_, pruned2) = storage.prune_expired_buckets(131).unwrap();
+    assert_eq!(pruned2, 1, "strictly after grace bucket must be pruned");
     assert!(storage.get_hmc_lock("tag_grace").unwrap().is_none());
 }

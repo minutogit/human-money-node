@@ -267,9 +267,8 @@ async fn live_state_signature_over_quic_requires_exact_ready_state() {
     };
     {
         let mut ram = engine.hmc_ram.write().await;
-        ram.locks.insert(expected.lookup_tag.clone(), entry.clone());
-        ram.voucher_roots
-            .insert(expected.voucher_id.clone(), expected.root_valid_until);
+        ram.insert_lock_for_test(expected.lookup_tag.clone(), entry.clone());
+        ram.insert_voucher_root_for_test(expected.voucher_id.clone(), expected.root_valid_until);
     }
     let mut anchor = [0; 32];
     anchor[..2].copy_from_slice(&expected.shard_id.to_be_bytes());

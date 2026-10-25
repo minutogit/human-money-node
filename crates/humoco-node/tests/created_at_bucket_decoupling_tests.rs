@@ -877,7 +877,7 @@ async fn test_idempotent_retries_with_identical_created_at_returns_200() {
     // 3. Verify that the entry remains mapped to the correct bucket in engine RAM
     let hmc_ram = engine.hmc_ram.read().await;
     let stored = hmc_ram
-        .locks
+        .locks()
         .get(&lookup_tag)
         .expect("Lock must be in RAM index");
     assert_eq!(stored.created_at_ms, created_at_ms);

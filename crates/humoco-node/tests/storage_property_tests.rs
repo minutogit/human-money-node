@@ -136,7 +136,7 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
 
                             // Verify RAM and Disk state consistency immediately
                             let ram = engine.hmc_ram.read().await;
-                            assert!(ram.locks.contains_key(&tag), "RAM must contain newly spent tag");
+                            assert!(ram.locks().contains_key(&tag), "RAM must contain newly spent tag");
                             drop(ram);
 
                             let disk = storage.get_hmc_lock(&tag).unwrap();
@@ -214,7 +214,7 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
 
                         // Assert the original entry was NOT overwritten in RAM or Disk
                         let ram = engine.hmc_ram.read().await;
-                        assert_eq!(ram.locks.get(&tag).unwrap().t_id, original_tid);
+                        assert_eq!(ram.locks().get(&tag).unwrap().t_id, original_tid);
                         drop(ram);
 
                         let disk = storage.get_hmc_lock(&tag).unwrap().expect("disk entry must exist");
@@ -234,7 +234,7 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                 // Assert RAM and Disk state consistency against model
                 let ram = engine.hmc_ram.read().await;
                 for (tag, (_, expected_tid, _)) in &model_spends {
-                    let ram_entry = ram.locks.get(tag);
+                    let ram_entry = ram.locks().get(tag);
                     assert!(ram_entry.is_some(), "unexpired tag {} must be in RAM", tag);
                     assert_eq!(ram_entry.unwrap().t_id, *expected_tid);
                 }
@@ -259,7 +259,7 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                 // Assert RAM and Disk consistency after reopen
                 let ram = engine.hmc_ram.read().await;
                 for (tag, (_, expected_tid, _)) in &model_spends {
-                    let ram_entry = ram.locks.get(tag);
+                    let ram_entry = ram.locks().get(tag);
                     assert!(
                         ram_entry.is_some(),
                         "Recovered RAM must contain active spend: {}",

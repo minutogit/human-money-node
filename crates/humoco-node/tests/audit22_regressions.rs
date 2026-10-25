@@ -201,7 +201,7 @@ async fn test_a22_03_normal_pruning_must_remove_expired_root_metadata() {
     for _ in 0..3 {
         engine.prune_expired(SimTime(81_000)).await.unwrap();
     }
-    assert!(engine.hmc_ram.read().await.root_anchors.is_empty());
+    assert!(engine.hmc_ram.read().await.root_anchors().is_empty());
     let remains = db.voucher_root(&root.layer2_voucher_id).unwrap().is_some();
     cancel.cancel();
     worker.await.unwrap();

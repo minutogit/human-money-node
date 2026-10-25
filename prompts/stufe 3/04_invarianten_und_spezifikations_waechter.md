@@ -1,0 +1,38 @@
+# Audit 04 — Invariant and Specification Guardian
+
+Date: 2026-10-25. Scope: the audit prompt's six reconciliation areas against the current canonical invariant registry, specifications and working implementation. Base HEAD: `d5be41f4e8a9662dffb5170b629191a950aab922`; pre-existing/concurrent edits are included. Audit only; no production patch applied.
+
+## Findings
+
+- **A04-01 / P2 — Disk pruning violates the strict grace boundary.** Spec12:81,144 and `sim-core/src/storage.rs:29` require `now > root expiry + 30s`. `node/src/storage/db.rs:22–23,540–550` instead permits deletion at the rounded-up second, including equality for whole-second roots. Reproduced using actual `RedbStorage`: store root expiry 50,000 ms, call `prune_expired_buckets(80)`; the disk lock is deleted while `should_prune(80,000,50,000)` is false. The root-metadata helper at `db.rs:1225–1227` uses the same non-strict equality. This is a boundary inconsistency; it does not establish spending validity after expiry or a demonstrated double spend.
+- **A04-02 / P2 — EMA specification and implementation disagree.** Spec09:89–90 specifies linear decay to zero after 24h. `sim-core/src/quota.rs:340–359` implements exponential half-life decay. Actual library result: `decay_integer_ema(1_000_000,86_400) == 500_000`, versus specified zero. Both are physical-time based, but their budgets/decay trajectories differ. An explicit policy decision is required before changing production arithmetic.
+- **A04-03 / P2 — Public partition-merge model bypasses class ordering.** Spec02:51–53 and INV-0804 require justified class2 > class1 > class0 before min-hash. `sim-core/src/chaos.rs:9–29` selects only the smaller hash. Reproduced: a lower-hash Pending lock replaces a higher-hash Final lock. The principal resolver uses class-aware `compare_native_precedence`; this finding concerns the exported simulation helper and the validity of conclusions drawn from it, not a demonstrated production merge exploit.
+- **A04-04 / P3 — Accounting specification is internally contradictory.** Spec09:20–43 retains the 192-byte policy unit and distinguishes estimates from measurements; Spec12:145 demands approximately 224 bytes of actual storage-time footprint. `sim-core/src/quota.rs:10–48` deliberately charges 192 bytes. This is an unresolved normative documentation conflict, not evidence that changing the multiplier to 224 is automatically correct.
+- **A04-05 / P3 — Audit prompt contains retired invariant meanings.** `prompts/04_invarianten_und_spezifikations_waechter.md` assigns ingress timing to INV-1202 and requires unconditional min-hash wins. The canonical registry explicitly assigns INV-1202 to atomic insertion, INV-1206 to the time window, and INV-0804 to class-aware ordering. Blindly implementing the prompt's proposed corrections would weaken current behavior.
+
+## Reconciliation status
+
+`COMPLIANT` below means the inspected narrow implementation/math matches the stated rule; it is not a claim that every acceptance scenario or system proof has executed.
+
+| Area / canonical IDs | Status and evidence |
+| --- | --- |
+| Quorum / INV-0206,0801,0805 | COMPLIANT for Q(0)=0, adaptive Q for 1–19, fixed14 for >=20: 101 actual library boundary checks. `types.rs:337`; HTTP collector `api/routes.rs:1403–1415` adds the stability gate. Full authority/transition proof not established. |
+| Resolver / INV-0804 | DIVERGENCE in exported chaos helper (A04-03); main resolver `resolver.rs:106` uses class/hash/ID precedence. No claim that status labels alone establish justified support. |
+| HRW / INV-0302,0303,0307 | COMPLIANT for inspected full256-bit descending score, identity tie-break, identity dedup and top20 cap (`types.rs:961,1009`). Four permutation controls passed, including shard65535. Membership/source authority remains a separate proof gate. |
+| Time / INV-1206 | COMPLIANT for inspected minimum lead/root-bound check (`storage.rs:14–25`); exact30s rejects and30s+1ms accepts in actual library probes. Full clock/entry composition remains open. |
+| Expiry / INV-0204,1203 | DIVERGENCE at exact disk grace equality (A04-01); RAM uses strict `should_prune`. Existing fractional-second tests do not cover the whole-second equality counterexample. |
+| Quotas / INV-0901–0905,0907–0908,1204 | COMPLIANT for 192/one-year and960/five-year arithmetic, 960000 floor, 28-slot structure and K<=5 clamp (`quota.rs:32–61,220–260,552–582`). DIVERGENCE for EMA and footprint wording (A04-02/04). Extreme median overflow is recorded in Audit13; it is not counted twice as a new defect. |
+
+Validation: 237 workspace library tests and 14 selected Audit19/Audit22 regressions passed, including existing real-QUIC receiver/convergence cases. Local actual-library probes reproduced the three behavioral divergences above. These passing existing tests do not reject those counterexamples. Miri was unavailable. The initial mandatory standard suite did not compile; its final rerun status is recorded below.
+
+Coverage limit: the registry owns 115 topics plus retired undefined references. This report reconciles the six areas requested by Audit04; it does **not** certify all115 scenarios or close G1–G5. Other invariant families retain unverified acceptance status for this run. Existing earlier audit results are not treated as proof of current correctness.
+
+Final shared standard validation: `timeout 180s cargo test-std --offline --no-fail-fast` exited124. Completed targets: **417 passed,1 failed,14 ignored**; unfinished `status_reconciliation_tests` is excluded from these totals. The failure was `test_valid_signatures_for_wrong_request_or_tls_context_never_form_quorum_wire` at `phase11_wire_level_adversarial_tests.rs:1811`: one actual send versus two expected; HTTP503 rejected the request. This is a failed test, not evidence of an accepted forged quorum. The original E0609 field access was repaired concurrently before this rerun. The full baseline remains incomplete and non-clean.
+
+## Integrated fix plan
+
+1. **A04-01:** add a red regression for a whole-second root at grace−1ms, exact grace and grace+1ms, covering active/provisional records, root metadata, support and own-choice retention. For a seconds-only purge interface, the earliest eligible tick is `floor((root_ms+30000)/1000)+1`, with overflow-safe handling; alternatively pass milliseconds and use the shared strict predicate. Apply consistently to standalone and worker-transaction pruning. Preserve bounded batches and prove eventual deletion.
+2. **A04-02:** select the authoritative decay equation through the existing decision register. If exponential half-life is intended, correct Spec09 and its examples; if linear is intended, change all shared callers together. Add golden vectors at0,12h,24h,48h, monotonic decay and maximum counters. Reconcile peer-rate estimation and quota effects.
+3. **A04-03:** route model merges through the shared class-aware comparator, including deterministic equal-hash/ID tie handling and explicit eligibility/support assumptions. Add input-order reversal, lower-class/low-hash and equal-class controls. Do not use this helper as production consensus evidence without corresponding real-wire tests.
+4. **A04-04/05:** make one accounting policy unit authoritative and label measured memory costs separately; update INV-1204 and the audit prompt to canonical IDs/retired-rule mappings. Add matching accounting fixtures rather than silently changing fees/quotas or restoring unconditional min-hash.
+5. Finish mandatory standard validation after the independent test repair. Before broad compliance claims, extend the per-ID acceptance map with executed boundary evidence and retain open architecture proof gates explicitly.

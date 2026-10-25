@@ -294,7 +294,7 @@ async fn unknown_shard_is_rejected_over_real_quic_despite_global_readiness() {
         bytes.is_empty(),
         "no binding vote may escape an unknown shard"
     );
-    assert!(engine.hmc_ram.read().await.locks.is_empty());
+    assert!(engine.hmc_ram.read().await.locks().is_empty());
     cancel.cancel();
 }
 

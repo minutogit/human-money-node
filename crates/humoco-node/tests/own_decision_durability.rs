@@ -288,7 +288,7 @@ async fn identical_pending_root_retries_wait_for_durable_barrier() {
             .hmc_ram
             .read()
             .await
-            .root_anchors
+            .root_anchors()
             .contains_key("prefix-voucher")
         {
             tokio::task::yield_now().await;

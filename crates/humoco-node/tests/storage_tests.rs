@@ -335,9 +335,9 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
         // Verify RAM index initially
         {
             let hmc = engine.hmc_ram.read().await;
-            assert_eq!(hmc.locks.len(), 2);
-            assert!(hmc.locks.contains_key("tag_short"));
-            assert!(hmc.locks.contains_key("tag_long"));
+            assert_eq!(hmc.locks().len(), 2);
+            assert!(hmc.locks().contains_key("tag_short"));
+            assert!(hmc.locks().contains_key("tag_long"));
         }
 
         // Wait for persistence flush
@@ -359,9 +359,9 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
         // Check RAM state: tag_short expired, tag_long valid
         {
             let hmc = engine.hmc_ram.read().await;
-            assert_eq!(hmc.locks.len(), 1);
-            assert!(!hmc.locks.contains_key("tag_short"));
-            assert!(hmc.locks.contains_key("tag_long"));
+            assert_eq!(hmc.locks().len(), 1);
+            assert!(!hmc.locks().contains_key("tag_short"));
+            assert!(hmc.locks().contains_key("tag_long"));
         }
 
         // Prune expired buckets

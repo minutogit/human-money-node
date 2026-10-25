@@ -5,20 +5,31 @@ use crate::crypto::compute_canonical_hash;
 use crate::sim::{SimMessage, SimNetwork, SimNode};
 use crate::types::{LockRecord, SimTime};
 
-/// Deterministic partition merge via min(H_canon) (INV-1601)
+/// Deterministic partition merge via confirmation class precedence then min(H_canon) (INV-0804, INV-1601)
 pub fn resolve_partition_merge(locks_a: &[LockRecord], locks_b: &[LockRecord]) -> Vec<LockRecord> {
     let mut parent_map: BTreeMap<[u8; 32], LockRecord> = BTreeMap::new();
     for l in locks_a.iter().chain(locks_b.iter()) {
         let parent = l.parent_lock;
         if let Some(existing) = parent_map.get(&parent) {
-            // conflict: pick min H_canon
             let h_existing = compute_canonical_hash(
                 &existing.parent_lock,
                 &existing.receiver_pub,
                 &existing.nonce,
             );
             let h_new = compute_canonical_hash(&l.parent_lock, &l.receiver_pub, &l.nonce);
-            if h_new < h_existing {
+            let class_existing = existing.status.confirmation_class();
+            let class_new = l.status.confirmation_class();
+            if matches!(
+                crate::resolver::compare_native_precedence(
+                    class_existing,
+                    &h_existing,
+                    &existing.id,
+                    class_new,
+                    &h_new,
+                    &l.id,
+                ),
+                crate::resolver::NativeCandidateOrdering::PrecedenceB
+            ) {
                 parent_map.insert(parent, l.clone());
             }
         } else {
@@ -30,6 +41,9 @@ pub fn resolve_partition_merge(locks_a: &[LockRecord], locks_b: &[LockRecord]) -
 
 /// Simulate 60/40 partition for 12h then merge, verify convergence (helper)
 pub fn simulate_60_40_partition_merge(num_nodes: usize) -> bool {
+    if num_nodes < 2 || num_nodes > u16::MAX as usize {
+        return false;
+    }
     // Use SimNetwork to split 60% vs 40%
     let mut net = SimNetwork::new();
     net.set_latency(5, 15);
@@ -37,7 +51,7 @@ pub fn simulate_60_40_partition_merge(num_nodes: usize) -> bool {
         net.add_node(SimNode::new(id, 10)); // initial small
     }
     // fully mesh each partition for simplicity
-    let split = (num_nodes * 60) / 100;
+    let split = ((num_nodes * 60) / 100).clamp(1, num_nodes - 1);
     let group_a: Vec<u16> = (0..split as u16).collect();
     let group_b: Vec<u16> = (split as u16..num_nodes as u16).collect();
     for &a in &group_a {
@@ -195,5 +209,84 @@ mod tests {
         let hb = compute_canonical_hash(&parent, &[0x03; 32], b"b");
         let expected = if ha < hb { a.id } else { b.id };
         assert_eq!(merged[0].id, expected);
+    }
+
+    #[test]
+    fn test_merge_class_precedence() {
+        use crate::types::LockStatus;
+        let parent = [0xAA; 32];
+        let mut pending =
+            LockRecord::new(parent, [0x02; 32], b"pending".to_vec(), SimTime(0), SimTime(1000));
+        let mut final_lock =
+            LockRecord::new(parent, [0x03; 32], b"final".to_vec(), SimTime(0), SimTime(1000));
+
+        let h_pending = compute_canonical_hash(&parent, &pending.receiver_pub, &pending.nonce);
+        let h_final = compute_canonical_hash(&parent, &final_lock.receiver_pub, &final_lock.nonce);
+
+        if h_pending > h_final {
+            std::mem::swap(&mut pending.receiver_pub, &mut final_lock.receiver_pub);
+            std::mem::swap(&mut pending.nonce, &mut final_lock.nonce);
+            pending.id = LockRecord::new(
+                parent,
+                pending.receiver_pub,
+                pending.nonce.clone(),
+                SimTime(0),
+                SimTime(1000),
+            )
+            .id;
+            final_lock.id = LockRecord::new(
+                parent,
+                final_lock.receiver_pub,
+                final_lock.nonce.clone(),
+                SimTime(0),
+                SimTime(1000),
+            )
+            .id;
+        }
+
+        let h_pending = compute_canonical_hash(&parent, &pending.receiver_pub, &pending.nonce);
+        let h_final = compute_canonical_hash(&parent, &final_lock.receiver_pub, &final_lock.nonce);
+        assert!(
+            h_pending < h_final,
+            "pending must have smaller hash to test class precedence"
+        );
+
+        pending.status = LockStatus::Pending;
+        final_lock.status = LockStatus::Final { sigs: 14 };
+
+        // Even though pending has a smaller canonical hash, final_lock must win!
+        let merged_1 =
+            resolve_partition_merge(std::slice::from_ref(&pending), std::slice::from_ref(&final_lock));
+        assert_eq!(merged_1.len(), 1);
+        assert_eq!(merged_1[0].id, final_lock.id);
+
+        let merged_2 =
+            resolve_partition_merge(std::slice::from_ref(&final_lock), std::slice::from_ref(&pending));
+        assert_eq!(merged_2.len(), 1);
+        assert_eq!(merged_2[0].id, final_lock.id);
+
+        // Provisional (class 1) vs Final (class 2)
+        let mut prov = pending.clone();
+        prov.status = LockStatus::Provisional {
+            sigs: 3,
+            required: 3,
+        };
+        let merged_3 =
+            resolve_partition_merge(std::slice::from_ref(&prov), std::slice::from_ref(&final_lock));
+        assert_eq!(merged_3[0].id, final_lock.id);
+
+        // Equal class (Final vs Final): min(H_canon) decides
+        let mut final_a = pending.clone();
+        final_a.status = LockStatus::Final { sigs: 14 };
+        let merged_final =
+            resolve_partition_merge(std::slice::from_ref(&final_a), std::slice::from_ref(&final_lock));
+        assert_eq!(merged_final[0].id, final_a.id);
+    }
+
+    #[test]
+    fn test_simulate_60_40_bounds_check() {
+        assert!(!simulate_60_40_partition_merge(0));
+        assert!(!simulate_60_40_partition_merge(1));
+        assert!(!simulate_60_40_partition_merge(u16::MAX as usize + 1));
     }
 }

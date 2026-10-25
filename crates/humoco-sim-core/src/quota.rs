@@ -68,7 +68,7 @@ impl ByteYears {
 
     /// Computes Byte-Years from days
     pub fn from_ttl_days(days: u64) -> u64 {
-        Self::from_ttl_seconds(days * 86_400)
+        Self::from_ttl_seconds(days.saturating_mul(86_400))
     }
 
     /// Computes Byte-Years from years (e.g. 5.0 years = 960 Byte-Years)
@@ -104,7 +104,9 @@ impl QuartileStats {
         let median = if n % 2 == 1 {
             sorted[n / 2]
         } else {
-            (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+            let low = sorted[n / 2 - 1] as u128;
+            let high = sorted[n / 2] as u128;
+            ((low + high) / 2) as u64
         };
 
         let q1 = sorted[n / 4];
@@ -847,6 +849,45 @@ mod tests {
     }
 
     #[test]
+    fn test_decay_integer_ema_golden_vectors() {
+        let base = 1_000_000_000u64;
+
+        // 1. delta_secs = 0s (no decay)
+        assert_eq!(decay_integer_ema(base, 0), 1_000_000_000);
+
+        // 2. delta_secs = 12h (43,200s, exactly half a half-life: factor 2^(-0.5) ≈ 0.70710678)
+        // Table entry 32 gives 0xb504f334. (1_000_000_000 * 0xb504f334) >> 32 = 707_106_781
+        let decayed_12h = decay_integer_ema(base, 43_200);
+        assert_eq!(decayed_12h, 707_106_781);
+
+        // 3. delta_secs = 24h (86,400s, exactly 1 half-life: 50% remaining)
+        let decayed_24h = decay_integer_ema(base, 86_400);
+        assert_eq!(decayed_24h, 500_000_000);
+
+        // 4. delta_secs = 48h (172,800s, exactly 2 half-lives: 25% remaining)
+        let decayed_48h = decay_integer_ema(base, 172_800);
+        assert_eq!(decayed_48h, 250_000_000);
+
+        // 5. delta_secs = 64 * 86,400s (64 half-lives: decays completely to 0)
+        let decayed_64hl = decay_integer_ema(base, 64 * 86_400);
+        assert_eq!(decayed_64hl, 0);
+
+        // Check boundary beyond 64 half-lives
+        assert_eq!(decay_integer_ema(base, 65 * 86_400), 0);
+
+        // Standard 1_000_000 unit vector
+        assert_eq!(decay_integer_ema(1_000_000, 0), 1_000_000);
+        assert_eq!(decay_integer_ema(1_000_000, 43_200), 707_106);
+        assert_eq!(decay_integer_ema(1_000_000, 86_400), 500_000);
+        assert_eq!(decay_integer_ema(1_000_000, 172_800), 250_000);
+        assert_eq!(decay_integer_ema(1_000_000, 64 * 86_400), 0);
+
+        // Daily rate conversion golden vector: floor(EMA * ln(2))
+        assert_eq!(ema_to_daily_rate(1_000_000), 693_147);
+        assert_eq!(ema_to_daily_rate(base), 693_147_000);
+    }
+
+    #[test]
     fn test_integer_ema_u128_overflow_safety() {
         // Test with values near u64::MAX
         let old_ema = u64::MAX;
@@ -1023,6 +1064,20 @@ mod tests {
         };
         let damper = exact_one.spread_damper();
         assert!((damper - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_a13_01_quartiles_and_byte_years_overflow_safety() {
+        // A13-01: calculate median on [u64::MAX, u64::MAX] must not overflow
+        let stats = QuartileStats::calculate(&[u64::MAX, u64::MAX]);
+        assert_eq!(stats.median, u64::MAX);
+
+        let stats_near_max = QuartileStats::calculate(&[u64::MAX - 1, u64::MAX]);
+        assert_eq!(stats_near_max.median, u64::MAX - 1);
+
+        // A13-02: from_ttl_days(u64::MAX) must saturate and not panic
+        let by_max = ByteYears::from_ttl_days(u64::MAX);
+        assert!(by_max > 0);
     }
 
     #[test]

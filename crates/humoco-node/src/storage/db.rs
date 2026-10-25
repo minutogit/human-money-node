@@ -20,7 +20,7 @@ use tracing::warn;
 /// ensuring that records are never prematurely expired before their full +30s grace window passes.
 #[inline(always)]
 pub const fn grace_expiry_bucket_sec(root_valid_until_ms: u64) -> u64 {
-    root_valid_until_ms.saturating_add(30_999) / 1_000
+    (root_valid_until_ms.saturating_add(30_000) / 1_000).saturating_add(1)
 }
 
 #[derive(Debug, Error)]
@@ -249,7 +249,7 @@ impl RedbStorage {
             locks.insert(tag, lock_bytes.as_slice())?;
             txn.open_table(TABLE_HMC_VOUCHER_INDEX)?
                 .insert((entry.layer2_voucher_id.as_str(), tag), ())?;
-            let expires_sec = valid_until_ms.saturating_add(30_999) / 1_000;
+            let expires_sec = grace_expiry_bucket_sec(valid_until_ms);
             txn.open_table(TABLE_HMC_TTL_INDEX)?
                 .insert(&(expires_sec, tag), ())?;
             txn.open_table(TABLE_OWN_CHOICE_TTL)?
@@ -318,7 +318,7 @@ impl RedbStorage {
             }
             let bytes = bincode::serialize(&(record, root_valid_until_ms))?;
             locks.insert(&record.parent_lock, bytes.as_slice())?;
-            let expires_sec = root_valid_until_ms.saturating_add(30_999) / 1_000;
+            let expires_sec = grace_expiry_bucket_sec(root_valid_until_ms);
             txn.open_table(TABLE_TTL_INDEX)?
                 .insert(&(expires_sec, &record.parent_lock), ())?;
             txn.open_table(TABLE_OWN_CHOICE_TTL)?
@@ -1188,13 +1188,15 @@ impl RedbStorage {
     fn prune_own_choices(txn: &redb::WriteTransaction, now_sec: u64) -> Result<(), StorageError> {
         let mut ttl = txn.open_table(TABLE_OWN_CHOICE_TTL)?;
         let expired = ttl
-            .range(..(now_sec, ""))?
+            .range(..(now_sec.saturating_add(1), ""))?
             .take(256)
             .map(|row| row.map(|(key, _)| (key.value().0, key.value().1.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
         for (sec, slot) in expired {
-            signing::remove_choice(txn, slot.as_str())?;
-            ttl.remove(&(sec, slot.as_str()))?;
+            if sec <= now_sec {
+                signing::remove_choice(txn, slot.as_str())?;
+                ttl.remove(&(sec, slot.as_str()))?;
+            }
         }
         Ok(())
     }
@@ -1222,9 +1224,7 @@ impl RedbStorage {
                         serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
                     {
                         if let Ok(exp) = roots::root_valid_until(&entry) {
-                            let threshold_ms = exp.saturating_add(30_000);
-                            let needed_sec = threshold_ms.saturating_add(999) / 1_000;
-                            now_sec >= needed_sec
+                            now_sec >= grace_expiry_bucket_sec(exp)
                         } else {
                             true
                         }
@@ -1769,5 +1769,93 @@ impl RedbStorage {
         } else {
             Ok(items)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::hmc::L2LockEntry;
+    use humoco_sim_core::types::{LockRecord, SimTime};
+
+    fn sample_root(voucher_id: &str, valid_until_ms: u64) -> L2LockEntry {
+        L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: voucher_id.to_string(),
+            t_id: [1; 32],
+            sender_ephemeral_pub: [2; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 1_000,
+            deletable_at: Some(valid_until_ms.to_string()),
+            privacy_guard: None,
+        }
+    }
+
+    #[test]
+    fn test_grace_expiry_bucket_sec_boundary() {
+        // At 50_000 ms, 50_000 + 30_000 = 80_000 ms.
+        // Second 80 (80_000 ms) is NOT > 80_000 ms. Bucket must be 81.
+        assert_eq!(grace_expiry_bucket_sec(50_000), 81);
+        assert_eq!(grace_expiry_bucket_sec(50_001), 81);
+        assert_eq!(grace_expiry_bucket_sec(50_999), 81);
+        assert_eq!(grace_expiry_bucket_sec(51_000), 82);
+    }
+
+    #[test]
+    fn test_regression_a04_01_prune_boundary_50000ms() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("prune_boundary.redb");
+        let storage = RedbStorage::open(&db_path).expect("open db");
+
+        let root_valid_until_ms = 50_000u64;
+        let parent = [42u8; 32];
+        let record = LockRecord::new(
+            parent,
+            [43u8; 32],
+            b"test_record".to_vec(),
+            SimTime(1_000),
+            SimTime(root_valid_until_ms),
+        );
+        storage.put_lock(&record, root_valid_until_ms).expect("put_lock");
+
+        let voucher_id = "test-voucher-50000";
+        let root = sample_root(voucher_id, root_valid_until_ms);
+        let root_tag = bs58::encode(root.t_id).into_string();
+        storage.put_hmc_lock(&root_tag, &root).expect("put root");
+
+        let mut spend = sample_root(voucher_id, root_valid_until_ms);
+        spend.t_id = [2; 32];
+        spend.deletable_at = None;
+        let spend_tag = "hmc-spend-50000";
+        storage.put_hmc_lock(spend_tag, &spend).expect("put spend");
+
+        // now_sec = 79: must NOT delete
+        let (pruned_native_79, pruned_hmc_79) = storage.prune_expired_buckets(79).expect("prune 79");
+        assert_eq!(pruned_native_79.len(), 0);
+        assert_eq!(pruned_hmc_79, 0);
+        assert!(storage.get_lock(&parent).expect("get_lock").is_some());
+        assert!(storage.get_hmc_lock(spend_tag).expect("get_hmc_lock").is_some());
+        assert!(storage.voucher_root(voucher_id).expect("voucher_root").is_some());
+
+        // now_sec = 80: must NOT delete (grace period +30s expires strictly at >80_000 ms)
+        let (pruned_native_80, pruned_hmc_80) = storage.prune_expired_buckets(80).expect("prune 80");
+        assert_eq!(pruned_native_80.len(), 0);
+        assert_eq!(pruned_hmc_80, 0);
+        assert!(storage.get_lock(&parent).expect("get_lock").is_some());
+        assert!(storage.get_hmc_lock(spend_tag).expect("get_hmc_lock").is_some());
+        assert!(storage.voucher_root(voucher_id).expect("voucher_root").is_some());
+
+        // now_sec = 81: MUST delete
+        let (pruned_native_81, pruned_hmc_81) = storage.prune_expired_buckets(81).expect("prune 81");
+        assert!(pruned_native_81.contains(&parent));
+        assert!(pruned_hmc_81 > 0);
+        assert!(storage.get_lock(&parent).expect("get_lock").is_none());
+        assert!(storage.get_hmc_lock(spend_tag).expect("get_hmc_lock").is_none());
+        assert!(storage.voucher_root(voucher_id).expect("voucher_root").is_none());
     }
 }

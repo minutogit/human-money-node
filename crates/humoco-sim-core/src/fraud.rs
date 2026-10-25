@@ -606,6 +606,12 @@ pub fn verify_heartbeat_signature_strict(
 
 pub type FraudProof = FraudProofPayload;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FraudBuildError {
+    #[error("Signer mismatch")]
+    SignerMismatch,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FraudProofPayload {
     /// Perpetrator as 32-byte public key (first 2 bytes = NodeId LE for simulation)
@@ -641,13 +647,15 @@ impl FraudProofPayload {
         u16::from_le_bytes([pk[0], pk[1]])
     }
 
-    /// Create pillar 1 proof from two attestations (L3A != L3B, same parent_lock)
-    pub fn new_shard_equivocation(a: Attestation, b: Attestation) -> Self {
-        assert_eq!(a.node_id, b.node_id, "equivocation requires same signer");
+    /// Try creating pillar 1 proof from two attestations (L3A != L3B, same parent_lock)
+    pub fn try_new_shard_equivocation(a: Attestation, b: Attestation) -> Result<Self, FraudBuildError> {
+        if a.node_id != b.node_id {
+            return Err(FraudBuildError::SignerMismatch);
+        }
         let perpetrator = a.node_id;
         let perpetrator_node_id = Self::pubkey_from_node_id(perpetrator);
         let pillar = FraudProofPillar::ShardEquivocation;
-        Self {
+        Ok(Self {
             perpetrator_node_id,
             proof_pillar: pillar,
             _padding: [0u8; 7],
@@ -657,38 +665,63 @@ impl FraudProofPayload {
             reporter_signature: [0u8; 64],
             perpetrator,
             pillar,
-        }
+        })
+    }
+
+    /// Create pillar 1 proof from two attestations (L3A != L3B, same parent_lock)
+    pub fn new_shard_equivocation(a: Attestation, b: Attestation) -> Self {
+        Self::try_new_shard_equivocation(a, b).expect("equivocation requires same signer")
     }
 
     /// Alternative constructor with explicit perpetrator pubkey
+    pub fn try_new_shard_equivocation_with_pubkey(
+        a: Attestation,
+        b: Attestation,
+        perpetrator_pubkey: [u8; 32],
+    ) -> Result<Self, FraudBuildError> {
+        let mut p = Self::try_new_shard_equivocation(a, b)?;
+        p.perpetrator_node_id = perpetrator_pubkey;
+        Ok(p)
+    }
+
     pub fn new_shard_equivocation_with_pubkey(
         a: Attestation,
         b: Attestation,
         perpetrator_pubkey: [u8; 32],
     ) -> Self {
-        let mut p = Self::new_shard_equivocation(a, b);
-        p.perpetrator_node_id = perpetrator_pubkey;
-        p
+        Self::try_new_shard_equivocation_with_pubkey(a, b, perpetrator_pubkey)
+            .expect("equivocation requires same signer")
     }
 
     /// Alternative constructor with explicit reporter
+    pub fn try_new_shard_equivocation_with_reporter(
+        a: Attestation,
+        b: Attestation,
+        reporter: NodeId,
+    ) -> Result<Self, FraudBuildError> {
+        let mut p = Self::try_new_shard_equivocation(a, b)?;
+        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
+        Ok(p)
+    }
+
     pub fn new_shard_equivocation_with_reporter(
         a: Attestation,
         b: Attestation,
         reporter: NodeId,
     ) -> Self {
-        let mut p = Self::new_shard_equivocation(a, b);
-        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
-        p
+        Self::try_new_shard_equivocation_with_reporter(a, b, reporter)
+            .expect("equivocation requires same signer")
     }
 
-    /// Create pillar 3 proof from two heartbeats
-    pub fn new_heartbeat_spam(a: Heartbeat, b: Heartbeat) -> Self {
-        assert_eq!(a.node_id, b.node_id, "heartbeat spam requires same node");
+    /// Try creating pillar 3 proof from two heartbeats
+    pub fn try_new_heartbeat_spam(a: Heartbeat, b: Heartbeat) -> Result<Self, FraudBuildError> {
+        if a.node_id != b.node_id {
+            return Err(FraudBuildError::SignerMismatch);
+        }
         let perpetrator = a.node_id;
         let perpetrator_node_id = Self::pubkey_from_node_id(perpetrator);
         let pillar = FraudProofPillar::HeartbeatSpam;
-        Self {
+        Ok(Self {
             perpetrator_node_id,
             proof_pillar: pillar,
             _padding: [0u8; 7],
@@ -698,28 +731,41 @@ impl FraudProofPayload {
             reporter_signature: [0u8; 64],
             perpetrator,
             pillar,
-        }
+        })
+    }
+
+    /// Create pillar 3 proof from two heartbeats
+    pub fn new_heartbeat_spam(a: Heartbeat, b: Heartbeat) -> Self {
+        Self::try_new_heartbeat_spam(a, b).expect("heartbeat spam requires same node")
+    }
+
+    pub fn try_new_heartbeat_spam_with_reporter(
+        a: Heartbeat,
+        b: Heartbeat,
+        reporter: NodeId,
+    ) -> Result<Self, FraudBuildError> {
+        let mut p = Self::try_new_heartbeat_spam(a, b)?;
+        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
+        Ok(p)
     }
 
     pub fn new_heartbeat_spam_with_reporter(a: Heartbeat, b: Heartbeat, reporter: NodeId) -> Self {
-        let mut p = Self::new_heartbeat_spam(a, b);
-        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
-        p
+        Self::try_new_heartbeat_spam_with_reporter(a, b, reporter)
+            .expect("heartbeat spam requires same node")
     }
 
-    /// Create pillar 2 proof from two ingress evidences (IngressCounterConflict)
-    pub fn new_ingress_counter_conflict(
+    /// Try creating pillar 2 proof from two ingress evidences (IngressCounterConflict)
+    pub fn try_new_ingress_counter_conflict(
         a: IngressEnvelopeEvidence,
         b: IngressEnvelopeEvidence,
-    ) -> Self {
-        assert_eq!(
-            a.gateway_pubkey, b.gateway_pubkey,
-            "ingress counter conflict requires same gateway signer"
-        );
+    ) -> Result<Self, FraudBuildError> {
+        if a.gateway_pubkey != b.gateway_pubkey {
+            return Err(FraudBuildError::SignerMismatch);
+        }
         let perpetrator_node_id = a.gateway_pubkey;
         let perpetrator = Self::node_id_from_pubkey(&perpetrator_node_id);
         let pillar = FraudProofPillar::IngressCounterConflict;
-        Self {
+        Ok(Self {
             perpetrator_node_id,
             proof_pillar: pillar,
             _padding: [0u8; 7],
@@ -729,7 +775,26 @@ impl FraudProofPayload {
             reporter_signature: [0u8; 64],
             perpetrator,
             pillar,
-        }
+        })
+    }
+
+    /// Create pillar 2 proof from two ingress evidences (IngressCounterConflict)
+    pub fn new_ingress_counter_conflict(
+        a: IngressEnvelopeEvidence,
+        b: IngressEnvelopeEvidence,
+    ) -> Self {
+        Self::try_new_ingress_counter_conflict(a, b)
+            .expect("ingress counter conflict requires same gateway signer")
+    }
+
+    pub fn try_new_ingress_counter_conflict_with_reporter(
+        a: IngressEnvelopeEvidence,
+        b: IngressEnvelopeEvidence,
+        reporter: NodeId,
+    ) -> Result<Self, FraudBuildError> {
+        let mut p = Self::try_new_ingress_counter_conflict(a, b)?;
+        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
+        Ok(p)
     }
 
     pub fn new_ingress_counter_conflict_with_reporter(
@@ -737,9 +802,8 @@ impl FraudProofPayload {
         b: IngressEnvelopeEvidence,
         reporter: NodeId,
     ) -> Self {
-        let mut p = Self::new_ingress_counter_conflict(a, b);
-        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
-        p
+        Self::try_new_ingress_counter_conflict_with_reporter(a, b, reporter)
+            .expect("ingress counter conflict requires same gateway signer")
     }
 
     /// Checks if two ingress evidences constitute an under-reporting or rollback fraud conflict.
@@ -747,7 +811,9 @@ impl FraudProofPayload {
         a: &IngressEnvelopeEvidence,
         b: &IngressEnvelopeEvidence,
     ) -> bool {
-        let proof = Self::new_ingress_counter_conflict(a.clone(), b.clone());
+        let Ok(proof) = Self::try_new_ingress_counter_conflict(a.clone(), b.clone()) else {
+            return false;
+        };
         proof.verify_ingress_counter_conflict()
     }
 
@@ -1363,6 +1429,56 @@ mod tests {
         assert!(
             !proof_corrupt.verify(),
             "corrupted evidence must yield false"
+        );
+    }
+
+    #[test]
+    fn test_fallible_fraud_constructors_and_check_ingress_conflict() {
+        let pk_a = dummy_pubkey(1);
+        let pk_b = dummy_pubkey(2);
+        let hash = [0xAA; 32];
+
+        let env_a = sign_ingress_envelope(pk_a, 5, 1, 1000, 0, 100, 100, hash);
+        let env_b = sign_ingress_envelope(pk_b, 5, 2, 500, 0, 100, 200, [0xBB; 32]);
+
+        // try_new_ingress_counter_conflict with mismatched gateway pubkeys must return SignerMismatch
+        assert_eq!(
+            FraudProofPayload::try_new_ingress_counter_conflict(env_a.clone(), env_b.clone()),
+            Err(FraudBuildError::SignerMismatch)
+        );
+
+        // check_ingress_conflict with mismatched gateway pubkeys must return false without panicking
+        assert!(!FraudProofPayload::check_ingress_conflict(&env_a, &env_b));
+        assert!(!FraudProofPayload::check_ingress_conflict(&env_b, &env_a));
+
+        // try_new_shard_equivocation with mismatched node IDs must return SignerMismatch
+        let att_a = Attestation {
+            lock_id: [0x22; 32],
+            parent_lock: [0x11; 32],
+            node_id: 1,
+            timestamp: SimTime(1000),
+            signature: [0u8; 64],
+            shard_id: 0,
+        };
+        let att_b = Attestation {
+            lock_id: [0x33; 32],
+            parent_lock: [0x11; 32],
+            node_id: 2,
+            timestamp: SimTime(1000),
+            signature: [0u8; 64],
+            shard_id: 0,
+        };
+        assert_eq!(
+            FraudProofPayload::try_new_shard_equivocation(att_a, att_b),
+            Err(FraudBuildError::SignerMismatch)
+        );
+
+        // try_new_heartbeat_spam with mismatched node IDs must return SignerMismatch
+        let hb_a = sign_heartbeat(1, SimTime(1000));
+        let hb_b = sign_heartbeat(2, SimTime(1050));
+        assert_eq!(
+            FraudProofPayload::try_new_heartbeat_spam(hb_a, hb_b),
+            Err(FraudBuildError::SignerMismatch)
         );
     }
 

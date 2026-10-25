@@ -533,8 +533,7 @@ async fn test_a23_01_real_quic_signing_release_refuses_double_signature_under_fa
         .unwrap();
     {
         let mut ram = engine.hmc_ram.write().await;
-        ram.locks
-            .insert(parent_hex.clone(), L2LockEntry::from(&lock_b_req));
+        ram.insert_lock_for_test(parent_hex.clone(), L2LockEntry::from(&lock_b_req));
     }
 
     let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(

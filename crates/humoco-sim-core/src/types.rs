@@ -95,13 +95,13 @@ impl SimTime {
 impl Add<u64> for SimTime {
     type Output = SimTime;
     fn add(self, rhs: u64) -> Self::Output {
-        SimTime(self.0 + rhs)
+        SimTime(self.0.saturating_add(rhs))
     }
 }
 
 impl AddAssign<u64> for SimTime {
     fn add_assign(&mut self, rhs: u64) {
-        self.0 += rhs;
+        self.0 = self.0.saturating_add(rhs);
     }
 }
 
@@ -1427,6 +1427,13 @@ mod tests {
         let t2 = t1 + 50;
         assert_eq!(t2.as_millis(), 200);
         assert_eq!(t2 - t1, 50);
+
+        // A13-02: Saturating arithmetic on u64::MAX
+        let max_time = SimTime(u64::MAX);
+        assert_eq!(max_time + 1, SimTime(u64::MAX));
+        let mut t_sat = SimTime(u64::MAX);
+        t_sat += 1;
+        assert_eq!(t_sat, SimTime(u64::MAX));
     }
 
     #[test]

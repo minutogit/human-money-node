@@ -843,6 +843,7 @@ dependencies = [
  "humoco-proto",
  "proptest",
  "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

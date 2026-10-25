@@ -476,7 +476,7 @@ async fn test_sync_single_shard_quarantines_minority_locks_and_converges() {
             .hmc_ram
             .read()
             .await
-            .locks
+            .locks()
             .contains_key(&tag_b),
         "Unconfirmed minority lock B must NOT be in active HmcRamIndex"
     );

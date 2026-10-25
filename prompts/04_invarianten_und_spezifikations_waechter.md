@@ -22,16 +22,16 @@ Verify the following 6 core invariants for bit-exact compliance:
    - Does $N < 20$ strictly yield `PROVISIONAL` (yellow) and only $N \ge 20$ with $\ge 14/20$ signatures after 24h hysteresis yield `FINAL` (green)?
    - Is the 24h hysteresis protected against flapping?
 
-2. ⚖️ Deterministic Resolver (Spec 02):
+2. ⚖️ Deterministic Resolver (Spec 02, 08):
    - Is $H_{\text{canon}} = \text{BLAKE3}(\text{len} \parallel \text{"HUMOCO\_V1\_CANON\_RESOLVER"} \parallel \text{Parent} \parallel \text{Receiver} \parallel \text{Sig})$ bit-identical in the resolver and in wire verification?
-   - Does the minimal hash $\min(H_{\text{canon}})$ always win strictly on collisions?
+   - Is class-aware precedence strictly enforced: confirmation class first (`class 2` Final > `class 1` Provisional > `class 0` Pending), and does minimal hash $\min(H_{\text{canon}})$ (with node id as tie-breaker) decide only between candidates of the same confirmation class (INV-0804)?
 
 3. 🗺️ Sharding & HRW Rendezvous Formula (Spec 03):
    - Are the $2^{16} = 65,536$ buckets deterministically distributed across active nodes via Highest Random Weight (HRW)?
    - Is the top-20 shard ordering stable and reproducible?
 
 4. ⏳ Time Windows, TTL & Zero State Bloat (Spec 12, 14):
-   - Does the ingress window hold strictly: `now + 30s < valid_until <= root.valid_until` (INV-1202)?
+   - Does the ingress window hold strictly: `now + 30s < valid_until <= root.valid_until` (INV-1206, with INV-1202 being atomic first-seen insertion on `parent_lock`)?
    - Does pruning apply only after the 30s grace period: `now > root.valid_until + 30s` (INV-1203)?
    - Are expired locks physically purged (Zero State Bloat)?
 

@@ -26,27 +26,27 @@ pub enum IngressOrigin {
 #[derive(Default)]
 pub struct HmcRamIndex {
     /// lookup_tag -> L2LockEntry
-    pub locks: HashMap<String, L2LockEntry>,
+    pub(crate) locks: HashMap<String, L2LockEntry>,
     /// Genesis proofs are metadata, NEVER entries in the collision registry.
-    pub root_anchors: HashMap<String, L2LockEntry>,
+    pub(crate) root_anchors: HashMap<String, L2LockEntry>,
     root_durable: HashSet<String>,
     /// lookup_tag -> confirmation class (0 = Unconfirmed, 1 = Provisional, 2 = Final)
-    pub confirmation_classes: HashMap<String, u8>,
+    pub(crate) confirmation_classes: HashMap<String, u8>,
     /// layer2_voucher_id -> Set of lookup_tags
-    pub vouchers: HashMap<String, HashSet<String>>,
+    pub(crate) vouchers: HashMap<String, HashSet<String>>,
     /// layer2_voucher_id -> root valid_until timestamp in ms
-    pub voucher_roots: HashMap<String, u64>,
+    pub(crate) voucher_roots: HashMap<String, u64>,
     /// layer2_voucher_id -> genesis parent lock [u8; 32]
-    pub voucher_genesis_parents: HashMap<String, [u8; 32]>,
+    pub(crate) voucher_genesis_parents: HashMap<String, [u8; 32]>,
     /// lookup_tag -> valid_until timestamp in ms
-    pub valid_until: HashMap<String, u64>,
+    pub(crate) valid_until: HashMap<String, u64>,
     /// Bucket-Index: bucket_sec (valid_until_ms + 30s) / 1000 -> Vec<lookup_tag>
-    pub ttl_buckets: BTreeMap<u64, Vec<String>>,
+    pub(crate) ttl_buckets: BTreeMap<u64, Vec<String>>,
     /// Exact local entry versions acknowledged by durable persistence. Derived
     /// RAM metadata only: never synced, archived or used as an original choice.
     pub(crate) durable_entries: HashMap<String, ([u8; 32], u64)>,
     /// Cuckoo pre-filter for fast negative lookups
-    pub filter: SpentLockFilter,
+    pub(crate) filter: SpentLockFilter,
 }
 
 /// Computes the deterministic canonical hash for an HMC lock entry (docs/02:97, Spec 02, 08):
@@ -69,6 +69,72 @@ pub fn compute_hmc_canonical_hash(
 impl HmcRamIndex {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Read-only inspection of active RAM locks.
+    pub fn locks(&self) -> &HashMap<String, L2LockEntry> {
+        &self.locks
+    }
+
+    /// Read-only inspection of anchored root metadata.
+    pub fn root_anchors(&self) -> &HashMap<String, L2LockEntry> {
+        &self.root_anchors
+    }
+
+    /// Read-only inspection of the SpentLockFilter.
+    pub fn filter(&self) -> &SpentLockFilter {
+        &self.filter
+    }
+
+    /// Read-only inspection of voucher root validity timestamps.
+    pub fn voucher_roots(&self) -> &HashMap<String, u64> {
+        &self.voucher_roots
+    }
+
+    /// Returns the number of active locks in RAM.
+    pub fn len(&self) -> usize {
+        self.locks.len()
+    }
+
+    /// Returns true if there are no active locks in RAM.
+    pub fn is_empty(&self) -> bool {
+        self.locks.is_empty()
+    }
+
+    /// Returns true if there are no active locks in the RAM index.
+    pub fn is_locks_empty(&self) -> bool {
+        self.locks.is_empty()
+    }
+
+    /// Returns the number of active locks in the RAM index.
+    pub fn locks_len(&self) -> usize {
+        self.locks.len()
+    }
+
+    /// Returns true if there are no anchored roots.
+    pub fn is_root_anchors_empty(&self) -> bool {
+        self.root_anchors.is_empty()
+    }
+
+    /// Returns the lock entry for a given lookup tag, if present.
+    pub fn get_lock(&self, tag: &str) -> Option<&L2LockEntry> {
+        self.locks.get(tag)
+    }
+
+    /// Returns true if the index contains a lock with the given lookup tag.
+    pub fn contains_lock(&self, tag: &str) -> bool {
+        self.locks.contains_key(tag)
+    }
+
+    /// Explicit test/mock insertion helper for integration tests.
+    /// Internal engine state must not be arbitrarily mutated by external production callers.
+    pub fn insert_lock_for_test(&mut self, tag: String, entry: L2LockEntry) {
+        self.locks.insert(tag, entry);
+    }
+
+    /// Test helper to insert a voucher root valid_until timestamp in ms.
+    pub fn insert_voucher_root_for_test(&mut self, voucher_id: String, root_valid_until_ms: u64) {
+        self.voucher_roots.insert(voucher_id, root_valid_until_ms);
     }
 
     /// Genesis gives no output up for spending. It only anchors immutable root
@@ -675,14 +741,14 @@ pub struct PersistenceStats {
 pub struct DualTierEngine {
     pub ram: Arc<RwLock<RamIndex>>,
     pub hmc_ram: Arc<RwLock<HmcRamIndex>>,
-    pub banned_nodes: Arc<RwLock<HashSet<[u8; 32]>>>,
+    pub(crate) banned_nodes: Arc<RwLock<HashSet<[u8; 32]>>>,
     pub db: Arc<RedbStorage>,
-    pub tx: mpsc::Sender<FlushOp>,
-    pub peer_manager: Arc<RwLock<Option<Arc<crate::network::PeerManager>>>>,
-    pub recent_locks: Arc<parking_lot::RwLock<RecentLockBuffer>>,
+    pub(crate) tx: mpsc::Sender<FlushOp>,
+    pub(crate) peer_manager: Arc<RwLock<Option<Arc<crate::network::PeerManager>>>>,
+    pub(crate) recent_locks: Arc<parking_lot::RwLock<RecentLockBuffer>>,
     pub stats: Arc<PersistenceStats>,
     /// Previous pruning anchor timestamp in ms for detecting forward clock jumps (local NTP warp protection)
-    pub last_prune_anchor: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) last_prune_anchor: Arc<std::sync::atomic::AtomicU64>,
     pending_approvals: Arc<parking_lot::Mutex<HashMap<[u8; 32], PendingOriginalApproval>>>,
     support_updates: Arc<tokio::sync::Semaphore>,
     activity: super::activity::ShardActivity,

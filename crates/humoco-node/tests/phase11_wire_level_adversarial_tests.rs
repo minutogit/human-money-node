@@ -1790,10 +1790,21 @@ async fn test_valid_signatures_for_wrong_request_or_tls_context_never_form_quoru
     for attack in 1..=5 {
         for (i, node) in nodes.iter().enumerate().skip(1) {
             node.ready.store(i <= 14, Ordering::SeqCst);
-            node.delay
-                .store(if i <= 14 { 20 } else { 0 }, Ordering::SeqCst);
+            node.delay.store(
+                if i == 1 {
+                    0
+                } else if i <= 14 {
+                    20
+                } else {
+                    0
+                },
+                Ordering::SeqCst,
+            );
             node.attack
                 .store(if i == 1 { attack } else { 0 }, Ordering::SeqCst);
+        }
+        if let Ok(addr) = nodes[1].transport.local_addr() {
+            let _ = nodes[0].pm.reset_peer_suspension(addr).await;
         }
         // Independent real spend slots under the same durable root preserve
         // the frozen committee while avoiding a previous local signing slot.

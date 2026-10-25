@@ -1,7 +1,7 @@
 # ⚖️ AI Audit Prompt: Monotonic Confirmation Classes, Inherited Support & Village Merge Quarantine
 
 > **Doctrine:** *"Physics trumps negotiation & deterministic convergence."*  
-> **Mandatory Reference:** DEC-022, DEC-064, Invariant G3, Finding F01 (`ARCHITECTURE_IMPLEMENTATION_AUDIT_2026-10-24.md`), Spec 02, Spec 08.
+> **Mandatory Reference:** DEC-022, DEC-064, Invariant G3 (`docs/ARCHITECTURE_INHERITED_SUPPORT_CONTRACT_2026-10-24.md`), Spec 02, Spec 08.
 
 ---
 

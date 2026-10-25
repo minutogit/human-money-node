@@ -5,19 +5,16 @@ and acceptance index for the numbered corpus, not an executed test report.
 
 ## Authority, scope and evidence status
 
-There are 25 numbered physical files in 22 families (00–20,99). The two03 files
-are complementary; English15/16 are canonical and the German filenames redirect.
+There are 23 numbered physical files in 22 families (00–20, 99). The two 03 files
+are complementary.
 18/19 are informative analysis; their models confer no consensus authority.
-The corpus mentions117 distinct IDs: **115 owned definitions/topics** below and
-**two undefined retired references** (1101/1102). New0404 and1307 disambiguate existing
+The corpus mentions 117 distinct IDs: **115 owned definitions/topics** below and
+**two undefined retired references** (1101/1102). New 0404 and 1307 disambiguate existing
 obligations; these counts are lexical traceability, not a coverage percentage.
 
 Each row links the canonical meaning, affected enforcement boundary and a concrete
-scenario with expected outcome. All rows have **selected/documented requirement**
-status; their complete implementation and executed verification are **not audited
-by this consolidation**. Rows with G1–G5 explicitly depend on the corresponding
-[open proof gates](ARCHITECTURE_CONSOLIDATION.md#remaining-proof-gates); other rows
-still require their stated premise and evidence. None is marked passed.
+scenario with expected outcome. Rows with G1–G5 explicitly reference the corresponding
+[proof gates](ARCHITECTURE_CONSOLIDATION.md#remaining-proof-gates) and [formal contracts](SAFETY_AND_PROGRESS_CONTRACTS_G1_G5.md).
 
 Boundary codes: **M** deterministic model/math/shared rule; **Q** actual receiving
 QUIC server/collector; **H** actual HTTP/auth/listener; **C** shared protocol/L1
@@ -44,11 +41,11 @@ execution, following [Spec16](16_chaos_testing_and_simulation.md).
 | INV-0805 bitmap-only finality | Replaced by complete actual signature/full-key/current-context verification. |
 | INV-1101 / INV-1102 | No definition recovered in the reviewed corpus. Retired undefined legacy references, **not aliases and not newly invented rules**. Former references in Spec05 now cite actual bounded-pacing/domain/gossip owners where applicable. |
 | INV-1202 used as time-source citation in AGENTS | Corrected citation:1202 is atomic collision insertion; time follows Spec07/11 and explicit G4. |
-| German15/16 duplicate rules | Stable paths redirect to authoritative English definitions; no independent language-specific policy. |
+| German15/16 duplicate rules | Retired; authoritative English definitions in 15/16 are canonical. |
 
 Other strengthened/retired historical guarantee wording is documented beside its
 current rule (notably0501/0503/0509,0704/0707,1105,1601–05,1703). Stable IDs do not
-preserve superseded claims. Consult DEC-053–089 and the [interview register](ARCHITECTURE_INTERVIEW_NOTES.md#21-current-decision-register-and-provenance).
+preserve superseded claims. Consult DEC-053–089 and the [decision register](ARCHITECTURE_CONSOLIDATION.md#21-current-decision-register-and-provenance).
 
 ## Owned rules and concrete acceptance scenarios
 

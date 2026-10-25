@@ -113,9 +113,9 @@ flowchart LR
 
 ---
 
-### ⏳ Phase 7: Decentralized Quorum Certificates & Client-Side Order Statistics
-*Goal: Mathematical plausibility check at the point of sale (PoS) without trusting individual servers (see [`TODO.md`](TODO.md)).*
-- [ ] **7.1 Wire format:** Integrate `QuorumCertificate` into `L2ResponseEnvelope`.
-- [ ] **7.2 Node gateway:** Assemble quorum certificates from shard-node attestations (`FINAL` vs. `PROVISIONAL`).
+### ✅ Phase 7: Decentralized Quorum Certificates & Client-Side Verification
+*Goal: Mathematical plausibility and live-quorum check at the point of sale (PoS) without trusting individual servers (see [`docs/06_dumb_server_smart_client_flow.md`](docs/06_dumb_server_smart_client_flow.md)).*
+- [x] **7.1 Wire format:** Integrate `QuorumCertificate` and live-state proof into response envelopes.
+- [x] **7.2 Node gateway:** Assemble quorum certificates and 14/20 live-state proofs from shard-node attestations (`FINAL` vs. `PROVISIONAL`).
 - [ ] **7.3 Client plausibility (`human-money-core`):** Continuous order-statistics check $\max(0, 1 - 20/N)$ & maturity traffic-light.
 - [ ] **7.4 App UI (`human-money-app`):** Point-of-sale traffic-light display (green / yellow / red).

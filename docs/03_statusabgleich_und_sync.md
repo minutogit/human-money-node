@@ -78,6 +78,15 @@ own approvals is bounded and distinct; it is not a mandatory prerequisite when a
 valid current live quorum answers. The merchant receipt is ephemeral after completed
 checkout and is not recursively inserted into the L1 ProofChain.
 
+## 5. 5-Minute Bucketed Shard Sync and Exact-Payload Retries (DEC-059–061)
+
+To support high-throughput synchronization without full-shard transfers under concurrent writes:
+
+1. **Deterministic 5-minute bucket assignment:** Every admitted lock is assigned to a deterministic 5-minute bucket `bucket_id = floor(T_0 / 300_000)` based on the wallet-signed creation timestamp `T_0`.
+2. **Nominal bucket sealing (30s grace):** Closed 5-minute windows seal after a 30s grace period (`T_0 + 30s`).
+3. **Targeted bucket range reconciliation (`ShardBucketRangeRequest`):** Nodes compare compact bucket digests across bucket ranges and fetch only divergent 5-minute buckets instead of streaming the entire shard.
+4. **Exact-payload retry invariant (DEC-060):** Gateways and clients retrying uncertain requests re-send the exact serialized payload with unchanged `T_0` (up to 3 bounded attempts), ensuring all shard replicas project the lock into the identical 5-minute bucket.
+
 These requirements add no new global finality guarantee, predecessor veto,
 root-risk marker, ordinary-crash quarantine or new assurance tier. See the
 [consolidation result and proof gates](ARCHITECTURE_CONSOLIDATION.md).

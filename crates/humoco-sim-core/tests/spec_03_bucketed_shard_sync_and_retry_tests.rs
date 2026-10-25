@@ -3,7 +3,7 @@
 //! Integration and verification tests for 5-minute bucketed shard sync,
 //! timestamp determinism, and gateway retry/triple-send invariants.
 //!
-//! References: docs/PLAN_BUCKETED_SHARD_SYNC.md
+//! References: docs/03_statusabgleich_und_sync.md §5 (DEC-059–061)
 
 use humoco_sim_core::crypto::compute_shard_bucket_digest;
 use humoco_sim_core::types::{
@@ -174,7 +174,7 @@ fn test_gateway_retry_payload_identity_invariance() {
 
 #[test]
 fn test_triple_send_packet_loss_probability_bound() {
-    // Mathematical verification of the triple-send heuristic (PLAN_BUCKETED_SHARD_SYNC.md)
+    // Mathematical verification of the triple-send heuristic (docs/03_statusabgleich_und_sync.md §5)
     let p_loss = 0.01f64; // 1% packet loss per attempt
     let p_loss_single = p_loss;
     let p_loss_double = p_loss * p_loss;

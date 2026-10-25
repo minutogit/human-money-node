@@ -3,7 +3,7 @@
 //! Certified Epoch Handoff (CEH) Adversarial Test Suite.
 //!
 //! Validates the 4 core mathematical and adversarial scenarios defined in
-//! `docs/CERTIFIED_EPOCH_HANDOFF_PLAN.md`:
+//! evaluated under DEC-053 / DEC-055 (`docs/ARCHITECTURE_CONSOLIDATION.md`):
 //! 1. Scenario 1 (39-Node Bridge Attack): Split-Brain Impossibility (Theorem 1).
 //! 2. Scenario 2 (22-Node Newcomer Activation Race): Write-Barrier & Snapshot Transfer.
 //! 3. Scenario 3 (8/6 Split + View Change & Late Redemption): Progress under Byzantine split.

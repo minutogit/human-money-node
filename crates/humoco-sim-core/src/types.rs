@@ -1101,7 +1101,7 @@ pub fn bitmask_count(bitmask: SignersBitmask) -> u32 {
 // ---------------------------------------------------------------------------
 // Scenario 1: Digest-first pull sync (spec_03)
 // ---------------------------------------------------------------------------
-// 5-Minuten Bucket Shard Digest (docs/PLAN_BUCKETED_SHARD_SYNC.md)
+// 5-Minuten Bucket Shard Digest (docs/03_statusabgleich_und_sync.md §5)
 // ---------------------------------------------------------------------------
 
 /// Standard duration of one time-bucket for shard sync: 5 minutes (300 seconds = 300,000 ms).

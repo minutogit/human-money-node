@@ -7,57 +7,11 @@ This prompt suite contains **25 highly specialized, reusable AI audits** coverin
 
 ---
 
-## Architecture Interview
-
-[architecture_interview.md](architecture_interview.md) starts or resumes a systematic
-decision interview using a compact state tree and detailed decision notes. It creates
-only missing memory files, preserves prior decisions and asks one substantive question
-at a time. This workflow prepares design decisions and a final plan; it does not invoke
-the audit orchestrator or automatically implement protocol changes.
-
-To start a new chat, ask the agent to read and execute `prompts/architecture_interview.md`.
-
-## Decentralized Robustness Research
-
-[decentralized_robustness_research.md](decentralized_robustness_research.md) is an
-autonomous research and validation assignment for the unresolved membership,
-bootstrap, handoff and operational robustness questions. It requires primary-source
-internet research, independent adversarial review, executable models, realistic
-capacity evidence and a precise safety/availability envelope. It preserves the
-interview decisions and distinguishes assumed conditions from enforceable protocol
-rules. Preparing the prompt does not execute the research or change production.
-Ask an agent to read and execute it to start or resume that focused investigation.
-
-## Trust Network Blind Spot Research
-
-[trust_network_blind_spot_research.md](trust_network_blind_spot_research.md) focuses
-on the clarified recursive operator-trust model: intended code, reliable operation
-and carefully chosen friends who exercise the same care. It audits the link from
-human admission to counted votes, rechecks prior attacks against the intended
-process, and seeks the smallest workable rule before architectural replacement.
-It requires independent review, executable safety/progress checks and practical
-evidence with explicit human/fault assumptions. Preparing this prompt does not
-resume the stopped investigation; ask an agent to read and execute it explicitly.
-
-## Terminology Alignment
-
-[terminology_alignment_plan.md](terminology_alignment_plan.md) provides an executable
-plan to review the shared glossary against specifications and code comments, apply
-justified editorial fixes and record unresolved meaning/design conflicts. It applies the settled vocabulary autonomously under interview DEC-052 and preserves
-runtime behavior, wire formats and identifiers. No glossary preference questions are required.
-Preparing the plan does not execute its audit. Ask an agent to read and execute it
-when starting the terminology alignment work.
-
----
-
-Current execution status and unresolved semantic architecture conflicts are recorded in
-[TERMINOLOGY_ALIGNMENT_REPORT.md](../docs/TERMINOLOGY_ALIGNMENT_REPORT.md).
-
 ## 🗂️ Overview of the Audit Suite & Systematic Orchestrator
 
 > **Central Orchestrator & Tracking:**
 > * **[00_master_audit_orchestrator.md](00_master_audit_orchestrator.md)**: **Master Prompt** to autonomously select, parallel-dispatch (via Model-Router & Muse Spark), and dynamically chain audits until sufficient findings are discovered and fixed.
-> * **[AUDIT_REGISTRY.md](AUDIT_REGISTRY.md)**: **Central Status Matrix & Audit Log** tracking the execution timestamps, findings count, priority scores, and health status for all 20 audit prompts.
+> * **[AUDIT_REGISTRY.md](AUDIT_REGISTRY.md)**: **Central Status Matrix & Audit Log** tracking the execution timestamps, findings count, priority scores, and health status for all 25 audit prompts.
 
 ---
 

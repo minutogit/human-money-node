@@ -935,7 +935,7 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     assert_eq!(count, 1, "Should have 1 active lock");
     assert_ne!(digest, [0u8; 32]);
 
-    // 3. Test ShardBucketRangeRequest for 5-minute bucket sync (docs/PLAN_BUCKETED_SHARD_SYNC.md).
+    // 3. Test ShardBucketRangeRequest for 5-minute bucket sync (docs/03_statusabgleich_und_sync.md §5).
     let bucket_id = humoco_sim_core::types::timestamp_to_bucket_id(hmc_req.created_at_ms);
     let bucket_req = humoco_sim_core::types::ShardBucketRangeRequest {
         shard_id: hmc_shard,

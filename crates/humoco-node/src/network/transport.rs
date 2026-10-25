@@ -2896,7 +2896,7 @@ impl QuicTransport {
         Ok((digest, count))
     }
 
-    /// Requests bucket digests for a specific shard over a range of buckets (docs/PLAN_BUCKETED_SHARD_SYNC.md).
+    /// Requests bucket digests for a specific shard over a range of buckets (docs/03_statusabgleich_und_sync.md §5).
     pub async fn request_shard_bucket_range(
         &self,
         conn: &quinn::Connection,

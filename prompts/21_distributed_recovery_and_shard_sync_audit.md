@@ -1,7 +1,7 @@
 # 🔄 AI Audit Prompt: Distributed Recovery, Shard Sync & Fragmented Consensus States
 
 > **Doctrine:** *"In decentralization there is no trust, only mathematical proofs."*  
-> **Mandatory Reference:** DEC-053, DEC-055, Finding F02 (`ARCHITECTURE_IMPLEMENTATION_AUDIT_2026-10-24.md`), Spec 03.
+> **Mandatory Reference:** DEC-053, DEC-055, Contract G2 (`docs/ARCHITECTURE_DISTRIBUTED_RECOVERY_CONTRACT_2026-10-24.md`), Spec 03.
 
 ---
 

@@ -3,14 +3,10 @@
 > **Purpose:** This document is the authoritative bilingual reference for developers, operators, and AI agents.  
 > **Rule:** The human maintainer communicates in German; all codebase identifiers, commits, issues, pull requests, and public documentation are in idiomatic English.
 
-> **Vocabulary status, 2026-10-16:** Names are settled and maintained autonomously
-> under interview DEC-049–052. No further naming approval is required.
-> [Section 3](#3-basic-concepts--review-draft) defines the shared vocabulary;
-> unresolved protocol rules remain explicitly qualified. Editorial maintenance
-> does not override specifications or establish implementation correctness.
-> Changes and checks are recorded in [the alignment report](TERMINOLOGY_ALIGNMENT_REPORT.md).
-> [Section 4](#4-ambiguities-to-review) retains the ambiguity register; the report
-> records which wording issues were fixed and which decisions remain open.
+> **Vocabulary status:** Names are settled and maintained autonomously
+> under DEC-049–052 ([`ARCHITECTURE_CONSOLIDATION.md`](ARCHITECTURE_CONSOLIDATION.md#21-current-decision-register-and-provenance)). No further naming approval is required.
+> [Section 3](#3-basic-concepts--review-draft) defines the shared vocabulary.
+> [Section 4](#4-ambiguities-to-review) retains the ambiguity register.
 
 Use this file as the shared dictionary rather than creating a second competing
 glossary. German headwords support conversation; English terms and definitions
@@ -206,9 +202,9 @@ handoff certificate format or permanent committee-history construction is select
 | G-054 | Signierfreigabe | Signing activation / Readiness | Permission to issue binding votes once applicable membership, recovery and storage conditions are justified. Connectivity, ticket maturity and downloaded bytes do not individually establish it. |
 | G-055 | Wiederherstellung | Recovery | Re-establishing the state and safety conditions needed after restart, loss or reassignment. Restoring registry records and safely resuming the same signing identity are separate obligations. |
 
-Basis: interview DEC-026/031/032/041/045/046, §§7.5–7.10/7.17;
-[notes](ARCHITECTURE_INTERVIEW_NOTES.md). Existing sync interfaces are described in
-[Spec 03](03_routing_und_sharding.md); they are not a proof of the proposed handoff.
+Basis: interview DEC-026/031/032/041/045/046;
+[decision register](ARCHITECTURE_CONSOLIDATION.md#21-current-decision-register-and-provenance). Existing sync interfaces are described in
+[Spec 03](03_routing_und_sharding.md).
 
 ### 3.7 Storage, admission and time
 
@@ -239,8 +235,8 @@ Basis: `AGENTS.md` rules 7/8 and §3; [Spec 10](10_p2p_wire_format_und_session_f
 
 ## 4. Ambiguities to review
 
-This register preserves terminology distinctions and unresolved architecture obligations. See the [alignment report](TERMINOLOGY_ALIGNMENT_REPORT.md)
-for applied wording corrections, retained aliases, coverage and unresolved requirements.
+This register preserves terminology distinctions and architectural boundaries. See [ARCHITECTURE_CONSOLIDATION.md](ARCHITECTURE_CONSOLIDATION.md)
+for consolidated requirements and decision records.
 A resolved wording issue does not resolve the associated protocol-design obligation.
 
 | ID | Wording to check | Proposed clarification / unresolved point |

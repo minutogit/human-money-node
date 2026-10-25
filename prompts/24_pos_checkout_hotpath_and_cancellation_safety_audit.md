@@ -1,7 +1,7 @@
 # 🛒 AI Audit Prompt: PoS Checkout Hot-Path, Dynamic Living-Mesh Committees & Cancellation-Safety
 
 > **Doctrine:** *"Smart Client, Dumb Server – 800 ms checkout budget, 14/20 Quorum Fast-Exit."*  
-> **Mandatory Reference:** Invariant G4, Finding F03, Finding F04, Finding F05 (`ARCHITECTURE_IMPLEMENTATION_AUDIT_2026-10-24.md`), Spec 06, Spec 15.
+> **Mandatory Reference:** Invariant G4 (`docs/SAFETY_AND_PROGRESS_CONTRACTS_G1_G5.md`), Spec 03, Spec 06, Spec 15.
 
 ---
 

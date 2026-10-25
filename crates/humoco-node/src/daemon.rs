@@ -193,7 +193,10 @@ impl RunCleanup {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
         let recovery_work = self.recovery_work.lock().clone();
-        if let Some(work) = recovery_work { work.close(); work.wait().await; }
+        if let Some(work) = recovery_work {
+            work.close();
+            work.wait().await;
+        }
         let flush = self.flush.lock().clone();
         if let Some((cancel, handle)) = flush {
             cancel.cancel();
@@ -386,11 +389,19 @@ impl NodeDaemon {
             // Only explicit operator sovereignty establishes a NEW regional root.
             // A durable one-shot marker also makes interrupted bootstrap fail closed.
             if db_path.exists() {
-                return Err(NodeError::Daemon("new-region bootstrap refuses an existing database".into()));
+                return Err(NodeError::Daemon(
+                    "new-region bootstrap refuses an existing database".into(),
+                ));
             }
             let marker = self.config.storage.data_dir.join("region-bootstrap-used");
-            let reservation = std::fs::OpenOptions::new().write(true).create_new(true)
-                .open(&marker).map_err(|source| NodeError::IoWithPath { path: marker, source })?;
+            let reservation = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&marker)
+                .map_err(|source| NodeError::IoWithPath {
+                    path: marker,
+                    source,
+                })?;
             reservation.sync_all()?;
             std::fs::File::open(&self.config.storage.data_dir)?.sync_all()?;
         }
@@ -1152,7 +1163,10 @@ async fn compute_local_shard_digest(
     storage: &std::sync::Arc<crate::storage::RedbStorage>,
 ) -> Result<[u8; 32], NodeError> {
     let storage = storage.clone();
-    let (digest, _) = engine.recovery_work.spawn_blocking(move || storage.committed_shard_digest(shard_id, now_ms)).await
+    let (digest, _) = engine
+        .recovery_work
+        .spawn_blocking(move || storage.committed_shard_digest(shard_id, now_ms))
+        .await
         .map_err(|e| NodeError::Daemon(format!("digest worker: {e}")))??;
     Ok(digest)
 }
@@ -1172,18 +1186,35 @@ pub async fn sync_single_shard(
     cancel_token: &CancellationToken,
 ) -> Result<bool, NodeError> {
     use crate::storage::db::install::ShardStage;
-    use std::collections::{HashMap,HashSet};
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
-    use std::time::{Duration,Instant};
+    use std::time::{Duration, Instant};
     readiness_manager.mark_syncing(shard_id);
-    if !engine.is_signing_healthy() || !readiness_manager.storage_healthy.load(std::sync::atomic::Ordering::Acquire) {
+    if !engine.is_signing_healthy()
+        || !readiness_manager
+            .storage_healthy
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
         return Ok(false);
     }
-    let (committee, remote, total) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
-    if !committee.iter().any(|member|member.node_pubkey == *identity.node_pubkey()) { return Ok(false); }
-    let frozen_keys: Vec<_> = committee.iter().map(|member|member.node_pubkey).collect();
-    let (needed,_) = humoco_sim_core::types::required_quorum(total);
-    if needed == 0 { return Ok(false); }
+    let (committee, remote, total) = peer_manager
+        .shard_committee(
+            *identity.node_pubkey(),
+            *identity.hrw_routing_id(),
+            shard_id,
+        )
+        .await;
+    if !committee
+        .iter()
+        .any(|member| member.node_pubkey == *identity.node_pubkey())
+    {
+        return Ok(false);
+    }
+    let frozen_keys: Vec<_> = committee.iter().map(|member| member.node_pubkey).collect();
+    let (needed, _) = humoco_sim_core::types::required_quorum(total);
+    if needed == 0 {
+        return Ok(false);
+    }
     if total == 1 && remote.is_empty() {
         readiness_manager.mark_shard_ready(shard_id);
         return Ok(true);
@@ -1191,19 +1222,29 @@ pub async fn sync_single_shard(
     // Freeze in parallel: sequential twenty-peer timeouts cannot consume the
     // absolute no-gap lease before the complete cut is even requested.
     let mut requests = tokio::task::JoinSet::new();
-    for (member,addr) in remote {
+    for (member, addr) in remote {
         let transport = transport.clone();
         requests.spawn(async move {
             let started = Instant::now();
             let conn = transport.connect_peer(addr).await.ok()?;
-            let (_,key) = crate::network::tls::extract_peer_identity_from_connection(&conn)?;
-            if key.to_bytes() != member.node_pubkey { return None; }
-            let reply = transport.request_frozen_shard(&conn,shard_id,1).await.ok()?;
-            Some((member.node_pubkey,conn,reply,started+Duration::from_millis(25_000)))
+            let (_, key) = crate::network::tls::extract_peer_identity_from_connection(&conn)?;
+            if key.to_bytes() != member.node_pubkey {
+                return None;
+            }
+            let reply = transport
+                .request_frozen_shard(&conn, shard_id, 1)
+                .await
+                .ok()?;
+            Some((
+                member.node_pubkey,
+                conn,
+                reply,
+                started + Duration::from_millis(25_000),
+            ))
         });
     }
     let mut sources = Vec::new();
-    let collect_until = tokio::time::Instant::now()+Duration::from_secs(8);
+    let collect_until = tokio::time::Instant::now() + Duration::from_secs(8);
     while !requests.is_empty() {
         tokio::select! {
             _ = cancel_token.cancelled() => break,
@@ -1216,19 +1257,32 @@ pub async fn sync_single_shard(
     requests.abort_all();
     while requests.join_next().await.is_some() {}
     let result = async {
-        if cancel_token.is_cancelled() { return Ok(false); }
-        let mut groups: HashMap<[u8;32],HashSet<[u8;32]>> = HashMap::new();
-        for (key,_,reply,expires) in &sources {
-            if frozen_keys.contains(key) && Instant::now() < *expires { groups.entry(reply.digest).or_default().insert(*key); }
+        if cancel_token.is_cancelled() {
+            return Ok(false);
         }
-        let Some((digest,witnesses)) = groups.into_iter().find(|(_,keys)|keys.len() >= needed) else {
-            if cancel_token.is_cancelled() { return Ok(false); }
-            let viable: Vec<_> = sources.iter()
-                .filter(|(key,_,_,expires)|frozen_keys.contains(key)&&Instant::now()<*expires).collect();
-            if viable.len() < needed { return Ok(false); }
+        let mut groups: HashMap<[u8; 32], HashSet<[u8; 32]>> = HashMap::new();
+        for (key, _, reply, expires) in &sources {
+            if frozen_keys.contains(key) && Instant::now() < *expires {
+                groups.entry(reply.digest).or_default().insert(*key);
+            }
+        }
+        let Some((digest, witnesses)) = groups.into_iter().find(|(_, keys)| keys.len() >= needed)
+        else {
+            if cancel_token.is_cancelled() {
+                return Ok(false);
+            }
+            let viable: Vec<_> = sources
+                .iter()
+                .filter(|(key, _, _, expires)| {
+                    frozen_keys.contains(key) && Instant::now() < *expires
+                })
+                .collect();
+            if viable.len() < needed {
+                return Ok(false);
+            }
             let recon_now = peer_manager.net_time_ms();
             let mut download_tasks = tokio::task::JoinSet::new();
-            for (_,conn,reply,expires) in viable {
+            for (_, conn, reply, expires) in viable {
                 let conn = conn.clone();
                 let reply_digest = reply.digest;
                 let expires = *expires;
@@ -1237,21 +1291,43 @@ pub async fn sync_single_shard(
                 let readiness_manager = readiness_manager.clone();
                 let cancel_token = cancel_token.clone();
                 download_tasks.spawn(async move {
-                    if Instant::now() >= expires || cancel_token.is_cancelled() { return None; }
-                    let stage = Arc::new(engine_work.spawn_blocking(move || ShardStage::new(shard_id, recon_now)).await.ok()?.ok()?);
+                    if Instant::now() >= expires || cancel_token.is_cancelled() {
+                        return None;
+                    }
+                    let stage = Arc::new(
+                        engine_work
+                            .spawn_blocking(move || ShardStage::new(shard_id, recon_now))
+                            .await
+                            .ok()?
+                            .ok()?,
+                    );
                     let mut cursor = 0;
                     let mut sequence = 2;
                     let mut complete = false;
                     loop {
-                        if cancel_token.is_cancelled() || Instant::now() >= expires { break; }
+                        if cancel_token.is_cancelled() || Instant::now() >= expires {
+                            break;
+                        }
                         let (Ok(_bytes), Ok(_entries)) = (
-                            readiness_manager.sync_bytes.clone().try_acquire_many_owned(512 * 1024),
-                            readiness_manager.sync_entries.clone().try_acquire_many_owned(500),
-                        ) else { break; };
+                            readiness_manager
+                                .sync_bytes
+                                .clone()
+                                .try_acquire_many_owned(512 * 1024),
+                            readiness_manager
+                                .sync_entries
+                                .clone()
+                                .try_acquire_many_owned(500),
+                        ) else {
+                            break;
+                        };
                         let page = match tokio::time::timeout(
                             Duration::from_secs(3),
-                            transport.request_active_sync_page_for_shard(&conn, sequence, cursor, 500, shard_id),
-                        ).await {
+                            transport.request_active_sync_page_for_shard(
+                                &conn, sequence, cursor, 500, shard_id,
+                            ),
+                        )
+                        .await
+                        {
                             Ok(Ok(page)) => page,
                             _ => break,
                         };
@@ -1259,9 +1335,17 @@ pub async fn sync_single_shard(
                         let next = page.next_cursor;
                         let more = page.has_more;
                         let cut = stage.clone();
-                        let appended = engine_work.spawn_blocking(move || cut.append(page.payload)).await.ok()?;
-                        if appended.is_err() { break; }
-                        if !more { complete = true; break; }
+                        let appended = engine_work
+                            .spawn_blocking(move || cut.append(page.payload))
+                            .await
+                            .ok()?;
+                        if appended.is_err() {
+                            break;
+                        }
+                        if !more {
+                            complete = true;
+                            break;
+                        }
                         match next {
                             Some(next) if next > cursor => cursor = next,
                             _ => break,
@@ -1269,8 +1353,14 @@ pub async fn sync_single_shard(
                     }
                     if complete && Instant::now() < expires {
                         let cut = stage.clone();
-                        let Ok(staged_digest_res) = engine_work.spawn_blocking(move || cut.digest()).await else { return None; };
-                        let Ok(staged_digest) = staged_digest_res else { return None; };
+                        let Ok(staged_digest_res) =
+                            engine_work.spawn_blocking(move || cut.digest()).await
+                        else {
+                            return None;
+                        };
+                        let Ok(staged_digest) = staged_digest_res else {
+                            return None;
+                        };
                         if staged_digest != reply_digest {
                             return None;
                         }
@@ -1288,131 +1378,385 @@ pub async fn sync_single_shard(
                     downloaded_deadlines.push(expires);
                 }
             }
-            if downloaded.len() < needed { return Ok(false); }
-            let Some(deadline) = downloaded_deadlines.into_iter().min() else { return Ok(false); };
-            let Ok(_installation_memory) = readiness_manager.sync_bytes.clone().try_acquire_many_owned(512*1024) else { return Ok(false); };
-            let target_storage = storage.clone();
-            let reconciled = engine.recovery_work.spawn_blocking(move || {
-                reconcile_distributed_stage(shard_id,recon_now,needed,&downloaded,&target_storage)
-            }).await.map_err(|e|NodeError::Daemon(format!("reconciliation worker: {e}")))??;
-            let Some((stage,digest,witnesses_count)) = reconciled else { return Ok(false); };
-            if cancel_token.is_cancelled() || Instant::now() >= deadline { return Ok(false); }
-            let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
-            if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys || Instant::now() >= deadline {
+            if downloaded.len() < needed {
                 return Ok(false);
             }
-            let class = if total >= 20 && peer_manager.is_network_stable_ge20_for_24h(peer_manager.net_time_ms()) { 2 } else { 1 };
+            let Some(deadline) = downloaded_deadlines.into_iter().min() else {
+                return Ok(false);
+            };
+            let Ok(_installation_memory) = readiness_manager
+                .sync_bytes
+                .clone()
+                .try_acquire_many_owned(512 * 1024)
+            else {
+                return Ok(false);
+            };
+            let target_storage = storage.clone();
+            let reconciled = engine
+                .recovery_work
+                .spawn_blocking(move || {
+                    reconcile_distributed_stage(
+                        shard_id,
+                        recon_now,
+                        needed,
+                        &downloaded,
+                        &target_storage,
+                    )
+                })
+                .await
+                .map_err(|e| NodeError::Daemon(format!("reconciliation worker: {e}")))??;
+            let Some((stage, digest, witnesses_count)) = reconciled else {
+                return Ok(false);
+            };
+            if cancel_token.is_cancelled() || Instant::now() >= deadline {
+                return Ok(false);
+            }
+            let (current, _, _) = peer_manager
+                .shard_committee(
+                    *identity.node_pubkey(),
+                    *identity.hrw_routing_id(),
+                    shard_id,
+                )
+                .await;
+            if current.iter().map(|m| m.node_pubkey).collect::<Vec<_>>() != frozen_keys
+                || Instant::now() >= deadline
+            {
+                return Ok(false);
+            }
+            let class = if total >= 20
+                && peer_manager.is_network_stable_ge20_for_24h(peer_manager.net_time_ms())
+            {
+                2
+            } else {
+                1
+            };
             let mut context = blake3::Hasher::new();
             let domain = b"HUMOCO_V1_LIVE_CUT_SUPPORT";
-            context.update(&[domain.len() as u8]); context.update(domain);
-            context.update(&[match transport.network_id() { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 }]);
-            context.update(&shard_id.to_le_bytes()); context.update(&digest);
+            context.update(&[domain.len() as u8]);
+            context.update(domain);
+            context.update(&[match transport.network_id() {
+                humoco_sim_core::types::NetworkId::Mainnet => 0,
+                humoco_sim_core::types::NetworkId::Testnet => 1,
+            }]);
+            context.update(&shard_id.to_le_bytes());
+            context.update(&digest);
             context.update(&0u8.to_le_bytes());
             context.update(&[class]);
-            for key in &frozen_keys { context.update(key); }
+            for key in &frozen_keys {
+                context.update(key);
+            }
             let context = *context.finalize().as_bytes();
-            engine.install_shard_snapshot(stage,digest,class,context,witnesses_count,None,Some(deadline)).await?;
-            if cancel_token.is_cancelled() || Instant::now() >= deadline || !engine.is_signing_healthy() { return Ok(false); }
-            let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
-            if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys { return Ok(false); }
-            if compute_local_shard_digest(shard_id,peer_manager.net_time_ms(),engine,storage).await? != digest || Instant::now() >= deadline { return Ok(false); }
+            engine
+                .install_shard_snapshot(
+                    stage,
+                    digest,
+                    class,
+                    context,
+                    witnesses_count,
+                    None,
+                    Some(deadline),
+                )
+                .await?;
+            if cancel_token.is_cancelled()
+                || Instant::now() >= deadline
+                || !engine.is_signing_healthy()
+            {
+                return Ok(false);
+            }
+            let (current, _, _) = peer_manager
+                .shard_committee(
+                    *identity.node_pubkey(),
+                    *identity.hrw_routing_id(),
+                    shard_id,
+                )
+                .await;
+            if current.iter().map(|m| m.node_pubkey).collect::<Vec<_>>() != frozen_keys {
+                return Ok(false);
+            }
+            if compute_local_shard_digest(shard_id, peer_manager.net_time_ms(), engine, storage)
+                .await?
+                != digest
+                || Instant::now() >= deadline
+            {
+                return Ok(false);
+            }
             readiness_manager.mark_shard_ready(shard_id);
             return Ok(true);
         };
         let witnesses_count = witnesses.len();
-        let mut support_groups: HashMap<[u8;32],HashSet<[u8;32]>> = HashMap::new();
-        for (key,_,reply,_) in sources.iter()
-            .filter(|(key,_,reply,_)|witnesses.contains(key) && reply.digest == digest) {
-            support_groups.entry(reply.support_digest).or_default().insert(*key);
+        let mut support_groups: HashMap<[u8; 32], HashSet<[u8; 32]>> = HashMap::new();
+        for (key, _, reply, _) in sources
+            .iter()
+            .filter(|(key, _, reply, _)| witnesses.contains(key) && reply.digest == digest)
+        {
+            support_groups
+                .entry(reply.support_digest)
+                .or_default()
+                .insert(*key);
         }
         let mut compatible_supports: Vec<_> = support_groups.keys().copied().collect();
         compatible_supports.sort_unstable();
-        let mut qualified_supports: Vec<_> = support_groups.iter()
-            .filter(|(_,keys)|keys.len() >= needed).map(|(support,_)|*support).collect();
+        let mut qualified_supports: Vec<_> = support_groups
+            .iter()
+            .filter(|(_, keys)| keys.len() >= needed)
+            .map(|(support, _)| *support)
+            .collect();
         qualified_supports.sort_unstable();
-        let proofs: Vec<_> = sources.iter()
-            .filter(|(key,_,reply,_)|witnesses.contains(key) && reply.digest == digest)
-            .map(|(key,_,reply,_)|(*key,reply.clone())).collect();
-        let inherited = crate::storage::db::support::VerifiedInheritedCut::verify(transport.network_id(),shard_id,*identity.node_pubkey(),&frozen_keys,needed,digest,&compatible_supports,&qualified_supports,&proofs)?;
-        let class = if total >= 20 && peer_manager.is_network_stable_ge20_for_24h(peer_manager.net_time_ms()) { 2 } else { 1 };
+        let proofs: Vec<_> = sources
+            .iter()
+            .filter(|(key, _, reply, _)| witnesses.contains(key) && reply.digest == digest)
+            .map(|(key, _, reply, _)| (*key, reply.clone()))
+            .collect();
+        let inherited = crate::storage::db::support::VerifiedInheritedCut::verify(
+            transport.network_id(),
+            shard_id,
+            *identity.node_pubkey(),
+            &frozen_keys,
+            needed,
+            digest,
+            &compatible_supports,
+            &qualified_supports,
+            &proofs,
+        )?;
+        let class = if total >= 20
+            && peer_manager.is_network_stable_ge20_for_24h(peer_manager.net_time_ms())
+        {
+            2
+        } else {
+            1
+        };
         let mut context = blake3::Hasher::new();
         let domain = b"HUMOCO_V1_LIVE_CUT_SUPPORT";
-        context.update(&[domain.len() as u8]); context.update(domain);
-        context.update(&[match transport.network_id() { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 }]);
-        context.update(&shard_id.to_le_bytes()); context.update(&digest);
+        context.update(&[domain.len() as u8]);
+        context.update(domain);
+        context.update(&[match transport.network_id() {
+            humoco_sim_core::types::NetworkId::Mainnet => 0,
+            humoco_sim_core::types::NetworkId::Testnet => 1,
+        }]);
+        context.update(&shard_id.to_le_bytes());
+        context.update(&digest);
         context.update(&(compatible_supports.len() as u8).to_le_bytes());
-        for support in &compatible_supports { context.update(support); }
+        for support in &compatible_supports {
+            context.update(support);
+        }
         context.update(&[class]);
-        for key in &frozen_keys { context.update(key); }
+        for key in &frozen_keys {
+            context.update(key);
+        }
         let context = *context.finalize().as_bytes();
-        let minimum_deadline = sources.iter().filter(|(key,_,_,_)|witnesses.contains(key)).map(|(_,_,_,deadline)|*deadline).min();
-        let Some(deadline) = minimum_deadline else { return Ok(false); };
+        let minimum_deadline = sources
+            .iter()
+            .filter(|(key, _, _, _)| witnesses.contains(key))
+            .map(|(_, _, _, deadline)| *deadline)
+            .min();
+        let Some(deadline) = minimum_deadline else {
+            return Ok(false);
+        };
         // Hold only a small cache per disk cut. Page reservations cover wire,
         // deserialization, validation and write buffers BEFORE requesting bytes.
-        let Ok(_cache) = readiness_manager.sync_bytes.clone().try_acquire_many_owned(128*1024) else { return Ok(false); };
-        for (key,conn,reply,_) in &sources {
-            if !witnesses.contains(key) || reply.digest != digest || !compatible_supports.contains(&reply.support_digest) { continue; }
+        let Ok(_cache) = readiness_manager
+            .sync_bytes
+            .clone()
+            .try_acquire_many_owned(128 * 1024)
+        else {
+            return Ok(false);
+        };
+        for (key, conn, reply, _) in &sources {
+            if !witnesses.contains(key)
+                || reply.digest != digest
+                || !compatible_supports.contains(&reply.support_digest)
+            {
+                continue;
+            }
             let now = peer_manager.net_time_ms();
-            let stage = Arc::new(engine.recovery_work.spawn_blocking(move ||ShardStage::new(shard_id,now)).await
-                .map_err(|e|NodeError::Daemon(format!("staging worker: {e}")))??);
+            let stage = Arc::new(
+                engine
+                    .recovery_work
+                    .spawn_blocking(move || ShardStage::new(shard_id, now))
+                    .await
+                    .map_err(|e| NodeError::Daemon(format!("staging worker: {e}")))??,
+            );
             let mut cursor = 0;
             let mut sequence = 2;
             let mut complete = false;
             loop {
-                if cancel_token.is_cancelled() || Instant::now() >= deadline { break; }
-                let (Ok(_bytes),Ok(_entries)) = (
-                    readiness_manager.sync_bytes.clone().try_acquire_many_owned(512*1024),
-                    readiness_manager.sync_entries.clone().try_acquire_many_owned(500)) else { break; };
-                let page = match tokio::time::timeout(Duration::from_secs(3),transport.request_active_sync_page_for_shard(conn,sequence,cursor,500,shard_id)).await {
-                    Ok(Ok(page)) => page, _ => break,
+                if cancel_token.is_cancelled() || Instant::now() >= deadline {
+                    break;
+                }
+                let (Ok(_bytes), Ok(_entries)) = (
+                    readiness_manager
+                        .sync_bytes
+                        .clone()
+                        .try_acquire_many_owned(512 * 1024),
+                    readiness_manager
+                        .sync_entries
+                        .clone()
+                        .try_acquire_many_owned(500),
+                ) else {
+                    break;
+                };
+                let page = match tokio::time::timeout(
+                    Duration::from_secs(3),
+                    transport
+                        .request_active_sync_page_for_shard(conn, sequence, cursor, 500, shard_id),
+                )
+                .await
+                {
+                    Ok(Ok(page)) => page,
+                    _ => break,
                 };
                 sequence += 1;
                 let next = page.next_cursor;
                 let more = page.has_more;
                 let cut = stage.clone();
-                let appended = engine.recovery_work.spawn_blocking(move ||cut.append(page.payload)).await
-                    .map_err(|e|NodeError::Daemon(format!("staging worker: {e}")))?;
-                if appended.is_err() { break; }
-                if !more { complete = true; break; }
-                match next { Some(next) if next > cursor => cursor = next, _ => break }
+                let appended = engine
+                    .recovery_work
+                    .spawn_blocking(move || cut.append(page.payload))
+                    .await
+                    .map_err(|e| NodeError::Daemon(format!("staging worker: {e}")))?;
+                if appended.is_err() {
+                    break;
+                }
+                if !more {
+                    complete = true;
+                    break;
+                }
+                match next {
+                    Some(next) if next > cursor => cursor = next,
+                    _ => break,
+                }
             }
-            if !complete { continue; }
+            if !complete {
+                continue;
+            }
             let cut = stage.clone();
-            let Ok(staged_digest_res) = engine.recovery_work.spawn_blocking(move ||cut.digest()).await else { continue; };
-            let Ok(staged_digest) = staged_digest_res else { continue; };
-            if staged_digest != digest { continue; }
-            let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
-            if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys || cancel_token.is_cancelled() || Instant::now() >= deadline { return Ok(false); }
-            let Ok(_installation_memory) = readiness_manager.sync_bytes.clone().try_acquire_many_owned(512*1024) else { return Ok(false); };
+            let Ok(staged_digest_res) = engine
+                .recovery_work
+                .spawn_blocking(move || cut.digest())
+                .await
+            else {
+                continue;
+            };
+            let Ok(staged_digest) = staged_digest_res else {
+                continue;
+            };
+            if staged_digest != digest {
+                continue;
+            }
+            let (current, _, _) = peer_manager
+                .shard_committee(
+                    *identity.node_pubkey(),
+                    *identity.hrw_routing_id(),
+                    shard_id,
+                )
+                .await;
+            if current.iter().map(|m| m.node_pubkey).collect::<Vec<_>>() != frozen_keys
+                || cancel_token.is_cancelled()
+                || Instant::now() >= deadline
+            {
+                return Ok(false);
+            }
+            let Ok(_installation_memory) = readiness_manager
+                .sync_bytes
+                .clone()
+                .try_acquire_many_owned(512 * 1024)
+            else {
+                return Ok(false);
+            };
             let cut = stage.clone();
-            let Ok(staged_support_res) = engine.recovery_work.spawn_blocking(move ||cut.support_digest()).await else { continue; };
-            let Ok(staged_support) = staged_support_res else { continue; };
-            if !compatible_supports.contains(&staged_support) { continue; }
-            engine.install_shard_snapshot(stage,digest,class,context,witnesses_count,Some(inherited.clone()),Some(deadline)).await?;
-            if cancel_token.is_cancelled() || Instant::now() >= deadline || !engine.is_signing_healthy() { return Ok(false); }
-            let (current,_,_) = peer_manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard_id).await;
-            if current.iter().map(|m|m.node_pubkey).collect::<Vec<_>>() != frozen_keys { return Ok(false); }
-            if compute_local_shard_digest(shard_id,peer_manager.net_time_ms(),engine,storage).await? != digest || Instant::now() >= deadline { return Ok(false); }
+            let Ok(staged_support_res) = engine
+                .recovery_work
+                .spawn_blocking(move || cut.support_digest())
+                .await
+            else {
+                continue;
+            };
+            let Ok(staged_support) = staged_support_res else {
+                continue;
+            };
+            if !compatible_supports.contains(&staged_support) {
+                continue;
+            }
+            engine
+                .install_shard_snapshot(
+                    stage,
+                    digest,
+                    class,
+                    context,
+                    witnesses_count,
+                    Some(inherited.clone()),
+                    Some(deadline),
+                )
+                .await?;
+            if cancel_token.is_cancelled()
+                || Instant::now() >= deadline
+                || !engine.is_signing_healthy()
+            {
+                return Ok(false);
+            }
+            let (current, _, _) = peer_manager
+                .shard_committee(
+                    *identity.node_pubkey(),
+                    *identity.hrw_routing_id(),
+                    shard_id,
+                )
+                .await;
+            if current.iter().map(|m| m.node_pubkey).collect::<Vec<_>>() != frozen_keys {
+                return Ok(false);
+            }
+            if compute_local_shard_digest(shard_id, peer_manager.net_time_ms(), engine, storage)
+                .await?
+                != digest
+                || Instant::now() >= deadline
+            {
+                return Ok(false);
+            }
             // Quorum sources remain fenced THROUGH target publication. No valid
             // quorum can commit an omitted write in the cut-to-activation gap.
             readiness_manager.mark_shard_ready(shard_id);
             return Ok(true);
         }
         Ok(false)
-    }.await;
+    }
+    .await;
     // Release explicitly on all normal outcomes. Cancellation/disconnect uses
     // the source's absolute expiry; neither retries nor repeated signals renew it.
-    for (_,conn,reply,_) in &sources {
-        let _ = tokio::time::timeout(Duration::from_millis(100),transport.release_frozen_shard(conn,shard_id,999,reply.token)).await;
+    for (_, conn, reply, _) in &sources {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            transport.release_frozen_shard(conn, shard_id, 999, reply.token),
+        )
+        .await;
     }
-    if !matches!(result,Ok(true)) { readiness_manager.mark_sync_failed(shard_id); }
+    if !matches!(result, Ok(true)) {
+        readiness_manager.mark_sync_failed(shard_id);
+    }
     result
 }
 
-type ReconciledRootFacts = std::collections::HashMap<(String, [u8; 32]), (crate::api::hmc::L2LockEntry, std::collections::HashSet<usize>)>;
-type ReconciledNativeFacts = std::collections::HashMap<([u8; 32], [u8; 32]), ((LockRecord, u64, u8), std::collections::HashSet<usize>)>;
-type ReconciledHmcFacts = std::collections::HashMap<(String, [u8; 32]), ((String, crate::api::hmc::L2LockEntry, u8), std::collections::HashSet<usize>)>;
-type ReconciledStage = (Arc<crate::storage::db::install::ShardStage>, [u8; 32], usize);
+type ReconciledRootFacts = std::collections::HashMap<
+    (String, [u8; 32]),
+    (
+        crate::api::hmc::L2LockEntry,
+        std::collections::HashSet<usize>,
+    ),
+>;
+type ReconciledNativeFacts = std::collections::HashMap<
+    ([u8; 32], [u8; 32]),
+    ((LockRecord, u64, u8), std::collections::HashSet<usize>),
+>;
+type ReconciledHmcFacts = std::collections::HashMap<
+    (String, [u8; 32]),
+    (
+        (String, crate::api::hmc::L2LockEntry, u8),
+        std::collections::HashSet<usize>,
+    ),
+>;
+type ReconciledStage = (
+    Arc<crate::storage::db::install::ShardStage>,
+    [u8; 32],
+    usize,
+);
 
 struct ReconciledCutFacts {
     roots: Vec<crate::api::hmc::L2LockEntry>,
@@ -1429,21 +1773,31 @@ fn read_reconciled_cut_facts(
     let mut roots = Vec::new();
     let mut root_by_voucher = HashMap::new();
     for root in storage.all_voucher_roots()? {
-        let Ok(validity) = crate::storage::db::roots::root_valid_until(&root) else { continue; };
-        if validity <= now { continue; }
+        let Ok(validity) = crate::storage::db::roots::root_valid_until(&root) else {
+            continue;
+        };
+        if validity <= now {
+            continue;
+        }
         let tag = bs58::encode(root.t_id).into_string();
         let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
-        if humoco_sim_core::types::canonical_voucher_shard(&parent) != shard { continue; }
+        if humoco_sim_core::types::canonical_voucher_shard(&parent) != shard {
+            continue;
+        }
         root_by_voucher.insert(root.layer2_voucher_id.clone(), root.clone());
         roots.push(root);
     }
     let native = storage.active_locks_for_shard(shard, now)?;
     let mut hmc = Vec::new();
     for (tag, entry) in storage.all_valid_hmc_locks(now)? {
-        let Some(root) = root_by_voucher.get(&entry.layer2_voucher_id) else { continue; };
+        let Some(root) = root_by_voucher.get(&entry.layer2_voucher_id) else {
+            continue;
+        };
         let root_tag = bs58::encode(root.t_id).into_string();
         let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag);
-        if humoco_sim_core::types::canonical_voucher_shard(&parent) != shard { continue; }
+        if humoco_sim_core::types::canonical_voucher_shard(&parent) != shard {
+            continue;
+        }
         hmc.push((tag, entry));
     }
     Ok(ReconciledCutFacts { roots, native, hmc })
@@ -1460,14 +1814,22 @@ fn append_reconciled_native(
         if bincode::serialized_size(&batch)? > 60 * 1024 {
             if let Some(overflow) = batch.pop() {
                 if !batch.is_empty() {
-                    stage.append(SyncPayload { locks: std::mem::take(&mut batch), hmc_locks: Vec::new(), support: Vec::new() })?;
+                    stage.append(SyncPayload {
+                        locks: std::mem::take(&mut batch),
+                        hmc_locks: Vec::new(),
+                        support: Vec::new(),
+                    })?;
                 }
                 batch.push(overflow);
             }
         }
     }
     if !batch.is_empty() {
-        stage.append(SyncPayload { locks: batch, hmc_locks: Vec::new(), support: Vec::new() })?;
+        stage.append(SyncPayload {
+            locks: batch,
+            hmc_locks: Vec::new(),
+            support: Vec::new(),
+        })?;
     }
     Ok(())
 }
@@ -1483,14 +1845,22 @@ fn append_reconciled_hmc(
         if bincode::serialized_size(&batch)? > 60 * 1024 {
             if let Some(overflow) = batch.pop() {
                 if !batch.is_empty() {
-                    stage.append(SyncPayload { locks: Vec::new(), hmc_locks: std::mem::take(&mut batch), support: Vec::new() })?;
+                    stage.append(SyncPayload {
+                        locks: Vec::new(),
+                        hmc_locks: std::mem::take(&mut batch),
+                        support: Vec::new(),
+                    })?;
                 }
                 batch.push(overflow);
             }
         }
     }
     if !batch.is_empty() {
-        stage.append(SyncPayload { locks: Vec::new(), hmc_locks: batch, support: Vec::new() })?;
+        stage.append(SyncPayload {
+            locks: Vec::new(),
+            hmc_locks: batch,
+            support: Vec::new(),
+        })?;
     }
     Ok(())
 }
@@ -1510,30 +1880,41 @@ fn reconcile_distributed_stage(
     let mut root_facts: ReconciledRootFacts = HashMap::new();
     let mut native_facts: ReconciledNativeFacts = HashMap::new();
     let mut hmc_facts: ReconciledHmcFacts = HashMap::new();
-    let ingest = |storage: &crate::storage::RedbStorage, index: usize,
+    let ingest = |storage: &crate::storage::RedbStorage,
+                  index: usize,
                   root_facts: &mut ReconciledRootFacts,
                   native_facts: &mut ReconciledNativeFacts,
                   hmc_facts: &mut ReconciledHmcFacts|
-        -> Result<(), crate::storage::StorageError> {
+     -> Result<(), crate::storage::StorageError> {
         let facts = read_reconciled_cut_facts(storage, shard_id, now)?;
         for root in facts.roots {
             let digest = *blake3::hash(&serde_json::to_vec(&root)?).as_bytes();
-            root_facts.entry((root.layer2_voucher_id.clone(), digest)).or_insert_with(|| (root, HashSet::new())).1.insert(index);
+            root_facts
+                .entry((root.layer2_voucher_id.clone(), digest))
+                .or_insert_with(|| (root, HashSet::new()))
+                .1
+                .insert(index);
         }
         for (row, root) in facts.native {
-            let class = storage.native_confirmation_support(&row.parent_lock)?
+            let class = storage
+                .native_confirmation_support(&row.parent_lock)?
                 .filter(|s| s.child == row.id)
-                .map_or(row.status.confirmation_class(), |s| s.class.max(row.status.confirmation_class()));
-            let entry = native_facts.entry((row.parent_lock, row.id))
+                .map_or(row.status.confirmation_class(), |s| {
+                    s.class.max(row.status.confirmation_class())
+                });
+            let entry = native_facts
+                .entry((row.parent_lock, row.id))
                 .or_insert_with(|| ((row.clone(), root, class), HashSet::new()));
             entry.0 .2 = entry.0 .2.max(class);
             entry.1.insert(index);
         }
         for (tag, entry) in facts.hmc {
-            let class = storage.confirmation_support(&tag)?
+            let class = storage
+                .confirmation_support(&tag)?
                 .filter(|s| s.child == entry.t_id)
                 .map_or(0, |s| s.class);
-            let map_entry = hmc_facts.entry((tag.clone(), entry.t_id))
+            let map_entry = hmc_facts
+                .entry((tag.clone(), entry.t_id))
                 .or_insert_with(|| ((tag.clone(), entry.clone(), class), HashSet::new()));
             map_entry.0 .2 = map_entry.0 .2.max(class);
             map_entry.1.insert(index);
@@ -1541,15 +1922,31 @@ fn reconcile_distributed_stage(
         Ok(())
     };
     for (index, stage) in stages.iter().enumerate() {
-        ingest(&stage.storage, index, &mut root_facts, &mut native_facts, &mut hmc_facts)?;
+        ingest(
+            &stage.storage,
+            index,
+            &mut root_facts,
+            &mut native_facts,
+            &mut hmc_facts,
+        )?;
     }
-    ingest(target.as_ref(), stages.len(), &mut root_facts, &mut native_facts, &mut hmc_facts)?;
+    ingest(
+        target.as_ref(),
+        stages.len(),
+        &mut root_facts,
+        &mut native_facts,
+        &mut hmc_facts,
+    )?;
 
     let mut selected_roots: HashMap<String, (L2LockEntry, [u8; 32], usize)> = HashMap::new();
     for ((voucher, digest), (entry, witnesses)) in &root_facts {
-        if witnesses.len() < needed { continue; }
+        if witnesses.len() < needed {
+            continue;
+        }
         if let Some((_, existing, _)) = selected_roots.get(voucher) {
-            if existing != digest { return Ok(None); }
+            if existing != digest {
+                return Ok(None);
+            }
         } else {
             selected_roots.insert(voucher.clone(), (entry.clone(), *digest, witnesses.len()));
         }
@@ -1557,14 +1954,28 @@ fn reconcile_distributed_stage(
 
     let mut selected_native: HashMap<[u8; 32], (LockRecord, u64, usize, u8)> = HashMap::new();
     for ((parent, _), ((row, root, class), witnesses)) in &native_facts {
-        if witnesses.len() < needed { continue; }
+        if witnesses.len() < needed {
+            continue;
+        }
+        if !row.has_valid_id() {
+            continue;
+        }
         if let Some((old, _, _, old_class)) = selected_native.get(parent) {
-            if *class < *old_class {
+            let new_hash = humoco_sim_core::crypto::compute_canonical_hash(
+                parent,
+                &row.receiver_pub,
+                &row.nonce,
+            );
+            let old_hash = humoco_sim_core::crypto::compute_canonical_hash(
+                parent,
+                &old.receiver_pub,
+                &old.nonce,
+            );
+            if humoco_sim_core::resolver::compare_native_precedence(
+                *old_class, &old_hash, &old.id, *class, &new_hash, &row.id,
+            ) == humoco_sim_core::resolver::NativeCandidateOrdering::PrecedenceA
+            {
                 continue;
-            } else if *class == *old_class {
-                let new_hash = humoco_sim_core::crypto::compute_canonical_hash(parent, &row.receiver_pub, &row.nonce);
-                let old_hash = humoco_sim_core::crypto::compute_canonical_hash(parent, &old.receiver_pub, &old.nonce);
-                if new_hash >= old_hash { continue; }
             }
         }
         selected_native.insert(*parent, (row.clone(), *root, witnesses.len(), *class));
@@ -1572,46 +1983,72 @@ fn reconcile_distributed_stage(
 
     let mut selected_hmc: HashMap<String, (String, L2LockEntry, usize, u8)> = HashMap::new();
     for ((tag, _), ((stored_tag, entry, class), witnesses)) in &hmc_facts {
-        if witnesses.len() < needed { continue; }
-        if !selected_roots.contains_key(&entry.layer2_voucher_id) { continue; }
+        if witnesses.len() < needed {
+            continue;
+        }
+        if !selected_roots.contains_key(&entry.layer2_voucher_id) {
+            continue;
+        }
         if let Some((_, old, _, old_class)) = selected_hmc.get(tag) {
             if *class < *old_class {
                 continue;
             } else if *class == *old_class {
                 let parent = *blake3::hash(tag.as_bytes()).as_bytes();
-                let new_hash = crate::storage::compute_hmc_canonical_hash(&parent, &entry.sender_ephemeral_pub, &entry.t_id);
-                let old_hash = crate::storage::compute_hmc_canonical_hash(&parent, &old.sender_ephemeral_pub, &old.t_id);
-                if new_hash >= old_hash { continue; }
+                let new_hash = crate::storage::compute_hmc_canonical_hash(
+                    &parent,
+                    &entry.sender_ephemeral_pub,
+                    &entry.t_id,
+                );
+                let old_hash = crate::storage::compute_hmc_canonical_hash(
+                    &parent,
+                    &old.sender_ephemeral_pub,
+                    &old.t_id,
+                );
+                if new_hash >= old_hash {
+                    continue;
+                }
             }
         }
-        selected_hmc.insert(tag.clone(), (stored_tag.clone(), entry.clone(), witnesses.len(), *class));
+        selected_hmc.insert(
+            tag.clone(),
+            (stored_tag.clone(), entry.clone(), witnesses.len(), *class),
+        );
     }
 
     if selected_roots.is_empty() && selected_native.is_empty() && selected_hmc.is_empty() {
         return Ok(None);
     }
 
-    let min_witnesses = selected_native.values().map(|(_, _, w, _)| *w)
+    let min_witnesses = selected_native
+        .values()
+        .map(|(_, _, w, _)| *w)
         .chain(selected_hmc.values().map(|(_, _, w, _)| *w))
         .chain(selected_roots.values().map(|(_, _, w)| *w))
         .min()
         .unwrap_or(needed);
 
     let stage = Arc::new(crate::storage::db::install::ShardStage::new(shard_id, now)?);
-    let mut roots: Vec<(String, L2LockEntry)> = selected_roots.into_values()
-        .map(|(entry, _, _)| (bs58::encode(entry.t_id).into_string(), entry)).collect();
+    let mut roots: Vec<(String, L2LockEntry)> = selected_roots
+        .into_values()
+        .map(|(entry, _, _)| (bs58::encode(entry.t_id).into_string(), entry))
+        .collect();
     roots.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     append_reconciled_hmc(&stage, &roots)?;
-    let mut native: Vec<(LockRecord, u64)> = selected_native.into_values().map(|(row, root, _, _)| (row, root)).collect();
+    let mut native: Vec<(LockRecord, u64)> = selected_native
+        .into_values()
+        .map(|(row, root, _, _)| (row, root))
+        .collect();
     native.sort_unstable_by(|a, b| a.0.parent_lock.cmp(&b.0.parent_lock));
     append_reconciled_native(&stage, &native)?;
-    let mut hmc: Vec<(String, L2LockEntry)> = selected_hmc.into_values().map(|(tag, entry, _, _)| (tag, entry)).collect();
+    let mut hmc: Vec<(String, L2LockEntry)> = selected_hmc
+        .into_values()
+        .map(|(tag, entry, _, _)| (tag, entry))
+        .collect();
     hmc.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     append_reconciled_hmc(&stage, &hmc)?;
     let digest = stage.digest()?;
     Ok(Some((stage, digest, min_witnesses)))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1717,11 +2154,21 @@ mod tests {
         parent[..2].copy_from_slice(&shard.to_be_bytes());
 
         // Find two different receiver_pub / nonces such that one has lower hash than the other
-        let row_low_hash = LockRecord::new(parent, [1u8; 32], vec![1], SimTime(now), SimTime(600_000));
-        let row_high_hash = LockRecord::new(parent, [2u8; 32], vec![2], SimTime(now), SimTime(600_000));
+        let row_low_hash =
+            LockRecord::new(parent, [1u8; 32], vec![1], SimTime(now), SimTime(600_000));
+        let row_high_hash =
+            LockRecord::new(parent, [2u8; 32], vec![2], SimTime(now), SimTime(600_000));
 
-        let hash_1 = humoco_sim_core::crypto::compute_canonical_hash(&parent, &row_low_hash.receiver_pub, &row_low_hash.nonce);
-        let hash_2 = humoco_sim_core::crypto::compute_canonical_hash(&parent, &row_high_hash.receiver_pub, &row_high_hash.nonce);
+        let hash_1 = humoco_sim_core::crypto::compute_canonical_hash(
+            &parent,
+            &row_low_hash.receiver_pub,
+            &row_low_hash.nonce,
+        );
+        let hash_2 = humoco_sim_core::crypto::compute_canonical_hash(
+            &parent,
+            &row_high_hash.receiver_pub,
+            &row_high_hash.nonce,
+        );
 
         let (winner_class2, loser_class1) = if hash_1 > hash_2 {
             // row_low_hash has higher hash -> give it class 2!
@@ -1739,11 +2186,13 @@ mod tests {
             root_valid_until_ms: 600_000,
             verified_context: [77; 32],
         };
-        stage_a.append(SyncPayload {
-            locks: vec![(winner_class2.clone(), 600_000)],
-            hmc_locks: vec![],
-            support: vec![(0, native_key(&parent), fact_a)],
-        }).unwrap();
+        stage_a
+            .append(SyncPayload {
+                locks: vec![(winner_class2.clone(), 600_000)],
+                hmc_locks: vec![],
+                support: vec![(0, native_key(&parent), fact_a)],
+            })
+            .unwrap();
 
         // stage_b has class 1 for loser_class1 (which has smaller hash!)
         let stage_b = Arc::new(ShardStage::new(shard, now).unwrap());
@@ -1754,14 +2203,18 @@ mod tests {
             root_valid_until_ms: 600_000,
             verified_context: [88; 32],
         };
-        stage_b.append(SyncPayload {
-            locks: vec![(loser_class1.clone(), 600_000)],
-            hmc_locks: vec![],
-            support: vec![(0, native_key(&parent), fact_b)],
-        }).unwrap();
+        stage_b
+            .append(SyncPayload {
+                locks: vec![(loser_class1.clone(), 600_000)],
+                hmc_locks: vec![],
+                support: vec![(0, native_key(&parent), fact_b)],
+            })
+            .unwrap();
 
         let stages = vec![stage_a, stage_b];
-        let reconciled = reconcile_distributed_stage(shard, now, 1, &stages, &target).unwrap().expect("reconciled stage");
+        let reconciled = reconcile_distributed_stage(shard, now, 1, &stages, &target)
+            .unwrap()
+            .expect("reconciled stage");
         let (reconciled_stage, _, _) = reconciled;
 
         // Verify which row was selected: by DEC-064 & DEC-022, Class 2 MUST beat Class 1 regardless of hash!
@@ -1789,40 +2242,69 @@ mod tests {
         let mut parent_local = [4u8; 32];
         parent_local[..2].copy_from_slice(&shard.to_be_bytes());
         parent_local[2] = 0xAA;
-        let mut local_row = LockRecord::new(parent_local, [9u8; 32], vec![9], SimTime(now), SimTime(600_000));
-        local_row.status = humoco_sim_core::types::LockStatus::Provisional { sigs: 3, required: 3 };
+        let mut local_row = LockRecord::new(
+            parent_local,
+            [9u8; 32],
+            vec![9],
+            SimTime(now),
+            SimTime(600_000),
+        );
+        local_row.status = humoco_sim_core::types::LockStatus::Provisional {
+            sigs: 3,
+            required: 3,
+        };
         target.put_lock(&local_row, 600_000).unwrap();
 
         // Remote stages hold a completely different lock with quorum (needed = 2)
         let mut parent_remote = [4u8; 32];
         parent_remote[..2].copy_from_slice(&shard.to_be_bytes());
         parent_remote[2] = 0xBB;
-        let remote_row = LockRecord::new(parent_remote, [8u8; 32], vec![8], SimTime(now), SimTime(600_000));
+        let remote_row = LockRecord::new(
+            parent_remote,
+            [8u8; 32],
+            vec![8],
+            SimTime(now),
+            SimTime(600_000),
+        );
 
         let stage_1 = Arc::new(ShardStage::new(shard, now).unwrap());
-        stage_1.append(SyncPayload {
-            locks: vec![(remote_row.clone(), 600_000)],
-            hmc_locks: vec![],
-            support: vec![],
-        }).unwrap();
+        stage_1
+            .append(SyncPayload {
+                locks: vec![(remote_row.clone(), 600_000)],
+                hmc_locks: vec![],
+                support: vec![],
+            })
+            .unwrap();
 
         let stage_2 = Arc::new(ShardStage::new(shard, now).unwrap());
-        stage_2.append(SyncPayload {
-            locks: vec![(remote_row.clone(), 600_000)],
-            hmc_locks: vec![],
-            support: vec![],
-        }).unwrap();
+        stage_2
+            .append(SyncPayload {
+                locks: vec![(remote_row.clone(), 600_000)],
+                hmc_locks: vec![],
+                support: vec![],
+            })
+            .unwrap();
 
         let stages = vec![stage_1, stage_2];
-        let reconciled = reconcile_distributed_stage(shard, now, 2, &stages, &target).unwrap().expect("reconciled stage");
+        let reconciled = reconcile_distributed_stage(shard, now, 2, &stages, &target)
+            .unwrap()
+            .expect("reconciled stage");
         let (reconciled_stage, _, _) = reconciled;
 
         let page = reconciled_stage.page(0).unwrap();
         // The quorated remote row MUST be present
-        assert!(page.payload.locks.iter().any(|(r, _)| r.parent_lock == parent_remote));
+        assert!(page
+            .payload
+            .locks
+            .iter()
+            .any(|(r, _)| r.parent_lock == parent_remote));
         // The unquorated local row MUST NOT be injected into the network-reconciled stage
         assert!(
-            !page.payload.locks.iter().any(|(r, _)| r.parent_lock == parent_local),
+            !page
+                .payload
+                .locks
+                .iter()
+                .any(|(r, _)| r.parent_lock == parent_local),
             "Unquorated local lock must not be laundered into the quorated stage"
         );
     }

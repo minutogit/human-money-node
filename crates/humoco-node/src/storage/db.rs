@@ -134,7 +134,11 @@ impl RedbStorage {
     /// Atomically reserves a NEW database for an explicit regional bootstrap.
     /// Existing paths, including interrupted empty files, are never reopened here.
     pub fn create_new_region(path: &Path) -> Result<Self, StorageError> {
-        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)?;
         let db = Database::builder().create_file(file)?;
         Self::initialize_database(db, path)
     }
@@ -431,7 +435,9 @@ impl RedbStorage {
                 if sec <= now_sec {
                     table_ttl.remove(&(sec, &parent))?;
                     table_locks.remove(&parent)?;
-                    write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?.remove(support::native_key(&parent).as_str())?;
+                    write_txn
+                        .open_table(support::TABLE_NATIVE_SUPPORT)?
+                        .remove(support::native_key(&parent).as_str())?;
                     // Quarantined minority copies (TABLE_PROVISIONAL_LOCKS) share
                     // the same TTL and are purged together here (F09, DEC-035).
                     table_prov_locks.remove(&parent)?;
@@ -481,6 +487,7 @@ impl RedbStorage {
                 pruned_hmc_count += 1;
             }
         }
+        Self::prune_voucher_roots(&write_txn, now_sec)?;
         Self::prune_own_choices(&write_txn, now_sec)?;
         write_txn.commit()?;
         Ok((pruned, pruned_hmc_count))
@@ -757,9 +764,15 @@ impl RedbStorage {
                 let tag = k_guard.value().to_string();
                 let entry: crate::api::hmc::L2LockEntry = serde_json::from_slice(v_guard.value())?;
                 let roots = write_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
-                let root = roots.get(entry.layer2_voucher_id.as_str())?.ok_or_else(|| StorageError::DurableCommitFailed("quarantine spend lacks root".into()))?;
+                let root = roots
+                    .get(entry.layer2_voucher_id.as_str())?
+                    .ok_or_else(|| {
+                        StorageError::DurableCommitFailed("quarantine spend lacks root".into())
+                    })?;
                 let root: crate::api::hmc::L2LockEntry = serde_json::from_slice(root.value())?;
-                let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&bs58::encode(root.t_id).into_string());
+                let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+                    &bs58::encode(root.t_id).into_string(),
+                );
                 let sid = humoco_sim_core::types::canonical_voucher_shard(&parent);
                 if sid == shard_id && !keep_hmc_tags.contains(&tag) {
                     if let Some(value) = write_txn
@@ -842,7 +855,11 @@ impl RedbStorage {
         let val_bytes = serde_json::to_vec(entry)?;
         // A spend never supplies its own root lifetime, even when a legacy
         // client leaves a deletable_at hint on the entry.
-        let root = self.voucher_root(&entry.layer2_voucher_id)?.ok_or_else(|| StorageError::DurableCommitFailed("spend requires a committed Root Anchor".into()))?;
+        let root = self
+            .voucher_root(&entry.layer2_voucher_id)?
+            .ok_or_else(|| {
+                StorageError::DurableCommitFailed("spend requires a committed Root Anchor".into())
+            })?;
         let valid_until_ms = roots::root_valid_until(&root)?;
         let bucket_sec = valid_until_ms.saturating_add(30_000) / 1_000;
 
@@ -911,10 +928,20 @@ impl RedbStorage {
                         continue;
                     }
                     let roots = write_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
-                    let root = roots.get(entry.layer2_voucher_id.as_str())?.ok_or_else(|| StorageError::DurableCommitFailed("spend requires a committed Root Anchor".into()))?;
+                    let root = roots
+                        .get(entry.layer2_voucher_id.as_str())?
+                        .ok_or_else(|| {
+                            StorageError::DurableCommitFailed(
+                                "spend requires a committed Root Anchor".into(),
+                            )
+                        })?;
                     let root: crate::api::hmc::L2LockEntry = serde_json::from_slice(root.value())?;
                     let inherited = roots::root_valid_until(&root)?;
-                    if inherited != *valid_until_ms { return Err(StorageError::DurableCommitFailed("spend root lifetime mismatch".into())); }
+                    if inherited != *valid_until_ms {
+                        return Err(StorageError::DurableCommitFailed(
+                            "spend root lifetime mismatch".into(),
+                        ));
+                    }
                     let bucket_sec = inherited.saturating_add(30_000) / 1_000;
                     table_hmc.insert(*tag, *bytes)?;
                     table_vidx.insert((entry.layer2_voucher_id.as_str(), *tag), ())?;
@@ -961,25 +988,57 @@ impl RedbStorage {
         Ok(())
     }
 
+    /// Prunes expired voucher root records and TTL index entries (A22-03).
+    ///
+    /// Shared helper called within write transactions by both `prune_expired_buckets`
+    /// and `prune_expired_in_txn`. Bounded to 256 entries per pass.
+    fn prune_voucher_roots(
+        txn: &redb::WriteTransaction,
+        now_sec: u64,
+    ) -> Result<usize, StorageError> {
+        let mut ttl = txn.open_table(roots::TABLE_VOUCHER_ROOT_TTL)?;
+        let expired = ttl
+            .range(..(now_sec.saturating_add(1), ""))?
+            .take(256)
+            .map(|row| row.map(|(key, _)| (key.value().0, key.value().1.to_string())))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut roots = txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
+        let mut count = 0;
+        for (second, voucher) in expired {
+            if second <= now_sec {
+                let should_remove = if let Some(guard) = roots.get(voucher.as_str())? {
+                    if let Ok(entry) =
+                        serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
+                    {
+                        if let Ok(exp) = roots::root_valid_until(&entry) {
+                            let threshold_ms = exp.saturating_add(30_000);
+                            let needed_sec = threshold_ms.saturating_add(999) / 1_000;
+                            now_sec >= needed_sec
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+                if should_remove {
+                    roots.remove(voucher.as_str())?;
+                    ttl.remove((second, voucher.as_str()))?;
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
     /// Prunes expired buckets inside an already-open write transaction.
     fn prune_expired_in_txn(
         write_txn: &redb::WriteTransaction,
         now_sec: u64,
     ) -> Result<(), StorageError> {
-        {
-            let mut ttl = write_txn.open_table(roots::TABLE_VOUCHER_ROOT_TTL)?;
-            let expired = ttl
-                .range(..(now_sec, ""))?
-                .take(256)
-                .map(|row| row.map(|(key, _)| (key.value().0, key.value().1.to_string())))
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut roots = write_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
-            for (second, voucher) in expired {
-                roots.remove(voucher.as_str())?;
-                ttl.remove((second, voucher.as_str()))?;
-            }
-        }
-
+        Self::prune_voucher_roots(write_txn, now_sec)?;
         Self::prune_own_choices(write_txn, now_sec)?;
         let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
         let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
@@ -999,7 +1058,9 @@ impl RedbStorage {
             if sec <= now_sec {
                 table_ttl.remove(&(sec, &parent))?;
                 table_locks.remove(&parent)?;
-                write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?.remove(support::native_key(&parent).as_str())?;
+                write_txn
+                    .open_table(support::TABLE_NATIVE_SUPPORT)?
+                    .remove(support::native_key(&parent).as_str())?;
                 // Quarantined minority copies (TABLE_PROVISIONAL_LOCKS) share the
                 // same TTL and are purged together here (F09, DEC-035).
                 table_prov_locks.remove(&parent)?;
@@ -1286,7 +1347,10 @@ impl RedbStorage {
             {
                 let source = read_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
                 let mut destination = write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
-                for row in source.iter()? { let (key,value) = row?; destination.insert(key.value(),value.value())?; }
+                for row in source.iter()? {
+                    let (key, value) = row?;
+                    destination.insert(key.value(), value.value())?;
+                }
             }
             let support_src = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
             let mut support_dst = write_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;

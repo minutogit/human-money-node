@@ -21,7 +21,9 @@ pub type NodePubKey = [u8; 32];
 pub type HrwRoutingId = [u8; 32];
 
 /// Network identifier for domain separation (Mainnet vs Testnet)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum NetworkId {
     #[default]
     Mainnet,
@@ -63,7 +65,19 @@ pub const FLAG_INBOUND_ACTIVE: u8 = 1 << 0;
 pub const FLAG_LAST_FAILED: u8 = 1 << 1;
 
 /// Deterministic discrete simulation time in milliseconds
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct SimTime(pub u64);
 
 impl SimTime {
@@ -190,6 +204,25 @@ pub struct LockRecord {
 }
 
 impl LockRecord {
+    pub fn compute_id(
+        parent_lock: &Hash256,
+        receiver_pub: &Hash256,
+        nonce: &[u8],
+        created_at: SimTime,
+        valid_until: SimTime,
+    ) -> Hash256 {
+        let mut hasher = blake3::Hasher::new();
+        let tag = b"HUMOCO_V1_LOCK_ID";
+        hasher.update(&[tag.len() as u8]);
+        hasher.update(tag);
+        hasher.update(parent_lock);
+        hasher.update(receiver_pub);
+        hasher.update(nonce);
+        hasher.update(&created_at.0.to_le_bytes());
+        hasher.update(&valid_until.0.to_le_bytes());
+        *hasher.finalize().as_bytes()
+    }
+
     pub fn new(
         parent_lock: Hash256,
         receiver_pub: Hash256,
@@ -197,16 +230,7 @@ impl LockRecord {
         created_at: SimTime,
         valid_until: SimTime,
     ) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        let tag = b"HUMOCO_V1_LOCK_ID";
-        hasher.update(&[tag.len() as u8]);
-        hasher.update(tag);
-        hasher.update(&parent_lock);
-        hasher.update(&receiver_pub);
-        hasher.update(&nonce);
-        hasher.update(&created_at.0.to_le_bytes());
-        hasher.update(&valid_until.0.to_le_bytes());
-        let id: Hash256 = *hasher.finalize().as_bytes();
+        let id = Self::compute_id(&parent_lock, &receiver_pub, &nonce, created_at, valid_until);
 
         Self {
             id,
@@ -218,6 +242,18 @@ impl LockRecord {
             status: LockStatus::Pending,
             signers: BTreeSet::new(),
         }
+    }
+
+    /// Verifies that the lock ID cryptographically matches its canonical preimage.
+    pub fn has_valid_id(&self) -> bool {
+        self.id
+            == Self::compute_id(
+                &self.parent_lock,
+                &self.receiver_pub,
+                &self.nonce,
+                self.created_at,
+                self.valid_until,
+            )
     }
 }
 
@@ -243,7 +279,7 @@ pub struct Attestation {
 }
 
 pub mod serde_bytes_64 {
-    use serde::{Deserializer, Serializer, de::Error};
+    use serde::{de::Error, Deserializer, Serializer};
 
     pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -429,7 +465,11 @@ impl PeerPresenceEntry {
     /// Note: Penalty decay is service/interaction-based (-2 per success) to prevent free-riders from
     /// sitting out penalties in low-traffic shards without contributing work.
     /// On DORMANT, backoff_level, malus_score, and flags are reset so the node can be probed directly on re-entry.
-    pub fn record_hour(&mut self, current_epoch: u16, received_heartbeat: bool) -> PeerPresenceState {
+    pub fn record_hour(
+        &mut self,
+        current_epoch: u16,
+        received_heartbeat: bool,
+    ) -> PeerPresenceState {
         let _ = current_epoch;
         let bit = if received_heartbeat { 1u32 } else { 0u32 };
         self.hourly_bitmask = (self.hourly_bitmask << 1) | bit;
@@ -556,7 +596,9 @@ impl NetworkStressThermometer {
 
         let target = if is_suspended { 10_000u32 } else { 0u32 };
 
-        let updated = ((decayed as u32 * (10_000 - Self::EVENT_ALPHA_BPS)) + (target * Self::EVENT_ALPHA_BPS)) / 10_000;
+        let updated = ((decayed as u32 * (10_000 - Self::EVENT_ALPHA_BPS))
+            + (target * Self::EVENT_ALPHA_BPS))
+            / 10_000;
         self.stress_level_bps = updated.min(10_000) as u16;
 
         self.is_under_stress()
@@ -671,7 +713,10 @@ impl ShardPredecessorStatus {
 
 /// Counts how many predecessor ranks are both >= 24h QUIC-stable and cooperative (!is_suspended)
 pub fn count_healthy_predecessors(predecessors: &[ShardPredecessorStatus]) -> usize {
-    predecessors.iter().filter(|p| p.is_healthy_and_stable()).count()
+    predecessors
+        .iter()
+        .filter(|p| p.is_healthy_and_stable())
+        .count()
 }
 
 /// Checks whether an active shard node or replacement may safely retire to IdleStandby (docs/03:3.1 & INV-0307)
@@ -863,7 +908,11 @@ impl FirstSeenPacer {
     }
 
     /// Computes a stochastically scattered pacing interval with jitter (default: 50 min + 0..20 min = avg 60 min)
-    pub fn calculate_jittered_interval(base_seconds: u64, max_jitter_seconds: u64, seed: u64) -> u64 {
+    pub fn calculate_jittered_interval(
+        base_seconds: u64,
+        max_jitter_seconds: u64,
+        seed: u64,
+    ) -> u64 {
         if max_jitter_seconds == 0 {
             return base_seconds;
         }
@@ -957,19 +1006,29 @@ pub struct CommitteeMember {
 /// Committee membership is derived autonomously on demand per routing event / lock request
 /// from the living active mesh snapshot. There is NO daily committee tenure, NO 24h predecessor
 /// baton handoff requirement (DEC-053/055), and NO static epoch assignment.
-pub fn select_shard_committee(shard_id: ShardId, active: &[CommitteeMember]) -> Vec<CommitteeMember> {
+pub fn select_shard_committee(
+    shard_id: ShardId,
+    active: &[CommitteeMember],
+) -> Vec<CommitteeMember> {
     let mut identities = std::collections::BTreeMap::new();
     for member in active {
-        identities.entry(member.node_pubkey)
+        identities
+            .entry(member.node_pubkey)
             .and_modify(|ticket: &mut HrwRoutingId| *ticket = (*ticket).min(member.hrw_routing_id))
             .or_insert(member.hrw_routing_id);
     }
-    let mut ranked: Vec<_> = identities.into_iter()
-        .map(|(node_pubkey, hrw_routing_id)| CommitteeMember { node_pubkey, hrw_routing_id })
+    let mut ranked: Vec<_> = identities
+        .into_iter()
+        .map(|(node_pubkey, hrw_routing_id)| CommitteeMember {
+            node_pubkey,
+            hrw_routing_id,
+        })
         .collect();
-    ranked.sort_by(|a, b| hrw_score_32(&b.hrw_routing_id, shard_id)
-        .cmp(&hrw_score_32(&a.hrw_routing_id, shard_id))
-        .then_with(|| a.node_pubkey.cmp(&b.node_pubkey)));
+    ranked.sort_by(|a, b| {
+        hrw_score_32(&b.hrw_routing_id, shard_id)
+            .cmp(&hrw_score_32(&a.hrw_routing_id, shard_id))
+            .then_with(|| a.node_pubkey.cmp(&b.node_pubkey))
+    });
     ranked.truncate(20);
     ranked
 }
@@ -987,7 +1046,8 @@ pub fn verify_order_statistics_quorum(
     }
     let signers: std::collections::HashSet<_> = signer_node_ids.iter().copied().collect();
     let (required_q, is_final) = required_quorum(committee.len());
-    let valid = signers.len() == signer_node_ids.len() && signers.len() >= required_q
+    let valid = signers.len() == signer_node_ids.len()
+        && signers.len() >= required_q
         && signers.is_subset(&members);
     (valid, valid && is_final)
 }
@@ -1004,7 +1064,11 @@ pub fn hrw_rank_nodes(active_nodes: &[NodeId], shard_id: ShardId) -> Vec<(NodeId
 }
 
 /// Selects the top-N candidates for a shard based on HRW ranking.
-pub fn select_shard_candidates(active_nodes: &[NodeId], shard_id: ShardId, n: usize) -> Vec<NodeId> {
+pub fn select_shard_candidates(
+    active_nodes: &[NodeId],
+    shard_id: ShardId,
+    n: usize,
+) -> Vec<NodeId> {
     let mut ranked = hrw_rank_nodes(active_nodes, shard_id);
     ranked.truncate(n);
     ranked.into_iter().map(|(nid, _)| nid).collect()
@@ -1058,7 +1122,9 @@ pub fn timestamp_to_bucket_id(timestamp_ms: u64) -> u64 {
 /// Checks whether a given bucket_id is sealed at the given net_time_ms.
 #[inline]
 pub fn is_bucket_sealed(bucket_id: u64, now_ms: u64) -> bool {
-    let seal_threshold = (bucket_id.saturating_add(1)).saturating_mul(BUCKET_DURATION_MS).saturating_add(BUCKET_SEAL_GRACE_MS);
+    let seal_threshold = (bucket_id.saturating_add(1))
+        .saturating_mul(BUCKET_DURATION_MS)
+        .saturating_add(BUCKET_SEAL_GRACE_MS);
     now_ms >= seal_threshold
 }
 
@@ -1265,7 +1331,9 @@ pub fn verify_causality_proof_chain_stateless(
 ) -> Result<(), CausalityError> {
     // Defense-in-depth: limit maximum hops and nonce bytes to fend off CPU amplification DoS
     if chain.hops.len() > MAX_PROOFCHAIN_HOPS {
-        return Err(CausalityError::BrokenChainLink { hop_index: chain.hops.len() });
+        return Err(CausalityError::BrokenChainLink {
+            hop_index: chain.hops.len(),
+        });
     }
     if chain.target_lock.nonce.len() > MAX_NONCE_BYTES {
         return Err(CausalityError::BrokenChainLink { hop_index: 0 });
@@ -1413,8 +1481,16 @@ mod tests {
 
     #[test]
     fn test_peer_presence_entry_lifecycle_and_backoff_reset() {
-        assert_eq!(std::mem::size_of::<PeerPresenceEntry>(), 16, "Must be exactly 16 bytes");
-        assert_eq!(std::mem::align_of::<PeerPresenceEntry>(), 8, "Must be 8-byte aligned");
+        assert_eq!(
+            std::mem::size_of::<PeerPresenceEntry>(),
+            16,
+            "Must be exactly 16 bytes"
+        );
+        assert_eq!(
+            std::mem::align_of::<PeerPresenceEntry>(),
+            8,
+            "Must be 8-byte aligned"
+        );
         assert_eq!(FLAG_INBOUND_ACTIVE, 1, "FLAG_INBOUND_ACTIVE must be 1<<0");
         assert_eq!(FLAG_LAST_FAILED, 2, "FLAG_LAST_FAILED must be 1<<1");
 
@@ -1444,27 +1520,46 @@ mod tests {
         entry.record_inbound_activity();
         assert!(entry.flags & FLAG_INBOUND_ACTIVE != 0);
         let bl = entry.record_outbound_failure();
-        assert_eq!(bl, 1, "First failure with inbound => backoff 1 (malus 2 / 2)");
+        assert_eq!(
+            bl, 1,
+            "First failure with inbound => backoff 1 (malus 2 / 2)"
+        );
         assert_eq!(entry.malus_score, 2);
         assert_eq!(entry.backoff_level, 1);
-        assert_eq!(entry.flags & FLAG_INBOUND_ACTIVE, 0, "Inbound flag cleared after escalation");
+        assert_eq!(
+            entry.flags & FLAG_INBOUND_ACTIVE,
+            0,
+            "Inbound flag cleared after escalation"
+        );
         assert!(entry.flags & FLAG_LAST_FAILED != 0);
         assert!(entry.is_suspended());
         assert!(entry.is_service_choked());
         assert!(!entry.is_hrw_eligible(), "Choked peer not HRW eligible");
-        assert!(!entry.should_forward_gossip(), "Gossip is suppressed while service is choked");
+        assert!(
+            !entry.should_forward_gossip(),
+            "Gossip is suppressed while service is choked"
+        );
 
         // Eskalationssperre: second failure WITHOUT inbound -> no escalation (offline/DDoS protection)
         let bl2 = entry.record_outbound_failure();
         assert_eq!(bl2, 1, "Without inbound and backoff>0, no escalation");
-        assert_eq!(entry.malus_score, 2, "Malus unchanged due to escalation lock");
+        assert_eq!(
+            entry.malus_score, 2,
+            "Malus unchanged due to escalation lock"
+        );
         assert_eq!(entry.backoff_level, 1);
         assert!(entry.is_suspended());
 
         // Service-based healing (no hourly decay): 1 hour passes -> malus remains until worked off
         entry.record_hour(125, true);
-        assert_eq!(entry.backoff_level, 1, "No automatic hourly decay (anti-free-rider)");
-        assert_eq!(entry.malus_score, 2, "Malus persists until worked off via successful interactions");
+        assert_eq!(
+            entry.backoff_level, 1,
+            "No automatic hourly decay (anti-free-rider)"
+        );
+        assert_eq!(
+            entry.malus_score, 2,
+            "Malus persists until worked off via successful interactions"
+        );
         assert!(entry.is_suspended());
         assert!(!entry.is_hrw_eligible());
         assert!(!entry.should_forward_gossip());
@@ -1488,8 +1583,15 @@ mod tests {
         entry.record_outbound_success();
         assert_eq!(entry.malus_score, 4);
         assert_eq!(entry.backoff_level, 2);
-        assert_eq!(entry.flags & FLAG_LAST_FAILED, 0, "Success clears LAST_FAILED");
-        assert!(!entry.is_service_choked(), "Not choked after success (flag cleared)");
+        assert_eq!(
+            entry.flags & FLAG_LAST_FAILED,
+            0,
+            "Success clears LAST_FAILED"
+        );
+        assert!(
+            !entry.is_service_choked(),
+            "Not choked after success (flag cleared)"
+        );
         assert!(entry.should_forward_gossip());
         assert!(entry.is_hrw_eligible());
 
@@ -1514,7 +1616,10 @@ mod tests {
             entry.record_hour(ep, false);
         }
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Dormant);
-        assert_eq!(entry.backoff_level, 0, "Dormant transition resets backoff to 0 for re-entry probation");
+        assert_eq!(
+            entry.backoff_level, 0,
+            "Dormant transition resets backoff to 0 for re-entry probation"
+        );
         assert_eq!(entry.malus_score, 0, "Dormant transition resets malus to 0");
         assert_eq!(entry.flags, 0, "Dormant clears flags");
         assert!(!entry.is_suspended());
@@ -1525,7 +1630,10 @@ mod tests {
         assert_eq!(entry.backoff_level, 0);
         entry.record_hour(148, true);
         assert_eq!(entry.evaluate_state(), PeerPresenceState::Active);
-        assert!(entry.is_hrw_eligible(), "Active node with backoff 0 immediately eligible for quorums");
+        assert!(
+            entry.is_hrw_eligible(),
+            "Active node with backoff 0 immediately eligible for quorums"
+        );
         assert!(entry.should_forward_gossip());
 
         // Alias checks
@@ -1551,7 +1659,10 @@ mod tests {
         entry.record_outbound_failure_damped(false);
         assert_eq!(entry.malus_score, 2);
         assert_eq!(entry.backoff_level, 1);
-        assert!(!entry.should_forward_gossip(), "Choked -> gossip suppressed");
+        assert!(
+            !entry.should_forward_gossip(),
+            "Choked -> gossip suppressed"
+        );
 
         // Stress mode failure: +1 malus (damped!)
         entry.record_inbound_activity();
@@ -1599,14 +1710,20 @@ mod tests {
         for _ in 0..19 {
             thermo.update(3600, false);
         }
-        assert!(thermo.stress_level_bps < 100, "19 OK responses dampen down to < 1%");
+        assert!(
+            thermo.stress_level_bps < 100,
+            "19 OK responses dampen down to < 1%"
+        );
         assert!(!thermo.is_under_stress());
 
         // 3. Sustained DoS attack (e.g. 80 consecutive chokes over 30-40 minutes)
         for i in 1..=80 {
             thermo.update(3600 + i * 25, true);
         }
-        assert!(thermo.stress_level_bps >= 4000, "Sustained attack crosses 40% threshold");
+        assert!(
+            thermo.stress_level_bps >= 4000,
+            "Sustained attack crosses 40% threshold"
+        );
         assert!(thermo.is_under_stress());
 
         // 4. Attack stops -> 2 hours pass -> decays back below threshold

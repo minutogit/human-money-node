@@ -37,6 +37,53 @@ pub fn resolve_split_brain(lock_a: &mut LockRecord, lock_b: &mut LockRecord) -> 
     resolve_split_brain_canonical(lock_a, lock_b, None, None)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeCandidateOrdering {
+    /// Candidate A strictly takes precedence over Candidate B.
+    PrecedenceA,
+    /// Candidate B strictly takes precedence over Candidate A.
+    PrecedenceB,
+    /// Candidates are identical.
+    Equal,
+}
+
+/// Pure native comparison helper returning a total ordering from
+/// `(confirmation class, H_canon, valid lock ID)` with explicit precedence semantics (A22-01).
+///
+/// Precedence rules:
+/// 1. Higher confirmation class strictly takes precedence (DEC-064 / INV-0206).
+/// 2. Smaller canonical hash takes precedence on equal classes (min(H_canon), Spec 02).
+/// 3. Smaller lock ID takes precedence as secondary tie-breaker on equal primary hashes (A22-01).
+pub fn compare_native_precedence(
+    class_a: u8,
+    h_a: &Hash256,
+    id_a: &Hash256,
+    class_b: u8,
+    h_b: &Hash256,
+    id_b: &Hash256,
+) -> NativeCandidateOrdering {
+    if id_a == id_b {
+        return NativeCandidateOrdering::Equal;
+    }
+    if class_a > class_b {
+        return NativeCandidateOrdering::PrecedenceA;
+    }
+    if class_b > class_a {
+        return NativeCandidateOrdering::PrecedenceB;
+    }
+    if h_a < h_b {
+        return NativeCandidateOrdering::PrecedenceA;
+    }
+    if h_b < h_a {
+        return NativeCandidateOrdering::PrecedenceB;
+    }
+    if id_a < id_b {
+        NativeCandidateOrdering::PrecedenceA
+    } else {
+        NativeCandidateOrdering::PrecedenceB
+    }
+}
+
 /// Canonical split-brain resolution with signature entropy (Spec 02:97, INV-0201)
 pub fn resolve_split_brain_canonical(
     lock_a: &mut LockRecord,
@@ -55,67 +102,74 @@ pub fn resolve_split_brain_canonical(
     }
 
     let h_a = match sig_a {
-        Some(sig) => crate::crypto::compute_canonical_hash_with_sig(&lock_a.parent_lock, &lock_a.receiver_pub, sig),
+        Some(sig) => crate::crypto::compute_canonical_hash_with_sig(
+            &lock_a.parent_lock,
+            &lock_a.receiver_pub,
+            sig,
+        ),
         None => compute_canonical_hash(&lock_a.parent_lock, &lock_a.receiver_pub, &lock_a.nonce),
     };
     let h_b = match sig_b {
-        Some(sig) => crate::crypto::compute_canonical_hash_with_sig(&lock_b.parent_lock, &lock_b.receiver_pub, sig),
+        Some(sig) => crate::crypto::compute_canonical_hash_with_sig(
+            &lock_b.parent_lock,
+            &lock_b.receiver_pub,
+            sig,
+        ),
         None => compute_canonical_hash(&lock_b.parent_lock, &lock_b.receiver_pub, &lock_b.nonce),
     };
 
-    // Confirmation class precedence (DEC-064 / Contract G3 / INV-0206):
-    // Class 2 (Final) > Class 1 (Provisional) > Class 0 (Pending/Unconfirmed)
-    // A lower confirmation class NEVER displaces a higher confirmation class,
-    // regardless of canonical hash value.
     let class_a = lock_a.status.confirmation_class();
     let class_b = lock_b.status.confirmation_class();
 
-    if class_a > class_b {
-        lock_b.status = LockStatus::Void {
-            reason: format!(
-                "Equivocation collision: Class {} lock cannot displace Class {} lock {:?}",
-                class_b, class_a, lock_a.id
-            ),
-        };
-        return ResolutionResult::WinnerA {
-            winner_hash: h_a,
-            loser_hash: h_b,
-        };
-    }
-    if class_b > class_a {
-        lock_a.status = LockStatus::Void {
-            reason: format!(
-                "Equivocation collision: Class {} lock cannot displace Class {} lock {:?}",
-                class_a, class_b, lock_b.id
-            ),
-        };
-        return ResolutionResult::WinnerB {
-            winner_hash: h_b,
-            loser_hash: h_a,
-        };
-    }
-
-    if h_a < h_b {
-        lock_b.status = LockStatus::Void {
-            reason: format!(
-                "Equivocation collision: lost min(H_canon) against winner lock {:?}",
-                lock_a.id
-            ),
-        };
-        ResolutionResult::WinnerA {
-            winner_hash: h_a,
-            loser_hash: h_b,
+    match compare_native_precedence(class_a, &h_a, &lock_a.id, class_b, &h_b, &lock_b.id) {
+        NativeCandidateOrdering::Equal => ResolutionResult::Identical,
+        NativeCandidateOrdering::PrecedenceA => {
+            lock_b.status = LockStatus::Void {
+                reason: if class_a > class_b {
+                    format!(
+                        "Equivocation collision: Class {} lock cannot displace Class {} lock {:?}",
+                        class_b, class_a, lock_a.id
+                    )
+                } else if h_a < h_b {
+                    format!(
+                        "Equivocation collision: lost min(H_canon) against winner lock {:?}",
+                        lock_a.id
+                    )
+                } else {
+                    format!(
+                        "Equivocation collision: lost tie-breaker min(LockId) against winner lock {:?}",
+                        lock_a.id
+                    )
+                },
+            };
+            ResolutionResult::WinnerA {
+                winner_hash: h_a,
+                loser_hash: h_b,
+            }
         }
-    } else {
-        lock_a.status = LockStatus::Void {
-            reason: format!(
-                "Equivocation collision: lost min(H_canon) against winner lock {:?}",
-                lock_b.id
-            ),
-        };
-        ResolutionResult::WinnerB {
-            winner_hash: h_b,
-            loser_hash: h_a,
+        NativeCandidateOrdering::PrecedenceB => {
+            lock_a.status = LockStatus::Void {
+                reason: if class_b > class_a {
+                    format!(
+                        "Equivocation collision: Class {} lock cannot displace Class {} lock {:?}",
+                        class_a, class_b, lock_b.id
+                    )
+                } else if h_b < h_a {
+                    format!(
+                        "Equivocation collision: lost min(H_canon) against winner lock {:?}",
+                        lock_b.id
+                    )
+                } else {
+                    format!(
+                        "Equivocation collision: lost tie-breaker min(LockId) against winner lock {:?}",
+                        lock_b.id
+                    )
+                },
+            };
+            ResolutionResult::WinnerB {
+                winner_hash: h_b,
+                loser_hash: h_a,
+            }
         }
     }
 }
@@ -129,8 +183,14 @@ pub fn resolve_split_brain_with_proof(
     attestations_a: &[Attestation],
     attestations_b: &[Attestation],
 ) -> (ResolutionResult, Vec<FraudProofPayload>) {
-    let sig_a = attestations_a.iter().min_by_key(|a| a.node_id).map(|a| &a.signature);
-    let sig_b = attestations_b.iter().min_by_key(|b| b.node_id).map(|b| &b.signature);
+    let sig_a = attestations_a
+        .iter()
+        .min_by_key(|a| a.node_id)
+        .map(|a| &a.signature);
+    let sig_b = attestations_b
+        .iter()
+        .min_by_key(|b| b.node_id)
+        .map(|b| &b.signature);
     let result = resolve_split_brain_canonical(lock_a, lock_b, sig_a, sig_b);
     // Only create proofs on a real conflict (WinnerA/B)
     let need_proofs = matches!(
@@ -142,16 +202,17 @@ pub fn resolve_split_brain_with_proof(
     }
 
     use std::collections::HashMap;
-    let map_a: HashMap<u16, &Attestation> =
-        attestations_a.iter().map(|a| (a.node_id, a)).collect();
-    let map_b: HashMap<u16, &Attestation> =
-        attestations_b.iter().map(|b| (b.node_id, b)).collect();
+    let map_a: HashMap<u16, &Attestation> = attestations_a.iter().map(|a| (a.node_id, a)).collect();
+    let map_b: HashMap<u16, &Attestation> = attestations_b.iter().map(|b| (b.node_id, b)).collect();
 
     let mut proofs = Vec::new();
     for (&nid, &a) in &map_a {
         if let Some(&b) = map_b.get(&nid) {
             if a.parent_lock == b.parent_lock && a.lock_id != b.lock_id {
-                proofs.push(FraudProofPayload::new_shard_equivocation(a.clone(), b.clone()));
+                proofs.push(FraudProofPayload::new_shard_equivocation(
+                    a.clone(),
+                    b.clone(),
+                ));
             }
         }
     }
@@ -258,20 +319,37 @@ mod tests {
             SimTime(0),
             SimTime(1000),
         );
-        // Distinguish IDs so they aren't marked Identical
+        // Distinguish IDs deterministically (la.id < lb.id)
+        la.id = [0x01; 32];
         lb.id = [0xFF; 32];
 
         let res_eq = resolve_split_brain(&mut la, &mut lb);
         match res_eq {
+            ResolutionResult::WinnerA {
+                winner_hash,
+                loser_hash,
+            } => {
+                assert_eq!(winner_hash, loser_hash);
+                assert!(!la.status.is_void());
+                assert!(lb.status.is_void());
+            }
+            _ => panic!("Expected WinnerA when la.id < lb.id on equal canonical hash"),
+        }
+
+        // Swapping inputs must select the same winner (la)
+        let mut la2 = la.clone();
+        let mut lb2 = lb.clone();
+        let res_swap = resolve_split_brain(&mut lb2, &mut la2);
+        match res_swap {
             ResolutionResult::WinnerB {
                 winner_hash,
                 loser_hash,
             } => {
                 assert_eq!(winner_hash, loser_hash);
-                assert!(la.status.is_void());
-                assert!(!lb.status.is_void());
+                assert!(!la2.status.is_void());
+                assert!(lb2.status.is_void());
             }
-            _ => panic!("Expected WinnerB when h_a == h_b"),
+            _ => panic!("Expected WinnerB (la2) when reversed"),
         }
     }
 
@@ -477,5 +555,135 @@ mod tests {
         );
         assert_eq!(res_noconf, ResolutionResult::NoConflict);
         assert!(proofs_noconf.is_empty());
+    }
+
+    #[test]
+    fn test_a22_01_equal_native_hash_must_converge_independently_of_order() {
+        let parent = [21u8; 32];
+        let receiver = [22u8; 32];
+        let nonce = vec![23u8];
+        let mut a = LockRecord::new(
+            parent,
+            receiver,
+            nonce.clone(),
+            SimTime(1000),
+            SimTime(600_000),
+        );
+        let mut b = LockRecord::new(parent, receiver, nonce, SimTime(1001), SimTime(600_000));
+        a.status = LockStatus::Provisional {
+            sigs: 3,
+            required: 3,
+        };
+        b.status = LockStatus::Provisional {
+            sigs: 3,
+            required: 3,
+        };
+
+        assert_ne!(a.id, b.id);
+        assert_eq!(
+            compute_canonical_hash(&a.parent_lock, &a.receiver_pub, &a.nonce),
+            compute_canonical_hash(&b.parent_lock, &b.receiver_pub, &b.nonce)
+        );
+
+        let (mut a1, mut b1) = (a.clone(), b.clone());
+        resolve_split_brain(&mut a1, &mut b1);
+        let winner_ab = if a1.status.is_void() { b1.id } else { a1.id };
+
+        let (mut b2, mut a2) = (b.clone(), a.clone());
+        resolve_split_brain(&mut b2, &mut a2);
+        let winner_ba = if b2.status.is_void() { a2.id } else { b2.id };
+
+        assert_eq!(
+            winner_ab, winner_ba,
+            "equal-hash same-class native records must converge to the same winner regardless of arrival order"
+        );
+    }
+
+    #[test]
+    fn test_a22_01_different_validity_shared_lifetime_deterministic_order() {
+        let parent = [31u8; 32];
+        let receiver = [32u8; 32];
+        let nonce = vec![33u8];
+        let mut a = LockRecord::new(
+            parent,
+            receiver,
+            nonce.clone(),
+            SimTime(1000),
+            SimTime(500_000),
+        );
+        let mut b = LockRecord::new(parent, receiver, nonce, SimTime(1000), SimTime(600_000));
+        a.status = LockStatus::Provisional {
+            sigs: 3,
+            required: 3,
+        };
+        b.status = LockStatus::Provisional {
+            sigs: 3,
+            required: 3,
+        };
+
+        assert_ne!(a.id, b.id);
+        assert_eq!(
+            compute_canonical_hash(&a.parent_lock, &a.receiver_pub, &a.nonce),
+            compute_canonical_hash(&b.parent_lock, &b.receiver_pub, &b.nonce)
+        );
+
+        let (mut a1, mut b1) = (a.clone(), b.clone());
+        resolve_split_brain(&mut a1, &mut b1);
+        let winner_ab = if a1.status.is_void() { b1.id } else { a1.id };
+
+        let (mut b2, mut a2) = (b, a);
+        resolve_split_brain(&mut b2, &mut a2);
+        let winner_ba = if b2.status.is_void() { a2.id } else { b2.id };
+
+        assert_eq!(
+            winner_ab, winner_ba,
+            "different-validity equal-hash records must converge to the same winner"
+        );
+    }
+
+    #[test]
+    fn test_a22_01_lower_class_with_smaller_id_still_loses_to_higher_class() {
+        let parent = [41u8; 32];
+        let receiver = [42u8; 32];
+        let nonce = vec![43u8];
+        let a = LockRecord::new(
+            parent,
+            receiver,
+            nonce.clone(),
+            SimTime(1000),
+            SimTime(600_000),
+        );
+        let b = LockRecord::new(parent, receiver, nonce, SimTime(1001), SimTime(600_000));
+
+        // Determine which ID is smaller
+        let (small, big) = if a.id < b.id { (a, b) } else { (b, a) };
+        let mut lower_class = small;
+        let mut higher_class = big;
+        lower_class.status = LockStatus::Pending; // class 0
+        higher_class.status = LockStatus::Final { sigs: 14 }; // class 2
+
+        let mut lc_copy = lower_class.clone();
+        let mut hc_copy = higher_class.clone();
+        resolve_split_brain(&mut lc_copy, &mut hc_copy);
+        assert!(
+            lc_copy.status.is_void(),
+            "lower class with smaller id must lose"
+        );
+        assert!(
+            !hc_copy.status.is_void(),
+            "higher class with larger id must win"
+        );
+
+        let mut hc_copy2 = higher_class.clone();
+        let mut lc_copy2 = lower_class.clone();
+        resolve_split_brain(&mut hc_copy2, &mut lc_copy2);
+        assert!(
+            lc_copy2.status.is_void(),
+            "lower class must lose in reversed order"
+        );
+        assert!(
+            !hc_copy2.status.is_void(),
+            "higher class must win in reversed order"
+        );
     }
 }

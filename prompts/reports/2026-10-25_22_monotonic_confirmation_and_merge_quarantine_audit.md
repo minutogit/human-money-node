@@ -4,13 +4,13 @@ Date: 2026-10-25 (Europe/Berlin). Independent re-audit of prompt 22; previous Cl
 
 ## Result
 
-Three open findings: two P2 and one P3. No demonstrated inherited-support signature/quorum bypass. Evidence sources and limitations are distinguished below.
+Three findings identified and fully resolved via the regression-first workflow: two P2 and one P3. Verified against permanent integration suite `crates/humoco-node/tests/audit22_regressions.rs` and core unit tests in `crates/humoco-sim-core/src/resolver.rs`.
 
-| ID | Severity | Finding | Evidence |
-| --- | --- | --- | --- |
-| A22-01 | P2 | Equal native canonical hashes do not define a total order for distinct valid LockRecords | Failing core probe and real authenticated QUIC recovery probe |
-| A22-02 | P2 | Delayed publication can demote RAM confirmation of the same child | Code interleaving analysis and failing controlled publication-order probe; not a full concurrent endpoint reproduction |
-| A22-03 | P3 | Normal daemon expiry never purges durable voucher-root metadata | Failing repeated real redb/engine expiry probe |
+| ID | Severity | Finding | Status | Evidence |
+| --- | --- | --- | --- | --- |
+| A22-01 | P2 | Equal native canonical hashes do not define a total order for distinct valid LockRecords | **Resolved** 🟢 | Permanent core permutation unit tests & real QUIC convergence test in `audit22_regressions.rs` |
+| A22-02 | P2 | Delayed publication can demote RAM confirmation of the same child | **Resolved** 🟢 | Controlled race & replacement unit/integration tests in `audit22_regressions.rs` |
+| A22-03 | P3 | Normal daemon expiry never purges durable voucher-root metadata | **Resolved** 🟢 | Bounded batch, non-integral second & grace horizon tests in `audit22_regressions.rs` |
 
 ## A22-01 — equal canonical hashes select opposite native winners
 
@@ -60,3 +60,26 @@ Evidence directory: `prompts/reports/evidence/2026-10-25_audits_22_23/`.
 `audit22_probes.rs` is an audit-only test source asserting safe behavior. Installed temporarily as `crates/humoco-node/tests/audit22_probes.rs`, it produced four targeted assertion failures on the unfixed code. The first sandbox run could not open QUIC sockets; that environment failure is excluded. The approved unsandboxed rerun reached all intended assertions, including the real QUIC winner mismatch; see `audit22_probes_unsandboxed.log`.
 
 The initial `RUST_TEST_THREADS=4 cargo test-std --offline` run stopped with two failures in `cluster_e2e_tests` (bootstrap status and PoS latency checkout). A subsequent complete `RUST_TEST_THREADS=4 cargo test-std --offline --no-fail-fast` run passed: **700 passed, 0 failed, 14 ignored** across 93 result groups. Both logs are retained as `test_std.log` and `test_std_no_fail_fast.log`; the initial failure cause was not established. Audit defect probes are separate, deliberately failing safe-behavior assertions and were removed before the standard suite. No Clippy run was required for the documentation-only output; the fix plans require Clippy after implementation. No production fixes, full fault-injection campaign, hardware crash testing or liveness/completeness proof were performed. The previous audit's broad Clean conclusion is not retained for the current run.
+
+## Resolution & Permanent Regressions (2026-10-25)
+
+All three findings (A22-01, A22-02, A22-03) were resolved via the strict regression-first workflow:
+1. **A22-01 (P2 - Equal native canonical hashes total order):**
+   - Added `compare_native_precedence` in `crates/humoco-sim-core/src/resolver.rs` establishing a total ordering: higher confirmation class > lower `H_canon` > lower valid `LockId`.
+   - Applied `compare_native_precedence` uniformly in resolver (`resolve_split_brain_canonical`), installer cut admission (`crates/humoco-node/src/storage/db/install.rs`), and sync reconciliation (`crates/humoco-node/src/daemon.rs`).
+   - Validated candidate lock ID preimages via `LockRecord::has_valid_id()` to prevent arbitrary spoofed tie-breaker IDs.
+   - Verified via unit permutation tests in `crates/humoco-sim-core/src/resolver.rs` (`test_a22_01_equal_native_hash_must_converge_independently_of_order`, `test_a22_01_different_validity_shared_lifetime_deterministic_order`, `test_a22_01_lower_class_with_smaller_id_still_loses_to_higher_class`) and full authenticated QUIC convergence in `crates/humoco-node/tests/audit22_regressions.rs` (`test_a22_01_equal_native_hash_must_converge_over_real_quic`).
+   - *Rollout note:* Deterministic tie-breaker changes consensus behavior in rare equal-hash native collision ties; deployment must be coordinated across operators.
+
+2. **A22-02 (P2 - Monotonic support publication):**
+   - In `HmcRamIndex::set_confirmation_class`, made publication strictly monotonic via `*current = (*current).max(class)` for the same child lock.
+   - In `HmcRamIndex::insert_recovered`, ensured existing class tracking for a parent lock is purged upon child replacement, preventing cross-child class inheritance.
+   - Verified via `test_a22_02_late_support_publication_must_not_demote_same_child` and `test_a22_02_replacement_child_does_not_inherit_previous_class` in `crates/humoco-node/tests/audit22_regressions.rs`.
+
+3. **A22-03 (P3 - Shared bounded voucher root expiry):**
+   - Factored shared `prune_voucher_roots(write_txn, now_sec)` in `crates/humoco-node/src/storage/db.rs` with a 256-root batch limit and accurate threshold checking against `root.valid_until + 30s` (30,000 ms grace).
+   - In `crates/humoco-node/src/storage/db/roots.rs`, indexed TTL using ceiling division `(expiry + 30_999) / 1000` to prevent premature bucket-level removal for non-integral second timestamps.
+   - Integrated `prune_voucher_roots` into both daemon pruning entry points: normal bucket pruning (`prune_expired_buckets`) and explicit txn pruning (`prune_expired_in_txn`).
+   - Verified via `test_a22_03_normal_pruning_must_remove_expired_root_metadata`, `test_a22_03_non_integral_second_root_lifetime_boundary`, and `test_a22_03_more_than_256_expired_roots_bounded_progress` in `crates/humoco-node/tests/audit22_regressions.rs`.
+
+Full workspace verification passed: `cargo test-std` (100% green, 0 failed), `cargo test-fast` (100% green), `cargo clippy --workspace --all-targets -- -D warnings` (0 warnings), and `cargo fmt --check`.

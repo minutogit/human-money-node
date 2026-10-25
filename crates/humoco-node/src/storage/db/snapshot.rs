@@ -173,15 +173,22 @@ impl Cut {
                 });
                 if selected {
                     let key = support::native_key(&record.parent_lock);
-                    let metadata = support_metadata(&self.txn,support::TABLE_NATIVE_SUPPORT,0,&key)?;
-                    let metadata_bytes = metadata.as_ref().map(bincode::serialized_size).transpose()?.unwrap_or(0) as usize;
+                    let metadata =
+                        support_metadata(&self.txn, support::TABLE_NATIVE_SUPPORT, 0, &key)?;
+                    let metadata_bytes = metadata
+                        .as_ref()
+                        .map(bincode::serialized_size)
+                        .transpose()?
+                        .unwrap_or(0) as usize;
                     if size + bytes.value().len() + metadata_bytes > MAX_PAGE_BYTES
                         || payload.locks.len() + payload.hmc_locks.len() >= limit
                     {
                         return Ok((payload, false));
                     }
                     size += bytes.value().len() + metadata_bytes;
-                    if let Some(metadata) = metadata { payload.support.push(metadata); }
+                    if let Some(metadata) = metadata {
+                        payload.support.push(metadata);
+                    }
                     payload.locks.push((record, root));
                 }
                 self.native_after = Some(*key.value());
@@ -219,15 +226,26 @@ impl Cut {
                     humoco_sim_core::types::timestamp_to_bucket_id(entry.created_at_ms) == b
                 });
             if selected {
-                let metadata = support_metadata(&self.txn,support::TABLE_CONFIRMATION_SUPPORT,1,key.value())?;
-                let metadata_bytes = metadata.as_ref().map(bincode::serialized_size).transpose()?.unwrap_or(0) as usize;
+                let metadata = support_metadata(
+                    &self.txn,
+                    support::TABLE_CONFIRMATION_SUPPORT,
+                    1,
+                    key.value(),
+                )?;
+                let metadata_bytes = metadata
+                    .as_ref()
+                    .map(bincode::serialized_size)
+                    .transpose()?
+                    .unwrap_or(0) as usize;
                 if size + bytes.value().len() + key.value().len() + metadata_bytes > MAX_PAGE_BYTES
                     || payload.locks.len() + payload.hmc_locks.len() >= limit
                 {
                     return Ok((payload, false));
                 }
                 size += bytes.value().len() + key.value().len() + metadata_bytes;
-                if let Some(metadata) = metadata { payload.support.push(metadata); }
+                if let Some(metadata) = metadata {
+                    payload.support.push(metadata);
+                }
                 payload.hmc_locks.push((key.value().into(), entry));
             }
             self.hmc_after = Some(key.value().into());
@@ -240,12 +258,26 @@ impl Cut {
     }
 }
 
-type SupportMetadata = (u8,String,support::ConfirmationSupport);
-fn support_metadata(tx:&redb::ReadTransaction,table:TableDefinition<&str,&[u8]>,kind:u8,key:&str)
-    -> Result<Option<SupportMetadata>,StorageError> {
-    if key.len() > 128 { return Err(invalid("oversize support key")); }
-    let table=tx.open_table(table)?;
-    let Some(value)=table.get(key)? else { return Ok(None); };
-    if value.value().len() > 2048 { return Err(invalid("oversize support metadata")); }
-    Ok(Some((kind,key.into(),serde_json::from_slice(value.value())?)))
+type SupportMetadata = (u8, String, support::ConfirmationSupport);
+fn support_metadata(
+    tx: &redb::ReadTransaction,
+    table: TableDefinition<&str, &[u8]>,
+    kind: u8,
+    key: &str,
+) -> Result<Option<SupportMetadata>, StorageError> {
+    if key.len() > 128 {
+        return Err(invalid("oversize support key"));
+    }
+    let table = tx.open_table(table)?;
+    let Some(value) = table.get(key)? else {
+        return Ok(None);
+    };
+    if value.value().len() > 2048 {
+        return Err(invalid("oversize support metadata"));
+    }
+    Ok(Some((
+        kind,
+        key.into(),
+        serde_json::from_slice(value.value())?,
+    )))
 }

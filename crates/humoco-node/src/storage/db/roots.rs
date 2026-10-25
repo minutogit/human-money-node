@@ -12,14 +12,24 @@ pub fn is_root(tag: &str, entry: &crate::api::hmc::L2LockEntry) -> bool {
 /// An idempotent root retry may not replace its original L1 author or deed.
 /// Legacy unsigned output hints are not authority; the sidecar authenticates
 /// actual outputs separately and can be added once by the original author.
-pub(crate) fn same_root_deed(a: &crate::api::hmc::L2LockEntry, b: &crate::api::hmc::L2LockEntry) -> bool {
-    a.layer2_voucher_id == b.layer2_voucher_id && a.t_id == b.t_id
+pub(crate) fn same_root_deed(
+    a: &crate::api::hmc::L2LockEntry,
+    b: &crate::api::hmc::L2LockEntry,
+) -> bool {
+    a.layer2_voucher_id == b.layer2_voucher_id
+        && a.t_id == b.t_id
         && a.sender_ephemeral_pub == b.sender_ephemeral_pub
         && a.layer2_signature == b.layer2_signature
-        && a.trap_r == b.trap_r && a.trap_s == b.trap_s
-        && a.encrypted_timestamp == b.encrypted_timestamp && a.created_at_ms == b.created_at_ms
-        && a.deletable_at == b.deletable_at && a.privacy_guard == b.privacy_guard
-        && match (&a.causal_output, &b.causal_output) { (Some(old), Some(new)) => old == new, _ => true }
+        && a.trap_r == b.trap_r
+        && a.trap_s == b.trap_s
+        && a.encrypted_timestamp == b.encrypted_timestamp
+        && a.created_at_ms == b.created_at_ms
+        && a.deletable_at == b.deletable_at
+        && a.privacy_guard == b.privacy_guard
+        && match (&a.causal_output, &b.causal_output) {
+            (Some(old), Some(new)) => old == new,
+            _ => true,
+        }
 }
 pub fn root_valid_until(entry: &crate::api::hmc::L2LockEntry) -> Result<u64, StorageError> {
     let raw = entry
@@ -49,15 +59,24 @@ pub fn root_valid_until(entry: &crate::api::hmc::L2LockEntry) -> Result<u64, Sto
         }
         // Preserve the immutable Core L1 root-ID preimage. A valid signature
         // from an arbitrary author must not preempt somebody else's root ID.
-        if entry.layer2_voucher_id.len() == 64 && entry.layer2_voucher_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if entry.layer2_voucher_id.len() == 64
+            && entry
+                .layer2_voucher_id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        {
             use sha2::{Digest, Sha256};
             let mut hash = Sha256::new();
             hash.update(entry.t_id);
             hash.update(entry.sender_ephemeral_pub);
-            if let Some(receiver) = proof.receiver_pubkey_hash { hash.update(receiver); }
+            if let Some(receiver) = proof.receiver_pubkey_hash {
+                hash.update(receiver);
+            }
             hash.update(raw.as_bytes());
             if hex::encode(hash.finalize()) != entry.layer2_voucher_id {
-                return Err(StorageError::DurableCommitFailed("root proof does not derive the canonical L1 voucher identity".into()));
+                return Err(StorageError::DurableCommitFailed(
+                    "root proof does not derive the canonical L1 voucher identity".into(),
+                ));
             }
         }
         Ok(proof.root_valid_until_ms)
@@ -82,13 +101,9 @@ pub(super) fn put(
         }
     }
     roots.insert(entry.layer2_voucher_id.as_str(), bytes.as_slice())?;
-    txn.open_table(TABLE_VOUCHER_ROOT_TTL)?.insert(
-        (
-            expiry.saturating_add(30_000) / 1_000,
-            entry.layer2_voucher_id.as_str(),
-        ),
-        (),
-    )?;
+    let expires_sec = expiry.saturating_add(30_999) / 1_000;
+    txn.open_table(TABLE_VOUCHER_ROOT_TTL)?
+        .insert((expires_sec, entry.layer2_voucher_id.as_str()), ())?;
     Ok(())
 }
 /// Atomic bounded-chunk migration of old self-loop genesis records. Private old
@@ -164,19 +179,50 @@ mod tests {
         use ed25519_dalek::Signer;
         use sha2::{Digest, Sha256};
         let key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
-        let mut proof = humoco_proto::causal::CausalOutputProof { version: 1, voucher_id: String::new(), transaction_id: [7; 32], state_hash: [6; 32], sender_pubkey: key.verifying_key().to_bytes(), receiver_pubkey_hash: Some([9; 32]), change_pubkey_hash: None, root_valid_until_ms: 50_000, is_root: true, signature: [0; 64] };
+        let mut proof = humoco_proto::causal::CausalOutputProof {
+            version: 1,
+            voucher_id: String::new(),
+            transaction_id: [7; 32],
+            state_hash: [6; 32],
+            sender_pubkey: key.verifying_key().to_bytes(),
+            receiver_pubkey_hash: Some([9; 32]),
+            change_pubkey_hash: None,
+            root_valid_until_ms: 50_000,
+            is_root: true,
+            signature: [0; 64],
+        };
         let mut hash = Sha256::new();
-        hash.update(proof.transaction_id); hash.update(proof.sender_pubkey); hash.update([9; 32]); hash.update(b"50000");
+        hash.update(proof.transaction_id);
+        hash.update(proof.sender_pubkey);
+        hash.update([9; 32]);
+        hash.update(b"50000");
         proof.voucher_id = hex::encode(hash.finalize());
         proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
-        let mut entry = crate::api::hmc::L2LockEntry { causal_output: Some(proof.clone()), layer2_voucher_id: proof.voucher_id.clone(), t_id: proof.transaction_id, sender_ephemeral_pub: proof.sender_pubkey, receiver_ephemeral_pub_hash: None, change_ephemeral_pub_hash: None, layer2_signature: [0; 64], trap_r: None, trap_s: None, encrypted_timestamp: 0, created_at_ms: 1_000, deletable_at: Some("50000".into()), privacy_guard: None };
+        let mut entry = crate::api::hmc::L2LockEntry {
+            causal_output: Some(proof.clone()),
+            layer2_voucher_id: proof.voucher_id.clone(),
+            t_id: proof.transaction_id,
+            sender_ephemeral_pub: proof.sender_pubkey,
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 1_000,
+            deletable_at: Some("50000".into()),
+            privacy_guard: None,
+        };
         assert_eq!(root_valid_until(&entry).unwrap(), 50_000);
         proof.voucher_id = "00".repeat(32);
         proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
         assert!(proof.verify(), "the attacker owns a genuine signing key");
         entry.layer2_voucher_id = proof.voucher_id.clone();
         entry.causal_output = Some(proof);
-        assert!(root_valid_until(&entry).is_err(), "a genuine unrelated author cannot preempt a root ID");
+        assert!(
+            root_valid_until(&entry).is_err(),
+            "a genuine unrelated author cannot preempt a root ID"
+        );
     }
     #[test]
     fn legacy_genesis_migrates_to_root_metadata_and_never_occupies_a_spend_slot() {
@@ -202,16 +248,30 @@ mod tests {
             let db = RedbStorage::open(&path).unwrap();
             let txn = db.db.begin_write().unwrap();
             let bytes = serde_json::to_vec(&root).unwrap();
-            txn.open_table(TABLE_HMC_LOCKS).unwrap().insert(tag.as_str(), bytes.as_slice()).unwrap();
-            txn.open_table(TABLE_HMC_VOUCHER_INDEX).unwrap().insert((root.layer2_voucher_id.as_str(),tag.as_str()), ()).unwrap();
+            txn.open_table(TABLE_HMC_LOCKS)
+                .unwrap()
+                .insert(tag.as_str(), bytes.as_slice())
+                .unwrap();
+            txn.open_table(TABLE_HMC_VOUCHER_INDEX)
+                .unwrap()
+                .insert((root.layer2_voucher_id.as_str(), tag.as_str()), ())
+                .unwrap();
             txn.commit().unwrap();
         }
         let db = RedbStorage::open(&path).unwrap();
         assert!(db.get_hmc_lock(&tag).unwrap().is_none());
-        assert_eq!(db.voucher_root(&root.layer2_voucher_id).unwrap(), Some(root.clone()));
-        assert!(db.get_hmc_locks_for_voucher(&root.layer2_voucher_id).unwrap().is_empty());
+        assert_eq!(
+            db.voucher_root(&root.layer2_voucher_id).unwrap(),
+            Some(root.clone())
+        );
+        assert!(db
+            .get_hmc_locks_for_voucher(&root.layer2_voucher_id)
+            .unwrap()
+            .is_empty());
         let mut different = root.clone();
         different.t_id = [9; 32];
-        assert!(db.put_hmc_lock(&bs58::encode(different.t_id).into_string(), &different).is_err());
+        assert!(db
+            .put_hmc_lock(&bs58::encode(different.t_id).into_string(), &different)
+            .is_err());
     }
 }

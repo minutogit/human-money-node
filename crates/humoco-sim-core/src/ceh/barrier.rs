@@ -57,7 +57,9 @@ impl std::fmt::Display for BarrierError {
                 write!(f, "barrier draining, retry after {retry_after_secs}s")
             }
             Self::Locked => write!(f, "barrier locked"),
-            Self::DrainPending { remaining_in_flight } => {
+            Self::DrainPending {
+                remaining_in_flight,
+            } => {
                 write!(f, "drain pending, {remaining_in_flight} writes remaining")
             }
         }
@@ -77,7 +79,9 @@ pub struct WriteGuard {
 
 impl Drop for WriteGuard {
     fn drop(&mut self) {
-        self.tracker.active_in_flight_writes.fetch_sub(1, Ordering::SeqCst);
+        self.tracker
+            .active_in_flight_writes
+            .fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -130,18 +134,26 @@ impl WriteBarrier {
         match stage {
             BarrierStage::Open => {
                 // Speculatively increment active write counter
-                self.inner.active_in_flight_writes.fetch_add(1, Ordering::SeqCst);
+                self.inner
+                    .active_in_flight_writes
+                    .fetch_add(1, Ordering::SeqCst);
                 // Re-check stage to prevent race with begin_drain
                 if self.stage() != BarrierStage::Open {
                     // Undo speculation and reject
-                    self.inner.active_in_flight_writes.fetch_sub(1, Ordering::SeqCst);
-                    return Err(BarrierError::Draining { retry_after_secs: 2 });
+                    self.inner
+                        .active_in_flight_writes
+                        .fetch_sub(1, Ordering::SeqCst);
+                    return Err(BarrierError::Draining {
+                        retry_after_secs: 2,
+                    });
                 }
                 Ok(WriteGuard {
                     tracker: Arc::clone(&self.inner),
                 })
             }
-            BarrierStage::FenceDrain => Err(BarrierError::Draining { retry_after_secs: 2 }),
+            BarrierStage::FenceDrain => Err(BarrierError::Draining {
+                retry_after_secs: 2,
+            }),
             BarrierStage::FenceLocked => Err(BarrierError::Locked),
         }
     }
@@ -150,7 +162,9 @@ impl WriteBarrier {
     ///
     /// New writes are rejected immediately. In-flight tasks continue until completion.
     pub fn begin_drain(&self) {
-        self.inner.stage.store(BarrierStage::FenceDrain as u8, Ordering::SeqCst);
+        self.inner
+            .stage
+            .store(BarrierStage::FenceDrain as u8, Ordering::SeqCst);
     }
 
     /// Checks if all in-flight operations have completely drained.
@@ -169,13 +183,17 @@ impl WriteBarrier {
                 remaining_in_flight: active,
             });
         }
-        self.inner.stage.store(BarrierStage::FenceLocked as u8, Ordering::SeqCst);
+        self.inner
+            .stage
+            .store(BarrierStage::FenceLocked as u8, Ordering::SeqCst);
         Ok(())
     }
 
     /// Reopens the barrier for normal operations (e.g., after epoch handoff completes).
     pub fn reopen(&self) {
-        self.inner.stage.store(BarrierStage::Open as u8, Ordering::SeqCst);
+        self.inner
+            .stage
+            .store(BarrierStage::Open as u8, Ordering::SeqCst);
     }
 }
 
@@ -215,7 +233,12 @@ mod tests {
 
         // New acquire must be rejected with 503 Draining
         let err = barrier.acquire_write().expect_err("must fail");
-        assert_eq!(err, BarrierError::Draining { retry_after_secs: 2 });
+        assert_eq!(
+            err,
+            BarrierError::Draining {
+                retry_after_secs: 2
+            }
+        );
 
         // Cannot lock while 1 in-flight
         let lock_err = barrier.lock().expect_err("cannot lock yet");

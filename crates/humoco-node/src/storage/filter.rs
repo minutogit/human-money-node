@@ -1,5 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
 use cuckoofilter::CuckooFilter;
+use std::collections::hash_map::DefaultHasher;
 
 /// In-memory Cuckoo pre-filter for fast negative lookups before hitting RamIndex.
 /// Used to accelerate PoS hot-path collision checks (< 1µs).

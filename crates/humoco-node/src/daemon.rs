@@ -439,11 +439,17 @@ impl NodeDaemon {
             .lock()
             .push(tier_controller.quota_worker_abort_handle());
         *cleanup.quota_failed.lock() = Some(tier_controller.quota_worker_failure_handle());
-        for peer in &self.config.f2f.peers {
-            tier_controller.register_f2f_peer(peer);
-        }
+        // Client friend secrets are strictly decoupled from P2P network peer topology (A25-03).
+        // P2P peer keys/endpoints are NEVER registered as HTTP ingress bearer tokens.
         for token in &self.config.f2f.tokens {
-            tier_controller.register_f2f_peer(token);
+            let trimmed = token.trim();
+            if crate::ingress::tier::is_valid_client_token(trimmed) {
+                tier_controller.register_f2f_peer(trimmed);
+            } else {
+                tracing::warn!(
+                    "Ignored invalid F2F client token in configuration: tokens must match 'f2f_<32 hex digits>'"
+                );
+            }
         }
 
         // Initialize QUIC P2P PeerManager with F2F friends, resolved endpoints, and known peers

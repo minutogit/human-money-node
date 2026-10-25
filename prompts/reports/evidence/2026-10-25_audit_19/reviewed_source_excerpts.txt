@@ -1,0 +1,247 @@
+crates/humoco-node/src/network/transport.rs
+771:                     crate::network::framing::LockWirePayload::Hmc {
+772:                         req,
+773:                         root_valid_until,
+774:                         chain,
+775:                         ..
+776:                     } => {
+777:                         let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
+778:                         let entry = crate::api::hmc::L2LockEntry::from(req);
+779:                         let base_fp =
+780:                             humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+781:                         let base_by = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_s);
+782:                         let chain_len = chain.as_ref().map(|c| c.chain.len()).unwrap_or(1);
+783:                         (
+784:                             entry.t_id,
+785:                             base_fp.saturating_mul(chain_len as u64),
+786:                             base_by.saturating_mul(chain_len as u64),
+787:                         )
+788:                     }
+789:                 };
+790: 
+791:                 // 7. Epoch-bound signature verification and under-reporting check.
+792:                 // The envelope digest commits to (epoch_day, epoch_seq), so replay
+793:                 // across days or reordering within a day invalidates the signature.
+794:                 let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+795:                     sender_pubkey,
+796:                     envelope_epoch_day,
+797:                     envelope_epoch_seq,
+798:                     timestamp_ms,
+799:                     declared_write_ema,
+800:                     declared_read_ema,
+801:                     footprint,
+802:                     false,
+803:                     op_hash,
+804:                     sender_signature,
+805:                 );
+806: 
+807:                 if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
+808:                     warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: invalid ingress envelope signature");
+809:                     let resp_header = WireHeader::new(
+810:                         MsgType::LockVerifyResponse as u16,
+811:                         header.session_seq.wrapping_add(1),
+812:                         header.epoch_id,
+813:                         humoco_sim_core::wire::FLAG_SIGNATURE_INVALID,
+814:                         0,
+815:                     );
+816:                     return Ok((resp_header, Vec::new()));
+817:                 }
+818: 
+819:                 if !readiness_manager.is_shard_ready(shard_id) {
+820:                     readiness_manager.request_sync(shard_id);
+821:                     return Ok((
+822:                         WireHeader::new(
+823:                             MsgType::LockVerifyResponse as u16,
+824:                             header.session_seq.wrapping_add(1),
+825:                             header.epoch_id,
+826:                             humoco_sim_core::wire::FLAG_NOT_READY,
+827:                             0,
+828:                         ),
+829:                         Vec::new(),
+830:                     ));
+831:                 }
+832:                 if let Some(pm) = peer_manager.as_ref() {
+833:                     if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
+834:                         if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
+835:                             &prev, &curr,
+836:                         ) {
+837:                             warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: under-reporting detected in LockVerifyRequest! Slashing perpetrator.");
+838:                             let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
+839:                             let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
+840:                             let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
+841:                             let _ = storage.put_evidence(&evidence_hash, &evidence_bytes);
+842:                             engine.ban_node(sender_pubkey, now_ms).await;
+843:                             pm.ban_node(&sender_pubkey).await;
+844:                             pm.broadcast_fraud_proof(proof);
+845: 
+846:                             let resp_header = WireHeader::new(
+847:                                 MsgType::LockVerifyResponse as u16,
+848:                                 header.session_seq.wrapping_add(1),
+849:                                 header.epoch_id,
+850:                                 humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
+851:                                     | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+852:                                     | humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
+853:                                 0,
+854:                             );
+855:                             return Ok((resp_header, Vec::new()));
+856:                         }
+857:                     }
+858:                     pm.update_node_write_evidence(&sender_pubkey, curr.clone())
+859:                         .await;
+860:                     pm.record_observed_evidence(curr.clone()).await;
+861:                 }
+862: 
+863:                 // 8. Reservation-First backpressure (Rule 10): the sender quota MUST be
+864:                 // reserved BEFORE any RAM-index or persistence mutation. If the queue
+865:                 // is full the request is rejected here and RAM stays untouched.
+866:                 if let Some(tc) = &tier_controller {
+867:                     let epoch_day = tc.current_epoch_day_at(now_ms);
+868:                     if let Err(e) =
+869:                         tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day)
+870:                     {
+871:                         warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
+872:                         let resp_header = WireHeader::new(
+873:                             MsgType::LockVerifyResponse as u16,
+874:                             header.session_seq.wrapping_add(1),
+875:                             header.epoch_id,
+876:                             humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+877:                             0,
+878:                         );
+879:                         return Ok((resp_header, Vec::new()));
+880:                     }
+
+crates/humoco-node/src/api/routes.rs
+1240:                 Ok((_nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)) => {
+1241:                     in_flight.remove(&rank_idx);
+1242:                     // Phase 9 P1 (Spec 09 INV-0908): 24h quota moratorium after a partition merge.
+1243:                     // During merge hysteresis no quota-driven peer penalty may be applied,
+1244:                     // preventing cascade bans from divergent thermometers.
+1245:                     let in_moratorium = query.peer_mgr.is_in_merge_hysteresis(query.peer_mgr.net_time_ms());
+1246:                     let verdict = humoco_sim_core::quota::evaluate_quota_exceeded_claim(query.my_load, query.quota_limit);
+1247:                     match verdict {
+1248:                         humoco_sim_core::quota::QuotaPlausibilityVerdict::FraudulentRejection { .. } => {
+1249:                             if in_moratorium {
+1250:                                 tracing::info!(
+1251:                                     %addr,
+1252:                                     rank_idx,
+1253:                                     my_load = query.my_load,
+1254:                                     quota_limit = query.quota_limit,
+1255:                                     "Shard peer quota rejection during 24h merge moratorium - penalty suppressed (INV-0908)"
+1256:                                 );
+1257:                             } else {
+1258:                                 tracing::warn!(
+1259:                                     %addr,
+1260:                                     rank_idx,
+1261:                                     my_load = query.my_load,
+1262:                                     quota_limit = query.quota_limit,
+1263:                                     "Shard peer fraudulently claimed FLAG_QUOTA_EXCEEDED (Zone 1) - recording peer failure"
+1264:                                 );
+1265:                                 if rank_idx < 20 {
+1266:                                     query.peer_mgr.record_failure(addr).await;
+1267:                                 }
+1268:                             }
+1269:                         }
+1270:                         humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff { .. }
+1271:                         | humoco_sim_core::quota::QuotaPlausibilityVerdict::LegitimateOverload { .. } => {
+1272:                             tracing::info!(
+1273:                                 %addr,
+
+crates/humoco-node/src/network/manager.rs
+1883:     pub async fn record_failure(&self, addr: SocketAddr) {
+1884:         self.record_failure_at(addr, Instant::now()).await;
+1885:     }
+1886: 
+1887:     /// Records a failed interaction with a peer at a specific timestamp (for debounce verification).
+1888:     pub async fn record_failure_at(&self, addr: SocketAddr, now: Instant) {
+1889:         let mut peers = self.peers.write().await;
+1890:         if let Some(peer) = peers.get_mut(&addr) {
+1891:             peer.mark_failure_at(now);
+1892:         } else {
+1893:             let mut info = PeerInfo::with_type(addr, PeerConnectionType::ShardDirect);
+1894:             info.mark_failure_at(now);
+1895:             peers.insert(addr, info);
+1896:         }
+1897:     }
+
+crates/humoco-node/src/network/peer.rs
+129:     pub fn mark_failure_at(&mut self, now: Instant) {
+130:         let should_increment = match self.last_failure {
+131:             Some(last) => now.duration_since(last) >= Duration::from_secs(FAILURE_DEBOUNCE_SECS),
+132:             None => true,
+133:         };
+134: 
+135:         if should_increment {
+136:             self.last_failure = Some(now);
+137:             self.missing_count = self.missing_count.saturating_add(1);
+138:             if self.missing_count >= FAILURE_THRESHOLD_SUSPENDED {
+139:                 self.status = PeerStatus::Suspended;
+140:                 self.connection = None;
+141:             } else if self.missing_count >= FAILURE_THRESHOLD_DEGRADING {
+142:                 self.status = PeerStatus::Degrading;
+143:             }
+144:         }
+
+crates/humoco-node/src/ingress/tier.rs
+494:     pub fn evaluate_node_write_quota(
+495:         &self,
+496:         sender_pubkey: &[u8; 32],
+497:         required_byte_years: u64,
+498:         epoch_day: u64,
+499:     ) -> Result<(), IngressError> {
+500:         let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
+501:         let daily_quota = self.calculate_daily_quota(MAX_WHALE_MULTIPLIER, 1.0);
+502:         let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+503:         if thermo.try_accept_lock(epoch_day, node_id, required_byte_years, daily_quota) {
+504:             Ok(())
+505:         } else {
+506:             let used = thermo.get_node_usage(node_id);
+507:             let available = daily_quota.saturating_sub(used);
+508:             Err(IngressError::QuotaExceeded {
+509:                 available,
+510:                 required: required_byte_years,
+511:             })
+512:         }
+513:     }
+514: 
+515:     /// Evaluates and registers dynamic ingress for a network node against the 5x Whale Brake daily read limit.
+516:     pub fn evaluate_node_read_quota(
+517:         &self,
+518:         sender_pubkey: &[u8; 32],
+519:         required_credits: u64,
+520:         epoch_day: u64,
+521:     ) -> Result<(), IngressError> {
+522:         let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
+523:         let daily_read_quota = self.calculate_daily_read_quota(MAX_WHALE_MULTIPLIER, 1.0);
+524:         let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+525:         if thermo.try_accept_read(epoch_day, node_id, required_credits, daily_read_quota) {
+526:             Ok(())
+527:         } else {
+528:             let used = thermo.get_node_read_usage(node_id);
+529:             let available = daily_read_quota.saturating_sub(used);
+530:             Err(IngressError::ReadQuotaExceeded {
+531:                 available,
+532:                 required: required_credits,
+533:             })
+534:         }
+535:     }
+536: 
+
+crates/humoco-node/tests/phase4_net_time_and_quotas.rs
+315:         0,
+316:         0,
+317:         hmc_payload.len() as u32,
+318:     );
+319: 
+320:     let (resp_header, resp_payload) = handler_shard
+321:         .handle_authenticated(
+322:             req_header,
+323:             hmc_payload,
+324:             Some(*identity_client.node_pubkey()),
+325:         )
+326:         .await
+327:         .expect("handle");
+328:     assert_eq!(resp_header.msg_type, MsgType::LockVerifyResponse as u16);
+329:     assert_eq!(
+330:         resp_header.flags & FLAG_QUOTA_EXCEEDED,
+331:         FLAG_QUOTA_EXCEEDED,
+332:         "Shard must return FLAG_QUOTA_EXCEEDED when write load > 5x limit"

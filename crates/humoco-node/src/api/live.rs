@@ -4,15 +4,15 @@ use crate::{
     network::PeerManager, storage::DualTierEngine,
 };
 use axum::{
-    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use humoco_proto::{
+    live::{live_state_digest, verify_live_state_proof, LiveStateContext, LiveStateProof},
     AttestationVote,
-    live::{LiveStateContext, LiveStateProof, live_state_digest, verify_live_state_proof},
 };
 use std::sync::Arc;
 
@@ -275,7 +275,7 @@ pub async fn verify_current(
     Json(context): Json<LiveStateContext>,
 ) -> Response {
     let deadline = deadline_ext
-        .map(|ext| ext.0.0)
+        .map(|ext| ext.0 .0)
         .unwrap_or_else(|| tokio::time::Instant::now() + LIVE_PROOF_SERVER_BUDGET);
 
     if tokio::time::Instant::now() >= deadline {

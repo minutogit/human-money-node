@@ -16,7 +16,6 @@ use crate::ceh::types::{
 };
 use crate::types::NodePubKey;
 
-
 // ---------------------------------------------------------------------------
 // Domain Tags
 // ---------------------------------------------------------------------------
@@ -267,12 +266,8 @@ pub fn hash_round_change(
         }
         Some(prep) => {
             hasher.update(&[1u8]);
-            let prep_hash = hash_prepared_proof(
-                prep.shard_id,
-                prep.epoch,
-                prep.round,
-                &prep.proposal_hash,
-            );
+            let prep_hash =
+                hash_prepared_proof(prep.shard_id, prep.epoch, prep.round, &prep.proposal_hash);
             hasher.update(&prep_hash);
         }
     }
@@ -583,11 +578,7 @@ pub fn sign_candidate_proof(
 
 /// Verifies the signature on a `CandidateProof`.
 pub fn verify_candidate_proof(candidate: &CandidateProof) -> bool {
-    let digest = hash_candidate_proof(
-        &candidate.pubkey,
-        &candidate.ticket,
-        candidate.timestamp,
-    );
+    let digest = hash_candidate_proof(&candidate.pubkey, &candidate.ticket, candidate.timestamp);
     verify_signature(&candidate.pubkey, &digest, &candidate.f2f_sig)
 }
 
@@ -651,7 +642,12 @@ pub fn verify_prepared_proof(
     committee: &[NodePubKey; CEH_COMMITTEE_SIZE],
     min_signatures: usize,
 ) -> Result<(), CehError> {
-    let digest = hash_prepare_vote(proof.shard_id, proof.epoch, proof.round, &proof.proposal_hash);
+    let digest = hash_prepare_vote(
+        proof.shard_id,
+        proof.epoch,
+        proof.round,
+        &proof.proposal_hash,
+    );
     crate::ceh::types::validate_signatures_against_committee(
         &proof.prepare_signatures,
         committee,

@@ -1,31 +1,44 @@
-use std::sync::Arc;
 use ed25519_dalek::Signer;
+use std::sync::Arc;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 use humoco_node::api::hmc::{L2LockEntry, L2Verdict};
 use humoco_node::identity::NodeIdentity;
-use humoco_node::network::{
-    DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport,
+use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
+use humoco_node::storage::{
+    compute_hmc_canonical_hash, DualTierEngine, IngressOrigin, RedbStorage,
 };
-use humoco_node::storage::{compute_hmc_canonical_hash, DualTierEngine, IngressOrigin, RedbStorage};
 use humoco_sim_core::crypto::compute_canonical_hash;
 use humoco_sim_core::fraud::FraudProofPayload;
 use humoco_sim_core::storage::IngressVerdictLow;
 use humoco_sim_core::types::{LockRecord, SimTime};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
-async fn register_root(engine: &DualTierEngine, prototype: &L2LockEntry, key: &ed25519_dalek::SigningKey) -> String {
-    use humoco_node::api::hmc::{calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER};
+async fn register_root(
+    engine: &DualTierEngine,
+    prototype: &L2LockEntry,
+    key: &ed25519_dalek::SigningKey,
+) -> String {
+    use humoco_node::api::hmc::{
+        calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER,
+    };
     let mut root = prototype.clone();
-    root.t_id = [0x42;32];
+    root.t_id = [0x42; 32];
     root.sender_ephemeral_pub = key.verifying_key().to_bytes();
     let tag = bs58::encode(root.t_id).into_string();
-    let hash = calculate_l2_payload_hash_raw(TRAP_NONE_PLACEHOLDER, &tag, &root.t_id,
-        &root.sender_ephemeral_pub, root.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-        root.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER), root.encrypted_timestamp,
-        root.created_at_ms, root.deletable_at.as_deref(),
-        privacy_guard_commitment(root.privacy_guard.as_deref()).as_str());
+    let hash = calculate_l2_payload_hash_raw(
+        TRAP_NONE_PLACEHOLDER,
+        &tag,
+        &root.t_id,
+        &root.sender_ephemeral_pub,
+        root.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+        root.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
+        root.encrypted_timestamp,
+        root.created_at_ms,
+        root.deletable_at.as_deref(),
+        privacy_guard_commitment(root.privacy_guard.as_deref()).as_str(),
+    );
     root.layer2_signature = key.sign(&hash).to_bytes();
     let (verdict, _) = engine.ingress_hmc_lock(tag.clone(), root).await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
@@ -62,7 +75,10 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
         nonce_winner = counter.to_le_bytes().to_vec();
         h_winner = compute_canonical_hash(&parent_lock, &receiver_winner, &nonce_winner);
     }
-    assert!(h_winner < h_loser, "h_winner must be strictly smaller than h_loser");
+    assert!(
+        h_winner < h_loser,
+        "h_winner must be strictly smaller than h_loser"
+    );
 
     let lock_loser = LockRecord::new(
         parent_lock,
@@ -80,7 +96,9 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
     );
 
     // Step A1: Ingress loser lock first -> accepted
-    let v1 = engine.ingress_lock(lock_loser.clone(), now, root_valid).await;
+    let v1 = engine
+        .ingress_lock(lock_loser.clone(), now, root_valid)
+        .await;
     assert_eq!(v1, Ok(IngressVerdictLow::AcceptedNew));
     assert_eq!(
         engine.get_ram_lock(&parent_lock).await.map(|l| l.id),
@@ -90,7 +108,12 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
 
     // Step A1.5: ClientApi ingress with colliding winner lock -> RejectedCollision (never overwrites on live ingress)
     let v_client = engine
-        .ingress_lock_with_origin(lock_winner.clone(), now, root_valid, IngressOrigin::ClientApi)
+        .ingress_lock_with_origin(
+            lock_winner.clone(),
+            now,
+            root_valid,
+            IngressOrigin::ClientApi,
+        )
         .await;
     assert_eq!(
         v_client,
@@ -100,7 +123,12 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
 
     // Step A2: PartitionSync ingress winner lock second -> collision -> min(H_canon) resolves in favor of lock_winner!
     let v2 = engine
-        .ingress_lock_with_origin(lock_winner.clone(), now, root_valid, IngressOrigin::PartitionSync)
+        .ingress_lock_with_origin(
+            lock_winner.clone(),
+            now,
+            root_valid,
+            IngressOrigin::PartitionSync,
+        )
         .await;
     assert_eq!(
         v2,
@@ -144,8 +172,14 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
 
     // Step A4: Verify disk persistence of the winner after flush batch
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    let disk_lock = storage.get_lock(&parent_lock).expect("disk get").expect("lock present");
-    assert_eq!(disk_lock.0.id, lock_winner.id, "Disk entry must be the winner lock");
+    let disk_lock = storage
+        .get_lock(&parent_lock)
+        .expect("disk get")
+        .expect("lock present");
+    assert_eq!(
+        disk_lock.0.id, lock_winner.id,
+        "Disk entry must be the winner lock"
+    );
 
     // --- Part B: HMC L2LockEntry min(H_canon) Resolution ---
     let lookup_tag = "voucher_tag_split_brain_test".to_string();
@@ -170,9 +204,15 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
     assert!(h_hmc_winner < h_hmc_loser);
 
     let sign_entry = |key: &ed25519_dalek::SigningKey, entry: &mut L2LockEntry| {
-        use humoco_node::api::hmc::{calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER};
+        use humoco_node::api::hmc::{
+            calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER,
+        };
         let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string();
-        let eff_v = if is_genesis { TRAP_NONE_PLACEHOLDER } else { &entry.layer2_voucher_id };
+        let eff_v = if is_genesis {
+            TRAP_NONE_PLACEHOLDER
+        } else {
+            &entry.layer2_voucher_id
+        };
         let hash = calculate_l2_payload_hash_raw(
             eff_v,
             &lookup_tag,
@@ -225,7 +265,9 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
     register_root(&engine, &entry_loser, &key_a).await;
 
     // Ingress HMC loser lock first
-    let (v_hmc1, is_new1) = engine.ingress_hmc_lock(lookup_tag.clone(), entry_loser.clone()).await;
+    let (v_hmc1, is_new1) = engine
+        .ingress_hmc_lock(lookup_tag.clone(), entry_loser.clone())
+        .await;
     assert!(is_new1);
     assert!(matches!(v_hmc1, L2Verdict::Verified { .. }));
     assert_eq!(
@@ -235,16 +277,32 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
 
     // Verify ClientApi ingress with colliding winner lock -> Rejected/Conflict (never overwrites on live ingress)
     let (v_hmc_client, is_new_client) = engine
-        .ingress_hmc_lock_with_origin(lookup_tag.clone(), entry_winner.clone(), IngressOrigin::ClientApi, None)
+        .ingress_hmc_lock_with_origin(
+            lookup_tag.clone(),
+            entry_winner.clone(),
+            IngressOrigin::ClientApi,
+            None,
+        )
         .await;
     assert!(!is_new_client);
-    assert!(matches!(v_hmc_client, L2Verdict::Conflict { .. }), "Live ClientApi ingress must reject colliding HMC lock");
+    assert!(
+        matches!(v_hmc_client, L2Verdict::Conflict { .. }),
+        "Live ClientApi ingress must reject colliding HMC lock"
+    );
 
     // Ingress HMC winner lock second via PartitionSync -> should replace loser via min(H_canon)
     let (v_hmc2, is_new2) = engine
-        .ingress_hmc_lock_with_origin(lookup_tag.clone(), entry_winner.clone(), IngressOrigin::PartitionSync, None)
+        .ingress_hmc_lock_with_origin(
+            lookup_tag.clone(),
+            entry_winner.clone(),
+            IngressOrigin::PartitionSync,
+            None,
+        )
         .await;
-    assert!(is_new2, "Winner must trigger a new flush op to replace loser");
+    assert!(
+        is_new2,
+        "Winner must trigger a new flush op to replace loser"
+    );
     assert!(matches!(v_hmc2, L2Verdict::Verified { .. }));
     assert_eq!(
         engine.get_hmc_ram_lock(&lookup_tag).await.map(|e| e.t_id),
@@ -277,20 +335,34 @@ async fn test_phase3_split_brain_deterministic_healing_min_h_canon() {
     };
     sign_entry(&key_a, &mut entry_loser2);
     let (v_hmc3, is_new3) = engine
-        .ingress_hmc_lock_with_origin(lookup_tag.clone(), entry_loser2, IngressOrigin::PartitionSync, None)
+        .ingress_hmc_lock_with_origin(
+            lookup_tag.clone(),
+            entry_loser2,
+            IngressOrigin::PartitionSync,
+            None,
+        )
         .await;
     assert!(!is_new3);
     match v_hmc3 {
         L2Verdict::Conflict { existing_lock } => {
-            assert_eq!(existing_lock.t_id, t_id_winner, "Conflict must point to winner as existing lock");
+            assert_eq!(
+                existing_lock.t_id, t_id_winner,
+                "Conflict must point to winner as existing lock"
+            );
         }
         _ => panic!("Expected Conflict verdict for inferior HMC lock"),
     }
 
     // Verify HMC disk persistence of the winner after flush
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    let disk_hmc = storage.get_hmc_lock(&lookup_tag).expect("get_hmc_lock").expect("hmc present");
-    assert_eq!(disk_hmc.t_id, t_id_winner, "HMC Disk entry must match winner");
+    let disk_hmc = storage
+        .get_hmc_lock(&lookup_tag)
+        .expect("get_hmc_lock")
+        .expect("hmc present");
+    assert_eq!(
+        disk_hmc.t_id, t_id_winner,
+        "HMC Disk entry must match winner"
+    );
 }
 
 /// 2. Test for Multi-Shard Sync including regular LockRecords and HMC-Locks.
@@ -347,8 +419,10 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
     transport_b.spawn_accept_loop();
 
     // Register reciprocal F2F friends
-    pm_a.register_f2f_friend(*identity_b.node_id(), Some(addr_b)).await;
-    pm_b.register_f2f_friend(*identity_a.node_id(), Some(addr_a)).await;
+    pm_a.register_f2f_friend(*identity_b.node_id(), Some(addr_b))
+        .await;
+    pm_b.register_f2f_friend(*identity_a.node_id(), Some(addr_a))
+        .await;
 
     // Populate Node A with locks in multiple shards:
     // Shard 0 lock
@@ -361,7 +435,9 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
         SimTime(0),
         SimTime(60_000),
     );
-    let _ = engine_a.ingress_lock(lock_shard_0.clone(), SimTime(0), SimTime(600_000)).await;
+    let _ = engine_a
+        .ingress_lock(lock_shard_0.clone(), SimTime(0), SimTime(600_000))
+        .await;
 
     // Shard 42 lock
     let mut parent_shard_42 = [0u8; 32];
@@ -373,7 +449,9 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
         SimTime(0),
         SimTime(60_000),
     );
-    let _ = engine_a.ingress_lock(lock_shard_42.clone(), SimTime(0), SimTime(600_000)).await;
+    let _ = engine_a
+        .ingress_lock(lock_shard_42.clone(), SimTime(0), SimTime(600_000))
+        .await;
 
     // HMC lock on a specific voucher tag
     let hmc_tag = "voucher_multi_shard_sync_tag".to_string();
@@ -397,9 +475,15 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
         privacy_guard: None,
     };
     {
-        use humoco_node::api::hmc::{calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER};
+        use humoco_node::api::hmc::{
+            calculate_l2_payload_hash_raw, privacy_guard_commitment, TRAP_NONE_PLACEHOLDER,
+        };
         let is_genesis = hmc_tag == bs58::encode(&hmc_entry.t_id).into_string();
-        let eff_v = if is_genesis { TRAP_NONE_PLACEHOLDER } else { &hmc_entry.layer2_voucher_id };
+        let eff_v = if is_genesis {
+            TRAP_NONE_PLACEHOLDER
+        } else {
+            &hmc_entry.layer2_voucher_id
+        };
         let hash = calculate_l2_payload_hash_raw(
             eff_v,
             &hmc_tag,
@@ -417,19 +501,33 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
     let root_tag = register_root(&engine_a, &hmc_entry, &hmc_key).await;
     let root_parent = *blake3::hash(root_tag.as_bytes()).as_bytes();
     let hmc_shard_id = humoco_sim_core::types::extract_shard_id(&root_parent);
-    let (verdict, _) = engine_a.ingress_hmc_lock(hmc_tag.clone(), hmc_entry.clone()).await;
+    let (verdict, _) = engine_a
+        .ingress_hmc_lock(hmc_tag.clone(), hmc_entry.clone())
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
 
     // Wait 100ms for flush on Node A
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Connect Node B to Node A
-    let conn_b = transport_b.connect_peer(addr_a).await.expect("connect B -> A");
+    let conn_b = transport_b
+        .connect_peer(addr_a)
+        .await
+        .expect("connect B -> A");
 
     // Execute ActiveSync request
-    let sync_payload = transport_b.request_active_sync(&conn_b, 1).await.expect("request_active_sync");
-    assert!(!sync_payload.locks.is_empty(), "Should receive regular locks");
-    assert!(!sync_payload.hmc_locks.is_empty(), "Should receive HMC locks");
+    let sync_payload = transport_b
+        .request_active_sync(&conn_b, 1)
+        .await
+        .expect("request_active_sync");
+    assert!(
+        !sync_payload.locks.is_empty(),
+        "Should receive regular locks"
+    );
+    assert!(
+        !sync_payload.hmc_locks.is_empty(),
+        "Should receive HMC locks"
+    );
 
     // Ingress received sync locks into Node B's engine via PartitionSync
     for (rec, rv) in sync_payload.locks {
@@ -464,13 +562,22 @@ async fn test_phase3_multi_shard_and_hmc_sync() {
     handler_a.readiness_manager.mark_shard_ready(0);
     handler_a.readiness_manager.mark_shard_ready(42);
     handler_a.readiness_manager.mark_shard_ready(hmc_shard_id);
-    let (d_shard0, _cnt0) = transport_b.request_shard_digest(&conn_b, 0, 2).await.expect("shard 0 digest");
+    let (d_shard0, _cnt0) = transport_b
+        .request_shard_digest(&conn_b, 0, 2)
+        .await
+        .expect("shard 0 digest");
     assert_ne!(d_shard0, [0u8; 32]);
 
-    let (d_shard42, _cnt42) = transport_b.request_shard_digest(&conn_b, 42, 3).await.expect("shard 42 digest");
+    let (d_shard42, _cnt42) = transport_b
+        .request_shard_digest(&conn_b, 42, 3)
+        .await
+        .expect("shard 42 digest");
     assert_ne!(d_shard42, [0u8; 32]);
 
-    let (d_hmc_shard, _cnt_hmc) = transport_b.request_shard_digest(&conn_b, hmc_shard_id, 4).await.expect("hmc shard digest");
+    let (d_hmc_shard, _cnt_hmc) = transport_b
+        .request_shard_digest(&conn_b, hmc_shard_id, 4)
+        .await
+        .expect("hmc shard digest");
     assert_ne!(d_hmc_shard, [0u8; 32]);
 }
 
@@ -528,17 +635,25 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
     transport_b.spawn_accept_loop();
 
     // Register reciprocal F2F friends
-    pm_a.register_f2f_friend(*identity_b.node_id(), Some(addr_b)).await;
-    pm_b.register_f2f_friend(*identity_a.node_id(), Some(addr_a)).await;
+    pm_a.register_f2f_friend(*identity_b.node_id(), Some(addr_b))
+        .await;
+    pm_b.register_f2f_friend(*identity_a.node_id(), Some(addr_a))
+        .await;
 
     // Establish connection B -> A
-    let conn_b = transport_b.connect_peer(addr_a).await.expect("connect B -> A");
+    let conn_b = transport_b
+        .connect_peer(addr_a)
+        .await
+        .expect("connect B -> A");
 
     // Verify Peer B is recognized and authorized
     let offender_node_id = *identity_b.node_id();
     assert!(!pm_a.is_banned(&offender_node_id).await);
     assert!(!engine.is_node_banned(&offender_node_id).await);
-    assert!(pm_a.can_authorize_direct_rpc(&conn_b.remote_address(), Some(&offender_node_id)).await);
+    assert!(
+        pm_a.can_authorize_direct_rpc(&conn_b.remote_address(), Some(&offender_node_id))
+            .await
+    );
 
     // Create a valid First-Party Equivocation Proof:
     // Peer B signs two conflicting attestations for the same parent_lock with different lock_ids!
@@ -553,11 +668,21 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
     let p2 = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id_2);
     let d1 = humoco_sim_core::crypto::compute_sig_digest(
         humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
-        0, 0, 0, shard_id, 0, &p1,
+        0,
+        0,
+        0,
+        shard_id,
+        0,
+        &p1,
     );
     let d2 = humoco_sim_core::crypto::compute_sig_digest(
         humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
-        0, 0, 0, shard_id, 0, &p2,
+        0,
+        0,
+        0,
+        shard_id,
+        0,
+        &p2,
     );
 
     use ed25519_dalek::Signer;
@@ -581,7 +706,8 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
         shard_id: 0,
     };
 
-    let proof = FraudProofPayload::new_shard_equivocation_with_pubkey(att_1, att_2, offender_node_id);
+    let proof =
+        FraudProofPayload::new_shard_equivocation_with_pubkey(att_1, att_2, offender_node_id);
     assert!(proof.verify(), "Proof must be cryptographically valid");
 
     let raw_proof = bincode::serialize(&proof).expect("serialize proof");
@@ -595,7 +721,10 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
         0,
         raw_proof.len() as u32,
     );
-    let (resp_hdr, _resp_payload) = transport_b.send_request(&conn_b, &proof_header, &raw_proof).await.expect("send EquivocationProof");
+    let (resp_hdr, _resp_payload) = transport_b
+        .send_request(&conn_b, &proof_header, &raw_proof)
+        .await
+        .expect("send EquivocationProof");
     assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
 
     // Wait a brief moment for ban and connection closure to settle
@@ -608,16 +737,27 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
 
     // Verify:
     // 1. Offender is immediately banned in engine and peer_manager
-    assert!(engine.is_node_banned(&proof.perpetrator_node_id).await, "Offender must be banned in DualTierEngine");
-    assert!(pm_a.is_banned(&proof.perpetrator_node_id).await, "Offender must be banned in PeerManager");
+    assert!(
+        engine.is_node_banned(&proof.perpetrator_node_id).await,
+        "Offender must be banned in DualTierEngine"
+    );
+    assert!(
+        pm_a.is_banned(&proof.perpetrator_node_id).await,
+        "Offender must be banned in PeerManager"
+    );
 
     // 2. Evidence is durably persisted in redb
-    let stored_evidence = storage.get_evidence(&evidence_hash).expect("get_evidence").expect("evidence found");
+    let stored_evidence = storage
+        .get_evidence(&evidence_hash)
+        .expect("get_evidence")
+        .expect("evidence found");
     assert_eq!(stored_evidence, raw_proof);
 
     // 3. Peering path authorization is revoked immediately
     assert!(
-        !pm_a.can_authorize_direct_rpc(&conn_b.remote_address(), Some(&proof.perpetrator_node_id)).await,
+        !pm_a
+            .can_authorize_direct_rpc(&conn_b.remote_address(), Some(&proof.perpetrator_node_id))
+            .await,
         "Direct RPC authorization must be revoked for banned node"
     );
 
@@ -632,7 +772,8 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
     let payload = bincode::serialize(&humoco_node::network::framing::LockWirePayload::Sim(
         banned_lock,
         600_000,
-    )).unwrap();
+    ))
+    .unwrap();
     let banned_ingress_header = WireHeader::new(
         MsgType::LockVerifyRequest as u16,
         2,
@@ -642,7 +783,16 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
     );
 
     use humoco_node::network::RequestHandler;
-    let (ingress_resp_hdr, ingress_resp_bytes) = handler_a.handle(banned_ingress_header, payload).await.expect("handle");
-    assert_eq!(ingress_resp_hdr.msg_type, MsgType::LockVerifyResponse as u16);
-    assert!(ingress_resp_bytes.is_empty(), "Banned node ingress must produce empty rejected response");
+    let (ingress_resp_hdr, ingress_resp_bytes) = handler_a
+        .handle(banned_ingress_header, payload)
+        .await
+        .expect("handle");
+    assert_eq!(
+        ingress_resp_hdr.msg_type,
+        MsgType::LockVerifyResponse as u16
+    );
+    assert!(
+        ingress_resp_bytes.is_empty(),
+        "Banned node ingress must produce empty rejected response"
+    );
 }

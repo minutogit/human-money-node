@@ -1,13 +1,13 @@
+use parking_lot::RwLock as PlRwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use parking_lot::RwLock as PlRwLock;
 use thiserror::Error;
 
-use humoco_sim_core::quota::{ByteYears, NetworkThermometer, MAX_WHALE_MULTIPLIER};
-use humoco_sim_core::types::NodeId;
 use crate::ingress::pow::{PowEngine, PowError};
 use crate::storage::{RedbStorage, StorageError};
+use humoco_sim_core::quota::{ByteYears, NetworkThermometer, MAX_WHALE_MULTIPLIER};
+use humoco_sim_core::types::NodeId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IngressTier {
@@ -37,6 +37,20 @@ pub struct F2fClientMeta {
     pub label: String,
     pub registered_at_ms: u64,
     pub last_active_ms: Option<u64>,
+}
+
+/// Returns true if the token matches the required client secret format `f2f_<token>` (e.g. 128-bit secret `f2f_<32 hex digits>` or labeled client token).
+pub fn is_valid_client_token(token: &str) -> bool {
+    let t = token.trim();
+    if !t.starts_with("f2f_") {
+        return false;
+    }
+    let suffix = &t[4..];
+    suffix.len() >= 8
+        && suffix.len() <= 64
+        && suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 #[derive(Debug, Error)]
@@ -91,6 +105,8 @@ struct VipQuotaPersistOp {
     remaining: u64,
 }
 
+type P2pDailyUsage = (u64, HashMap<[u8; 32], u64>);
+
 #[derive(Clone)]
 pub struct TierController {
     storage: Arc<RedbStorage>,
@@ -112,6 +128,8 @@ pub struct TierController {
     vip_persist_tx: tokio::sync::mpsc::Sender<VipQuotaPersistOp>,
     vip_persist_worker: tokio::task::AbortHandle,
     vip_persist_failed: Arc<AtomicBool>,
+    p2p_node_usage: Arc<RwLock<P2pDailyUsage>>,
+    p2p_node_read_usage: Arc<RwLock<P2pDailyUsage>>,
 }
 
 impl TierController {
@@ -120,7 +138,8 @@ impl TierController {
     /// Spawns a FIFO-sequenced VIP quota persist worker that processes write operations
     /// in strict order, preventing out-of-order write races from unsequenced `tokio::spawn`.
     pub fn new(storage: Arc<RedbStorage>, pow_engine: Arc<PowEngine>) -> Self {
-        let (vip_persist_tx, mut vip_persist_rx) = tokio::sync::mpsc::channel::<VipQuotaPersistOp>(1_024);
+        let (vip_persist_tx, mut vip_persist_rx) =
+            tokio::sync::mpsc::channel::<VipQuotaPersistOp>(1_024);
         let persist_storage = storage.clone();
         let vip_persist_failed = Arc::new(AtomicBool::new(false));
         let worker_failed = vip_persist_failed.clone();
@@ -129,7 +148,8 @@ impl TierController {
                 let storage = persist_storage.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     storage.set_quota(&op.account_tag, op.remaining)
-                }).await;
+                })
+                .await;
                 if !matches!(res, Ok(Ok(()))) {
                     worker_failed.store(true, Ordering::Release);
                     tracing::warn!(?res, "FIFO VIP quota persistence failed");
@@ -157,6 +177,8 @@ impl TierController {
             vip_persist_tx,
             vip_persist_worker: worker.abort_handle(),
             vip_persist_failed,
+            p2p_node_usage: Arc::new(RwLock::new((0, HashMap::new()))),
+            p2p_node_read_usage: Arc::new(RwLock::new((0, HashMap::new()))),
         }
     }
 
@@ -178,18 +200,28 @@ impl TierController {
 
     /// Records gateway declared usage, advancing day roll-over if needed, and returns:
     /// `(epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes)`.
-    pub fn record_declared_usage(&self, now_ms: u64, footprint_micro_bj: u64) -> (u32, u64, u64, u64) {
+    pub fn record_declared_usage(
+        &self,
+        now_ms: u64,
+        footprint_micro_bj: u64,
+    ) -> (u32, u64, u64, u64) {
         let day = self.current_epoch_day_at(now_ms);
         let last_day = self.current_epoch_day_cached.load(Ordering::Relaxed);
         if day > last_day
-            && self.current_epoch_day_cached.compare_exchange(last_day, day, Ordering::SeqCst, Ordering::Relaxed).is_ok()
+            && self
+                .current_epoch_day_cached
+                .compare_exchange(last_day, day, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
         {
             let prev_cum = self.cumulative_micro_byte_years.swap(0, Ordering::SeqCst);
             self.prev_day_final_bytes.store(prev_cum, Ordering::SeqCst);
             self.epoch_seq.store(0, Ordering::SeqCst);
         }
         let seq = self.next_epoch_seq();
-        let cum = self.cumulative_micro_byte_years.fetch_add(footprint_micro_bj, Ordering::SeqCst) + footprint_micro_bj;
+        let cum = self
+            .cumulative_micro_byte_years
+            .fetch_add(footprint_micro_bj, Ordering::SeqCst)
+            + footprint_micro_bj;
         let prev = self.prev_day_final_bytes.load(Ordering::Relaxed);
         (day as u32, seq, cum, prev)
     }
@@ -214,7 +246,11 @@ impl TierController {
     }
 
     /// Tops up VIP quota for an account, updating cache and persisting asynchronously.
-    pub fn topup_vip_quota(&self, account_tag: [u8; 32], byte_years: u64) -> Result<u64, IngressError> {
+    pub fn topup_vip_quota(
+        &self,
+        account_tag: [u8; 32],
+        byte_years: u64,
+    ) -> Result<u64, IngressError> {
         let mut cache = self.vip_quota_cache.write();
         let bal = cache
             .entry(account_tag)
@@ -247,7 +283,10 @@ impl TierController {
         let cache = self.vip_quota_cache.read();
         let mut list = Vec::with_capacity(cache.len());
         for (tag, balance) in cache.iter() {
-            let name = tag_to_name.get(tag).cloned().unwrap_or_else(|| hex::encode(tag));
+            let name = tag_to_name
+                .get(tag)
+                .cloned()
+                .unwrap_or_else(|| hex::encode(tag));
             list.push((name, *balance));
         }
         list.sort_by(|a, b| a.0.cmp(&b.0));
@@ -266,7 +305,10 @@ impl TierController {
     /// Uses a FIFO channel to sequence writes, preventing out-of-order write races
     /// that could occur with unsequenced `tokio::spawn` calls.
     fn persist_vip_quota_async(&self, account_tag: [u8; 32], remaining: u64) {
-        let op = VipQuotaPersistOp { account_tag, remaining };
+        let op = VipQuotaPersistOp {
+            account_tag,
+            remaining,
+        };
         if let Err(e) = self.vip_persist_tx.try_send(op) {
             tracing::warn!("FIFO VIP quota persist channel send failed: {:?}", e);
         }
@@ -274,9 +316,15 @@ impl TierController {
 
     /// In-memory atomic check-and-charge for VIP quota (hot-path, <1µs, no fsync stall).
     /// Returns remaining balance after deduction or QuotaExceeded.
-    pub fn try_charge_vip_in_memory(&self, account_tag: &[u8; 32], required: u64) -> Result<u64, IngressError> {
+    pub fn try_charge_vip_in_memory(
+        &self,
+        account_tag: &[u8; 32],
+        required: u64,
+    ) -> Result<u64, IngressError> {
         let mut cache = self.vip_quota_cache.write();
-        let bal = cache.entry(*account_tag).or_insert_with(|| self.storage.get_quota(account_tag).unwrap_or(0));
+        let bal = cache
+            .entry(*account_tag)
+            .or_insert_with(|| self.storage.get_quota(account_tag).unwrap_or(0));
         if *bal < required {
             return Err(IngressError::QuotaExceeded {
                 available: *bal,
@@ -298,53 +346,83 @@ impl TierController {
     /// [INV-0907]
     /// Initializes the thermometer of a new node with the current peer median
     pub fn seed_from_peers(&self, peer_median: u64) {
-        self.thermometer.write().unwrap_or_else(|e| e.into_inner()).seed_from_peers(peer_median);
+        self.thermometer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .seed_from_peers(peer_median);
     }
 
     /// [INV-0908]
     /// Fast re-seed on network merges (e.g., village A docks into the global mesh)
     pub fn fast_reseed_on_merge(&self, global_median: u64) {
-        self.thermometer.write().unwrap_or_else(|e| e.into_inner()).fast_reseed_on_merge(global_median);
+        self.thermometer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .fast_reseed_on_merge(global_median);
     }
 
     /// [INV-0922] Records a daily median in the 28-day slotted ring buffer
     pub fn record_daily_median(&self, median: u64) {
-        self.thermometer.write().unwrap_or_else(|e| e.into_inner()).record_daily_median(median);
+        self.thermometer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_daily_median(median);
     }
 
     /// Returns the rolling 24-hour write daily rate in Byte-Years
     pub fn rolling_24h_average(&self) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).rolling_24h_average()
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .rolling_24h_average()
     }
 
     /// Returns the rolling 24-hour write daily rate in Byte-Years at a specific second
     pub fn rolling_24h_average_at(&self, now_sec: u64) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).rolling_24h_average_at(now_sec)
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .rolling_24h_average_at(now_sec)
     }
 
     /// Returns the current raw write EMA in micro-Byte-Years (µBJ)
     pub fn current_write_ema_micro_bj(&self) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).current_write_ema_micro_bj()
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_write_ema_micro_bj()
     }
 
     /// Returns the current raw read EMA in credits
     pub fn current_read_ema_credits(&self) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).current_read_ema_credits()
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_read_ema_credits()
     }
 
     /// Returns the current rolling 24-hour read daily rate in credits
     pub fn rolling_24h_read_average(&self) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).rolling_24h_read_average()
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .rolling_24h_read_average()
     }
 
     /// Returns the rolling 24-hour read daily rate in credits at a specific second
     pub fn rolling_24h_read_average_at(&self, now_sec: u64) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).rolling_24h_read_average_at(now_sec)
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .rolling_24h_read_average_at(now_sec)
     }
 
     /// [INV-0923] Records a daily read median
     pub fn record_daily_read_median(&self, median: u64) {
-        self.thermometer.write().unwrap_or_else(|e| e.into_inner()).record_daily_read_median(median);
+        self.thermometer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_daily_read_median(median);
     }
 
     /// [INV-0903/0904] Autonomous thermometer day roll-over (Spec 09 Phase 9 P1).
@@ -400,28 +478,46 @@ impl TierController {
 
     /// [INV-0924] Calculates effective reference value NCB_eff = max(Moving_Median, HARD_FLOOR_BASELINE_DAILY)
     pub fn effective_ncb(&self) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).effective_ncb()
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .effective_ncb()
     }
 
     /// [INV-0925] Calculates effective reference value NCB_read_eff = max(Moving_Read_Median, HARD_FLOOR_READ_BASELINE_DAILY)
     pub fn effective_read_ncb(&self) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).effective_read_ncb()
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .effective_read_ncb()
     }
 
     /// Calculates dynamic daily quota with 5x Whale Brake K <= 5.0 (Spec 09)
     pub fn calculate_daily_quota(&self, k_multiplier: f64, spread_damper: f64) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).calculate_daily_quota(k_multiplier, spread_damper)
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .calculate_daily_quota(k_multiplier, spread_damper)
     }
 
     /// [INV-0927] Calculates daily read quota for a node:
     /// Read_Quota = NCB_read_eff * min(K, 5.0) * Spread_Damper
     pub fn calculate_daily_read_quota(&self, k_multiplier: f64, spread_damper: f64) -> u64 {
-        self.thermometer.read().unwrap_or_else(|e| e.into_inner()).calculate_daily_read_quota(k_multiplier, spread_damper)
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .calculate_daily_read_quota(k_multiplier, spread_damper)
     }
 
     /// [INV-0928] Evaluates read quota for a client: Returns `Ok(())` if the read is within the daily budget.
     /// Returns `Err(IngressError::ReadQuotaExceeded)` if the budget is exceeded (silent dropping).
-    pub fn evaluate_read_quota(&self, client_id: NodeId, credits: u64, epoch_day: u64, k_multiplier: f64) -> Result<(), IngressError> {
+    pub fn evaluate_read_quota(
+        &self,
+        client_id: NodeId,
+        credits: u64,
+        epoch_day: u64,
+        k_multiplier: f64,
+    ) -> Result<(), IngressError> {
         let daily_quota = self.calculate_daily_read_quota(k_multiplier, 1.0);
         let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
         if thermo.try_accept_read(epoch_day, client_id, credits, daily_quota) {
@@ -456,7 +552,12 @@ impl TierController {
     }
 
     /// Evaluates and registers dynamic ingress for F2F peers against daily quota (K=1.0)
-    pub fn evaluate_f2f_quota(&self, peer_token: &str, required_byte_years: u64, epoch_day: u64) -> Result<(), IngressError> {
+    pub fn evaluate_f2f_quota(
+        &self,
+        peer_token: &str,
+        required_byte_years: u64,
+        epoch_day: u64,
+    ) -> Result<(), IngressError> {
         let token_hash = *blake3::hash(peer_token.as_bytes()).as_bytes();
         let peer_node_id: NodeId = u16::from_be_bytes([token_hash[0], token_hash[1]]);
         let daily_quota = self.calculate_daily_quota(1.0, 1.0);
@@ -474,9 +575,16 @@ impl TierController {
     }
 
     /// Evaluates and registers dynamic ingress for VIP accounts against daily quota with 5x Whale Brake (K <= 5.0)
-    pub fn evaluate_vip_quota(&self, account_tag: &[u8; 32], required_byte_years: u64, epoch_day: u64, k_multiplier: f64) -> Result<(), IngressError> {
+    pub fn evaluate_vip_quota(
+        &self,
+        account_tag: &[u8; 32],
+        required_byte_years: u64,
+        epoch_day: u64,
+        k_multiplier: f64,
+    ) -> Result<(), IngressError> {
         let vip_node_id: NodeId = u16::from_be_bytes([account_tag[0], account_tag[1]]);
-        let daily_quota = self.calculate_daily_quota(k_multiplier.clamp(0.0, MAX_WHALE_MULTIPLIER), 1.0);
+        let daily_quota =
+            self.calculate_daily_quota(k_multiplier.clamp(0.0, MAX_WHALE_MULTIPLIER), 1.0);
         let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
         if thermo.try_accept_lock(epoch_day, vip_node_id, required_byte_years, daily_quota) {
             Ok(())
@@ -491,44 +599,86 @@ impl TierController {
     }
 
     /// Evaluates and registers dynamic ingress for a network node against the 5x Whale Brake daily write limit.
+    ///
+    /// W4 (Audit 19): Sender-specific P2P write budgets are isolated by full 32-byte `NodePubKey`
+    /// in `p2p_node_usage`, preventing 16-bit prefix contention across distinct network nodes.
     pub fn evaluate_node_write_quota(
         &self,
         sender_pubkey: &[u8; 32],
         required_byte_years: u64,
         epoch_day: u64,
     ) -> Result<(), IngressError> {
-        let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
         let daily_quota = self.calculate_daily_quota(MAX_WHALE_MULTIPLIER, 1.0);
-        let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-        if thermo.try_accept_lock(epoch_day, node_id, required_byte_years, daily_quota) {
-            Ok(())
+        let mut p2p_usage = self
+            .p2p_node_usage
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if p2p_usage.0 != epoch_day {
+            p2p_usage.0 = epoch_day;
+            p2p_usage.1.clear();
+        }
+        let current_usage = p2p_usage.1.entry(*sender_pubkey).or_insert(0);
+        if let Some(new_usage) = current_usage.checked_add(required_byte_years) {
+            if new_usage <= daily_quota {
+                *current_usage = new_usage;
+                drop(p2p_usage);
+                let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
+                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+                let _ = thermo.try_accept_lock(epoch_day, node_id, required_byte_years, u64::MAX);
+                Ok(())
+            } else {
+                let available = daily_quota.saturating_sub(*current_usage);
+                Err(IngressError::QuotaExceeded {
+                    available,
+                    required: required_byte_years,
+                })
+            }
         } else {
-            let used = thermo.get_node_usage(node_id);
-            let available = daily_quota.saturating_sub(used);
             Err(IngressError::QuotaExceeded {
-                available,
+                available: 0,
                 required: required_byte_years,
             })
         }
     }
 
     /// Evaluates and registers dynamic ingress for a network node against the 5x Whale Brake daily read limit.
+    ///
+    /// W4 (Audit 19): Sender-specific P2P read credits are isolated by full 32-byte `NodePubKey`
+    /// in `p2p_node_read_usage`, preventing 16-bit prefix contention across distinct network nodes.
     pub fn evaluate_node_read_quota(
         &self,
         sender_pubkey: &[u8; 32],
         required_credits: u64,
         epoch_day: u64,
     ) -> Result<(), IngressError> {
-        let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
         let daily_read_quota = self.calculate_daily_read_quota(MAX_WHALE_MULTIPLIER, 1.0);
-        let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-        if thermo.try_accept_read(epoch_day, node_id, required_credits, daily_read_quota) {
-            Ok(())
+        let mut p2p_read_usage = self
+            .p2p_node_read_usage
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if p2p_read_usage.0 != epoch_day {
+            p2p_read_usage.0 = epoch_day;
+            p2p_read_usage.1.clear();
+        }
+        let current_usage = p2p_read_usage.1.entry(*sender_pubkey).or_insert(0);
+        if let Some(new_usage) = current_usage.checked_add(required_credits) {
+            if new_usage <= daily_read_quota {
+                *current_usage = new_usage;
+                drop(p2p_read_usage);
+                let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
+                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+                let _ = thermo.try_accept_read(epoch_day, node_id, required_credits, u64::MAX);
+                Ok(())
+            } else {
+                let available = daily_read_quota.saturating_sub(*current_usage);
+                Err(IngressError::ReadQuotaExceeded {
+                    available,
+                    required: required_credits,
+                })
+            }
         } else {
-            let used = thermo.get_node_read_usage(node_id);
-            let available = daily_read_quota.saturating_sub(used);
             Err(IngressError::ReadQuotaExceeded {
-                available,
+                available: 0,
                 required: required_credits,
             })
         }
@@ -537,13 +687,22 @@ impl TierController {
     /// Registers an auth token associated with a specific VIP account tag.
     pub fn register_vip_token(&self, token: impl Into<String>, account_tag: [u8; 32]) {
         let token_str = token.into();
-        self.vip_tokens.write().unwrap_or_else(|e| e.into_inner()).insert(token_str, account_tag);
-        self.vip_tags.write().unwrap_or_else(|e| e.into_inner()).insert(account_tag);
+        self.vip_tokens
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token_str, account_tag);
+        self.vip_tags
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(account_tag);
     }
 
     /// Registers an authorized VIP account tag directly.
     pub fn register_vip_tag(&self, account_tag: [u8; 32]) {
-        self.vip_tags.write().unwrap_or_else(|e| e.into_inner()).insert(account_tag);
+        self.vip_tags
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(account_tag);
     }
 
     /// Registers a trusted F2F client with optional friendly label and stores metadata.
@@ -704,7 +863,11 @@ impl TierController {
         // 2. Check Tier 2 (F2F Peer) with Spec 09 dynamic daily quota
         if let Some(token) = peer_token {
             let token_trimmed = token.trim();
-            let is_valid = self.f2f_tokens.read().unwrap_or_else(|e| e.into_inner()).contains(token_trimmed);
+            let is_valid = self
+                .f2f_tokens
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(token_trimmed);
             if is_valid {
                 let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
                 let epoch_day = match now_ms {
@@ -753,22 +916,48 @@ impl TierController {
         let daily_quota = self.calculate_daily_quota(1.0, 1.0);
 
         if self.pow_engine.default_difficulty() == 0 {
-            self.free_writes_today.fetch_add(1, Ordering::Relaxed);
             let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-            thermo.try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
+            let accepted =
+                thermo.try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
+            if !accepted {
+                let used = thermo.get_node_usage(free_node_id);
+                let available = daily_quota.saturating_sub(used);
+                return Err(IngressError::QuotaExceeded {
+                    available,
+                    required: required_byte_years,
+                });
+            }
+            self.free_writes_today.fetch_add(1, Ordering::Relaxed);
             thermo.record_write_ingress(now_sec, footprint_micro_bj);
             return Ok(IngressTier::Tier3Public);
         }
 
-        let load_factor = (self.rolling_24h_average_at(now_sec) as f64 / self.effective_ncb().max(1) as f64).clamp(0.0, 1.0);
+        let load_factor = (self.rolling_24h_average_at(now_sec) as f64
+            / self.effective_ncb().max(1) as f64)
+            .clamp(0.0, 1.0);
         let dynamic_difficulty = self.pow_engine.required_difficulty_for_load(load_factor);
 
         match (pow_challenge, pow_nonce) {
             (Some(challenge), Some(nonce)) => {
-                self.pow_engine.verify_pow_for_parent(challenge, nonce, dynamic_difficulty, parent_lock).await?;
-                self.free_writes_today.fetch_add(1, Ordering::Relaxed);
+                self.pow_engine
+                    .verify_pow_for_parent(challenge, nonce, dynamic_difficulty, parent_lock)
+                    .await?;
                 let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-                thermo.try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
+                let accepted = thermo.try_accept_lock(
+                    epoch_day,
+                    free_node_id,
+                    required_byte_years,
+                    daily_quota,
+                );
+                if !accepted {
+                    let used = thermo.get_node_usage(free_node_id);
+                    let available = daily_quota.saturating_sub(used);
+                    return Err(IngressError::QuotaExceeded {
+                        available,
+                        required: required_byte_years,
+                    });
+                }
+                self.free_writes_today.fetch_add(1, Ordering::Relaxed);
                 thermo.record_write_ingress(now_sec, footprint_micro_bj);
                 Ok(IngressTier::Tier3Public)
             }
@@ -789,7 +978,12 @@ impl TierController {
         let token_cleaned = token.strip_prefix("Bearer ").unwrap_or(token).trim();
 
         // 1. Check registered token map
-        if let Some(tag) = self.vip_tokens.read().unwrap_or_else(|e| e.into_inner()).get(token_cleaned) {
+        if let Some(tag) = self
+            .vip_tokens
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(token_cleaned)
+        {
             return Ok(*tag);
         }
 
@@ -798,7 +992,12 @@ impl TierController {
             if let Ok(bytes) = hex::decode(token_cleaned) {
                 let mut tag = [0u8; 32];
                 tag.copy_from_slice(&bytes);
-                if self.vip_tags.read().unwrap_or_else(|e| e.into_inner()).contains(&tag) {
+                if self
+                    .vip_tags
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&tag)
+                {
                     return Ok(tag);
                 }
             }
@@ -830,18 +1029,17 @@ mod tests {
         storage.set_quota(&account_tag, 1000).unwrap();
 
         // 1 Year TTL = 192 Byte-Years
-        let tier = controller.evaluate_and_charge(
-            Some(token),
-            None,
-            None,
-            None,
-            31_536_000,
-            None,
-        ).await.expect("VIP access");
+        let tier = controller
+            .evaluate_and_charge(Some(token), None, None, None, 31_536_000, None)
+            .await
+            .expect("VIP access");
 
         assert_eq!(tier, IngressTier::Tier1Vip);
         // In-memory cache must reflect deduction atomically (<1µs, no fsync stall)
-        assert_eq!(controller.get_cached_vip_quota(&account_tag), Some(1000 - 192));
+        assert_eq!(
+            controller.get_cached_vip_quota(&account_tag),
+            Some(1000 - 192)
+        );
         // Durable storage is updated asynchronously; wait for background persist
         for _ in 0..30 {
             if storage.get_quota(&account_tag).unwrap() == 1000 - 192 {
@@ -852,14 +1050,16 @@ mod tests {
         assert_eq!(storage.get_quota(&account_tag).unwrap(), 1000 - 192);
 
         // Exceed quota
-        let result = controller.evaluate_and_charge(
-            Some(token),
-            None,
-            None,
-            None,
-            31_536_000 * 5, // 5 years = 960 BY, available is 808
-            None,
-        ).await;
+        let result = controller
+            .evaluate_and_charge(
+                Some(token),
+                None,
+                None,
+                None,
+                31_536_000 * 5, // 5 years = 960 BY, available is 808
+                None,
+            )
+            .await;
         assert!(matches!(result, Err(IngressError::QuotaExceeded { .. })));
     }
 
@@ -873,24 +1073,15 @@ mod tests {
         let controller = TierController::new(storage, pow);
         controller.register_f2f_peer("friend_node_token_abc");
 
-        let tier = controller.evaluate_and_charge(
-            None,
-            Some("friend_node_token_abc"),
-            None,
-            None,
-            60,
-            None,
-        ).await.expect("F2F access");
+        let tier = controller
+            .evaluate_and_charge(None, Some("friend_node_token_abc"), None, None, 60, None)
+            .await
+            .expect("F2F access");
         assert_eq!(tier, IngressTier::Tier2F2F);
 
-        let err = controller.evaluate_and_charge(
-            None,
-            Some("unknown_peer"),
-            None,
-            None,
-            60,
-            None,
-        ).await;
+        let err = controller
+            .evaluate_and_charge(None, Some("unknown_peer"), None, None, 60, None)
+            .await;
         assert!(matches!(err, Err(IngressError::InvalidPeerToken)));
     }
 
@@ -904,9 +1095,15 @@ mod tests {
         let controller = TierController::new(storage, pow.clone());
 
         // Without PoW -> PoWRequired
-        let err = controller.evaluate_and_charge(None, None, None, None, 60, None).await;
+        let err = controller
+            .evaluate_and_charge(None, None, None, None, 60, None)
+            .await;
         let challenge = match err {
-            Err(IngressError::PoWRequired { challenge, difficulty, .. }) => {
+            Err(IngressError::PoWRequired {
+                challenge,
+                difficulty,
+                ..
+            }) => {
                 assert_eq!(difficulty, 8);
                 challenge
             }
@@ -915,14 +1112,10 @@ mod tests {
 
         // Solve PoW
         let nonce = PowEngine::solve_pow(&challenge, 8, 5000).expect("Solve");
-        let tier = controller.evaluate_and_charge(
-            None,
-            None,
-            Some(&challenge),
-            Some(nonce),
-            60,
-            None,
-        ).await.expect("PoW accepted");
+        let tier = controller
+            .evaluate_and_charge(None, None, Some(&challenge), Some(nonce), 60, None)
+            .await
+            .expect("PoW accepted");
         assert_eq!(tier, IngressTier::Tier3Public);
     }
 
@@ -973,7 +1166,11 @@ mod tests {
         assert_eq!(quota_whale_k5, 960_000 * 5);
 
         let quota_whale_k10 = controller.calculate_daily_quota(10.0, 1.0);
-        assert_eq!(quota_whale_k10, 960_000 * 5, "Whale brake must clamp K <= 5.0");
+        assert_eq!(
+            quota_whale_k10,
+            960_000 * 5,
+            "Whale brake must clamp K <= 5.0"
+        );
 
         // F2F dynamic quota evaluation
         let peer_token = "peer_token_dynamic_123";
@@ -981,24 +1178,42 @@ mod tests {
 
         // 1 Year TTL = 192 Byte-Years, fits easily into 960_000
         let res = controller.evaluate_f2f_quota(peer_token, 192, 1);
-        assert!(matches!(res, Ok(())), "F2F quota 192 must be Ok, got {:?}", res);
+        assert!(
+            matches!(res, Ok(())),
+            "F2F quota 192 must be Ok, got {:?}",
+            res
+        );
 
         // Exceed daily quota in single epoch day
         let res_exceed = controller.evaluate_f2f_quota(peer_token, 960_000, 1);
-        assert!(matches!(res_exceed, Err(IngressError::QuotaExceeded { .. })));
+        assert!(matches!(
+            res_exceed,
+            Err(IngressError::QuotaExceeded { .. })
+        ));
 
         // Next epoch day resets usage
         let res_next_day = controller.evaluate_f2f_quota(peer_token, 192, 2);
-        assert!(matches!(res_next_day, Ok(())), "next day quota must reset, got {:?}", res_next_day);
+        assert!(
+            matches!(res_next_day, Ok(())),
+            "next day quota must reset, got {:?}",
+            res_next_day
+        );
 
         // VIP dynamic quota evaluation
         let vip_tag = [0x77u8; 32];
         let res_vip = controller.evaluate_vip_quota(&vip_tag, 960_000 * 4, 1, 5.0);
-        assert!(matches!(res_vip, Ok(())), "VIP quota must be Ok, got {:?}", res_vip);
+        assert!(
+            matches!(res_vip, Ok(())),
+            "VIP quota must be Ok, got {:?}",
+            res_vip
+        );
 
         // Exceeding K=5.0 limit for VIP
         let res_vip_exceed = controller.evaluate_vip_quota(&vip_tag, 960_000 * 2, 1, 5.0);
-        assert!(matches!(res_vip_exceed, Err(IngressError::QuotaExceeded { .. })));
+        assert!(matches!(
+            res_vip_exceed,
+            Err(IngressError::QuotaExceeded { .. })
+        ));
     }
 
     #[tokio::test]

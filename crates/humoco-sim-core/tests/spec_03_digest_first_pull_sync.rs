@@ -59,7 +59,11 @@ fn test_digest_first_pull_sync_bft_cluster_success() {
 
     let cluster = evaluate_digest_clusters(&responses, 20);
     match cluster {
-        ClusterResult::DominantQuorum { digest, votes, peers } => {
+        ClusterResult::DominantQuorum {
+            digest,
+            votes,
+            peers,
+        } => {
             assert_eq!(digest, d_star, "Dominant cluster must be D*");
             assert_eq!(votes, 15);
             assert_eq!(peers.len(), 15);
@@ -108,7 +112,10 @@ fn test_digest_first_pull_sync_insufficient_quorum_backoff() {
     // 4 timeouts / other splits not reaching 14
     let cluster = evaluate_digest_clusters(&responses, 20);
     match cluster {
-        ClusterResult::InsufficientQuorum { max_votes, backoff_ms } => {
+        ClusterResult::InsufficientQuorum {
+            max_votes,
+            backoff_ms,
+        } => {
             assert_eq!(max_votes, 12);
             assert_eq!(backoff_ms, 500, "500ms backoff required");
             // no stream import should happen - we just ensure backoff is signaled
@@ -141,7 +148,10 @@ fn test_digest_first_pull_sync_poisoned_stream_payload_rejection() {
     poisoned_locks[0].nonce = b"poisoned".to_vec();
     // Need to recompute id for tampered lock? Not necessary for digest check, but we recalc id to be consistent
     let tampered_digest = compute_shard_digest(SHARD_ID, &poisoned_locks);
-    assert_ne!(tampered_digest, d_star, "Poisoned stream must have different digest");
+    assert_ne!(
+        tampered_digest, d_star,
+        "Poisoned stream must have different digest"
+    );
     // Verification: Stream-Hash != D* -> Verworfen
     let is_valid = tampered_digest == target_digest;
     assert!(!is_valid, "Poisoned stream payload must be rejected");

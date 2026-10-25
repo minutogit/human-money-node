@@ -1,9 +1,9 @@
-use std::net::SocketAddr;
-use std::time::Duration;
 use axum::http::StatusCode;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
+use std::net::SocketAddr;
+use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -91,7 +91,7 @@ impl HmcTestWallet {
         );
         let sig = self.signing_key.sign(&payload_hash);
         L2LockRequest {
-        causal_output: None,
+            causal_output: None,
             auth: L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -143,7 +143,7 @@ impl HmcTestWallet {
         );
         let sig = self.signing_key.sign(&payload_hash);
         L2LockRequest {
-        causal_output: None,
+            causal_output: None,
             auth: L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -190,7 +190,7 @@ impl HmcTestWallet {
         );
         let sig = self.signing_key.sign(&payload_hash);
         L2LockRequest {
-        causal_output: None,
+            causal_output: None,
             auth: L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -213,11 +213,7 @@ impl HmcTestWallet {
     }
 
     /// Constructs an atomic chain lock request.
-    pub fn make_chain(
-        &self,
-        voucher_id: &str,
-        chain: Vec<L2LockRequest>,
-    ) -> L2ChainLockRequest {
+    pub fn make_chain(&self, voucher_id: &str, chain: Vec<L2LockRequest>) -> L2ChainLockRequest {
         L2ChainLockRequest {
             auth: L2AuthPayload {
                 ephemeral_pubkey: self.pubkey_bytes(),
@@ -249,7 +245,9 @@ impl TestNode {
     pub fn create_setup(temp: TempDir, _node_idx: usize) -> (NodeConfig, NodeIdentity, TempDir) {
         let identity = NodeIdentity::generate();
         let key_path = temp.path().join("node_key.bin");
-        identity.save_to_file(&key_path).expect("save node identity key");
+        identity
+            .save_to_file(&key_path)
+            .expect("save node identity key");
 
         let mut config = NodeConfig::default();
         config.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
@@ -257,7 +255,7 @@ impl TestNode {
         config.storage.data_dir = temp.path().join("data");
         config.identity.key_path = key_path;
         config.network.control_socket = None;
-        config.f2f.tokens.push("cluster_f2f_token".into());
+        config.f2f.tokens.push("f2f_cluster_token".into());
 
         (config, identity, temp)
     }
@@ -278,9 +276,7 @@ impl TestNode {
             tx,
         );
 
-        let task_handle = tokio::spawn(async move {
-            daemon.run().await
-        });
+        let task_handle = tokio::spawn(async move { daemon.run().await });
 
         let bound_addrs = tokio::time::timeout(Duration::from_secs(5), rx).await??;
         config.network.rpc_listen_addr = bound_addrs.rpc_addr;
@@ -331,7 +327,10 @@ impl TestNode {
 
         let mut req_str = format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
-            method, path, self.rpc_addr, body_bytes.len()
+            method,
+            path,
+            self.rpc_addr,
+            body_bytes.len()
         );
         for (k, v) in headers {
             req_str.push_str(&format!("{}: {}\r\n", k, v));
@@ -369,7 +368,8 @@ impl TestNode {
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(500);
 
-        let status = StatusCode::from_u16(status_code_u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(status_code_u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         Ok((status, body_part.to_vec()))
     }
 
@@ -395,7 +395,7 @@ impl TestNode {
                 Some(&json_body),
                 &[
                     ("Content-Type", "application/json"),
-                    ("X-Peer-Token", "cluster_f2f_token"),
+                    ("X-Peer-Token", "f2f_cluster_token"),
                 ],
             )
             .await?;
@@ -416,7 +416,7 @@ impl TestNode {
                 Some(&json_body),
                 &[
                     ("Content-Type", "application/json"),
-                    ("X-Peer-Token", "cluster_f2f_token"),
+                    ("X-Peer-Token", "f2f_cluster_token"),
                 ],
             )
             .await?;
@@ -449,7 +449,7 @@ impl TestNode {
                 Some(&json_body),
                 &[
                     ("Content-Type", "application/json"),
-                    ("X-Peer-Token", "cluster_f2f_token"),
+                    ("X-Peer-Token", "f2f_cluster_token"),
                 ],
             )
             .await?;
@@ -484,9 +484,7 @@ impl TestNode {
             tx,
         );
 
-        let task_handle = tokio::spawn(async move {
-            daemon.run().await
-        });
+        let task_handle = tokio::spawn(async move { daemon.run().await });
 
         let bound_addrs = tokio::time::timeout(Duration::from_secs(5), rx).await??;
 
@@ -527,11 +525,15 @@ async fn test_scenario_1_isolated_village_start_and_mesh_merge() {
     cfg2.f2f.trusted_pubkeys.push(id1.public_key_hex());
 
     // 1. Spawn Node 1
-    let mut node1 = TestNode::spawn(cfg1, id1, temp1).await.expect("spawn node 1");
+    let mut node1 = TestNode::spawn(cfg1, id1, temp1)
+        .await
+        .expect("spawn node 1");
 
     // 2. Configure Node 2 with Node 1's bound P2P address and spawn Node 2
     cfg2.f2f.peers.push(node1.p2p_addr.to_string());
-    let mut node2 = TestNode::spawn(cfg2, id2, temp2).await.expect("spawn node 2");
+    let mut node2 = TestNode::spawn(cfg2, id2, temp2)
+        .await
+        .expect("spawn node 2");
 
     // 3. Interconnect peers before transactions
     node1.config.f2f.peers.push(node2.p2p_addr.to_string());
@@ -555,12 +557,18 @@ async fn test_scenario_1_isolated_village_start_and_mesh_merge() {
     let genesis2_tag = bs58::encode(&genesis2.transaction_hash).into_string();
 
     // 4. Lock voucher 1 on Node 1
-    let (status1, resp1) = node1.post_hmc_lock(&genesis1).await.expect("lock genesis 1");
+    let (status1, resp1) = node1
+        .post_hmc_lock(&genesis1)
+        .await
+        .expect("lock genesis 1");
     assert_eq!(status1, StatusCode::CREATED);
     assert!(matches!(resp1.verdict, L2Verdict::Verified { .. }));
 
     // 5. Lock voucher 2 on Node 2
-    let (status2, resp2) = node2.post_hmc_lock(&genesis2).await.expect("lock genesis 2");
+    let (status2, resp2) = node2
+        .post_hmc_lock(&genesis2)
+        .await
+        .expect("lock genesis 2");
     assert_eq!(status2, StatusCode::CREATED);
     assert!(matches!(resp2.verdict, L2Verdict::Verified { .. }));
 
@@ -599,7 +607,10 @@ async fn test_scenario_1_isolated_village_start_and_mesh_merge() {
 
     // 8. Follow-up payment for Voucher 1 submitted to Node 2 (which originally didn't hold it)
     let succ1 = wallet1.make_successor(voucher_1, "village_succ_tag_01", 200, None, None);
-    let (succ1_status, succ1_resp) = node2.post_hmc_lock(&succ1).await.expect("post succ 1 to node 2");
+    let (succ1_status, succ1_resp) = node2
+        .post_hmc_lock(&succ1)
+        .await
+        .expect("post succ 1 to node 2");
     assert!(
         succ1_status == StatusCode::CREATED || succ1_status == StatusCode::OK,
         "Successor 1 on Node 2 should succeed, got {}",
@@ -609,7 +620,10 @@ async fn test_scenario_1_isolated_village_start_and_mesh_merge() {
 
     // 9. Follow-up payment for Voucher 2 submitted to Node 1
     let succ2 = wallet2.make_successor(voucher_2, "village_succ_tag_02", 200, None, None);
-    let (succ2_status, succ2_resp) = node1.post_hmc_lock(&succ2).await.expect("post succ 2 to node 1");
+    let (succ2_status, succ2_resp) = node1
+        .post_hmc_lock(&succ2)
+        .await
+        .expect("post succ 2 to node 1");
     assert!(
         succ2_status == StatusCode::CREATED || succ2_status == StatusCode::OK,
         "Successor 2 on Node 1 should succeed, got {}",
@@ -635,13 +649,23 @@ async fn test_scenario_2_multi_hop_causality_chain_ingress_newcomer() {
     let (mut cfg3, id3, temp3) = TestNode::create_setup(temp3, 2);
 
     // Mutual trust
-    cfg1.f2f.trusted_pubkeys.extend([id2.public_key_hex(), id3.public_key_hex()]);
-    cfg2.f2f.trusted_pubkeys.extend([id1.public_key_hex(), id3.public_key_hex()]);
-    cfg3.f2f.trusted_pubkeys.extend([id1.public_key_hex(), id2.public_key_hex()]);
+    cfg1.f2f
+        .trusted_pubkeys
+        .extend([id2.public_key_hex(), id3.public_key_hex()]);
+    cfg2.f2f
+        .trusted_pubkeys
+        .extend([id1.public_key_hex(), id3.public_key_hex()]);
+    cfg3.f2f
+        .trusted_pubkeys
+        .extend([id1.public_key_hex(), id2.public_key_hex()]);
 
-    let node1 = TestNode::spawn(cfg1, id1, temp1).await.expect("spawn node 1");
+    let node1 = TestNode::spawn(cfg1, id1, temp1)
+        .await
+        .expect("spawn node 1");
     cfg2.f2f.peers.push(node1.p2p_addr.to_string());
-    let _node2 = TestNode::spawn(cfg2, id2, temp2).await.expect("spawn node 2");
+    let _node2 = TestNode::spawn(cfg2, id2, temp2)
+        .await
+        .expect("spawn node 2");
 
     let wallet = HmcTestWallet::new();
     let now = test_now_ms();
@@ -664,7 +688,9 @@ async fn test_scenario_2_multi_hop_causality_chain_ingress_newcomer() {
 
     // Node 3 is a newcomer that has not participated yet
     cfg3.f2f.peers.push(node1.p2p_addr.to_string());
-    let node3 = TestNode::spawn(cfg3, id3, temp3).await.expect("spawn node 3");
+    let node3 = TestNode::spawn(cfg3, id3, temp3)
+        .await
+        .expect("spawn node 3");
 
     // Wallet submits full causality chain [Genesis, Hop 1, Hop 2, Hop 3] atomically to Node 3
     let chain_req = wallet.make_chain(
@@ -672,7 +698,10 @@ async fn test_scenario_2_multi_hop_causality_chain_ingress_newcomer() {
         vec![genesis.clone(), hop1.clone(), hop2.clone(), hop3.clone()],
     );
 
-    let (chain_status, chain_resp) = node3.post_hmc_chain(&chain_req).await.expect("post chain lock");
+    let (chain_status, chain_resp) = node3
+        .post_hmc_chain(&chain_req)
+        .await
+        .expect("post chain lock");
     assert!(
         chain_status == StatusCode::CREATED || chain_status == StatusCode::OK,
         "Atomic chain ingress on newcomer node must succeed with 201/200, got {}",
@@ -714,8 +743,12 @@ async fn test_scenario_3_double_spend_partition_and_canonical_resolution() {
     cfg1.f2f.trusted_pubkeys.push(id2.public_key_hex());
     cfg2.f2f.trusted_pubkeys.push(id1.public_key_hex());
 
-    let mut node1 = TestNode::spawn(cfg1, id1, temp1).await.expect("spawn node 1");
-    let mut node2 = TestNode::spawn(cfg2, id2, temp2).await.expect("spawn node 2");
+    let mut node1 = TestNode::spawn(cfg1, id1, temp1)
+        .await
+        .expect("spawn node 1");
+    let mut node2 = TestNode::spawn(cfg2, id2, temp2)
+        .await
+        .expect("spawn node 2");
 
     let wallet_a = HmcTestWallet::new();
     let wallet_b = HmcTestWallet::new();
@@ -742,8 +775,10 @@ async fn test_scenario_3_double_spend_partition_and_canonical_resolution() {
     loop {
         rng.fill_bytes(&mut tx_hash_winner);
         rng.fill_bytes(&mut tx_hash_loser);
-        let h_winner = compute_hmc_canonical_hash(&parent_bytes, &wallet_a.pubkey_bytes(), &tx_hash_winner);
-        let h_loser = compute_hmc_canonical_hash(&parent_bytes, &wallet_b.pubkey_bytes(), &tx_hash_loser);
+        let h_winner =
+            compute_hmc_canonical_hash(&parent_bytes, &wallet_a.pubkey_bytes(), &tx_hash_winner);
+        let h_loser =
+            compute_hmc_canonical_hash(&parent_bytes, &wallet_b.pubkey_bytes(), &tx_hash_loser);
         if h_winner < h_loser {
             break;
         }
@@ -767,15 +802,27 @@ async fn test_scenario_3_double_spend_partition_and_canonical_resolution() {
     );
 
     // 3. Ingress during partition: Winner to Node 1, Loser to Node 2
-    let (w_status, _) = node1.post_hmc_lock(&req_winner).await.expect("winner lock to node 1");
+    let (w_status, _) = node1
+        .post_hmc_lock(&req_winner)
+        .await
+        .expect("winner lock to node 1");
     assert_eq!(w_status, StatusCode::CREATED);
 
-    let (l_status, _) = node2.post_hmc_lock(&req_loser).await.expect("loser lock to node 2");
+    let (l_status, _) = node2
+        .post_hmc_lock(&req_loser)
+        .await
+        .expect("loser lock to node 2");
     assert_eq!(l_status, StatusCode::CREATED);
 
     // Verify isolated states
-    let (_, resp1) = node1.query_hmc_status(voucher_id, ds_shared_tag, wallet_a.pubkey_bytes()).await.unwrap();
-    let (_, resp2) = node2.query_hmc_status(voucher_id, ds_shared_tag, wallet_b.pubkey_bytes()).await.unwrap();
+    let (_, resp1) = node1
+        .query_hmc_status(voucher_id, ds_shared_tag, wallet_a.pubkey_bytes())
+        .await
+        .unwrap();
+    let (_, resp2) = node2
+        .query_hmc_status(voucher_id, ds_shared_tag, wallet_b.pubkey_bytes())
+        .await
+        .unwrap();
     match resp1.verdict {
         L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, tx_hash_winner),
         _ => panic!("Node 1 must hold winner lock"),
@@ -799,7 +846,9 @@ async fn test_scenario_3_double_spend_partition_and_canonical_resolution() {
             .query_hmc_status(voucher_id, ds_shared_tag, wallet_a.pubkey_bytes())
             .await
             .map(|(s, r)| match r.verdict {
-                L2Verdict::Verified { lock_entry } => s == StatusCode::OK && lock_entry.t_id == tx_hash_winner,
+                L2Verdict::Verified { lock_entry } => {
+                    s == StatusCode::OK && lock_entry.t_id == tx_hash_winner
+                }
                 _ => false,
             })
             .unwrap_or(false);
@@ -808,7 +857,9 @@ async fn test_scenario_3_double_spend_partition_and_canonical_resolution() {
             .query_hmc_status(voucher_id, ds_shared_tag, wallet_a.pubkey_bytes())
             .await
             .map(|(s, r)| match r.verdict {
-                L2Verdict::Verified { lock_entry } => s == StatusCode::OK && lock_entry.t_id == tx_hash_winner,
+                L2Verdict::Verified { lock_entry } => {
+                    s == StatusCode::OK && lock_entry.t_id == tx_hash_winner
+                }
                 _ => false,
             })
             .unwrap_or(false);
@@ -842,18 +893,36 @@ async fn test_scenario_4_offline_maintenance_catchup_sync() {
     let temp3 = tempdir().expect("tempdir 3");
     let (mut cfg3, id3, temp3) = TestNode::create_setup(temp3, 2);
 
-    cfg1.f2f.trusted_pubkeys.extend([id2.public_key_hex(), id3.public_key_hex()]);
-    cfg2.f2f.trusted_pubkeys.extend([id1.public_key_hex(), id3.public_key_hex()]);
-    cfg3.f2f.trusted_pubkeys.extend([id1.public_key_hex(), id2.public_key_hex()]);
+    cfg1.f2f
+        .trusted_pubkeys
+        .extend([id2.public_key_hex(), id3.public_key_hex()]);
+    cfg2.f2f
+        .trusted_pubkeys
+        .extend([id1.public_key_hex(), id3.public_key_hex()]);
+    cfg3.f2f
+        .trusted_pubkeys
+        .extend([id1.public_key_hex(), id2.public_key_hex()]);
 
-    let mut node1 = TestNode::spawn(cfg1, id1, temp1).await.expect("spawn node 1");
+    let mut node1 = TestNode::spawn(cfg1, id1, temp1)
+        .await
+        .expect("spawn node 1");
     cfg2.f2f.peers.push(node1.p2p_addr.to_string());
-    let mut node2 = TestNode::spawn(cfg2, id2, temp2).await.expect("spawn node 2");
-    cfg3.f2f.peers.extend([node1.p2p_addr.to_string(), node2.p2p_addr.to_string()]);
-    let node3 = TestNode::spawn(cfg3, id3, temp3).await.expect("spawn node 3");
+    let mut node2 = TestNode::spawn(cfg2, id2, temp2)
+        .await
+        .expect("spawn node 2");
+    cfg3.f2f
+        .peers
+        .extend([node1.p2p_addr.to_string(), node2.p2p_addr.to_string()]);
+    let node3 = TestNode::spawn(cfg3, id3, temp3)
+        .await
+        .expect("spawn node 3");
 
     // Interconnect peers
-    node1.config.f2f.peers.extend([node2.p2p_addr.to_string(), node3.p2p_addr.to_string()]);
+    node1
+        .config
+        .f2f
+        .peers
+        .extend([node2.p2p_addr.to_string(), node3.p2p_addr.to_string()]);
     node2.config.f2f.peers.push(node3.p2p_addr.to_string());
     node1.restart().await.expect("restart node 1");
     node2.config.f2f.peers = vec![node1.p2p_addr.to_string(), node3.p2p_addr.to_string()];
@@ -877,9 +946,15 @@ async fn test_scenario_4_offline_maintenance_catchup_sync() {
     let genesis2 = wallet2.make_genesis(v2, valid_until, 100);
     let genesis2_tag = bs58::encode(&genesis2.transaction_hash).into_string();
 
-    let (s1, _) = node1.post_hmc_lock(&genesis1).await.expect("lock v1 on node 1");
+    let (s1, _) = node1
+        .post_hmc_lock(&genesis1)
+        .await
+        .expect("lock v1 on node 1");
     assert_eq!(s1, StatusCode::CREATED);
-    let (s2, _) = node3.post_hmc_lock(&genesis2).await.expect("lock v2 on node 3");
+    let (s2, _) = node3
+        .post_hmc_lock(&genesis2)
+        .await
+        .expect("lock v2 on node 3");
     assert_eq!(s2, StatusCode::CREATED);
 
     // 3. Node 2 restarts after maintenance with the same database
@@ -929,15 +1004,12 @@ async fn test_scenario_5_spam_rejection_fantasy_locks() {
     let fantasy_ds_tag = "fantasy_parent_tag_abcdef123456";
 
     // Attempt to submit an unanchored successor lock without prior genesis anchor
-    let fantasy_lock = wallet.make_successor(
-        fantasy_voucher_id,
-        fantasy_ds_tag,
-        100,
-        None,
-        None,
-    );
+    let fantasy_lock = wallet.make_successor(fantasy_voucher_id, fantasy_ds_tag, 100, None, None);
 
-    let (status, resp) = node.post_hmc_lock(&fantasy_lock).await.expect("post fantasy lock");
+    let (status, resp) = node
+        .post_hmc_lock(&fantasy_lock)
+        .await
+        .expect("post fantasy lock");
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -952,7 +1024,10 @@ async fn test_scenario_5_spam_rejection_fantasy_locks() {
                 reason
             );
         }
-        _ => panic!("Expected Rejected verdict for fantasy lock, got {:?}", resp.verdict),
+        _ => panic!(
+            "Expected Rejected verdict for fantasy lock, got {:?}",
+            resp.verdict
+        ),
     }
 
     // Verify RAM index and storage have zero bloat (query status returns MissingLocks / NotFound)

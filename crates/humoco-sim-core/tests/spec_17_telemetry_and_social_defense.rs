@@ -3,12 +3,13 @@
 
 use humoco_sim_core::telemetry::{
     detect_clock_skew, detect_gateway_concentration, detect_gateway_no_free_tier,
-    detect_shard_operator_dominance, detect_single_bridge_botnet, detect_single_edge_censorship_risk,
-    evaluate_gateway_concentration_ratio, evaluate_multi_node_cluster, evaluate_starvation,
-    evaluate_subnet_dominance_max, hash_degree_map, is_deactivated_by_starvation,
-    is_purged_by_starvation, starvation_at_time, DiagnosticWarning, IngressAuditTracker,
-    PrometheusMetrics, ShardPerformanceTracker, StarvationStage, TopologyReport, WarningLevel,
-    WARN_GATEWAY_CONCENTRATION, WARN_GATEWAY_NO_FREE_TIER, INFO_SHARD_OPERATOR_DOMINANCE,
+    detect_shard_operator_dominance, detect_single_bridge_botnet,
+    detect_single_edge_censorship_risk, evaluate_gateway_concentration_ratio,
+    evaluate_multi_node_cluster, evaluate_starvation, evaluate_subnet_dominance_max,
+    hash_degree_map, is_deactivated_by_starvation, is_purged_by_starvation, starvation_at_time,
+    DiagnosticWarning, IngressAuditTracker, PrometheusMetrics, ShardPerformanceTracker,
+    StarvationStage, TopologyReport, WarningLevel, INFO_SHARD_OPERATOR_DOMINANCE,
+    WARN_GATEWAY_CONCENTRATION, WARN_GATEWAY_NO_FREE_TIER,
 };
 use humoco_sim_core::types::SimTime;
 use std::collections::HashMap;
@@ -36,10 +37,7 @@ fn test_inv1701_telemetry_is_non_authoritative_no_auto_ban() {
             "INV-1701: Level {:?} darf keinen Auto-Bann auslösen",
             lvl
         );
-        assert!(
-            !lvl.as_str().is_empty(),
-            "Level muss stringifizierbar sein"
-        );
+        assert!(!lvl.as_str().is_empty(), "Level muss stringifizierbar sein");
     }
 
     // TopologyReport erzeugt nur Warnungen, ändert keine Bannlisten (simuliert via HashSet)
@@ -123,7 +121,8 @@ fn test_inv1701_dashboard_warnings_do_not_evict_peers_automatically() {
 #[test]
 fn test_inv1702_legit_multi_node_cluster_with_pow_and_ge3_no_warning() {
     // Legitimer Betreiber: 10 Nodes, je >=3 Kanten, valider PoW => keine Botnet-Warnung
-    let operator_nodes: Vec<(u16, usize)> = (0..10).map(|i| (i as u16, 3 + (i % 3) as usize)).collect(); // degrees 3,4,5
+    let operator_nodes: Vec<(u16, usize)> =
+        (0..10).map(|i| (i as u16, 3 + (i % 3) as usize)).collect(); // degrees 3,4,5
     let mut pow_valid = HashMap::new();
     for (nid, _) in &operator_nodes {
         pow_valid.insert(*nid, true);
@@ -164,7 +163,10 @@ fn test_inv1702_single_bridge_botnet_besen_detected_and_throttled() {
     // Dunbar-RED drosselt zu >99.9% (simuliert via Prometheus red_drop_rate)
     let bridge: u16 = 77;
     let w = detect_single_bridge_botnet(bridge, 500, 0);
-    assert!(w.is_some(), "Besen mit 500 Bots über 1 Brücke muss detektiert werden");
+    assert!(
+        w.is_some(),
+        "Besen mit 500 Bots über 1 Brücke muss detektiert werden"
+    );
     let warn = w.unwrap();
     assert_eq!(warn.level, WarningLevel::WarnSingleBridgeBotnet);
     assert!(warn.message.contains("500"));
@@ -222,8 +224,14 @@ fn test_inv1702_single_edge_censorship_risk_and_clock_skew() {
     let w_skew = detect_clock_skew(local, 60_000).expect("60s skew muss warnen");
     assert_eq!(w_skew.level, WarningLevel::WarnLocalClockSkew);
     assert!(detect_clock_skew(local, 45_001).is_some());
-    assert!(detect_clock_skew(local, 45_000).is_none(), "45s ist Schwelle, erst >45s warnen");
-    assert!(detect_clock_skew(local, -60_000).is_some(), "negative Skew ebenfalls");
+    assert!(
+        detect_clock_skew(local, 45_000).is_none(),
+        "45s ist Schwelle, erst >45s warnen"
+    );
+    assert!(
+        detect_clock_skew(local, -60_000).is_some(),
+        "negative Skew ebenfalls"
+    );
     assert!(detect_clock_skew(local, 10_000).is_none());
 }
 
@@ -278,8 +286,14 @@ fn test_inv1703_starvation_cascade_21h_deactivated_48h_purged() {
     let h48 = SimTime::from_millis(48 * 3600 * 1000);
     let h72 = SimTime::from_millis(72 * 3600 * 1000);
 
-    assert_eq!(starvation_at_time(revoke_at, h21), StarvationStage::Deactivated);
-    assert_eq!(starvation_at_time(revoke_at, h22), StarvationStage::Deactivated);
+    assert_eq!(
+        starvation_at_time(revoke_at, h21),
+        StarvationStage::Deactivated
+    );
+    assert_eq!(
+        starvation_at_time(revoke_at, h22),
+        StarvationStage::Deactivated
+    );
     assert_eq!(starvation_at_time(revoke_at, h48), StarvationStage::Purged);
     assert_eq!(starvation_at_time(revoke_at, h72), StarvationStage::Purged);
 
@@ -290,12 +304,18 @@ fn test_inv1703_starvation_cascade_21h_deactivated_48h_purged() {
     // Ohne zentrale Abstimmung: zwei Nodes rechnen identisches Ergebnis deterministisch
     let node_a = starvation_at_time(revoke_at, h48);
     let node_b = starvation_at_time(revoke_at, h48);
-    assert_eq!(node_a, node_b, "Deterministische Konvergenz ohne Abstimmung");
+    assert_eq!(
+        node_a, node_b,
+        "Deterministische Konvergenz ohne Abstimmung"
+    );
 
     // Edge: REVOKE bei späterer Zeit (nicht Zero)
     let revoke_late = SimTime::from_millis(100_000);
     let now = SimTime::from_millis(100_000 + 48 * 3600 * 1000);
-    assert_eq!(starvation_at_time(revoke_late, now), StarvationStage::Purged);
+    assert_eq!(
+        starvation_at_time(revoke_late, now),
+        StarvationStage::Purged
+    );
 }
 
 #[test]
@@ -331,14 +351,15 @@ fn test_inv1704_ingress_audit_threshold_80_percent_day1_warns() {
     let mut t2 = IngressAuditTracker::new(quota);
     let at_80 = (quota as f64 * 0.80) as u64;
     let w2 = t2.record_ingress(peer, day0, at_80);
-    assert!(
-        w2.is_some(),
-        "80% auf Tag 1 muss Audit-Warnung erzeugen"
-    );
+    assert!(w2.is_some(), "80% auf Tag 1 muss Audit-Warnung erzeugen");
     let warn = w2.unwrap();
     assert_eq!(warn.level, WarningLevel::InfoAuditIngressHigh);
     assert_eq!(warn.peer, Some(peer));
-    assert!(warn.message.contains("80%") || warn.message.contains("768000") || warn.message.contains(&at_80.to_string()));
+    assert!(
+        warn.message.contains("80%")
+            || warn.message.contains("768000")
+            || warn.message.contains(&at_80.to_string())
+    );
     assert!(t2.is_audit_threshold_exceeded(peer));
     assert!(t2.usage_ratio(peer) >= 0.8);
 
@@ -346,7 +367,9 @@ fn test_inv1704_ingress_audit_threshold_80_percent_day1_warns() {
     // Daher testen wir 88% generisch: 844_800
     let mut t3 = IngressAuditTracker::new(quota);
     let at_88 = (quota as f64 * 0.88) as u64;
-    let w3 = t3.record_ingress(peer, day0, at_88).expect("88% muss warnen");
+    let w3 = t3
+        .record_ingress(peer, day0, at_88)
+        .expect("88% muss warnen");
     assert_eq!(w3.level, WarningLevel::InfoAuditIngressHigh);
     assert!(w3.message.contains("88%") || w3.message.contains(&at_88.to_string()));
 
@@ -356,7 +379,10 @@ fn test_inv1704_ingress_audit_threshold_80_percent_day1_warns() {
     let second = (quota as f64 * 0.45) as u64;
     assert!(t4.record_ingress(peer, day0, first).is_none());
     let w4 = t4.record_ingress(peer, day0, second);
-    assert!(w4.is_some(), "Kumuliert 85% muss beim zweiten Record warnen");
+    assert!(
+        w4.is_some(),
+        "Kumuliert 85% muss beim zweiten Record warnen"
+    );
 }
 
 #[test]
@@ -423,7 +449,9 @@ fn test_inv1705_local_shard_performance_degraded_below_80() {
     tracker.record(150, 63); // 63/150 =42%
     assert!(tracker.is_degraded());
     assert!((tracker.participation_ratio() - 0.42).abs() < 0.001);
-    let w = tracker.check_local_warning().expect("42% muss WARN degradiert");
+    let w = tracker
+        .check_local_warning()
+        .expect("42% muss WARN degradiert");
     assert_eq!(w.level, WarningLevel::WarnLocalShardPerformanceDegraded);
     assert!(w.message.contains("42%") || w.message.contains("63/150") || w.message.contains("63"));
     assert_eq!(w.peer, None, "Lokale Warnung hat kein Peer");
@@ -440,7 +468,10 @@ fn test_inv1705_local_shard_performance_degraded_below_80() {
     // Grenzwert 80% => kein degraded
     tracker.record(100, 80);
     assert!(!tracker.is_degraded());
-    assert!(tracker.check_local_warning().is_none(), "80% exakt darf nicht warnen");
+    assert!(
+        tracker.check_local_warning().is_none(),
+        "80% exakt darf nicht warnen"
+    );
 
     // 100% => keine Warnung
     tracker.record(100, 100);
@@ -464,14 +495,19 @@ fn test_inv1705_neighbor_shard_activity_optional_info() {
     assert!(w.message.contains("0/150") || w.message.contains("0"));
 
     // Peer mit 10/150 =6.6% => ebenfalls Info ( <50%)
-    let w2 = tracker.check_neighbor(100, 10, 150).expect("10/150 muss Info");
+    let w2 = tracker
+        .check_neighbor(100, 10, 150)
+        .expect("10/150 muss Info");
     assert_eq!(w2.level, WarningLevel::InfoNeighborShardActivity);
 
     // Peer mit 100/150 =66% => keine Info (>=50%)
     assert!(tracker.check_neighbor(101, 100, 150).is_none());
     assert!(tracker.check_neighbor(101, 80, 150).is_none()); // 53% gerade über 50?
-    // 75/150=50% genau => Schwelle: <50% => kein Warn bei 50% ?
-    assert!(tracker.check_neighbor(102, 75, 150).is_none(), "50% exakt darf nicht informieren");
+                                                             // 75/150=50% genau => Schwelle: <50% => kein Warn bei 50% ?
+    assert!(
+        tracker.check_neighbor(102, 75, 150).is_none(),
+        "50% exakt darf nicht informieren"
+    );
 
     // Total 0 => kein Check
     assert!(tracker.check_neighbor(103, 0, 0).is_none());
@@ -532,7 +568,10 @@ fn test_prometheus_metrics_render_deterministic() {
 
     let r1 = m1.render();
     let r2 = m2.render();
-    assert_eq!(r1, r2, "Prometheus render muss deterministisch sortiert sein");
+    assert_eq!(
+        r1, r2,
+        "Prometheus render muss deterministisch sortiert sein"
+    );
     assert!(r1.contains("humoco_active_nodes_total 14"));
     assert!(r1.contains("humoco_peer_connections 5"));
     assert!(r1.contains("humoco_immature_nodes 2"));
@@ -560,7 +599,10 @@ fn test_inv1702_1704_1705_combined_topology_health() {
 #[test]
 fn test_inv1701_gateway_concentration_and_dominance_helpers() {
     // 1. Gateway Concentration
-    assert_eq!(WarningLevel::WarnGatewayConcentration.as_str(), WARN_GATEWAY_CONCENTRATION);
+    assert_eq!(
+        WarningLevel::WarnGatewayConcentration.as_str(),
+        WARN_GATEWAY_CONCENTRATION
+    );
     assert!(!WarningLevel::WarnGatewayConcentration.triggers_auto_ban());
     assert!(WarningLevel::WarnGatewayConcentration.is_warn());
 
@@ -569,7 +611,10 @@ fn test_inv1701_gateway_concentration_and_dominance_helpers() {
     assert!((ratio - 1.0).abs() < 1e-6);
     let warn = detect_gateway_concentration(&counts);
     assert!(warn.is_some());
-    assert_eq!(warn.as_ref().unwrap().level, WarningLevel::WarnGatewayConcentration);
+    assert_eq!(
+        warn.as_ref().unwrap().level,
+        WarningLevel::WarnGatewayConcentration
+    );
 
     // Below threshold total locks (< 20)
     let small_counts = vec![9, 1];
@@ -581,7 +626,10 @@ fn test_inv1701_gateway_concentration_and_dominance_helpers() {
     assert!(detect_gateway_concentration(&div_counts).is_none());
 
     // 2. Shard Operator Subnet Dominance
-    assert_eq!(WarningLevel::InfoShardOperatorDominance.as_str(), INFO_SHARD_OPERATOR_DOMINANCE);
+    assert_eq!(
+        WarningLevel::InfoShardOperatorDominance.as_str(),
+        INFO_SHARD_OPERATOR_DOMINANCE
+    );
     assert!(!WarningLevel::InfoShardOperatorDominance.triggers_auto_ban());
     assert!(WarningLevel::InfoShardOperatorDominance.is_info());
 
@@ -590,22 +638,30 @@ fn test_inv1701_gateway_concentration_and_dominance_helpers() {
     assert!((max_sub_ratio - (4.0 / 6.0)).abs() < 1e-6);
     let dom_info = detect_shard_operator_dominance(12, &subnet_counts);
     assert!(dom_info.is_some());
-    assert_eq!(dom_info.as_ref().unwrap().level, WarningLevel::InfoShardOperatorDominance);
+    assert_eq!(
+        dom_info.as_ref().unwrap().level,
+        WarningLevel::InfoShardOperatorDominance
+    );
 
     // Balanced subnets: 1, 1, 1, 1
     let balanced = vec![1, 1, 1, 1];
     assert!(detect_shard_operator_dominance(12, &balanced).is_none());
 
     // 3. Fallback Gateway No Free Tier
-    assert_eq!(WarningLevel::WarnGatewayNoFreeTier.as_str(), WARN_GATEWAY_NO_FREE_TIER);
+    assert_eq!(
+        WarningLevel::WarnGatewayNoFreeTier.as_str(),
+        WARN_GATEWAY_NO_FREE_TIER
+    );
     assert!(!WarningLevel::WarnGatewayNoFreeTier.triggers_auto_ban());
     assert!(WarningLevel::WarnGatewayNoFreeTier.is_warn());
 
     let no_free_tier_warn = detect_gateway_no_free_tier("https://gw-vip-only.humoco.org", false);
     assert!(no_free_tier_warn.is_some());
-    assert_eq!(no_free_tier_warn.as_ref().unwrap().level, WarningLevel::WarnGatewayNoFreeTier);
+    assert_eq!(
+        no_free_tier_warn.as_ref().unwrap().level,
+        WarningLevel::WarnGatewayNoFreeTier
+    );
 
     let free_tier_ok = detect_gateway_no_free_tier("https://gw-public.humoco.org", true);
     assert!(free_tier_ok.is_none());
 }
-

@@ -6,10 +6,12 @@ mod simulation;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use humoco_node::api::hmc::{L2Verdict, L2StatusQuery, L2AuthPayload};
+use humoco_node::api::hmc::{L2AuthPayload, L2StatusQuery, L2Verdict};
 use humoco_sim_core::crypto::{sign_lock_attestation, verify_attestation};
-use humoco_sim_core::fraud::{sign_heartbeat, FraudProofPayload, FraudProofPillar, SlotDetector128};
-use humoco_sim_core::types::{SimTime, Attestation};
+use humoco_sim_core::fraud::{
+    sign_heartbeat, FraudProofPayload, FraudProofPillar, SlotDetector128,
+};
+use humoco_sim_core::types::{Attestation, SimTime};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
 use simulation::{MeshSimulator, SimWallet};
@@ -33,7 +35,8 @@ async fn test_sim_03_byzantine_resilience() {
     let mut sim = MeshSimulator::new();
 
     // --- Phase 1: Fake Quorum Ingress Rejection ---
-    sim.reporter.begin_phase("Phase 1 - Fake Quorum Ingress Rejection");
+    sim.reporter
+        .begin_phase("Phase 1 - Fake Quorum Ingress Rejection");
 
     let n0 = sim.spawn_node().await.expect("spawn n0 honest");
     sim.reporter.step(format!(
@@ -57,7 +60,10 @@ async fn test_sim_03_byzantine_resilience() {
     );
     sim.reporter.check(
         matches!(env_legit.verdict, L2Verdict::Verified { .. }),
-        format!("Legit genesis must be Verified, got {:?}", env_legit.verdict),
+        format!(
+            "Legit genesis must be Verified, got {:?}",
+            env_legit.verdict
+        ),
     );
 
     // Craft fake quorum / manipulated signature: flip a byte in layer2_signature
@@ -82,11 +88,15 @@ async fn test_sim_03_byzantine_resilience() {
     );
     sim.reporter.check(
         matches!(env_fake.verdict, L2Verdict::Rejected { .. }),
-        format!("Fake quorum verdict must be Rejected, got {:?}", env_fake.verdict),
+        format!(
+            "Fake quorum verdict must be Rejected, got {:?}",
+            env_fake.verdict
+        ),
     );
     if let L2Verdict::Rejected { reason } = &env_fake.verdict {
         sim.reporter.check(
-            reason.to_lowercase().contains("signature") || reason.to_lowercase().contains("invalid"),
+            reason.to_lowercase().contains("signature")
+                || reason.to_lowercase().contains("invalid"),
             format!("Rejection reason must mention signature, got '{reason}'"),
         );
     }
@@ -100,19 +110,20 @@ async fn test_sim_03_byzantine_resilience() {
         .expect("query legit after fake");
     sim.reporter.check(
         qs == StatusCode::OK && matches!(qv.verdict, L2Verdict::Verified { .. }),
-        format!("Legit genesis must remain Verified after fake attempt, got {qs} {:?}", qv.verdict),
+        format!(
+            "Legit genesis must remain Verified after fake attempt, got {qs} {:?}",
+            qv.verdict
+        ),
     );
 
     sim.reporter.end_phase_ok();
 
     // --- Phase 2: Equivocation Double-Signing Ban ---
-    sim.reporter.begin_phase("Phase 2 - Equivocation Double-Signing Ban");
+    sim.reporter
+        .begin_phase("Phase 2 - Equivocation Double-Signing Ban");
 
     // Spawn a second node F2F-paired to n0 to have a real F2F session
-    let n1 = sim
-        .spawn_node_with_f2f(&[n0])
-        .await
-        .expect("spawn n1 F2F");
+    let n1 = sim.spawn_node_with_f2f(&[n0]).await.expect("spawn n1 F2F");
     sim.reporter.step(format!(
         "Spawned node 1 F2F with node 0: rpc={} p2p={}",
         sim.node(n1).rpc_addr,
@@ -186,10 +197,8 @@ async fn test_sim_03_byzantine_resilience() {
             decoded_hdr.msg_type
         ),
     );
-    sim.reporter.check(
-        header.is_valid_magic(),
-        "WireHeader magic must be valid",
-    );
+    sim.reporter
+        .check(header.is_valid_magic(), "WireHeader magic must be valid");
     // Also demonstrate the diagnostic alias doesn't panic (SimTime usage)
     let _ = SimTime(0u64);
 
@@ -202,8 +211,12 @@ async fn test_sim_03_byzantine_resilience() {
         let storage = RedbStorage::open(&db_path).expect("open redb");
 
         let evidence_hash = *blake3::hash(&raw_payload).as_bytes();
-        storage.put_evidence(&evidence_hash, &raw_payload).expect("put evidence redb");
-        let loaded = storage.get_evidence(&evidence_hash).expect("get evidence redb");
+        storage
+            .put_evidence(&evidence_hash, &raw_payload)
+            .expect("put evidence redb");
+        let loaded = storage
+            .get_evidence(&evidence_hash)
+            .expect("get evidence redb");
         sim.reporter.check(
             loaded.is_some() && loaded.unwrap() == raw_payload,
             "Evidence must be persisted and retrievable in redb (ACID)",
@@ -211,9 +224,16 @@ async fn test_sim_03_byzantine_resilience() {
 
         // Persist ban atomically in redb
         let now_ms = 1_700_000_000_000u64;
-        storage.ban_node(&rogue_pubkey, now_ms).expect("ban_node redb");
-        let is_banned_disk = storage.is_node_banned(&rogue_pubkey).expect("is_node_banned redb");
-        sim.reporter.check(is_banned_disk, "Rogue NodePubKey must be banned on disk (redb)");
+        storage
+            .ban_node(&rogue_pubkey, now_ms)
+            .expect("ban_node redb");
+        let is_banned_disk = storage
+            .is_node_banned(&rogue_pubkey)
+            .expect("is_node_banned redb");
+        sim.reporter.check(
+            is_banned_disk,
+            "Rogue NodePubKey must be banned on disk (redb)",
+        );
 
         // Verify banned list contains rogue
         let banned_list = storage.all_banned_nodes().expect("all_banned_nodes");
@@ -235,7 +255,8 @@ async fn test_sim_03_byzantine_resilience() {
         pm.add_peer(rogue_addr).await;
 
         let is_friend_before = pm.is_f2f_friend(&rogue_pubkey).await;
-        sim.reporter.check(is_friend_before, "Rogue must be F2F friend before ban");
+        sim.reporter
+            .check(is_friend_before, "Rogue must be F2F friend before ban");
 
         // Also demonstrate Quinn QUIC transport creation (real production component)
         {
@@ -245,15 +266,15 @@ async fn test_sim_03_byzantine_resilience() {
 
             let id = NodeIdentity::generate();
             let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let transport_res = QuicTransport::bind(
-                bind_addr,
-                &id,
-            );
+            let transport_res = QuicTransport::bind(bind_addr, &id);
             let transport_ok = transport_res.is_ok();
             let transport_err = transport_res.as_ref().err().map(|e| format!("{e:?}"));
             sim.reporter.check(
                 transport_ok,
-                format!("Quinn QUIC transport must bind on ephemeral port, got {:?}", transport_err),
+                format!(
+                    "Quinn QUIC transport must bind on ephemeral port, got {:?}",
+                    transport_err
+                ),
             );
             if let Ok(t) = transport_res {
                 let _ = t.local_addr();
@@ -271,7 +292,10 @@ async fn test_sim_03_byzantine_resilience() {
             format!("ban_node must affect >=1 entry, got {affected}"),
         );
         let is_banned = pm.is_banned(&rogue_pubkey).await;
-        sim.reporter.check(is_banned, "Rogue must be banned in PeerManager after equivocation");
+        sim.reporter.check(
+            is_banned,
+            "Rogue must be banned in PeerManager after equivocation",
+        );
 
         let is_friend_after = pm.is_f2f_friend(&rogue_pubkey).await;
         sim.reporter.check(
@@ -285,7 +309,9 @@ async fn test_sim_03_byzantine_resilience() {
             !can_gossip,
             "Banned rogue must not be able to gossip (Gossip Barrier)",
         );
-        let can_rpc = pm.can_authorize_direct_rpc(&rogue_addr, Some(&rogue_pubkey)).await;
+        let can_rpc = pm
+            .can_authorize_direct_rpc(&rogue_addr, Some(&rogue_pubkey))
+            .await;
         sim.reporter.check(
             !can_rpc,
             "Banned rogue must not be authorized for Shard-Direct RPC",
@@ -316,7 +342,8 @@ async fn test_sim_03_byzantine_resilience() {
     sim.reporter.end_phase_ok();
 
     // --- Phase 3: Heartbeat Spam & SlotDetector128 O(1) Fraud Slashing (Spec 10 Pillar 3) ---
-    sim.reporter.begin_phase("Phase 3 - Heartbeat Spam & SlotDetector128 O(1) Slashing");
+    sim.reporter
+        .begin_phase("Phase 3 - Heartbeat Spam & SlotDetector128 O(1) Slashing");
 
     {
         let mut detector = SlotDetector128::new();
@@ -327,24 +354,37 @@ async fn test_sim_03_byzantine_resilience() {
 
         // First heartbeat stored cleanly
         let proof1 = detector.observe(hb1);
-        sim.reporter.check(proof1.is_none(), "First honest heartbeat must not trigger fraud");
+        sim.reporter.check(
+            proof1.is_none(),
+            "First honest heartbeat must not trigger fraud",
+        );
 
         // Second heartbeat within 10 minutes (< 50 min threshold) => Slashing proof generated immediately!
         let t1 = SimTime(1_000_000_000 + 10 * 60 * 1000);
         let hb2 = sign_heartbeat(node_id, t1);
         let proof2 = detector.observe(hb2);
-        sim.reporter.check(proof2.is_some(), "Heartbeat spam within 10m (<50m) must trigger FraudProofPayload immediately");
+        sim.reporter.check(
+            proof2.is_some(),
+            "Heartbeat spam within 10m (<50m) must trigger FraudProofPayload immediately",
+        );
 
         if let Some(proof) = proof2 {
-            sim.reporter.check(proof.proof_pillar == FraudProofPillar::HeartbeatSpam, "Proof pillar must be HeartbeatSpam");
-            sim.reporter.check(proof.verify(), "Generated HeartbeatSpam fraud proof must be cryptographically valid");
+            sim.reporter.check(
+                proof.proof_pillar == FraudProofPillar::HeartbeatSpam,
+                "Proof pillar must be HeartbeatSpam",
+            );
+            sim.reporter.check(
+                proof.verify(),
+                "Generated HeartbeatSpam fraud proof must be cryptographically valid",
+            );
         }
     }
 
     sim.reporter.end_phase_ok();
 
     // --- Phase 4: Unanchored Fantasy Lock Rejection (400 Bad Request, keine RamIndex-Allokation) ---
-    sim.reporter.begin_phase("Phase 4 - Unanchored Fantasy Lock Rejection");
+    sim.reporter
+        .begin_phase("Phase 4 - Unanchored Fantasy Lock Rejection");
 
     // Snapshot total_locks before fantasy to ensure no allocation
     let (health_status, health_body) = sim
@@ -358,13 +398,19 @@ async fn test_sim_03_byzantine_resilience() {
     );
     let total_before: usize = serde_json::from_slice::<serde_json::Value>(&health_body)
         .ok()
-        .and_then(|v| v.get("total_locks").and_then(|n| n.as_u64()).map(|n| n as usize))
+        .and_then(|v| {
+            v.get("total_locks")
+                .and_then(|n| n.as_u64())
+                .map(|n| n as usize)
+        })
         .unwrap_or(0);
 
     // Fantasy voucher: never anchored via genesis
-    let fantasy_voucher = hex::encode(&blake3::hash(b"fantasy_voucher_never_anchored").as_bytes()[..16]);
+    let fantasy_voucher =
+        hex::encode(&blake3::hash(b"fantasy_voucher_never_anchored").as_bytes()[..16]);
     let fantasy_wallet = SimWallet::new();
-    let fantasy_req = fantasy_wallet.create_successor_lock(&fantasy_voucher, "parent_ds_tag_fantasy_01");
+    let fantasy_req =
+        fantasy_wallet.create_successor_lock(&fantasy_voucher, "parent_ds_tag_fantasy_01");
 
     // This must be rejected with 400 Bad Request (Unknown voucher root)
     let (st_fantasy, env_fantasy) = sim
@@ -378,7 +424,10 @@ async fn test_sim_03_byzantine_resilience() {
     );
     sim.reporter.check(
         matches!(env_fantasy.verdict, L2Verdict::Rejected { .. }),
-        format!("Fantasy verdict must be Rejected, got {:?}", env_fantasy.verdict),
+        format!(
+            "Fantasy verdict must be Rejected, got {:?}",
+            env_fantasy.verdict
+        ),
     );
     if let L2Verdict::Rejected { reason } = &env_fantasy.verdict {
         sim.reporter.check(
@@ -395,7 +444,11 @@ async fn test_sim_03_byzantine_resilience() {
         .expect("GET /health after fantasy");
     let total_after: usize = serde_json::from_slice::<serde_json::Value>(&health_body2)
         .ok()
-        .and_then(|v| v.get("total_locks").and_then(|n| n.as_u64()).map(|n| n as usize))
+        .and_then(|v| {
+            v.get("total_locks")
+                .and_then(|n| n.as_u64())
+                .map(|n| n as usize)
+        })
         .unwrap_or(usize::MAX);
     sim.reporter.check(
         health_status2 == StatusCode::OK,
@@ -419,8 +472,14 @@ async fn test_sim_03_byzantine_resilience() {
         format!("Fantasy status HTTP must be 200, got {qs_fantasy}"),
     );
     sim.reporter.check(
-        matches!(qv_fantasy.verdict, L2Verdict::UnknownVoucher | L2Verdict::MissingLocks { .. } | L2Verdict::Rejected { .. }),
-        format!("Fantasy query must be UnknownVoucher/MissingLocks/Rejected, got {:?}", qv_fantasy.verdict),
+        matches!(
+            qv_fantasy.verdict,
+            L2Verdict::UnknownVoucher | L2Verdict::MissingLocks { .. } | L2Verdict::Rejected { .. }
+        ),
+        format!(
+            "Fantasy query must be UnknownVoucher/MissingLocks/Rejected, got {:?}",
+            qv_fantasy.verdict
+        ),
     );
     sim.reporter.check(
         !matches!(qv_fantasy.verdict, L2Verdict::Verified { .. }),

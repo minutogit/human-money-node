@@ -1,7 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 use crate::error::NodeError;
 
@@ -145,10 +145,7 @@ impl fmt::Debug for AlertConfig {
                 &self.peer_upgrade_threshold_percent,
             )
             .field("min_peers_for_alert", &self.min_peers_for_alert)
-            .field(
-                "notify_on_sunset_warning",
-                &self.notify_on_sunset_warning,
-            )
+            .field("notify_on_sunset_warning", &self.notify_on_sunset_warning)
             .finish()
     }
 }
@@ -177,7 +174,9 @@ pub struct NetworkConfig {
     pub fast_ticker_interval_secs: Option<u64>,
 }
 
-fn default_shutdown_timeout_secs() -> u64 { 10 }
+fn default_shutdown_timeout_secs() -> u64 {
+    10
+}
 
 fn default_shard_query_depth() -> usize {
     3
@@ -414,21 +413,33 @@ impl NodeConfig {
     pub fn validate_network_boundaries(&self) -> Result<(), NodeError> {
         if let Some(addr) = self.network.operator_listen_addr {
             if !addr.ip().is_loopback() {
-                return Err(NodeError::Daemon("operator_listen_addr must be loopback; use SSH forwarding for remote access".into()));
+                return Err(NodeError::Daemon(
+                    "operator_listen_addr must be loopback; use SSH forwarding for remote access"
+                        .into(),
+                ));
             }
             if addr.port() != 0 && addr == self.network.rpc_listen_addr {
-                return Err(NodeError::Daemon("operator and public listeners must be separate".into()));
+                return Err(NodeError::Daemon(
+                    "operator and public listeners must be separate".into(),
+                ));
             }
         }
         if !(1..=300).contains(&self.network.shutdown_timeout_secs) {
-            return Err(NodeError::Daemon("shutdown_timeout_secs must be between 1 and 300".into()));
+            return Err(NodeError::Daemon(
+                "shutdown_timeout_secs must be between 1 and 300".into(),
+            ));
         }
         if self.discovery.public_gateway_urls.len() > 16 {
-            return Err(NodeError::Daemon("at most 16 public HTTP gateway advertisements are allowed".into()));
+            return Err(NodeError::Daemon(
+                "at most 16 public HTTP gateway advertisements are allowed".into(),
+            ));
         }
         for raw in &self.discovery.public_gateway_urls {
             if !is_publishable_gateway_url(raw) {
-                return Err(NodeError::Daemon("gateway URL must be bounded HTTP(S) without credentials, query or fragment".into()));
+                return Err(NodeError::Daemon(
+                    "gateway URL must be bounded HTTP(S) without credentials, query or fragment"
+                        .into(),
+                ));
             }
         }
         Ok(())
@@ -591,7 +602,10 @@ mod tests {
         config.network.advertised_addr = Some("203.0.113.195:9090".parse().unwrap());
         config.f2f.peers.push("192.168.1.100:9090".to_string());
         config.quotas.default_byte_years = 500_000_000;
-        config.discovery.bootstrap_gateways.push("https://bootstrap.humoco.org".to_string());
+        config
+            .discovery
+            .bootstrap_gateways
+            .push("https://bootstrap.humoco.org".to_string());
 
         let toml_str = toml::to_string_pretty(&config).expect("Serialize to TOML");
         let parsed: NodeConfig = toml::from_str(&toml_str).expect("Deserialize from TOML");
@@ -641,8 +655,14 @@ mod tests {
         "#;
         let config: NodeConfig = toml::from_str(toml_str).expect("Parse discovery section");
         assert_eq!(config.discovery.bootstrap_gateways.len(), 2);
-        assert_eq!(config.discovery.bootstrap_gateways[0], "https://gateway1.humoco.org");
-        assert_eq!(config.discovery.bootstrap_gateways[1], "https://gateway2.humoco.org");
+        assert_eq!(
+            config.discovery.bootstrap_gateways[0],
+            "https://gateway1.humoco.org"
+        );
+        assert_eq!(
+            config.discovery.bootstrap_gateways[1],
+            "https://gateway2.humoco.org"
+        );
     }
 
     #[test]

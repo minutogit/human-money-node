@@ -1,10 +1,7 @@
 //! Integration tests for Distributed Recovery, Shard Sync & Fragmented Consensus States.
 //! Verifies fixes for Audit Findings F04, F05, F10b (Prompt 21).
 
-use humoco_node::{
-    network::framing::SyncPayload,
-    storage::db::install::ShardStage,
-};
+use humoco_node::{network::framing::SyncPayload, storage::db::install::ShardStage};
 use humoco_sim_core::types::{LockRecord, SimTime};
 
 #[test]
@@ -53,7 +50,13 @@ fn test_stage_rejects_cumulative_overflow_beyond_capacity() {
             parent[..2].copy_from_slice(&shard.to_be_bytes());
             let offset = (page_idx * 400 + i) as u64;
             parent[2..10].copy_from_slice(&offset.to_le_bytes());
-            let row = LockRecord::new(parent, [1u8; 32], vec![2], SimTime(now), SimTime(now + 60_000));
+            let row = LockRecord::new(
+                parent,
+                [1u8; 32],
+                vec![2],
+                SimTime(now),
+                SimTime(now + 60_000),
+            );
             locks.push((row, now + 60_000));
         }
         let payload = SyncPayload {

@@ -40,13 +40,17 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     // =========================================================================
     // Phase 1: Mesh Baseline (4 Honest Nodes 0..3 + 1 Gateway Node 4)
     // =========================================================================
-    sim.reporter.begin_phase("Phase 1 - Baseline Setup (Honest Shards + Gateway)");
+    sim.reporter
+        .begin_phase("Phase 1 - Baseline Setup (Honest Shards + Gateway)");
 
     let n0 = sim.spawn_node().await.expect("spawn n0");
     let n1 = sim.spawn_node_with_f2f(&[n0]).await.expect("spawn n1");
     let n2 = sim.spawn_node_with_f2f(&[n1]).await.expect("spawn n2");
     let n3 = sim.spawn_node_with_f2f(&[n2, n0]).await.expect("spawn n3");
-    let n4_lazy = sim.spawn_node_with_f2f(&[n0, n1]).await.expect("spawn n4 gateway");
+    let n4_lazy = sim
+        .spawn_node_with_f2f(&[n0, n1])
+        .await
+        .expect("spawn n4 gateway");
 
     sim.reporter.step(format!(
         "Spawned mesh: honest shards n0={}, n1={}, n2={}, n3={} | gateway n4={}",
@@ -71,11 +75,17 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
 
         sim.reporter.check(
             status == StatusCode::CREATED || status == StatusCode::OK,
-            format!("Genesis anchor on node {} must return 200/201, got {}", node_idx, status),
+            format!(
+                "Genesis anchor on node {} must return 200/201, got {}",
+                node_idx, status
+            ),
         );
         sim.reporter.check(
             matches!(envelope.verdict, L2Verdict::Verified { .. }),
-            format!("Genesis verdict on node {} must be Verified, got {:?}", node_idx, envelope.verdict),
+            format!(
+                "Genesis verdict on node {} must be Verified, got {:?}",
+                node_idx, envelope.verdict
+            ),
         );
     }
 
@@ -91,7 +101,10 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
 
     sim.reporter.check(
         b_status == StatusCode::CREATED,
-        format!("Baseline spend via n4 must return 201 Created, got {}", b_status),
+        format!(
+            "Baseline spend via n4 must return 201 Created, got {}",
+            b_status
+        ),
     );
     sim.reporter.check(
         matches!(b_env.verdict, L2Verdict::Verified { .. }),
@@ -111,7 +124,10 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     );
     sim.reporter.check(
         matches!(qb_env.verdict, L2Verdict::Verified { .. }),
-        format!("Baseline status verdict must be Verified, got {:?}", qb_env.verdict),
+        format!(
+            "Baseline status verdict must be Verified, got {:?}",
+            qb_env.verdict
+        ),
     );
 
     sim.reporter.end_phase_ok();
@@ -119,7 +135,8 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     // =========================================================================
     // Phase 2: Gateway Goes Parasitic (Refuses Shard Work / Drops RPCs)
     // =========================================================================
-    sim.reporter.begin_phase("Phase 2 - Gateway Becomes Parasitic & Degraded");
+    sim.reporter
+        .begin_phase("Phase 2 - Gateway Becomes Parasitic & Degraded");
 
     // We simulate the parasitic gateway disconnecting from shard consensus
     // (stopping its node daemon / refusing P2P collaboration).
@@ -134,7 +151,8 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     // =========================================================================
     // Phase 3: Honest Shards Maintain Quorum & Consensus Independently
     // =========================================================================
-    sim.reporter.begin_phase("Phase 3 - Autonomous Shard Quorum without Parasite");
+    sim.reporter
+        .begin_phase("Phase 3 - Autonomous Shard Quorum without Parasite");
 
     // Transactions processed directly on honest shards (n0..n3) continue 100% unaffected
     let honest_tag = "honest_shard_parent_tag_02".to_string();
@@ -148,7 +166,10 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
 
     sim.reporter.check(
         h_status == StatusCode::CREATED,
-        format!("Honest shard transaction on n0 must return 201 Created, got {}", h_status),
+        format!(
+            "Honest shard transaction on n0 must return 201 Created, got {}",
+            h_status
+        ),
     );
     sim.reporter.check(
         matches!(h_env.verdict, L2Verdict::Verified { .. }),
@@ -176,7 +197,8 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     // =========================================================================
     // Phase 4: Smart Client Failover from Failing Gateway to Honest Gateway
     // =========================================================================
-    sim.reporter.begin_phase("Phase 4 - Smart Client Rapid Failover (< 200ms)");
+    sim.reporter
+        .begin_phase("Phase 4 - Smart Client Rapid Failover (< 200ms)");
 
     let customer_spend_tag = "customer_checkout_tag_03".to_string();
     let customer_spend = wallet.create_successor_lock(&voucher_id, &customer_spend_tag);
@@ -190,7 +212,8 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
         "Customer request to non-cooperating gateway n4 must fail or time out".to_string(),
     );
 
-    sim.reporter.step("Smart Client detected gateway failure -> executing Hydra Failover to Node 1");
+    sim.reporter
+        .step("Smart Client detected gateway failure -> executing Hydra Failover to Node 1");
 
     // Smart Client failover: immediately retries against honest gateway Node 1
     let (failover_status, failover_env) = sim
@@ -219,7 +242,8 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     // =========================================================================
     // Phase 5: Economic Isolation & Double-Spend Protection
     // =========================================================================
-    sim.reporter.begin_phase("Phase 5 - Economic Neutralization & Collision Protection");
+    sim.reporter
+        .begin_phase("Phase 5 - Economic Neutralization & Collision Protection");
 
     // Verify status on failover gateway
     let q_cust = status_query(&voucher_id, &customer_spend_tag);
@@ -235,7 +259,10 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     );
     sim.reporter.check(
         matches!(qc_env.verdict, L2Verdict::Verified { .. }),
-        format!("Customer transaction must be Verified on n1, got {:?}", qc_env.verdict),
+        format!(
+            "Customer transaction must be Verified on n1, got {:?}",
+            qc_env.verdict
+        ),
     );
 
     // Attempting a double-spend of the same customer parent tag on Node 1 is blocked immediately with 409 Conflict
@@ -255,7 +282,10 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     );
     sim.reporter.check(
         matches!(ds_env.verdict, L2Verdict::Conflict { .. }),
-        format!("Double-spend verdict must be Conflict, got {:?}", ds_env.verdict),
+        format!(
+            "Double-spend verdict must be Conflict, got {:?}",
+            ds_env.verdict
+        ),
     );
 
     // Verify genesis status query
@@ -272,7 +302,10 @@ async fn test_sim_06_lazy_gateway_free_rider_resilience() {
     );
     sim.reporter.check(
         matches!(qg_env.verdict, L2Verdict::Verified { .. }),
-        format!("Genesis status verdict must be Verified, got {:?}", qg_env.verdict),
+        format!(
+            "Genesis status verdict must be Verified, got {:?}",
+            qg_env.verdict
+        ),
     );
 
     sim.reporter.end_phase_ok();

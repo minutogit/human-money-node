@@ -8,8 +8,6 @@
 //! - TTL cleanup of confirmation support and staging records
 //! - Idempotent repeated shutdown signals and verified database release
 
-use std::sync::Arc;
-use std::time::Duration;
 use ed25519_dalek::Signer;
 use humoco_node::{
     api::{build_router, hmc::*, AppState},
@@ -17,14 +15,12 @@ use humoco_node::{
     identity::NodeIdentity,
     ingress::{PowEngine, TierController},
     network::PeerManager,
-    storage::{
-        db::install::ShardStage,
-        db::support,
-        DualTierEngine, RedbStorage,
-    },
+    storage::{db::install::ShardStage, db::support, DualTierEngine, RedbStorage},
 };
 use humoco_sim_core::wire::{MsgType, WireHeader};
 use sha3::{Digest, Sha3_256};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 fn make_root_request(author: &NodeIdentity, voucher: &str, now: u64) -> L2LockRequest {
@@ -61,9 +57,15 @@ fn make_root_request(author: &NodeIdentity, voucher: &str, now: u64) -> L2LockRe
         is_root: true,
         signature: [0; 64],
     };
-    proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+    proof.signature = author
+        .signing_key()
+        .sign(&proof.digest().unwrap())
+        .to_bytes();
     req.causal_output = Some(proof);
-    req.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&req)).to_bytes();
+    req.layer2_signature = author
+        .signing_key()
+        .sign(&calculate_l2_payload_hash(&req))
+        .to_bytes();
     req
 }
 
@@ -90,7 +92,8 @@ async fn pow_positive_exact_retry_and_adversarial_tamper_rejection() {
     let shard = humoco_sim_core::types::canonical_voucher_shard(&parent);
     state.readiness_manager.mark_shard_ready(shard);
 
-    let server = tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap() });
+    let server =
+        tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap() });
     let client = reqwest::Client::new();
 
     // 1. Request PoW challenge
@@ -132,7 +135,8 @@ async fn pow_positive_exact_retry_and_adversarial_tamper_rejection() {
         .unwrap();
     // Idempotent retry returns 200 OK (Verified)
     assert!(
-        retry_res.status() == reqwest::StatusCode::OK || retry_res.status() == reqwest::StatusCode::CREATED,
+        retry_res.status() == reqwest::StatusCode::OK
+            || retry_res.status() == reqwest::StatusCode::CREATED,
         "exact retry must be accepted idempotently, got {}",
         retry_res.status()
     );
@@ -141,7 +145,10 @@ async fn pow_positive_exact_retry_and_adversarial_tamper_rejection() {
     let mut different_req = root_req.clone();
     different_req.layer2_voucher_id = "different-voucher".into();
     different_req.transaction_hash = [99; 32];
-    different_req.layer2_signature = id.signing_key().sign(&calculate_l2_payload_hash(&different_req)).to_bytes();
+    different_req.layer2_signature = id
+        .signing_key()
+        .sign(&calculate_l2_payload_hash(&different_req))
+        .to_bytes();
 
     let reuse_res = client
         .post(format!("http://{addr}/v1/lock"))
@@ -153,7 +160,8 @@ async fn pow_positive_exact_retry_and_adversarial_tamper_rejection() {
         .unwrap();
     // Reusing the same challenge is rejected
     assert!(
-        reuse_res.status() == reqwest::StatusCode::UNAUTHORIZED || reuse_res.status() == reqwest::StatusCode::BAD_REQUEST,
+        reuse_res.status() == reqwest::StatusCode::UNAUTHORIZED
+            || reuse_res.status() == reqwest::StatusCode::BAD_REQUEST,
         "adversarial PoW reuse on different lock must be rejected, got {}",
         reuse_res.status()
     );
@@ -214,9 +222,12 @@ async fn token_origin_isolation_and_redirect_rejection() {
     let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
         &bs58::encode(root_req.transaction_hash).into_string(),
     );
-    state.readiness_manager.mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&parent));
+    state
+        .readiness_manager
+        .mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&parent));
 
-    let server = tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap() });
+    let server =
+        tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap() });
     let client = reqwest::Client::new();
 
     // Invariant: Anti-Hallucination Rule 3 (Ban on 'Dual-Role Ingress'):
@@ -258,14 +269,16 @@ async fn token_origin_isolation_and_redirect_rejection() {
         axum::routing::get(|| async {
             (
                 axum::http::StatusCode::FOUND,
-                [(axum::http::header::LOCATION, "http://malicious.example/steal")],
+                [(
+                    axum::http::header::LOCATION,
+                    "http://malicious.example/steal",
+                )],
                 "Redirecting",
             )
         }),
     );
-    let redirect_server = tokio::spawn(async move {
-        axum::serve(redirect_listener, redirect_app).await.unwrap()
-    });
+    let redirect_server =
+        tokio::spawn(async move { axum::serve(redirect_listener, redirect_app).await.unwrap() });
 
     let redirect_refusing_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -319,24 +332,37 @@ async fn regional_source_wrong_key_replay_expiry_disagreement_and_missing() {
     let verify_with_authority = |sig: [u8; 64], hash: [u8; 32]| {
         use ed25519_dalek::Verifier;
         if let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig) {
-            authority.signing_key().verifying_key().verify(&hash, &sig).is_ok()
+            authority
+                .signing_key()
+                .verifying_key()
+                .verify(&hash, &sig)
+                .is_ok()
         } else {
             false
         }
     };
     let (hash, _) = sign_regional_view(&authority, shard, digest, now);
-    assert!(!verify_with_authority(wrong_sig, hash), "wrong authority key must fail verification");
+    assert!(
+        !verify_with_authority(wrong_sig, hash),
+        "wrong authority key must fail verification"
+    );
 
     // 2. Replay / expired response: timestamp outside 30s freshness window
     let expired_ts = now - 35_000;
     let is_fresh = |ts: u64, current: u64| ts.abs_diff(current) <= 30_000;
-    assert!(!is_fresh(expired_ts, now), "timestamp older than 30s must be rejected as expired");
+    assert!(
+        !is_fresh(expired_ts, now),
+        "timestamp older than 30s must be rejected as expired"
+    );
 
     // 3. Disagreement: two regional sources return conflicting digests for the same shard
     let source_a_digest = [1u8; 32];
     let source_b_digest = [2u8; 32];
     let sources_agree = source_a_digest == source_b_digest;
-    assert!(!sources_agree, "unresolved disagreement between regional sources must fail closed");
+    assert!(
+        !sources_agree,
+        "unresolved disagreement between regional sources must fail closed"
+    );
 
     // 4. Missing source / connection refused fails closed
     let client = reqwest::Client::builder()
@@ -344,27 +370,32 @@ async fn regional_source_wrong_key_replay_expiry_disagreement_and_missing() {
         .build()
         .unwrap();
     let missing_source = client.get("http://127.0.0.1:1/nonexistent").send().await;
-    assert!(missing_source.is_err(), "missing regional source fails closed");
+    assert!(
+        missing_source.is_err(),
+        "missing regional source fails closed"
+    );
 }
 
 #[tokio::test]
 async fn pre_allocation_rejection_above_64_kib() {
     // 1. Wire frame rejection for payload > 64 KiB (MAX_STANDARD_FRAME_PAYLOAD_LEN = 65_536)
-    let header_oversize = WireHeader::new(
-        MsgType::LockVerifyRequest as u16,
-        1,
-        0,
-        0,
-        65_537,
-    );
+    let header_oversize = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, 65_537);
     let mut buf = Vec::new();
     let oversized_payload = vec![0u8; 65_537];
-    let write_res = humoco_node::network::framing::write_frame(&mut buf, &header_oversize, &oversized_payload).await;
-    assert!(write_res.is_err(), "payload above 64 KiB must be rejected by write_frame");
+    let write_res =
+        humoco_node::network::framing::write_frame(&mut buf, &header_oversize, &oversized_payload)
+            .await;
+    assert!(
+        write_res.is_err(),
+        "payload above 64 KiB must be rejected by write_frame"
+    );
 
     let mut read_buf = std::io::Cursor::new(header_oversize.to_bytes());
     let read_res = humoco_node::network::framing::read_frame(&mut read_buf).await;
-    assert!(read_res.is_err(), "header claiming payload above 64 KiB must be rejected by read_frame");
+    assert!(
+        read_res.is_err(),
+        "header claiming payload above 64 KiB must be rejected by read_frame"
+    );
 
     // 2. ShardStage append rejects pages exceeding limits
     let stage = ShardStage::new(1234, 1_000_000).unwrap();
@@ -385,7 +416,10 @@ async fn pre_allocation_rejection_above_64_kib() {
         oversize_page.locks.push((rec, 50_000));
     }
     let res = stage.append(oversize_page);
-    assert!(res.is_err(), "page with > 500 records must be rejected with ceiling exceeded");
+    assert!(
+        res.is_err(),
+        "page with > 500 records must be rejected with ceiling exceeded"
+    );
 }
 
 #[tokio::test]
@@ -416,7 +450,8 @@ async fn ttl_cleanup_of_support_and_staging_records() {
     };
     let mut root = entry.clone();
     root.t_id = [1; 32];
-    db.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root).unwrap();
+    db.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root)
+        .unwrap();
     db.put_hmc_lock(tag, &entry).unwrap();
 
     let keys: Vec<_> = (0..20).map(|_| NodeIdentity::generate()).collect();
@@ -464,19 +499,28 @@ async fn ttl_cleanup_of_support_and_staging_records() {
     // Prune before expiry + grace period: record remains
     let before_grace_sec = (root_expiry + 10_000) / 1000;
     db.prune_expired_buckets(before_grace_sec).unwrap();
-    assert!(db.confirmation_support(tag).unwrap().is_some(), "support record must survive before grace horizon");
+    assert!(
+        db.confirmation_support(tag).unwrap().is_some(),
+        "support record must survive before grace horizon"
+    );
 
     // Prune past root_expiry + 30s grace horizon
     let after_grace_sec = (root_expiry + 35_000) / 1000;
     db.prune_expired_buckets(after_grace_sec).unwrap();
-    assert!(db.confirmation_support(tag).unwrap().is_none(), "support record must be purged after root expiry + grace");
+    assert!(
+        db.confirmation_support(tag).unwrap().is_none(),
+        "support record must be purged after root expiry + grace"
+    );
 
     // Staging tempfile cleanup: ShardStage removes its temporary database file upon drop
     let stage = ShardStage::new(99, now).unwrap();
     let stage_file_path = stage.storage_path().to_path_buf();
     assert!(stage_file_path.exists());
     drop(stage);
-    assert!(!stage_file_path.exists(), "temporary staging file must be unlinked upon drop");
+    assert!(
+        !stage_file_path.exists(),
+        "temporary staging file must be unlinked upon drop"
+    );
 }
 
 #[tokio::test]
@@ -555,5 +599,8 @@ async fn repeated_shutdown_signals_are_idempotent_and_release_database() {
 
     // Database lock must be completely released, allowing immediate reopen
     let reopened = RedbStorage::open(&path);
-    assert!(reopened.is_ok(), "Redb storage must reopen immediately after verified shutdown");
+    assert!(
+        reopened.is_ok(),
+        "Redb storage must reopen immediately after verified shutdown"
+    );
 }

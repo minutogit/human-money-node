@@ -18,9 +18,7 @@ use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 use humoco_node::api::dto::AttestationDto;
-use humoco_node::api::hmc::{
-    calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest,
-};
+use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::network::framing::LockWirePayload;
 use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
@@ -105,9 +103,8 @@ fn make_hmc_genesis(
 async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(
-        RedbStorage::open(&temp.path().join("anti_slash.redb")).expect("open redb"),
-    );
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("anti_slash.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     let shard_identity = NodeIdentity::generate();
@@ -129,8 +126,21 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
 
     // Explicit single-member fixture readiness and mature ticket; this is not recovery evidence.
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
-    shard_pm.learn_node_from_gossip_with_hrw(*shard_identity.node_pubkey(), *shard_identity.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
-    shard_pm.set_first_seen_for_test(shard_identity.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    shard_pm
+        .learn_node_from_gossip_with_hrw(
+            *shard_identity.node_pubkey(),
+            *shard_identity.hrw_routing_id(),
+            "127.0.0.1:1".parse().unwrap(),
+            0,
+            None,
+        )
+        .await;
+    shard_pm
+        .set_first_seen_for_test(
+            shard_identity.node_pubkey(),
+            std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+        )
+        .await;
     let handler = Arc::new(
         NodeRequestHandler::with_peer_manager(
             engine.clone(),
@@ -198,14 +208,19 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
     let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
     let parent = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
     let shard = humoco_sim_core::types::extract_shard_id(&parent);
-    engine.record_hmc_voucher_genesis_parent(&genesis_req.layer2_voucher_id, parent).await;
+    engine
+        .record_hmc_voucher_genesis_parent(&genesis_req.layer2_voucher_id, parent)
+        .await;
     readiness.mark_shard_ready(shard);
 
     let (v_gen, is_new_gen) = engine
         .ingress_hmc_lock(genesis_tag.clone(), L2LockEntry::from(&genesis_req))
         .await;
     assert!(is_new_gen);
-    assert!(matches!(v_gen, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+    assert!(matches!(
+        v_gen,
+        humoco_node::api::hmc::L2Verdict::Verified { .. }
+    ));
 
     // -----------------------------------------------------------------------
     // Step 1: Send Lock A for parent P over QUIC wire
@@ -299,10 +314,8 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
             humoco_sim_core::types::NetworkId::Mainnet,
         );
         let parent_bytes = *blake3::hash(parent_hex.as_bytes()).as_bytes();
-        let payload_digest = humoco_sim_core::crypto::compute_attestation_payload_digest(
-            &parent_bytes,
-            &tx_hash_a,
-        );
+        let payload_digest =
+            humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_bytes, &tx_hash_a);
         let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
             domain_tag,
             0,
@@ -337,7 +350,10 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         false,
         &tx_hash_a,
     );
-    let sender_sig_a_retry = client_identity.signing_key().sign(&digest_a_retry).to_bytes();
+    let sender_sig_a_retry = client_identity
+        .signing_key()
+        .sign(&digest_a_retry)
+        .to_bytes();
 
     let wire_payload_a_retry = bincode::serialize(&LockWirePayload::Hmc {
         req: lock_a_req.clone(),
@@ -483,7 +499,10 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         false,
         &tx_hash_b,
     );
-    let sender_sig_b_retry = client_identity.signing_key().sign(&digest_b_retry).to_bytes();
+    let sender_sig_b_retry = client_identity
+        .signing_key()
+        .sign(&digest_b_retry)
+        .to_bytes();
 
     let wire_payload_b_retry = bincode::serialize(&LockWirePayload::Hmc {
         req: lock_b_req.clone(),

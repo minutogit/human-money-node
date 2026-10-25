@@ -34,7 +34,12 @@ async fn test_anti_framing_split_brain_collision_does_not_ban_signers() {
     lock_a.signers.insert(victim_node_id_u16);
 
     let res_a = engine
-        .ingress_lock_with_origin(lock_a, SimTime(100), SimTime(2_000_000), IngressOrigin::PartitionSync)
+        .ingress_lock_with_origin(
+            lock_a,
+            SimTime(100),
+            SimTime(2_000_000),
+            IngressOrigin::PartitionSync,
+        )
         .await;
     assert_eq!(res_a.unwrap(), IngressVerdictLow::AcceptedNew);
 
@@ -50,7 +55,12 @@ async fn test_anti_framing_split_brain_collision_does_not_ban_signers() {
 
     // Ingress colliding lock — deterministic min(H_canon) decides WinnerA/B, never panic
     let res_b = engine
-        .ingress_lock_with_origin(lock_b, SimTime(100), SimTime(2_000_000), IngressOrigin::PartitionSync)
+        .ingress_lock_with_origin(
+            lock_b,
+            SimTime(100),
+            SimTime(2_000_000),
+            IngressOrigin::PartitionSync,
+        )
         .await;
     assert!(
         matches!(
@@ -86,7 +96,9 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
     for i in 0..25u64 {
         let dummy_id = *blake3::hash(&i.to_le_bytes()).as_bytes();
         let addr = format!("127.0.0.1:{}", 20000 + i).parse().unwrap();
-        peer_mgr.learn_node_from_gossip(dummy_id, addr, 1, None).await;
+        peer_mgr
+            .learn_node_from_gossip(dummy_id, addr, 1, None)
+            .await;
     }
 
     // Immature nodes MUST NOT be counted in active_nodes_count
@@ -157,7 +169,12 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
     let root_valid = now_ms + 500_000; // 500s in future
 
     // Anchor root
-    engine.hmc_ram.write().await.voucher_roots.insert(voucher_id.clone(), root_valid);
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .voucher_roots
+        .insert(voucher_id.clone(), root_valid);
 
     // 1. Root expiry within 30 seconds is rejected; child TTL cannot override it.
     let invalid_entry = L2LockEntry {
@@ -187,7 +204,10 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
 
     assert!(!is_new);
     assert!(
-        matches!(verdict_invalid, humoco_node::api::hmc::L2Verdict::Rejected { .. }),
+        matches!(
+            verdict_invalid,
+            humoco_node::api::hmc::L2Verdict::Rejected { .. }
+        ),
         "INV-1202 verletzt: Lock mit valid_until < now + 30s muss auf ClientApi abgewiesen werden!"
     );
 
@@ -218,7 +238,10 @@ async fn test_hmc_ingress_window_enforcement_on_hot_path() {
         .await;
 
     assert!(is_new_valid);
-    assert!(matches!(verdict_valid, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+    assert!(matches!(
+        verdict_valid,
+        humoco_node::api::hmc::L2Verdict::Verified { .. }
+    ));
 }
 
 #[tokio::test]
@@ -238,7 +261,8 @@ async fn test_cold_boot_pruning_deferred_during_boot_sync() {
         "Without peer median samples, clock cannot be corroborated"
     );
 
-    let should_defer_prune = !peer_mgr.is_local_sync_ready() && !peer_mgr.clock().is_time_corroborated(0);
+    let should_defer_prune =
+        !peer_mgr.is_local_sync_ready() && !peer_mgr.clock().is_time_corroborated(0);
     assert!(
         should_defer_prune,
         "A03 Invariant: Pruning must be deferred during uncorroborated cold-boot sync"
@@ -246,10 +270,10 @@ async fn test_cold_boot_pruning_deferred_during_boot_sync() {
 
     // Once boot sync converges, pruning is unblocked
     peer_mgr.set_local_sync_ready(true);
-    let should_defer_now = !peer_mgr.is_local_sync_ready() && !peer_mgr.clock().is_time_corroborated(0);
+    let should_defer_now =
+        !peer_mgr.is_local_sync_ready() && !peer_mgr.clock().is_time_corroborated(0);
     assert!(
         !should_defer_now,
         "A03 Invariant: Once sync converges, pruning is active"
     );
 }
-

@@ -28,7 +28,10 @@ fn test_f2f_median_filters_extreme_gaslighting_attack() {
     let status = evaluate_sync_status(25, median, NodeSyncStatus::InSync);
     assert_eq!(status, NodeSyncStatus::InSync);
     let horizon: humoco_sim_core::types::NodeHorizonStatus = status.into();
-    assert_eq!(horizon, humoco_sim_core::types::NodeHorizonStatus::Converged);
+    assert_eq!(
+        horizon,
+        humoco_sim_core::types::NodeHorizonStatus::Converged
+    );
 }
 
 #[test]
@@ -64,11 +67,31 @@ fn test_simulated_network_gaslighting_immunity() {
     // Simulate F2F median defense on a sample node (id 0)
     // Node 0 has 5 F2F friends: 3 honest reporting 25, 2 byz reporting 50_000
     let f2f_reports = vec![
-        F2FPresenceReport { peer_id: 1, reported_network_size: 25, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 2, reported_network_size: 25, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 3, reported_network_size: 25, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 4, reported_network_size: 50_000, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 5, reported_network_size: 50_000, timestamp: SimTime(0) },
+        F2FPresenceReport {
+            peer_id: 1,
+            reported_network_size: 25,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 2,
+            reported_network_size: 25,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 3,
+            reported_network_size: 25,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 4,
+            reported_network_size: 50_000,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 5,
+            reported_network_size: 50_000,
+            timestamp: SimTime(0),
+        },
     ];
     let median = compute_f2f_median_from_reports(&f2f_reports);
     assert_eq!(median, 25);
@@ -79,12 +102,36 @@ fn test_simulated_network_gaslighting_immunity() {
 
     // Even with 6 friends spam still filtered
     let f2f_reports_even = vec![
-        F2FPresenceReport { peer_id: 1, reported_network_size: 25, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 2, reported_network_size: 25, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 3, reported_network_size: 25, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 4, reported_network_size: 25, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 6, reported_network_size: 100_000, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 7, reported_network_size: 100_000, timestamp: SimTime(0) },
+        F2FPresenceReport {
+            peer_id: 1,
+            reported_network_size: 25,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 2,
+            reported_network_size: 25,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 3,
+            reported_network_size: 25,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 4,
+            reported_network_size: 25,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 6,
+            reported_network_size: 100_000,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 7,
+            reported_network_size: 100_000,
+            timestamp: SimTime(0),
+        },
     ];
     let median_even = compute_f2f_median_from_reports(&f2f_reports_even);
     assert_eq!(median_even, 25);
@@ -92,11 +139,17 @@ fn test_simulated_network_gaslighting_immunity() {
     assert_eq!(sync_even, NodeSyncStatus::InSync);
 
     // Simulate actual network run with a lock request - should propagate despite gaslighting
-    use humoco_sim_core::types::LockRecord;
     use humoco_sim_core::sim::SimMessage;
+    use humoco_sim_core::types::LockRecord;
     let parent = [0x77; 32];
     let receiver = [0x88; 32];
-    let lock = LockRecord::new(parent, receiver, b"gaslight_test".to_vec(), SimTime(0), SimTime(50_000));
+    let lock = LockRecord::new(
+        parent,
+        receiver,
+        b"gaslight_test".to_vec(),
+        SimTime(0),
+        SimTime(50_000),
+    );
     let lock_id = lock.id;
     net.schedule(SimTime(0), 0, 0, SimMessage::LockRequest(lock));
     net.run_until(SimTime(500));
@@ -107,5 +160,9 @@ fn test_simulated_network_gaslighting_immunity() {
             count += 1;
         }
     }
-    assert!(count >= 20, "Gossip must reach majority despite gaslighting, got {}", count);
+    assert!(
+        count >= 20,
+        "Gossip must reach majority despite gaslighting, got {}",
+        count
+    );
 }

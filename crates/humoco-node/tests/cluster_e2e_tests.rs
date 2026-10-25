@@ -1,6 +1,6 @@
+use axum::http::StatusCode;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use axum::http::StatusCode;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -121,7 +121,10 @@ impl TestNode {
 
         let mut req_str = format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
-            method, path, self.rpc_addr, body_bytes.len()
+            method,
+            path,
+            self.rpc_addr,
+            body_bytes.len()
         );
         for (k, v) in headers {
             req_str.push_str(&format!("{}: {}\r\n", k, v));
@@ -160,7 +163,8 @@ impl TestNode {
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(500);
 
-        let status = StatusCode::from_u16(status_code_u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(status_code_u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         Ok((status, body_part.to_vec()))
     }
 
@@ -180,7 +184,7 @@ impl TestNode {
                     Some(&json_body),
                     &[
                         ("Content-Type", "application/json"),
-                        ("X-Peer-Token", "cluster_f2f_token"),
+                        ("X-Peer-Token", "f2f_cluster_token"),
                     ],
                 )
                 .await?;
@@ -219,9 +223,7 @@ impl TestNode {
     pub async fn get_status(
         &self,
     ) -> Result<(StatusCode, NodeStatusResponse), Box<dyn std::error::Error + Send + Sync>> {
-        let (status, body) = self
-            .http_request("GET", "/health", None, &[])
-            .await?;
+        let (status, body) = self.http_request("GET", "/health", None, &[]).await?;
         let resp: NodeStatusResponse = serde_json::from_slice(&body)?;
         Ok((status, resp))
     }
@@ -234,7 +236,9 @@ pub struct ClusterHarness {
 
 impl ClusterHarness {
     /// Spawns explicitly prepared application/QUIC fixtures; does not establish safe recovery.
-    pub async fn spawn_cluster(size: usize) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn spawn_cluster(
+        size: usize,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         assert!(size > 0, "Cluster size must be at least 1");
 
         let mut node_setups = Vec::with_capacity(size);
@@ -251,14 +255,18 @@ impl ClusterHarness {
             config.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
             config.storage.data_dir = temp.path().join("data");
             config.identity.key_path = key_path;
-            config.network.control_socket = Some(temp.path().join(format!("humoco_node_{}.sock", i)));
-            config.f2f.tokens.push("cluster_f2f_token".into());
+            config.network.control_socket =
+                Some(temp.path().join(format!("humoco_node_{}.sock", i)));
+            config.f2f.tokens.push("f2f_cluster_token".into());
 
             node_setups.push((temp, identity, config));
         }
 
         // Mutual F2F pubkey trust across all cluster nodes
-        let pubkeys: Vec<String> = node_setups.iter().map(|(_, id, _)| id.public_key_hex()).collect();
+        let pubkeys: Vec<String> = node_setups
+            .iter()
+            .map(|(_, id, _)| id.public_key_hex())
+            .collect();
         for (i, (_, _, config)) in node_setups.iter_mut().enumerate() {
             for (j, pk) in pubkeys.iter().enumerate() {
                 if i != j {
@@ -273,57 +281,114 @@ impl ClusterHarness {
         let mut test_nodes = Vec::with_capacity(size);
         let mut managers = Vec::with_capacity(size);
         for (temp, identity, config) in node_setups {
-            use std::sync::Arc;
-            use humoco_node::api::{AppState, build_router};
-            use humoco_node::network::{PeerManager, NodeRequestHandler, QuicTransport};
-            use humoco_node::storage::{DualTierEngine, RedbStorage};
+            use humoco_node::api::{build_router, AppState};
             use humoco_node::ingress::{PowEngine, TierController};
+            use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
+            use humoco_node::storage::{DualTierEngine, RedbStorage};
+            use std::sync::Arc;
             std::fs::create_dir_all(&config.storage.data_dir)?;
-            let storage = Arc::new(RedbStorage::open(&config.storage.data_dir.join("humoco.redb"))?);
+            let storage = Arc::new(RedbStorage::open(
+                &config.storage.data_dir.join("humoco.redb"),
+            )?);
             let flush_cancel = CancellationToken::new();
-            let (engine, flush_worker) = DualTierEngine::new_with_token(storage.clone(), flush_cancel.clone());
+            let (engine, flush_worker) =
+                DualTierEngine::new_with_token(storage.clone(), flush_cancel.clone());
             let cancel_token = CancellationToken::new();
             let manager = Arc::new(PeerManager::new(Vec::new()));
             manager.set_local_sync_ready(true);
-            let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::with_cancel_token(cancel_token.clone()));
-            for shard in 0..=u16::MAX { readiness.mark_shard_ready(shard); }
-            for member in &all_identities {
-                manager.learn_node_from_gossip_with_hrw(*member.node_pubkey(), *member.hrw_routing_id(), "127.0.0.1:1".parse()?, 0, None).await;
-                manager.set_first_seen_for_test(member.node_pubkey(), Instant::now() - Duration::from_secs(25*3600)).await;
+            let readiness = Arc::new(
+                humoco_node::daemon::ShardReadinessManager::with_cancel_token(cancel_token.clone()),
+            );
+            for shard in 0..=u16::MAX {
+                readiness.mark_shard_ready(shard);
             }
-            let handler = Arc::new(NodeRequestHandler::with_peer_manager(engine.clone(), storage.clone(), identity.clone(), manager.clone()).with_readiness_manager(readiness.clone()));
-            let transport = QuicTransport::bind_with_options("127.0.0.1:0".parse()?, &identity, manager.clone(), handler, cancel_token.clone())?;
+            for member in &all_identities {
+                manager
+                    .learn_node_from_gossip_with_hrw(
+                        *member.node_pubkey(),
+                        *member.hrw_routing_id(),
+                        "127.0.0.1:1".parse()?,
+                        0,
+                        None,
+                    )
+                    .await;
+                manager
+                    .set_first_seen_for_test(
+                        member.node_pubkey(),
+                        Instant::now() - Duration::from_secs(25 * 3600),
+                    )
+                    .await;
+            }
+            let handler = Arc::new(
+                NodeRequestHandler::with_peer_manager(
+                    engine.clone(),
+                    storage.clone(),
+                    identity.clone(),
+                    manager.clone(),
+                )
+                .with_readiness_manager(readiness.clone()),
+            );
+            let transport = QuicTransport::bind_with_options(
+                "127.0.0.1:0".parse()?,
+                &identity,
+                manager.clone(),
+                handler,
+                cancel_token.clone(),
+            )?;
             transport.set_sync_ready(true);
             let p2p_addr = transport.local_addr()?;
             transport.spawn_accept_loop();
             let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
             let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
-            tier.register_f2f_peer("cluster_f2f_token");
+            tier.register_f2f_peer("f2f_cluster_token");
             let mut state = AppState::new(engine, storage, identity.clone(), tier, pow);
             state.peer_manager = Some(manager.clone());
             state.transport = Some(transport.clone());
             state.readiness_manager = readiness;
             // This loopback-only fixture exposes diagnostics locally; production
             // public/operator separation is tested by the dedicated route tests.
-            let app = build_router(state.clone()).merge(humoco_node::api::routes::build_operator_router(state));
+            let app = build_router(state.clone())
+                .merge(humoco_node::api::routes::build_operator_router(state));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let rpc_addr = listener.local_addr()?;
             let server_cancel = cancel_token.clone();
             let task_handle = tokio::spawn(async move {
                 let shutdown = server_cancel.clone();
-                let result = axum::serve(listener, app).with_graceful_shutdown(async move { shutdown.cancelled().await; }).await;
+                let result = axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        shutdown.cancelled().await;
+                    })
+                    .await;
                 transport.close();
                 flush_cancel.cancel();
                 let _ = flush_worker.await;
                 result.map_err(NodeError::Io)
             });
             managers.push(manager);
-            test_nodes.push(TestNode { identity, config, temp_dir: temp, cancel_token, rpc_addr, p2p_addr, task_handle: Some(task_handle) });
+            test_nodes.push(TestNode {
+                identity,
+                config,
+                temp_dir: temp,
+                cancel_token,
+                rpc_addr,
+                p2p_addr,
+                task_handle: Some(task_handle),
+            });
         }
         for manager in &managers {
             for node in &test_nodes {
-                manager.register_f2f_friend(*node.identity.node_pubkey(), Some(node.p2p_addr)).await;
-                manager.learn_node_from_gossip_with_hrw(*node.identity.node_pubkey(), *node.identity.hrw_routing_id(), node.p2p_addr, 0, None).await;
+                manager
+                    .register_f2f_friend(*node.identity.node_pubkey(), Some(node.p2p_addr))
+                    .await;
+                manager
+                    .learn_node_from_gossip_with_hrw(
+                        *node.identity.node_pubkey(),
+                        *node.identity.hrw_routing_id(),
+                        node.p2p_addr,
+                        0,
+                        None,
+                    )
+                    .await;
             }
         }
 
@@ -350,7 +415,12 @@ impl ClusterHarness {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             if !ready {
-                return Err(format!("Node {} failed to become ready on {}", node.identity.node_id_hex(), node.rpc_addr).into());
+                return Err(format!(
+                    "Node {} failed to become ready on {}",
+                    node.identity.node_id_hex(),
+                    node.rpc_addr
+                )
+                .into());
             }
         }
 
@@ -385,8 +455,15 @@ async fn test_e2e_cluster_lock_and_sync() {
     let parent_hex = "ab".repeat(32);
     let now = test_now_ms();
     let root = make_e2e_hmc_genesis(&parent_hex, now + 600_000, &sender_key);
-    for node in &harness.nodes { assert_eq!(node.post_lock(&root).await.unwrap().0, StatusCode::CREATED); }
-    let lock_req = make_e2e_hmc_spend(&root.layer2_voucher_id, "cluster-spend-slot", [8;32], &sender_key);
+    for node in &harness.nodes {
+        assert_eq!(node.post_lock(&root).await.unwrap().0, StatusCode::CREATED);
+    }
+    let lock_req = make_e2e_hmc_spend(
+        &root.layer2_voucher_id,
+        "cluster-spend-slot",
+        [8; 32],
+        &sender_key,
+    );
     let tx_id_hex = hex::encode(lock_req.transaction_hash);
 
     // 1. Submit lock on Node 0 (Node 1) via POST /v1/lock
@@ -499,7 +576,11 @@ async fn test_e2e_pos_latency_benchmark() {
 
         latencies.push(elapsed);
         let resp = last_resp.expect("Response must be present");
-        assert!(matches!(last_status, StatusCode::CREATED | StatusCode::OK), "checkout {i}: {last_status}: {:?}", resp.verdict);
+        assert!(
+            matches!(last_status, StatusCode::CREATED | StatusCode::OK),
+            "checkout {i}: {last_status}: {:?}",
+            resp.verdict
+        );
         assert!(matches!(resp.verdict, L2Verdict::Verified { .. }));
         assert_ne!(resp.server_signature, [0u8; 64]);
         success_count += 1;
@@ -509,8 +590,20 @@ async fn test_e2e_pos_latency_benchmark() {
 
     let total_duration: Duration = latencies.iter().sum();
     let avg_latency_ms = total_duration.as_secs_f64() * 1000.0 / count as f64;
-    let max_latency_ms = latencies.iter().max().copied().unwrap_or_default().as_secs_f64() * 1000.0;
-    let min_latency_ms = latencies.iter().min().copied().unwrap_or_default().as_secs_f64() * 1000.0;
+    let max_latency_ms = latencies
+        .iter()
+        .max()
+        .copied()
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0;
+    let min_latency_ms = latencies
+        .iter()
+        .min()
+        .copied()
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0;
 
     println!(
         "\n=================================================================\n\
@@ -541,16 +634,31 @@ async fn test_e2e_partition_and_conflict_resolution() {
     let genesis_key = SigningKey::from_bytes(&[0x99u8; 32]);
     let genesis_req = make_e2e_hmc_genesis(voucher_id, now + 600_000, &genesis_key);
 
-    for node in &harness.nodes { assert_eq!(node.post_lock(&genesis_req).await.unwrap().0, StatusCode::CREATED); }
+    for node in &harness.nodes {
+        assert_eq!(
+            node.post_lock(&genesis_req).await.unwrap().0,
+            StatusCode::CREATED
+        );
+    }
 
     let parent_lock_bytes = [0x77u8; 32];
     let parent_hex = hex::encode(parent_lock_bytes);
 
     let sender_key_a = SigningKey::from_bytes(&[0x11u8; 32]);
-    let req_a = make_e2e_hmc_spend(&genesis_req.layer2_voucher_id, &parent_hex, [0x11u8; 32], &sender_key_a);
+    let req_a = make_e2e_hmc_spend(
+        &genesis_req.layer2_voucher_id,
+        &parent_hex,
+        [0x11u8; 32],
+        &sender_key_a,
+    );
 
     let sender_key_b = SigningKey::from_bytes(&[0x22u8; 32]);
-    let req_b = make_e2e_hmc_spend(&genesis_req.layer2_voucher_id, &parent_hex, [0x22u8; 32], &sender_key_b);
+    let req_b = make_e2e_hmc_spend(
+        &genesis_req.layer2_voucher_id,
+        &parent_hex,
+        [0x22u8; 32],
+        &sender_key_b,
+    );
 
     // 1. Initial lock submission -> 201 Created
     let (status_a, resp_a) = harness.nodes[0]
@@ -575,8 +683,16 @@ async fn test_e2e_partition_and_conflict_resolution() {
     );
 
     // 3. Compute deterministic canonical hashes min(H_canon)
-    let h_canon_a = compute_hmc_canonical_hash(&parent_lock_bytes, &req_a.sender_ephemeral_pub, &req_a.transaction_hash);
-    let h_canon_b = compute_hmc_canonical_hash(&parent_lock_bytes, &req_b.sender_ephemeral_pub, &req_b.transaction_hash);
+    let h_canon_a = compute_hmc_canonical_hash(
+        &parent_lock_bytes,
+        &req_a.sender_ephemeral_pub,
+        &req_a.transaction_hash,
+    );
+    let h_canon_b = compute_hmc_canonical_hash(
+        &parent_lock_bytes,
+        &req_b.sender_ephemeral_pub,
+        &req_b.transaction_hash,
+    );
 
     let winner_hash = std::cmp::min(h_canon_a, h_canon_b);
     let is_a_winner = winner_hash == h_canon_a;
@@ -603,33 +719,49 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         .expect("Failed to spawn harness");
     let node = &harness.nodes[0];
 
-    println!("Starting Compliance Test against live TCP node at {}...", node.rpc_addr);
+    println!(
+        "Starting Compliance Test against live TCP node at {}...",
+        node.rpc_addr
+    );
 
     use humoco_node::api::hmc::L2StatusQuery;
-    let sender_key = SigningKey::from_bytes(&[73;32]);
+    let sender_key = SigningKey::from_bytes(&[73; 32]);
     let sender_pub = sender_key.verifying_key().to_bytes();
-    let genesis_req = make_e2e_hmc_genesis("live-compliance-root", test_now_ms()+600_000, &sender_key);
+    let genesis_req =
+        make_e2e_hmc_genesis("live-compliance-root", test_now_ms() + 600_000, &sender_key);
     let v_id = genesis_req.layer2_voucher_id.clone();
     let (status, envelope) = node.post_lock(&genesis_req).await.unwrap();
     assert_eq!(status, StatusCode::CREATED);
     assert!(envelope.quorum_certificate.is_none());
-    let spend = make_e2e_hmc_spend(&v_id, "live-compliance-slot", [74;32], &sender_key);
+    let spend = make_e2e_hmc_spend(&v_id, "live-compliance-slot", [74; 32], &sender_key);
     assert_eq!(node.post_lock(&spend).await.unwrap().0, StatusCode::CREATED);
     let query_happy = L2StatusQuery {
-        auth: spend.auth.clone(), layer2_voucher_id: v_id.clone(),
-        challenge_ds_tag: spend.ds_tag.clone().unwrap(), locator_prefixes: vec![], read_quorum: 1,
+        auth: spend.auth.clone(),
+        layer2_voucher_id: v_id.clone(),
+        challenge_ds_tag: spend.ds_tag.clone().unwrap(),
+        locator_prefixes: vec![],
+        read_quorum: 1,
     };
-    let (status, body) = node.http_request("POST", "/v1/status",
-        Some(&serde_json::to_string(&query_happy).unwrap()), &[("Content-Type", "application/json")]).await.unwrap();
+    let (status, body) = node
+        .http_request(
+            "POST",
+            "/v1/status",
+            Some(&serde_json::to_string(&query_happy).unwrap()),
+            &[("Content-Type", "application/json")],
+        )
+        .await
+        .unwrap();
     assert_eq!(status, StatusCode::OK);
     let envelope: L2ResponseEnvelope = serde_json::from_slice(&body).unwrap();
     assert!(matches!(envelope.verdict, L2Verdict::Verified { .. }));
-    let alternative_key = SigningKey::from_bytes(&[76;32]);
-    let alternative = make_e2e_hmc_spend(&v_id, "live-compliance-slot", [75;32], &alternative_key);
+    let alternative_key = SigningKey::from_bytes(&[76; 32]);
+    let alternative = make_e2e_hmc_spend(&v_id, "live-compliance-slot", [75; 32], &alternative_key);
     let (status, envelope) = node.post_lock(&alternative).await.unwrap();
     assert_eq!(status, StatusCode::CONFLICT);
     match envelope.verdict {
-        L2Verdict::Conflict { existing_lock } => assert_eq!(existing_lock.t_id, spend.transaction_hash),
+        L2Verdict::Conflict { existing_lock } => {
+            assert_eq!(existing_lock.t_id, spend.transaction_hash)
+        }
         verdict => panic!("Expected genuine spend conflict, got {verdict:?}"),
     }
 
@@ -677,7 +809,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
             Some(&json_body),
             &[
                 ("Content-Type", "application/json"),
-                ("X-Peer-Token", "cluster_f2f_token"),
+                ("X-Peer-Token", "f2f_cluster_token"),
             ],
         )
         .await
@@ -722,14 +854,21 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     config_a.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
     config_a.storage.data_dir = temp_a.path().join("data");
     config_a.identity.key_path = key_path_a;
-    config_a.f2f.tokens.push("cluster_f2f_token".into());
-    config_a.f2f.trusted_pubkeys.push(identity_b.public_key_hex());
+    config_a.f2f.tokens.push("f2f_cluster_token".into());
+    config_a
+        .f2f
+        .trusted_pubkeys
+        .push(identity_b.public_key_hex());
 
     let cancel_a = CancellationToken::new();
     let (tx_a, rx_a) = tokio::sync::oneshot::channel::<BoundAddrs>();
-    let daemon_a = NodeDaemon::with_bound_sender(config_a.clone(), identity_a.clone(), cancel_a.clone(), tx_a);
+    let daemon_a =
+        NodeDaemon::with_bound_sender(config_a.clone(), identity_a.clone(), cancel_a.clone(), tx_a);
     let handle_a = tokio::spawn(async move { daemon_a.run().await });
-    let bound_a = tokio::time::timeout(Duration::from_secs(5), rx_a).await.unwrap().unwrap();
+    let bound_a = tokio::time::timeout(Duration::from_secs(5), rx_a)
+        .await
+        .unwrap()
+        .unwrap();
 
     let node_a = TestNode {
         identity: identity_a.clone(),
@@ -756,8 +895,16 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     let parent_hex = "ff".repeat(32);
     let now = test_now_ms();
     let root = make_e2e_hmc_genesis(&parent_hex, now + 600_000, &sender_key_a);
-    assert_eq!(node_a.post_lock(&root).await.unwrap().0, StatusCode::CREATED);
-    let req = make_e2e_hmc_spend(&root.layer2_voucher_id, "closed-spend-slot", [19;32], &sender_key_a);
+    assert_eq!(
+        node_a.post_lock(&root).await.unwrap().0,
+        StatusCode::CREATED
+    );
+    let req = make_e2e_hmc_spend(
+        &root.layer2_voucher_id,
+        "closed-spend-slot",
+        [19; 32],
+        &sender_key_a,
+    );
     let tx_id_hex = hex::encode(req.transaction_hash);
 
     let (status, resp) = node_a.post_lock(&req).await.expect("post_lock on Node A");
@@ -774,15 +921,26 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     config_b.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
     config_b.storage.data_dir = temp_b.path().join("data");
     config_b.identity.key_path = key_path_b;
-    config_b.f2f.tokens.push("cluster_f2f_token".into());
-    config_b.f2f.trusted_pubkeys.push(identity_a.public_key_hex());
-    config_b.f2f.peers.push(format!("{}@{}", identity_a.public_key_hex(), bound_a.p2p_addr));
+    config_b.f2f.tokens.push("f2f_cluster_token".into());
+    config_b
+        .f2f
+        .trusted_pubkeys
+        .push(identity_a.public_key_hex());
+    config_b.f2f.peers.push(format!(
+        "{}@{}",
+        identity_a.public_key_hex(),
+        bound_a.p2p_addr
+    ));
 
     let cancel_b = CancellationToken::new();
     let (tx_b, rx_b) = tokio::sync::oneshot::channel::<BoundAddrs>();
-    let daemon_b = NodeDaemon::with_bound_sender(config_b.clone(), identity_b.clone(), cancel_b.clone(), tx_b);
+    let daemon_b =
+        NodeDaemon::with_bound_sender(config_b.clone(), identity_b.clone(), cancel_b.clone(), tx_b);
     let handle_b = tokio::spawn(async move { daemon_b.run().await });
-    let bound_b = tokio::time::timeout(Duration::from_secs(5), rx_b).await.unwrap().unwrap();
+    let bound_b = tokio::time::timeout(Duration::from_secs(5), rx_b)
+        .await
+        .unwrap()
+        .unwrap();
 
     let node_b = TestNode {
         identity: identity_b,
@@ -805,7 +963,9 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     }
 
     // 4. Verify that Node B pulls the lock from Node A via active bootstrap sync
-    let sync_req = SyncRequest { sparse_locators: vec![] };
+    let sync_req = SyncRequest {
+        sparse_locators: vec![],
+    };
     let mut synced = false;
     for _ in 0..100 {
         if let Ok((status, sync_resp)) = node_b.post_sync(&sync_req).await {
@@ -817,8 +977,14 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    assert!(!synced, "A rejected bootstrap write must never materialize on the joining node");
-    assert_eq!(node_b.post_lock(&root).await.unwrap().0, StatusCode::CREATED);
+    assert!(
+        !synced,
+        "A rejected bootstrap write must never materialize on the joining node"
+    );
+    assert_eq!(
+        node_b.post_lock(&root).await.unwrap().0,
+        StatusCode::CREATED
+    );
     let (status, response) = node_b.post_lock(&req).await.expect("joining node write");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(matches!(response.verdict, L2Verdict::Rejected { .. }));
@@ -843,16 +1009,30 @@ async fn test_e2e_churn_preserves_frozen_quorum_and_restart_gate() {
         assert_eq!(node.post_lock(&root1).await.unwrap().0, StatusCode::CREATED);
         assert_eq!(node.post_lock(&root2).await.unwrap().0, StatusCode::CREATED);
     }
-    let req1 = make_e2e_hmc_spend(&root1.layer2_voucher_id, "churn-slot-one", [31;32], &sender_key_1);
+    let req1 = make_e2e_hmc_spend(
+        &root1.layer2_voucher_id,
+        "churn-slot-one",
+        [31; 32],
+        &sender_key_1,
+    );
     let (status, resp) = harness.nodes[0].post_lock(&req1).await.unwrap();
     assert_eq!(status, StatusCode::CREATED);
     assert!(matches!(resp.verdict, L2Verdict::Verified { .. }));
     harness.nodes[2].cancel_token.cancel();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let req2 = make_e2e_hmc_spend(&root2.layer2_voucher_id, "churn-slot-two", [32;32], &sender_key_2);
+    let req2 = make_e2e_hmc_spend(
+        &root2.layer2_voucher_id,
+        "churn-slot-two",
+        [32; 32],
+        &sender_key_2,
+    );
     let tx_id_2 = hex::encode(req2.transaction_hash);
     let (status, resp) = harness.nodes[0].post_lock(&req2).await.unwrap();
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "Frozen committee cannot replace the offline member");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Frozen committee cannot replace the offline member"
+    );
     assert!(matches!(resp.verdict, L2Verdict::Rejected { .. }));
 
     // Respawn Node 2 reusing its storage directory and identity
@@ -860,7 +1040,11 @@ async fn test_e2e_churn_preserves_frozen_quorum_and_restart_gate() {
     config_respawn.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
     config_respawn.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
     config_respawn.f2f = harness.nodes[2].config.f2f.clone();
-    config_respawn.f2f.peers = vec![format!("{}@{}", harness.nodes[0].identity.public_key_hex(), harness.nodes[0].p2p_addr)];
+    config_respawn.f2f.peers = vec![format!(
+        "{}@{}",
+        harness.nodes[0].identity.public_key_hex(),
+        harness.nodes[0].p2p_addr
+    )];
 
     let cancel_respawn = CancellationToken::new();
     let (tx_r, rx_r) = tokio::sync::oneshot::channel::<BoundAddrs>();
@@ -871,7 +1055,10 @@ async fn test_e2e_churn_preserves_frozen_quorum_and_restart_gate() {
         tx_r,
     );
     let handle_respawn = tokio::spawn(async move { daemon_respawn.run().await });
-    let bound_respawn = tokio::time::timeout(Duration::from_secs(5), rx_r).await.unwrap().unwrap();
+    let bound_respawn = tokio::time::timeout(Duration::from_secs(5), rx_r)
+        .await
+        .unwrap()
+        .unwrap();
 
     let node_2_respawned = TestNode {
         identity: harness.nodes[2].identity.clone(),
@@ -884,7 +1071,9 @@ async fn test_e2e_churn_preserves_frozen_quorum_and_restart_gate() {
     };
 
     // Verify Node 2 reconnects and syncs missing lock 2
-    let sync_req = SyncRequest { sparse_locators: vec![] };
+    let sync_req = SyncRequest {
+        sparse_locators: vec![],
+    };
     let mut has_lock_2 = false;
     for _ in 0..100 {
         if let Ok((status, sync_resp)) = node_2_respawned.post_sync(&sync_req).await {
@@ -896,8 +1085,14 @@ async fn test_e2e_churn_preserves_frozen_quorum_and_restart_gate() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    assert!(!has_lock_2, "Restart does not create a missing unconfirmed lock or prove recovery coverage");
-    let (status, response) = node_2_respawned.post_lock(&req2).await.expect("restarted node write");
+    assert!(
+        !has_lock_2,
+        "Restart does not create a missing unconfirmed lock or prove recovery coverage"
+    );
+    let (status, response) = node_2_respawned
+        .post_lock(&req2)
+        .await
+        .expect("restarted node write");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(matches!(response.verdict, L2Verdict::Rejected { .. }));
 
@@ -910,7 +1105,8 @@ async fn test_e2e_sync_garbage_and_invalid_lock_rejection() {
     let db_path = temp.path().join("humoco.redb");
     let storage = std::sync::Arc::new(humoco_node::storage::RedbStorage::open(&db_path).unwrap());
     let cancel = CancellationToken::new();
-    let (engine, _flush_handle) = humoco_node::storage::DualTierEngine::new_with_token(storage.clone(), cancel.clone());
+    let (engine, _flush_handle) =
+        humoco_node::storage::DualTierEngine::new_with_token(storage.clone(), cancel.clone());
 
     let now_ms = 1_000_000u64;
 
@@ -923,15 +1119,24 @@ async fn test_e2e_sync_garbage_and_invalid_lock_rejection() {
         humoco_sim_core::types::SimTime(now_ms - 50_000),
     );
 
-    let res = engine.ingress_lock_with_origin(
-        expired_lock,
-        humoco_sim_core::types::SimTime(now_ms),
-        humoco_sim_core::types::SimTime(now_ms + 100_000),
-        humoco_node::storage::IngressOrigin::PartitionSync,
-    ).await;
+    let res = engine
+        .ingress_lock_with_origin(
+            expired_lock,
+            humoco_sim_core::types::SimTime(now_ms),
+            humoco_sim_core::types::SimTime(now_ms + 100_000),
+            humoco_node::storage::IngressOrigin::PartitionSync,
+        )
+        .await;
 
-    assert!(matches!(res, Ok(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow) | Err(_)));
-    assert_eq!(engine.ram.read().await.len(), 0, "Expired lock must not be inserted into RAM");
+    assert!(matches!(
+        res,
+        Ok(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow) | Err(_)
+    ));
+    assert_eq!(
+        engine.ram.read().await.len(),
+        0,
+        "Expired lock must not be inserted into RAM"
+    );
 
     // 2. Ingest lock with root_valid_until < valid_until (invalid causality / origin mandate)
     let invalid_root_lock = humoco_sim_core::types::LockRecord::new(
@@ -942,15 +1147,24 @@ async fn test_e2e_sync_garbage_and_invalid_lock_rejection() {
         humoco_sim_core::types::SimTime(now_ms + 60_000),
     );
 
-    let res2 = engine.ingress_lock_with_origin(
-        invalid_root_lock,
-        humoco_sim_core::types::SimTime(now_ms),
-        humoco_sim_core::types::SimTime(now_ms + 10_000), // root expires before successor lock!
-        humoco_node::storage::IngressOrigin::PartitionSync,
-    ).await;
+    let res2 = engine
+        .ingress_lock_with_origin(
+            invalid_root_lock,
+            humoco_sim_core::types::SimTime(now_ms),
+            humoco_sim_core::types::SimTime(now_ms + 10_000), // root expires before successor lock!
+            humoco_node::storage::IngressOrigin::PartitionSync,
+        )
+        .await;
 
-    assert!(matches!(res2, Ok(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow) | Err(_)));
-    assert_eq!(engine.ram.read().await.len(), 0, "Invalid root validity lock must not be inserted");
+    assert!(matches!(
+        res2,
+        Ok(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow) | Err(_)
+    ));
+    assert_eq!(
+        engine.ram.read().await.len(),
+        0,
+        "Invalid root validity lock must not be inserted"
+    );
 
     // 3. Ingest HMC lock with missing voucher root and invalid deletable_at
     let invalid_hmc_entry = humoco_node::api::hmc::L2LockEntry {
@@ -969,17 +1183,23 @@ async fn test_e2e_sync_garbage_and_invalid_lock_rejection() {
         privacy_guard: None,
     };
 
-    let (v, is_new) = engine.ingress_hmc_lock_with_origin(
-        "corrupted_tag".to_string(),
-        invalid_hmc_entry,
-        humoco_node::storage::IngressOrigin::PartitionSync,
-        Some(now_ms),
-    ).await;
+    let (v, is_new) = engine
+        .ingress_hmc_lock_with_origin(
+            "corrupted_tag".to_string(),
+            invalid_hmc_entry,
+            humoco_node::storage::IngressOrigin::PartitionSync,
+            Some(now_ms),
+        )
+        .await;
 
-    assert!(!is_new, "Corrupted HMC lock without root or deletable_at must be rejected");
-    assert!(matches!(v, humoco_node::api::hmc::L2Verdict::Rejected { .. }));
+    assert!(
+        !is_new,
+        "Corrupted HMC lock without root or deletable_at must be rejected"
+    );
+    assert!(matches!(
+        v,
+        humoco_node::api::hmc::L2Verdict::Rejected { .. }
+    ));
 
     cancel.cancel();
 }
-
-

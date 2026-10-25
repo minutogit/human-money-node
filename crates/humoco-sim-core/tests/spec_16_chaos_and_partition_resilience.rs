@@ -1,5 +1,7 @@
 //! Spec 16: Chaos & Partition Resilience (INV-1601..1603)
-use humoco_sim_core::chaos::{resolve_partition_merge, simulate_crash_and_promotion, test_packet_drop_resilience};
+use humoco_sim_core::chaos::{
+    resolve_partition_merge, simulate_crash_and_promotion, test_packet_drop_resilience,
+};
 use humoco_sim_core::crypto::compute_canonical_hash;
 use humoco_sim_core::sim::{SimMessage, SimNetwork, SimNode};
 use humoco_sim_core::types::{LockRecord, SimTime};
@@ -8,17 +10,30 @@ use humoco_sim_core::types::{LockRecord, SimTime};
 #[test]
 fn test_inv1601_deep_partition_merge_60_40_over_12h_min_h_canon_convergence() {
     let parent = [0x5A; 32];
-    let a_receiver = [0xAA;32];
-    let b_receiver = [0xBB;32];
+    let a_receiver = [0xAA; 32];
+    let b_receiver = [0xBB; 32];
     let nonce_a = b"branch_a_60pct".to_vec();
     let nonce_b = b"branch_b_40pct".to_vec();
 
     // Two colliding locks on same parent (simulate both partitions locking same voucher)
-    let lock_a = LockRecord::new(parent, a_receiver, nonce_a.clone(), SimTime(0), SimTime(5_000_000));
-    let lock_b = LockRecord::new(parent, b_receiver, nonce_b.clone(), SimTime(0), SimTime(5_000_000));
+    let lock_a = LockRecord::new(
+        parent,
+        a_receiver,
+        nonce_a.clone(),
+        SimTime(0),
+        SimTime(5_000_000),
+    );
+    let lock_b = LockRecord::new(
+        parent,
+        b_receiver,
+        nonce_b.clone(),
+        SimTime(0),
+        SimTime(5_000_000),
+    );
 
     // Pure resolver: min(H_canon) decides winner deterministically
-    let merged = resolve_partition_merge(std::slice::from_ref(&lock_a), std::slice::from_ref(&lock_b));
+    let merged =
+        resolve_partition_merge(std::slice::from_ref(&lock_a), std::slice::from_ref(&lock_b));
     assert_eq!(merged.len(), 1, "same parent must converge to 1 winner");
     let h_a = compute_canonical_hash(&parent, &a_receiver, &nonce_a);
     let h_b = compute_canonical_hash(&parent, &b_receiver, &nonce_b);
@@ -29,29 +44,47 @@ fn test_inv1601_deep_partition_merge_60_40_over_12h_min_h_canon_convergence() {
     let mut locks_a = Vec::new();
     let mut locks_b = Vec::new();
     for i in 0..5000 {
-        let mut p = [0u8;32];
+        let mut p = [0u8; 32];
         p[0] = (i & 0xFF) as u8;
-        p[1] = ((i>>8)&0xFF) as u8;
+        p[1] = ((i >> 8) & 0xFF) as u8;
         p[2] = 0xA0;
-        let rec = LockRecord::new(p, [0x11;32], format!("a_{}", i).into_bytes(), SimTime(0), SimTime(5_000_000));
+        let rec = LockRecord::new(
+            p,
+            [0x11; 32],
+            format!("a_{}", i).into_bytes(),
+            SimTime(0),
+            SimTime(5_000_000),
+        );
         locks_a.push(rec);
     }
     for i in 0..3000 {
-        let mut p = [0u8;32];
+        let mut p = [0u8; 32];
         p[0] = (i & 0xFF) as u8;
-        p[1] = ((i>>8)&0xFF) as u8;
+        p[1] = ((i >> 8) & 0xFF) as u8;
         p[2] = 0xA0;
         // Overlap first 1000 parents to create conflicts
-        let rec = LockRecord::new(p, [0x22;32], format!("b_{}", i).into_bytes(), SimTime(0), SimTime(5_000_000));
+        let rec = LockRecord::new(
+            p,
+            [0x22; 32],
+            format!("b_{}", i).into_bytes(),
+            SimTime(0),
+            SimTime(5_000_000),
+        );
         locks_b.push(rec);
     }
     // Add non-overlapping B locks
     for i in 5000..8000 {
-        let mut p = [0u8;32];
+        let mut p = [0u8; 32];
         p[0] = (i & 0xFF) as u8;
-        p[1] = ((i>>8)&0xFF) as u8;
+        p[1] = ((i >> 8) & 0xFF) as u8;
         p[2] = 0xB0;
-        let rec = LockRecord::new(p, [0x22;32], format!("b2_{}", i).into_bytes(), SimTime(0), SimTime(5_000_000));
+        let rec = LockRecord::new(
+            p,
+            [0x22; 32],
+            format!("b2_{}", i).into_bytes(),
+            SimTime(0),
+            SimTime(5_000_000),
+        );
         locks_b.push(rec);
     }
 
@@ -77,47 +110,98 @@ fn test_inv1601_deep_partition_merge_60_40_over_12h_min_h_canon_convergence() {
     let group_b: Vec<u16> = (60..100).collect();
     for &a in &group_a {
         for &b in &group_a {
-            if a!=b { net.nodes.get_mut(&a).unwrap().add_peer(b); }
+            if a != b {
+                net.nodes.get_mut(&a).unwrap().add_peer(b);
+            }
         }
     }
     for &a in &group_b {
         for &b in &group_b {
-            if a!=b { net.nodes.get_mut(&a).unwrap().add_peer(b); }
+            if a != b {
+                net.nodes.get_mut(&a).unwrap().add_peer(b);
+            }
         }
     }
     net.partition(vec![group_a.clone(), group_b.clone()]);
 
-    let conflict_lock_a = LockRecord::new(parent, a_receiver, nonce_a.clone(), SimTime(0), SimTime(100_000));
-    let conflict_lock_b = LockRecord::new(parent, b_receiver, nonce_b.clone(), SimTime(0), SimTime(100_000));
+    let conflict_lock_a = LockRecord::new(
+        parent,
+        a_receiver,
+        nonce_a.clone(),
+        SimTime(0),
+        SimTime(100_000),
+    );
+    let conflict_lock_b = LockRecord::new(
+        parent,
+        b_receiver,
+        nonce_b.clone(),
+        SimTime(0),
+        SimTime(100_000),
+    );
 
-    net.schedule(SimTime(100), group_a[0], group_a[0], SimMessage::LockRequest(conflict_lock_a.clone()));
-    net.schedule(SimTime(100), group_b[0], group_b[0], SimMessage::LockRequest(conflict_lock_b.clone()));
+    net.schedule(
+        SimTime(100),
+        group_a[0],
+        group_a[0],
+        SimMessage::LockRequest(conflict_lock_a.clone()),
+    );
+    net.schedule(
+        SimTime(100),
+        group_b[0],
+        group_b[0],
+        SimMessage::LockRequest(conflict_lock_b.clone()),
+    );
     // Simulate 12h = 43_200_000 ms but we run to 500ms in virtual time (fast path), then heal
     net.run_until(SimTime(500));
 
     // Before merge: each partition has its own lock
-    assert!(net.nodes[&group_a[0]].locks.contains_key(&conflict_lock_a.id));
-    assert!(net.nodes[&group_b[0]].locks.contains_key(&conflict_lock_b.id));
+    assert!(net.nodes[&group_a[0]]
+        .locks
+        .contains_key(&conflict_lock_a.id));
+    assert!(net.nodes[&group_b[0]]
+        .locks
+        .contains_key(&conflict_lock_b.id));
 
     // Merge
     net.heal_partition();
     for id in 0..100 {
         for other in 0..100 {
-            if id!=other { net.nodes.get_mut(&id).unwrap().add_peer(other); }
+            if id != other {
+                net.nodes.get_mut(&id).unwrap().add_peer(other);
+            }
         }
         net.nodes.get_mut(&id).unwrap().update_active_nodes(100);
     }
     // Cross gossip to trigger resolver
     let la = net.nodes[&group_a[0]].locks[&conflict_lock_a.id].clone();
     let lb = net.nodes[&group_b[0]].locks[&conflict_lock_b.id].clone();
-    net.schedule(SimTime(510), group_a[0], group_b[0], SimMessage::GossipLock{ lock: la, hops:0});
-    net.schedule(SimTime(510), group_b[0], group_a[0], SimMessage::GossipLock{ lock: lb, hops:0});
+    net.schedule(
+        SimTime(510),
+        group_a[0],
+        group_b[0],
+        SimMessage::GossipLock { lock: la, hops: 0 },
+    );
+    net.schedule(
+        SimTime(510),
+        group_b[0],
+        group_a[0],
+        SimMessage::GossipLock { lock: lb, hops: 0 },
+    );
     net.run_until(SimTime(2500));
 
     // After merge all 100 must converge to winner min(H_canon)
-    let winner = if h_a < h_b { conflict_lock_a.id } else { conflict_lock_b.id };
+    let winner = if h_a < h_b {
+        conflict_lock_a.id
+    } else {
+        conflict_lock_b.id
+    };
     for id in 0..100 {
-        assert_eq!(net.nodes[&(id as u16)].parent_to_lock.get(&parent), Some(&winner), "node {} not converged", id);
+        assert_eq!(
+            net.nodes[&(id as u16)].parent_to_lock.get(&parent),
+            Some(&winner),
+            "node {} not converged",
+            id
+        );
     }
 }
 
@@ -125,7 +209,10 @@ fn test_inv1601_deep_partition_merge_60_40_over_12h_min_h_canon_convergence() {
 #[test]
 fn test_inv1602_30_percent_byzantine_packet_drop_resilience() {
     // 30% drop should still allow >50% propagation due to gossip redundancy
-    assert!(test_packet_drop_resilience(0.30, 20), "20 nodes with 30% drop must still propagate to >50%");
+    assert!(
+        test_packet_drop_resilience(0.30, 20),
+        "20 nodes with 30% drop must still propagate to >50%"
+    );
 
     // Direct SimNetwork test with 30% drop
     let mut net = SimNetwork::new();
@@ -137,15 +224,27 @@ fn test_inv1602_30_percent_byzantine_packet_drop_resilience() {
     }
     for i in 0..20 {
         for j in 0..20 {
-            if i!=j { net.nodes.get_mut(&(i as u16)).unwrap().add_peer(j as u16); }
+            if i != j {
+                net.nodes.get_mut(&(i as u16)).unwrap().add_peer(j as u16);
+            }
         }
     }
-    let lock = LockRecord::new([0xAA;32],[0xBB;32], b"byz_drop".to_vec(), SimTime(0),SimTime(60_000));
+    let lock = LockRecord::new(
+        [0xAA; 32],
+        [0xBB; 32],
+        b"byz_drop".to_vec(),
+        SimTime(0),
+        SimTime(60_000),
+    );
     let lid = lock.id;
     net.schedule(SimTime(10), 0, 0, SimMessage::LockRequest(lock));
     net.run_until(SimTime(3000));
     net.run_all();
-    let reached = net.nodes.values().filter(|n| n.locks.contains_key(&lid)).count();
+    let reached = net
+        .nodes
+        .values()
+        .filter(|n| n.locks.contains_key(&lid))
+        .count();
     // With 30% drop and gossip fanout, at least half should still receive; due to determinism and redundancy, we expect >=10
     assert!(reached >= 10, "30% drop: reached {}/20, need >=10", reached);
 
@@ -153,14 +252,32 @@ fn test_inv1602_30_percent_byzantine_packet_drop_resilience() {
     let mut net0 = SimNetwork::new();
     net0.set_latency(5, 10);
     net0.set_packet_drop_rate(0.0);
-    for id in 0..20 { net0.add_node(SimNode::new(id, 20)); }
-    for i in 0..20 { for j in 0..20 { if i!=j { net0.nodes.get_mut(&(i as u16)).unwrap().add_peer(j as u16);} } }
-    let lock0 = LockRecord::new([0xCC;32],[0xDD;32], b"no_drop".to_vec(), SimTime(0),SimTime(60_000));
+    for id in 0..20 {
+        net0.add_node(SimNode::new(id, 20));
+    }
+    for i in 0..20 {
+        for j in 0..20 {
+            if i != j {
+                net0.nodes.get_mut(&(i as u16)).unwrap().add_peer(j as u16);
+            }
+        }
+    }
+    let lock0 = LockRecord::new(
+        [0xCC; 32],
+        [0xDD; 32],
+        b"no_drop".to_vec(),
+        SimTime(0),
+        SimTime(60_000),
+    );
     let lid0 = lock0.id;
-    net0.schedule(SimTime(10),0,0, SimMessage::LockRequest(lock0));
+    net0.schedule(SimTime(10), 0, 0, SimMessage::LockRequest(lock0));
     net0.run_until(SimTime(3000));
     net0.run_all();
-    let reached0 = net0.nodes.values().filter(|n| n.locks.contains_key(&lid0)).count();
+    let reached0 = net0
+        .nodes
+        .values()
+        .filter(|n| n.locks.contains_key(&lid0))
+        .count();
     assert_eq!(reached0, 20, "0% drop must reach all 20");
 
     // 50% drop still >0 but less than 30% drop's reach
@@ -170,10 +287,10 @@ fn test_inv1602_30_percent_byzantine_packet_drop_resilience() {
 // INV-1603: Fixed committees tolerate six outages, not seven.
 #[test]
 fn test_inv1603_crashes_do_not_authorize_replacement_signers() {
-    assert_eq!(simulate_crash_and_promotion(25,6),(true,None));
-    assert_eq!(simulate_crash_and_promotion(25,7),(false,None));
+    assert_eq!(simulate_crash_and_promotion(25, 6), (true, None));
+    assert_eq!(simulate_crash_and_promotion(25, 7), (false, None));
     let active: Vec<u16> = (0..25).collect();
-    let (committee, backup) = humoco_sim_core::types::select_quorum_with_backup(&active,42);
-    assert_eq!(committee.len(),20);
-    assert_eq!(backup,None);
+    let (committee, backup) = humoco_sim_core::types::select_quorum_with_backup(&active, 42);
+    assert_eq!(committee.len(), 20);
+    assert_eq!(backup, None);
 }

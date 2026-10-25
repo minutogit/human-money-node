@@ -447,14 +447,23 @@ fn push_bits(buf: &mut Vec<bool>, val: u16, len: usize) {
 fn place_finder(modules: &mut [Vec<bool>], is_func: &mut [Vec<bool>], r: usize, c: usize) {
     for dr in 0..7 {
         for dc in 0..7 {
-            let is_black = dr == 0 || dr == 6 || dc == 0 || dc == 6 || ((2..=4).contains(&dr) && (2..=4).contains(&dc));
+            let is_black = dr == 0
+                || dr == 6
+                || dc == 0
+                || dc == 6
+                || ((2..=4).contains(&dr) && (2..=4).contains(&dc));
             modules[r + dr][c + dc] = is_black;
             is_func[r + dr][c + dc] = true;
         }
     }
 }
 
-fn place_alignment(modules: &mut [Vec<bool>], is_func: &mut [Vec<bool>], center_r: usize, center_c: usize) {
+fn place_alignment(
+    modules: &mut [Vec<bool>],
+    is_func: &mut [Vec<bool>],
+    center_r: usize,
+    center_c: usize,
+) {
     for dr in 0..5 {
         for dc in 0..5 {
             let r = center_r - 2 + dr;
@@ -533,4 +542,3 @@ mod tests {
         }
     }
 }
-

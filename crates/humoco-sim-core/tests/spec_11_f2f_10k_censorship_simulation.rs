@@ -167,11 +167,7 @@ struct GossipResult {
 }
 
 /// Simuliert die Ausbreitung des Keepalive/Gossip-Heartbeats vom Opferknoten
-fn simulate_gossip(
-    graph: &F2FGraph,
-    victim: usize,
-    byzantine_nodes: &[bool],
-) -> GossipResult {
+fn simulate_gossip(graph: &F2FGraph, victim: usize, byzantine_nodes: &[bool]) -> GossipResult {
     let n = graph.adj.len();
     let mut visited = vec![false; n];
     let mut hop_dist = vec![u32::MAX; n];
@@ -251,8 +247,14 @@ fn test_10k_f2f_gossip_censorship_resilience() {
 
     println!("\n📊 TOPOLOGIE-KENNZAHLEN:");
     println!("  Gesamtknoten (N):               {}", N_NODES);
-    println!("  Durchschnittlicher Knotengrad:  {:.2} Peers (Dunbar-Limit: {})", avg_deg, MAX_DEGREE);
-    println!("  Clustering-Koeffizient (C):     {:.4} (Sehr hohe Dreiecks-Dichte)", clustering);
+    println!(
+        "  Durchschnittlicher Knotengrad:  {:.2} Peers (Dunbar-Limit: {})",
+        avg_deg, MAX_DEGREE
+    );
+    println!(
+        "  Clustering-Koeffizient (C):     {:.4} (Sehr hohe Dreiecks-Dichte)",
+        clustering
+    );
     println!("  Graph-Generierungszeit:         {:?}", t_init.elapsed());
 
     let victim_node = 42;
@@ -264,8 +266,14 @@ fn test_10k_f2f_gossip_censorship_resilience() {
     let baseline_res = simulate_gossip(&graph, victim_node, &clean_byz);
     println!("\n-------------------------------------------------------------");
     println!("📈 BASELINE (0 % Böse Knoten):");
-    println!("  Erreichte ehrliche Knoten:      {}/{} (100.00%)", baseline_res.reached_honest_count, baseline_res.total_honest_count);
-    println!("  Maximaler Durchmesser / Hops:   {} Hops", baseline_res.max_hops);
+    println!(
+        "  Erreichte ehrliche Knoten:      {}/{} (100.00%)",
+        baseline_res.reached_honest_count, baseline_res.total_honest_count
+    );
+    println!(
+        "  Maximaler Durchmesser / Hops:   {} Hops",
+        baseline_res.max_hops
+    );
     assert_eq!(baseline_res.reached_honest_count, N_NODES);
 
     // -------------------------------------------------------------
@@ -283,13 +291,23 @@ fn test_10k_f2f_gossip_censorship_resilience() {
     }
 
     let exp1_res = simulate_gossip(&graph, victim_node, &byz_flags_1);
-    let reach_pct_1 = (exp1_res.reached_honest_count as f64 / exp1_res.total_honest_count as f64) * 100.0;
+    let reach_pct_1 =
+        (exp1_res.reached_honest_count as f64 / exp1_res.total_honest_count as f64) * 100.0;
 
     println!("\n-------------------------------------------------------------");
     println!("⚔️ EXPERIMENT 1: 10 % Zufällige Zensur-Knoten (1.000 Angreifer)");
-    println!("  Erreichte ehrliche Knoten:      {}/{} ({:.4}%)", exp1_res.reached_honest_count, exp1_res.total_honest_count, reach_pct_1);
-    println!("  Geblockte Weiterleitungen:      {} Pakete", exp1_res.blocked_at_byzantine_count);
-    println!("  Maximaler Durchmesser / Hops:   {} Hops", exp1_res.max_hops);
+    println!(
+        "  Erreichte ehrliche Knoten:      {}/{} ({:.4}%)",
+        exp1_res.reached_honest_count, exp1_res.total_honest_count, reach_pct_1
+    );
+    println!(
+        "  Geblockte Weiterleitungen:      {} Pakete",
+        exp1_res.blocked_at_byzantine_count
+    );
+    println!(
+        "  Maximaler Durchmesser / Hops:   {} Hops",
+        exp1_res.max_hops
+    );
 
     // -------------------------------------------------------------
     // EXPERIMENT 2: Gezielte Infiltration des Freundeskreises (Worst-Case Eclipse)
@@ -312,14 +330,28 @@ fn test_10k_f2f_gossip_censorship_resilience() {
     }
 
     let exp2_res = simulate_gossip(&graph, victim_node, &byz_flags_2);
-    let reach_pct_2 = (exp2_res.reached_honest_count as f64 / exp2_res.total_honest_count as f64) * 100.0;
+    let reach_pct_2 =
+        (exp2_res.reached_honest_count as f64 / exp2_res.total_honest_count as f64) * 100.0;
 
     println!("\n-------------------------------------------------------------");
     println!("🔥 EXPERIMENT 2: Gezielte 70% Infiltration der direkten Freunde + 10% Byzanz");
-    println!("  Kompromittierte direkte Freunde:{}/{}", friends_to_compromise, victim_friends.len());
-    println!("  Erreichte ehrliche Knoten:      {}/{} ({:.4}%)", exp2_res.reached_honest_count, exp2_res.total_honest_count, reach_pct_2);
-    println!("  Geblockte Weiterleitungen:      {} Pakete", exp2_res.blocked_at_byzantine_count);
-    println!("  Maximaler Durchmesser / Hops:   {} Hops", exp2_res.max_hops);
+    println!(
+        "  Kompromittierte direkte Freunde:{}/{}",
+        friends_to_compromise,
+        victim_friends.len()
+    );
+    println!(
+        "  Erreichte ehrliche Knoten:      {}/{} ({:.4}%)",
+        exp2_res.reached_honest_count, exp2_res.total_honest_count, reach_pct_2
+    );
+    println!(
+        "  Geblockte Weiterleitungen:      {} Pakete",
+        exp2_res.blocked_at_byzantine_count
+    );
+    println!(
+        "  Maximaler Durchmesser / Hops:   {} Hops",
+        exp2_res.max_hops
+    );
 
     println!("\n-------------------------------------------------------------");
     println!("📊 RUNDEN- / HOP-ZÄHLER: Ausbreitungswelle P_reach(t) pro Hop");
@@ -328,15 +360,29 @@ fn test_10k_f2f_gossip_censorship_resilience() {
     println!("  ├──────┼────────────────────────┼────────────────────────┤");
     let max_h = exp1_res.reach_by_hop.len().max(exp2_res.reach_by_hop.len());
     for h in 0..max_h {
-        let r1 = exp1_res.reach_by_hop.get(h).copied().unwrap_or(*exp1_res.reach_by_hop.last().unwrap());
-        let r2 = exp2_res.reach_by_hop.get(h).copied().unwrap_or(*exp2_res.reach_by_hop.last().unwrap());
+        let r1 = exp1_res
+            .reach_by_hop
+            .get(h)
+            .copied()
+            .unwrap_or(*exp1_res.reach_by_hop.last().unwrap());
+        let r2 = exp2_res
+            .reach_by_hop
+            .get(h)
+            .copied()
+            .unwrap_or(*exp2_res.reach_by_hop.last().unwrap());
         let pct1 = (r1 as f64 / exp1_res.total_honest_count as f64) * 100.0;
         let pct2 = (r2 as f64 / exp2_res.total_honest_count as f64) * 100.0;
-        println!("  │ {:>4} │ {:>5} / 9000 ({:>5.1}%) │ {:>5} / 9000 ({:>5.1}%) │", h, r1, pct1, r2, pct2);
+        println!(
+            "  │ {:>4} │ {:>5} / 9000 ({:>5.1}%) │ {:>5} / 9000 ({:>5.1}%) │",
+            h, r1, pct1, r2, pct2
+        );
     }
     println!("  └──────┴────────────────────────┴────────────────────────┘");
 
     // Verifikations-Kriterien
-    assert!(reach_pct_1 >= 99.9, "10 % zufällige Zensoren dürfen ehrliche Knoten nicht isolieren");
+    assert!(
+        reach_pct_1 >= 99.9,
+        "10 % zufällige Zensoren dürfen ehrliche Knoten nicht isolieren"
+    );
     assert!(reach_pct_2 >= 99.9, "Selbst bei 70% korrumpierten direkten Freunden müssen die restlichen ehrlichen Freunde via Triadic Closure das Netz fluten");
 }

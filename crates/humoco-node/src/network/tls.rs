@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use std::sync::Arc;
 
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
@@ -41,14 +41,18 @@ pub fn generate_node_certificate(
         .map_err(|e| NodeError::Tls(format!("Failed to encode PKCS#8 DER private key: {}", e)))?;
 
     let pkcs8_key_der = PrivatePkcs8KeyDer::from(pkcs8_doc.as_bytes().to_vec());
-    let key_pair = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&pkcs8_key_der, &rcgen::PKCS_ED25519)
-        .map_err(|e| NodeError::Tls(format!("Failed to parse rcgen keypair from PKCS#8 DER: {}", e)))?;
+    let key_pair =
+        rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&pkcs8_key_der, &rcgen::PKCS_ED25519)
+            .map_err(|e| {
+                NodeError::Tls(format!(
+                    "Failed to parse rcgen keypair from PKCS#8 DER: {}",
+                    e
+                ))
+            })?;
 
-    let mut params = rcgen::CertificateParams::new(vec![
-        "localhost".to_string(),
-        identity.node_id_hex(),
-    ])
-    .map_err(|e| NodeError::Tls(format!("Failed to create certificate params: {}", e)))?;
+    let mut params =
+        rcgen::CertificateParams::new(vec!["localhost".to_string(), identity.node_id_hex()])
+            .map_err(|e| NodeError::Tls(format!("Failed to create certificate params: {}", e)))?;
 
     params.is_ca = rcgen::IsCa::NoCa;
 
@@ -86,17 +90,14 @@ fn verify_handshake_signature(
         ));
     }
 
-    let (_node_id, vk) = extract_peer_node_id(cert.as_ref()).map_err(|_| {
-        rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
-    })?;
+    let (_node_id, vk) = extract_peer_node_id(cert.as_ref())
+        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature))?;
 
-    let sig = ed25519_dalek::Signature::from_slice(dss.signature()).map_err(|_| {
-        rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
-    })?;
+    let sig = ed25519_dalek::Signature::from_slice(dss.signature())
+        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature))?;
 
-    vk.verify_strict(message, &sig).map_err(|_| {
-        rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
-    })?;
+    vk.verify_strict(message, &sig)
+        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature))?;
 
     Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
 }
@@ -190,9 +191,8 @@ pub fn extract_peer_node_id(
     // RFC 8410: Ed25519 SubjectPublicKeyInfo prefix in ASN.1 DER:
     // SEQUENCE (0x30, 0x05) { OID 1.3.101.112 (0x06, 0x03, 0x2b, 0x65, 0x70) }
     // BIT STRING (0x03, 0x21, 0x00) -> followed by 32 raw public key bytes.
-    const ED25519_SPKI_PREFIX: [u8; 10] = [
-        0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
+    const ED25519_SPKI_PREFIX: [u8; 10] =
+        [0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
 
     let pos = cert_der
         .windows(ED25519_SPKI_PREFIX.len())
@@ -203,7 +203,9 @@ pub fn extract_peer_node_id(
 
     let pubkey_offset = pos + ED25519_SPKI_PREFIX.len();
     if pubkey_offset + 32 > cert_der.len() {
-        return Err(NodeError::Tls("Truncated Ed25519 public key in certificate".into()));
+        return Err(NodeError::Tls(
+            "Truncated Ed25519 public key in certificate".into(),
+        ));
     }
 
     let mut pubkey_bytes = [0u8; 32];
@@ -228,7 +230,9 @@ pub fn extract_peer_identity_from_connection(
 }
 
 /// Builds a Quinn ServerConfig from a NodeIdentity, enforcing client certificate authentication via P2pClientCertVerifier.
-pub fn build_quinn_server_config(identity: &NodeIdentity) -> Result<quinn::ServerConfig, NodeError> {
+pub fn build_quinn_server_config(
+    identity: &NodeIdentity,
+) -> Result<quinn::ServerConfig, NodeError> {
     build_quinn_server_config_with_network(identity, humoco_sim_core::types::NetworkId::default())
 }
 
@@ -247,8 +251,9 @@ pub fn build_quinn_server_config_with_network(
 
     server_tls_config.alpn_protocols = vec![get_alpn_for_network(network_id).to_vec()];
 
-    let quic_server_config = quinn::crypto::rustls::QuicServerConfig::try_from(server_tls_config)
-        .map_err(|e| NodeError::Tls(format!("Failed to build QuicServerConfig: {}", e)))?;
+    let quic_server_config =
+        quinn::crypto::rustls::QuicServerConfig::try_from(server_tls_config)
+            .map_err(|e| NodeError::Tls(format!("Failed to build QuicServerConfig: {}", e)))?;
 
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
 
@@ -282,8 +287,11 @@ pub fn build_quinn_friend_client_config(
 ) -> Result<quinn::ClientConfig, NodeError> {
     let mut config = build_quinn_client_config_with_identity_and_network(identity, network_id)?;
     let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(Some(std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
-        .try_into().map_err(|error| NodeError::Tls(format!("Invalid idle timeout: {error}")))?));
+    transport.max_idle_timeout(Some(
+        std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
+            .try_into()
+            .map_err(|error| NodeError::Tls(format!("Invalid idle timeout: {error}")))?,
+    ));
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     config.transport_config(Arc::new(transport));
     Ok(config)
@@ -302,12 +310,18 @@ pub fn build_quinn_client_config_with_identity_and_network(
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_client_auth_cert(vec![cert_der], key_der)
-        .map_err(|e| NodeError::Tls(format!("Failed to build rustls ClientConfig with client auth: {}", e)))?;
+        .map_err(|e| {
+            NodeError::Tls(format!(
+                "Failed to build rustls ClientConfig with client auth: {}",
+                e
+            ))
+        })?;
 
     client_tls_config.alpn_protocols = vec![get_alpn_for_network(network_id).to_vec()];
 
-    let quic_client_config = quinn::crypto::rustls::QuicClientConfig::try_from(client_tls_config)
-        .map_err(|e| NodeError::Tls(format!("Failed to build QuicClientConfig: {}", e)))?;
+    let quic_client_config =
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_tls_config)
+            .map_err(|e| NodeError::Tls(format!("Failed to build QuicClientConfig: {}", e)))?;
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
 
@@ -350,8 +364,9 @@ pub fn build_quinn_client_config_with_network(
 
     client_tls_config.alpn_protocols = vec![get_alpn_for_network(network_id).to_vec()];
 
-    let quic_client_config = quinn::crypto::rustls::QuicClientConfig::try_from(client_tls_config)
-        .map_err(|e| NodeError::Tls(format!("Failed to build QuicClientConfig: {}", e)))?;
+    let quic_client_config =
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_tls_config)
+            .map_err(|e| NodeError::Tls(format!("Failed to build QuicClientConfig: {}", e)))?;
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
 
@@ -416,16 +431,20 @@ mod tests {
         let message = b"handshake_context_test_payload";
         let valid_sig = identity.signing_key().sign(message);
 
-        let make_dss = |scheme: rustls::SignatureScheme, sig: &[u8]| -> rustls::DigitallySignedStruct {
-            let mut bytes = Vec::new();
-            scheme.encode(&mut bytes);
-            (sig.len() as u16).encode(&mut bytes);
-            bytes.extend_from_slice(sig);
-            let mut reader = Reader::init(&bytes);
-            rustls::DigitallySignedStruct::read(&mut reader).expect("decode dss")
-        };
+        let make_dss =
+            |scheme: rustls::SignatureScheme, sig: &[u8]| -> rustls::DigitallySignedStruct {
+                let mut bytes = Vec::new();
+                scheme.encode(&mut bytes);
+                (sig.len() as u16).encode(&mut bytes);
+                bytes.extend_from_slice(sig);
+                let mut reader = Reader::init(&bytes);
+                rustls::DigitallySignedStruct::read(&mut reader).expect("decode dss")
+            };
 
-        let valid_dss = make_dss(rustls::SignatureScheme::ED25519, valid_sig.to_bytes().as_ref());
+        let valid_dss = make_dss(
+            rustls::SignatureScheme::ED25519,
+            valid_sig.to_bytes().as_ref(),
+        );
 
         // 1. Valid signature -> Ok
         assert!(verifier
@@ -443,17 +462,21 @@ mod tests {
         // 3. Foreign signature -> BadSignature error
         let foreign_identity = NodeIdentity::generate();
         let foreign_sig = foreign_identity.signing_key().sign(message);
-        let foreign_dss = make_dss(rustls::SignatureScheme::ED25519, foreign_sig.to_bytes().as_ref());
+        let foreign_dss = make_dss(
+            rustls::SignatureScheme::ED25519,
+            foreign_sig.to_bytes().as_ref(),
+        );
         assert!(verifier
             .verify_tls13_signature(message, &cert, &foreign_dss)
             .is_err());
 
         // 4. Unsupported scheme -> BadSignature error
-        let bad_scheme_dss = make_dss(rustls::SignatureScheme::RSA_PSS_SHA256, valid_sig.to_bytes().as_ref());
+        let bad_scheme_dss = make_dss(
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            valid_sig.to_bytes().as_ref(),
+        );
         assert!(verifier
             .verify_tls13_signature(message, &cert, &bad_scheme_dss)
             .is_err());
     }
 }
-
-

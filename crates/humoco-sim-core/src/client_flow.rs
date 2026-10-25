@@ -17,7 +17,9 @@ pub struct QuorumCertificate {
 }
 
 impl QuorumCertificate {
-    pub fn signer_count(&self) -> usize { self.signatures.len() }
+    pub fn signer_count(&self) -> usize {
+        self.signatures.len()
+    }
 }
 
 /// Three-way ingress verdict (INV-0603)
@@ -26,9 +28,15 @@ pub enum IngressVerdict {
     /// Case 1: Verified - lock already exists with identical id/t_id
     Verified { lock: LockRecord },
     /// Case 2: Conflict - parent already locked with different lock (409)
-    Conflict { existing: LockRecord, reason: String },
+    Conflict {
+        existing: LockRecord,
+        reason: String,
+    },
     /// Case 3: New lock - needs quorum, returns certificate if >=14
-    NewLock { cert: QuorumCertificate, status_is_final: bool },
+    NewLock {
+        cert: QuorumCertificate,
+        status_is_final: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,15 +55,29 @@ pub struct DumbServer {
 
 impl DumbServer {
     pub fn new(top20: Vec<u16>, root_valid: SimTime) -> Self {
-        Self { ram: RamIndex::new(), top20, root_valid, hysteresis_stable: true }
+        Self {
+            ram: RamIndex::new(),
+            top20,
+            root_valid,
+            hysteresis_stable: true,
+        }
     }
 
     pub fn with_hysteresis(top20: Vec<u16>, root_valid: SimTime, hysteresis_stable: bool) -> Self {
-        Self { ram: RamIndex::new(), top20, root_valid, hysteresis_stable }
+        Self {
+            ram: RamIndex::new(),
+            top20,
+            root_valid,
+            hysteresis_stable,
+        }
     }
 
     /// Ingress handling with 3-way verdict. Idempotent for identical lock.
-    pub fn ingress(&mut self, record: LockRecord, now: SimTime) -> Result<IngressVerdict, IngressError> {
+    pub fn ingress(
+        &mut self,
+        record: LockRecord,
+        now: SimTime,
+    ) -> Result<IngressVerdict, IngressError> {
         if !ingress_time_window_valid(now, record.valid_until, self.root_valid) {
             return Err(IngressError::InvalidWindow);
         }
@@ -66,7 +88,10 @@ impl DumbServer {
                 return Ok(IngressVerdict::Verified { lock: existing });
             } else {
                 // Case 2: double-spend
-                return Ok(IngressVerdict::Conflict { existing, reason: "409 Conflict: parent already locked".into() });
+                return Ok(IngressVerdict::Conflict {
+                    existing,
+                    reason: "409 Conflict: parent already locked".into(),
+                });
             }
         }
         // First-seen: insert and generate quorum cert
@@ -82,10 +107,18 @@ impl DumbServer {
         let _ = self.ram.try_insert(record.clone(), now, self.root_valid);
         // For N>=20, FINAL requires >=14 and 24h network stability hysteresis (INV-0802)
         let is_final = sigs.len() >= 14 && self.top20.len() >= 20 && self.hysteresis_stable;
-        let cert = QuorumCertificate { lock_id: record.id, shard_id: 0, signatures: sigs, signer_bitmap: bitmap };
+        let cert = QuorumCertificate {
+            lock_id: record.id,
+            shard_id: 0,
+            signatures: sigs,
+            signer_bitmap: bitmap,
+        };
         // Case 1 if somehow reassessed? Already handled. So new lock
         // But also if server already had verified path, that would be Verified above.
-        Ok(IngressVerdict::NewLock { cert, status_is_final: is_final })
+        Ok(IngressVerdict::NewLock {
+            cert,
+            status_is_final: is_final,
+        })
     }
     /// Checks the model certificate (>=14 deterministic test attestations from `top20`).
     pub fn verify_quorum_certificate(&self, cert: &QuorumCertificate) -> bool {
@@ -95,7 +128,11 @@ impl DumbServer {
 
 /// Checks model attestations against the caller-supplied committee and threshold (INV-0604).
 /// This helper verifies deterministic test signatures, not production Ed25519 approvals.
-pub fn verify_quorum_certificate(cert: &QuorumCertificate, top20: &[u16], threshold: usize) -> bool {
+pub fn verify_quorum_certificate(
+    cert: &QuorumCertificate,
+    top20: &[u16],
+    threshold: usize,
+) -> bool {
     if cert.signatures.len() < threshold {
         return false;
     }
@@ -139,20 +176,35 @@ pub struct SmartClient {
 
 impl SmartClient {
     pub fn new(id: u16) -> Self {
-        Self { id, proof_chains: HashMap::new(), pending_offline: Vec::new() }
+        Self {
+            id,
+            proof_chains: HashMap::new(),
+            pending_offline: Vec::new(),
+        }
     }
     pub fn add_to_chain(&mut self, record: LockRecord) {
-        self.proof_chains.entry(record.parent_lock).or_default().push(record.clone());
+        self.proof_chains
+            .entry(record.parent_lock)
+            .or_default()
+            .push(record.clone());
         // also keep by id for client signature generation etc.
     }
-    pub fn custody_len(&self) -> usize { self.proof_chains.values().map(|v| v.len()).sum() }
-    pub fn is_custody_empty(&self) -> bool { self.custody_len() == 0 }
+    pub fn custody_len(&self) -> usize {
+        self.proof_chains.values().map(|v| v.len()).sum()
+    }
+    pub fn is_custody_empty(&self) -> bool {
+        self.custody_len() == 0
+    }
     /// INV-0605: collect offline (no network), queue for later
     pub fn collect_offline(&mut self, record: LockRecord) {
         self.pending_offline.push(record);
     }
     /// Upon reconnect, submit each pending lock idempotently to server; returns results
-    pub fn reconnect_and_submit(&mut self, server: &mut DumbServer, now: SimTime) -> Vec<Result<IngressVerdict, IngressError>> {
+    pub fn reconnect_and_submit(
+        &mut self,
+        server: &mut DumbServer,
+        now: SimTime,
+    ) -> Vec<Result<IngressVerdict, IngressError>> {
         let pending = std::mem::take(&mut self.pending_offline);
         let mut results = Vec::new();
         for rec in pending {
@@ -171,7 +223,13 @@ impl SmartClient {
 }
 
 /// Helper to create deterministic LockRecord for tests
-pub fn make_lock(parent: Hash256, receiver: Hash256, nonce: Vec<u8>, now: SimTime, valid_until: SimTime) -> LockRecord {
+pub fn make_lock(
+    parent: Hash256,
+    receiver: Hash256,
+    nonce: Vec<u8>,
+    now: SimTime,
+    valid_until: SimTime,
+) -> LockRecord {
     LockRecord::new(parent, receiver, nonce, now, valid_until)
 }
 
@@ -197,7 +255,9 @@ impl Default for ConsensusBloomFilter {
 
 impl ConsensusBloomFilter {
     pub fn new() -> Self {
-        Self { bits: vec![0u8; CONSENSUS_FILTER_BYTES] }
+        Self {
+            bits: vec![0u8; CONSENSUS_FILTER_BYTES],
+        }
     }
 
     /// Inserts a node (bound to HrwRoutingId + NodePubKey) into the filter
@@ -320,8 +380,10 @@ pub fn verify_zero_trust_quorum(
     signers: &[SignerEntry],
     authenticated_committee: &[crate::types::CommitteeMember],
 ) -> Result<(), ZeroTrustVerifyError> {
-    let members: HashMap<_, _> = authenticated_committee.iter()
-        .map(|m| (m.node_pubkey, m.hrw_routing_id)).collect();
+    let members: HashMap<_, _> = authenticated_committee
+        .iter()
+        .map(|m| (m.node_pubkey, m.hrw_routing_id))
+        .collect();
     if members.is_empty() || members.len() > 20 || members.len() != authenticated_committee.len() {
         return Err(ZeroTrustVerifyError::InvalidCommittee);
     }
@@ -333,9 +395,13 @@ pub fn verify_zero_trust_quorum(
         return Err(ZeroTrustVerifyError::InsufficientSignatures);
     }
     let payload = crate::crypto::compute_attestation_payload_digest(parent_lock, lock_id);
-    let domain = if expected_status == 1 { crate::crypto::domain_approve_final(network_id) }
-        else { crate::crypto::domain_approve_prov(network_id) };
-    let digest = crate::crypto::compute_sig_digest(domain, 0, 0, 0, shard_id, expected_status, &payload);
+    let domain = if expected_status == 1 {
+        crate::crypto::domain_approve_final(network_id)
+    } else {
+        crate::crypto::domain_approve_prov(network_id)
+    };
+    let digest =
+        crate::crypto::compute_sig_digest(domain, 0, 0, 0, shard_id, expected_status, &payload);
     let mut seen = HashSet::new();
     for (index, signer) in signers.iter().enumerate() {
         if members.get(&signer.pub_key) != Some(&signer.hrw_id) {
@@ -363,16 +429,36 @@ mod tests {
         let parent_lock = [0xBB; 32];
         let mut sigs = Vec::new();
         for i in 0..14 {
-            sigs.push(sign_lock_attestation(i, &lock_id, &parent_lock, SimTime(100)));
+            sigs.push(sign_lock_attestation(
+                i,
+                &lock_id,
+                &parent_lock,
+                SimTime(100),
+            ));
         }
-        let cert = QuorumCertificate { lock_id, shard_id: 0, signatures: sigs, signer_bitmap: (1u32<<14)-1 };
+        let cert = QuorumCertificate {
+            lock_id,
+            shard_id: 0,
+            signatures: sigs,
+            signer_bitmap: (1u32 << 14) - 1,
+        };
         assert!(verify_quorum_certificate(&cert, &top20, 14));
         // only 13 fails
         let mut sigs13 = Vec::new();
         for i in 0..13 {
-            sigs13.push(sign_lock_attestation(i, &lock_id, &parent_lock, SimTime(100)));
+            sigs13.push(sign_lock_attestation(
+                i,
+                &lock_id,
+                &parent_lock,
+                SimTime(100),
+            ));
         }
-        let cert13 = QuorumCertificate { lock_id, shard_id: 0, signatures: sigs13, signer_bitmap: (1u32<<13)-1 };
+        let cert13 = QuorumCertificate {
+            lock_id,
+            shard_id: 0,
+            signatures: sigs13,
+            signer_bitmap: (1u32 << 13) - 1,
+        };
         assert!(!verify_quorum_certificate(&cert13, &top20, 14));
     }
 }

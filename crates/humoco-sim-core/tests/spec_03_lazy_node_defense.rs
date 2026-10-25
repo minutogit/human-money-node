@@ -1,12 +1,11 @@
-use humoco_sim_core::sim::{SimNetwork, SimNode};
-use humoco_sim_core::types::{
-    bitmask_has_bit, bitmask_count, hrw_rank_nodes, required_quorum,
-    select_quorum_with_backup, LockRecord, NodeId, ShardId, SignersBitmask,
-    SimTime,
-};
 use humoco_sim_core::crypto::sign_lock_attestation;
+use humoco_sim_core::sim::{SimNetwork, SimNode};
 use humoco_sim_core::state_machine::apply_attestation;
 use humoco_sim_core::types::LockId;
+use humoco_sim_core::types::{
+    bitmask_count, bitmask_has_bit, hrw_rank_nodes, required_quorum, select_quorum_with_backup,
+    LockRecord, NodeId, ShardId, SignersBitmask, SimTime,
+};
 
 const SHARD_ID: ShardId = 42;
 const NUM_NODES: usize = 25;
@@ -31,20 +30,23 @@ fn test_spec_03_top20_shard_and_rank21_backup() {
     let (top20, rank21) = select_quorum_with_backup(&node_ids, SHARD_ID);
 
     assert_eq!(top20.len(), 20, "Top-20 should have exactly 20 candidates");
-    assert!(rank21.is_none(), "No backup may be authorized as a FINAL signer");
+    assert!(
+        rank21.is_none(),
+        "No backup may be authorized as a FINAL signer"
+    );
 
     let rank7_id = ranked[6].0;
     let rank21_id = ranked[20].0;
 
-    assert!(
-        top20.contains(&rank7_id),
-        "Rank 7 node must be in Top-20"
-    );
+    assert!(top20.contains(&rank7_id), "Rank 7 node must be in Top-20");
     assert!(
         !top20.contains(&rank21_id),
         "Rank 21 node should NOT be in Top-20"
     );
-    assert_eq!(ranked[20].0, rank21_id, "Rank 21 must be the 21st node in HRW order");
+    assert_eq!(
+        ranked[20].0, rank21_id,
+        "Rank 21 must be the 21st node in HRW order"
+    );
 }
 
 #[test]
@@ -84,11 +86,18 @@ fn test_spec_03_lazy_node_defense_suspend_and_promote() {
         let att = sign_lock_attestation(*nid, &lock_id, &lock.parent_lock, SimTime(100 + i as u64));
         let status = apply_attestation(&mut lock, att, NUM_NODES).unwrap();
         if lock.signers.len() >= 14 {
-            assert!(status.is_active(), "Attestation should make lock active at >= 14 sigs");
+            assert!(
+                status.is_active(),
+                "Attestation should make lock active at >= 14 sigs"
+            );
         }
     }
 
-    assert_eq!(lock.signers.len(), 19, "Should have 19 signers (top-20 minus rank 7)");
+    assert_eq!(
+        lock.signers.len(),
+        19,
+        "Should have 19 signers (top-20 minus rank 7)"
+    );
 
     let mut bitmask: SignersBitmask = 0;
     for i in 0..20 {
@@ -168,7 +177,9 @@ fn test_spec_03_lazy_node_defense_suspend_and_promote() {
 
 #[test]
 fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
-    use humoco_sim_core::types::{PeerPresenceEntry, PeerPresenceState, FLAG_INBOUND_ACTIVE, FLAG_LAST_FAILED};
+    use humoco_sim_core::types::{
+        PeerPresenceEntry, PeerPresenceState, FLAG_INBOUND_ACTIVE, FLAG_LAST_FAILED,
+    };
 
     let mut peer = PeerPresenceEntry::new(0xABCD_EF01, 100);
 
@@ -190,8 +201,14 @@ fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
     assert_eq!(peer.malus_score, 2);
     assert_eq!(peer.backoff_level, 1);
     assert!(peer.is_suspended(), "Choked after failure");
-    assert!(!peer.is_hrw_eligible(), "Choked peer not HRW eligible (gateway skips to rank 21)");
-    assert!(!peer.should_forward_gossip(), "Gossip is suppressed while service is choked");
+    assert!(
+        !peer.is_hrw_eligible(),
+        "Choked peer not HRW eligible (gateway skips to rank 21)"
+    );
+    assert!(
+        !peer.should_forward_gossip(),
+        "Gossip is suppressed while service is choked"
+    );
 
     // Eskalationssperre: ohne inbound keine weitere Eskalation (offline/DDoS Schutz)
     let bl2 = peer.record_outbound_failure();
@@ -202,8 +219,14 @@ fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
 
     // Service-basiertes Heilen: 1 Stunde ohne Arbeit vergeht -> Malus bleibt bestehen (kein Zeit-Ablasshandel)
     peer.record_hour(125, true);
-    assert_eq!(peer.backoff_level, 1, "No automatic hourly decay (anti-free-rider)");
-    assert_eq!(peer.malus_score, 2, "Malus persists until worked off via successful interactions");
+    assert_eq!(
+        peer.backoff_level, 1,
+        "No automatic hourly decay (anti-free-rider)"
+    );
+    assert_eq!(
+        peer.malus_score, 2,
+        "Malus persists until worked off via successful interactions"
+    );
     assert!(peer.is_suspended());
     assert!(!peer.is_hrw_eligible());
     assert!(!peer.should_forward_gossip());
@@ -230,7 +253,10 @@ fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
     assert_eq!(peer.malus_score, 4);
     assert_eq!(peer.backoff_level, 2);
     assert_eq!(peer.flags & FLAG_LAST_FAILED, 0);
-    assert!(!peer.is_suspended(), "Not choked after success (flag cleared)");
+    assert!(
+        !peer.is_suspended(),
+        "Not choked after success (flag cleared)"
+    );
     assert!(peer.should_forward_gossip());
     assert!(peer.is_hrw_eligible());
 
@@ -252,8 +278,14 @@ fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
         peer.record_hour(ep, false);
     }
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Dormant);
-    assert_eq!(peer.backoff_level, 0, "Dormant resets backoff for clean re-entry");
-    assert_eq!(peer.malus_score, 0, "Dormant resets malus for clean re-entry");
+    assert_eq!(
+        peer.backoff_level, 0,
+        "Dormant resets backoff for clean re-entry"
+    );
+    assert_eq!(
+        peer.malus_score, 0,
+        "Dormant resets malus for clean re-entry"
+    );
     assert_eq!(peer.flags, 0, "Dormant clears flags");
     assert!(!peer.is_suspended());
 
@@ -263,7 +295,10 @@ fn test_spec_03_transient_missing_count_suspension_and_autonomous_decay() {
     peer.record_hour(150, true);
     assert_eq!(peer.evaluate_state(), PeerPresenceState::Active);
     assert_eq!(peer.backoff_level, 0);
-    assert!(peer.is_hrw_eligible(), "Eligible for probation probe immediately upon re-entry");
+    assert!(
+        peer.is_hrw_eligible(),
+        "Eligible for probation probe immediately upon re-entry"
+    );
     assert!(peer.should_forward_gossip());
 
     // Alias roundtrip

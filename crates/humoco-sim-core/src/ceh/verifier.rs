@@ -211,7 +211,9 @@ impl ConflictResolver {
                 Ok(SlotState::Settled(receipt))
             }
             SlotState::Settled(existing) => {
-                if existing.parent_lock == receipt.parent_lock && existing.child_lock == receipt.child_lock {
+                if existing.parent_lock == receipt.parent_lock
+                    && existing.child_lock == receipt.child_lock
+                {
                     Ok(SlotState::Settled(existing)) // Idempotent 200 OK
                 } else {
                     // Divergent lock on settled slot -> reject
@@ -238,7 +240,9 @@ impl ConflictResolver {
                 let epoch_diff = current_epoch.saturating_sub(marked_epoch);
                 let time_diff = current_time.saturating_sub(marked_time);
 
-                if epoch_diff > LATE_CERTIFICATE_WINDOW_EPOCHS || time_diff > LATE_CERTIFICATE_WINDOW_SECS {
+                if epoch_diff > LATE_CERTIFICATE_WINDOW_EPOCHS
+                    || time_diff > LATE_CERTIFICATE_WINDOW_SECS
+                {
                     // Window expired! Conflict freezes permanently
                     return Ok(SlotState::PermanentlyFrozenUntilExpiry {
                         parent_lock,
@@ -252,7 +256,10 @@ impl ConflictResolver {
                 // Redemption successful: clear conflict in favor of the verified certificate!
                 Ok(SlotState::Settled(receipt))
             }
-            SlotState::PermanentlyFrozenUntilExpiry { parent_lock, valid_until } => {
+            SlotState::PermanentlyFrozenUntilExpiry {
+                parent_lock,
+                valid_until,
+            } => {
                 // Permanently blocked slot rejects any subsequent redemption
                 Ok(SlotState::PermanentlyFrozenUntilExpiry {
                     parent_lock,
@@ -336,14 +343,9 @@ mod tests {
         assert_eq!(new_state, SlotState::Settled(receipt.clone()));
 
         // If presented at Day 45 (> 30 days) -> Freezes permanently
-        let expired_state = ConflictResolver::process_receipt(
-            slot,
-            receipt,
-            45,
-            45 * 86_400,
-            &committee,
-        )
-        .expect("permanently frozen");
+        let expired_state =
+            ConflictResolver::process_receipt(slot, receipt, 45, 45 * 86_400, &committee)
+                .expect("permanently frozen");
 
         assert!(matches!(
             expired_state,

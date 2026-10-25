@@ -36,8 +36,14 @@ fn generate_committee(
         pubkeys.push(pk);
     }
     (
-        signers.try_into().map_err(|_| ()).expect("committee signers"),
-        pubkeys.try_into().map_err(|_| ()).expect("committee pubkeys"),
+        signers
+            .try_into()
+            .map_err(|_| ())
+            .expect("committee signers"),
+        pubkeys
+            .try_into()
+            .map_err(|_| ())
+            .expect("committee pubkeys"),
     )
 }
 
@@ -228,11 +234,16 @@ fn test_inv_ceh_05_genesis_pioneer_adoption() {
 
     // Counter-test: fewer than 14 signatures fails quorum
     let mut insufficient_g = pioneer_g.clone();
-    insufficient_g.genesis_signatures.truncate(CEH_BFT_QUORUM - 1);
+    insufficient_g
+        .genesis_signatures
+        .truncate(CEH_BFT_QUORUM - 1);
     let res_fail = verify_handshake_genesis(None, Some(&insufficient_g));
     assert!(matches!(
         res_fail,
-        Err(CehError::QuorumNotReached { have: 13, required: 14 })
+        Err(CehError::QuorumNotReached {
+            have: 13,
+            required: 14
+        })
     ));
 
     // Both None -> Ok(None)
@@ -311,15 +322,19 @@ fn test_inv_ceh_06_phase_transition_19_to_20_to_21_nodes() {
     let mut node_21_manifest: Option<GenesisManifest> = None;
 
     // Node 21 handshakes with federation Node 0
-    let handshake_res = verify_handshake_genesis(node_21_manifest.as_ref(), node_manifests[0].as_ref())
-        .expect("Pioneer adoption handshake must succeed");
+    let handshake_res =
+        verify_handshake_genesis(node_21_manifest.as_ref(), node_manifests[0].as_ref())
+            .expect("Pioneer adoption handshake must succeed");
 
     // Node 21 adopts the remote federation manifest
     assert_eq!(handshake_res, Some(federation_manifest.clone()));
     node_21_manifest = handshake_res;
 
     // Node 21 is now a fully anchored federation member!
-    assert_eq!(node_21_manifest.as_ref().unwrap().canonical_hash(), fingerprint);
+    assert_eq!(
+        node_21_manifest.as_ref().unwrap().canonical_hash(),
+        fingerprint
+    );
 
     // Subsequent handshakes with another federation member (e.g. Node 15) succeed as peers
     assert_eq!(
@@ -354,11 +369,11 @@ fn test_inv_ceh_06_phase_transition_19_to_20_to_21_nodes() {
 /// honest peers strictly reject foreign heartbeats at the signature layer without growing wire size.
 #[test]
 fn test_inv_1106_heartbeat_cryptographic_domain_isolation() {
+    use ed25519_dalek::Signer;
     use humoco_sim_core::fraud::{
         compute_heartbeat_digest, verify_heartbeat_signature_strict, IngressEnvelopeEvidence,
     };
     use humoco_sim_core::types::NetworkId;
-    use ed25519_dalek::Signer;
 
     let (sk, pk) = generate_keypair(77);
     let now_ms = 1_700_000_123u64;
@@ -428,4 +443,3 @@ fn test_inv_1106_heartbeat_cryptographic_domain_isolation() {
         "INV-1106: Mainnet peer MUST strictly reject Testnet heartbeat at signature layer!"
     );
 }
-

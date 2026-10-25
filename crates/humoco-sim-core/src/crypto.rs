@@ -169,10 +169,7 @@ pub fn compute_canonical_hash_normalized(
 /// `(parent_lock, lock_id)` pair and never trust a bare `lock_id`.
 ///
 /// PayloadDigest = BLAKE3(len || "HUMOCO_V1_ATTESTATION_PAYLOAD" || parent_lock || lock_id)
-pub fn compute_attestation_payload_digest(
-    parent_lock: &[u8; 32],
-    lock_id: &[u8; 32],
-) -> [u8; 32] {
+pub fn compute_attestation_payload_digest(parent_lock: &[u8; 32], lock_id: &[u8; 32]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     let tag_len = DOMAIN_ATTESTATION_PAYLOAD.len() as u8;
     hasher.update(&[tag_len]);
@@ -252,7 +249,13 @@ pub fn sign_lock_attestation_for_shard(
     shard_id: u16,
     timestamp: SimTime,
 ) -> Attestation {
-    let mut att = sign_lock_attestation_for_network(node_id, lock_id, parent_lock, timestamp, NetworkId::Mainnet);
+    let mut att = sign_lock_attestation_for_network(
+        node_id,
+        lock_id,
+        parent_lock,
+        timestamp,
+        NetworkId::Mainnet,
+    );
     att.shard_id = shard_id;
     att
 }
@@ -268,10 +271,7 @@ pub fn sign_lock_attestation(
 }
 
 /// Verifies the deterministic attestation signature for a specific network
-pub fn verify_attestation_for_network(
-    attestation: &Attestation,
-    network_id: NetworkId,
-) -> bool {
+pub fn verify_attestation_for_network(attestation: &Attestation, network_id: NetworkId) -> bool {
     let domain = domain_attestation(network_id);
     let mut hasher = blake3::Hasher::new();
     let tag_len = domain.len() as u8;
@@ -314,7 +314,11 @@ pub fn sign_deterministic_sig(pub_key: &NodePubKey, lock_id: &LockId) -> [u8; 64
 
 /// Checks a deterministic test signature against the public key and lock ID.
 /// This is a simulation check, not Ed25519 signature verification.
-pub fn verify_deterministic_sig(pub_key: &NodePubKey, lock_id: &LockId, signature: &[u8; 64]) -> bool {
+pub fn verify_deterministic_sig(
+    pub_key: &NodePubKey,
+    lock_id: &LockId,
+    signature: &[u8; 64],
+) -> bool {
     let mut hasher = blake3::Hasher::new();
     let tag_len = DOMAIN_ATTESTATION.len() as u8;
     hasher.update(&[tag_len]);
@@ -375,15 +379,26 @@ pub fn compute_shard_digest(shard_id: ShardId, locks: &[LockRecord]) -> Hash256 
 ///
 /// Variant with an explicit time filter for validity checks.
 pub fn compute_shard_digest_at(shard_id: ShardId, locks: &[LockRecord], now: SimTime) -> Hash256 {
-    let selected: Vec<_> = locks.iter().filter(|lock| u16::from_be_bytes([lock.parent_lock[0], lock.parent_lock[1]]) == shard_id).cloned().collect();
+    let selected: Vec<_> = locks
+        .iter()
+        .filter(|lock| u16::from_be_bytes([lock.parent_lock[0], lock.parent_lock[1]]) == shard_id)
+        .cloned()
+        .collect();
     compute_selected_shard_digest_at(shard_id, &selected, now)
 }
 
 /// Hash objective rows whose canonical shard membership was already checked by
 /// the caller. HMC membership derives from the root, not the SST collision key.
 /// This projection does not establish committee authority or recovery readiness.
-pub fn compute_selected_shard_digest_at(shard_id: ShardId, locks: &[LockRecord], now: SimTime) -> Hash256 {
-    let mut active: Vec<&LockRecord> = locks.iter().filter(|lock| !lock.status.is_void() && lock.valid_until > now).collect();
+pub fn compute_selected_shard_digest_at(
+    shard_id: ShardId,
+    locks: &[LockRecord],
+    now: SimTime,
+) -> Hash256 {
+    let mut active: Vec<&LockRecord> = locks
+        .iter()
+        .filter(|lock| !lock.status.is_void() && lock.valid_until > now)
+        .collect();
     active.sort_by(|a, b| a.parent_lock.cmp(&b.parent_lock));
     let mut hasher = blake3::Hasher::new();
     hasher.update(&[0x01]);
@@ -406,14 +421,32 @@ pub fn compute_shard_bucket_digest(
     bucket_id: u64,
     locks: &[LockRecord],
 ) -> Hash256 {
-    let selected: Vec<_> = locks.iter().filter(|lock| u16::from_be_bytes([lock.parent_lock[0], lock.parent_lock[1]]) == shard_id).cloned().collect();
+    let selected: Vec<_> = locks
+        .iter()
+        .filter(|lock| u16::from_be_bytes([lock.parent_lock[0], lock.parent_lock[1]]) == shard_id)
+        .cloned()
+        .collect();
     compute_selected_shard_bucket_digest(shard_id, bucket_id, &selected)
 }
 
 /// Bucket projection for records with independently checked shard membership.
-pub fn compute_selected_shard_bucket_digest(shard_id: ShardId, bucket_id: u64, locks: &[LockRecord]) -> Hash256 {
-    let mut bucket_locks: Vec<&LockRecord> = locks.iter().filter(|lock| !lock.status.is_void() && crate::types::timestamp_to_bucket_id(lock.created_at.0) == bucket_id).collect();
-    bucket_locks.sort_by(|a, b| a.parent_lock.cmp(&b.parent_lock).then_with(|| a.id.cmp(&b.id)));
+pub fn compute_selected_shard_bucket_digest(
+    shard_id: ShardId,
+    bucket_id: u64,
+    locks: &[LockRecord],
+) -> Hash256 {
+    let mut bucket_locks: Vec<&LockRecord> = locks
+        .iter()
+        .filter(|lock| {
+            !lock.status.is_void()
+                && crate::types::timestamp_to_bucket_id(lock.created_at.0) == bucket_id
+        })
+        .collect();
+    bucket_locks.sort_by(|a, b| {
+        a.parent_lock
+            .cmp(&b.parent_lock)
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
     let mut hasher = blake3::Hasher::new();
     let tag = b"HUMOCO_V1_BUCKET_DIGEST";
@@ -497,10 +530,16 @@ mod tests {
         );
 
         // It must be valid in Testnet
-        assert!(verify_attestation_for_network(&testnet_att, NetworkId::Testnet));
+        assert!(verify_attestation_for_network(
+            &testnet_att,
+            NetworkId::Testnet
+        ));
 
         // It MUST FAIL when submitted to Mainnet (Cross-Network Replay Protection!)
-        assert!(!verify_attestation_for_network(&testnet_att, NetworkId::Mainnet));
+        assert!(!verify_attestation_for_network(
+            &testnet_att,
+            NetworkId::Mainnet
+        ));
         assert!(!verify_attestation(&testnet_att));
 
         // Check the quorum domain tags as well
@@ -611,7 +650,8 @@ mod tests {
 
         let digest_multi = compute_shard_digest_at(shard_id, &locks, now);
         // Only lock_after_now is active; digest should match single active lock
-        let digest_single = compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_after_now), now);
+        let digest_single =
+            compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_after_now), now);
         assert_eq!(digest_multi, digest_single);
 
         // Lock from a different shard (shard 999) -> strictly EXCLUDED from shard 7 digest
@@ -626,11 +666,8 @@ mod tests {
             SimTime(50),
             SimTime(101),
         );
-        let digest_with_other = compute_shard_digest_at(
-            shard_id,
-            &[lock_after_now.clone(), lock_other_shard],
-            now,
-        );
+        let digest_with_other =
+            compute_shard_digest_at(shard_id, &[lock_after_now.clone(), lock_other_shard], now);
         assert_eq!(digest_multi, digest_with_other);
 
         // Active locks with identical parent_lock order & lexicographical sorting
@@ -653,22 +690,17 @@ mod tests {
         lock_p1_b.parent_lock = make_parent(0xBB);
 
         // Passed in reverse order: [B, A]
-        let digest_sorted1 = compute_shard_digest_at(
-            shard_id,
-            &[lock_p1_b.clone(), lock_p1_a.clone()],
-            now,
-        );
+        let digest_sorted1 =
+            compute_shard_digest_at(shard_id, &[lock_p1_b.clone(), lock_p1_a.clone()], now);
         // Passed in order: [A, B]
-        let digest_sorted2 = compute_shard_digest_at(
-            shard_id,
-            &[lock_p1_a.clone(), lock_p1_b.clone()],
-            now,
-        );
+        let digest_sorted2 =
+            compute_shard_digest_at(shard_id, &[lock_p1_a.clone(), lock_p1_b.clone()], now);
         assert_eq!(digest_sorted1, digest_sorted2);
 
         // Test compute_shard_digest (defaults to SimTime(0))
         let digest_zero = compute_shard_digest(shard_id, std::slice::from_ref(&lock_at_now));
-        let digest_zero_explicit = compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_at_now), SimTime(0));
+        let digest_zero_explicit =
+            compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_at_now), SimTime(0));
         assert_eq!(digest_zero, digest_zero_explicit);
     }
 
@@ -695,13 +727,16 @@ mod tests {
         assert_eq!(hash_norm, expected);
 
         // Perturbation tests
-        let hash_diff_parent = compute_canonical_hash_normalized(&[0x43u8; 32], receiver_bytes, sig_bytes);
+        let hash_diff_parent =
+            compute_canonical_hash_normalized(&[0x43u8; 32], receiver_bytes, sig_bytes);
         assert_ne!(hash_norm, hash_diff_parent);
 
-        let hash_diff_rec = compute_canonical_hash_normalized(&parent_lock, b"other_receiver", sig_bytes);
+        let hash_diff_rec =
+            compute_canonical_hash_normalized(&parent_lock, b"other_receiver", sig_bytes);
         assert_ne!(hash_norm, hash_diff_rec);
 
-        let hash_diff_sig = compute_canonical_hash_normalized(&parent_lock, receiver_bytes, b"other_sig");
+        let hash_diff_sig =
+            compute_canonical_hash_normalized(&parent_lock, receiver_bytes, b"other_sig");
         assert_ne!(hash_norm, hash_diff_sig);
     }
 
@@ -743,31 +778,87 @@ mod tests {
         // Field sensitivity checks
         assert_ne!(
             digest,
-            compute_sig_digest(b"OTHER_DOMAIN", epoch_id, session_seq, flags, shard_id, status_tag, &payload_digest)
+            compute_sig_digest(
+                b"OTHER_DOMAIN",
+                epoch_id,
+                session_seq,
+                flags,
+                shard_id,
+                status_tag,
+                &payload_digest
+            )
         );
         assert_ne!(
             digest,
-            compute_sig_digest(domain_tag, epoch_id + 1, session_seq, flags, shard_id, status_tag, &payload_digest)
+            compute_sig_digest(
+                domain_tag,
+                epoch_id + 1,
+                session_seq,
+                flags,
+                shard_id,
+                status_tag,
+                &payload_digest
+            )
         );
         assert_ne!(
             digest,
-            compute_sig_digest(domain_tag, epoch_id, session_seq + 1, flags, shard_id, status_tag, &payload_digest)
+            compute_sig_digest(
+                domain_tag,
+                epoch_id,
+                session_seq + 1,
+                flags,
+                shard_id,
+                status_tag,
+                &payload_digest
+            )
         );
         assert_ne!(
             digest,
-            compute_sig_digest(domain_tag, epoch_id, session_seq, flags ^ 1, shard_id, status_tag, &payload_digest)
+            compute_sig_digest(
+                domain_tag,
+                epoch_id,
+                session_seq,
+                flags ^ 1,
+                shard_id,
+                status_tag,
+                &payload_digest
+            )
         );
         assert_ne!(
             digest,
-            compute_sig_digest(domain_tag, epoch_id, session_seq, flags, shard_id + 1, status_tag, &payload_digest)
+            compute_sig_digest(
+                domain_tag,
+                epoch_id,
+                session_seq,
+                flags,
+                shard_id + 1,
+                status_tag,
+                &payload_digest
+            )
         );
         assert_ne!(
             digest,
-            compute_sig_digest(domain_tag, epoch_id, session_seq, flags, shard_id, status_tag ^ 1, &payload_digest)
+            compute_sig_digest(
+                domain_tag,
+                epoch_id,
+                session_seq,
+                flags,
+                shard_id,
+                status_tag ^ 1,
+                &payload_digest
+            )
         );
         assert_ne!(
             digest,
-            compute_sig_digest(domain_tag, epoch_id, session_seq, flags, shard_id, status_tag, &[0xAAu8; 32])
+            compute_sig_digest(
+                domain_tag,
+                epoch_id,
+                session_seq,
+                flags,
+                shard_id,
+                status_tag,
+                &[0xAAu8; 32]
+            )
         );
     }
 
@@ -804,7 +895,11 @@ mod tests {
         assert!(!verify_deterministic_sig(&pub_key, &lock_id, &tampered_sig));
         let mut tampered_sig2 = sig;
         tampered_sig2[32] ^= 0xFF;
-        assert!(!verify_deterministic_sig(&pub_key, &lock_id, &tampered_sig2));
+        assert!(!verify_deterministic_sig(
+            &pub_key,
+            &lock_id,
+            &tampered_sig2
+        ));
 
         // Canonical hash with signature
         let parent = [0x12u8; 32];
@@ -815,8 +910,14 @@ mod tests {
         assert_eq!(h_with_sig, h_direct);
 
         // Network domain getters
-        assert_eq!(domain_attestation(NetworkId::Mainnet), HUMOCO_V1_ATTESTATION_MAINNET);
-        assert_eq!(domain_attestation(NetworkId::Testnet), HUMOCO_V1_ATTESTATION_TESTNET);
+        assert_eq!(
+            domain_attestation(NetworkId::Mainnet),
+            HUMOCO_V1_ATTESTATION_MAINNET
+        );
+        assert_eq!(
+            domain_attestation(NetworkId::Testnet),
+            HUMOCO_V1_ATTESTATION_TESTNET
+        );
     }
 
     #[test]
@@ -875,4 +976,3 @@ mod tests {
         assert_eq!(whitened, *hasher.finalize().as_bytes());
     }
 }
-

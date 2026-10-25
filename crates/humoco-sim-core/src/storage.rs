@@ -12,11 +12,17 @@ pub const MAX_LOCK_TTL_SECONDS: u64 = MAX_LOCK_TTL_YEARS * crate::quota::SECONDS
 pub const MAX_LOCK_TTL_MS: u64 = MAX_LOCK_TTL_SECONDS * 1_000; // 346_896_000_000 ms
 
 /// Ingress time window: now+30s < valid_until <= root.valid_until <= now + MAX_LOCK_TTL_MS (INV-1202)
-pub fn ingress_time_window_valid(now: SimTime, valid_until: SimTime, root_valid_until: SimTime) -> bool {
+pub fn ingress_time_window_valid(
+    now: SimTime,
+    valid_until: SimTime,
+    root_valid_until: SimTime,
+) -> bool {
     // valid_until must be strictly > now + 30s, <= root_valid_until, and root_valid_until <= now + 11 years
     let min_valid = now.0.saturating_add(30_000);
     let max_valid = now.0.saturating_add(MAX_LOCK_TTL_MS);
-    valid_until.0 > min_valid && valid_until.0 <= root_valid_until.0 && root_valid_until.0 <= max_valid
+    valid_until.0 > min_valid
+        && valid_until.0 <= root_valid_until.0
+        && root_valid_until.0 <= max_valid
 }
 
 /// Should prune if now > root.valid_until + 30s grace (INV-1203)
@@ -116,7 +122,11 @@ impl RamIndex {
         self.map
             .values()
             .map(|r| {
-                let rv = self.root_valid.get(&r.parent_lock).copied().unwrap_or(SimTime(0));
+                let rv = self
+                    .root_valid
+                    .get(&r.parent_lock)
+                    .copied()
+                    .unwrap_or(SimTime(0));
                 (r.clone(), rv)
             })
             .collect()
@@ -160,14 +170,22 @@ impl RamIndex {
     pub fn prune_expired_bounded(&mut self, now: SimTime, limit: usize) -> usize {
         let mut pruned = 0;
         for _ in 0..limit {
-            let Some((&bucket, _)) = self.ttl_buckets.first_key_value() else { break; };
-            if now.0 <= bucket.saturating_add(1).saturating_mul(1000) { break; }
+            let Some((&bucket, _)) = self.ttl_buckets.first_key_value() else {
+                break;
+            };
+            if now.0 <= bucket.saturating_add(1).saturating_mul(1000) {
+                break;
+            }
             let parent = self.ttl_buckets.get_mut(&bucket).and_then(Vec::pop);
             if self.ttl_buckets.get(&bucket).is_some_and(Vec::is_empty) {
                 self.ttl_buckets.remove(&bucket);
             }
             if let Some(parent) = parent {
-                if self.root_valid.get(&parent).is_some_and(|rv| should_prune(now, *rv)) {
+                if self
+                    .root_valid
+                    .get(&parent)
+                    .is_some_and(|rv| should_prune(now, *rv))
+                {
                     self.map.remove(&parent);
                     self.root_valid.remove(&parent);
                     pruned += 1;
@@ -182,9 +200,15 @@ impl RamIndex {
         for i in 0..samples {
             let mut parent = [0xAB; 32];
             parent[0] = (i & 0xFF) as u8;
-            parent[1] = ((i>>8)&0xFF) as u8;
-            parent[2] = ((i>>16)&0xFF) as u8;
-            let rec = LockRecord::new(parent, [0xCC;32], vec![i as u8], SimTime(0), SimTime(60_000));
+            parent[1] = ((i >> 8) & 0xFF) as u8;
+            parent[2] = ((i >> 16) & 0xFF) as u8;
+            let rec = LockRecord::new(
+                parent,
+                [0xCC; 32],
+                vec![i as u8],
+                SimTime(0),
+                SimTime(60_000),
+            );
             let _ = self.try_insert(rec, SimTime(0), SimTime(600_000));
         }
         start.elapsed()
@@ -197,7 +221,9 @@ impl RamIndex {
 }
 
 impl Default for RamIndex {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Maturity tier distinguishing final (CEH BFT quorum committed) from provisional locks.
@@ -259,7 +285,8 @@ impl DualRamIndex {
         now: SimTime,
         root_valid_until: SimTime,
     ) -> Result<IngressVerdictLow, IngressVerdictLow> {
-        self.provisional_index.try_insert(record, now, root_valid_until)
+        self.provisional_index
+            .try_insert(record, now, root_valid_until)
     }
 
     /// Promotes a provisional lock to final status after BFT certification.
@@ -283,7 +310,11 @@ impl DualRamIndex {
         }
 
         self.provisional_index.remove(parent_lock);
-        if self.final_index.try_insert(rec.clone(), now, root_valid_until).is_err() {
+        if self
+            .final_index
+            .try_insert(rec.clone(), now, root_valid_until)
+            .is_err()
+        {
             self.final_index.replace_lock(rec.clone(), root_valid_until);
         }
         Ok(rec)
@@ -369,13 +400,27 @@ pub struct DualTierStorage {
 
 impl DualTierStorage {
     pub fn new() -> Self {
-        Self { ram: RamIndex::new(), wal: VecDeque::new(), disk: BTreeMap::new(), next_seq: 0 }
+        Self {
+            ram: RamIndex::new(),
+            wal: VecDeque::new(),
+            disk: BTreeMap::new(),
+            next_seq: 0,
+        }
     }
     /// Hot-path insert: RAM immediately, WAL queued (async)
-    pub fn ingress(&mut self, record: LockRecord, now: SimTime, root_valid_until: SimTime) -> Result<IngressVerdictLow, IngressVerdictLow> {
+    pub fn ingress(
+        &mut self,
+        record: LockRecord,
+        now: SimTime,
+        root_valid_until: SimTime,
+    ) -> Result<IngressVerdictLow, IngressVerdictLow> {
         let res = self.ram.try_insert(record.clone(), now, root_valid_until)?;
         // async WAL enqueue (non-blocking)
-        self.wal.push_back(WalEntry { lock: record, root_valid_until, seq: self.next_seq });
+        self.wal.push_back(WalEntry {
+            lock: record,
+            root_valid_until,
+            seq: self.next_seq,
+        });
         self.next_seq += 1;
         Ok(res)
     }
@@ -384,7 +429,8 @@ impl DualTierStorage {
         let mut n = 0;
         while let Some(entry) = self.wal.pop_front() {
             // Zero-I/O blocking simulation: just insert into disk map
-            self.disk.insert(entry.lock.parent_lock, (entry.lock, entry.root_valid_until));
+            self.disk
+                .insert(entry.lock.parent_lock, (entry.lock, entry.root_valid_until));
             n += 1;
         }
         n
@@ -412,13 +458,21 @@ impl DualTierStorage {
             }
         }
     }
-    pub fn ram_len(&self) -> usize { self.ram.len() }
-    pub fn disk_len(&self) -> usize { self.disk.len() }
-    pub fn wal_len(&self) -> usize { self.wal.len() }
+    pub fn ram_len(&self) -> usize {
+        self.ram.len()
+    }
+    pub fn disk_len(&self) -> usize {
+        self.disk.len()
+    }
+    pub fn wal_len(&self) -> usize {
+        self.wal.len()
+    }
 }
 
 impl Default for DualTierStorage {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

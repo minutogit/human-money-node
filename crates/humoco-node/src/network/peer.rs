@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
 
 /// Spec 15 / Spec 19: 3-phase lifecycle (Connected -> Degrading -> Suspended).
 /// From 2 failures (debounced): Degrading (early warning).

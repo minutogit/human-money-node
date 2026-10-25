@@ -152,7 +152,7 @@ impl NetworkClock {
 
     /// Records a heartbeat time sample:
     /// `offset = t_peer_heartbeat - t_local_system_clock`.
-    /// 
+    ///
     /// Security barriers:
     /// 1. WoT Gating: Discards samples immediately (`return false`) if `is_f2f_friend == false`.
     /// 2. Clamping: Keeps logical `time_offset` strictly within `[-max_clamp, max_clamp]`.
@@ -188,29 +188,24 @@ impl NetworkClock {
                     "F2F clock skew exceeds 45s threshold — median damping applied"
                 );
                 let diff: i64 = offset_target - state.logical_offset;
-                let step = if diff.abs() <= 1_000 {
-                    diff
-                } else {
-                    diff / 2
-                };
+                let step = if diff.abs() <= 1_000 { diff } else { diff / 2 };
                 let raw_offset = state.logical_offset + step;
                 // Barrier 2: Clamping to max_clamp_ms (default: 15 minutes, or adapted on merge)
                 state.logical_offset = raw_offset.clamp(-clamp_limit, clamp_limit);
-                self.time_offset.store(state.logical_offset, Ordering::Release);
+                self.time_offset
+                    .store(state.logical_offset, Ordering::Release);
             } else if state.logical_offset != 0 {
                 // When peer clocks return within tolerance (<= 45s),
                 // smoothly decay any existing offset back to 0.
                 let diff: i64 = -state.logical_offset;
-                let step = if diff.abs() <= 1_000 {
-                    diff
-                } else {
-                    diff / 2
-                };
-                state.logical_offset = (state.logical_offset + step).clamp(-clamp_limit, clamp_limit);
+                let step = if diff.abs() <= 1_000 { diff } else { diff / 2 };
+                state.logical_offset =
+                    (state.logical_offset + step).clamp(-clamp_limit, clamp_limit);
                 if state.logical_offset.abs() <= MAX_TIME_OFFSET_CLAMP_MS {
                     state.max_clamp_ms = MAX_TIME_OFFSET_CLAMP_MS;
                 }
-                self.time_offset.store(state.logical_offset, Ordering::Release);
+                self.time_offset
+                    .store(state.logical_offset, Ordering::Release);
             }
         }
 
@@ -246,7 +241,11 @@ impl NetworkClock {
 
     /// Returns the number of samples currently stored in the ring buffer
     pub fn sample_count(&self) -> usize {
-        self.inner.read().unwrap_or_else(|e| e.into_inner()).samples.len()
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .samples
+            .len()
     }
 
     /// Computes the current median offset of samples, if >= 10 samples are present
@@ -299,17 +298,14 @@ impl NetworkClock {
                 0
             };
             let diff: i64 = target - state.logical_offset;
-            let step = if diff.abs() <= 1_000 {
-                diff
-            } else {
-                diff / 2
-            };
+            let step = if diff.abs() <= 1_000 { diff } else { diff / 2 };
             let clamp_limit = state.max_clamp_ms;
             state.logical_offset = (state.logical_offset + step).clamp(-clamp_limit, clamp_limit);
             if state.logical_offset.abs() <= MAX_TIME_OFFSET_CLAMP_MS {
                 state.max_clamp_ms = MAX_TIME_OFFSET_CLAMP_MS;
             }
-            self.time_offset.store(state.logical_offset, Ordering::Release);
+            self.time_offset
+                .store(state.logical_offset, Ordering::Release);
         }
     }
 }
@@ -348,7 +344,11 @@ mod tests {
         }
         assert_eq!(clock.sample_count(), 9);
         assert_eq!(clock.current_median_offset(), None);
-        assert_eq!(clock.logical_offset_ms(), 0, "No tracking before 10 samples");
+        assert_eq!(
+            clock.logical_offset_ms(),
+            0,
+            "No tracking before 10 samples"
+        );
 
         // 10th sample triggers median calculation
         clock.record_sample(true, local_time + 60_000, local_time);

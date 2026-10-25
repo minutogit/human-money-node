@@ -7,12 +7,16 @@ use crate::types::{LockRecord, SimTime};
 
 /// Deterministic partition merge via min(H_canon) (INV-1601)
 pub fn resolve_partition_merge(locks_a: &[LockRecord], locks_b: &[LockRecord]) -> Vec<LockRecord> {
-    let mut parent_map: BTreeMap<[u8;32], LockRecord> = BTreeMap::new();
+    let mut parent_map: BTreeMap<[u8; 32], LockRecord> = BTreeMap::new();
     for l in locks_a.iter().chain(locks_b.iter()) {
         let parent = l.parent_lock;
         if let Some(existing) = parent_map.get(&parent) {
             // conflict: pick min H_canon
-            let h_existing = compute_canonical_hash(&existing.parent_lock, &existing.receiver_pub, &existing.nonce);
+            let h_existing = compute_canonical_hash(
+                &existing.parent_lock,
+                &existing.receiver_pub,
+                &existing.nonce,
+            );
             let h_new = compute_canonical_hash(&l.parent_lock, &l.receiver_pub, &l.nonce);
             if h_new < h_existing {
                 parent_map.insert(parent, l.clone());
@@ -35,26 +39,52 @@ pub fn simulate_60_40_partition_merge(num_nodes: usize) -> bool {
     // fully mesh each partition for simplicity
     let split = (num_nodes * 60) / 100;
     let group_a: Vec<u16> = (0..split as u16).collect();
-    let group_b: Vec<u16> = (split as u16 .. num_nodes as u16).collect();
+    let group_b: Vec<u16> = (split as u16..num_nodes as u16).collect();
     for &a in &group_a {
         for &b in &group_a {
-            if a != b { net.nodes.get_mut(&a).unwrap().add_peer(b); }
+            if a != b {
+                net.nodes.get_mut(&a).unwrap().add_peer(b);
+            }
         }
     }
     for &a in &group_b {
         for &b in &group_b {
-            if a != b { net.nodes.get_mut(&a).unwrap().add_peer(b); }
+            if a != b {
+                net.nodes.get_mut(&a).unwrap().add_peer(b);
+            }
         }
     }
     net.partition(vec![group_a.clone(), group_b.clone()]);
     // inject conflicting locks on same parent
-    let parent = [0xCC;32];
-    let lock_a = LockRecord::new(parent, [0x11;32], b"part_a".to_vec(), SimTime(0), SimTime(1_000_000));
-    let lock_b = LockRecord::new(parent, [0x22;32], b"part_b".to_vec(), SimTime(0), SimTime(1_000_000));
-    net.schedule(SimTime(10), group_a[0], group_a[0], SimMessage::LockRequest(lock_a.clone()));
-    net.schedule(SimTime(10), group_b[0], group_b[0], SimMessage::LockRequest(lock_b.clone()));
+    let parent = [0xCC; 32];
+    let lock_a = LockRecord::new(
+        parent,
+        [0x11; 32],
+        b"part_a".to_vec(),
+        SimTime(0),
+        SimTime(1_000_000),
+    );
+    let lock_b = LockRecord::new(
+        parent,
+        [0x22; 32],
+        b"part_b".to_vec(),
+        SimTime(0),
+        SimTime(1_000_000),
+    );
+    net.schedule(
+        SimTime(10),
+        group_a[0],
+        group_a[0],
+        SimMessage::LockRequest(lock_a.clone()),
+    );
+    net.schedule(
+        SimTime(10),
+        group_b[0],
+        group_b[0],
+        SimMessage::LockRequest(lock_b.clone()),
+    );
     net.run_until(SimTime(43_200_000)); // 12h = 43200s *1000
-    // heal
+                                        // heal
     net.heal_partition();
     for id in 0..num_nodes as u16 {
         // add bridge
@@ -63,19 +93,32 @@ pub fn simulate_60_40_partition_merge(num_nodes: usize) -> bool {
         } else {
             net.nodes.get_mut(&id).unwrap().add_peer(group_a[0]);
         }
-        net.nodes.get_mut(&id).unwrap().update_active_nodes(num_nodes);
+        net.nodes
+            .get_mut(&id)
+            .unwrap()
+            .update_active_nodes(num_nodes);
     }
     let stored_a = net.nodes[&group_a[0]].locks.values().next().cloned();
     let stored_b = net.nodes[&group_b[0]].locks.values().next().cloned();
     if let (Some(la), Some(lb)) = (stored_a, stored_b) {
         // gossip each to other side
-        net.schedule(SimTime(43_200_010), group_a[0], group_b[0], SimMessage::GossipLock{ lock: la, hops:0 });
-        net.schedule(SimTime(43_200_010), group_b[0], group_a[0], SimMessage::GossipLock{ lock: lb, hops:0 });
+        net.schedule(
+            SimTime(43_200_010),
+            group_a[0],
+            group_b[0],
+            SimMessage::GossipLock { lock: la, hops: 0 },
+        );
+        net.schedule(
+            SimTime(43_200_010),
+            group_b[0],
+            group_a[0],
+            SimMessage::GossipLock { lock: lb, hops: 0 },
+        );
     }
     net.run_until(SimTime(43_201_000));
     // check convergence: all nodes have same winner
-    let h_a = compute_canonical_hash(&parent, &[0x11;32], b"part_a");
-    let h_b = compute_canonical_hash(&parent, &[0x22;32], b"part_b");
+    let h_a = compute_canonical_hash(&parent, &[0x11; 32], b"part_a");
+    let h_b = compute_canonical_hash(&parent, &[0x22; 32], b"part_b");
     let winner_id = if h_a < h_b { lock_a.id } else { lock_b.id };
     for id in 0..num_nodes as u16 {
         let node = &net.nodes[&id];
@@ -103,16 +146,28 @@ pub fn test_packet_drop_resilience(drop_rate: f64, honest_nodes: usize) -> bool 
     // fully connect
     for i in 0..honest_nodes as u16 {
         for j in 0..honest_nodes as u16 {
-            if i!=j { net.nodes.get_mut(&i).unwrap().add_peer(j); }
+            if i != j {
+                net.nodes.get_mut(&i).unwrap().add_peer(j);
+            }
         }
     }
-    let lock = LockRecord::new([0xAA;32],[0xBB;32], b"resilience".to_vec(), SimTime(0), SimTime(60000));
+    let lock = LockRecord::new(
+        [0xAA; 32],
+        [0xBB; 32],
+        b"resilience".to_vec(),
+        SimTime(0),
+        SimTime(60000),
+    );
     let lid = lock.id;
     net.schedule(SimTime(10), 0, 0, SimMessage::LockRequest(lock));
     net.run_until(SimTime(5000));
     net.run_all();
     // With drop, we expect at least 70% of nodes to have lock and quorum (>=14 if N>=20 or proportional)
-    let with_lock = net.nodes.values().filter(|n| n.locks.contains_key(&lid)).count();
+    let with_lock = net
+        .nodes
+        .values()
+        .filter(|n| n.locks.contains_key(&lid))
+        .count();
     // For drop 0.3, expect >60% reach
     with_lock as f64 / honest_nodes as f64 > 0.5
 }
@@ -131,13 +186,13 @@ mod tests {
     use super::*;
     #[test]
     fn test_merge_resolves_min_canon() {
-        let parent = [0x01;32];
-        let a = LockRecord::new(parent, [0x02;32], b"a".to_vec(), SimTime(0), SimTime(1000));
-        let b = LockRecord::new(parent, [0x03;32], b"b".to_vec(), SimTime(0), SimTime(1000));
+        let parent = [0x01; 32];
+        let a = LockRecord::new(parent, [0x02; 32], b"a".to_vec(), SimTime(0), SimTime(1000));
+        let b = LockRecord::new(parent, [0x03; 32], b"b".to_vec(), SimTime(0), SimTime(1000));
         let merged = resolve_partition_merge(std::slice::from_ref(&a), std::slice::from_ref(&b));
         assert_eq!(merged.len(), 1);
-        let ha = compute_canonical_hash(&parent, &[0x02;32], b"a");
-        let hb = compute_canonical_hash(&parent, &[0x03;32], b"b");
+        let ha = compute_canonical_hash(&parent, &[0x02; 32], b"a");
+        let hb = compute_canonical_hash(&parent, &[0x03; 32], b"b");
         let expected = if ha < hb { a.id } else { b.id };
         assert_eq!(merged[0].id, expected);
     }

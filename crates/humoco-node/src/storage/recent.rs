@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 pub const DEFAULT_RECENT_LOCKS_CAPACITY: usize = 32;
 
@@ -153,7 +153,11 @@ mod tests {
                 } else {
                     RecentLockStatus::Conflict
                 },
-                tier: if i % 2 == 0 { "VIP".to_string() } else { "Free".to_string() },
+                tier: if i % 2 == 0 {
+                    "VIP".to_string()
+                } else {
+                    "Free".to_string()
+                },
                 byte_years: if i % 2 == 0 { 120 } else { 0 },
                 voucher_id: Some(format!("voucher_{}", i)),
             });
@@ -177,8 +181,8 @@ mod tests {
 
     #[test]
     fn test_thread_safety_concurrent_pushes_and_reads() {
-        use std::sync::Arc;
         use parking_lot::RwLock;
+        use std::sync::Arc;
 
         let buffer = Arc::new(RwLock::new(RecentLockBuffer::new(32)));
         let mut handles = Vec::new();

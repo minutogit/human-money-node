@@ -55,10 +55,16 @@ fn test_pillar_1_equivocation_double_sign_bans_immediately() {
     for (_id, node) in net.nodes.iter_mut() {
         assert!(!node.is_banned(byzantine), "vor Beweis nicht gebannt");
         let verified = node.verify_fraud_proof(&proof);
-        assert!(verified, "jeder ehrliche Knoten muss Beweis als gültig erkennen");
+        assert!(
+            verified,
+            "jeder ehrliche Knoten muss Beweis als gültig erkennen"
+        );
         let banned = node.apply_fraud_proof(&proof);
         assert!(banned, "apply muss true liefern");
-        assert!(node.is_banned(byzantine), "Täter muss sofort O(1) gebannt sein");
+        assert!(
+            node.is_banned(byzantine),
+            "Täter muss sofort O(1) gebannt sein"
+        );
         // Idempotenz: zweites Anwenden bleibt gebannt
         assert!(node.is_banned(byzantine));
     }
@@ -70,13 +76,21 @@ fn test_pillar_1_equivocation_double_sign_bans_immediately() {
     let att_a2 = sign_lock_attestation(byzantine, &lock_a.id, &parent_lock, SimTime(100));
     let att_b_same = sign_lock_attestation(byzantine, &lock_a.id, &parent_lock, SimTime(300));
     let bad_proof = FraudProofPayload::new_shard_equivocation(att_a2, att_b_same);
-    assert!(!bad_proof.verify(), "gleiche lock_ids darf nicht als Equivocation gelten");
+    assert!(
+        !bad_proof.verify(),
+        "gleiche lock_ids darf nicht als Equivocation gelten"
+    );
 
     // Gegenprobe 2: unterschiedliche parent_locks dürfen NIEMALS als Equivocation gelten (False-Positive-Schutz!)
     let different_parent = [0x99; 32];
-    let att_diff_parent = sign_lock_attestation(byzantine, &lock_b.id, &different_parent, SimTime(200));
-    let false_positive_proof = FraudProofPayload::new_shard_equivocation(att_a.clone(), att_diff_parent);
-    assert!(!false_positive_proof.verify(), "unterschiedliche parent_locks dürfen niemals gebannt werden!");
+    let att_diff_parent =
+        sign_lock_attestation(byzantine, &lock_b.id, &different_parent, SimTime(200));
+    let false_positive_proof =
+        FraudProofPayload::new_shard_equivocation(att_a.clone(), att_diff_parent);
+    assert!(
+        !false_positive_proof.verify(),
+        "unterschiedliche parent_locks dürfen niemals gebannt werden!"
+    );
 }
 
 /// Säule 3: Heartbeat-Spamming & 128-Slot Detektor (10 Minuten < 50 Min -> Betrug)
@@ -90,10 +104,7 @@ fn test_pillar_3_heartbeat_spam_128_slot_detector_bans() {
     // Erster Heartbeat bei t=0
     let hb1 = sign_heartbeat(malicious, SimTime(0));
     let res1 = detector.observe(hb1.clone());
-    assert!(
-        res1.is_none(),
-        "erster Heartbeat darf kein Betrug sein"
-    );
+    assert!(res1.is_none(), "erster Heartbeat darf kein Betrug sein");
     // Slot sollte belegt sein
     assert!(detector.get_slot(malicious).is_some());
 
@@ -108,7 +119,10 @@ fn test_pillar_3_heartbeat_spam_128_slot_detector_bans() {
     assert_eq!(proof.proof_pillar, FraudProofPillar::HeartbeatSpam);
     assert_eq!(proof.pillar, FraudProofPillar::HeartbeatSpam);
     assert_eq!(proof.perpetrator, malicious);
-    assert!(proof.verify(), "Heartbeat-Spam Beweis muss verifizierbar sein");
+    assert!(
+        proof.verify(),
+        "Heartbeat-Spam Beweis muss verifizierbar sein"
+    );
 
     // Nach Betrug muss Slot wieder frei sein
     assert!(detector.is_empty(malicious));
@@ -152,7 +166,10 @@ fn test_pillar_3_heartbeat_spam_128_slot_detector_bans() {
     // 80 Minuten später -> stale (>75 Min), Slot wird überschrieben ohne Betrug
     let hb_new = sign_heartbeat(99, SimTime(4_800_000)); // 80 Min
     assert!(det_stale.observe(hb_new.clone()).is_none());
-    assert_eq!(det_stale.get_slot(99).unwrap().timestamp_unix, SimTime(4_800_000));
+    assert_eq!(
+        det_stale.get_slot(99).unwrap().timestamp_unix,
+        SimTime(4_800_000)
+    );
 
     // 5. Kollision: fremder frischer Slot belegt denselben Index -> nicht überschreiben
     let mut det_coll = SlotDetector128::new();
@@ -219,10 +236,24 @@ fn test_pillar_2_ingress_counter_conflict_bans_immediately() {
 
     // Erzeuge zwei betrügerische Pakete (Pfad 4: Zähler-Rückschritt am gleichen Tag)
     let p1 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
-        &signing_key, 1, 10, 500_000, 0, 100_000, 1000, [0x11; 32],
+        &signing_key,
+        1,
+        10,
+        500_000,
+        0,
+        100_000,
+        1000,
+        [0x11; 32],
     );
     let p2 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
-        &signing_key, 1, 11, 400_000, 0, 100_000, 2000, [0x22; 32],
+        &signing_key,
+        1,
+        11,
+        400_000,
+        0,
+        100_000,
+        2000,
+        [0x22; 32],
     );
 
     let proof = FraudProofPayload::new_ingress_counter_conflict(p1, p2);
@@ -263,7 +294,8 @@ fn test_pillar_1_successor_equivocation_with_different_parent_shard_id() {
     let canonical_shard_id: u16 = 42;
 
     let sign_successor_att = |lock_id: [u8; 32]| -> humoco_sim_core::types::Attestation {
-        let payload_digest = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id);
+        let payload_digest =
+            humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id);
         let sig_digest = humoco_sim_core::crypto::compute_sig_digest(
             humoco_sim_core::crypto::DOMAIN_APPROVE_FINAL,
             0,
@@ -287,7 +319,8 @@ fn test_pillar_1_successor_equivocation_with_different_parent_shard_id() {
     let att_a = sign_successor_att(lock_a);
     let att_b = sign_successor_att(lock_b);
 
-    let proof = FraudProofPayload::new_shard_equivocation_with_pubkey(att_a, att_b, offender_pubkey);
+    let proof =
+        FraudProofPayload::new_shard_equivocation_with_pubkey(att_a, att_b, offender_pubkey);
     assert_eq!(proof.proof_pillar, FraudProofPillar::ShardEquivocation);
     assert_eq!(proof.perpetrator_node_id, offender_pubkey);
     assert!(proof.verify(), "A08: Successor equivocation proof must verify even when parent bytes differ from signed shard!");
@@ -312,15 +345,34 @@ fn test_pillar_2_v2_envelope_sequence_fork_conflict_bans_immediately() {
     let op_b = [0xBB; 32];
 
     let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
-        &signing_key, epoch_day, epoch_seq, ts, write_ema, read_ema, footprint, false, op_a,
+        &signing_key,
+        epoch_day,
+        epoch_seq,
+        ts,
+        write_ema,
+        read_ema,
+        footprint,
+        false,
+        op_a,
     );
     let p2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
-        &signing_key, epoch_day, epoch_seq, ts + 10, write_ema, read_ema, footprint, false, op_b,
+        &signing_key,
+        epoch_day,
+        epoch_seq,
+        ts + 10,
+        write_ema,
+        read_ema,
+        footprint,
+        false,
+        op_b,
     );
 
     let proof = FraudProofPayload::new_ingress_counter_conflict(p1, p2);
     assert_eq!(proof.proof_pillar, FraudProofPillar::IngressCounterConflict);
     assert_eq!(proof.perpetrator, malicious_gateway_id);
     assert_eq!(proof.perpetrator_node_id, gateway_pubkey);
-    assert!(proof.verify(), "A07: V2 envelope sequence fork must be detected as fraud!");
+    assert!(
+        proof.verify(),
+        "A07: V2 envelope sequence fork must be detected as fraud!"
+    );
 }

@@ -1,20 +1,14 @@
-use std::sync::Arc;
 use humoco_node::storage::{DualTierEngine, RedbStorage};
 use humoco_sim_core::storage::IngressVerdictLow;
 use humoco_sim_core::types::{Hash256, LockRecord, SimTime};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn create_sample_lock(parent_byte: u8, valid_until_ms: u64) -> LockRecord {
     let parent = [parent_byte; 32];
     let receiver = [0xEE; 32];
     let nonce = vec![parent_byte, 0x01, 0x02];
-    LockRecord::new(
-        parent,
-        receiver,
-        nonce,
-        SimTime(0),
-        SimTime(valid_until_ms),
-    )
+    LockRecord::new(parent, receiver, nonce, SimTime(0), SimTime(valid_until_ms))
 }
 
 #[test]
@@ -26,9 +20,13 @@ fn test_redb_storage_crud() {
     // 1. Lock CRUD
     let lock1 = create_sample_lock(0x01, 60_000);
     let root_valid_until_1 = 600_000;
-    storage.put_lock(&lock1, root_valid_until_1).expect("put_lock failed");
+    storage
+        .put_lock(&lock1, root_valid_until_1)
+        .expect("put_lock failed");
 
-    let retrieved = storage.get_lock(&lock1.parent_lock).expect("get_lock failed");
+    let retrieved = storage
+        .get_lock(&lock1.parent_lock)
+        .expect("get_lock failed");
     assert!(retrieved.is_some(), "lock should be retrieved");
     let (rec, rv) = retrieved.unwrap();
     assert_eq!(rec.id, lock1.id);
@@ -58,9 +56,14 @@ fn test_redb_storage_crud() {
     assert_eq!(storage.get_quota(&account).unwrap(), 1_000_000);
 
     // Charge more than available -> fails and leaves quota intact
-    let charge_err = storage.check_and_charge_quota(&account, 1_500_000).unwrap_err();
+    let charge_err = storage
+        .check_and_charge_quota(&account, 1_500_000)
+        .unwrap_err();
     match charge_err {
-        humoco_node::storage::StorageError::QuotaExceeded { available, required } => {
+        humoco_node::storage::StorageError::QuotaExceeded {
+            available,
+            required,
+        } => {
             assert_eq!(available, 1_000_000);
             assert_eq!(required, 1_500_000);
         }
@@ -139,7 +142,11 @@ async fn test_dual_tier_engine_hotpath_and_async_flush() {
     assert_eq!(replay_verdict, IngressVerdictLow::IdempotentReplay);
 
     // 3. Collision (different lock on same parent) where existing lock1 wins min(H_canon)
-    let h1 = humoco_sim_core::crypto::compute_canonical_hash(&lock1.parent_lock, &lock1.receiver_pub, &lock1.nonce);
+    let h1 = humoco_sim_core::crypto::compute_canonical_hash(
+        &lock1.parent_lock,
+        &lock1.receiver_pub,
+        &lock1.nonce,
+    );
     let mut nonce_b = 0u8;
     let colliding_lock = loop {
         let cand = LockRecord::new(
@@ -149,15 +156,17 @@ async fn test_dual_tier_engine_hotpath_and_async_flush() {
             SimTime(0),
             SimTime(60_000),
         );
-        let h_cand = humoco_sim_core::crypto::compute_canonical_hash(&cand.parent_lock, &cand.receiver_pub, &cand.nonce);
+        let h_cand = humoco_sim_core::crypto::compute_canonical_hash(
+            &cand.parent_lock,
+            &cand.receiver_pub,
+            &cand.nonce,
+        );
         if h_cand > h1 {
             break cand;
         }
         nonce_b = nonce_b.wrapping_add(1);
     };
-    let collision_verdict = engine
-        .ingress_lock(colliding_lock, now, root_valid)
-        .await;
+    let collision_verdict = engine.ingress_lock(colliding_lock, now, root_valid).await;
     assert_eq!(collision_verdict, Err(IngressVerdictLow::RejectedCollision));
 
     // 4. Time Window Rejection (valid_until <= now + 30s)
@@ -205,8 +214,8 @@ async fn test_coldstart_crash_recovery_and_ttl_pruning() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test_recovery.redb");
 
-    let lock_short = create_sample_lock(0x31, 50_000);   // valid_until 50s, root 60s
-    let lock_long = create_sample_lock(0x32, 500_000);   // valid_until 500s, root 600s
+    let lock_short = create_sample_lock(0x31, 50_000); // valid_until 50s, root 60s
+    let lock_long = create_sample_lock(0x32, 500_000); // valid_until 500s, root 600s
 
     // Phase 1: Setup engine and write locks
     {
@@ -314,9 +323,13 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
 
         anchor_storage_fixture(&engine, &entry_short).await;
         anchor_storage_fixture(&engine, &entry_long).await;
-        let (_, is_new1) = engine.ingress_hmc_lock("tag_short".to_string(), entry_short.clone()).await;
+        let (_, is_new1) = engine
+            .ingress_hmc_lock("tag_short".to_string(), entry_short.clone())
+            .await;
         assert!(is_new1);
-        let (_, is_new2) = engine.ingress_hmc_lock("tag_long".to_string(), entry_long.clone()).await;
+        let (_, is_new2) = engine
+            .ingress_hmc_lock("tag_long".to_string(), entry_long.clone())
+            .await;
         assert!(is_new2);
 
         // Verify RAM index initially
@@ -394,7 +407,9 @@ fn test_defensive_deserialization_corrupted_entries() {
         privacy_guard: None,
     };
     let root = root_fixture(&entry);
-    storage.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root).unwrap();
+    storage
+        .put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root)
+        .unwrap();
     storage.put_hmc_lock("tag_valid", &entry).unwrap();
     storage.ban_node(&[0x99; 32], 12345).unwrap();
 
@@ -407,11 +422,18 @@ fn test_defensive_deserialization_corrupted_entries() {
             let mut table_locks = write_txn.open_table(TABLE_LOCKS).unwrap();
             // Corrupt binary bytes that cannot be deserialized as LockRecord
             let corrupt_parent = [0xDE; 32];
-            table_locks.insert(&corrupt_parent, b"garbage_corrupted_payload_bytes".as_slice()).unwrap();
+            table_locks
+                .insert(
+                    &corrupt_parent,
+                    b"garbage_corrupted_payload_bytes".as_slice(),
+                )
+                .unwrap();
 
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS).unwrap();
             // Corrupt JSON bytes that cannot be deserialized as L2LockEntry
-            table_hmc.insert("tag_corrupt", b"not_a_valid_json{{}".as_slice()).unwrap();
+            table_hmc
+                .insert("tag_corrupt", b"not_a_valid_json{{}".as_slice())
+                .unwrap();
         }
         write_txn.commit().unwrap();
     }
@@ -442,7 +464,10 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].parent_lock_hex, hex::encode(lock1.parent_lock));
     assert_eq!(recent[0].child_lock_hex, hex::encode(lock1.id));
-    assert_eq!(recent[0].status, humoco_node::storage::RecentLockStatus::Provisional);
+    assert_eq!(
+        recent[0].status,
+        humoco_node::storage::RecentLockStatus::Provisional
+    );
 
     // 2. Ingress colliding lock (same parent, different child) -> Conflict
     let lock2 = LockRecord::new(
@@ -460,8 +485,14 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
     let recent2 = engine.get_recent_locks(10);
     assert_eq!(recent2.len(), 2);
     // Newest is the conflict
-    assert_eq!(recent2[0].status, humoco_node::storage::RecentLockStatus::Conflict);
-    assert_eq!(recent2[1].status, humoco_node::storage::RecentLockStatus::Provisional);
+    assert_eq!(
+        recent2[0].status,
+        humoco_node::storage::RecentLockStatus::Conflict
+    );
+    assert_eq!(
+        recent2[1].status,
+        humoco_node::storage::RecentLockStatus::Provisional
+    );
 
     // 3. inspect_lock on existing parent
     let insp = engine.inspect_lock(&lock1.parent_lock).await;
@@ -497,7 +528,10 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
         .ingress_hmc_lock(hmc_parent_hex.clone(), hmc_entry.clone())
         .await;
     assert!(is_new);
-    assert!(matches!(h_verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+    assert!(matches!(
+        h_verdict,
+        humoco_node::api::hmc::L2Verdict::Verified { .. }
+    ));
 
     let hmc_insp = engine.inspect_lock(&hmc_parent).await;
     assert!(hmc_insp.is_some());
@@ -668,7 +702,10 @@ async fn test_durable_before_vote_crash_durability() {
         )
         .await;
 
-    assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }), "{verdict:?}");
+    assert!(
+        matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }),
+        "{verdict:?}"
+    );
     assert!(is_new);
 
     // Now simulate an abrupt crash without graceful shutdown drain:
@@ -682,13 +719,21 @@ async fn test_durable_before_vote_crash_durability() {
     let reopened_storage = Arc::new(RedbStorage::open(&db_path).expect("failed to reopen redb"));
 
     // Check that entry is durably persisted on disk in TABLE_HMC_LOCKS
-    let disk_entry = reopened_storage.get_hmc_lock(&tag).expect("disk read failed");
-    assert!(disk_entry.is_some(), "Lock MUST be durably present on disk before vote/verdict");
+    let disk_entry = reopened_storage
+        .get_hmc_lock(&tag)
+        .expect("disk read failed");
+    assert!(
+        disk_entry.is_some(),
+        "Lock MUST be durably present on disk before vote/verdict"
+    );
     assert_eq!(disk_entry.unwrap().t_id, [0x42; 32]);
 
     // Re-instantiate a fresh DualTierEngine and verify recovery from disk
     let (new_engine, _new_worker) = DualTierEngine::new(Arc::clone(&reopened_storage));
-    let _ = new_engine.recover_from_disk(SimTime(1000)).await.expect("recovery failed");
+    let _ = new_engine
+        .recover_from_disk(SimTime(1000))
+        .await
+        .expect("recovery failed");
 
     // Verify the lock is in the RAM index and voucher lineage is recovered
     let insp = new_engine.inspect_lock(&parent_bytes).await;
@@ -700,16 +745,32 @@ async fn test_durable_before_vote_crash_durability() {
     assert_eq!(lin.unwrap().voucher_id, "voucher_crash");
 }
 
-
-
 // Byte-storage fixtures use artificial signatures. Separate roots exercise the
 // production namespace/TTL boundary; genuine author authentication is covered
 // by chain_causality_and_prefix_tests over HTTP and QUIC.
 fn root_fixture(entry: &humoco_node::api::hmc::L2LockEntry) -> humoco_node::api::hmc::L2LockEntry {
-    let mut root = entry.clone(); root.t_id[0] ^= 0x80; root
+    let mut root = entry.clone();
+    root.t_id[0] ^= 0x80;
+    root
 }
-async fn anchor_storage_fixture(engine: &DualTierEngine, entry: &humoco_node::api::hmc::L2LockEntry) {
+async fn anchor_storage_fixture(
+    engine: &DualTierEngine,
+    entry: &humoco_node::api::hmc::L2LockEntry,
+) {
     let root = root_fixture(entry);
-    let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.t_id).into_string(), root, humoco_node::storage::IngressOrigin::ClientApi, None, None, None, None).await;
-    assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }), "{verdict:?}");
+    let (verdict, _) = engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root.t_id).into_string(),
+            root,
+            humoco_node::storage::IngressOrigin::ClientApi,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }),
+        "{verdict:?}"
+    );
 }

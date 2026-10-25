@@ -12,8 +12,8 @@
 //! f) 100-node HRW/quorum validation.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -24,15 +24,15 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use humoco_node::api::hmc::{
-    L2AuthPayload, L2ChainLockRequest, L2LockEntry, L2LockRequest, L2ResponseEnvelope, L2Verdict,
-    calculate_l2_payload_hash,
+    calculate_l2_payload_hash, L2AuthPayload, L2ChainLockRequest, L2LockEntry, L2LockRequest,
+    L2ResponseEnvelope, L2Verdict,
 };
-use humoco_node::api::{AppState, build_router};
+use humoco_node::api::{build_router, AppState};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::ingress::{PowEngine, TierController};
 use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
-use humoco_sim_core::types::{LockRecord, SimTime, required_quorum};
+use humoco_sim_core::types::{required_quorum, LockRecord, SimTime};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
 // ---------------------------------------------------------------------------
@@ -723,12 +723,10 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
         "different network originals must not ban"
     );
     assert!(!pm_server.is_banned(&victim_pubkey).await);
-    assert!(
-        storage_s
-            .get_evidence(blake3::hash(&payload).as_bytes())
-            .expect("evidence lookup")
-            .is_none()
-    );
+    assert!(storage_s
+        .get_evidence(blake3::hash(&payload).as_bytes())
+        .expect("evidence lookup")
+        .is_none());
 
     // A provisional-to-final transition still protects the original spend slot
     // within the same network. A conflicting original is genuine self-proof.
@@ -1606,11 +1604,10 @@ async fn test_exact_committee_includes_self_and_never_queries_rank21_wire() {
     assert_eq!(status, StatusCode::CREATED);
     let qc = body.quorum_certificate.expect("certificate");
     assert_eq!(qc.signer_count, 14);
-    assert!(
-        qc.signatures
-            .iter()
-            .any(|s| s.node_id == nodes[0].identity.node_id_u16())
-    );
+    assert!(qc
+        .signatures
+        .iter()
+        .any(|s| s.node_id == nodes[0].identity.node_id_u16()));
     assert_eq!(qc.signer_bitmap.count_ones(), 14);
     assert_eq!(qc.signer_bitmap >> 20, 0);
     assert_eq!(
@@ -1637,11 +1634,10 @@ async fn test_exact_committee_outside_gateway_queries_twenty_wire() {
     assert_eq!(status, StatusCode::CREATED);
     let qc = body.quorum_certificate.expect("certificate");
     assert_eq!(qc.signer_count, 14);
-    assert!(
-        !qc.signatures
-            .iter()
-            .any(|s| s.node_id == nodes[0].identity.node_id_u16())
-    );
+    assert!(!qc
+        .signatures
+        .iter()
+        .any(|s| s.node_id == nodes[0].identity.node_id_u16()));
     assert_eq!(qc.signer_bitmap.count_ones(), 14);
     assert_eq!(qc.signer_bitmap >> 20, 0);
     assert_eq!(

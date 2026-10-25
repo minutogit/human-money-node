@@ -1,7 +1,5 @@
 use humoco_sim_core::sim::{SimMessage, SimNetwork, SimNode};
-use humoco_sim_core::types::{
-    required_quorum, LockRecord, LockStatus, SimTime,
-};
+use humoco_sim_core::types::{required_quorum, LockRecord, LockStatus, SimTime};
 
 #[test]
 fn test_village_to_global_merge_lazy_upgrade_and_shard_shift() {
@@ -43,7 +41,10 @@ fn test_village_to_global_merge_lazy_upgrade_and_shard_shift() {
         assert_eq!(node.locks[&lock_1_id].signers.len(), 5);
         assert!(matches!(
             node.locks[&lock_1_id].status,
-            LockStatus::Provisional { sigs: 5, required: 4 }
+            LockStatus::Provisional {
+                sigs: 5,
+                required: 4
+            }
         ));
     }
 

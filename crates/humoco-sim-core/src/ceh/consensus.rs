@@ -15,17 +15,16 @@
 //!    - 14 RoundChanges assemble a `NewViewCertificate`.
 //!    - Unbounded exponential backoff: $T(r) = T_0 \times 2^r$.
 
-use std::collections::BTreeMap;
 use ed25519_dalek::SigningKey;
+use std::collections::BTreeMap;
 
 use crate::ceh::crypto::{
     sign_commit_vote, sign_epoch_certificate, sign_prepare_vote, sign_round_change,
     verify_commit_vote, verify_prepare_vote, verify_round_change,
 };
 use crate::ceh::types::{
-    CehError, CommitVote, EpochCertificate, EpochProposal, NewViewCertificate,
-    NodePubKey, PrepareVote, PreparedProof, RoundChangeMessage, CEH_BFT_QUORUM,
-    CEH_COMMITTEE_SIZE,
+    CehError, CommitVote, EpochCertificate, EpochProposal, NewViewCertificate, NodePubKey,
+    PrepareVote, PreparedProof, RoundChangeMessage, CEH_BFT_QUORUM, CEH_COMMITTEE_SIZE,
 };
 
 /// Consensus state of a committee replica for an epoch handoff.
@@ -174,7 +173,10 @@ impl CehConsensusReplica {
     }
 
     /// Adds a received `PrepareVote` to the accumulation map.
-    pub fn add_prepare_vote(&mut self, vote: PrepareVote) -> Result<Option<PreparedProof>, CehError> {
+    pub fn add_prepare_vote(
+        &mut self,
+        vote: PrepareVote,
+    ) -> Result<Option<PreparedProof>, CehError> {
         if vote.round != self.round || vote.epoch != self.epoch || vote.shard_id != self.shard_id {
             return Ok(None);
         }
@@ -195,12 +197,8 @@ impl CehConsensusReplica {
 
         // Check if 14 Prepares reached
         if votes.len() >= CEH_BFT_QUORUM {
-            let mut prepared = PreparedProof::new(
-                self.shard_id,
-                self.epoch,
-                self.round,
-                vote.proposal_hash,
-            );
+            let mut prepared =
+                PreparedProof::new(self.shard_id, self.epoch, self.round, vote.proposal_hash);
             for v in votes {
                 prepared.add_signature(v.voter, v.signature);
             }
@@ -215,8 +213,14 @@ impl CehConsensusReplica {
     }
 
     /// Member action: handles an incoming Commit request in Phase 2 with Public Prepared Validity.
-    pub fn handle_commit_request(&mut self, prepared: &PreparedProof) -> Result<CommitVote, CehError> {
-        if prepared.round != self.round || prepared.epoch != self.epoch || prepared.shard_id != self.shard_id {
+    pub fn handle_commit_request(
+        &mut self,
+        prepared: &PreparedProof,
+    ) -> Result<CommitVote, CehError> {
+        if prepared.round != self.round
+            || prepared.epoch != self.epoch
+            || prepared.shard_id != self.shard_id
+        {
             return Err(CehError::RoundMismatch {
                 expected: self.round,
                 got: prepared.round,
@@ -331,11 +335,7 @@ impl CehConsensusReplica {
         list.push(rc.clone());
 
         if list.len() >= CEH_BFT_QUORUM {
-            let mut nvc = NewViewCertificate::new(
-                self.shard_id,
-                self.epoch,
-                rc.next_round,
-            );
+            let mut nvc = NewViewCertificate::new(self.shard_id, self.epoch, rc.next_round);
             for m in list {
                 nvc.add_message(m.clone());
             }
@@ -462,10 +462,7 @@ mod tests {
 
         let mut nvc = None;
         for rc in round_changes {
-            if let Some(cert) = replicas[1]
-                .add_round_change(rc)
-                .expect("add round change")
-            {
+            if let Some(cert) = replicas[1].add_round_change(rc).expect("add round change") {
                 nvc = Some(cert);
             }
         }

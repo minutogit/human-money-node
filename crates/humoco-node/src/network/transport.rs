@@ -774,7 +774,167 @@ impl RequestHandler for NodeRequestHandler {
                         chain,
                         ..
                     } => {
-                        let ttl_s = root_valid_until.saturating_sub(effective_ts) / 1000;
+                        // A19-01: Authenticate root lifetime before computing signed envelope footprint and recipient reservation.
+                        // Wire lifetime cannot undercharge or extend TTL.
+                        let auth_root_valid = if req.is_genesis
+                            && chain.as_ref().is_none_or(|c| c.chain.len() == 1)
+                        {
+                            let entry = crate::api::hmc::L2LockEntry::from(req);
+                            if entry.deletable_at.is_some() {
+                                match crate::storage::db::roots::root_valid_until(&entry) {
+                                    Ok(v) => {
+                                        if *root_valid_until != v {
+                                            warn!(
+                                                claimed = *root_valid_until,
+                                                authenticated = v,
+                                                "LockVerifyRequest rejected: wire root_valid_until mismatch with authenticated root"
+                                            );
+                                            let resp_header = WireHeader::new(
+                                                MsgType::LockVerifyResponse as u16,
+                                                header.session_seq.wrapping_add(1),
+                                                header.epoch_id,
+                                                humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                                0,
+                                            );
+                                            return Ok((resp_header, Vec::new()));
+                                        }
+                                        v
+                                    }
+                                    Err(_) => {
+                                        let resp_header = WireHeader::new(
+                                            MsgType::LockVerifyResponse as u16,
+                                            header.session_seq.wrapping_add(1),
+                                            header.epoch_id,
+                                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                            0,
+                                        );
+                                        return Ok((resp_header, Vec::new()));
+                                    }
+                                }
+                            } else {
+                                *root_valid_until
+                            }
+                        } else if let Some(chain_req) = chain {
+                            if chain_req.chain.is_empty() {
+                                let resp_header = WireHeader::new(
+                                    MsgType::LockVerifyResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                    0,
+                                );
+                                return Ok((resp_header, Vec::new()));
+                            }
+                            if chain_req.chain[0].is_genesis {
+                                let entry = crate::api::hmc::L2LockEntry::from(&chain_req.chain[0]);
+                                if entry.deletable_at.is_some() {
+                                    match crate::storage::db::roots::root_valid_until(&entry) {
+                                        Ok(v) => {
+                                            if *root_valid_until != v {
+                                                let resp_header = WireHeader::new(
+                                                    MsgType::LockVerifyResponse as u16,
+                                                    header.session_seq.wrapping_add(1),
+                                                    header.epoch_id,
+                                                    humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                                    0,
+                                                );
+                                                return Ok((resp_header, Vec::new()));
+                                            }
+                                            v
+                                        }
+                                        Err(_) => {
+                                            let resp_header = WireHeader::new(
+                                                MsgType::LockVerifyResponse as u16,
+                                                header.session_seq.wrapping_add(1),
+                                                header.epoch_id,
+                                                humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                                0,
+                                            );
+                                            return Ok((resp_header, Vec::new()));
+                                        }
+                                    }
+                                } else {
+                                    *root_valid_until
+                                }
+                            } else {
+                                match engine
+                                    .get_hmc_voucher_root_valid(&chain_req.layer2_voucher_id)
+                                    .await
+                                {
+                                    Some(v) => {
+                                        if *root_valid_until != v {
+                                            let resp_header = WireHeader::new(
+                                                MsgType::LockVerifyResponse as u16,
+                                                header.session_seq.wrapping_add(1),
+                                                header.epoch_id,
+                                                humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                                0,
+                                            );
+                                            return Ok((resp_header, Vec::new()));
+                                        }
+                                        v
+                                    }
+                                    None => {
+                                        let resp_header = WireHeader::new(
+                                            MsgType::LockVerifyResponse as u16,
+                                            header.session_seq.wrapping_add(1),
+                                            header.epoch_id,
+                                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                            0,
+                                        );
+                                        return Ok((resp_header, Vec::new()));
+                                    }
+                                }
+                            }
+                        } else {
+                            match engine
+                                .get_hmc_voucher_root_valid(&req.layer2_voucher_id)
+                                .await
+                            {
+                                Some(v) => {
+                                    if *root_valid_until != v {
+                                        warn!(
+                                            claimed = *root_valid_until,
+                                            authenticated = v,
+                                            "LockVerifyRequest rejected: wire root_valid_until mismatch with authenticated root"
+                                        );
+                                        let resp_header = WireHeader::new(
+                                            MsgType::LockVerifyResponse as u16,
+                                            header.session_seq.wrapping_add(1),
+                                            header.epoch_id,
+                                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                            0,
+                                        );
+                                        return Ok((resp_header, Vec::new()));
+                                    }
+                                    v
+                                }
+                                None => {
+                                    let resp_header = WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                        0,
+                                    );
+                                    return Ok((resp_header, Vec::new()));
+                                }
+                            }
+                        };
+
+                        if auth_root_valid <= effective_ts {
+                            warn!("LockVerifyRequest rejected: authenticated root is expired");
+                            let resp_header = WireHeader::new(
+                                MsgType::LockVerifyResponse as u16,
+                                header.session_seq.wrapping_add(1),
+                                header.epoch_id,
+                                humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                0,
+                            );
+                            return Ok((resp_header, Vec::new()));
+                        }
+
+                        let ttl_s = auth_root_valid.saturating_sub(effective_ts) / 1000;
                         let entry = crate::api::hmc::L2LockEntry::from(req);
                         let base_fp =
                             humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
@@ -1002,7 +1162,11 @@ impl RequestHandler for NodeRequestHandler {
                                 _ => {
                                     let last_hop = match chain_req.chain.last() {
                                         Some(h) => h,
-                                        None => return Err(NodeError::Network("Empty chain received on wire".into())),
+                                        None => {
+                                            return Err(NodeError::Network(
+                                                "Empty chain received on wire".into(),
+                                            ))
+                                        }
                                     };
                                     let lookup_tag = if last_hop.is_genesis {
                                         bs58::encode(&last_hop.transaction_hash).into_string()
@@ -1568,43 +1732,133 @@ impl RequestHandler for NodeRequestHandler {
                     if payload.len() != 20 || payload[0] != 1 || payload[1] > 1 {
                         return Err(NodeError::Network("invalid frozen-shard request".into()));
                     }
-                    let shard = u16::from_le_bytes([payload[2],payload[3]]);
-                    let token: [u8;16] = payload[4..20].try_into().map_err(|_|NodeError::Network("invalid fence token".into()))?;
-                    let owner = peer_identity.ok_or_else(||NodeError::Network("source fence requires authenticated peer".into()))?;
+                    let shard = u16::from_le_bytes([payload[2], payload[3]]);
+                    let token: [u8; 16] = payload[4..20]
+                        .try_into()
+                        .map_err(|_| NodeError::Network("invalid fence token".into()))?;
+                    let owner = peer_identity.ok_or_else(|| {
+                        NodeError::Network("source fence requires authenticated peer".into())
+                    })?;
                     if payload[1] == 1 {
-                        if !engine.release_source_shard(shard,owner,token) { return Err(NodeError::Network("foreign source lease".into())); }
-                        return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,0,0),Vec::new()));
+                        if !engine.release_source_shard(shard, owner, token) {
+                            return Err(NodeError::Network("foreign source lease".into()));
+                        }
+                        return Ok((
+                            WireHeader::new(
+                                MsgType::ShardDigestResponse as u16,
+                                header.session_seq.wrapping_add(1),
+                                0,
+                                0,
+                                0,
+                            ),
+                            Vec::new(),
+                        ));
                     }
-                    let manager = peer_manager.as_ref().ok_or_else(||NodeError::Network("source fence lacks mesh authority".into()))?;
-                    let (committee,_,_) = manager.shard_committee(*identity.node_pubkey(),*identity.hrw_routing_id(),shard).await;
-                    if !readiness_manager.is_shard_ready(shard) || !engine.is_signing_healthy()
-                        || !committee.iter().any(|member|member.node_pubkey == owner)
-                        || !committee.iter().any(|member|member.node_pubkey == *identity.node_pubkey()) {
-                        return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,humoco_sim_core::wire::FLAG_NOT_READY,0),Vec::new()));
+                    let manager = peer_manager.as_ref().ok_or_else(|| {
+                        NodeError::Network("source fence lacks mesh authority".into())
+                    })?;
+                    let (committee, _, _) = manager
+                        .shard_committee(*identity.node_pubkey(), *identity.hrw_routing_id(), shard)
+                        .await;
+                    if !readiness_manager.is_shard_ready(shard)
+                        || !engine.is_signing_healthy()
+                        || !committee.iter().any(|member| member.node_pubkey == owner)
+                        || !committee
+                            .iter()
+                            .any(|member| member.node_pubkey == *identity.node_pubkey())
+                    {
+                        return Ok((
+                            WireHeader::new(
+                                MsgType::ShardDigestResponse as u16,
+                                header.session_seq.wrapping_add(1),
+                                0,
+                                humoco_sim_core::wire::FLAG_NOT_READY,
+                                0,
+                            ),
+                            Vec::new(),
+                        ));
                     }
-                    let token = match engine.freeze_source_shard(shard,owner).await {
+                    let token = match engine.freeze_source_shard(shard, owner).await {
                         Ok(token) => token,
                         Err(error) => {
                             debug!(shard,error=%error,"Cold source fence unavailable");
-                            return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,humoco_sim_core::wire::FLAG_NOT_READY,0),Vec::new()));
+                            return Ok((
+                                WireHeader::new(
+                                    MsgType::ShardDigestResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    0,
+                                    humoco_sim_core::wire::FLAG_NOT_READY,
+                                    0,
+                                ),
+                                Vec::new(),
+                            ));
                         }
                     };
                     let now = manager.net_time_ms();
                     let db = storage.clone();
-                    let digest_result = engine.recovery_work.spawn_blocking(move || { let (digest,count) = db.committed_shard_digest(shard,now)?; let support = db.inherited_support_digest(shard,now)?; Ok::<_,crate::storage::StorageError>((digest,count,support)) }).await
-                        .map_err(|e|NodeError::Network(format!("frozen digest worker: {e}")))?;
-                    let (digest,_,support_digest) = match digest_result { Ok(value) => value, Err(error) => {
-                        engine.release_source_shard(shard,owner,token); return Err(error.into());
-                    }};
-                    if !engine.is_signing_healthy() || !readiness_manager.is_shard_ready(shard) || !engine.source_shard_lease_valid(shard,owner,token) {
-                        engine.release_source_shard(shard,owner,token);
-                        return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,humoco_sim_core::wire::FLAG_NOT_READY,0),Vec::new()));
+                    let digest_result = engine
+                        .recovery_work
+                        .spawn_blocking(move || {
+                            let (digest, count) = db.committed_shard_digest(shard, now)?;
+                            let support = db.inherited_support_digest(shard, now)?;
+                            Ok::<_, crate::storage::StorageError>((digest, count, support))
+                        })
+                        .await
+                        .map_err(|e| NodeError::Network(format!("frozen digest worker: {e}")))?;
+                    let (digest, _, support_digest) = match digest_result {
+                        Ok(value) => value,
+                        Err(error) => {
+                            engine.release_source_shard(shard, owner, token);
+                            return Err(error.into());
+                        }
+                    };
+                    if !engine.is_signing_healthy()
+                        || !readiness_manager.is_shard_ready(shard)
+                        || !engine.source_shard_lease_valid(shard, owner, token)
+                    {
+                        engine.release_source_shard(shard, owner, token);
+                        return Ok((
+                            WireHeader::new(
+                                MsgType::ShardDigestResponse as u16,
+                                header.session_seq.wrapping_add(1),
+                                0,
+                                humoco_sim_core::wire::FLAG_NOT_READY,
+                                0,
+                            ),
+                            Vec::new(),
+                        ));
                     }
-                    let mut reply = crate::network::framing::FrozenShardReply { version: 2,token,digest,lease_ms:25_000,support_digest,signature:Vec::new() };
+                    let mut reply = crate::network::framing::FrozenShardReply {
+                        version: 2,
+                        token,
+                        digest,
+                        lease_ms: 25_000,
+                        support_digest,
+                        signature: Vec::new(),
+                    };
                     use ed25519_dalek::Signer;
-                    reply.signature = identity.signing_key().sign(&reply.signing_digest(network_id,shard,identity.node_pubkey(),&owner)).to_bytes().to_vec();
-                    let bytes = bincode::serialize(&reply).map_err(|e|NodeError::Network(format!("frozen reply: {e}")))?;
-                    return Ok((WireHeader::new(MsgType::ShardDigestResponse as u16,header.session_seq.wrapping_add(1),0,0,checked_payload_len(bytes.len())?),bytes));
+                    reply.signature = identity
+                        .signing_key()
+                        .sign(&reply.signing_digest(
+                            network_id,
+                            shard,
+                            identity.node_pubkey(),
+                            &owner,
+                        ))
+                        .to_bytes()
+                        .to_vec();
+                    let bytes = bincode::serialize(&reply)
+                        .map_err(|e| NodeError::Network(format!("frozen reply: {e}")))?;
+                    return Ok((
+                        WireHeader::new(
+                            MsgType::ShardDigestResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            0,
+                            0,
+                            checked_payload_len(bytes.len())?,
+                        ),
+                        bytes,
+                    ));
                 }
                 let shard_id = if payload.len() >= 2 {
                     u16::from_le_bytes([payload[0], payload[1]])
@@ -1627,9 +1881,14 @@ impl RequestHandler for NodeRequestHandler {
                     return Ok((resp_header, Vec::new()));
                 }
                 let db = storage.clone();
-                let (digest, lock_count) = engine.recovery_work.spawn_blocking(move || db.committed_shard_digest(shard_id, now_ms)).await
+                let (digest, lock_count) = engine
+                    .recovery_work
+                    .spawn_blocking(move || db.committed_shard_digest(shard_id, now_ms))
+                    .await
                     .map_err(|e| NodeError::Network(format!("digest worker: {e}")))??;
-                if let Some(pm) = peer_manager.as_ref() { pm.register_active_shard(shard_id).await; }
+                if let Some(pm) = peer_manager.as_ref() {
+                    pm.register_active_shard(shard_id).await;
+                }
                 let resp_bytes = bincode::serialize(&(digest, lock_count)).unwrap_or_default();
                 let payload_len = checked_payload_len(resp_bytes.len())?;
                 let is_ready = readiness_manager.is_shard_ready(shard_id);
@@ -1661,9 +1920,12 @@ impl RequestHandler for NodeRequestHandler {
                     .map(|pm| pm.net_time_ms())
                     .unwrap_or_else(|| clock.net_time_ms());
                 let db = storage.clone();
-                let locks = tokio::task::spawn_blocking(move || db.committed_shard_records(shard_id, now_ms)).await
-                    .map_err(|e| NodeError::Network(format!("bucket worker: {e}")))?
-                    .map_err(|e| NodeError::Network(format!("committed buckets unavailable: {e}")))?;
+                let locks = tokio::task::spawn_blocking(move || {
+                    db.committed_shard_records(shard_id, now_ms)
+                })
+                .await
+                .map_err(|e| NodeError::Network(format!("bucket worker: {e}")))?
+                .map_err(|e| NodeError::Network(format!("committed buckets unavailable: {e}")))?;
                 let mut buckets = Vec::new();
                 let end_bucket = req.start_bucket.saturating_add(req.bucket_count as u64);
                 for b_id in req.start_bucket..end_bucket {
@@ -2545,31 +2807,64 @@ impl QuicTransport {
     }
 
     /// Network domain of this authenticated transport.
-    pub(crate) fn network_id(&self) -> humoco_sim_core::types::NetworkId { self.network_id }
+    pub(crate) fn network_id(&self) -> humoco_sim_core::types::NetworkId {
+        self.network_id
+    }
 
     /// Acquire a short absolute source fence before cold state transfer.
-    pub async fn request_frozen_shard(&self, conn: &quinn::Connection, shard: u16, seq: u64)
-        -> Result<crate::network::framing::FrozenShardReply,NodeError> {
-        let payload = [vec![1,0],shard.to_le_bytes().to_vec(),vec![0;16]].concat();
-        let header = WireHeader::new(MsgType::ShardDigestRequest as u16,seq,0,0,20);
-        let (header,bytes) = self.send_request(conn,&header,&payload).await?;
-        if header.msg_type != MsgType::ShardDigestResponse as u16 || header.flags != 0 || bytes.len() != 161 {
-            return Err(NodeError::Network("source is not ready for a no-gap cut".into()));
+    pub async fn request_frozen_shard(
+        &self,
+        conn: &quinn::Connection,
+        shard: u16,
+        seq: u64,
+    ) -> Result<crate::network::framing::FrozenShardReply, NodeError> {
+        let payload = [vec![1, 0], shard.to_le_bytes().to_vec(), vec![0; 16]].concat();
+        let header = WireHeader::new(MsgType::ShardDigestRequest as u16, seq, 0, 0, 20);
+        let (header, bytes) = self.send_request(conn, &header, &payload).await?;
+        if header.msg_type != MsgType::ShardDigestResponse as u16
+            || header.flags != 0
+            || bytes.len() != 161
+        {
+            return Err(NodeError::Network(
+                "source is not ready for a no-gap cut".into(),
+            ));
         }
-        let reply: crate::network::framing::FrozenShardReply = bincode::deserialize(&bytes).map_err(|e|NodeError::Network(format!("frozen reply: {e}")))?;
-        if reply.version != 2 || reply.lease_ms != 25_000 { return Err(NodeError::Network("unsupported source fence".into())); }
-        let (_,source) = crate::network::tls::extract_peer_identity_from_connection(conn).ok_or_else(||NodeError::Network("unauthenticated support source".into()))?;
-        let signature = ed25519_dalek::Signature::from_slice(&reply.signature).map_err(|_|NodeError::Network("invalid support signature".into()))?;
-        source.verify_strict(&reply.signing_digest(self.network_id,shard,&source.to_bytes(),self.identity.node_pubkey()),&signature)
-            .map_err(|_|NodeError::Network("foreign or forged support assertion".into()))?;
+        let reply: crate::network::framing::FrozenShardReply = bincode::deserialize(&bytes)
+            .map_err(|e| NodeError::Network(format!("frozen reply: {e}")))?;
+        if reply.version != 2 || reply.lease_ms != 25_000 {
+            return Err(NodeError::Network("unsupported source fence".into()));
+        }
+        let (_, source) = crate::network::tls::extract_peer_identity_from_connection(conn)
+            .ok_or_else(|| NodeError::Network("unauthenticated support source".into()))?;
+        let signature = ed25519_dalek::Signature::from_slice(&reply.signature)
+            .map_err(|_| NodeError::Network("invalid support signature".into()))?;
+        source
+            .verify_strict(
+                &reply.signing_digest(
+                    self.network_id,
+                    shard,
+                    &source.to_bytes(),
+                    self.identity.node_pubkey(),
+                ),
+                &signature,
+            )
+            .map_err(|_| NodeError::Network("foreign or forged support assertion".into()))?;
         Ok(reply)
     }
     /// Release only the exact authenticated source lease; expiry is the fallback.
-    pub async fn release_frozen_shard(&self, conn: &quinn::Connection, shard: u16, seq: u64, token: [u8;16]) -> Result<(),NodeError> {
-        let payload = [vec![1,1],shard.to_le_bytes().to_vec(),token.to_vec()].concat();
-        let header = WireHeader::new(MsgType::ShardDigestRequest as u16,seq,0,0,20);
-        let (header,_) = self.send_request(conn,&header,&payload).await?;
-        if header.msg_type != MsgType::ShardDigestResponse as u16 || header.flags != 0 { return Err(NodeError::Network("source release rejected".into())); }
+    pub async fn release_frozen_shard(
+        &self,
+        conn: &quinn::Connection,
+        shard: u16,
+        seq: u64,
+        token: [u8; 16],
+    ) -> Result<(), NodeError> {
+        let payload = [vec![1, 1], shard.to_le_bytes().to_vec(), token.to_vec()].concat();
+        let header = WireHeader::new(MsgType::ShardDigestRequest as u16, seq, 0, 0, 20);
+        let (header, _) = self.send_request(conn, &header, &payload).await?;
+        if header.msg_type != MsgType::ShardDigestResponse as u16 || header.flags != 0 {
+            return Err(NodeError::Network("source release rejected".into()));
+        }
         Ok(())
     }
 
@@ -2644,17 +2939,38 @@ impl QuicTransport {
         limit: usize,
         target_bucket_id: Option<u64>,
     ) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
-        self.request_active_sync_selected(conn, seq, cursor, limit, target_bucket_id, None).await
+        self.request_active_sync_selected(conn, seq, cursor, limit, target_bucket_id, None)
+            .await
     }
 
     /// Freeze a snapshot cut for one root shard, including its separate anchors.
-    pub async fn request_active_sync_page_for_shard(&self, conn: &quinn::Connection, seq: u64, cursor: u64, limit: usize, shard: u16) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
-        self.request_active_sync_selected(conn, seq, cursor, limit, None, Some(shard)).await
+    pub async fn request_active_sync_page_for_shard(
+        &self,
+        conn: &quinn::Connection,
+        seq: u64,
+        cursor: u64,
+        limit: usize,
+        shard: u16,
+    ) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
+        self.request_active_sync_selected(conn, seq, cursor, limit, None, Some(shard))
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn request_active_sync_selected(&self, conn: &quinn::Connection, seq: u64, cursor: u64, limit: usize, target_bucket_id: Option<u64>, target_shard: Option<u16>) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
-        let mut req = crate::network::framing::ActiveSyncRequest::with_bucket(cursor, limit, target_bucket_id);
+    async fn request_active_sync_selected(
+        &self,
+        conn: &quinn::Connection,
+        seq: u64,
+        cursor: u64,
+        limit: usize,
+        target_bucket_id: Option<u64>,
+        target_shard: Option<u16>,
+    ) -> Result<crate::network::framing::ActiveSyncResponse, NodeError> {
+        let mut req = crate::network::framing::ActiveSyncRequest::with_bucket(
+            cursor,
+            limit,
+            target_bucket_id,
+        );
         req.target_shard = target_shard;
         let req_bytes = req.to_bytes().unwrap_or_default();
         let payload_len = checked_payload_len(req_bytes.len())?;

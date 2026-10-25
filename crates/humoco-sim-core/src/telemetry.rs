@@ -277,8 +277,7 @@ impl PrometheusMetrics {
         for p in &peers {
             out.push_str(&format!(
                 "humoco_edge_inbound_rate{{peer=\"{}\"}} {}\n",
-                p,
-                self.inbound_rate[p]
+                p, self.inbound_rate[p]
             ));
         }
         let mut rpeers: Vec<NodeId> = self.red_drop_rate.keys().copied().collect();
@@ -286,8 +285,7 @@ impl PrometheusMetrics {
         for p in &rpeers {
             out.push_str(&format!(
                 "humoco_edge_red_drop_rate{{peer=\"{}\"}} {}\n",
-                p,
-                self.red_drop_rate[p]
+                p, self.red_drop_rate[p]
             ));
         }
         out
@@ -763,7 +761,11 @@ mod tests {
             WarningLevel::InfoAuditIngressHigh,
             WarningLevel::InfoShardOperatorDominance,
         ] {
-            assert!(!lvl.triggers_auto_ban(), "Level {:?} must never auto-ban", lvl);
+            assert!(
+                !lvl.triggers_auto_ban(),
+                "Level {:?} must never auto-ban",
+                lvl
+            );
         }
     }
 

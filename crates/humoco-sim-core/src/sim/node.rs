@@ -6,8 +6,7 @@ use crate::resolver::{resolve_split_brain, ResolutionResult};
 use crate::sim::network::SimMessage;
 use crate::state_machine::apply_attestation;
 use crate::types::{
-    self, Hash256, LockId, LockRecord, LockStatus, NodeId,
-    ShardId, SignersBitmask, SimTime,
+    self, Hash256, LockId, LockRecord, LockStatus, NodeId, ShardId, SignersBitmask, SimTime,
 };
 
 /// O(1) Collision Lock Registry for banned nodes (ServerBann)
@@ -76,10 +75,7 @@ impl SimNode {
     /// Records a missing attestation from a candidate.
     /// Returns true if the failure threshold has been exceeded.
     pub fn record_missing(&mut self, lock_id: LockId, node_id: NodeId) -> bool {
-        let count = self
-            .missing_count
-            .entry((lock_id, node_id))
-            .or_insert(0);
+        let count = self.missing_count.entry((lock_id, node_id)).or_insert(0);
         *count += 1;
         *count >= crate::types::MISSING_COUNT_THRESHOLD
     }
@@ -168,7 +164,8 @@ impl SimNode {
         // O(1) insert
         let newly_banned = self.banned_nodes.insert(proof.perpetrator);
         // If proof arrives via pubkey, fallback
-        let pk_nid = u16::from_le_bytes([proof.perpetrator_node_id[0], proof.perpetrator_node_id[1]]);
+        let pk_nid =
+            u16::from_le_bytes([proof.perpetrator_node_id[0], proof.perpetrator_node_id[1]]);
         if pk_nid != proof.perpetrator {
             self.banned_nodes.insert(pk_nid);
         }
@@ -235,7 +232,11 @@ impl SimNode {
     }
 
     /// Deterministically selects k = min(d, ceil(sqrt(d)) + 1) peers for epidemic gossip fan-out (docs/11:124)
-    pub fn select_gossip_targets(&self, msg_hash: &Hash256, exclude: Option<NodeId>) -> Vec<NodeId> {
+    pub fn select_gossip_targets(
+        &self,
+        msg_hash: &Hash256,
+        exclude: Option<NodeId>,
+    ) -> Vec<NodeId> {
         let candidates: Vec<NodeId> = self
             .peers
             .iter()

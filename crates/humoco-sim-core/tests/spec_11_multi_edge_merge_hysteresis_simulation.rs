@@ -38,7 +38,12 @@ struct SimulationNode {
 }
 
 impl SimulationNode {
-    fn new(id: NodeId, hop_distance: usize, initial_known: &[NodeId], pacing_interval: u64) -> Self {
+    fn new(
+        id: NodeId,
+        hop_distance: usize,
+        initial_known: &[NodeId],
+        pacing_interval: u64,
+    ) -> Self {
         Self {
             id,
             _hop_distance: hop_distance,
@@ -166,7 +171,9 @@ fn test_multi_edge_merge_5_bridges_hysteresis_wave_and_convergence() {
         // B. Gossip Ingress an Nachbarn verarbeiten
         for (recipient_id, new_node_id) in forwarded_messages {
             if let Some(recipient) = nodes.get_mut(&recipient_id) {
-                recipient.pacer.handle_incoming_node_gossip(new_node_id, current_time);
+                recipient
+                    .pacer
+                    .handle_incoming_node_gossip(new_node_id, current_time);
                 recipient.n_local = recipient.pacer.known_count();
             }
         }
@@ -353,11 +360,31 @@ fn test_shard_quorum_safeguard_during_syncing_wave() {
 #[test]
 fn test_f2f_reports_filtering_during_percolation() {
     let reports = [
-        F2FPresenceReport { peer_id: 1, reported_network_size: 50, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 2, reported_network_size: 52, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 3, reported_network_size: 75, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 4, reported_network_size: 90, timestamp: SimTime(0) },
-        F2FPresenceReport { peer_id: 5, reported_network_size: 100, timestamp: SimTime(0) },
+        F2FPresenceReport {
+            peer_id: 1,
+            reported_network_size: 50,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 2,
+            reported_network_size: 52,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 3,
+            reported_network_size: 75,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 4,
+            reported_network_size: 90,
+            timestamp: SimTime(0),
+        },
+        F2FPresenceReport {
+            peer_id: 5,
+            reported_network_size: 100,
+            timestamp: SimTime(0),
+        },
     ];
 
     let raw_sizes: Vec<usize> = reports.iter().map(|r| r.reported_network_size).collect();

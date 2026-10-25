@@ -38,7 +38,8 @@ async fn test_sim_05_shard_baton_handover_integration() {
     // =========================================================================
     // Phase 1: Generation 1 (Nodes 0..3) Genesis & Initial Lock
     // =========================================================================
-    sim.reporter.begin_phase("Phase 1 - Gen 1 Initial Mesh (Nodes 0..3)");
+    sim.reporter
+        .begin_phase("Phase 1 - Gen 1 Initial Mesh (Nodes 0..3)");
 
     let n0 = sim.spawn_node().await.expect("spawn n0");
     let n1 = sim.spawn_node_with_f2f(&[n0]).await.expect("spawn n1");
@@ -76,7 +77,10 @@ async fn test_sim_05_shard_baton_handover_integration() {
     );
     sim.reporter.check(
         matches!(envelope.verdict, L2Verdict::Verified { .. }),
-        format!("Genesis lock verdict must be Verified, got {:?}", envelope.verdict),
+        format!(
+            "Genesis lock verdict must be Verified, got {:?}",
+            envelope.verdict
+        ),
     );
 
     // Initial spend on Gen 1
@@ -119,7 +123,8 @@ async fn test_sim_05_shard_baton_handover_integration() {
     // =========================================================================
     // Phase 2: Generation 2 Growth (Nodes 4..6 Join and Sync State)
     // =========================================================================
-    sim.reporter.begin_phase("Phase 2 - Gen 2 Growth & Baton Handover");
+    sim.reporter
+        .begin_phase("Phase 2 - Gen 2 Growth & Baton Handover");
 
     let n4 = sim.spawn_node_with_f2f(&[n0, n1]).await.expect("spawn n4");
     let n5 = sim.spawn_node_with_f2f(&[n2, n3]).await.expect("spawn n5");
@@ -142,11 +147,17 @@ async fn test_sim_05_shard_baton_handover_integration() {
 
     sim.reporter.check(
         sync_post_status == StatusCode::OK || sync_post_status == StatusCode::CREATED,
-        format!("Anchor on n4 must succeed (200/201), got {}", sync_post_status),
+        format!(
+            "Anchor on n4 must succeed (200/201), got {}",
+            sync_post_status
+        ),
     );
     sim.reporter.check(
         matches!(sync_post_env.verdict, L2Verdict::Verified { .. }),
-        format!("Verdict on n4 must be Verified, got {:?}", sync_post_env.verdict),
+        format!(
+            "Verdict on n4 must be Verified, got {:?}",
+            sync_post_env.verdict
+        ),
     );
 
     sim.reporter.end_phase_ok();
@@ -154,18 +165,21 @@ async fn test_sim_05_shard_baton_handover_integration() {
     // =========================================================================
     // Phase 3: Decommission Old Generation 1 Nodes (n0 & n1 Stopped)
     // =========================================================================
-    sim.reporter.begin_phase("Phase 3 - Decommission Gen 1 (Stop n0 & n1)");
+    sim.reporter
+        .begin_phase("Phase 3 - Decommission Gen 1 (Stop n0 & n1)");
 
     sim.stop_node(n0).await;
     sim.stop_node(n1).await;
 
-    sim.reporter.step("Successfully stopped Gen 1 nodes n0 and n1");
+    sim.reporter
+        .step("Successfully stopped Gen 1 nodes n0 and n1");
     sim.reporter.end_phase_ok();
 
     // =========================================================================
     // Phase 4: Gen 2 Nodes Serve Status Queries for Genesis
     // =========================================================================
-    sim.reporter.begin_phase("Phase 4 - Gen 2 Custodians Status Verification");
+    sim.reporter
+        .begin_phase("Phase 4 - Gen 2 Custodians Status Verification");
 
     let q_gen = status_query(&voucher_id, &genesis_tag);
     let (q4_status, q4_env) = sim
@@ -180,7 +194,10 @@ async fn test_sim_05_shard_baton_handover_integration() {
     );
     sim.reporter.check(
         matches!(q4_env.verdict, L2Verdict::Verified { .. }),
-        format!("Gen 2 custodian n4 verdict must be Verified, got {:?}", q4_env.verdict),
+        format!(
+            "Gen 2 custodian n4 verdict must be Verified, got {:?}",
+            q4_env.verdict
+        ),
     );
 
     sim.reporter.end_phase_ok();
@@ -188,7 +205,8 @@ async fn test_sim_05_shard_baton_handover_integration() {
     // =========================================================================
     // Phase 5: Causal Succession - Spend on Gen 2 Custodian
     // =========================================================================
-    sim.reporter.begin_phase("Phase 5 - Causal Child Lock Spend on Gen 2");
+    sim.reporter
+        .begin_phase("Phase 5 - Causal Child Lock Spend on Gen 2");
 
     let parent_tag_2 = "parent_branch_tag_02".to_string();
     let child_req_2 = wallet.create_successor_lock(&voucher_id, &parent_tag_2);
@@ -207,11 +225,17 @@ async fn test_sim_05_shard_baton_handover_integration() {
 
     sim.reporter.check(
         child_status == StatusCode::CREATED,
-        format!("Child lock on n4 must return 201 Created, got {}", child_status),
+        format!(
+            "Child lock on n4 must return 201 Created, got {}",
+            child_status
+        ),
     );
     sim.reporter.check(
         matches!(child_env.verdict, L2Verdict::Verified { .. }),
-        format!("Child lock verdict on n4 must be Verified, got {:?}", child_env.verdict),
+        format!(
+            "Child lock verdict on n4 must be Verified, got {:?}",
+            child_env.verdict
+        ),
     );
 
     // Status query on child lock from n4
@@ -224,11 +248,17 @@ async fn test_sim_05_shard_baton_handover_integration() {
 
     sim.reporter.check(
         q_child_status == StatusCode::OK,
-        format!("Child status query on n4 must be 200 OK, got {}", q_child_status),
+        format!(
+            "Child status query on n4 must be 200 OK, got {}",
+            q_child_status
+        ),
     );
     sim.reporter.check(
         matches!(q_child_env.verdict, L2Verdict::Verified { .. }),
-        format!("Child status on n4 must be Verified, got {:?}", q_child_env.verdict),
+        format!(
+            "Child status on n4 must be Verified, got {:?}",
+            q_child_env.verdict
+        ),
     );
 
     sim.reporter.end_phase_ok();
@@ -236,7 +266,8 @@ async fn test_sim_05_shard_baton_handover_integration() {
     // =========================================================================
     // Phase 6: Double-Spend Collision Detection on Gen 2 Custodians
     // =========================================================================
-    sim.reporter.begin_phase("Phase 6 - Double-Spend Collision Protection on Gen 2");
+    sim.reporter
+        .begin_phase("Phase 6 - Double-Spend Collision Protection on Gen 2");
 
     // Attempt to double-spend the same parent_tag_2 with a conflicting child
     let conflicting_child = wallet.create_successor_lock(&voucher_id, &parent_tag_2);

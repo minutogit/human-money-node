@@ -26,9 +26,7 @@ pub use error::NodeError;
 pub use identity::NodeIdentity;
 pub use ingress::{IngressError, IngressTier, PowEngine, PowError, TierController};
 pub use network::{
-    read_frame, write_frame, BoxFuture, DefaultRequestHandler, NodeRequestHandler, PeerInfo, PeerManager, PeerStatus,
-    QuicTransport, RequestHandler,
+    read_frame, write_frame, BoxFuture, DefaultRequestHandler, NodeRequestHandler, PeerInfo,
+    PeerManager, PeerStatus, QuicTransport, RequestHandler,
 };
 pub use storage::{DualTierEngine, FlushOp, RedbStorage, StorageError};
-
-

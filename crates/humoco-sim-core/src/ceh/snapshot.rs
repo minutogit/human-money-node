@@ -11,7 +11,9 @@
 use std::collections::BTreeSet;
 
 /// Represents an active collision lock record within a shard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ActiveLockEntry {
     pub parent_lock: [u8; 32],
     pub child_lock: [u8; 32],
@@ -53,7 +55,9 @@ impl ShardStateSnapshot {
 
     /// Checks if a given `parent_lock` is committed in this snapshot.
     pub fn contains_parent(&self, parent_lock: &[u8; 32]) -> bool {
-        self.active_locks.iter().any(|entry| entry.parent_lock == *parent_lock)
+        self.active_locks
+            .iter()
+            .any(|entry| entry.parent_lock == *parent_lock)
     }
 
     /// Checks if a specific `(parent_lock, child_lock)` pair is present in this snapshot.
@@ -76,7 +80,8 @@ impl ShardStateSnapshot {
             }
         }
         // Recompute root after union reconciliation
-        self.closed_state_root = compute_closed_state_root(self.shard_id, self.epoch, &self.active_locks);
+        self.closed_state_root =
+            compute_closed_state_root(self.shard_id, self.epoch, &self.active_locks);
     }
 }
 

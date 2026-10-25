@@ -1,11 +1,11 @@
+use parking_lot::Mutex;
+use rand::RngCore;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
-use rand::RngCore;
 
 /// Maximum failed login attempts allowed per IP within the rate-limit window.
 pub const MAX_AUTH_FAILURES_PER_WINDOW: usize = 5;
@@ -62,7 +62,8 @@ impl AdminTokenManager {
                 file.flush()?;
 
                 // Ensure permissions are strictly 0600
-                let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+                let _ =
+                    std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
             }
 
             #[cfg(not(unix))]

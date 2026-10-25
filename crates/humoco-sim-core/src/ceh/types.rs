@@ -19,7 +19,6 @@ use std::fmt;
 
 pub use crate::types::NodePubKey;
 
-
 /// Canonical committee size for CEH consensus (20 nodes).
 pub const CEH_COMMITTEE_SIZE: usize = 20;
 
@@ -41,7 +40,6 @@ pub fn alloc_shards_closed_state_roots() -> Box<[[u8; 32]; CEH_NUM_SHARDS]> {
         Err(_) => unreachable!("length is guaranteed to be CEH_NUM_SHARDS"),
     }
 }
-
 
 /// Serialization helper module for `Vec<(NodePubKey, [u8; 64])>`.
 pub mod serde_sig_vec {
@@ -105,15 +103,9 @@ pub enum CehError {
     /// Shard identifier does not match expected shard.
     ShardMismatch { expected: u16, got: u16 },
     /// Proposal hash does not match expected hash.
-    ProposalHashMismatch {
-        expected: [u8; 32],
-        got: [u8; 32],
-    },
+    ProposalHashMismatch { expected: [u8; 32], got: [u8; 32] },
     /// Incompatible genesis manifest encountered during peer handshake.
-    IncompatibleGenesisManifest {
-        local: [u8; 32],
-        remote: [u8; 32],
-    },
+    IncompatibleGenesisManifest { local: [u8; 32], remote: [u8; 32] },
     /// Causal predecessor lock is not yet finalized in the collision lock registry.
     CausalPredecessorNotFinal([u8; 32]),
 }
@@ -135,10 +127,9 @@ impl fmt::Display for CehError {
                 f,
                 "invalid audit path length: have {have}, expected {expected}"
             ),
-            Self::InvalidShardCount { have, expected } => write!(
-                f,
-                "invalid shard count: have {have}, expected {expected}"
-            ),
+            Self::InvalidShardCount { have, expected } => {
+                write!(f, "invalid shard count: have {have}, expected {expected}")
+            }
             Self::SignerNotInCommittee(pk) => {
                 write!(f, "signer {} not in committee", hex_prefix(pk))
             }
@@ -315,8 +306,15 @@ impl EpochCertificate {
     }
 
     /// Verifies this epoch certificate signatures against the expected predecessor committee.
-    pub fn verify(&self, expected_committee: &[NodePubKey; CEH_COMMITTEE_SIZE]) -> Result<(), CehError> {
-        crate::ceh::crypto::verify_epoch_certificate_signatures(self, expected_committee, CEH_BFT_QUORUM)
+    pub fn verify(
+        &self,
+        expected_committee: &[NodePubKey; CEH_COMMITTEE_SIZE],
+    ) -> Result<(), CehError> {
+        crate::ceh::crypto::verify_epoch_certificate_signatures(
+            self,
+            expected_committee,
+            CEH_BFT_QUORUM,
+        )
     }
 }
 
@@ -367,7 +365,10 @@ impl UnifiedNetworkEpochManifest {
     }
 
     /// Verifies this manifest pioneer signatures against the pioneer committee.
-    pub fn verify(&self, pioneer_committee: &[NodePubKey; CEH_COMMITTEE_SIZE]) -> Result<(), CehError> {
+    pub fn verify(
+        &self,
+        pioneer_committee: &[NodePubKey; CEH_COMMITTEE_SIZE],
+    ) -> Result<(), CehError> {
         if &self.pioneer_committee != pioneer_committee {
             return Err(CehError::SignerNotInCommittee(pioneer_committee[0]));
         }
@@ -422,8 +423,15 @@ impl LockReceipt {
     }
 
     /// Verifies this lock receipt attestations against the expected committee.
-    pub fn verify(&self, expected_committee: &[NodePubKey; CEH_COMMITTEE_SIZE]) -> Result<(), CehError> {
-        crate::ceh::crypto::verify_lock_receipt_signatures(self, Some(expected_committee), CEH_BFT_QUORUM)
+    pub fn verify(
+        &self,
+        expected_committee: &[NodePubKey; CEH_COMMITTEE_SIZE],
+    ) -> Result<(), CehError> {
+        crate::ceh::crypto::verify_lock_receipt_signatures(
+            self,
+            Some(expected_committee),
+            CEH_BFT_QUORUM,
+        )
     }
 }
 

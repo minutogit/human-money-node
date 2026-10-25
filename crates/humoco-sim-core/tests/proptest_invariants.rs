@@ -1,5 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::all, clippy::pedantic, clippy::nursery)]
-#![allow(unused_variables, unused_mut, dead_code, unused_imports, unused_comparisons)]
+#![allow(
+    unused_variables,
+    unused_mut,
+    dead_code,
+    unused_imports,
+    unused_comparisons
+)]
 //! Property-Based Testing (`proptest`) for Consensus and Protocol Invariants
 //!
 //! Scope of Work:
@@ -43,15 +49,15 @@ fn arb_nonce() -> impl Strategy<Value = Vec<u8>> {
 
 fn arb_lock_pair() -> impl Strategy<
     Value = (
-        [u8; 32],            // parent_lock
-        [u8; 32],            // receiver_a
-        [u8; 32],            // receiver_b
-        Vec<u8>,             // nonce_a
-        Vec<u8>,             // nonce_b
-        Option<[u8; 64]>,    // sig_a
-        Option<[u8; 64]>,    // sig_b
-        u64,                 // created_ms
-        u64,                 // ttl_ms
+        [u8; 32],         // parent_lock
+        [u8; 32],         // receiver_a
+        [u8; 32],         // receiver_b
+        Vec<u8>,          // nonce_a
+        Vec<u8>,          // nonce_b
+        Option<[u8; 64]>, // sig_a
+        Option<[u8; 64]>, // sig_b
+        u64,              // created_ms
+        u64,              // ttl_ms
     ),
 > {
     (

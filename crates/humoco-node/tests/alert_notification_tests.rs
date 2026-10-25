@@ -10,7 +10,11 @@ use humoco_node::alert::{AlertDispatcher, AlertKind};
 use humoco_node::config::AlertConfig;
 
 /// Helper to spawn a mock webhook server that counts POSTs and stores last payload.
-async fn spawn_mock_server() -> (String, Arc<AtomicUsize>, Arc<tokio::sync::Mutex<Option<serde_json::Value>>>) {
+async fn spawn_mock_server() -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+) {
     let counter = Arc::new(AtomicUsize::new(0));
     let last_payload: Arc<tokio::sync::Mutex<Option<serde_json::Value>>> =
         Arc::new(tokio::sync::Mutex::new(None));
@@ -31,7 +35,9 @@ async fn spawn_mock_server() -> (String, Arc<AtomicUsize>, Arc<tokio::sync::Mute
         }),
     );
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock");
     let addr = listener.local_addr().expect("local addr");
     let url = format!("http://{}/webhook", addr);
 
@@ -102,7 +108,10 @@ async fn test_webhook_success_when_threshold_reached() {
     );
 
     let payload = last_payload.lock().await.clone().expect("payload present");
-    assert_eq!(payload.get("kind").and_then(|v| v.as_str()), Some("OutdatedVersion"));
+    assert_eq!(
+        payload.get("kind").and_then(|v| v.as_str()),
+        Some("OutdatedVersion")
+    );
     assert!(payload.get("message").is_some());
     assert!(payload.get("timestamp").is_some());
 }
@@ -125,12 +134,16 @@ async fn test_cooldown_suppresses_duplicate_alerts() {
     let dispatcher = AlertDispatcher::new(config, temp.path().to_path_buf());
 
     // First alert should succeed
-    dispatcher.send_alert(AlertKind::OutdatedVersion, "first alert").await;
+    dispatcher
+        .send_alert(AlertKind::OutdatedVersion, "first alert")
+        .await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 
     // Second immediate alert with same kind must be suppressed by 24h cooldown
-    dispatcher.send_alert(AlertKind::OutdatedVersion, "second alert").await;
+    dispatcher
+        .send_alert(AlertKind::OutdatedVersion, "second alert")
+        .await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         counter.load(Ordering::SeqCst),
@@ -139,7 +152,9 @@ async fn test_cooldown_suppresses_duplicate_alerts() {
     );
 
     // Different kind should not be suppressed (SunsetApproaching has separate cooldown)
-    dispatcher.send_alert(AlertKind::SunsetApproaching, "sunset alert").await;
+    dispatcher
+        .send_alert(AlertKind::SunsetApproaching, "sunset alert")
+        .await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         counter.load(Ordering::SeqCst),
@@ -182,12 +197,20 @@ async fn test_no_alert_when_too_few_peers() {
     // Now with sufficient peers but threshold not reached => no alert
     dispatcher.check_and_alert_outdated(10, 2).await; // 20% < 50%
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_eq!(counter.load(Ordering::SeqCst), 0, "Threshold 50% not reached with 20% should not alert");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "Threshold 50% not reached with 20% should not alert"
+    );
 
     // Finally threshold reached with sufficient peers => alert
     dispatcher.check_and_alert_outdated(10, 6).await; // 60% >=50%
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "Should alert when threshold reached and min_peers satisfied");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "Should alert when threshold reached and min_peers satisfied"
+    );
 }
 
 #[tokio::test]
@@ -207,13 +230,15 @@ async fn test_cooldown_persistence_across_dispatcher_instances() {
     };
 
     let d1 = AlertDispatcher::new(config.clone(), data_dir.clone());
-    d1.send_alert(AlertKind::OutdatedVersion, "alert from d1").await;
+    d1.send_alert(AlertKind::OutdatedVersion, "alert from d1")
+        .await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 
     // New instance with same data_dir should respect persisted cooldown
     let d2 = AlertDispatcher::new(config, data_dir);
-    d2.send_alert(AlertKind::OutdatedVersion, "alert from d2").await;
+    d2.send_alert(AlertKind::OutdatedVersion, "alert from d2")
+        .await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         counter.load(Ordering::SeqCst),

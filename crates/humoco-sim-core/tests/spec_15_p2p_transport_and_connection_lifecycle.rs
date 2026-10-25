@@ -1,5 +1,5 @@
 //! Spec 15: P2P Transport & Connection Lifecycle (INV-1501..1503)
-use humoco_sim_core::transport::{compute_backoff, ConnectionPool, ConnState, Connection};
+use humoco_sim_core::transport::{compute_backoff, ConnState, Connection, ConnectionPool};
 use humoco_sim_core::types::SimTime;
 
 #[test]
@@ -22,7 +22,10 @@ fn test_inv1501_three_phase_connection_lifecycle_connected_degrading_suspended()
     conn.on_miss(SimTime(30_000));
     assert_eq!(conn.state, ConnState::Suspended);
     assert!(conn.is_suspended());
-    assert!(conn.next_retry_at.0 > 30_000, "backoff must set future retry");
+    assert!(
+        conn.next_retry_at.0 > 30_000,
+        "backoff must set future retry"
+    );
 
     // Heartbeat after suspension restores Connected
     conn.on_heartbeat(SimTime(40_000));
@@ -61,7 +64,11 @@ fn test_inv1502_exponentielles_backoff_mit_jitter() {
 
     // Attempt 6: 32s -> ~32000ms but cap 60s
     let b6 = compute_backoff(6, base, cap, 42);
-    assert!((24000..=40000).contains(&b6), "b6 {} out of 24000..40000", b6);
+    assert!(
+        (24000..=40000).contains(&b6),
+        "b6 {} out of 24000..40000",
+        b6
+    );
 
     // Attempt high: capped at 60s
     let b10 = compute_backoff(10, base, cap, 42);
@@ -84,11 +91,19 @@ fn test_inv1502_exponentielles_backoff_mit_jitter() {
     for attempt in 1..10 {
         for seed in [0, 1, 999, 0xDEADBEEF] {
             let b = compute_backoff(attempt, base, cap, seed);
-            let exp = 1u64 << (attempt-1).min(10);
+            let exp = 1u64 << (attempt - 1).min(10);
             let base_exp = (base * exp).min(cap);
             let lo = (base_exp as f64 * 0.75) as u64;
             let hi = (base_exp as f64 * 1.25) as u64;
-            assert!(b >= lo && b <= hi, "attempt {} seed {} got {} not in {}..{}", attempt, seed, b, lo, hi);
+            assert!(
+                b >= lo && b <= hi,
+                "attempt {} seed {} got {} not in {}..{}",
+                attempt,
+                seed,
+                b,
+                lo,
+                hi
+            );
         }
     }
 
@@ -132,7 +147,10 @@ fn test_inv1503_connection_pool_limits_and_dunbar_eviction() {
     assert!(pool2.conns[&10].is_suspended());
     // Add new node should evict suspended node 10 before LRU
     let ev2 = pool2.add(999, now).unwrap();
-    assert_eq!(ev2, 10, "suspended node should be evicted first (Dunbar-Verdrängung)");
+    assert_eq!(
+        ev2, 10,
+        "suspended node should be evicted first (Dunbar-Verdrängung)"
+    );
     assert!(!pool2.contains(10));
     assert!(pool2.contains(999));
 
@@ -147,7 +165,10 @@ fn test_inv1503_connection_pool_limits_and_dunbar_eviction() {
     for i in 151..160 {
         pool3.add(i as u16, now);
     }
-    assert!(pool3.contains(0), "recently used node must survive Dunbar eviction");
+    assert!(
+        pool3.contains(0),
+        "recently used node must survive Dunbar eviction"
+    );
 
     // Hard limit never exceeded
     assert!(pool3.len() <= humoco_sim_core::transport::POOL_HARD_LIMIT);

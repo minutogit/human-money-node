@@ -743,7 +743,10 @@ impl FraudProofPayload {
     }
 
     /// Checks if two ingress evidences constitute an under-reporting or rollback fraud conflict.
-    pub fn check_ingress_conflict(a: &IngressEnvelopeEvidence, b: &IngressEnvelopeEvidence) -> bool {
+    pub fn check_ingress_conflict(
+        a: &IngressEnvelopeEvidence,
+        b: &IngressEnvelopeEvidence,
+    ) -> bool {
         let proof = Self::new_ingress_counter_conflict(a.clone(), b.clone());
         proof.verify_ingress_counter_conflict()
     }
@@ -782,45 +785,46 @@ impl FraudProofPayload {
         // Verify signatures of both attestations using genuine Ed25519 if valid key.
         // Phase 1 P0: the signed payload digest binds (parent_lock, lock_id) so a
         // signature cannot be transplanted across vouchers.
-        let is_ed25519_valid = if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.perpetrator_node_id) {
-            let verify_one = |att: &Attestation| -> bool {
-                let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
-                    Ok(s) => s,
-                    Err(_) => return false,
+        let is_ed25519_valid =
+            if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.perpetrator_node_id) {
+                let verify_one = |att: &Attestation| -> bool {
+                    let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
+                        Ok(s) => s,
+                        Err(_) => return false,
+                    };
+                    let shard_candidates = [
+                        att.shard_id,
+                        crate::types::extract_shard_id(&att.parent_lock),
+                    ];
+                    let payload_digest =
+                        compute_attestation_payload_digest(&att.parent_lock, &att.lock_id);
+                    shard_candidates.iter().any(|&shard_id| {
+                        let d_prov = compute_sig_digest(
+                            DOMAIN_APPROVE_PROV,
+                            0,
+                            0,
+                            0,
+                            shard_id,
+                            0,
+                            &payload_digest,
+                        );
+                        let d_final = compute_sig_digest(
+                            DOMAIN_APPROVE_FINAL,
+                            0,
+                            0,
+                            0,
+                            shard_id,
+                            1,
+                            &payload_digest,
+                        );
+                        vk.verify_strict(&d_prov, &sig).is_ok()
+                            || vk.verify_strict(&d_final, &sig).is_ok()
+                    })
                 };
-                let shard_candidates = [
-                    att.shard_id,
-                    crate::types::extract_shard_id(&att.parent_lock),
-                ];
-                let payload_digest =
-                    compute_attestation_payload_digest(&att.parent_lock, &att.lock_id);
-                shard_candidates.iter().any(|&shard_id| {
-                    let d_prov = compute_sig_digest(
-                        DOMAIN_APPROVE_PROV,
-                        0,
-                        0,
-                        0,
-                        shard_id,
-                        0,
-                        &payload_digest,
-                    );
-                    let d_final = compute_sig_digest(
-                        DOMAIN_APPROVE_FINAL,
-                        0,
-                        0,
-                        0,
-                        shard_id,
-                        1,
-                        &payload_digest,
-                    );
-                    vk.verify_strict(&d_prov, &sig).is_ok()
-                        || vk.verify_strict(&d_final, &sig).is_ok()
-                })
+                verify_one(&a) && verify_one(&b)
+            } else {
+                false
             };
-            verify_one(&a) && verify_one(&b)
-        } else {
-            false
-        };
 
         if is_ed25519_valid {
             return true;
@@ -960,12 +964,16 @@ impl FraudProofPayload {
 
         let delta_secs = (p2.timestamp_ms - p1.timestamp_ms) / 1000;
         if p2.is_read {
-            let min_allowed = crate::quota::decay_integer_ema(p1.declared_read_ema_credits, delta_secs).saturating_add(1);
+            let min_allowed =
+                crate::quota::decay_integer_ema(p1.declared_read_ema_credits, delta_secs)
+                    .saturating_add(1);
             if p2.declared_read_ema_credits < min_allowed {
                 return true;
             }
         } else {
-            let min_allowed = crate::quota::decay_integer_ema(p1.declared_write_ema_micro_bj, delta_secs).saturating_add(p2.footprint_micro_bj);
+            let min_allowed =
+                crate::quota::decay_integer_ema(p1.declared_write_ema_micro_bj, delta_secs)
+                    .saturating_add(p2.footprint_micro_bj);
             if p2.declared_write_ema_micro_bj < min_allowed {
                 return true;
             }
@@ -1002,9 +1010,7 @@ impl<const N: usize> Default for SlotDetector<N> {
 
 impl<const N: usize> SlotDetector<N> {
     pub fn new() -> Self {
-        Self {
-            slots: [None; N],
-        }
+        Self { slots: [None; N] }
     }
 
     #[inline]
@@ -1069,7 +1075,12 @@ impl<const N: usize> SlotDetector<N> {
     }
 
     /// Direct variant that checks the heartbeat signature and yields the slot
-    pub fn observe_raw(&mut self, node_id: NodeId, timestamp: SimTime, signature: [u8; 64]) -> Option<FraudProofPayload> {
+    pub fn observe_raw(
+        &mut self,
+        node_id: NodeId,
+        timestamp: SimTime,
+        signature: [u8; 64],
+    ) -> Option<FraudProofPayload> {
         self.observe(Heartbeat {
             node_id,
             timestamp,
@@ -1185,22 +1196,31 @@ mod tests {
         // Path 4 (same day, p2.seq > p1.seq, p2.cumul < p1.cumul) -> counter rollback! -> true
         let p2_rollback = sign_ingress_envelope(pk, 5, 11, 400, 0, 100, 2000, hash_b);
         let proof_path4 = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_rollback);
-        assert!(proof_path4.verify(), "Path 4 must be true (counter rollback)");
+        assert!(
+            proof_path4.verify(),
+            "Path 4 must be true (counter rollback)"
+        );
 
         // Path 5 (next day, p1.cumul < p2.prev_day_final_bytes) -> honest midnight transition with later locks -> false
         let p2_next_day_honest_more = sign_ingress_envelope(pk, 6, 1, 50, 600, 100, 3000, hash_b);
-        let proof_path5 = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_next_day_honest_more);
+        let proof_path5 =
+            FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_next_day_honest_more);
         assert!(!proof_path5.verify(), "Path 5 must be false");
 
         // Path 6 (next day, p1.cumul == p2.prev_day_final_bytes) -> honest midnight transition, exact close -> false
         let p2_next_day_honest_exact = sign_ingress_envelope(pk, 6, 1, 50, 500, 100, 3000, hash_b);
-        let proof_path6 = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_next_day_honest_exact);
+        let proof_path6 =
+            FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_next_day_honest_exact);
         assert!(!proof_path6.verify(), "Path 6 must be false");
 
         // Path 7 (next day, p1.cumul > p2.prev_day_final_bytes) -> prior-day embezzlement! -> true
         let p2_next_day_fraud = sign_ingress_envelope(pk, 6, 1, 50, 400, 100, 3000, hash_b);
-        let proof_path7 = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_next_day_fraud);
-        assert!(proof_path7.verify(), "Path 7 must be true (prior-day embezzlement)");
+        let proof_path7 =
+            FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_next_day_fraud);
+        assert!(
+            proof_path7.verify(),
+            "Path 7 must be true (prior-day embezzlement)"
+        );
 
         // Path 8 (gap >= 2 days: p2.epoch_day > p1.epoch_day + 1) -> rest day -> false
         let p2_gap_day = sign_ingress_envelope(pk, 8, 1, 50, 100, 100, 5000, hash_b);
@@ -1219,7 +1239,8 @@ mod tests {
         let p2 = sign_ingress_envelope(pk, 10, 2, 800, 0, 100, 200, hash_b);
 
         let proof_ordered = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2.clone());
-        let proof_reversed = FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p1.clone());
+        let proof_reversed =
+            FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p1.clone());
         assert!(proof_ordered.verify());
         assert!(proof_reversed.verify());
 
@@ -1227,15 +1248,19 @@ mod tests {
         let p_day1 = sign_ingress_envelope(pk, 10, 5, 2000, 0, 100, 1000, hash_a);
         let p_day2_fraud = sign_ingress_envelope(pk, 11, 1, 100, 1500, 100, 2000, hash_b);
 
-        let proof_fwd = FraudProofPayload::new_ingress_counter_conflict(p_day1.clone(), p_day2_fraud.clone());
-        let proof_rev = FraudProofPayload::new_ingress_counter_conflict(p_day2_fraud.clone(), p_day1.clone());
+        let proof_fwd =
+            FraudProofPayload::new_ingress_counter_conflict(p_day1.clone(), p_day2_fraud.clone());
+        let proof_rev =
+            FraudProofPayload::new_ingress_counter_conflict(p_day2_fraud.clone(), p_day1.clone());
         assert!(proof_fwd.verify());
         assert!(proof_rev.verify());
 
         // Honest path 3: (p1, p2) vs (p2, p1)
         let p_growth = sign_ingress_envelope(pk, 10, 6, 2500, 0, 100, 3000, hash_b);
-        let proof_growth_fwd = FraudProofPayload::new_ingress_counter_conflict(p_day1.clone(), p_growth.clone());
-        let proof_growth_rev = FraudProofPayload::new_ingress_counter_conflict(p_growth.clone(), p_day1.clone());
+        let proof_growth_fwd =
+            FraudProofPayload::new_ingress_counter_conflict(p_day1.clone(), p_growth.clone());
+        let proof_growth_rev =
+            FraudProofPayload::new_ingress_counter_conflict(p_growth.clone(), p_day1.clone());
         assert!(!proof_growth_fwd.verify());
         assert!(!proof_growth_rev.verify());
     }
@@ -1251,50 +1276,74 @@ mod tests {
 
         // Framing 1: tampered signature on packet 1
         p1.signature[0] ^= 0xFF;
-        let mut proof_bad_sig_a = FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p2.clone());
+        let mut proof_bad_sig_a =
+            FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p2.clone());
         proof_bad_sig_a.evidence_packet_a = encode_ingress_envelope(&p1);
         proof_bad_sig_a.evidence_packet_b = encode_ingress_envelope(&p2);
-        assert!(!proof_bad_sig_a.verify(), "invalid signature on packet A must be rejected");
+        assert!(
+            !proof_bad_sig_a.verify(),
+            "invalid signature on packet A must be rejected"
+        );
 
         // Framing 2: tampered signature on packet 2
         let mut p2_bad = p2.clone();
         p2_bad.signature[5] ^= 0xAA;
-        let mut proof_bad_sig_b = FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p2.clone());
+        let mut proof_bad_sig_b =
+            FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p2.clone());
         let p1_good = sign_ingress_envelope(pk_victim, 5, 1, 1000, 0, 100, 100, hash);
         proof_bad_sig_b.evidence_packet_a = encode_ingress_envelope(&p1_good);
         proof_bad_sig_b.evidence_packet_b = encode_ingress_envelope(&p2_bad);
-        assert!(!proof_bad_sig_b.verify(), "invalid signature on packet B must be rejected");
+        assert!(
+            !proof_bad_sig_b.verify(),
+            "invalid signature on packet B must be rejected"
+        );
 
         // Framing 3: two different signers (attacker plants foreign packet)
         let p_foreign = sign_ingress_envelope(pk_attacker, 5, 2, 500, 0, 100, 200, [0xBB; 32]);
-        let mut proof_diff_signers = FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p1_good.clone());
+        let mut proof_diff_signers =
+            FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p1_good.clone());
         proof_diff_signers.evidence_packet_a = encode_ingress_envelope(&p1_good);
         proof_diff_signers.evidence_packet_b = encode_ingress_envelope(&p_foreign);
-        assert!(!proof_diff_signers.verify(), "different signers must never count as fraud");
+        assert!(
+            !proof_diff_signers.verify(),
+            "different signers must never count as fraud"
+        );
 
         // Framing 4: wrong perpetrator_node_id declared
-        let mut proof_wrong_perp = FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p2.clone());
+        let mut proof_wrong_perp =
+            FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p2.clone());
         proof_wrong_perp.perpetrator_node_id = pk_attacker;
-        assert!(!proof_wrong_perp.verify(), "wrong perpetrator_node_id must be rejected");
+        assert!(
+            !proof_wrong_perp.verify(),
+            "wrong perpetrator_node_id must be rejected"
+        );
 
         // Framing 5: corrupted evidence data
-        let mut proof_corrupt = FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p2.clone());
+        let mut proof_corrupt =
+            FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p2.clone());
         proof_corrupt.evidence_packet_a = vec![0xFF; 20];
-        assert!(!proof_corrupt.verify(), "corrupted evidence must yield false");
+        assert!(
+            !proof_corrupt.verify(),
+            "corrupted evidence must yield false"
+        );
     }
 
     #[test]
     fn test_ingress_counter_conflict_fuzz_10k() {
         struct SimpleRng(u64);
         impl SimpleRng {
-            fn new(seed: u64) -> Self { Self(seed.max(1)) }
+            fn new(seed: u64) -> Self {
+                Self(seed.max(1))
+            }
             fn next_u64(&mut self) -> u64 {
                 self.0 ^= self.0 << 13;
                 self.0 ^= self.0 >> 7;
                 self.0 ^= self.0 << 17;
                 self.0
             }
-            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u32(&mut self) -> u32 {
+                self.next_u64() as u32
+            }
             fn gen_range(&mut self, min: u64, max: u64) -> u64 {
                 min + (self.next_u64() % (max - min + 1))
             }
@@ -1329,56 +1378,144 @@ mod tests {
             let (p1, p2, expected_fraud) = match path {
                 // Path 1: same day, seq1 == seq2, hash1 == hash2 -> false
                 1 => {
-                    let a = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1);
-                    let b = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1 + 10, hash1);
+                    let a = sign_ingress_envelope(
+                        pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1,
+                    );
+                    let b = sign_ingress_envelope(
+                        pk,
+                        base_day,
+                        base_seq,
+                        base_cumul,
+                        0,
+                        100,
+                        ts1 + 10,
+                        hash1,
+                    );
                     (a, b, false)
                 }
                 // Path 2: same day, seq1 == seq2, hash1 != hash2 -> true
                 2 => {
-                    let a = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1);
-                    let b = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1 + 10, hash2);
+                    let a = sign_ingress_envelope(
+                        pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1,
+                    );
+                    let b = sign_ingress_envelope(
+                        pk,
+                        base_day,
+                        base_seq,
+                        base_cumul,
+                        0,
+                        100,
+                        ts1 + 10,
+                        hash2,
+                    );
                     (a, b, true)
                 }
                 // Path 3: same day, seq2 > seq1, cum2 >= cum1 -> false
                 3 => {
                     let delta_cum = rng.gen_range(0, 100_000);
-                    let a = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1);
-                    let b = sign_ingress_envelope(pk, base_day, base_seq + 1, base_cumul + delta_cum, 0, 100, ts1 + 50, hash2);
+                    let a = sign_ingress_envelope(
+                        pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1,
+                    );
+                    let b = sign_ingress_envelope(
+                        pk,
+                        base_day,
+                        base_seq + 1,
+                        base_cumul + delta_cum,
+                        0,
+                        100,
+                        ts1 + 50,
+                        hash2,
+                    );
                     (a, b, false)
                 }
                 // Path 4: same day, seq2 > seq1, cum2 < cum1 -> true
                 4 => {
                     let drop = rng.gen_range(1, base_cumul.min(50_000));
-                    let a = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1);
-                    let b = sign_ingress_envelope(pk, base_day, base_seq + 1, base_cumul - drop, 0, 100, ts1 + 50, hash2);
+                    let a = sign_ingress_envelope(
+                        pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1,
+                    );
+                    let b = sign_ingress_envelope(
+                        pk,
+                        base_day,
+                        base_seq + 1,
+                        base_cumul - drop,
+                        0,
+                        100,
+                        ts1 + 50,
+                        hash2,
+                    );
                     (a, b, true)
                 }
                 // Path 5: next day, cum1 < prev_day_final_bytes -> false
                 5 => {
                     let prev_final = base_cumul + rng.gen_range(1, 50_000);
-                    let a = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1);
-                    let b = sign_ingress_envelope(pk, base_day + 1, 1, 500, prev_final, 100, ts1 + 86_400_000, hash2);
+                    let a = sign_ingress_envelope(
+                        pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1,
+                    );
+                    let b = sign_ingress_envelope(
+                        pk,
+                        base_day + 1,
+                        1,
+                        500,
+                        prev_final,
+                        100,
+                        ts1 + 86_400_000,
+                        hash2,
+                    );
                     (a, b, false)
                 }
                 // Path 6: next day, cum1 == prev_day_final_bytes -> false
                 6 => {
                     let prev_final = base_cumul;
-                    let a = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1);
-                    let b = sign_ingress_envelope(pk, base_day + 1, 1, 500, prev_final, 100, ts1 + 86_400_000, hash2);
+                    let a = sign_ingress_envelope(
+                        pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1,
+                    );
+                    let b = sign_ingress_envelope(
+                        pk,
+                        base_day + 1,
+                        1,
+                        500,
+                        prev_final,
+                        100,
+                        ts1 + 86_400_000,
+                        hash2,
+                    );
                     (a, b, false)
                 }
                 // Path 7: next day, cum1 > prev_day_final_bytes -> true
                 7 => {
                     let prev_final = base_cumul.saturating_sub(rng.gen_range(1, 10_000));
-                    let a = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1);
-                    let b = sign_ingress_envelope(pk, base_day + 1, 1, 500, prev_final, 100, ts1 + 86_400_000, hash2);
+                    let a = sign_ingress_envelope(
+                        pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1,
+                    );
+                    let b = sign_ingress_envelope(
+                        pk,
+                        base_day + 1,
+                        1,
+                        500,
+                        prev_final,
+                        100,
+                        ts1 + 86_400_000,
+                        hash2,
+                    );
                     (a, b, true)
                 }
                 // Path 8: gap >= 2 days -> false
                 8 => {
                     let gap = (rng.next_u32() % 50) + 2;
-                    let a = sign_ingress_envelope(pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1);
-                    let b = sign_ingress_envelope(pk, base_day + gap, 1, 500, 100, 100, ts1 + (gap as u64) * 86_400_000, hash2);
+                    let a = sign_ingress_envelope(
+                        pk, base_day, base_seq, base_cumul, 0, 100, ts1, hash1,
+                    );
+                    let b = sign_ingress_envelope(
+                        pk,
+                        base_day + gap,
+                        1,
+                        500,
+                        100,
+                        100,
+                        ts1 + (gap as u64) * 86_400_000,
+                        hash2,
+                    );
                     (a, b, false)
                 }
                 _ => unreachable!(),
@@ -1394,12 +1531,9 @@ mod tests {
             let proof = FraudProofPayload::new_ingress_counter_conflict(packet_a, packet_b);
             let verified = proof.verify();
             assert_eq!(
-                verified,
-                expected_fraud,
+                verified, expected_fraud,
                 "Fuzz failure on path {}: expected fraud={}, got={}",
-                path,
-                expected_fraud,
-                verified
+                path, expected_fraud, verified
             );
         }
     }

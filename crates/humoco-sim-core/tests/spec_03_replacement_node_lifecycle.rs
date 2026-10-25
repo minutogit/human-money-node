@@ -1,10 +1,10 @@
-use humoco_sim_core::types::{
-    can_replacement_retire_to_standby, count_healthy_predecessors, hrw_rank_nodes,
-    should_accept_replacement_invite, LockRecord, NodeId, ReplacementLifecycleState,
-    ShardId, ShardPredecessorStatus, SimTime,
-};
 use humoco_sim_core::crypto::sign_lock_attestation;
 use humoco_sim_core::state_machine::apply_attestation;
+use humoco_sim_core::types::{
+    can_replacement_retire_to_standby, count_healthy_predecessors, hrw_rank_nodes,
+    should_accept_replacement_invite, LockRecord, NodeId, ReplacementLifecycleState, ShardId,
+    ShardPredecessorStatus, SimTime,
+};
 use std::collections::HashMap;
 
 const SHARD_ID: ShardId = 42;
@@ -59,7 +59,12 @@ fn test_replacement_node_full_lifecycle_and_flapping_resilience() {
             // Rang 7 ist offline!
             continue;
         }
-        let att = sign_lock_attestation(*nid, &real_lock_id, &lock.parent_lock, SimTime(200 + i as u64));
+        let att = sign_lock_attestation(
+            *nid,
+            &real_lock_id,
+            &lock.parent_lock,
+            SimTime(200 + i as u64),
+        );
         let _ = apply_attestation(&mut lock, att, NUM_TOTAL_NODES);
         signers_count += 1;
     }
@@ -68,7 +73,10 @@ fn test_replacement_node_full_lifecycle_and_flapping_resilience() {
     // Rang 21 fügt seine Signatur als 20. Stimme hinzu
     let att21 = sign_lock_attestation(rank21_id, &real_lock_id, &lock.parent_lock, SimTime(250));
     let status21 = apply_attestation(&mut lock, att21, NUM_TOTAL_NODES).unwrap();
-    assert!(status21.is_final(), "Quorum erreicht FINAL mit Nachrücker Rang 21!");
+    assert!(
+        status21.is_final(),
+        "Quorum erreicht FINAL mit Nachrücker Rang 21!"
+    );
 
     // 5. Flapping-Test: Rang 7 reconnectet, fällt aber nach 2 Stunden wieder aus
     // Rang 21 prüft: Wie viele Vor-Ränge haben ununterbrochen >= 24h QUIC-Uptime?
@@ -100,7 +108,10 @@ fn test_replacement_node_full_lifecycle_and_flapping_resilience() {
         .collect();
 
     let healthy_count = count_healthy_predecessors(&predecessor_states);
-    assert_eq!(healthy_count, 19, "Fauler Knoten darf trotz Uptime NICHT mitgezählt werden!");
+    assert_eq!(
+        healthy_count, 19,
+        "Fauler Knoten darf trotz Uptime NICHT mitgezählt werden!"
+    );
     assert!(
         !can_replacement_retire_to_standby(healthy_count),
         "Rang 21 darf bei suspendiertem faulen Vorgänger NICHT abrüsten!"
@@ -116,7 +127,11 @@ fn test_replacement_node_full_lifecycle_and_flapping_resilience() {
         "Rang 21 darf nach 24h stabiler UND kooperativer Vor-Ränge sicher abrüsten!"
     );
     rank21_state = ReplacementLifecycleState::IdleStandby;
-    assert_eq!(rank21_state, ReplacementLifecycleState::IdleStandby, "Rang 21 kehrt in passiven Standby zurück.");
+    assert_eq!(
+        rank21_state,
+        ReplacementLifecycleState::IdleStandby,
+        "Rang 21 kehrt in passiven Standby zurück."
+    );
 }
 
 #[test]
@@ -147,7 +162,10 @@ fn test_displaced_active_node_phantom_gossip_resistance_and_retirement() {
 
     // 3. Prüfung: Knoten 20 evaluiert, ob er in IdleStandby abrüsten darf
     let healthy_count = count_healthy_predecessors(&predecessor_states);
-    assert_eq!(healthy_count, 19, "Phantome dürfen NICHT mitgezählt werden!");
+    assert_eq!(
+        healthy_count, 19,
+        "Phantome dürfen NICHT mitgezählt werden!"
+    );
     assert!(
         !can_active_node_retire_to_standby(healthy_count),
         "Knoten 20 darf trotz Papier-Rang 25 NIEMALS seinen Dienst quittieren!"
@@ -167,7 +185,10 @@ fn test_displaced_active_node_phantom_gossip_resistance_and_retirement() {
     });
 
     let full_healthy = count_healthy_predecessors(&predecessor_states);
-    assert_eq!(full_healthy, 20, "Nun sind 20 echte, physisch bewiesene Vor-Ränge aktiv!");
+    assert_eq!(
+        full_healthy, 20,
+        "Nun sind 20 echte, physisch bewiesene Vor-Ränge aktiv!"
+    );
     assert!(
         can_active_node_retire_to_standby(full_healthy),
         "Erst jetzt darf der verdrängte Knoten 20 geordnet in IdleStandby wechseln."

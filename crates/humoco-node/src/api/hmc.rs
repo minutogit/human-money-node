@@ -34,7 +34,7 @@ use crate::identity::NodeIdentity;
 macro_rules! impl_base58_array {
     ($mod_name:ident, $N:literal) => {
         pub mod $mod_name {
-            use serde::{Deserialize, Deserializer, Serializer, de};
+            use serde::{de, Deserialize, Deserializer, Serializer};
             use std::convert::TryInto;
 
             pub fn serialize<S>(data: &[u8; $N], serializer: S) -> Result<S::Ok, S::Error>
@@ -62,7 +62,7 @@ macro_rules! impl_base58_array {
     };
     ($mod_name:ident, $N:literal, opt) => {
         pub mod $mod_name {
-            use serde::{Deserialize, Deserializer, Serializer, de};
+            use serde::{de, Deserialize, Deserializer, Serializer};
             use std::convert::TryInto;
 
             pub fn serialize<S>(data: &Option<[u8; $N]>, serializer: S) -> Result<S::Ok, S::Error>
@@ -105,7 +105,7 @@ impl_base58_array!(base58_64, 64);
 impl_base58_array!(base58_64_opt, 64, opt);
 
 pub mod base58_u128 {
-    use serde::{Deserialize, Deserializer, Serializer, de};
+    use serde::{de, Deserialize, Deserializer, Serializer};
     use std::convert::TryInto;
 
     pub fn serialize<S>(data: &u128, serializer: S) -> Result<S::Ok, S::Error>

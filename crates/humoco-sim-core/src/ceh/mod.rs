@@ -53,7 +53,12 @@ mod tests {
         (signing_key, pubkey)
     }
 
-    fn generate_committee(start_seed: u8) -> ([SigningKey; CEH_COMMITTEE_SIZE], [NodePubKey; CEH_COMMITTEE_SIZE]) {
+    fn generate_committee(
+        start_seed: u8,
+    ) -> (
+        [SigningKey; CEH_COMMITTEE_SIZE],
+        [NodePubKey; CEH_COMMITTEE_SIZE],
+    ) {
         // We use dummy uninitialized arrays and fill them safely
         let mut signers: Vec<SigningKey> = Vec::with_capacity(CEH_COMMITTEE_SIZE);
         let mut pubkeys: Vec<NodePubKey> = Vec::with_capacity(CEH_COMMITTEE_SIZE);
@@ -62,8 +67,10 @@ mod tests {
             signers.push(sk);
             pubkeys.push(pk);
         }
-        let signers_arr: [SigningKey; CEH_COMMITTEE_SIZE] = signers.try_into().map_err(|_| ()).unwrap();
-        let pubkeys_arr: [NodePubKey; CEH_COMMITTEE_SIZE] = pubkeys.try_into().map_err(|_| ()).unwrap();
+        let signers_arr: [SigningKey; CEH_COMMITTEE_SIZE] =
+            signers.try_into().map_err(|_| ()).unwrap();
+        let pubkeys_arr: [NodePubKey; CEH_COMMITTEE_SIZE] =
+            pubkeys.try_into().map_err(|_| ()).unwrap();
         (signers_arr, pubkeys_arr)
     }
 
@@ -71,7 +78,10 @@ mod tests {
     fn test_domain_tags_length_prefixed() {
         assert_eq!(DOMAIN_CEH_GENESIS, b"HUMOCO_V1_CEH_GENESIS");
         assert_eq!(DOMAIN_CEH_CERT, b"HUMOCO_V1_CEH_CERT");
-        assert_eq!(DOMAIN_CEH_UNIFIED_MANIFEST, b"HUMOCO_V1_CEH_UNIFIED_MANIFEST");
+        assert_eq!(
+            DOMAIN_CEH_UNIFIED_MANIFEST,
+            b"HUMOCO_V1_CEH_UNIFIED_MANIFEST"
+        );
         assert_eq!(DOMAIN_CEH_LOCK_RECEIPT, b"HUMOCO_V1_CEH_LOCK_RECEIPT");
         assert_eq!(DOMAIN_CEH_PROPOSAL, b"HUMOCO_V1_CEH_PROPOSAL");
         assert_eq!(DOMAIN_CEH_PREPARE, b"HUMOCO_V1_CEH_PREPARE");
@@ -79,18 +89,16 @@ mod tests {
         assert_eq!(DOMAIN_CEH_ROUND_CHANGE, b"HUMOCO_V1_CEH_ROUND_CHANGE");
         assert_eq!(DOMAIN_CEH_VOUCHER_HOP, b"HUMOCO_V1_CEH_VOUCHER_HOP");
         assert_eq!(DOMAIN_CEH_VOUCHER_TREE, b"HUMOCO_V1_CEH_VOUCHER_TREE");
-        assert_eq!(DOMAIN_CEH_HIERARCHICAL_STATE_ROOT, b"HUMOCO_V1_CEH_HIERARCHICAL_STATE_ROOT");
+        assert_eq!(
+            DOMAIN_CEH_HIERARCHICAL_STATE_ROOT,
+            b"HUMOCO_V1_CEH_HIERARCHICAL_STATE_ROOT"
+        );
     }
 
     #[test]
     fn test_genesis_manifest_hashing_and_signing() {
         let (signers, committee) = generate_committee(1);
-        let mut manifest = GenesisManifest::new(
-            1,
-            [0xaa; 32],
-            1_700_000_000,
-            committee,
-        );
+        let mut manifest = GenesisManifest::new(1, [0xaa; 32], 1_700_000_000, committee);
 
         let hash1 = manifest.canonical_hash();
         let hash2 = manifest.canonical_hash();
@@ -107,10 +115,15 @@ mod tests {
 
         // Insufficient signatures
         let mut partial_manifest = manifest.clone();
-        partial_manifest.genesis_signatures.truncate(CEH_BFT_QUORUM - 1);
+        partial_manifest
+            .genesis_signatures
+            .truncate(CEH_BFT_QUORUM - 1);
         assert!(matches!(
             verify_genesis_manifest_signatures(&partial_manifest, CEH_BFT_QUORUM),
-            Err(CehError::QuorumNotReached { have: 13, required: 14 })
+            Err(CehError::QuorumNotReached {
+                have: 13,
+                required: 14
+            })
         ));
 
         // Non-committee signer
@@ -137,14 +150,7 @@ mod tests {
         let (signers, committee) = generate_committee(10);
         let (_, successor_comm) = generate_committee(30);
 
-        let mut cert = EpochCertificate::new(
-            42,
-            5,
-            0,
-            [0x11; 32],
-            [0x22; 32],
-            successor_comm,
-        );
+        let mut cert = EpochCertificate::new(42, 5, 0, [0x11; 32], [0x22; 32], successor_comm);
 
         let h1 = cert.canonical_hash();
         let h2 = cert.canonical_hash();
@@ -168,13 +174,7 @@ mod tests {
     #[test]
     fn test_lock_receipt_attestation() {
         let (signers, committee) = generate_committee(50);
-        let mut receipt = LockReceipt::new(
-            7,
-            12,
-            [0x01; 32],
-            [0x02; 32],
-            1_800_000_000,
-        );
+        let mut receipt = LockReceipt::new(7, 12, [0x01; 32], [0x02; 32], 1_800_000_000);
 
         for sk in signers.iter().take(14) {
             let (pk, sig) = sign_lock_receipt(sk, &receipt);
@@ -195,15 +195,7 @@ mod tests {
         assert!(verify_candidate_proof(&candidate));
 
         let (_, successor) = generate_committee(100);
-        let proposal = EpochProposal::new(
-            1,
-            10,
-            0,
-            [0x88; 32],
-            successor,
-            vec![candidate],
-            None,
-        );
+        let proposal = EpochProposal::new(1, 10, 0, [0x88; 32], successor, vec![candidate], None);
 
         let h1 = proposal.canonical_hash();
         assert_ne!(h1, [0u8; 32]);
@@ -271,7 +263,9 @@ mod tests {
         assert_ne!(root, [0u8; 32]);
 
         // Test boundary and random shard IDs
-        let test_shards = [0u16, 1u16, 2u16, 15u16, 255u16, 1024u16, 32767u16, 65534u16, 65535u16];
+        let test_shards = [
+            0u16, 1u16, 2u16, 15u16, 255u16, 1024u16, 32767u16, 65534u16, 65535u16,
+        ];
         for &shard_id in &test_shards {
             let proof = generate_shard_merkle_proof(&shard_roots, shard_id);
             assert_eq!(proof.shard_id, shard_id);
@@ -279,8 +273,16 @@ mod tests {
             assert_eq!(proof.audit_path.len(), CEH_MERKLE_TREE_DEPTH);
 
             // Valid verification
-            assert!(proof.verify(&root), "Merkle proof failed for shard {shard_id}");
-            assert!(verify_shard_merkle_leaf(&root, shard_id, &proof.closed_state_root, &proof.audit_path));
+            assert!(
+                proof.verify(&root),
+                "Merkle proof failed for shard {shard_id}"
+            );
+            assert!(verify_shard_merkle_leaf(
+                &root,
+                shard_id,
+                &proof.closed_state_root,
+                &proof.audit_path
+            ));
 
             // Tamper state root -> fails
             let mut tampered_proof = proof.clone();
@@ -308,13 +310,8 @@ mod tests {
         }
         let shards_merkle_root = compute_unified_shards_merkle_root(&shard_roots);
 
-        let mut manifest = UnifiedNetworkEpochManifest::new(
-            1,
-            0,
-            [0x99; 32],
-            shards_merkle_root,
-            committee,
-        );
+        let mut manifest =
+            UnifiedNetworkEpochManifest::new(1, 0, [0x99; 32], shards_merkle_root, committee);
 
         for sk in signers.iter().take(14) {
             let (pk, sig) = sign_unified_manifest(sk, &manifest);
@@ -330,12 +327,14 @@ mod tests {
         let (_, committee) = generate_committee(1);
         let manifest = GenesisManifest::new(1, [2u8; 32], 1000, committee);
         let bytes = bincode::serialize(&manifest).expect("bincode serialize failed");
-        let decoded: GenesisManifest = bincode::deserialize(&bytes).expect("bincode deserialize failed");
+        let decoded: GenesisManifest =
+            bincode::deserialize(&bytes).expect("bincode deserialize failed");
         assert_eq!(manifest, decoded);
 
         let cert = EpochCertificate::new(1, 2, 3, [4u8; 32], [5u8; 32], committee);
         let cert_bytes = bincode::serialize(&cert).expect("bincode serialize failed");
-        let decoded_cert: EpochCertificate = bincode::deserialize(&cert_bytes).expect("bincode deserialize failed");
+        let decoded_cert: EpochCertificate =
+            bincode::deserialize(&cert_bytes).expect("bincode deserialize failed");
         assert_eq!(cert, decoded_cert);
     }
 }

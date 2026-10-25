@@ -11,16 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::events::EventKind;
 use crate::api::health::{evaluate_health_tracked, HealthLevel, HealthSummary};
-pub use crate::ingress::F2fClientDto;
 use crate::api::metrics::LatencyTierStats;
 use crate::api::qr::generate_qr_svg;
 use crate::api::routes::AppState;
 use crate::api::system_stats::{SparklinesDto, SystemStatsDto};
+pub use crate::ingress::F2fClientDto;
 use crate::network::manager::NetworkNodeDto;
 use crate::network::peer::PeerConnectionType;
-use crate::storage::recent::{
-    RecentLockStatus, RecentLockSummary, VoucherSummaryDto,
-};
+use crate::storage::recent::{RecentLockStatus, RecentLockSummary, VoucherSummaryDto};
 
 /// Quota reservation percentages across the three ingress tiers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,7 +147,9 @@ pub struct AddMeshPeerRequest {
     pub pubkey: String,
     #[serde(default)]
     pub label: Option<String>,
-    #[deprecated(note = "dual_role_ingress is deprecated and ignored; server peering and client ingress are strictly decoupled")]
+    #[deprecated(
+        note = "dual_role_ingress is deprecated and ignored; server peering and client ingress are strictly decoupled"
+    )]
     #[serde(default)]
     pub dual_role_ingress: Option<bool>,
 }
@@ -381,7 +381,10 @@ pub fn format_epoch_millis(ms: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { y + 1 } else { y };
-    format!("{:02}.{:02}.{}, {:02}:{:02}:{:02}", d, month, year, h, mins, s)
+    format!(
+        "{:02}.{:02}.{}, {:02}:{:02}:{:02}",
+        d, month, year, h, mins, s
+    )
 }
 
 /// Type alias for DashboardData DTO
@@ -393,7 +396,10 @@ pub fn determine_peering_string(state: &AppState) -> String {
     let addr = if let Some(ref t) = state.transport {
         t.local_addr().ok().map(|a| {
             if a.ip().is_unspecified() {
-                SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), a.port())
+                SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    a.port(),
+                )
             } else {
                 a
             }
@@ -490,13 +496,10 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
             }
         }
         let subnet_counts: Vec<usize> = subnet_map.values().copied().collect();
-        let sub_dom_max =
-            humoco_sim_core::telemetry::evaluate_subnet_dominance_max(&subnet_counts);
+        let sub_dom_max = humoco_sim_core::telemetry::evaluate_subnet_dominance_max(&subnet_counts);
 
         let mut warns = Vec::new();
-        if let Some(w) =
-            humoco_sim_core::telemetry::detect_gateway_concentration(&source_counts)
-        {
+        if let Some(w) = humoco_sim_core::telemetry::detect_gateway_concentration(&source_counts) {
             warns.push(w.message);
         }
         if let Some(w) =
@@ -583,11 +586,20 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let (status, status_badge) = if connected_peers == 0 && configured_peers > 0 {
         ("DEGRADED".to_string(), "DEGRADED (0 Peers)".to_string())
     } else if total_active == 1 || configured_peers == 0 {
-        ("STANDALONE".to_string(), "STANDALONE (N=1, PROVISIONAL)".to_string())
+        (
+            "STANDALONE".to_string(),
+            "STANDALONE (N=1, PROVISIONAL)".to_string(),
+        )
     } else if total_active < 20 {
-        ("COMMUNITY MESH".to_string(), format!("COMMUNITY-MESH (N={}, PROVISIONAL)", total_active))
+        (
+            "COMMUNITY MESH".to_string(),
+            format!("COMMUNITY-MESH (N={}, PROVISIONAL)", total_active),
+        )
     } else if !is_stable_24h {
-        ("STABILIZING".to_string(), "WELTNETZ (24h-Stabilisierung)".to_string())
+        (
+            "STABILIZING".to_string(),
+            "WELTNETZ (24h-Stabilisierung)".to_string(),
+        )
     } else {
         ("ONLINE".to_string(), "WELTNETZ (FINAL)".to_string())
     };
@@ -598,7 +610,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         "14/20 (Final)".to_string()
     };
 
-    let (_active_byte_years, active_locks) = state.engine.get_active_footprint_byte_years(now_ms).await;
+    let (_active_byte_years, active_locks) =
+        state.engine.get_active_footprint_byte_years(now_ms).await;
     let flush_queue_depth = state.engine.flush_sender_len();
 
     // 3-Tier Latencies (Rolling 100)
@@ -614,10 +627,15 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let (shard_mode, shard_responsibility_ratio) = if total_active < 20 {
         ("Community-Mesh (N < 20)".to_string(), 1.0f64)
     } else {
-        ("HRW Top-20 Sharding (N >= 20)".to_string(), (20.0f64 / total_active as f64).min(1.0f64))
+        (
+            "HRW Top-20 Sharding (N >= 20)".to_string(),
+            (20.0f64 / total_active as f64).min(1.0f64),
+        )
     };
 
-    let sample_shards = [0, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960];
+    let sample_shards = [
+        0, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960,
+    ];
     let sample_shard_scores = sample_shards
         .into_iter()
         .map(|sid| {
@@ -692,9 +710,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
     let (total_write_used, total_read_used) = {
         let thermo_arc = state.tier_controller.thermometer();
-        let thermo = thermo_arc
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let thermo = thermo_arc.read().unwrap_or_else(|e| e.into_inner());
         (
             thermo.total_daily_write_usage(),
             thermo.total_daily_read_usage(),
@@ -714,7 +730,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     } else {
         0.0
     };
-    let (vip_writes_today, f2f_writes_today, free_writes_today) = state.tier_controller.tier_counters();
+    let (vip_writes_today, f2f_writes_today, free_writes_today) =
+        state.tier_controller.tier_counters();
 
     let thermometer = ThermometerStatsDto {
         gossip_write_load,
@@ -775,7 +792,11 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
 
     // 5. Tiers Overview
     let free_pow_diff = state.pow_engine.default_difficulty();
-    let free_pow_hashes = if free_pow_diff > 0 { 1u64 << free_pow_diff } else { 1 };
+    let free_pow_hashes = if free_pow_diff > 0 {
+        1u64 << free_pow_diff
+    } else {
+        1
+    };
     let free_pow_time_est = match free_pow_diff {
         0 => "< 0.1 ms (Instant)",
         1..=8 => "< 0.1 ms",
@@ -784,7 +805,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         17..=20 => "~ 250 ms",
         21..=24 => "~ 4 s",
         _ => "> 10 s",
-    }.to_string();
+    }
+    .to_string();
     let free_req_sec = sparklines.writes.last().copied().unwrap_or(0.0) as f64;
 
     let free_reserved_pct = 20.0;
@@ -792,7 +814,8 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let vip_reserved_pct = 50.0;
 
     let total_writes_today = vip_writes_today + f2f_writes_today + free_writes_today;
-    let total_quota_used_pct = ((today_write_used as f64 / daily_write_quota.max(1) as f64) * 100.0).clamp(0.0, 100.0);
+    let total_quota_used_pct =
+        ((today_write_used as f64 / daily_write_quota.max(1) as f64) * 100.0).clamp(0.0, 100.0);
 
     let free_quota = (daily_write_quota as f64 * 0.20).max(1.0);
     let friends_quota = (daily_write_quota as f64 * 0.30).max(1.0);
@@ -885,7 +908,11 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         .map(|pm| pm.clock().logical_offset_ms())
         .unwrap_or(0);
 
-    let last_flush_ms = state.engine.stats.last_successful_flush_ms.load(std::sync::atomic::Ordering::Relaxed);
+    let last_flush_ms = state
+        .engine
+        .stats
+        .last_successful_flush_ms
+        .load(std::sync::atomic::Ordering::Relaxed);
     let last_flush_ago_sec = if last_flush_ms > 0 {
         Some(now_ms.saturating_sub(last_flush_ms) / 1000)
     } else {
@@ -898,9 +925,21 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         last_flush_ago_sec,
         flush_queue_depth,
         flush_queue_capacity: 10_000,
-        flush_batches_total: state.engine.stats.flush_batches_total.load(std::sync::atomic::Ordering::Relaxed),
-        flush_errors_total: state.engine.stats.flush_errors_total.load(std::sync::atomic::Ordering::Relaxed),
-        flush_ops_total: state.engine.stats.flush_ops_total.load(std::sync::atomic::Ordering::Relaxed),
+        flush_batches_total: state
+            .engine
+            .stats
+            .flush_batches_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        flush_errors_total: state
+            .engine
+            .stats
+            .flush_errors_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        flush_ops_total: state
+            .engine
+            .stats
+            .flush_ops_total
+            .load(std::sync::atomic::Ordering::Relaxed),
         redb_file_bytes: system.redb_bytes,
     };
 
@@ -1026,7 +1065,10 @@ pub async fn admin_verify_token(
         state.event_log.record(
             EventKind::System,
             HealthLevel::Warn,
-            format!("Rate-Limit für Admin-Authentifizierung erreicht ({})", client_ip),
+            format!(
+                "Rate-Limit für Admin-Authentifizierung erreicht ({})",
+                client_ip
+            ),
         );
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -1215,8 +1257,21 @@ pub async fn admin_add_ingress_client(
     }
 
     let token = match payload.token {
-        Some(ref t) if !t.trim().is_empty() => t.trim().to_string(),
-        _ => {
+        Some(ref t) => {
+            let trimmed = t.trim();
+            if !crate::ingress::tier::is_valid_client_token(trimmed) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "message": "Invalid client token format: must match f2f_<32 hex digits>"
+                    })),
+                )
+                    .into_response();
+            }
+            trimmed.to_string()
+        }
+        None => {
             let mut bytes = [0u8; 16];
             rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
             format!("f2f_{}", hex::encode(bytes))
@@ -1229,7 +1284,9 @@ pub async fn admin_add_ingress_client(
         payload.label.trim().to_string()
     };
 
-    state.tier_controller.register_f2f_client(&token, Some(&label));
+    state
+        .tier_controller
+        .register_f2f_client(&token, Some(&label));
 
     let rpc_addr = state.config.network.rpc_listen_addr;
     let host = if rpc_addr.ip().is_unspecified() {
@@ -1302,7 +1359,10 @@ pub async fn admin_topup_quota(
     state.tier_controller.register_vip_token(trimmed, tag_bytes);
     state.tier_controller.register_vip_tag(tag_bytes);
 
-    match state.tier_controller.topup_vip_quota(tag_bytes, payload.byte_years) {
+    match state
+        .tier_controller
+        .topup_vip_quota(tag_bytes, payload.byte_years)
+    {
         Ok(new_balance) => {
             state.event_log.record(
                 EventKind::QuotaTopup,
@@ -1446,7 +1506,8 @@ pub async fn admin_ping_peer(
 
     // Otherwise, if transport is available, attempt to connect with 2000 ms timeout
     if let Some(ref transport) = state.transport {
-        match tokio::time::timeout(Duration::from_millis(2000), transport.connect_peer(addr)).await {
+        match tokio::time::timeout(Duration::from_millis(2000), transport.connect_peer(addr)).await
+        {
             Ok(Ok(conn)) => {
                 let rtt = conn.rtt().as_millis() as u32;
                 (
@@ -1530,19 +1591,15 @@ pub async fn compute_dashboard_etag(state: &AppState) -> String {
 }
 
 /// Handler for GET /dashboard/data supporting ETag caching (HTTP 304 Not Modified).
-pub async fn dashboard_data(
-    headers: HeaderMap,
-    State(state): State<AppState>,
-) -> Response {
+pub async fn dashboard_data(headers: HeaderMap, State(state): State<AppState>) -> Response {
     let etag = compute_dashboard_etag(&state).await;
 
-    if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+    if let Some(if_none_match) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
         if if_none_match == etag || if_none_match.trim_matches('"') == etag.trim_matches('"') {
-            return (
-                StatusCode::NOT_MODIFIED,
-                [(header::ETAG, etag)],
-            )
-                .into_response();
+            return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
         }
     }
 
@@ -1599,7 +1656,11 @@ pub async fn render_dashboard(State(state): State<AppState>) -> Response {
     let data = collect_dashboard_data(&state).await;
     let qr_svg = generate_qr_svg(&data.peering_string);
     let net_time_formatted = format_epoch_millis(data.network_time_ms);
-    let sim_badge_style = if data.is_simulation { "display: inline-block; " } else { "display: none; " };
+    let sim_badge_style = if data.is_simulation {
+        "display: inline-block; "
+    } else {
+        "display: none; "
+    };
 
     let html = format!(
         include_str!("assets/dashboard.html"),

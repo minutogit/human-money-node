@@ -7,11 +7,11 @@
 //! - INV-1701: Telemetry & security audit logs are purely diagnostic and operator-facing.
 //! - Fixed RAM ceiling: 1000 items * ~200 bytes ≈ 200 KB in memory.
 
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 
 use crate::api::health::HealthLevel;
 
@@ -61,7 +61,9 @@ impl EventLog {
     /// Creates a new `EventLog` with specified capacity.
     pub fn new(capacity: usize) -> Self {
         Self {
-            buffer: Arc::new(RwLock::new(VecDeque::with_capacity(capacity.min(EVENT_LOG_CAPACITY)))),
+            buffer: Arc::new(RwLock::new(VecDeque::with_capacity(
+                capacity.min(EVENT_LOG_CAPACITY),
+            ))),
             next_id: AtomicU64::new(1),
             capacity,
             persist_tx: parking_lot::RwLock::new(None),
@@ -114,12 +116,23 @@ impl EventLog {
     }
 
     /// Convenience helper to record a system-level audit event with explicit timestamp.
-    pub fn record_system_at(&self, timestamp_sec: u64, severity: HealthLevel, msg: impl Into<String>) -> u64 {
+    pub fn record_system_at(
+        &self,
+        timestamp_sec: u64,
+        severity: HealthLevel,
+        msg: impl Into<String>,
+    ) -> u64 {
         self.record_at(timestamp_sec, EventKind::System, severity, msg)
     }
 
     /// Records an event with an explicit timestamp (e.g. synchronized network time or testing).
-    pub fn record_at(&self, timestamp_sec: u64, kind: EventKind, severity: HealthLevel, msg: impl Into<String>) -> u64 {
+    pub fn record_at(
+        &self,
+        timestamp_sec: u64,
+        kind: EventKind,
+        severity: HealthLevel,
+        msg: impl Into<String>,
+    ) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let item = EventItem {
             id,

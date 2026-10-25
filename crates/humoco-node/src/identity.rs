@@ -1,9 +1,9 @@
-use std::path::Path;
 use argon2::{Algorithm, Argon2, Params, Version};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use sha2::Sha512;
+use std::path::Path;
 use zeroize::Zeroize;
 
 use crate::error::NodeError;
@@ -29,7 +29,11 @@ pub fn compute_hybrid_node_id(ed25519_pub: &[u8; 32], pqc_pub: &[u8]) -> [u8; 32
 }
 
 /// Computes the raw Argon2d PoW proof hash over NodePubKey || Nonce || T0.
-pub fn compute_pow_proof(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> Result<[u8; 32], NodeError> {
+pub fn compute_pow_proof(
+    node_pubkey: &[u8; 32],
+    nonce: u64,
+    t0: u64,
+) -> Result<[u8; 32], NodeError> {
     if nonce == 0 && t0 == 0 {
         return Ok(*blake3::hash(node_pubkey).as_bytes());
     }
@@ -151,13 +155,13 @@ impl NodeIdentity {
         Self::from_signing_key_with_pow(signing_key, nonce, t0)
     }
 
-/// Constructs an Ed25519 node identity from a BIP-39 mnemonic phrase and optional passphrase
-/// using SLIP-0010 Ed25519 master key derivation (matching the human-money-core standard).
-///
-/// The derivation steps are:
-/// 1. BIP-39 mnemonic to seed via PBKDF2-HMAC-SHA512 (2048 iterations) with salt "mnemonic" + passphrase.
-/// 2. SLIP-0010 master key derivation: HMAC-SHA512(key = b"ed25519 seed", data = bip39_seed).
-/// 3. The first 32 bytes (I_L) form the Ed25519 seed for SigningKey::from_bytes(&seed).
+    /// Constructs an Ed25519 node identity from a BIP-39 mnemonic phrase and optional passphrase
+    /// using SLIP-0010 Ed25519 master key derivation (matching the human-money-core standard).
+    ///
+    /// The derivation steps are:
+    /// 1. BIP-39 mnemonic to seed via PBKDF2-HMAC-SHA512 (2048 iterations) with salt "mnemonic" + passphrase.
+    /// 2. SLIP-0010 master key derivation: HMAC-SHA512(key = b"ed25519 seed", data = bip39_seed).
+    /// 3. The first 32 bytes (I_L) form the Ed25519 seed for SigningKey::from_bytes(&seed).
     pub fn from_mnemonic(phrase: &str, passphrase: Option<&str>) -> Result<Self, NodeError> {
         let mnemonic = bip39::Mnemonic::parse_normalized(phrase)
             .map_err(|err| NodeError::Identity(format!("Invalid mnemonic phrase: {err}")))?;
@@ -349,11 +353,10 @@ impl NodeIdentity {
                     source: err,
                 })?;
 
-            file.write_all(&out)
-                .map_err(|err| NodeError::IoWithPath {
-                    path: path.to_path_buf(),
-                    source: err,
-                })?;
+            file.write_all(&out).map_err(|err| NodeError::IoWithPath {
+                path: path.to_path_buf(),
+                source: err,
+            })?;
             file.flush().map_err(|err| NodeError::IoWithPath {
                 path: path.to_path_buf(),
                 source: err,
@@ -513,7 +516,8 @@ mod tests {
         );
 
         // Derivation with passphrase matching human-money-core vector
-        let id_pass = NodeIdentity::from_mnemonic(phrase, Some("TREZOR")).expect("Derive with passphrase");
+        let id_pass =
+            NodeIdentity::from_mnemonic(phrase, Some("TREZOR")).expect("Derive with passphrase");
         assert_eq!(
             id_pass.public_key_hex(),
             "8e07aa919abc1427adf010d10467dfba6f1f354b6707916dc9c059771ec13ecd"
@@ -523,7 +527,8 @@ mod tests {
 
     #[test]
     fn test_generate_with_mnemonic_and_rederivation() {
-        let (id, phrase) = NodeIdentity::generate_with_mnemonic(12).expect("Generate 12-word mnemonic");
+        let (id, phrase) =
+            NodeIdentity::generate_with_mnemonic(12).expect("Generate 12-word mnemonic");
         let words: Vec<&str> = phrase.split_whitespace().collect();
         assert_eq!(words.len(), 12);
 
@@ -531,7 +536,10 @@ mod tests {
         let rederived = NodeIdentity::from_mnemonic(&phrase, None).expect("Rederive from phrase");
         assert_eq!(id.public_key_hex(), rederived.public_key_hex());
         assert_eq!(id.node_id(), rederived.node_id());
-        assert_eq!(id.signing_key().to_bytes(), rederived.signing_key().to_bytes());
+        assert_eq!(
+            id.signing_key().to_bytes(),
+            rederived.signing_key().to_bytes()
+        );
 
         // Invalid word count returns descriptive error
         let bad_count_res = NodeIdentity::generate_with_mnemonic(13);
@@ -543,7 +551,8 @@ mod tests {
         }
 
         // 24-word mnemonic also supported
-        let (id24, phrase24) = NodeIdentity::generate_with_mnemonic(24).expect("Generate 24-word mnemonic");
+        let (id24, phrase24) =
+            NodeIdentity::generate_with_mnemonic(24).expect("Generate 24-word mnemonic");
         let words24: Vec<&str> = phrase24.split_whitespace().collect();
         assert_eq!(words24.len(), 24);
         let rederived24 = NodeIdentity::from_mnemonic(&phrase24, None).expect("Rederive 24");
@@ -582,7 +591,8 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let key_path = temp.path().join("keys/mnemonic_key.bin");
 
-        let (identity, _phrase) = NodeIdentity::generate_with_mnemonic(12).expect("Generate mnemonic");
+        let (identity, _phrase) =
+            NodeIdentity::generate_with_mnemonic(12).expect("Generate mnemonic");
         identity.save_to_file(&key_path).expect("Save identity");
         assert!(key_path.exists());
 
@@ -603,7 +613,11 @@ mod tests {
     fn test_did_key_format() {
         let identity = NodeIdentity::generate();
         let did = identity.did_key();
-        assert!(did.starts_with("did:key:z6Mk"), "Ed25519 multicodec did:key should start with did:key:z6Mk, got: {}", did);
+        assert!(
+            did.starts_with("did:key:z6Mk"),
+            "Ed25519 multicodec did:key should start with did:key:z6Mk, got: {}",
+            did
+        );
     }
 
     #[test]
@@ -633,4 +647,3 @@ mod tests {
         assert_eq!(&decoded_pk[..], identity.verifying_key().as_bytes());
     }
 }
-

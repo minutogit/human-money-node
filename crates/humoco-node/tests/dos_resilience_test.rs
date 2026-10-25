@@ -1,8 +1,8 @@
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -52,11 +52,22 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
     let peer_mgr = Arc::new(PeerManager::with_f2f(shard_entries, shard_pubkeys.clone()));
 
     for (key, addr) in shard_pubkeys.iter().zip(&shard_addrs) {
-        peer_mgr.learn_node_from_gossip_with_hrw(*key, *key, *addr, 0, None).await;
-        peer_mgr.set_first_seen_for_test(key, Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+        peer_mgr
+            .learn_node_from_gossip_with_hrw(*key, *key, *addr, 0, None)
+            .await;
+        peer_mgr
+            .set_first_seen_for_test(
+                key,
+                Instant::now() - std::time::Duration::from_secs(25 * 3600),
+            )
+            .await;
     }
     let active_nodes = peer_mgr.active_hrw_nodes().await;
-    assert_eq!(active_nodes.len(), 20, "Must have 20 eligible shard candidates");
+    assert_eq!(
+        active_nodes.len(),
+        20,
+        "Must have 20 eligible shard candidates"
+    );
 
     // Setup transport for local node
     let cancel_token = CancellationToken::new();
@@ -93,7 +104,7 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
         let del_str = valid_until_ms.to_string();
 
         let mut req_payload = humoco_node::api::hmc::L2LockRequest {
-        causal_output: None,
+            causal_output: None,
             auth: humoco_node::api::hmc::L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -118,12 +129,44 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
         req_payload.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
 
         let root = req_payload.clone();
-        let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.transaction_hash).into_string(), (&root).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(now), None, None, None).await;
-        assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
-        req_payload.is_genesis = false; req_payload.ds_tag = Some(format!("dos-spend-{round}")); req_payload.deletable_at = None; req_payload.transaction_hash = [round as u8 + 50; 32];
-        req_payload.layer2_signature = sender_key.sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&req_payload)).to_bytes();
-        let shard = engine.get_hmc_voucher_genesis_shard(&root.layer2_voucher_id).await.unwrap();
-        assert!(!peer_mgr.is_local_committee_member(*identity.node_pubkey(), *identity.hrw_routing_id(), shard).await, "fixture must route real shard requests, not stop at a local readiness gate");
+        let (verdict, _) = engine
+            .ingress_hmc_lock_durable(
+                bs58::encode(root.transaction_hash).into_string(),
+                (&root).into(),
+                humoco_node::storage::IngressOrigin::ClientApi,
+                Some(now),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(
+            verdict,
+            humoco_node::api::hmc::L2Verdict::Verified { .. }
+        ));
+        req_payload.is_genesis = false;
+        req_payload.ds_tag = Some(format!("dos-spend-{round}"));
+        req_payload.deletable_at = None;
+        req_payload.transaction_hash = [round as u8 + 50; 32];
+        req_payload.layer2_signature = sender_key
+            .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(
+                &req_payload,
+            ))
+            .to_bytes();
+        let shard = engine
+            .get_hmc_voucher_genesis_shard(&root.layer2_voucher_id)
+            .await
+            .unwrap();
+        assert!(
+            !peer_mgr
+                .is_local_committee_member(
+                    *identity.node_pubkey(),
+                    *identity.hrw_routing_id(),
+                    shard
+                )
+                .await,
+            "fixture must route real shard requests, not stop at a local readiness gate"
+        );
         let req = Request::builder()
             .method("POST")
             .uri("/v1/lock")
@@ -180,7 +223,10 @@ async fn test_isolated_peer_failure_is_still_penalized() {
     let p2 = peer_mgr.get_peer(&addr2).await.unwrap();
     let p3 = peer_mgr.get_peer(&addr3).await.unwrap();
 
-    assert_eq!(p1.missing_count, 1, "Isolated failure MUST increment missing_count");
+    assert_eq!(
+        p1.missing_count, 1,
+        "Isolated failure MUST increment missing_count"
+    );
     assert_eq!(p2.missing_count, 0);
     assert_eq!(p3.missing_count, 0);
 }

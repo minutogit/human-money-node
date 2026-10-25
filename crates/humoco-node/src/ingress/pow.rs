@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use parking_lot::Mutex;
 use thiserror::Error;
 
 pub const STATELESS_POW_DOMAIN: &[u8] = b"HUMOCO_V1_POW_STATELESS";
@@ -33,6 +31,17 @@ pub fn compute_stateless_challenge(parent_lock: &[u8; 32], epoch_slot: u64) -> [
     *hasher.finalize().as_bytes()
 }
 
+/// Canonical Direct Stateless Hashcash (Spec 13 §4, AGENTS.md):
+/// BLAKE3(len || "HUMOCO_V1_POW_STATELESS" || parent_lock || epoch_slot || nonce)
+pub fn hash_work(parent_lock: &[u8; 32], epoch_slot: u64, nonce: u64) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[STATELESS_POW_DOMAIN.len() as u8]);
+    hasher.update(STATELESS_POW_DOMAIN);
+    hasher.update(parent_lock);
+    hasher.update(&epoch_slot.to_le_bytes());
+    hasher.update(&nonce.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
 
 /// Nonce-Verifikation: BLAKE3("HUMOCO_POW_SOLUTION" || challenge || nonce)
 pub fn compute_solution_hash(challenge: &[u8; 32], nonce: u64) -> [u8; 32] {
@@ -64,7 +73,11 @@ pub fn check_difficulty(hash: &[u8; 32], difficulty: u32) -> bool {
 }
 
 /// Solves the BLAKE3 hashcash challenge by searching for a nonce satisfying the difficulty threshold.
-pub fn solve_blake3_hashcash(challenge_hex: &str, difficulty: u32, max_iterations: u64) -> Option<u64> {
+pub fn solve_blake3_hashcash(
+    challenge_hex: &str,
+    difficulty: u32,
+    max_iterations: u64,
+) -> Option<u64> {
     let payload = hex::decode(challenge_hex).ok()?;
     if payload.len() != 32 {
         return None;
@@ -87,7 +100,6 @@ pub struct PowEngine {
     pub secret: [u8; 32],
     default_difficulty: u32,
     challenge_ttl_seconds: u64,
-    seen_solutions: Arc<Mutex<HashMap<([u8; 32], u64), u64>>>,
     clock: Arc<parking_lot::RwLock<Option<Arc<crate::network::NetworkClock>>>>,
 }
 
@@ -98,7 +110,6 @@ impl PowEngine {
             secret,
             default_difficulty,
             challenge_ttl_seconds: DEFAULT_EPOCH_DURATION_SEC,
-            seen_solutions: Arc::new(Mutex::new(HashMap::new())),
             clock: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
@@ -159,11 +170,19 @@ impl PowEngine {
     }
 
     /// Generates a stateless BLAKE3 challenge bound to a specific parent lock at explicit timestamp.
-    pub fn generate_challenge_for_parent_at(&self, parent_lock: &[u8; 32], now_sec: u64) -> (String, u32, u64) {
+    pub fn generate_challenge_for_parent_at(
+        &self,
+        parent_lock: &[u8; 32],
+        now_sec: u64,
+    ) -> (String, u32, u64) {
         let slot = self.current_epoch_slot(now_sec);
         let expires_at = (slot + 1) * self.challenge_ttl_seconds;
         let challenge_bytes = compute_stateless_challenge(parent_lock, slot);
-        (hex::encode(challenge_bytes), self.default_difficulty, expires_at)
+        (
+            hex::encode(challenge_bytes),
+            self.default_difficulty,
+            expires_at,
+        )
     }
 
     /// Generates a stateless BLAKE3 challenge bound to a specific parent lock.
@@ -178,7 +197,11 @@ impl PowEngine {
     }
 
     /// Validates the challenge structure and computes its expiration time at explicit timestamp.
-    pub fn validate_challenge_at(&self, challenge_hex: &str, now_sec: u64) -> Result<([u8; 32], u64), PowError> {
+    pub fn validate_challenge_at(
+        &self,
+        challenge_hex: &str,
+        now_sec: u64,
+    ) -> Result<([u8; 32], u64), PowError> {
         let payload = hex::decode(challenge_hex).map_err(|_| PowError::InvalidFormat)?;
         if payload.len() != 32 {
             return Err(PowError::InvalidFormat);
@@ -238,11 +261,7 @@ impl PowEngine {
             } else {
                 [0u8; 32]
             };
-            if challenge_bytes != expected_curr
-                && challenge_bytes != expected_prev
-                && challenge_bytes != gen_curr
-                && challenge_bytes != gen_prev
-            {
+            if challenge_bytes != expected_curr && challenge_bytes != expected_prev {
                 return Err(PowError::InvalidFormat);
             }
         } else if challenge_bytes != gen_curr && challenge_bytes != gen_prev {
@@ -259,20 +278,8 @@ impl PowEngine {
             });
         }
 
-        // Replay check: every challenge+nonce pair can be verified only once (atomic check + insert)
-        let key = (challenge_bytes, nonce);
-        let expires_at = (current_slot + 1) * self.challenge_ttl_seconds;
-        {
-            let mut seen = self.seen_solutions.lock();
-            if seen.len() > 10_000 {
-                seen.retain(|_, exp| *exp > now_sec);
-            }
-            if seen.contains_key(&key) {
-                return Err(PowError::ReplayDetected);
-            }
-            seen.insert(key, expires_at);
-        }
-
+        // Stateless admission (A25-02 / Spec 13 §4): No stateful seen_solutions replay table
+        // retained across requests; exact retries of valid stateless work succeed idempotently.
         Ok(true)
     }
 
@@ -284,16 +291,33 @@ impl PowEngine {
         difficulty: u32,
         expected_parent_lock: Option<&[u8; 32]>,
     ) -> Result<bool, PowError> {
-        self.verify_pow_for_parent_at(challenge_hex, nonce, difficulty, expected_parent_lock, self.now_sec()).await
+        self.verify_pow_for_parent_at(
+            challenge_hex,
+            nonce,
+            difficulty,
+            expected_parent_lock,
+            self.now_sec(),
+        )
+        .await
     }
 
     /// Verifies PoW challenge without parent lock check.
-    pub async fn verify_pow(&self, challenge_hex: &str, nonce: u64, difficulty: u32) -> Result<bool, PowError> {
-        self.verify_pow_for_parent(challenge_hex, nonce, difficulty, None).await
+    pub async fn verify_pow(
+        &self,
+        challenge_hex: &str,
+        nonce: u64,
+        difficulty: u32,
+    ) -> Result<bool, PowError> {
+        self.verify_pow_for_parent(challenge_hex, nonce, difficulty, None)
+            .await
     }
 
     /// Solves the BLAKE3 hashcash challenge (helper for clients/tests).
-    pub fn solve_blake3_hashcash(challenge_hex: &str, difficulty: u32, max_iterations: u64) -> Option<u64> {
+    pub fn solve_blake3_hashcash(
+        challenge_hex: &str,
+        difficulty: u32,
+        max_iterations: u64,
+    ) -> Option<u64> {
         solve_blake3_hashcash(challenge_hex, difficulty, max_iterations)
     }
 
@@ -338,16 +362,20 @@ mod tests {
         let nonce = solve_blake3_hashcash(&challenge, difficulty, 10_000).expect("Solve PoW");
 
         // Fails if submitted for parent_b
-        let err = engine.verify_pow_for_parent(&challenge, nonce, difficulty, Some(&parent_b)).await;
+        let err = engine
+            .verify_pow_for_parent(&challenge, nonce, difficulty, Some(&parent_b))
+            .await;
         assert!(matches!(err, Err(PowError::InvalidFormat)));
 
         // Succeeds for matching parent_a
-        let ok = engine.verify_pow_for_parent(&challenge, nonce, difficulty, Some(&parent_a)).await;
+        let ok = engine
+            .verify_pow_for_parent(&challenge, nonce, difficulty, Some(&parent_a))
+            .await;
         assert_eq!(ok, Ok(true));
     }
 
     #[tokio::test]
-    async fn test_pow_replay_protection() {
+    async fn test_pow_stateless_retry_allowed() {
         let secret = [0x42u8; 32];
         let engine = PowEngine::new(secret, 8);
 
@@ -358,9 +386,9 @@ mod tests {
         let first = engine.verify_pow(&challenge, nonce, difficulty).await;
         assert_eq!(first, Ok(true));
 
-        // Replay with the same token and nonce is rejected
+        // Exact retry of valid stateless work also succeeds without replay error (A25-02 / W3)
         let second = engine.verify_pow(&challenge, nonce, difficulty).await;
-        assert_eq!(second, Err(PowError::ReplayDetected));
+        assert_eq!(second, Ok(true));
     }
 
     #[tokio::test]
@@ -394,8 +422,10 @@ mod tests {
         let (challenge, difficulty, _) = engine.generate_challenge();
         assert_eq!(difficulty, 16);
 
-        let nonce = solve_blake3_hashcash(&challenge, difficulty, 500_000).expect("Solve 16-bit PoW");
-        let hash = compute_solution_hash(&hex::decode(&challenge).unwrap().try_into().unwrap(), nonce);
+        let nonce =
+            solve_blake3_hashcash(&challenge, difficulty, 500_000).expect("Solve 16-bit PoW");
+        let hash =
+            compute_solution_hash(&hex::decode(&challenge).unwrap().try_into().unwrap(), nonce);
         assert_eq!(hash[0], 0);
         assert_eq!(hash[1], 0);
 
@@ -410,7 +440,10 @@ mod tests {
 
         let (challenge, _, _) = engine.generate_challenge();
         let result = engine.verify_pow(&challenge, 0, 16).await;
-        assert!(matches!(result, Err(PowError::InsufficientDifficulty { required: 16, .. })));
+        assert!(matches!(
+            result,
+            Err(PowError::InsufficientDifficulty { required: 16, .. })
+        ));
     }
 
     #[tokio::test]

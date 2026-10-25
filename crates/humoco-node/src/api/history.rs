@@ -8,11 +8,11 @@
 //!   lock-free / cheap accessors without locking `RamIndex` during hot-path transactions.
 //! - Fixed RAM ceiling: 1440 entries * ~72 bytes ≈ 104 KB maximum memory usage.
 
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 /// Maximum number of historical sample points retained (24 hours at 1 min resolution).
@@ -51,7 +51,9 @@ impl HistorySampler {
     /// Creates a new `HistorySampler` with the given capacity.
     pub fn new(capacity: usize) -> Self {
         Self {
-            buffer: Arc::new(RwLock::new(VecDeque::with_capacity(capacity.min(HISTORY_CAPACITY)))),
+            buffer: Arc::new(RwLock::new(VecDeque::with_capacity(
+                capacity.min(HISTORY_CAPACITY),
+            ))),
             capacity: capacity.min(HISTORY_CAPACITY),
             hourly: Arc::new(super::history_retention::HourlyHistory::default()),
         }
@@ -60,7 +62,9 @@ impl HistorySampler {
     /// Records a new sample point into the ring buffer.
     /// If capacity is exceeded, the oldest point is dropped.
     pub fn record(&self, point: HistoryPoint) {
-        if self.capacity == 0 { return; }
+        if self.capacity == 0 {
+            return;
+        }
         let mut guard = self.buffer.write();
         if guard.len() >= self.capacity {
             guard.pop_front();
@@ -172,7 +176,7 @@ impl HistorySampler {
     async fn persist_hourly(&self) {
         let hourly = self.hourly.clone();
         match tokio::task::spawn_blocking(move || hourly.persist()).await {
-            Ok(Ok(())) => {},
+            Ok(Ok(())) => {}
             other => tracing::warn!(?other, "Private hourly history could not be persisted"),
         }
     }

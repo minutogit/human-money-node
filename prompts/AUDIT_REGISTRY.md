@@ -21,37 +21,74 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
   * `🟡 In Progress`: Funde in Bearbeitung / Teilfixes erfolgt.
   * `🔴 Hotspot`: Mehrfach kritische Lücken gefunden, erfordert zeitnahen Re-Audit.
 
+
+---
+
+## 🏛️ Die 6 Kritikalitäts-Stufen (Architektur- & Schadensmatrix)
+
+Die 25 Audits sind nach **Schadenspotenzial**, **Produktionsnähe (Gen 2 vs. Gen 1)** und **Re-Audit-Relevanz** in 6 Kritikalitäts-Stufen eingeteilt:
+
+* **🔴 Stufe 1: Konsensus-Kern & PoS-Hotpath (Produktions-Integrität & Überleben)**  
+  *Schadenspotenzial: Katastrophal ($0-Toleranz)*. Fehler führen zu Double-Spends, Slashing ehrlicher Knoten (Doppel-Signatur), Fork-Divergenz oder Zusammenbruch der PoS-Kassen-SLA.  
+  Umfasst die hochspezialisierten „Generation 2“-Audits (Oktober 2026), die direkt auf den echten Modulen (`daemon.rs`, `recovery.rs`, `signing.rs`, `install.rs`, `transport.rs`, `routes.rs`) sitzen. Diese Audits müssen **zu 100 % fehlerfrei sitzen** und haben bei jedem Release oberste Priorität.  
+  *Audits: 23, 22, 24, 21, 25, 19*
+
+* **🟠 Stufe 2: Laufzeit-Dynamik & Aktive Test-Generierung (Deadlocks, Zeit & Fuzzing)**  
+  *Schadenspotenzial: Hoch (Systemstillstand / Liveness-Verlust)*. Fehler führen zu Deadlocks unter Last, Channel-Blockaden, vorzeitigem TTL-Löschen durch Uhrenmanipulation oder unentdeckten Test-Blindspots.  
+  Zeitlose Audits für Systemdynamik ($\Delta \text{Load} \le 0$), dezentralen Median (`P2pClock`) und automatisierte Mutation-/Property-Testgenerierung.  
+  *Audits: 03, 11, 12, 14, 06*
+
+* **🟡 Stufe 3: Code-Sicherheit & Invarianten-Wächter (Panic-Freiheit, Safety & Specs)**  
+  *Schadenspotenzial: Mittel bis Hoch (Remote Crash / Spezifikations-Drift)*.  
+  Erzwingt Panic-Freiheit auf Netzwerkpfaden (Verbot von `.unwrap()`/`.expect()`, Schutz vor Panics bei Slice-Zugriffen), `#![forbid(unsafe_code)]` und gleicht `INVARIANT_REGISTRY.md` bitgenau mit der Implementierung ab.  
+  *Audits: 15, 13, 04*
+
+* **🟢 Stufe 4: Makro- & Performance-Sammelbecken (Weitgehend durch Gen 2 abgelöst)**  
+  *Schadenspotenzial: Gering bis Mittel (Historische Sammelprompts)*.  
+  Diese Audits wurden in frühen Phasen konzipiert. Ihre Kernprüfungen wurden durch die schärferen Audits aus Stufe 1 (`21`–`25`) übernommen. Vor erneuten Durchläufen müssen veraltete Annahmen im Prompt-Text aktualisiert werden, um False Positives zu vermeiden.  
+  *Audits: 02, 05, 20, 07*
+
+* **🔵 Stufe 5: Konzeptionelle Spieltheorie & Architektur-Beweise (Einmal-Beweise)**  
+  *Schadenspotenzial: Gering (Design-Integrität)*.  
+  Mathematische Nachweise über Schutz vor Shard-Kartellen, Eclipse-Resilienz und Post-Breach-Containment (Blind Service / Client-Side Custody). Wiederholte Durchläufe bringen keinen neuen Erkenntnisgewinn, solange das Architekturmodell unverändert bleibt.  
+  *Audits: 08, 10, 09*
+
+* **⚪ Stufe 6: Code-Hygiene, Wartbarkeit & Supply Chain (Wartung ohne Konsensus-Risiko)**  
+  *Schadenspotenzial: Sehr gering (Kein Ausfallrisiko)*.  
+  Code-Abbau (*„Subtraction before Construction“*), Bereinigung toter DTOs/Wire-Typen, POSIX 0600-Dateirechte und Abhängigkeitsprüfung via `cargo audit`.  
+  *Audits: 01, 18, 17, 16*
+
 ---
 
 ## 📊 Status-Matrix der 25 Audit-Prompts
 
-| ID | Prompt-Datei | Pillar | Letzter Durchlauf | Modell | Funde gesamt | Offen | Status | Prio-Score |
-|---|---|---|---|---|---|---|---|---|
-| **01** | `01_subtraktion_und_vereinfachung.md` | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **02** | `02_security_und_byzantine_hardening.md` | 3. Byzantine | 2026-09-29 | subagents / gemini-3.7-flash | 10 | 0 | `🟢 Clean` | **Niedrig** |
-| **03** | `03_todes_spiralen_und_deadlock_audit.md` | 4. Dynamik | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **04** | `04_invarianten_und_spezifikations_waechter.md` | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 9 | 0 | `🟢 Clean` | **Niedrig** |
-| **05** | `05_performance_und_latency_audit.md` | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 7 | 0 | `🟢 Clean` | **Niedrig** |
-| **06** | `06_chaos_und_fuzz_test_generator.md` | 5. Chaos | 2026-09-29 | subagents / gemini-3.7-flash | 12 | 0 | `🟢 Clean` | **Niedrig** |
-| **07** | `07_faulheit_und_free_riding_audit.md` | 4. Dynamik | 2026-09-29 | subagents / gemini-3.7-flash | 6 | 0 | `🟢 Clean` | **Niedrig** |
-| **08** | `08_sabotage_zensur_und_eclipse_audit.md` | 3. Byzantine | 2026-09-29 | subagents / gemini-3.7-flash | 6 | 0 | `🟢 Clean` | **Niedrig** |
-| **09** | `09_knoten_hack_und_key_compromise_audit.md` | 3. Byzantine | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **10** | `10_kartellbildung_und_shard_takeover_audit.md` | 3. Byzantine | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **11** | `11_time_warp_und_uhren_manipulation_audit.md` | 4. Dynamik | 2026-09-29 | subagents / gemini-3.7-flash | 2 | 0 | `🟢 Clean` | **Niedrig** |
-| **12** | `12_mutation_testing_und_test_blindspot_audit.md` | 1. Testing | 2026-09-29 | subagents / gemini-3.7-flash | 8 | 0 | `🟢 Clean` | **Niedrig** |
-| **13** | `13_unsafe_code_und_memory_safety_audit.md` | 1. Safety | 2026-09-29 | subagents / gemini-3.7-flash | 4 | 0 | `🟢 Clean` | **Niedrig** |
-| **14** | `14_property_based_testing_und_fuzzing.md` | 1. Testing | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **15** | `15_clean_code_und_idiomatic_rust_audit.md` | 1. Clean Code | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **16** | `16_supply_chain_und_dependency_audit.md` | 1. Supply Chain | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **17** | `17_update_and_supply_chain_verification.md` | 1. Sovereign | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
-| **18** | `18_legacy_code_and_architectural_drift_audit.md` | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 12 | 0 | `🟢 Clean` | **Niedrig** |
-| **19** | `19_wire_level_quota_and_adversarial_verification_audit.md` | 5. Wire / Chaos | 2026-10-25 | Codex / independent subagent | 3 | 3 | `🟡 In Progress` | **🔥 Hoch** |
-| **20** | `20_adler_perspektive_und_systemische_vollstaendigkeit.md` | 2. Makro-Architektur | 2026-10-24 | model-router (minimax) / verified | 0 | 0 | `🟢 Clean` | **Niedrig** |
-| **21** | `21_distributed_recovery_and_shard_sync_audit.md` | 2. Recovery / Sync | 2026-10-24 | TDD / regression-verified | 6 | 0 | `🟢 Clean` | **Niedrig** |
-| **22** | `22_monotonic_confirmation_and_merge_quarantine_audit.md` | 2. Konsensus / Invarianten | 2026-10-25 | regression-first (TDD) / verified | 3 | 0 | `🟢 Clean` | **Niedrig** |
-| **23** | `23_dual_tier_concurrency_and_signing_history_audit.md` | 1. Safety / Concurrency | 2026-10-25 | regression-first (TDD) / verified | 1 | 0 | `🟢 Clean` | **Niedrig** |
-| **24** | `24_pos_checkout_hotpath_and_cancellation_safety_audit.md` | 4. Dynamik / Latency | 2026-10-24 | Codex | 4 | 4 | `🟡 In Progress` | **🔥 Hoch** |
-| **25** | `25_ingress_defense_and_stateless_pow_audit.md` | 3. Byzantine / Ingress | 2026-10-25 | Codex / independent subagent | 5 | 5 | `🟡 In Progress` | **🔥 Hoch** |
+| ID | Prompt-Datei | Stufe | Pillar | Letzter Durchlauf | Modell | Funde gesamt | Offen | Status | Prio-Score |
+|---|---|---|---|---|---|---|---|---|---|
+| **01** | `01_subtraktion_und_vereinfachung.md` | Stufe 6 | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **02** | `02_security_und_byzantine_hardening.md` | Stufe 4 | 3. Byzantine | 2026-09-29 | subagents / gemini-3.7-flash | 10 | 0 | `🟢 Clean` | **Niedrig** |
+| **03** | `03_todes_spiralen_und_deadlock_audit.md` | Stufe 2 | 4. Dynamik | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **04** | `04_invarianten_und_spezifikations_waechter.md` | Stufe 3 | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 9 | 0 | `🟢 Clean` | **Niedrig** |
+| **05** | `05_performance_und_latency_audit.md` | Stufe 4 | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 7 | 0 | `🟢 Clean` | **Niedrig** |
+| **06** | `06_chaos_und_fuzz_test_generator.md` | Stufe 2 | 5. Chaos | 2026-09-29 | subagents / gemini-3.7-flash | 12 | 0 | `🟢 Clean` | **Niedrig** |
+| **07** | `07_faulheit_und_free_riding_audit.md` | Stufe 4 | 4. Dynamik | 2026-09-29 | subagents / gemini-3.7-flash | 6 | 0 | `🟢 Clean` | **Niedrig** |
+| **08** | `08_sabotage_zensur_und_eclipse_audit.md` | Stufe 5 | 3. Byzantine | 2026-09-29 | subagents / gemini-3.7-flash | 6 | 0 | `🟢 Clean` | **Niedrig** |
+| **09** | `09_knoten_hack_und_key_compromise_audit.md` | Stufe 5 | 3. Byzantine | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **10** | `10_kartellbildung_und_shard_takeover_audit.md` | Stufe 5 | 3. Byzantine | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **11** | `11_time_warp_und_uhren_manipulation_audit.md` | Stufe 2 | 4. Dynamik | 2026-09-29 | subagents / gemini-3.7-flash | 2 | 0 | `🟢 Clean` | **Niedrig** |
+| **12** | `12_mutation_testing_und_test_blindspot_audit.md` | Stufe 2 | 1. Testing | 2026-09-29 | subagents / gemini-3.7-flash | 8 | 0 | `🟢 Clean` | **Niedrig** |
+| **13** | `13_unsafe_code_und_memory_safety_audit.md` | Stufe 3 | 1. Safety | 2026-09-29 | subagents / gemini-3.7-flash | 4 | 0 | `🟢 Clean` | **Niedrig** |
+| **14** | `14_property_based_testing_und_fuzzing.md` | Stufe 2 | 1. Testing | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **15** | `15_clean_code_und_idiomatic_rust_audit.md` | Stufe 3 | 1. Clean Code | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **16** | `16_supply_chain_und_dependency_audit.md` | Stufe 6 | 1. Supply Chain | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **17** | `17_update_and_supply_chain_verification.md` | Stufe 6 | 1. Sovereign | 2026-09-29 | subagents / gemini-3.7-flash | 5 | 0 | `🟢 Clean` | **Niedrig** |
+| **18** | `18_legacy_code_and_architectural_drift_audit.md` | Stufe 6 | 2. Architektur | 2026-09-29 | subagents / gemini-3.7-flash | 12 | 0 | `🟢 Clean` | **Niedrig** |
+| **19** | `19_wire_level_quota_and_adversarial_verification_audit.md` | Stufe 1 | 5. Wire / Chaos | 2026-10-25 | regression-first (TDD) / verified | 3 | 0 | `🟢 Clean` | **Niedrig** |
+| **20** | `20_adler_perspektive_und_systemische_vollstaendigkeit.md` | Stufe 4 | 2. Makro-Architektur | 2026-10-24 | model-router (minimax) / verified | 0 | 0 | `🟢 Clean` | **Niedrig** |
+| **21** | `21_distributed_recovery_and_shard_sync_audit.md` | Stufe 1 | 2. Recovery / Sync | 2026-10-24 | TDD / regression-verified | 6 | 0 | `🟢 Clean` | **Niedrig** |
+| **22** | `22_monotonic_confirmation_and_merge_quarantine_audit.md` | Stufe 1 | 2. Konsensus / Invarianten | 2026-10-25 | regression-first (TDD) / verified | 3 | 0 | `🟢 Clean` | **Niedrig** |
+| **23** | `23_dual_tier_concurrency_and_signing_history_audit.md` | Stufe 1 | 1. Safety / Concurrency | 2026-10-25 | regression-first (TDD) / verified | 1 | 0 | `🟢 Clean` | **Niedrig** |
+| **24** | `24_pos_checkout_hotpath_and_cancellation_safety_audit.md` | Stufe 1 | 4. Dynamik / Latency | 2026-10-25 | regression-first (TDD) / verified | 4 | 0 | `🟢 Clean` | **Niedrig** |
+| **25** | `25_ingress_defense_and_stateless_pow_audit.md` | Stufe 1 | 3. Byzantine / Ingress | 2026-10-25 | regression-first (TDD) / verified | 5 | 0 | `🟢 Clean` | **Niedrig** |
 
 ---
 
@@ -85,6 +122,7 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | 2026-10-24 22:30 | [22] | verified / inherited_support_tests | 0 | Audit 22: Monotonic Confirmation Classes & Merge Quarantine (5/5 Filter verifiziert: Monotone Klassenordnung DEC-064, Quorum-Support-Qualifikation F01, Quarantäne via `TABLE_PROVISIONAL_HMC_LOCKS` bei Dorf-Merge, Zero Bloat TTL-Pruning, deterministisches min(H_canon). 6/6 QUIC-Wire-Tests grün). | `prompts/reports/2026-10-24_22_monotonic_confirmation_and_merge_quarantine.md` |
 | 2026-10-24 22:35 | [23] | verified / storage_tests | 0 | Audit 23: Dual-Tier Concurrency & Fail-Closed Signing (5/5 Filter verifiziert: Nanosekunden atomic CAS Single-Winner Idempotenz, Durable-before-Vote DEC-029 synchroner oneshot Commit-Wait in `ingress_hmc_lock_durable`, non-blocking Tokio Worker Thread, G5 Fail-Closed Monotonic Signing Fingerprint Latch). | `prompts/reports/2026-10-24_23_dual_tier_concurrency_and_signing_history.md` |
 | 2026-10-24 | [24] | Codex | 4 | Audit only; no production fixes. Three P2 findings reproduced over real QUIC (minority-answer live-proof denial, client/server deadline mismatch, collision overwritten by HTTP 503); one P3 retry-response loss confirmed by inspection. Standard suite: 681 passed, 0 failed, 14 ignored. | `prompts/reports/2026-10-24_24_pos_checkout_hotpath_audit.md` |
+| 2026-10-25 09:15 | [24] | regression-first (TDD) / verified | 4 | Alle 4 Audit-24-Befunde behoben: 1. A24-01: Per-Member Live-Verifikation (`query_member_live_vote`) mit Gruppierung nach `live_state_digest` und 14-Vote Fast-Exit eliminiert First-Response-Wins Schwachstelle; 2. A24-02: Live-Proof-Sammlung an einheitliches absolutes Server-Deadline-Budget (750ms `LIVE_PROOF_SERVER_BUDGET`) via Middleware gebunden; 3. A24-03: Strikte `validate_remote_collision` mit Quorum-Isolation bewahrt HTTP 409 Conflict auf Single- und Chain-Routen, Dual-Serde für `L2LockEntry` (bincode vs. JSON HMC Digest); 4. A24-04: Bounded Peer-Attestation-Retries (max 3 Writes) mit identischer Response-Validierung und neutralen Nicht-Malus-Ergebnissen. Permanente Regressionstests in `status_reconciliation_tests.rs` und `phase11_wire_level_adversarial_tests.rs` (100% grün). | `prompts/reports/2026-10-24_24_pos_checkout_hotpath_audit.md` |
 | 2026-10-24 22:40 | [25] | model-router / verified | 0 | Audit 25: Ingress Defense, Dynamic Stateless PoW & Wire-Framing (5/5 Filter verifiziert: Stateless BLAKE3 PoW mit 10-Minuten-Slots und atomarem Replay-Schutz, Cheap-Filters-First vor Krypto/Disk, striktes Verbot von NodePubKey als HTTP-Bearer-Token, 64 KiB OOM-Framing-Cap, deterministische 1-von-20 Shard-Lese-Randomisierung. 22/22 Tests grün). | `prompts/reports/2026-10-24_25_ingress_defense_and_stateless_pow.md` |
 | 2026-10-25 | [22] | Codex subagent / independently reviewed | 3 | Re-audit: two P2 findings (equal native canonical-hash ordering; stale RAM class publication) and one P3 (root metadata expiry). Four safe-behavior probes fail as expected, including real QUIC recovery. Separate detailed regression-first fix plan created; no production fixes. | `prompts/reports/2026-10-25_22_monotonic_confirmation_and_merge_quarantine_audit.md` |
 | 2026-10-25 10:50 | [22] | regression-first (TDD) / verified | 3 | Alle 3 Audit-22-Befunde behoben: 1. A22-01: Totale Ordnung für native LockRecords mit identischem H_canon via deterministischem ID-Tie-Breaker (`compare_native_precedence`) in Resolver, Installer und Reconciler inkl. ID-Preimage-Validierung; 2. A22-02: Monotone Publikation von Confirmation Classes im RAM (`max(current, admitted)`) für denselben Child-Lock und Bereinigung bei Child-Ersetzung; 3. A22-03: Geteilter, schrittweiser Voucher-Root-Pruner (`prune_voucher_roots`) mit 256-Limit und exakter Grace-Horizont-Prüfung (30s) in beiden DB-Pruning-Pfaden gegen unbegrenzte Root-Metadaten-Akkumulation. Permanente Regressionstests in `audit22_regressions.rs` (6/6 grün inkl. echtem QUIC-Cluster). | `prompts/reports/2026-10-25_22_monotonic_confirmation_and_merge_quarantine_audit.md` |
@@ -93,4 +131,7 @@ $$\text{Prio-Score} = (\text{Tage seit letztem Run} + 1) \times (\text{Historisc
 | 2026-10-25 | [25] | Codex / independent subagent | 5 | Independent re-audit: PoW format/parent binding, mandatory replay state, P2P/HTTP token coupling, expensive processing before admission, and ignored public quota denial. Five observation probes and seven framing component tests passed; explicit end-to-end evidence limits retained. Separate regression-first fix plan; no production fixes. | `prompts/reports/2026-10-25_25_ingress_defense_and_stateless_pow_audit.md` |
 | 2026-10-25 | [19, 25] validation | Codex coordinator | 8 open | Shared standard checks: 708 passed, 5 failed, 14 ignored (4 concurrent Audit23 regressions, 1 quorum assembly failure); formatting differences and Clippy E0505 in concurrent signing.rs changes. No production fixes by these audits; no findings closed. | `prompts/reports/evidence/2026-10-25_audits_19_25_shared/README.md` |
 | 2026-10-25 11:15 | [23] | regression-first (TDD) / verified | 1 | A23-01 behoben: 1. Laufzeit-Kardinalitätsprüfung (`choices.len() == state.count`) und Validierung von Generation, Slot/TTL-Index und Zeilendekodierung vor Mutationen und Exakt-Retries in `commit_original_approval` und `commit_original_record_approval`; 2. Fail-Closed Signing-Latch in-memory und persistiert (`latch_corruption` via unmittelbarer redb-Transaktion); 3. QUIC-Schutz gegen Doppel-Signaturen bei logischem Historienverlust; 4. Permanente Regressionen in `audit23_regressions.rs` (4/4 grün inkl. echtem QUIC-Cluster). | `prompts/reports/2026-10-25_23_dual_tier_concurrency_and_signing_history_audit.md` |
+| 2026-10-25 12:45 | [19] | regression-first (TDD) / verified | 3 | Alle 3 Audit-19-Befunde behoben: 1. A19-01: Root-abgeleitete Byte-Years-Abrechnung auf Empfängerseite (echte `root.valid_until` aus Speicher/Causal Genesis, Mismatch-Ablehnung für unterdeklarierte Wire-Lifetimes vor Mutationen); 2. A19-03: Neutrales Quoten-Feedback (`FLAG_QUOTA_EXCEEDED` ohne `record_failure` Malus oder Peer-Präsenz-Degradierung); 3. A19-02: Umfassende QUIC-Receiver-Abdeckung in `audit19_regressions.rs` (5x Rate-Limits, TLS/Sender-Identitätsbindung `FLAG_UNAUTHORIZED`, Bounded Framing); 4. W4: P2P-Quoten-Isolation nach voller 32-Byte `NodePubKey`. | `prompts/reports/2026-10-25_19_wire_level_quota_and_adversarial_verification_fix_plan.md` |
+| 2026-10-25 12:50 | [25] | regression-first (TDD) / verified | 5 | Alle 5 Audit-25-Befunde behoben: 1. A25-01: Kanonisches Single-Domain PoW `hash_work` (`HUMOCO_V1_POW_STATELESS`) mit strikter Parent-Bindung (generischer Zero-Parent Fallback entfernt); 2. A25-02: Mandatorischer `seen_solutions`-Replay-Cache entfernt, idempotente Retries mit identischem Work gelingen fehlerfrei; 3. A25-03: Entkopplung von P2P-Topologie und Client-Bearer-Tokens (`is_valid_client_token` erzwingt `f2f_`-Präfix); 4. A25-04: Frühe unauthorisierte Ablehnung vor Krypto/Disk-I/O mit un权的/unsignierten HTTP-Fehlern; 5. A25-05: Durchsetzung täglicher Public-Quoten in `try_accept_lock` (HTTP 429 QuotaExceeded bei Erschöpfung). Regressionen in `audit25_regressions.rs` (5/5 grün). | `prompts/reports/2026-10-25_25_ingress_defense_and_stateless_pow_fix_plan.md` |
+
 

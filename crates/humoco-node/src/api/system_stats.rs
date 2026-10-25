@@ -1,9 +1,9 @@
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 /// Size of the sparkline ringbuffer in seconds (60 seconds).
@@ -127,7 +127,8 @@ impl CpuStatSample {
         let guest = parts.get(8).copied().unwrap_or(0);
         let guest_nice = parts.get(9).copied().unwrap_or(0);
 
-        let total = user + nice + system + idle + iowait + irq + softirq + steal + guest + guest_nice;
+        let total =
+            user + nice + system + idle + iowait + irq + softirq + steal + guest + guest_nice;
         let idle_total = idle + iowait;
         Some(Self {
             total,
@@ -288,7 +289,9 @@ impl SystemStatsCollector {
         // 3. Push to ringbuffers
         guard.writes_sparkline.push(writes_per_sec);
         guard.reads_sparkline.push(reads_per_sec);
-        guard.latency_sparkline.push(current_local_latency_ms as f32);
+        guard
+            .latency_sparkline
+            .push(current_local_latency_ms as f32);
         guard.nodes_sparkline.push(current_nodes_count as u32);
     }
 
@@ -315,11 +318,14 @@ impl SystemStatsCollector {
         let byte_years_capacity = max_storage_locks;
 
         let (redb_growth_mb_per_day, days_until_full, disk_headroom_label) = {
-            if let (Some(oldest), Some(newest)) = (guard.redb_history.front(), guard.redb_history.back()) {
+            if let (Some(oldest), Some(newest)) =
+                (guard.redb_history.front(), guard.redb_history.back())
+            {
                 let delta_sec = newest.0.duration_since(oldest.0).as_secs();
                 if delta_sec > 0 && newest.1 > oldest.1 {
                     let delta_bytes = newest.1 - oldest.1;
-                    let growth_mb_per_day = (delta_bytes as f64 / delta_sec as f64) * 86400.0 / (1024.0 * 1024.0);
+                    let growth_mb_per_day =
+                        (delta_bytes as f64 / delta_sec as f64) * 86400.0 / (1024.0 * 1024.0);
                     if growth_mb_per_day > 0.0 {
                         let bytes_per_day = growth_mb_per_day * 1024.0 * 1024.0;
                         let days = (disk_free as f64 / bytes_per_day) as u64;
@@ -433,11 +439,17 @@ mod tests {
         ring.push(30.0);
         ring.push(40.0);
         ring.push(50.0);
-        assert_eq!(ring.to_chronological_vec(), vec![10.0, 20.0, 30.0, 40.0, 50.0]);
+        assert_eq!(
+            ring.to_chronological_vec(),
+            vec![10.0, 20.0, 30.0, 40.0, 50.0]
+        );
 
         // Over-filled wrapping
         ring.push(60.0);
-        assert_eq!(ring.to_chronological_vec(), vec![20.0, 30.0, 40.0, 50.0, 60.0]);
+        assert_eq!(
+            ring.to_chronological_vec(),
+            vec![20.0, 30.0, 40.0, 50.0, 60.0]
+        );
     }
 
     #[test]
@@ -481,7 +493,10 @@ mod tests {
 
         let stats = collector.get_system_stats(100, 1.0, 0);
         let growth = stats.redb_growth_mb_per_day;
-        assert!((growth - 10.0).abs() < 0.1, "Growth expected ~10.0 MB/day, got {growth}");
+        assert!(
+            (growth - 10.0).abs() < 0.1,
+            "Growth expected ~10.0 MB/day, got {growth}"
+        );
         assert!(stats.days_until_full.is_some());
         let days = stats.days_until_full.unwrap();
         assert_eq!(stats.disk_headroom_label, format!("{days} Tage"));

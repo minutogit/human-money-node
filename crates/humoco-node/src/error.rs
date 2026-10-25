@@ -64,5 +64,7 @@ pub enum NodeError {
 }
 
 impl NodeError {
-    pub fn is_local_capacity(&self) -> bool { matches!(self, Self::LocalCapacity(_)) || crate::network::pool::is_pool_rotation_error(self) }
+    pub fn is_local_capacity(&self) -> bool {
+        matches!(self, Self::LocalCapacity(_)) || crate::network::pool::is_pool_rotation_error(self)
+    }
 }

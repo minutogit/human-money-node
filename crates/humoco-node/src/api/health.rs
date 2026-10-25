@@ -207,7 +207,9 @@ pub fn evaluate_health(data: &DashboardData) -> HealthSummary {
                 .unwrap_or(false)
     });
     if let Some(node) = incubating_node {
-        let remaining_sec = node.incubation_remaining_sec.unwrap_or(TICKET_INCUBATION_SEC);
+        let remaining_sec = node
+            .incubation_remaining_sec
+            .unwrap_or(TICKET_INCUBATION_SEC);
         if remaining_sec <= TICKET_INCUBATION_SEC {
             items.push(HealthItem::new(
                 "TICKET_INCUBATING",
@@ -276,7 +278,9 @@ pub fn evaluate_health(data: &DashboardData) -> HealthSummary {
     }
 
     // 12. FLUSH_STALE: flush_queue_depth > 0 && last_flush_ago_sec > 60 -> warn
-    if data.persistence.flush_queue_depth > 0 && data.persistence.last_flush_ago_sec.unwrap_or(0) > 60 {
+    if data.persistence.flush_queue_depth > 0
+        && data.persistence.last_flush_ago_sec.unwrap_or(0) > 60
+    {
         items.push(HealthItem::new(
             "FLUSH_STALE",
             HealthLevel::Warn,
@@ -289,7 +293,11 @@ pub fn evaluate_health(data: &DashboardData) -> HealthSummary {
         ));
     }
 
-    let level = items.iter().map(|item| item.severity).max().unwrap_or(HealthLevel::Ok);
+    let level = items
+        .iter()
+        .map(|item| item.severity)
+        .max()
+        .unwrap_or(HealthLevel::Ok);
 
     HealthSummary { level, items }
 }
@@ -351,9 +359,9 @@ pub fn evaluate_health_tracked(
 mod tests {
     use super::*;
     use crate::api::dashboard::{ConfigViewDto, TierSharesDto};
+    use crate::api::dashboard::{F2fOverviewDto, ThermometerStatsDto, TierOverviewDto};
     use crate::api::metrics::LatencyTierStats;
     use crate::api::system_stats::{SparklinesDto, SystemStatsDto};
-    use crate::api::dashboard::{F2fOverviewDto, ThermometerStatsDto, TierOverviewDto};
     use crate::network::manager::NetworkNodeDto;
 
     fn mock_healthy_dashboard_data() -> DashboardData {
@@ -487,7 +495,11 @@ mod tests {
                 p2p_port: 9090,
                 bind_addr: "127.0.0.1".to_string(),
                 footprint_bytes: 144,
-                tier_shares: TierSharesDto { free: 20, f2f: 30, vip: 50 },
+                tier_shares: TierSharesDto {
+                    free: 20,
+                    f2f: 30,
+                    vip: 50,
+                },
                 loopback_only: true,
             },
             f2f_clients: Vec::new(),
@@ -512,7 +524,10 @@ mod tests {
 
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Crit);
-        assert!(summary.items.iter().any(|i| i.code == "NO_PEERS" && i.severity == HealthLevel::Crit));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "NO_PEERS" && i.severity == HealthLevel::Crit));
     }
 
     #[test]
@@ -538,13 +553,19 @@ mod tests {
         data.flush_queue_depth = 1_001;
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Warn);
-        assert!(summary.items.iter().any(|i| i.code == "QUEUE_HIGH" && i.severity == HealthLevel::Warn));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "QUEUE_HIGH" && i.severity == HealthLevel::Warn));
 
         // >= 9000 -> Crit
         data.flush_queue_depth = 9_000;
         let summary_crit = evaluate_health(&data);
         assert_eq!(summary_crit.level, HealthLevel::Crit);
-        assert!(summary_crit.items.iter().any(|i| i.code == "QUEUE_HIGH" && i.severity == HealthLevel::Crit));
+        assert!(summary_crit
+            .items
+            .iter()
+            .any(|i| i.code == "QUEUE_HIGH" && i.severity == HealthLevel::Crit));
     }
 
     #[test]
@@ -554,7 +575,10 @@ mod tests {
 
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Warn);
-        assert!(summary.items.iter().any(|i| i.code == "SLA_VIOLATED" && i.severity == HealthLevel::Warn));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "SLA_VIOLATED" && i.severity == HealthLevel::Warn));
     }
 
     #[test]
@@ -564,7 +588,10 @@ mod tests {
 
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Warn);
-        assert!(summary.items.iter().any(|i| i.code == "BROOM" && i.severity == HealthLevel::Warn));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "BROOM" && i.severity == HealthLevel::Warn));
     }
 
     #[test]
@@ -603,7 +630,10 @@ mod tests {
         data.clock_drift_ms = 5_001;
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Warn);
-        assert!(summary.items.iter().any(|i| i.code == "CLOCK_DRIFT" && i.severity == HealthLevel::Warn));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "CLOCK_DRIFT" && i.severity == HealthLevel::Warn));
 
         // -5001 ms -> Warn (negative drift)
         data.clock_drift_ms = -5_001;
@@ -614,7 +644,10 @@ mod tests {
         data.clock_drift_ms = 30_001;
         let summary_crit = evaluate_health(&data);
         assert_eq!(summary_crit.level, HealthLevel::Crit);
-        assert!(summary_crit.items.iter().any(|i| i.code == "CLOCK_DRIFT" && i.severity == HealthLevel::Crit));
+        assert!(summary_crit
+            .items
+            .iter()
+            .any(|i| i.code == "CLOCK_DRIFT" && i.severity == HealthLevel::Crit));
 
         // -30001 ms -> Crit
         data.clock_drift_ms = -30_001;
@@ -630,7 +663,10 @@ mod tests {
 
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Ok);
-        assert!(summary.items.iter().any(|i| i.code == "TICKET_INCUBATING" && i.severity == HealthLevel::Ok));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "TICKET_INCUBATING" && i.severity == HealthLevel::Ok));
     }
 
     #[test]
@@ -641,7 +677,10 @@ mod tests {
 
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Crit);
-        assert!(summary.items.iter().any(|i| i.code == "DASHBOARD_EXPOSED" && i.severity == HealthLevel::Crit));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "DASHBOARD_EXPOSED" && i.severity == HealthLevel::Crit));
     }
 
     #[test]
@@ -665,7 +704,10 @@ mod tests {
 
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Crit);
-        assert!(summary.items.iter().any(|i| i.code == "PERSIST_ERROR" && i.severity == HealthLevel::Crit));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "PERSIST_ERROR" && i.severity == HealthLevel::Crit));
     }
 
     #[test]
@@ -675,12 +717,18 @@ mod tests {
 
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Warn);
-        assert!(summary.items.iter().any(|i| i.code == "DISK_SPACE_LOW" && i.severity == HealthLevel::Warn));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "DISK_SPACE_LOW" && i.severity == HealthLevel::Warn));
 
         data.disk_free_gb = 1.5;
         let summary_crit = evaluate_health(&data);
         assert_eq!(summary_crit.level, HealthLevel::Crit);
-        assert!(summary_crit.items.iter().any(|i| i.code == "DISK_SPACE_LOW" && i.severity == HealthLevel::Crit));
+        assert!(summary_crit
+            .items
+            .iter()
+            .any(|i| i.code == "DISK_SPACE_LOW" && i.severity == HealthLevel::Crit));
     }
 
     #[test]
@@ -691,7 +739,10 @@ mod tests {
 
         let summary = evaluate_health(&data);
         assert_eq!(summary.level, HealthLevel::Warn);
-        assert!(summary.items.iter().any(|i| i.code == "FLUSH_STALE" && i.severity == HealthLevel::Warn));
+        assert!(summary
+            .items
+            .iter()
+            .any(|i| i.code == "FLUSH_STALE" && i.severity == HealthLevel::Warn));
 
         // Not stale if last_flush_ago_sec <= 60
         data.persistence.last_flush_ago_sec = Some(30);
@@ -735,9 +786,12 @@ mod tests {
         }
 
         // QUEUE_HIGH is resolved, only NO_PEERS remains
-        let mut items2 = vec![
-            HealthItem::new("NO_PEERS", HealthLevel::Crit, "No peers", "Check network"),
-        ];
+        let mut items2 = vec![HealthItem::new(
+            "NO_PEERS",
+            HealthLevel::Crit,
+            "No peers",
+            "Check network",
+        )];
         tracker.track(&mut items2);
         assert!(items2[0].active_since_sec >= 75);
         assert_eq!(items2[0].duration_formatted, "1m 15s");

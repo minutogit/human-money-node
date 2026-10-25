@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use humoco_sim_core::types::LockRecord;
+use serde::{Deserialize, Serialize};
 
 /// Signed attestation from a consensus or ingress node.
 ///
@@ -202,7 +202,6 @@ pub struct PeersResponse {
     pub active_nodes_count: usize,
     pub peers: Vec<PeerEntryDto>,
 }
-
 
 /// Generic error response format with optional PoW challenge details.
 #[derive(Debug, Clone, Serialize, Deserialize)]

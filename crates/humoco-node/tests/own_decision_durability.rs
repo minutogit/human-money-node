@@ -191,10 +191,25 @@ fn signed_hop(genesis: bool, child: u8, stamp: u128) -> humoco_node::api::hmc::L
     };
     use sha3::{Digest, Sha3_256};
     if !genesis {
-        let mut hash = Sha3_256::new(); hash.update(32u32.to_le_bytes()); hash.update([1; 32]); hash.update(32u32.to_le_bytes()); hash.update(key.verifying_key().as_bytes());
+        let mut hash = Sha3_256::new();
+        hash.update(32u32.to_le_bytes());
+        hash.update([1; 32]);
+        hash.update(32u32.to_le_bytes());
+        hash.update(key.verifying_key().as_bytes());
         hop.ds_tag = Some(bs58::encode(hash.finalize()).into_string());
     }
-    let mut proof = humoco_proto::causal::CausalOutputProof { version: 1, voucher_id: hop.layer2_voucher_id.clone(), transaction_id: hop.transaction_hash, state_hash: hop.transaction_hash, sender_pubkey: hop.sender_ephemeral_pub, receiver_pubkey_hash: Some(Sha3_256::digest(key.verifying_key().as_bytes()).into()), change_pubkey_hash: None, root_valid_until_ms: 50_000, is_root: genesis, signature: [0; 64] };
+    let mut proof = humoco_proto::causal::CausalOutputProof {
+        version: 1,
+        voucher_id: hop.layer2_voucher_id.clone(),
+        transaction_id: hop.transaction_hash,
+        state_hash: hop.transaction_hash,
+        sender_pubkey: hop.sender_ephemeral_pub,
+        receiver_pubkey_hash: Some(Sha3_256::digest(key.verifying_key().as_bytes()).into()),
+        change_pubkey_hash: None,
+        root_valid_until_ms: 50_000,
+        is_root: genesis,
+        signature: [0; 64],
+    };
     proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
     hop.causal_output = Some(proof);
     hop.layer2_signature = key.sign(&calculate_l2_payload_hash(&hop)).to_bytes();
@@ -225,8 +240,14 @@ async fn invalid_suffix_preserves_durable_prefix_and_never_returns_terminal_succ
         .get_hmc_lock(&bs58::encode(genesis.transaction_hash).into_string())
         .unwrap()
         .is_none());
-    assert!(db.voucher_root(&genesis.layer2_voucher_id).unwrap().is_some());
-    assert!(db.get_hmc_locks_for_voucher(&genesis.layer2_voucher_id).unwrap().is_empty());
+    assert!(db
+        .voucher_root(&genesis.layer2_voucher_id)
+        .unwrap()
+        .is_some());
+    assert!(db
+        .get_hmc_locks_for_voucher(&genesis.layer2_voucher_id)
+        .unwrap()
+        .is_empty());
     cancel.cancel();
     worker.await.unwrap();
 }
@@ -263,7 +284,13 @@ async fn identical_pending_root_retries_wait_for_durable_barrier() {
     };
     let first = submit(engine.clone(), tag.clone(), entry.clone());
     tokio::time::timeout(std::time::Duration::from_millis(100), async {
-        while !engine.hmc_ram.read().await.root_anchors.contains_key("prefix-voucher") {
+        while !engine
+            .hmc_ram
+            .read()
+            .await
+            .root_anchors
+            .contains_key("prefix-voucher")
+        {
             tokio::task::yield_now().await;
         }
     })

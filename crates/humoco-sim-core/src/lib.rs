@@ -51,4 +51,3 @@ pub use telemetry::{
 pub use transport::*;
 pub use types::*;
 pub use wire::*;
-

@@ -21,17 +21,26 @@ fn test_split_brain_symmetric_double_spend_resolution() {
 
     // No attestations needed for basic resolution
     let (res, proofs) = resolve_split_brain_with_proof(&mut lock_a, &mut lock_b, &[], &[]);
-    assert!(proofs.is_empty(), "No equivocation without overlapping signers");
+    assert!(
+        proofs.is_empty(),
+        "No equivocation without overlapping signers"
+    );
 
     match res {
-        ResolutionResult::WinnerA { winner_hash, loser_hash } => {
+        ResolutionResult::WinnerA {
+            winner_hash,
+            loser_hash,
+        } => {
             assert!(expected_winner_is_a, "Expected A to win via min(H_canon)");
             assert_eq!(winner_hash, h_a);
             assert_eq!(loser_hash, h_b);
             assert!(!lock_a.status.is_void(), "Winner must stay active");
             assert!(lock_b.status.is_void(), "Loser must be VOID");
         }
-        ResolutionResult::WinnerB { winner_hash, loser_hash } => {
+        ResolutionResult::WinnerB {
+            winner_hash,
+            loser_hash,
+        } => {
             assert!(!expected_winner_is_a, "Expected B to win via min(H_canon)");
             assert_eq!(winner_hash, h_b);
             assert_eq!(loser_hash, h_a);
@@ -70,10 +79,17 @@ fn test_equivocation_proof_generation_and_o1_slashing() {
     let (res, proofs) = resolve_split_brain_with_proof(&mut lock_a, &mut lock_b, &atts_a, &atts_b);
 
     assert!(
-        matches!(res, ResolutionResult::WinnerA { .. } | ResolutionResult::WinnerB { .. }),
+        matches!(
+            res,
+            ResolutionResult::WinnerA { .. } | ResolutionResult::WinnerB { .. }
+        ),
         "Should have a winner"
     );
-    assert_eq!(proofs.len(), 3, "Should generate 3 equivocation proofs for nodes 1,2,3");
+    assert_eq!(
+        proofs.len(),
+        3,
+        "Should generate 3 equivocation proofs for nodes 1,2,3"
+    );
 
     // Verify each proof is valid and slashing is O(1)
     let mut banned: HashSet<u16> = HashSet::new();
@@ -82,7 +98,10 @@ fn test_equivocation_proof_generation_and_o1_slashing() {
         let was_banned = apply_fraud_proof(proof, &mut banned);
         assert!(was_banned, "apply_fraud_proof must succeed");
         // O(1) check: banned set contains perpetrator
-        assert!(banned.contains(&proof.perpetrator), "Perpetrator must be banned O(1)");
+        assert!(
+            banned.contains(&proof.perpetrator),
+            "Perpetrator must be banned O(1)"
+        );
     }
     assert_eq!(banned.len(), 3);
     assert!(banned.contains(&1));

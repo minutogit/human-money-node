@@ -3,7 +3,7 @@
 
 use humoco_sim_core::crypto::{sign_deterministic_sig, verify_deterministic_sig};
 use humoco_sim_core::quota::{ByteYears, HourlySlottedRingBuffer, NetworkThermometer};
-use humoco_sim_core::types::{verify_order_statistics_quorum, order_statistics_threshold};
+use humoco_sim_core::types::{order_statistics_threshold, verify_order_statistics_quorum};
 
 // ---------------------------------------------------------------------------
 // M1-O5: ByteYears::from_ttl_seconds(0) must return 1 (commercial rounding)
@@ -12,7 +12,11 @@ use humoco_sim_core::types::{verify_order_statistics_quorum, order_statistics_th
 #[test]
 fn test_mutant_m1o5_byteyears_zero_ttl_is_one() {
     // 0 seconds must still cost 1 Byte-Year (non-zero floor)
-    assert_eq!(ByteYears::from_ttl_seconds(0), 1, "0s TTL must be 1 Byte-Year (floor)");
+    assert_eq!(
+        ByteYears::from_ttl_seconds(0),
+        1,
+        "0s TTL must be 1 Byte-Year (floor)"
+    );
 
     // 1 second also must be at least 1
     assert_eq!(ByteYears::from_ttl_seconds(1), 1);
@@ -41,7 +45,10 @@ fn test_mutant_m1o7_quota_exact_boundary_le() {
 
     // Exactly consume quota in one go -> must be accepted (<=)
     let accepted = thermo.try_accept_lock(epoch_day, node, 100, quota);
-    assert!(accepted, "exact quota boundary (100/100) must be accepted with <=");
+    assert!(
+        accepted,
+        "exact quota boundary (100/100) must be accepted with <="
+    );
     assert_eq!(thermo.get_node_usage(node), 100);
 
     // One more byte-year must be rejected
@@ -94,7 +101,11 @@ fn test_mutant_m1o8_epoch_hour_duplicate_overwrite() {
     // Count stays 1 because same slot overwritten (count only increments if <24, but same hour should not double-count in future logic)
     // However current implementation increments count on each record if count<24 regardless of duplicate.
     // The key invariant is that slot value is overwritten:
-    assert_eq!(buf.slots()[5], 9_999, "duplicate epoch_hour must overwrite slot");
+    assert_eq!(
+        buf.slots()[5],
+        9_999,
+        "duplicate epoch_hour must overwrite slot"
+    );
     // Sum must reflect overwritten value
     // Note: count may be 2 due to implementation counting duplicates; verify overwrite still wins
     // After two records, sum should be 9_999 if count is 1 or 9_999 + maybe? Let's check actual sum logic.
@@ -118,7 +129,11 @@ fn test_mutant_m1o8_epoch_hour_same_slot_modulo_overwrite() {
     buf.record_hourly_median(5, 111);
     assert_eq!(buf.slots()[5], 111);
     buf.record_hourly_median(29, 222);
-    assert_eq!(buf.slots()[5], 222, "modulo slot must be overwritten by later epoch");
+    assert_eq!(
+        buf.slots()[5],
+        222,
+        "modulo slot must be overwritten by later epoch"
+    );
     assert_eq!(buf.last_epoch_hour(), 29);
 }
 
@@ -196,17 +211,26 @@ fn test_mutant_m1o4_verify_order_statistics_quorum_boundary() {
     // With threshold 0, any 4 distinct signers must be valid (since all HRW scores in [0,1) >=0)
     let signers = vec![1, 2, 3, 4];
     let (valid, _) = verify_order_statistics_quorum(&signers, &active_nodes);
-    assert!(valid, "with threshold 0 any quorum meeting distinct count must be valid (>=)");
+    assert!(
+        valid,
+        "with threshold 0 any quorum meeting distinct count must be valid (>=)"
+    );
 
     // Fewer than required_q distinct signers must be invalid even with threshold 0
     let small = vec![1, 2, 3];
     let (valid_small, _) = verify_order_statistics_quorum(&small, &active_nodes);
-    assert!(!valid_small, "quorum with < required distinct signers must be invalid");
+    assert!(
+        !valid_small,
+        "quorum with < required distinct signers must be invalid"
+    );
 
     // Duplicate signers do not count as distinct
     let dup = vec![1, 1, 1, 1];
     let (valid_dup, _) = verify_order_statistics_quorum(&dup, &active_nodes);
-    assert!(!valid_dup, "duplicates must not be counted as distinct signers");
+    assert!(
+        !valid_dup,
+        "duplicates must not be counted as distinct signers"
+    );
 
     // Verify threshold 0.5 case has at least one invalid and respects boundary
     let k_mid = 2.5; // threshold = 1 -2.5/5=0.5
@@ -216,9 +240,18 @@ fn test_mutant_m1o4_verify_order_statistics_quorum_boundary() {
     let mut found_valid = false;
     let mut found_invalid = false;
     for _ in 0u16..200 {
-        let (v, _) = verify_order_statistics_quorum(&[1,2,3,4], &active_nodes);
-        if v { found_valid = true; } else { found_invalid = true; }
-        if found_valid && found_invalid { break; }
+        let (v, _) = verify_order_statistics_quorum(&[1, 2, 3, 4], &active_nodes);
+        if v {
+            found_valid = true;
+        } else {
+            found_invalid = true;
+        }
+        if found_valid && found_invalid {
+            break;
+        }
     }
-    assert!(found_valid || found_invalid, "at least one of valid/invalid should be observable");
+    assert!(
+        found_valid || found_invalid,
+        "at least one of valid/invalid should be observable"
+    );
 }

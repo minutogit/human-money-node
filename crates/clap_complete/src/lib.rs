@@ -1,5 +1,5 @@
-use std::io::Write;
 use clap::{Command, ValueEnum};
+use std::io::Write;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
@@ -29,8 +29,14 @@ impl Generator for Shell {
 
     fn generate(&self, cmd: &Command, buf: &mut dyn Write) {
         let bin_name = cmd.get_name();
-        let subcmds: Vec<String> = cmd.get_subcommands().map(|sc| sc.get_name().to_string()).collect();
-        let opts: Vec<String> = cmd.get_opts().filter_map(|o| o.get_long().map(|l| format!("--{}", l))).collect();
+        let subcmds: Vec<String> = cmd
+            .get_subcommands()
+            .map(|sc| sc.get_name().to_string())
+            .collect();
+        let opts: Vec<String> = cmd
+            .get_opts()
+            .filter_map(|o| o.get_long().map(|l| format!("--{}", l)))
+            .collect();
         let all_tokens: Vec<String> = subcmds.iter().cloned().chain(opts).collect();
         let token_list = all_tokens.join(" ");
 
@@ -40,7 +46,11 @@ impl Generator for Shell {
                 let _ = writeln!(buf, "_{}() {{", bin_name);
                 let _ = writeln!(buf, "    local cur prev words cword");
                 let _ = writeln!(buf, "    _init_completion || return");
-                let _ = writeln!(buf, "    COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") )", token_list);
+                let _ = writeln!(
+                    buf,
+                    "    COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") )",
+                    token_list
+                );
                 let _ = writeln!(buf, "}}");
                 let _ = writeln!(buf, "complete -F _{} {}", bin_name, bin_name);
             }
@@ -60,15 +70,41 @@ impl Generator for Shell {
                 }
             }
             Shell::PowerShell => {
-                let _ = writeln!(buf, "Register-ArgumentCompleter -Native -CommandName {} -ScriptBlock {{", bin_name);
-                let _ = writeln!(buf, "    param($wordToComplete, $commandAst, $cursorPosition)");
-                let _ = writeln!(buf, "    @({}) | Where-Object {{ $_ -like \"$wordToComplete*\" }}",
-                    all_tokens.iter().map(|t| format!("'{}'", t)).collect::<Vec<_>>().join(", "));
+                let _ = writeln!(
+                    buf,
+                    "Register-ArgumentCompleter -Native -CommandName {} -ScriptBlock {{",
+                    bin_name
+                );
+                let _ = writeln!(
+                    buf,
+                    "    param($wordToComplete, $commandAst, $cursorPosition)"
+                );
+                let _ = writeln!(
+                    buf,
+                    "    @({}) | Where-Object {{ $_ -like \"$wordToComplete*\" }}",
+                    all_tokens
+                        .iter()
+                        .map(|t| format!("'{}'", t))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
                 let _ = writeln!(buf, "}}");
             }
             Shell::Elvish => {
-                let _ = writeln!(buf, "set edit:completion:arg-completer[{}] = {{|@words|", bin_name);
-                let _ = writeln!(buf, "    put {}", all_tokens.iter().map(|t| format!("'{}'", t)).collect::<Vec<_>>().join(" "));
+                let _ = writeln!(
+                    buf,
+                    "set edit:completion:arg-completer[{}] = {{|@words|",
+                    bin_name
+                );
+                let _ = writeln!(
+                    buf,
+                    "    put {}",
+                    all_tokens
+                        .iter()
+                        .map(|t| format!("'{}'", t))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
                 let _ = writeln!(buf, "}}");
             }
         }

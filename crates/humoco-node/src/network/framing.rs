@@ -614,7 +614,11 @@ impl SyncPayload {
         locks: Vec<(humoco_sim_core::types::LockRecord, u64)>,
         hmc_locks: Vec<(String, crate::api::hmc::L2LockEntry)>,
     ) -> Self {
-        Self { locks, hmc_locks, support: Vec::new() }
+        Self {
+            locks,
+            hmc_locks,
+            support: Vec::new(),
+        }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
@@ -1070,14 +1074,29 @@ pub struct FrozenShardReply {
 
 impl FrozenShardReply {
     /// A cold-transfer assertion, never an original approval or checkout proof.
-    pub fn signing_digest(&self, network: humoco_sim_core::types::NetworkId, shard: u16,
-        source: &[u8;32], receiver: &[u8;32]) -> [u8;32] {
+    pub fn signing_digest(
+        &self,
+        network: humoco_sim_core::types::NetworkId,
+        shard: u16,
+        source: &[u8; 32],
+        receiver: &[u8; 32],
+    ) -> [u8; 32] {
         let mut h = blake3::Hasher::new();
         let tag = b"HUMOCO_V1_INHERITED_SUPPORT_CUT";
-        h.update(&[tag.len() as u8]); h.update(tag); h.update(&[self.version]);
-        h.update(&[match network { humoco_sim_core::types::NetworkId::Mainnet => 0, humoco_sim_core::types::NetworkId::Testnet => 1 }]);
-        h.update(&shard.to_le_bytes()); h.update(source); h.update(receiver);
-        h.update(&self.token); h.update(&self.digest); h.update(&self.support_digest);
-        h.update(&self.lease_ms.to_le_bytes()); *h.finalize().as_bytes()
+        h.update(&[tag.len() as u8]);
+        h.update(tag);
+        h.update(&[self.version]);
+        h.update(&[match network {
+            humoco_sim_core::types::NetworkId::Mainnet => 0,
+            humoco_sim_core::types::NetworkId::Testnet => 1,
+        }]);
+        h.update(&shard.to_le_bytes());
+        h.update(source);
+        h.update(receiver);
+        h.update(&self.token);
+        h.update(&self.digest);
+        h.update(&self.support_digest);
+        h.update(&self.lease_ms.to_le_bytes());
+        *h.finalize().as_bytes()
     }
 }

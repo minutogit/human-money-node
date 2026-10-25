@@ -58,12 +58,18 @@ impl ControlServer {
     }
 
     /// Installs the identity of the daemon owning the entire storage lifecycle.
-    pub fn with_shutdown_lifecycle(mut self, lifecycle: Arc<super::lifecycle::ShutdownLifecycle>) -> Self {
+    pub fn with_shutdown_lifecycle(
+        mut self,
+        lifecycle: Arc<super::lifecycle::ShutdownLifecycle>,
+    ) -> Self {
         self.state.lifecycle = Some(lifecycle);
         self
     }
 
-    pub fn with_tier_controller(mut self, tier_controller: Arc<crate::ingress::TierController>) -> Self {
+    pub fn with_tier_controller(
+        mut self,
+        tier_controller: Arc<crate::ingress::TierController>,
+    ) -> Self {
         self.state.tier_controller = Some(tier_controller);
         self
     }
@@ -89,12 +95,11 @@ impl ControlServer {
             }
         }
 
-        let listener = UnixListener::bind(&self.socket_path).map_err(|err| {
-            NodeError::IoWithPath {
+        let listener =
+            UnixListener::bind(&self.socket_path).map_err(|err| NodeError::IoWithPath {
                 path: self.socket_path.clone(),
                 source: err,
-            }
-        })?;
+            })?;
 
         #[cfg(unix)]
         {
@@ -209,11 +214,8 @@ impl ControlServer {
                         writer.write_all(payload.as_bytes()),
                     )
                     .await;
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        writer.flush(),
-                    )
-                    .await;
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), writer.flush())
+                        .await;
                     continue;
                 }
             };
@@ -322,7 +324,10 @@ impl ControlServer {
                             match state.storage.get_quota(&tag_bytes) {
                                 Ok(balance) => ControlResponse::Quota { balance },
                                 Err(err) => ControlResponse::Error {
-                                    message: format!("Failed to retrieve quota from storage: {}", err),
+                                    message: format!(
+                                        "Failed to retrieve quota from storage: {}",
+                                        err
+                                    ),
                                 },
                             }
                         }
@@ -342,25 +347,25 @@ impl ControlServer {
                         cancel.cancel();
                     });
                     match &state.lifecycle {
-                        Some(lifecycle) => ControlResponse::ShutdownAccepted { identity: lifecycle.identity.clone() },
+                        Some(lifecycle) => ControlResponse::ShutdownAccepted {
+                            identity: lifecycle.identity.clone(),
+                        },
                         None => ControlResponse::Ok,
                     }
                 }
-                ControlRequest::RemovePeer { peer_str } => {
-                    match parse_peer_string(&peer_str) {
-                        Ok((key_opt, endpoint_opt)) => {
-                            let removed_hex = state
-                                .peer_manager
-                                .remove_peer_by_spec(key_opt, endpoint_opt.as_deref())
-                                .await;
-                            let pubkey_hex = removed_hex.unwrap_or_else(|| peer_str.clone());
-                            ControlResponse::PeerRemoved { pubkey_hex }
-                        }
-                        Err(err) => ControlResponse::Error {
-                            message: format!("Invalid peer specification: {}", err),
-                        },
+                ControlRequest::RemovePeer { peer_str } => match parse_peer_string(&peer_str) {
+                    Ok((key_opt, endpoint_opt)) => {
+                        let removed_hex = state
+                            .peer_manager
+                            .remove_peer_by_spec(key_opt, endpoint_opt.as_deref())
+                            .await;
+                        let pubkey_hex = removed_hex.unwrap_or_else(|| peer_str.clone());
+                        ControlResponse::PeerRemoved { pubkey_hex }
                     }
-                }
+                    Err(err) => ControlResponse::Error {
+                        message: format!("Invalid peer specification: {}", err),
+                    },
+                },
                 ControlRequest::GetDbStats => {
                     let ram_locks = state.engine.ram.read().await.len() as u64;
                     match state.storage.get_stats() {
@@ -385,7 +390,10 @@ impl ControlServer {
                                     (Some(addr), false)
                                 } else {
                                     // Hostname/DNS peer
-                                    let entry = crate::config::PeerConfigEntry::new(key_opt, endpoint.clone());
+                                    let entry = crate::config::PeerConfigEntry::new(
+                                        key_opt,
+                                        endpoint.clone(),
+                                    );
                                     state.peer_manager.add_dns_peer(entry).await;
                                     (None, true)
                                 }
@@ -415,7 +423,8 @@ impl ControlServer {
                 }
                 ControlRequest::GetRecentLocks { limit } => {
                     let recent = state.engine.get_recent_locks(limit);
-                    let dtos: Vec<RecentLockSummaryDto> = recent.into_iter().map(Into::into).collect();
+                    let dtos: Vec<RecentLockSummaryDto> =
+                        recent.into_iter().map(Into::into).collect();
                     ControlResponse::RecentLocks { locks: dtos }
                 }
                 ControlRequest::InspectLock { parent_lock } => {
@@ -429,7 +438,8 @@ impl ControlServer {
                             }
                         } else {
                             ControlResponse::Error {
-                                message: "parent_lock must be a 32-byte (64 hex characters) string".into(),
+                                message: "parent_lock must be a 32-byte (64 hex characters) string"
+                                    .into(),
                             }
                         }
                     } else {
@@ -487,11 +497,7 @@ impl ControlServer {
                 writer.write_all(resp_str.as_bytes()),
             )
             .await;
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                writer.flush(),
-            )
-            .await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), writer.flush()).await;
         }
 
         Ok(())

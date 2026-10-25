@@ -332,9 +332,13 @@ async fn test_chaos_pow_replay_and_invalid_challenge() {
     let res1 = app.clone().oneshot(req1).await.unwrap();
     assert_eq!(res1.status(), StatusCode::CREATED);
 
-    // Replay same challenge+nonce on different parent -> 401 (invalid) or 429 ReplayDetected
+    // Replay same challenge+nonce on different parent -> 401 (invalid/insufficient work for that parent)
     let sender_key2 = SigningKey::from_bytes(&[8u8; 32]);
-    let req2 = make_genesis(&"aa".repeat(32), now + 600_000, &sender_key2);
+    let mut req2 = make_genesis(&"aa".repeat(32), now + 600_000, &sender_key2);
+    req2.is_genesis = false;
+    req2.ds_tag = Some("different_parent_tag".into());
+    let h2 = calculate_l2_payload_hash(&req2);
+    req2.layer2_signature = sender_key2.sign(&h2).to_bytes();
     let replay_req = Request::builder()
         .method("POST")
         .uri("/v1/lock")

@@ -11,8 +11,8 @@
 use humoco_sim_core::quota::{
     evaluate_quota_exceeded_claim, ByteYears, NetworkThermometer, QuartileStats,
     QuotaPlausibilityVerdict, SlottedMedianRingBuffer, HARD_FLOOR_BASELINE_DAILY,
-    MAX_WHALE_MULTIPLIER, SANDBOX_K_MULTIPLIER, STANDARD_K_MULTIPLIER,
-    HARD_FLOOR_READ_BASELINE_DAILY, READ_TO_WRITE_RATIO,
+    HARD_FLOOR_READ_BASELINE_DAILY, MAX_WHALE_MULTIPLIER, READ_TO_WRITE_RATIO,
+    SANDBOX_K_MULTIPLIER, STANDARD_K_MULTIPLIER,
 };
 
 /// [INV-0902] [INV-0904]
@@ -39,138 +39,175 @@ fn test_spec_09_hard_floor_baseline_1000_locks_guarantee() {
     // 1.000 Locks einspeisen -> alle müssen erfolgreich akzeptiert werden
     for i in 0..1000 {
         let accepted = thermometer.try_accept_lock(epoch_day, node_id, lock_5y_footprint, quota);
-        assert!(accepted, "Lock {} von 1.000 muss innerhalb des Tageskontingents akzeptiert werden", i + 1);
+        assert!(
+            accepted,
+            "Lock {} von 1.000 muss innerhalb des Tageskontingents akzeptiert werden",
+            i + 1
+        );
     }
 
     assert_eq!(thermometer.get_node_usage(node_id), 960_000);
 
     // Der 1.001 Lock am selben Tag übersteigt das Budget und wird lautlos abgewiesen (Silent Dropping)
-    let lock_1001_accepted = thermometer.try_accept_lock(epoch_day, node_id, lock_5y_footprint, quota);
-    assert!(!lock_1001_accepted, "Lock 1.001 muss durch Silent Dropping abgewiesen werden");
+    let lock_1001_accepted =
+        thermometer.try_accept_lock(epoch_day, node_id, lock_5y_footprint, quota);
+    assert!(
+        !lock_1001_accepted,
+        "Lock 1.001 muss durch Silent Dropping abgewiesen werden"
+    );
 
     // Am nächsten Tag (neue 24h-Epoche) wird das Budget zurückgesetzt
     let next_day = epoch_day + 1;
-    let next_day_lock_accepted = thermometer.try_accept_lock(next_day, node_id, lock_5y_footprint, quota);
-    assert!(next_day_lock_accepted, "Am nächsten Tag muss das Budget wieder voll zur Verfügung stehen");
+    let next_day_lock_accepted =
+        thermometer.try_accept_lock(next_day, node_id, lock_5y_footprint, quota);
+    assert!(
+        next_day_lock_accepted,
+        "Am nächsten Tag muss das Budget wieder voll zur Verfügung stehen"
+    );
     assert_eq!(thermometer.get_node_usage(node_id), 960);
 }
 
 /// [INV-0901]
 /// Test 2: Quartilsberechnung (Q1, Median, Q3) und Zipf-Spread-Dämpfer
-    #[test]
-    fn test_quartile_distribution_and_spread_damper() {
-        // 10 repräsentative Knoten im Mesh
-        let samples = vec![
-            300_000, 320_000, // Kleine Dorfknoten (Q1)
-            500_000, 600_000, 700_000, // Mittlere Knoten
-            800_000, 900_000, // Normalnull (Median)
-            1_000_000, 1_200_000, 1_500_000, // Händler-Gateways (Q3)
-        ];
+#[test]
+fn test_quartile_distribution_and_spread_damper() {
+    // 10 repräsentative Knoten im Mesh
+    let samples = vec![
+        300_000, 320_000, // Kleine Dorfknoten (Q1)
+        500_000, 600_000, 700_000, // Mittlere Knoten
+        800_000, 900_000, // Normalnull (Median)
+        1_000_000, 1_200_000, 1_500_000, // Händler-Gateways (Q3)
+    ];
 
-        let stats = QuartileStats::calculate(&samples);
-        assert_eq!(stats.q1, 500_000);
-        assert_eq!(stats.median, 750_000);
-        assert_eq!(stats.q3, 1_000_000);
+    let stats = QuartileStats::calculate(&samples);
+    assert_eq!(stats.q1, 500_000);
+    assert_eq!(stats.median, 750_000);
+    assert_eq!(stats.q3, 1_000_000);
 
-        let damper = stats.spread_damper();
-        // Q1 / Q3 = 500k / 1M = 0.5 -> (1 - 0.5) / 0.66 = 0.5 / 0.66 = 0.757
-        assert!((0.7..=0.8).contains(&damper), "Spread-Dämpfer sollte ca. 0.757 sein, ist: {}", damper);
+    let damper = stats.spread_damper();
+    // Q1 / Q3 = 500k / 1M = 0.5 -> (1 - 0.5) / 0.66 = 0.5 / 0.66 = 0.757
+    assert!(
+        (0.7..=0.8).contains(&damper),
+        "Spread-Dämpfer sollte ca. 0.757 sein, ist: {}",
+        damper
+    );
 
-        // Extremfall 1: Alle Nodes identisch (Q1 == Q3) -> minimale Dämpfung (0.5)
-        let equal_samples = vec![1_000_000; 8];
-        let equal_stats = QuartileStats::calculate(&equal_samples);
-        assert_eq!(equal_stats.spread_damper(), 0.5);
+    // Extremfall 1: Alle Nodes identisch (Q1 == Q3) -> minimale Dämpfung (0.5)
+    let equal_samples = vec![1_000_000; 8];
+    let equal_stats = QuartileStats::calculate(&equal_samples);
+    assert_eq!(equal_stats.spread_damper(), 0.5);
 
-        // Extremfall 2: Gesunde Spreizung (Q1 / Q3 <= 0.34) -> voller Durchsatz (1.0)
-        let natural_samples = vec![100_000, 200_000, 300_000, 400_000, 500_000, 600_000, 1_000_000, 2_000_000];
-        let natural_stats = QuartileStats::calculate(&natural_samples);
-        assert_eq!(natural_stats.spread_damper(), 1.0);
+    // Extremfall 2: Gesunde Spreizung (Q1 / Q3 <= 0.34) -> voller Durchsatz (1.0)
+    let natural_samples = vec![
+        100_000, 200_000, 300_000, 400_000, 500_000, 600_000, 1_000_000, 2_000_000,
+    ];
+    let natural_stats = QuartileStats::calculate(&natural_samples);
+    assert_eq!(natural_stats.spread_damper(), 1.0);
+}
+
+/// [INV-0910]
+/// Test 9: Garantie der Hard Floor Baseline für Lesevorgänge: 50.000 Reads / Tag
+#[test]
+fn test_spec_09_read_hard_floor_baseline_50000_reads_guarantee() {
+    let mut thermometer = NetworkThermometer::new();
+    let node_id = 42;
+    let epoch_day = 0;
+
+    let ncb_eff = thermometer.effective_ncb();
+    assert_eq!(ncb_eff, HARD_FLOOR_BASELINE_DAILY);
+    assert_eq!(READ_TO_WRITE_RATIO, 5);
+
+    let spread_damper = 1.0;
+    let daily_read_quota = thermometer.calculate_daily_read_quota(1.0, spread_damper);
+    assert_eq!(daily_read_quota, HARD_FLOOR_READ_BASELINE_DAILY);
+
+    let one_read_credit = 1;
+    // Teste 50.000 Reads (unter Verwendung von Chunks zur Performance-Optimierung im Test)
+    for i in 0..50 {
+        let accepted = thermometer.try_accept_read(
+            epoch_day,
+            node_id,
+            one_read_credit * 1000,
+            daily_read_quota,
+        );
+        assert!(
+            accepted,
+            "Chunk {} von 50.000 Reads muss innerhalb des Tagesbudgets akzeptiert werden",
+            i + 1
+        );
     }
 
-    /// [INV-0910]
-    /// Test 9: Garantie der Hard Floor Baseline für Lesevorgänge: 50.000 Reads / Tag
-    #[test]
-    fn test_spec_09_read_hard_floor_baseline_50000_reads_guarantee() {
-        let mut thermometer = NetworkThermometer::new();
-        let node_id = 42;
-        let epoch_day = 0;
+    assert_eq!(thermometer.get_node_read_usage(node_id), 50_000);
 
-        let ncb_eff = thermometer.effective_ncb();
-        assert_eq!(ncb_eff, HARD_FLOOR_BASELINE_DAILY);
-        assert_eq!(READ_TO_WRITE_RATIO, 5);
+    let read_over_budget_accepted =
+        thermometer.try_accept_read(epoch_day, node_id, one_read_credit, daily_read_quota);
+    assert!(
+        !read_over_budget_accepted,
+        "Read 50.001 muss durch Silent Dropping abgewiesen werden"
+    );
 
-        let spread_damper = 1.0;
-        let daily_read_quota = thermometer.calculate_daily_read_quota(1.0, spread_damper);
-        assert_eq!(daily_read_quota, HARD_FLOOR_READ_BASELINE_DAILY);
+    let next_day = epoch_day + 1;
+    let next_day_read_accepted =
+        thermometer.try_accept_read(next_day, node_id, one_read_credit, daily_read_quota);
+    assert!(
+        next_day_read_accepted,
+        "Am nächsten Tag muss das Budget wieder voll zur Verfügung stehen"
+    );
+    assert_eq!(thermometer.get_node_read_usage(node_id), 1);
+}
 
-        let one_read_credit = 1;
-        // Teste 50.000 Reads (unter Verwendung von Chunks zur Performance-Optimierung im Test)
-        for i in 0..50 {
-            let accepted = thermometer.try_accept_read(epoch_day, node_id, one_read_credit * 1000, daily_read_quota);
-            assert!(accepted, "Chunk {} von 50.000 Reads muss innerhalb des Tagesbudgets akzeptiert werden", i + 1);
-        }
+/// [INV-0911]
+/// Test 10: 28-Tage Slotted Median-Inertie gegen Scraping-Spike
+#[test]
+fn test_spec_09_read_28_day_slotted_median_inertia_against_scraping_spike() {
+    let mut read_buffer = SlottedMedianRingBuffer::new();
 
-        assert_eq!(thermometer.get_node_read_usage(node_id), 50_000);
+    for _ in 0..28 {
+        read_buffer.push_daily_median(5_000);
+    }
+    assert_eq!(read_buffer.moving_average_median(), 5_000);
+    assert_eq!(read_buffer.days_recorded(), 28);
 
-        let read_over_budget_accepted = thermometer.try_accept_read(epoch_day, node_id, one_read_credit, daily_read_quota);
-        assert!(!read_over_budget_accepted, "Read 50.001 muss durch Silent Dropping abgewiesen werden");
+    read_buffer.push_daily_median(500_000);
+    read_buffer.push_daily_median(500_000);
 
-        let next_day = epoch_day + 1;
-        let next_day_read_accepted = thermometer.try_accept_read(next_day, node_id, one_read_credit, daily_read_quota);
-        assert!(next_day_read_accepted, "Am nächsten Tag muss das Budget wieder voll zur Verfügung stehen");
-        assert_eq!(thermometer.get_node_read_usage(node_id), 1);
+    let smoothed_median = read_buffer.moving_average_median();
+    let expected = (26 * 5_000 + 2 * 500_000) / 28;
+    assert_eq!(smoothed_median, expected);
+
+    for _ in 0..28 {
+        read_buffer.push_daily_median(5_000);
     }
 
-    /// [INV-0911]
-    /// Test 10: 28-Tage Slotted Median-Inertie gegen Scraping-Spike
-    #[test]
-    fn test_spec_09_read_28_day_slotted_median_inertia_against_scraping_spike() {
-        let mut read_buffer = SlottedMedianRingBuffer::new();
+    assert_eq!(read_buffer.moving_average_median(), 5_000);
+}
 
-        for _ in 0..28 {
-            read_buffer.push_daily_median(5_000);
-        }
-        assert_eq!(read_buffer.moving_average_median(), 5_000);
-        assert_eq!(read_buffer.days_recorded(), 28);
-
-        read_buffer.push_daily_median(500_000);
-        read_buffer.push_daily_median(500_000);
-
-        let smoothed_median = read_buffer.moving_average_median();
-        let expected = (26 * 5_000 + 2 * 500_000) / 28;
-        assert_eq!(smoothed_median, expected);
-
-        for _ in 0..28 {
-            read_buffer.push_daily_median(5_000);
-        }
-
-        assert_eq!(read_buffer.moving_average_median(), 5_000);
+/// [INV-0912] [INV-0913]
+/// Test 11: Whale Brake (K <= 5.0) und Sandbox-Limits für Lesevorgänge
+#[test]
+fn test_spec_09_read_whale_brake_and_sandbox_limits() {
+    let mut thermometer = NetworkThermometer::new();
+    for _ in 0..28 {
+        thermometer.record_daily_read_median(60_000);
     }
+    let ncb_read_eff = thermometer.effective_read_ncb();
+    assert_eq!(ncb_read_eff, 60_000);
 
-    /// [INV-0912] [INV-0913]
-    /// Test 11: Whale Brake (K <= 5.0) und Sandbox-Limits für Lesevorgänge
-    #[test]
-    fn test_spec_09_read_whale_brake_and_sandbox_limits() {
-        let mut thermometer = NetworkThermometer::new();
-        for _ in 0..28 {
-            thermometer.record_daily_read_median(60_000);
-        }
-        let ncb_read_eff = thermometer.effective_read_ncb();
-        assert_eq!(ncb_read_eff, 60_000);
+    let spread_damper = 1.0;
 
-        let spread_damper = 1.0;
+    let standard_read_quota =
+        thermometer.calculate_daily_read_quota(STANDARD_K_MULTIPLIER, spread_damper);
+    assert_eq!(standard_read_quota, 60_000);
 
-        let standard_read_quota = thermometer.calculate_daily_read_quota(STANDARD_K_MULTIPLIER, spread_damper);
-        assert_eq!(standard_read_quota, 60_000);
+    let sandbox_read_quota =
+        thermometer.calculate_daily_read_quota(SANDBOX_K_MULTIPLIER, spread_damper);
+    assert_eq!(sandbox_read_quota, 3_000);
 
-        let sandbox_read_quota = thermometer.calculate_daily_read_quota(SANDBOX_K_MULTIPLIER, spread_damper);
-        assert_eq!(sandbox_read_quota, 3_000);
-
-        let whale_read_quota = thermometer.calculate_daily_read_quota(100.0, spread_damper);
-        let max_allowed = ((ncb_read_eff as f64) * MAX_WHALE_MULTIPLIER * spread_damper) as u64;
-        assert_eq!(whale_read_quota, max_allowed);
-        assert_eq!(whale_read_quota, 300_000);
-    }
+    let whale_read_quota = thermometer.calculate_daily_read_quota(100.0, spread_damper);
+    let max_allowed = ((ncb_read_eff as f64) * MAX_WHALE_MULTIPLIER * spread_damper) as u64;
+    assert_eq!(whale_read_quota, max_allowed);
+    assert_eq!(whale_read_quota, 300_000);
+}
 
 /// [INV-0914]
 /// Test 12: Berechnung der Sync-Read-Credits
@@ -194,7 +231,10 @@ fn test_spec_09_read_quota_evaluation_on_join() {
     let epoch_day = 0;
 
     // Beim Kaltstart ist der effektive NCB_Read_Eff = Hard-Floor-Read-Baseline
-    assert_eq!(thermometer.effective_read_ncb(), HARD_FLOOR_READ_BASELINE_DAILY);
+    assert_eq!(
+        thermometer.effective_read_ncb(),
+        HARD_FLOOR_READ_BASELINE_DAILY
+    );
 
     let spread_damper = 1.0;
     let daily_read_quota = thermometer.calculate_daily_read_quota(1.0, spread_damper);
@@ -212,17 +252,28 @@ fn test_spec_09_read_quota_evaluation_on_join() {
 
     // Knoten verbraucht 30.000 Reads
     let one_read = 1;
-    let accepted1 = thermometer.try_accept_read(epoch_day, node_id, one_read * 30_000, daily_read_quota_after_seed);
+    let accepted1 = thermometer.try_accept_read(
+        epoch_day,
+        node_id,
+        one_read * 30_000,
+        daily_read_quota_after_seed,
+    );
     assert!(accepted1);
     assert_eq!(thermometer.get_node_read_usage(node_id), 30_000);
 
     // Knoten verbraucht weitere 70.000 Reads, Gesamt 100.000 -> Akzeptiert
-    let accepted2 = thermometer.try_accept_read(epoch_day, node_id, one_read * 70_000, daily_read_quota_after_seed);
+    let accepted2 = thermometer.try_accept_read(
+        epoch_day,
+        node_id,
+        one_read * 70_000,
+        daily_read_quota_after_seed,
+    );
     assert!(accepted2);
     assert_eq!(thermometer.get_node_read_usage(node_id), 100_000);
 
     // Knoten versucht, weitere 1 Read zu verbrauchen -> Silent Dropping
-    let accepted3 = thermometer.try_accept_read(epoch_day, node_id, one_read, daily_read_quota_after_seed);
+    let accepted3 =
+        thermometer.try_accept_read(epoch_day, node_id, one_read, daily_read_quota_after_seed);
     assert!(!accepted3);
     assert_eq!(thermometer.get_node_read_usage(node_id), 100_000);
 }
@@ -297,9 +348,8 @@ fn test_spec_09_organic_network_growth_and_silent_dropping() {
 
     // Simuliere 15 Nodes über mehrere Tage mit steigendem Transaktionsvolumen
     let mut daily_samples = vec![
-        600_000, 700_000, 800_000, 900_000, 1_000_000,
-        1_100_000, 1_200_000, 1_300_000, 1_400_000, 1_500_000,
-        1_600_000, 1_700_000, 1_800_000, 1_900_000, 2_000_000,
+        600_000, 700_000, 800_000, 900_000, 1_000_000, 1_100_000, 1_200_000, 1_300_000, 1_400_000,
+        1_500_000, 1_600_000, 1_700_000, 1_800_000, 1_900_000, 2_000_000,
     ];
 
     for day in 0..14 {
@@ -334,7 +384,10 @@ fn test_spec_09_new_node_seed_prevents_coldstart_deadlock() {
     let mut new_node_thermometer = NetworkThermometer::new();
 
     // Ohne Seed: Neuer Node startet bei Hard Floor (960k)
-    assert_eq!(new_node_thermometer.effective_ncb(), HARD_FLOOR_BASELINE_DAILY);
+    assert_eq!(
+        new_node_thermometer.effective_ncb(),
+        HARD_FLOOR_BASELINE_DAILY
+    );
 
     // Das Großnetz hat einen aktuellen Tages-Median von 50.000.000 Byte-Jahren
     let active_network_median = 50_000_000;
@@ -351,7 +404,10 @@ fn test_spec_09_new_node_seed_prevents_coldstart_deadlock() {
 
     // Regulärer Traffic (z. B. 10.000.000 Byte-Jahre) wird problemlos akzeptiert und löst keinen Fehlalarm aus
     let accepted = new_node_thermometer.try_accept_lock(0, 42, 10_000_000, daily_quota);
-    assert!(accepted, "Neuknoten darf normalen Großnetz-Traffic nicht fälschlich abweisen");
+    assert!(
+        accepted,
+        "Neuknoten darf normalen Großnetz-Traffic nicht fälschlich abweisen"
+    );
 }
 
 /// [INV-0908]
@@ -364,7 +420,10 @@ fn test_spec_09_merge_fast_reseed_and_scale_jump() {
     for _ in 0..28 {
         village_node_thermometer.record_daily_median(HARD_FLOOR_BASELINE_DAILY);
     }
-    assert_eq!(village_node_thermometer.effective_ncb(), HARD_FLOOR_BASELINE_DAILY);
+    assert_eq!(
+        village_node_thermometer.effective_ncb(),
+        HARD_FLOOR_BASELINE_DAILY
+    );
 
     // Merge-Ereignis: Dorf dockt an Weltnetz an (Globaler Median: 100.000.000 Byte-Jahre)
     let global_world_median = 100_000_000;
@@ -418,4 +477,3 @@ fn test_spec_09_three_zone_quota_exceeded_plausibility_and_malus() {
     );
     assert_eq!(overload_verdict.malus(), 0);
 }
-

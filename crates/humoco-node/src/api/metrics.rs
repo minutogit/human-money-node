@@ -1,13 +1,13 @@
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-use parking_lot::RwLock;
 use axum::{
     extract::State,
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::api::routes::AppState;
 
@@ -55,12 +55,22 @@ impl<const N: usize> RollingLatencyBuffer<N> {
 
     pub fn min_ms(&self) -> f64 {
         let guard = self.samples.read();
-        guard.iter().copied().min().map(|m| (m as f64) / 1000.0).unwrap_or(0.0)
+        guard
+            .iter()
+            .copied()
+            .min()
+            .map(|m| (m as f64) / 1000.0)
+            .unwrap_or(0.0)
     }
 
     pub fn max_ms(&self) -> f64 {
         let guard = self.samples.read();
-        guard.iter().copied().max().map(|m| (m as f64) / 1000.0).unwrap_or(0.0)
+        guard
+            .iter()
+            .copied()
+            .max()
+            .map(|m| (m as f64) / 1000.0)
+            .unwrap_or(0.0)
     }
 
     pub fn p95_ms(&self) -> f64 {
@@ -115,7 +125,8 @@ impl NodeMetrics {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.last_rejection_unix_sec.store(now_sec, Ordering::Relaxed);
+        self.last_rejection_unix_sec
+            .store(now_sec, Ordering::Relaxed);
     }
 
     /// Returns how many seconds ago the last rejection occurred, or `None` if no rejection has been recorded.
@@ -146,7 +157,8 @@ impl NodeMetrics {
     pub fn record_e2e_latency(&self, duration: Duration) {
         self.e2e_latency.record(duration);
         self.pos_latency_count.fetch_add(1, Ordering::Relaxed);
-        self.pos_latency_sum_micros.fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+        self.pos_latency_sum_micros
+            .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
     }
 
     /// Legacy helper: records to e2e latency.
@@ -303,7 +315,8 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let (active_byte_years, _) = state.engine.get_active_footprint_byte_years(now_ms).await;
-    let active_locks = state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+    let active_locks =
+        state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
     let daily_write_quota_byte_years = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let (peers_connected, gateway_concentration_ratio, shard_subnet_dominance_max) =
         if let Some(ref pm) = state.peer_manager {
@@ -357,13 +370,18 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     body.push_str("# TYPE humoco_locks_active_total gauge\n");
     body.push_str(&format!("humoco_locks_active_total {}\n", active_locks));
 
-    body.push_str("# HELP humoco_active_byte_years Total active storage-time footprint in Byte-Years\n");
+    body.push_str(
+        "# HELP humoco_active_byte_years Total active storage-time footprint in Byte-Years\n",
+    );
     body.push_str("# TYPE humoco_active_byte_years gauge\n");
     body.push_str(&format!("humoco_active_byte_years {}\n", active_byte_years));
 
     body.push_str("# HELP humoco_daily_write_quota_byte_years Daily write quota in Byte-Years\n");
     body.push_str("# TYPE humoco_daily_write_quota_byte_years gauge\n");
-    body.push_str(&format!("humoco_daily_write_quota_byte_years {}\n", daily_write_quota_byte_years));
+    body.push_str(&format!(
+        "humoco_daily_write_quota_byte_years {}\n",
+        daily_write_quota_byte_years
+    ));
 
     body.push_str("# HELP humoco_p2p_connected_peers Number of active connected peers\n");
     body.push_str("# TYPE humoco_p2p_connected_peers gauge\n");
@@ -377,22 +395,38 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     body.push_str("# TYPE humoco_flush_queue_depth gauge\n");
     body.push_str(&format!("humoco_flush_queue_depth {}\n", flush_queue_depth));
 
-    body.push_str("# HELP humoco_pos_latency_seconds Latency of PoS lock verification operations\n");
+    body.push_str(
+        "# HELP humoco_pos_latency_seconds Latency of PoS lock verification operations\n",
+    );
     body.push_str("# TYPE humoco_pos_latency_seconds summary\n");
-    body.push_str(&format!("humoco_pos_latency_seconds_count {}\n", pos_latency_count));
-    body.push_str(&format!("humoco_pos_latency_seconds_sum {:.6}\n", pos_latency_sum));
+    body.push_str(&format!(
+        "humoco_pos_latency_seconds_count {}\n",
+        pos_latency_count
+    ));
+    body.push_str(&format!(
+        "humoco_pos_latency_seconds_sum {:.6}\n",
+        pos_latency_sum
+    ));
 
     body.push_str("# HELP humoco_locks_rejected_total Total number of locks rejected due to conflicts or backpressure\n");
     body.push_str("# TYPE humoco_locks_rejected_total counter\n");
     body.push_str(&format!("humoco_locks_rejected_total {}\n", locks_rejected));
 
-    body.push_str("# HELP humoco_gateway_concentration_ratio Ratio of locks from top 2 ingress gateways\n");
+    body.push_str(
+        "# HELP humoco_gateway_concentration_ratio Ratio of locks from top 2 ingress gateways\n",
+    );
     body.push_str("# TYPE humoco_gateway_concentration_ratio gauge\n");
-    body.push_str(&format!("humoco_gateway_concentration_ratio {:.4}\n", gateway_concentration_ratio));
+    body.push_str(&format!(
+        "humoco_gateway_concentration_ratio {:.4}\n",
+        gateway_concentration_ratio
+    ));
 
     body.push_str("# HELP humoco_shard_subnet_dominance_max Maximum percentage of shard nodes in single subnet\n");
     body.push_str("# TYPE humoco_shard_subnet_dominance_max gauge\n");
-    body.push_str(&format!("humoco_shard_subnet_dominance_max {:.4}\n", shard_subnet_dominance_max));
+    body.push_str(&format!(
+        "humoco_shard_subnet_dominance_max {:.4}\n",
+        shard_subnet_dominance_max
+    ));
 
     body.push_str("# HELP humoco_free_tier_enabled Whether free tier PoW ingress is enabled on this node (1 = true, 0 = false)\n");
     body.push_str("# TYPE humoco_free_tier_enabled gauge\n");
@@ -401,23 +435,52 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     // Rejections breakdown
     body.push_str("# HELP humoco_rejections_total Total number of rejected requests by reason\n");
     body.push_str("# TYPE humoco_rejections_total counter\n");
-    body.push_str(&format!("humoco_rejections_total{{reason=\"conflict_409\"}} {}\n", state.metrics.rejected_conflict_409.load(Ordering::Relaxed)));
-    body.push_str(&format!("humoco_rejections_total{{reason=\"capacity_429\"}} {}\n", state.metrics.rejected_capacity_429.load(Ordering::Relaxed)));
-    body.push_str(&format!("humoco_rejections_total{{reason=\"quota_429\"}} {}\n", state.metrics.rejected_quota_429.load(Ordering::Relaxed)));
-    body.push_str(&format!("humoco_rejections_total{{reason=\"bad_pow_400\"}} {}\n", state.metrics.rejected_bad_pow_400.load(Ordering::Relaxed)));
+    body.push_str(&format!(
+        "humoco_rejections_total{{reason=\"conflict_409\"}} {}\n",
+        state.metrics.rejected_conflict_409.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "humoco_rejections_total{{reason=\"capacity_429\"}} {}\n",
+        state.metrics.rejected_capacity_429.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "humoco_rejections_total{{reason=\"quota_429\"}} {}\n",
+        state.metrics.rejected_quota_429.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "humoco_rejections_total{{reason=\"bad_pow_400\"}} {}\n",
+        state.metrics.rejected_bad_pow_400.load(Ordering::Relaxed)
+    ));
 
     // Persistence stats
     body.push_str("# HELP humoco_persistence_flush_batches_total Total successful persistence flush batches\n");
     body.push_str("# TYPE humoco_persistence_flush_batches_total counter\n");
-    body.push_str(&format!("humoco_persistence_flush_batches_total {}\n", state.engine.stats.flush_batches_total.load(Ordering::Relaxed)));
+    body.push_str(&format!(
+        "humoco_persistence_flush_batches_total {}\n",
+        state
+            .engine
+            .stats
+            .flush_batches_total
+            .load(Ordering::Relaxed)
+    ));
 
     body.push_str("# HELP humoco_persistence_flush_ops_total Total persistence flush operations\n");
     body.push_str("# TYPE humoco_persistence_flush_ops_total counter\n");
-    body.push_str(&format!("humoco_persistence_flush_ops_total {}\n", state.engine.stats.flush_ops_total.load(Ordering::Relaxed)));
+    body.push_str(&format!(
+        "humoco_persistence_flush_ops_total {}\n",
+        state.engine.stats.flush_ops_total.load(Ordering::Relaxed)
+    ));
 
     body.push_str("# HELP humoco_persistence_flush_errors_total Total persistence flush errors\n");
     body.push_str("# TYPE humoco_persistence_flush_errors_total counter\n");
-    body.push_str(&format!("humoco_persistence_flush_errors_total {}\n", state.engine.stats.flush_errors_total.load(Ordering::Relaxed)));
+    body.push_str(&format!(
+        "humoco_persistence_flush_errors_total {}\n",
+        state
+            .engine
+            .stats
+            .flush_errors_total
+            .load(Ordering::Relaxed)
+    ));
 
     // Health status gauge: 0 = Ok, 1 = Warn, 2 = Crit
     let health_level = if peers_connected == 0 && !state.is_simulation {
@@ -427,7 +490,9 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     } else {
         0 // Ok
     };
-    body.push_str("# HELP humoco_health_status Node health evaluation level (0=Ok, 1=Warn, 2=Crit)\n");
+    body.push_str(
+        "# HELP humoco_health_status Node health evaluation level (0=Ok, 1=Warn, 2=Crit)\n",
+    );
     body.push_str("# TYPE humoco_health_status gauge\n");
     body.push_str(&format!("humoco_health_status {}\n", health_level));
 

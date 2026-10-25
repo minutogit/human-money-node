@@ -1,5 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::all, clippy::pedantic, clippy::nursery)]
-#![allow(unused_variables, unused_mut, dead_code, unused_imports, unused_comparisons)]
+#![allow(
+    unused_variables,
+    unused_mut,
+    dead_code,
+    unused_imports,
+    unused_comparisons
+)]
 //! Property-Based Tests for HuMoCo Layer-2 Collision Lock Registry
 //!
 //! Covers 5 mathematical property families (using `proptest`):
@@ -12,12 +18,12 @@
 //! Run with: `cargo test --test proptests_humoco_properties -- --nocapture`
 
 use humoco_sim_core::{
-    compute_canonical_hash, derive_account_tag, resolve_split_brain, resolve_split_brain_canonical,
-    AccessControl, AccessTier, ByteYears, LockEntry144, LockRecord, NetworkThermometer,
-    RamIndex, SimTime, WireHeader, WIRE_MAGIC, CURRENT_PROTOCOL_VERSION,
-    HARD_FLOOR_BASELINE_DAILY, HARD_FLOOR_READ_BASELINE_DAILY, MAX_WHALE_MULTIPLIER,
-    QuartileStats, SlottedMedianRingBuffer, compute_backoff,
-    calculate_integer_ema, sign_lock_attestation, apply_attestation, promote_to_final_if_eligible,
+    apply_attestation, calculate_integer_ema, compute_backoff, compute_canonical_hash,
+    derive_account_tag, promote_to_final_if_eligible, resolve_split_brain,
+    resolve_split_brain_canonical, sign_lock_attestation, AccessControl, AccessTier, ByteYears,
+    LockEntry144, LockRecord, NetworkThermometer, QuartileStats, RamIndex, SimTime,
+    SlottedMedianRingBuffer, WireHeader, CURRENT_PROTOCOL_VERSION, HARD_FLOOR_BASELINE_DAILY,
+    HARD_FLOOR_READ_BASELINE_DAILY, MAX_WHALE_MULTIPLIER, WIRE_MAGIC,
 };
 use proptest::prelude::*;
 
@@ -38,7 +44,13 @@ fn arb_nonce() -> impl Strategy<Value = Vec<u8>> {
 }
 
 fn arb_lock_record() -> impl Strategy<Value = LockRecord> {
-    (arb_hash(), arb_hash(), arb_nonce(), 0u64..1_000_000_000u64, 1u64..1_000_000u64)
+    (
+        arb_hash(),
+        arb_hash(),
+        arb_nonce(),
+        0u64..1_000_000_000u64,
+        1u64..1_000_000u64,
+    )
         .prop_map(|(parent, receiver, nonce, created, ttl)| {
             let created_at = SimTime(created);
             let valid_until = SimTime(created.saturating_add(ttl).saturating_add(31_000));

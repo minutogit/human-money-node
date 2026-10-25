@@ -300,7 +300,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let num_nodes = std::env::args()
         .nth(1)
         .and_then(|s| s.parse::<usize>().ok())
-        .or_else(|| std::env::var("SIM_NODES").ok().and_then(|s| s.parse::<usize>().ok()))
+        .or_else(|| {
+            std::env::var("SIM_NODES")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+        })
         .unwrap_or(4);
     println!(
         "\x1b[1;33m🚀 Initialisiere {} HuMoCo Knoten im echten F2F Mesh...\x1b[0m",

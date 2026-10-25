@@ -1,22 +1,21 @@
-use std::sync::Arc;
-use ed25519_dalek::{Signer, SigningKey};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use ed25519_dalek::{Signer, SigningKey};
 use http_body_util::BodyExt;
+use std::sync::Arc;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
 use humoco_node::{
     api::{
         build_router,
-        routes::build_operator_router,
         hmc::{
             calculate_l2_payload_hash, L2AuthPayload, L2LockRequest, L2ResponseEnvelope, L2Verdict,
         },
-        AppState, NodeStatusResponse, PowChallengeResponse, SyncRequest,
-        SyncResponse,
+        routes::build_operator_router,
+        AppState, NodeStatusResponse, PowChallengeResponse, SyncRequest, SyncResponse,
     },
     identity::NodeIdentity,
     ingress::{PowEngine, TierController},
@@ -26,11 +25,20 @@ use humoco_node::{
 /// Explicit component-test island fixture. Its predeclared empty namespace is
 /// installed by the test; this does not exercise or prove production recovery.
 fn isolated_ready_state(state: AppState) -> AppState {
-    for shard in 0..=u16::MAX { state.readiness_manager.mark_shard_ready(shard); }
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
     state
 }
 
-fn setup_test_app_pair() -> (axum::Router, axum::Router, Arc<RedbStorage>, NodeIdentity, Arc<TierController>, Arc<PowEngine>) {
+fn setup_test_app_pair() -> (
+    axum::Router,
+    axum::Router,
+    Arc<RedbStorage>,
+    NodeIdentity,
+    Arc<TierController>,
+    Arc<PowEngine>,
+) {
     let temp = tempdir().expect("tempdir");
     let db_path = temp.path().join("test_api.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
@@ -50,22 +58,47 @@ fn setup_test_app_pair() -> (axum::Router, axum::Router, Arc<RedbStorage>, NodeI
     let state = isolated_ready_state(state);
     let operator = build_operator_router(state.clone());
     let router = build_router(state);
-    (router, operator, storage, identity, tier_controller, pow_engine)
+    (
+        router,
+        operator,
+        storage,
+        identity,
+        tier_controller,
+        pow_engine,
+    )
 }
 
-fn setup_test_app() -> (axum::Router, Arc<RedbStorage>, NodeIdentity, Arc<TierController>, Arc<PowEngine>) {
+fn setup_test_app() -> (
+    axum::Router,
+    Arc<RedbStorage>,
+    NodeIdentity,
+    Arc<TierController>,
+    Arc<PowEngine>,
+) {
     let (public, _operator, storage, identity, tiers, pow) = setup_test_app_pair();
     (public, storage, identity, tiers, pow)
 }
 
-fn setup_test_operator_app() -> (axum::Router, Arc<RedbStorage>, NodeIdentity, Arc<TierController>, Arc<PowEngine>) {
+fn setup_test_operator_app() -> (
+    axum::Router,
+    Arc<RedbStorage>,
+    NodeIdentity,
+    Arc<TierController>,
+    Arc<PowEngine>,
+) {
     let temp = tempdir().expect("tempdir");
     let storage = Arc::new(RedbStorage::open(&temp.path().join("operator.redb")).expect("redb"));
     let (engine, _flush) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
     let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
-    let state = AppState::new(engine, storage.clone(), identity.clone(), tiers.clone(), pow.clone());
+    let state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tiers.clone(),
+        pow.clone(),
+    );
     (build_operator_router(state), storage, identity, tiers, pow)
 }
 
@@ -81,20 +114,55 @@ fn test_now_ms() -> u64 {
 fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
-    hash.update(req.transaction_hash); hash.update(req.sender_ephemeral_pub);
-    if let Some(receiver) = req.receiver_ephemeral_pub_hash { hash.update(receiver); }
+    hash.update(req.transaction_hash);
+    hash.update(req.sender_ephemeral_pub);
+    if let Some(receiver) = req.receiver_ephemeral_pub_hash {
+        hash.update(receiver);
+    }
     hash.update(req.deletable_at.as_deref().unwrap().as_bytes());
     req.layer2_voucher_id = hex::encode(hash.finalize());
-    let mut proof = humoco_proto::causal::CausalOutputProof { version: 1, voucher_id: req.layer2_voucher_id.clone(), transaction_id: req.transaction_hash, state_hash: req.transaction_hash, sender_pubkey: req.sender_ephemeral_pub, receiver_pubkey_hash: req.receiver_ephemeral_pub_hash, change_pubkey_hash: req.change_ephemeral_pub_hash, root_valid_until_ms: req.deletable_at.as_ref().unwrap().parse().unwrap(), is_root: true, signature: [0; 64] };
+    let mut proof = humoco_proto::causal::CausalOutputProof {
+        version: 1,
+        voucher_id: req.layer2_voucher_id.clone(),
+        transaction_id: req.transaction_hash,
+        state_hash: req.transaction_hash,
+        sender_pubkey: req.sender_ephemeral_pub,
+        receiver_pubkey_hash: req.receiver_ephemeral_pub_hash,
+        change_pubkey_hash: req.change_ephemeral_pub_hash,
+        root_valid_until_ms: req.deletable_at.as_ref().unwrap().parse().unwrap(),
+        is_root: true,
+        signature: [0; 64],
+    };
     proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
     req.causal_output = Some(proof);
     req.layer2_signature = key.sign(&calculate_l2_payload_hash(req)).to_bytes();
 }
-async fn prepare_spend_fixture(app: &axum::Router, root: &L2LockRequest, owner: &SigningKey, token: &str) -> L2LockRequest {
-    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", token).body(Body::from(serde_json::to_vec(root).unwrap())).unwrap()).await.unwrap();
+async fn prepare_spend_fixture(
+    app: &axum::Router,
+    root: &L2LockRequest,
+    owner: &SigningKey,
+    token: &str,
+) -> L2LockRequest {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", token)
+                .body(Body::from(serde_json::to_vec(root).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert!(response.status().is_success());
     use sha3::{Digest, Sha3_256};
-    let mut hash = Sha3_256::new(); hash.update(32u32.to_le_bytes()); hash.update(root.transaction_hash); hash.update(32u32.to_le_bytes()); hash.update(owner.verifying_key().as_bytes());
+    let mut hash = Sha3_256::new();
+    hash.update(32u32.to_le_bytes());
+    hash.update(root.transaction_hash);
+    hash.update(32u32.to_le_bytes());
+    hash.update(owner.verifying_key().as_bytes());
     let tag = bs58::encode(hash.finalize()).into_string();
     make_test_hmc_spend(&root.layer2_voucher_id, &tag, [0xAC; 32], owner)
 }
@@ -212,7 +280,10 @@ async fn test_api_lock_submission_and_idempotency() {
     assert_eq!(res_dup.status(), StatusCode::OK);
 
     let submit_resp_dup: L2ResponseEnvelope = response_json(res_dup).await;
-    assert!(matches!(submit_resp_dup.verdict, L2Verdict::Verified { .. }));
+    assert!(matches!(
+        submit_resp_dup.verdict,
+        L2Verdict::Verified { .. }
+    ));
     assert_ne!(submit_resp_dup.server_signature, [0u8; 64]);
 }
 
@@ -243,7 +314,12 @@ async fn test_api_lock_conflict_double_spend() {
     assert_eq!(res_gen.status(), StatusCode::CREATED);
 
     let sender_key_a = SigningKey::from_bytes(&[1u8; 32]);
-    let req_lock_a = make_test_hmc_spend(&genesis_req.layer2_voucher_id, "spent_tag_01", [0x11; 32], &sender_key_a);
+    let req_lock_a = make_test_hmc_spend(
+        &genesis_req.layer2_voucher_id,
+        "spent_tag_01",
+        [0x11; 32],
+        &sender_key_a,
+    );
 
     let res_a = app
         .clone()
@@ -263,7 +339,12 @@ async fn test_api_lock_conflict_double_spend() {
 
     // Second lock on same ds_tag with different transaction_hash -> 409 Conflict
     let sender_key_b = SigningKey::from_bytes(&[2u8; 32]);
-    let req_lock_b = make_test_hmc_spend(&genesis_req.layer2_voucher_id, "spent_tag_01", [0x22; 32], &sender_key_b);
+    let req_lock_b = make_test_hmc_spend(
+        &genesis_req.layer2_voucher_id,
+        "spent_tag_01",
+        [0x22; 32],
+        &sender_key_b,
+    );
 
     let res_b = app
         .oneshot(
@@ -307,8 +388,8 @@ async fn test_api_pow_challenge_and_public_ingress() {
         .unwrap();
 
     assert_eq!(res_unauth.status(), StatusCode::UNAUTHORIZED);
-    let err_resp: L2ResponseEnvelope = response_json(res_unauth).await;
-    assert!(matches!(err_resp.verdict, L2Verdict::Rejected { .. }));
+    let err_resp: humoco_node::api::ErrorResponse = response_json(res_unauth).await;
+    assert_eq!(err_resp.error, "PoWRequired");
 
     // Test GET /v1/pow-challenge endpoint
     let res_pow_endpoint = app
@@ -383,11 +464,18 @@ async fn test_api_vip_tier_quota_deduction() {
 
     let actual_status = res.status();
     let submit_resp: L2ResponseEnvelope = response_json(res).await;
-    assert_eq!(actual_status, StatusCode::CREATED, "first-write verdict: {submit_resp:?}");
+    assert_eq!(
+        actual_status,
+        StatusCode::CREATED,
+        "first-write verdict: {submit_resp:?}"
+    );
     assert!(matches!(submit_resp.verdict, L2Verdict::Verified { .. }));
 
     // Quota should now be deducted in-memory atomically (<1µs, no fsync stall): 1000 - 192 = 808
-    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(808));
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(808)
+    );
     // Durable storage is updated asynchronously; poll for eventual persistence
     for _ in 0..20 {
         if storage.get_quota(&account_tag).unwrap() == 808 {
@@ -399,7 +487,8 @@ async fn test_api_vip_tier_quota_deduction() {
 
     // Try submitting with TTL that exceeds remaining quota (e.g. 5 years = 960 BY > 808)
     let sender_key_2 = SigningKey::from_bytes(&[5u8; 32]);
-    let req_excess = make_test_hmc_genesis(&"ff".repeat(32), now + 5 * 31_536_000_000, &sender_key_2);
+    let req_excess =
+        make_test_hmc_genesis(&"ff".repeat(32), now + 5 * 31_536_000_000, &sender_key_2);
 
     let res_excess = app
         .oneshot(
@@ -418,7 +507,10 @@ async fn test_api_vip_tier_quota_deduction() {
     let err_resp: L2ResponseEnvelope = response_json(res_excess).await;
     assert!(matches!(err_resp.verdict, L2Verdict::Rejected { .. }));
     // Quota remains 808 (in-memory and eventually on disk)
-    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(808));
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(808)
+    );
     assert_eq!(storage.get_quota(&account_tag).unwrap(), 808);
 }
 
@@ -467,7 +559,11 @@ async fn test_api_status_and_sync() {
         .unwrap();
     let actual_status = res_sub.status();
     let submit: L2ResponseEnvelope = response_json(res_sub).await;
-    assert_eq!(actual_status, StatusCode::CREATED, "first-write verdict: {submit:?}");
+    assert_eq!(
+        actual_status,
+        StatusCode::CREATED,
+        "first-write verdict: {submit:?}"
+    );
 
     // 3. Call sync without locator -> lock is returned
     let sync_req = SyncRequest {
@@ -487,8 +583,14 @@ async fn test_api_status_and_sync() {
         .unwrap();
     assert_eq!(res_sync.status(), StatusCode::OK);
     let sync_resp: SyncResponse = response_json(res_sync).await;
-    assert!(sync_resp.locks.is_empty(), "a root anchor is not a sync collision row");
-    assert!(_storage.voucher_root(&req_lock.layer2_voucher_id).unwrap().is_some());
+    assert!(
+        sync_resp.locks.is_empty(),
+        "a root anchor is not a sync collision row"
+    );
+    assert!(_storage
+        .voucher_root(&req_lock.layer2_voucher_id)
+        .unwrap()
+        .is_some());
 
     // 4. Call sync with locator including lock id -> filtered out
     let sync_req_filtered = SyncRequest {
@@ -515,23 +617,52 @@ async fn test_api_hmc_native_flow() {
     let (app, storage, identity, tiers, _) = setup_test_app();
     tiers.register_f2f_peer("hmc-native");
     let owner = SigningKey::from_bytes(&[71; 32]);
-    let root = make_test_hmc_genesis("native-root", test_now_ms()+600_000, &owner);
+    let root = make_test_hmc_genesis("native-root", test_now_ms() + 600_000, &owner);
     let spend = prepare_spend_fixture(&app, &root, &owner, "hmc-native").await;
     let tag = spend.ds_tag.clone().unwrap();
-    assert!(storage.get_hmc_lock(&bs58::encode(root.transaction_hash).into_string()).unwrap().is_none());
-    assert!(storage.voucher_root(&root.layer2_voucher_id).unwrap().is_some());
-    let post = |req: &L2LockRequest| Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", "hmc-native").body(Body::from(serde_json::to_vec(req).unwrap())).unwrap();
+    assert!(storage
+        .get_hmc_lock(&bs58::encode(root.transaction_hash).into_string())
+        .unwrap()
+        .is_none());
+    assert!(storage
+        .voucher_root(&root.layer2_voucher_id)
+        .unwrap()
+        .is_some());
+    let post = |req: &L2LockRequest| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/lock")
+            .header("content-type", "application/json")
+            .header("x-peer-token", "hmc-native")
+            .body(Body::from(serde_json::to_vec(req).unwrap()))
+            .unwrap()
+    };
     let first = app.clone().oneshot(post(&spend)).await.unwrap();
-    assert_eq!(first.status(), StatusCode::CREATED, "the first genuine spend must not collide with genesis");
+    assert_eq!(
+        first.status(),
+        StatusCode::CREATED,
+        "the first genuine spend must not collide with genesis"
+    );
     let envelope: L2ResponseEnvelope = response_json(first).await;
     use sha2::{Digest, Sha256};
-    identity.verifying_key().verify_strict(&Sha256::digest(serde_json::to_vec(&envelope.verdict).unwrap()), &ed25519_dalek::Signature::from_bytes(&envelope.server_signature)).unwrap();
-    assert_eq!(app.clone().oneshot(post(&spend)).await.unwrap().status(), StatusCode::OK);
+    identity
+        .verifying_key()
+        .verify_strict(
+            &Sha256::digest(serde_json::to_vec(&envelope.verdict).unwrap()),
+            &ed25519_dalek::Signature::from_bytes(&envelope.server_signature),
+        )
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(post(&spend)).await.unwrap().status(),
+        StatusCode::OK
+    );
     let alternate = make_test_hmc_spend(&root.layer2_voucher_id, &tag, [0xBB; 32], &owner);
     let collision = app.oneshot(post(&alternate)).await.unwrap();
     assert_eq!(collision.status(), StatusCode::CONFLICT);
     let envelope: L2ResponseEnvelope = response_json(collision).await;
-    assert!(matches!(envelope.verdict, L2Verdict::Conflict { existing_lock } if existing_lock.t_id == spend.transaction_hash));
+    assert!(
+        matches!(envelope.verdict, L2Verdict::Conflict { existing_lock } if existing_lock.t_id == spend.transaction_hash)
+    );
 }
 
 #[tokio::test]
@@ -576,7 +707,11 @@ async fn test_banned_node_ingress_403_rejection() {
         .await
         .unwrap();
 
-    assert_eq!(res.status(), StatusCode::FORBIDDEN, "Banned node must be rejected with 403 Forbidden");
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "Banned node must be rejected with 403 Forbidden"
+    );
 }
 
 #[tokio::test]
@@ -601,14 +736,23 @@ async fn test_api_quorum_certificate_assembly_standalone() {
     assert_eq!(res.status(), StatusCode::CREATED);
 
     let submit_resp: L2ResponseEnvelope = response_json(res).await;
-    assert!(submit_resp.quorum_certificate.is_some(), "QuorumCertificate must be attached");
+    assert!(
+        submit_resp.quorum_certificate.is_some(),
+        "QuorumCertificate must be attached"
+    );
 
     let qc = submit_resp.quorum_certificate.unwrap();
     assert_eq!(qc.status, 0, "Standalone status must be 0 (PROVISIONAL)");
-    assert_eq!(qc.active_nodes_count, 1, "Active nodes count must be 1 for standalone");
+    assert_eq!(
+        qc.active_nodes_count, 1,
+        "Active nodes count must be 1 for standalone"
+    );
     assert_eq!(qc.signer_count, 1, "Signer count must be 1 for standalone");
     assert_eq!(qc.signatures.len(), 1);
-    assert_eq!(qc.signatures[0].node_id, u16::from_be_bytes([identity.node_id()[0], identity.node_id()[1]]));
+    assert_eq!(
+        qc.signatures[0].node_id,
+        u16::from_be_bytes([identity.node_id()[0], identity.node_id()[1]])
+    );
 }
 
 #[tokio::test]
@@ -624,8 +768,11 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     let identity = NodeIdentity::generate();
 
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
-    for shard in 0..=u16::MAX { readiness.mark_shard_ready(shard); }
-    let handler = NodeRequestHandler::new(engine.clone(), storage.clone(), identity.clone()).with_readiness_manager(readiness);
+    for shard in 0..=u16::MAX {
+        readiness.mark_shard_ready(shard);
+    }
+    let handler = NodeRequestHandler::new(engine.clone(), storage.clone(), identity.clone())
+        .with_readiness_manager(readiness);
 
     // 1a. Legacy tuple / Sim bypass must be hard-rejected (Phase 1 P0).
     let now_ms = std::time::SystemTime::now()
@@ -695,12 +842,26 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         hmc_req.layer2_signature = sender.signing_key().sign(&payload_hash).to_bytes();
     }
     let root = hmc_req.clone();
-    let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.transaction_hash).into_string(), (&root).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(now_ms), None, None, None).await;
+    let (verdict, _) = engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root.transaction_hash).into_string(),
+            (&root).into(),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(now_ms),
+            None,
+            None,
+            None,
+        )
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
-    hmc_req = make_test_hmc_spend(&root.layer2_voucher_id, "handler-spend", [0x56; 32], sender.signing_key());
+    hmc_req = make_test_hmc_spend(
+        &root.layer2_voucher_id,
+        "handler-spend",
+        [0x56; 32],
+        sender.signing_key(),
+    );
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
-    let footprint =
-        humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
     let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
         sender.node_pubkey(),
         0,
@@ -738,31 +899,39 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         payload.len() as u32,
     );
 
-    let (resp_header, resp_payload) = handler.handle(header, payload).await.expect("handle LockVerifyRequest");
+    let (resp_header, resp_payload) = handler
+        .handle(header, payload)
+        .await
+        .expect("handle LockVerifyRequest");
     assert_eq!(resp_header.msg_type, MsgType::LockVerifyResponse as u16);
-    assert!(!resp_payload.is_empty(), "Response payload must contain signed attestation");
+    assert!(
+        !resp_payload.is_empty(),
+        "Response payload must contain signed attestation"
+    );
 
-    let att: humoco_node::api::AttestationDto = bincode::deserialize(&resp_payload).expect("deserialize attestation");
+    let att: humoco_node::api::AttestationDto =
+        bincode::deserialize(&resp_payload).expect("deserialize attestation");
     assert_eq!(att.lock_id, hex::encode(entry.t_id));
-    assert_eq!(att.node_id, u16::from_be_bytes([identity.node_id()[0], identity.node_id()[1]]));
+    assert_eq!(
+        att.node_id,
+        u16::from_be_bytes([identity.node_id()[0], identity.node_id()[1]])
+    );
 
     // 2. Test ShardDigestRequest for the actual Hmc shard.
     let lookup_tag = bs58::encode(&[0x55; 32]).into_string();
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
     let hmc_shard = u16::from_be_bytes([parent_bytes[0], parent_bytes[1]]);
-    let digest_header = WireHeader::new(
-        MsgType::ShardDigestRequest as u16,
-        2,
-        0,
-        0,
-        2,
-    );
+    let digest_header = WireHeader::new(MsgType::ShardDigestRequest as u16, 2, 0, 0, 2);
     let shard_payload = hmc_shard.to_le_bytes().to_vec();
-    let (d_resp_header, d_resp_payload) = handler.handle(digest_header, shard_payload).await.expect("handle ShardDigestRequest");
+    let (d_resp_header, d_resp_payload) = handler
+        .handle(digest_header, shard_payload)
+        .await
+        .expect("handle ShardDigestRequest");
     assert_eq!(d_resp_header.msg_type, MsgType::ShardDigestResponse as u16);
     assert_eq!(d_resp_payload.len(), 40); // 32 bytes digest + 8 bytes count
 
-    let (digest, count): ([u8; 32], u64) = bincode::deserialize(&d_resp_payload).expect("deserialize digest response");
+    let (digest, count): ([u8; 32], u64) =
+        bincode::deserialize(&d_resp_payload).expect("deserialize digest response");
     assert_eq!(count, 1, "Should have 1 active lock");
     assert_ne!(digest, [0u8; 32]);
 
@@ -781,9 +950,16 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         0,
         b_payload.len() as u32,
     );
-    let (b_resp_header, b_resp_payload) = handler.handle(b_header, b_payload).await.expect("handle ShardBucketRangeRequest");
-    assert_eq!(b_resp_header.msg_type, MsgType::ShardBucketRangeResponse as u16);
-    let b_resp: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&b_resp_payload).expect("deserialize bucket response");
+    let (b_resp_header, b_resp_payload) = handler
+        .handle(b_header, b_payload)
+        .await
+        .expect("handle ShardBucketRangeRequest");
+    assert_eq!(
+        b_resp_header.msg_type,
+        MsgType::ShardBucketRangeResponse as u16
+    );
+    let b_resp: humoco_sim_core::types::ShardBucketRangeResponse =
+        bincode::deserialize(&b_resp_payload).expect("deserialize bucket response");
     assert_eq!(b_resp.shard_id, hmc_shard);
     assert_eq!(b_resp.buckets.len(), 1);
     assert_eq!(b_resp.buckets[0].bucket_id, bucket_id);
@@ -797,7 +973,8 @@ async fn test_phase1_idempotent_retry_with_pow_and_created_at() {
 
     let parent_lock = "88".repeat(32);
     let (challenge, difficulty, _) = pow_engine.generate_challenge();
-    let nonce = PowEngine::solve_blake3_hashcash(&challenge, difficulty, 50_000).expect("Solve BLAKE3 PoW");
+    let nonce =
+        PowEngine::solve_blake3_hashcash(&challenge, difficulty, 50_000).expect("Solve BLAKE3 PoW");
 
     let now = test_now_ms();
     let sender_key = SigningKey::from_bytes(&[10u8; 32]);
@@ -838,7 +1015,11 @@ async fn test_phase1_idempotent_retry_with_pow_and_created_at() {
         .await
         .unwrap();
 
-    assert_eq!(res2.status(), StatusCode::OK, "Retry of same lock must be recognized as idempotent (HTTP 200)");
+    assert_eq!(
+        res2.status(),
+        StatusCode::OK,
+        "Retry of same lock must be recognized as idempotent (HTTP 200)"
+    );
     let resp2: L2ResponseEnvelope = response_json(res2).await;
     assert!(matches!(resp2.verdict, L2Verdict::Verified { .. }));
 }
@@ -889,7 +1070,11 @@ async fn test_phase1_idempotent_retry_preserves_signed_created_at() {
         .await
         .unwrap();
 
-    assert_eq!(res2.status(), StatusCode::OK, "Retry must succeed as idempotent (HTTP 200)");
+    assert_eq!(
+        res2.status(),
+        StatusCode::OK,
+        "Retry must succeed as idempotent (HTTP 200)"
+    );
     let resp2: L2ResponseEnvelope = response_json(res2).await;
     assert!(matches!(resp2.verdict, L2Verdict::Verified { .. }));
 }
@@ -920,7 +1105,8 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
     let genesis_del_ms = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64) + 600_000;
+        .as_millis() as u64)
+        + 600_000;
     let genesis_del_str = genesis_del_ms.to_string();
     let created_at_ms = test_now_ms();
     let genesis_hash = humoco_node::api::hmc::calculate_l2_payload_hash_raw(
@@ -1027,17 +1213,23 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
     assert!(envelope.quorum_certificate.is_some());
     let qc = envelope.quorum_certificate.unwrap();
     let genesis_parent_bytes = *blake3::hash(genesis_lookup_tag.as_bytes()).as_bytes();
-    let expected_genesis_shard_id = u16::from_be_bytes([genesis_parent_bytes[0], genesis_parent_bytes[1]]);
+    let expected_genesis_shard_id =
+        u16::from_be_bytes([genesis_parent_bytes[0], genesis_parent_bytes[1]]);
 
     // Verify: Shard-ID MUST equal expected_genesis_shard_id (derived from genesis voucher anchor), NOT from t_id!
-    assert_eq!(qc.shard_id, expected_genesis_shard_id, "Shard ID must be derived from genesis voucher anchor, never from t_id");
+    assert_eq!(
+        qc.shard_id, expected_genesis_shard_id,
+        "Shard ID must be derived from genesis voucher anchor, never from t_id"
+    );
 }
 
 #[tokio::test]
 async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let (_router, _storage, identity, _tier_controller, _pow_engine) = setup_test_app();
     let peer_mgr = Arc::new(humoco_node::network::PeerManager::new(vec![]));
-    let transport = humoco_node::network::QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &identity).unwrap();
+    let transport =
+        humoco_node::network::QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &identity)
+            .unwrap();
 
     let now = test_now_ms();
     let sender_key = SigningKey::from_bytes(&[12u8; 32]);
@@ -1054,12 +1246,26 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let mut found = 0;
     while found < 25 {
         let candidate = NodeIdentity::generate();
-        let score = humoco_sim_core::types::hrw_score_for_routing(candidate.hrw_routing_id(), shard_id);
+        let score =
+            humoco_sim_core::types::hrw_score_for_routing(candidate.hrw_routing_id(), shard_id);
         if score > self_score {
             let addr = format!("127.0.0.1:{}", 15000 + found).parse().unwrap();
-            peer_mgr.learn_node_from_gossip_with_hrw(*candidate.node_pubkey(), *candidate.hrw_routing_id(), addr, 1, None).await;
+            peer_mgr
+                .learn_node_from_gossip_with_hrw(
+                    *candidate.node_pubkey(),
+                    *candidate.hrw_routing_id(),
+                    addr,
+                    1,
+                    None,
+                )
+                .await;
             // Mature the node so it counts in active_known_nodes (24h incubation filter)
-            peer_mgr.set_first_seen_for_test(candidate.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+            peer_mgr
+                .set_first_seen_for_test(
+                    candidate.node_pubkey(),
+                    std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+                )
+                .await;
             found += 1;
         }
     }
@@ -1077,9 +1283,24 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("gateway_test_token");
 
-    let (verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root_req.transaction_hash).into_string(), (&root_req).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(test_now_ms()), None, None, None).await;
+    let (verdict, _) = engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root_req.transaction_hash).into_string(),
+            (&root_req).into(),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(test_now_ms()),
+            None,
+            None,
+            None,
+        )
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
-    let req_payload = make_test_hmc_spend(&root_req.layer2_voucher_id, "rank-filter-spend", [0x57; 32], &sender_key);
+    let req_payload = make_test_hmc_spend(
+        &root_req.layer2_voucher_id,
+        "rank-filter-spend",
+        [0x57; 32],
+        &sender_key,
+    );
     let mut state = AppState::new(
         engine,
         storage.clone(),
@@ -1114,11 +1335,20 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
 
     let self_node_pubkey = *identity.node_pubkey();
     // Gateway's own attestation must NOT be present in QuorumCertificate because its rank is > 20!
-    let self_attestation_present = qc.signatures.iter().any(|s| s.node_pubkey_bytes() == Some(self_node_pubkey));
-    assert!(!self_attestation_present, "Gateway with HRW rank > 20 must NOT attest itself into the QuorumCertificate");
+    let self_attestation_present = qc
+        .signatures
+        .iter()
+        .any(|s| s.node_pubkey_bytes() == Some(self_node_pubkey));
+    assert!(
+        !self_attestation_present,
+        "Gateway with HRW rank > 20 must NOT attest itself into the QuorumCertificate"
+    );
 
     // Task 1: Stateless gateway must NOT write foreign shard lock to local engine or redb!
-    assert!(storage.get_hmc_lock(&lookup_tag).unwrap().is_none(), "Stateless gateway must not write foreign shard lock to redb storage");
+    assert!(
+        storage.get_hmc_lock(&lookup_tag).unwrap().is_none(),
+        "Stateless gateway must not write foreign shard lock to redb storage"
+    );
 }
 
 #[tokio::test]
@@ -1149,7 +1379,11 @@ async fn test_api_created_at_clock_drift_exceeded() {
     assert_eq!(res_future.status(), StatusCode::BAD_REQUEST);
 
     // 2. Past clock drift: valid_until in the past
-    let req_past = make_test_hmc_genesis(&"33".repeat(32), now.saturating_sub(90_000_000), &sender_key);
+    let req_past = make_test_hmc_genesis(
+        &"33".repeat(32),
+        now.saturating_sub(90_000_000),
+        &sender_key,
+    );
 
     let res_past = app
         .clone()
@@ -1198,13 +1432,18 @@ async fn test_api_pow_adaptive_backpressure_and_stateless_hashcash() {
     // Must return 429 Too Many Requests with header X-Required-Difficulty
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
-        res.headers().get("x-required-difficulty").unwrap().to_str().unwrap(),
+        res.headers()
+            .get("x-required-difficulty")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         difficulty.to_string()
     );
 
     // 2. Solve stateless PoW properly for parent_bytes
-    let valid_nonce = humoco_node::ingress::pow::solve_blake3_hashcash(&challenge, difficulty, 50_000)
-        .expect("Must solve PoW");
+    let valid_nonce =
+        humoco_node::ingress::pow::solve_blake3_hashcash(&challenge, difficulty, 50_000)
+            .expect("Must solve PoW");
 
     let res_valid = app
         .clone()
@@ -1251,8 +1490,17 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
 
     // Verify branding & live status badge
-    assert!(body_str.contains("Human Money Node Control Center") || body_str.contains("HuMoCo Node Control Center"));
-    assert!(body_str.contains("STANDALONE") || body_str.contains("COMMUNITY") || body_str.contains("VILLAGE MODE") || body_str.contains("ONLINE") || body_str.contains("HEALTHY"));
+    assert!(
+        body_str.contains("Human Money Node Control Center")
+            || body_str.contains("HuMoCo Node Control Center")
+    );
+    assert!(
+        body_str.contains("STANDALONE")
+            || body_str.contains("COMMUNITY")
+            || body_str.contains("VILLAGE MODE")
+            || body_str.contains("ONLINE")
+            || body_str.contains("HEALTHY")
+    );
 
     // Verify 3-Tier Latencies Pills & Fast Stats
     assert!(body_str.contains("In-RAM"));
@@ -1273,11 +1521,19 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("isFetchInProgress"));
 
     // Verify 5-Tab Navigation Identifiers (Phase 4 Role-Based Tabs)
-    assert!(body_str.contains("Cockpit &amp; Vitalwerte") || body_str.contains("Cockpit & Vitalwerte"));
+    assert!(
+        body_str.contains("Cockpit &amp; Vitalwerte") || body_str.contains("Cockpit & Vitalwerte")
+    );
     assert!(body_str.contains("Netzwerk &amp; Shards") || body_str.contains("Netzwerk & Shards"));
-    assert!(body_str.contains("Ingress &amp; Lastkontrolle") || body_str.contains("Ingress & Lastkontrolle"));
+    assert!(
+        body_str.contains("Ingress &amp; Lastkontrolle")
+            || body_str.contains("Ingress & Lastkontrolle")
+    );
     assert!(body_str.contains("Kassen &amp; Zugänge") || body_str.contains("Kassen & Zugänge"));
-    assert!(body_str.contains("Diagnose, Forensik &amp; OS") || body_str.contains("Diagnose, Forensik & OS"));
+    assert!(
+        body_str.contains("Diagnose, Forensik &amp; OS")
+            || body_str.contains("Diagnose, Forensik & OS")
+    );
 
     // Verify Phase 4 6-Tile Hero KPI Bar
     assert!(body_str.contains("hero-grid"));
@@ -1291,14 +1547,28 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     // Verify Visual Cards & Systems
     assert!(body_str.contains("Schreib-Durchsatz"));
     assert!(body_str.contains("Lese-Durchsatz"));
-    assert!(body_str.contains("Hardware &amp; Ressourcen") || body_str.contains("Hardware & Ressourcen"));
-    assert!(body_str.contains("Persistenz") || body_str.contains("Knoten-Kapazität") || body_str.contains("Knoten-Kapazitätsrechner"));
+    assert!(
+        body_str.contains("Hardware &amp; Ressourcen")
+            || body_str.contains("Hardware & Ressourcen")
+    );
+    assert!(
+        body_str.contains("Persistenz")
+            || body_str.contains("Knoten-Kapazität")
+            || body_str.contains("Knoten-Kapazitätsrechner")
+    );
     assert!(body_str.contains("Netzwerk-Thermometer"));
-    assert!(body_str.contains("P2P Nachbarknoten") || body_str.contains("F2F Web-of-Trust Freunde") || body_str.contains("Server-zu-Server Mesh"));
+    assert!(
+        body_str.contains("P2P Nachbarknoten")
+            || body_str.contains("F2F Web-of-Trust Freunde")
+            || body_str.contains("Server-zu-Server Mesh")
+    );
     assert!(body_str.contains("Peer Explorer"));
     assert!(body_str.contains("Free Tier"));
     assert!(body_str.contains("VIP Tier"));
-    assert!(body_str.contains("Recent Locks Ring Buffer") || body_str.contains("Recent Locks Ringpuffer"));
+    assert!(
+        body_str.contains("Recent Locks Ring Buffer")
+            || body_str.contains("Recent Locks Ringpuffer")
+    );
     assert!(body_str.contains("Aktive Gutschein-Wurzeln"));
     assert!(body_str.contains("qr-svg"));
     assert!(body_str.contains("Kopieren") || body_str.contains("Copy"));
@@ -1315,13 +1585,26 @@ async fn test_dashboard_endpoint_rendering_and_airgap() {
     assert!(body_str.contains("vouchers-count-sub"));
 
     // Size under 128 KiB (self-contained offline air-gapped dashboard)
-    assert!(body_str.len() < 128 * 1024, "Dashboard HTML must be under 128 KiB, was {}", body_str.len());
+    assert!(
+        body_str.len() < 128 * 1024,
+        "Dashboard HTML must be under 128 KiB, was {}",
+        body_str.len()
+    );
 
     // Air-gap check: ZERO external script or link tags with http:// or https://
     let lower = body_str.to_lowercase();
-    assert!(!lower.contains("<script src=\"http"), "No external scripts allowed");
-    assert!(!lower.contains("<link href=\"http"), "No external stylesheets allowed");
-    assert!(!lower.contains("<link rel=\"stylesheet\" href=\"http"), "No external CDN allowed");
+    assert!(
+        !lower.contains("<script src=\"http"),
+        "No external scripts allowed"
+    );
+    assert!(
+        !lower.contains("<link href=\"http"),
+        "No external stylesheets allowed"
+    );
+    assert!(
+        !lower.contains("<link rel=\"stylesheet\" href=\"http"),
+        "No external CDN allowed"
+    );
 
     // Also test GET /dashboard/data
     let res_data = app
@@ -1534,13 +1817,13 @@ async fn test_prometheus_metrics_expansion() {
 
 #[tokio::test]
 async fn test_api_hmc_read_quorum_and_adaptive_logic() {
+    use ed25519_dalek::{Signer, SigningKey};
     use humoco_node::api::hmc::{
         calculate_l2_payload_hash_raw, L2AuthPayload, L2LockRequest, L2ResponseEnvelope,
         L2StatusQuery, L2Verdict, TRAP_NONE_PLACEHOLDER,
     };
     use rand::rngs::OsRng;
     use rand::RngCore;
-    use ed25519_dalek::{Signer, SigningKey};
 
     let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("read_quorum_test_token");
@@ -1598,7 +1881,6 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
     authenticate_root_fixture(&mut genesis_req, &sender_key);
     let voucher_id = genesis_req.layer2_voucher_id.clone();
 
-
     let res_gen = app
         .clone()
         .oneshot(
@@ -1614,10 +1896,23 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .unwrap();
     assert_eq!(res_gen.status(), StatusCode::CREATED);
 
-    let spend = prepare_spend_fixture(&app, &genesis_req, &sender_key, "read_quorum_test_token").await;
+    let spend =
+        prepare_spend_fixture(&app, &genesis_req, &sender_key, "read_quorum_test_token").await;
     let t_id_bs58 = spend.ds_tag.clone().unwrap();
     let t_id_bytes = spend.transaction_hash;
-    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", "read_quorum_test_token").body(Body::from(serde_json::to_vec(&spend).unwrap())).unwrap()).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "read_quorum_test_token")
+                .body(Body::from(serde_json::to_vec(&spend).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     // 1. Query with default read_quorum (omitted from JSON) -> should default to 1 and have no QC
     let query_json = serde_json::json!({
@@ -1643,7 +1938,10 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         .unwrap();
     assert_eq!(res_default.status(), StatusCode::OK);
     let env_default: L2ResponseEnvelope = response_json(res_default).await;
-    assert!(env_default.quorum_certificate.is_none(), "read_quorum=1 must omit quorum_certificate");
+    assert!(
+        env_default.quorum_certificate.is_none(),
+        "read_quorum=1 must omit quorum_certificate"
+    );
     match env_default.verdict {
         L2Verdict::Verified { ref lock_entry } => {
             assert_eq!(lock_entry.t_id, t_id_bytes);
@@ -1706,18 +2004,17 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
     let rejection: serde_json::Value = response_json(res_q3).await;
     assert_eq!(rejection["error"], "RecipientChallengeRequired");
     assert_eq!(rejection["verification_endpoint"], "/v1/verify-current");
-
 }
 
 #[tokio::test]
 async fn test_api_hmc_fast_forward_leap_locks() {
+    use ed25519_dalek::{Signer, SigningKey};
     use humoco_node::api::hmc::{
         calculate_l2_payload_hash_raw, L2AuthPayload, L2LockRequest, L2ResponseEnvelope,
         L2StatusQuery, L2Verdict, TRAP_NONE_PLACEHOLDER,
     };
     use rand::rngs::OsRng;
     use rand::RngCore;
-    use ed25519_dalek::{Signer, SigningKey};
 
     let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("leap_lock_test_token");
@@ -1776,7 +2073,6 @@ async fn test_api_hmc_fast_forward_leap_locks() {
     };
     authenticate_root_fixture(&mut genesis_req, &sender_key);
     let voucher_id = genesis_req.layer2_voucher_id.clone();
-
 
     let res_gen = app
         .clone()
@@ -1951,7 +2247,10 @@ async fn test_api_hmc_fast_forward_leap_locks() {
     let env_conflict: L2ResponseEnvelope = response_json(res_conflict).await;
     match env_conflict.verdict {
         L2Verdict::Conflict { existing_lock } => {
-            assert_eq!(existing_lock.t_id, leap_t_id, "Evidence must be the existing leap lock");
+            assert_eq!(
+                existing_lock.t_id, leap_t_id,
+                "Evidence must be the existing leap lock"
+            );
         }
         _ => panic!("Expected Conflict verdict"),
     }
@@ -1981,7 +2280,10 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         .unwrap();
     assert_eq!(res_qtag.status(), StatusCode::OK);
     let env_qtag: L2ResponseEnvelope = response_json(res_qtag).await;
-    assert!(env_qtag.quorum_certificate.is_none(), "ordinary lookup is not a payment proof");
+    assert!(
+        env_qtag.quorum_certificate.is_none(),
+        "ordinary lookup is not a payment proof"
+    );
     match env_qtag.verdict {
         L2Verdict::Verified { lock_entry } => {
             assert_eq!(lock_entry.t_id, leap_t_id);
@@ -2084,7 +2386,9 @@ fn make_genesis_hmc_req(
     valid_until_ms: u64,
     encrypted_timestamp: u128,
 ) -> humoco_node::api::hmc::L2LockRequest {
-    use humoco_node::api::hmc::{calculate_l2_payload_hash_raw, L2AuthPayload, L2LockRequest, TRAP_NONE_PLACEHOLDER};
+    use humoco_node::api::hmc::{
+        calculate_l2_payload_hash_raw, L2AuthPayload, L2LockRequest, TRAP_NONE_PLACEHOLDER,
+    };
     let sender_pub = sender_key.verifying_key().to_bytes();
     let tx_hash = {
         let mut h = blake3::Hasher::new();
@@ -2111,7 +2415,10 @@ fn make_genesis_hmc_req(
     let sig = sender_key.sign(&payload_hash);
     L2LockRequest {
         causal_output: None,
-        auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None },
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
         layer2_voucher_id: voucher_id.to_string(),
         ds_tag: None,
         transaction_hash: tx_hash,
@@ -2161,7 +2468,10 @@ fn make_follow_hmc_req(
     let sig = sender_key.sign(&payload_hash);
     L2LockRequest {
         causal_output: None,
-        auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None },
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
         layer2_voucher_id: voucher_id.to_string(),
         ds_tag: Some(ds_tag),
         transaction_hash: tx_hash,
@@ -2179,10 +2489,22 @@ fn make_follow_hmc_req(
     }
 }
 
-
-fn causal_fixture_key(index: u8) -> SigningKey { SigningKey::from_bytes(&[41 + index; 32]) }
+fn causal_fixture_key(index: u8) -> SigningKey {
+    SigningKey::from_bytes(&[41 + index; 32])
+}
 fn sign_fixture_output(req: &mut L2LockRequest, key: &SigningKey, root_valid_until_ms: u64) {
-    let mut proof = humoco_proto::causal::CausalOutputProof { version: 1, voucher_id: req.layer2_voucher_id.clone(), transaction_id: req.transaction_hash, state_hash: req.transaction_hash, sender_pubkey: req.sender_ephemeral_pub, receiver_pubkey_hash: req.receiver_ephemeral_pub_hash, change_pubkey_hash: req.change_ephemeral_pub_hash, root_valid_until_ms, is_root: req.is_genesis, signature: [0; 64] };
+    let mut proof = humoco_proto::causal::CausalOutputProof {
+        version: 1,
+        voucher_id: req.layer2_voucher_id.clone(),
+        transaction_id: req.transaction_hash,
+        state_hash: req.transaction_hash,
+        sender_pubkey: req.sender_ephemeral_pub,
+        receiver_pubkey_hash: req.receiver_ephemeral_pub_hash,
+        change_pubkey_hash: req.change_ephemeral_pub_hash,
+        root_valid_until_ms,
+        is_root: req.is_genesis,
+        signature: [0; 64],
+    };
     proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
     req.causal_output = Some(proof);
     req.layer2_signature = key.sign(&calculate_l2_payload_hash(req)).to_bytes();
@@ -2190,31 +2512,67 @@ fn sign_fixture_output(req: &mut L2LockRequest, key: &SigningKey, root_valid_unt
 fn causal_fixture_spend(previous: &L2LockRequest, key: &SigningKey, id: u8) -> L2LockRequest {
     use sha3::{Digest, Sha3_256};
     let proof = previous.causal_output.as_ref().unwrap();
-    let mut hash = Sha3_256::new(); hash.update(32u32.to_le_bytes()); hash.update(proof.state_hash); hash.update(32u32.to_le_bytes()); hash.update(key.verifying_key().as_bytes());
-    let mut req = make_test_hmc_spend(&previous.layer2_voucher_id, &bs58::encode(hash.finalize()).into_string(), [id; 32], key);
+    let mut hash = Sha3_256::new();
+    hash.update(32u32.to_le_bytes());
+    hash.update(proof.state_hash);
+    hash.update(32u32.to_le_bytes());
+    hash.update(key.verifying_key().as_bytes());
+    let mut req = make_test_hmc_spend(
+        &previous.layer2_voucher_id,
+        &bs58::encode(hash.finalize()).into_string(),
+        [id; 32],
+        key,
+    );
     sign_fixture_output(&mut req, key, proof.root_valid_until_ms);
     req
 }
 fn real_causal_fixture() -> humoco_node::api::hmc::L2ChainLockRequest {
     use sha3::{Digest, Sha3_256};
-    let key0 = causal_fixture_key(0); let key1 = causal_fixture_key(1); let key2 = causal_fixture_key(2);
+    let key0 = causal_fixture_key(0);
+    let key1 = causal_fixture_key(1);
+    let key2 = causal_fixture_key(2);
     let mut root = make_test_hmc_genesis("real-causal-fixture", test_now_ms() + 600_000, &key0);
-    root.receiver_ephemeral_pub_hash = Some(Sha3_256::digest(key1.verifying_key().as_bytes()).into());
+    root.receiver_ephemeral_pub_hash =
+        Some(Sha3_256::digest(key1.verifying_key().as_bytes()).into());
     authenticate_root_fixture(&mut root, &key0);
     let mut first = causal_fixture_spend(&root, &key1, 2);
-    first.receiver_ephemeral_pub_hash = Some(Sha3_256::digest(key2.verifying_key().as_bytes()).into());
-    sign_fixture_output(&mut first, &key1, root.causal_output.as_ref().unwrap().root_valid_until_ms);
+    first.receiver_ephemeral_pub_hash =
+        Some(Sha3_256::digest(key2.verifying_key().as_bytes()).into());
+    sign_fixture_output(
+        &mut first,
+        &key1,
+        root.causal_output.as_ref().unwrap().root_valid_until_ms,
+    );
     let last = causal_fixture_spend(&first, &key2, 3);
-    humoco_node::api::hmc::L2ChainLockRequest { auth: last.auth.clone(), layer2_voucher_id: root.layer2_voucher_id.clone(), chain: vec![root, first, last] }
+    humoco_node::api::hmc::L2ChainLockRequest {
+        auth: last.auth.clone(),
+        layer2_voucher_id: root.layer2_voucher_id.clone(),
+        chain: vec![root, first, last],
+    }
 }
-async fn post_causal_fixture(app: &axum::Router, chain: &humoco_node::api::hmc::L2ChainLockRequest) -> (StatusCode, L2ResponseEnvelope) {
-    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type", "application/json").header("x-peer-token", "causal-fixture").body(Body::from(serde_json::to_vec(chain).unwrap())).unwrap()).await.unwrap();
+async fn post_causal_fixture(
+    app: &axum::Router,
+    chain: &humoco_node::api::hmc::L2ChainLockRequest,
+) -> (StatusCode, L2ResponseEnvelope) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock/chain")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "causal-fixture")
+                .body(Body::from(serde_json::to_vec(chain).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     (response.status(), response_json(response).await)
 }
 
 #[tokio::test]
 async fn test_checkout_case_1_happy_single_lock() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
+    use humoco_node::api::hmc::{L2AuthPayload, L2ChainLockRequest, L2ResponseEnvelope, L2Verdict};
     let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("checkout_peer");
     let voucher_id = format!("voucher_case1_{}", test_now_ms());
@@ -2224,17 +2582,55 @@ async fn test_checkout_case_1_happy_single_lock() {
     // Anchor genesis via single lock
     let genesis = make_genesis_hmc_req(&voucher_id, &sender_key, valid_until, 100);
     let _genesis_tag = bs58::encode(&genesis.transaction_hash).into_string();
-    let res_gen = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type","application/json").header("X-Peer-Token","checkout_peer").body(Body::from(serde_json::to_vec(&genesis).unwrap())).unwrap()).await.unwrap();
+    let res_gen = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("X-Peer-Token", "checkout_peer")
+                .body(Body::from(serde_json::to_vec(&genesis).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_gen.status(), StatusCode::CREATED);
     // Happy single lock: chain with 1 follow hop via /v1/lock/chain
     let follow_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
     let follow_tag = format!("ds_tag_follow_{}", test_now_ms());
     let follow = make_follow_hmc_req(&voucher_id, follow_tag, &follow_key, 200, None, None);
-    let chain_req = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![follow.clone()] };
-    let res_chain = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_peer").body(Body::from(serde_json::to_vec(&chain_req).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(res_chain.status(), StatusCode::CREATED, "happy single lock chain should be 201");
+    let chain_req = L2ChainLockRequest {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.clone(),
+        chain: vec![follow.clone()],
+    };
+    let res_chain = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock/chain")
+                .header("content-type", "application/json")
+                .header("X-Peer-Token", "checkout_peer")
+                .body(Body::from(serde_json::to_vec(&chain_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_chain.status(),
+        StatusCode::CREATED,
+        "happy single lock chain should be 201"
+    );
     let env: L2ResponseEnvelope = response_json(res_chain).await;
-    match env.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, follow.transaction_hash), _ => panic!("expected Verified") };
+    match env.verdict {
+        L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, follow.transaction_hash),
+        _ => panic!("expected Verified"),
+    };
     assert!(env.quorum_certificate.is_some());
 }
 
@@ -2246,21 +2642,45 @@ async fn test_checkout_case_2_brand_new_genesis_voucher() {
     chain.chain.truncate(1);
     let (status, envelope) = post_causal_fixture(&app, &chain).await;
     assert_eq!(status, StatusCode::CREATED, "{:?}", envelope.verdict);
-    assert!(envelope.quorum_certificate.is_none(), "a root spends nothing and receives no spend votes");
-    assert!(storage.get_hmc_lock(&bs58::encode(chain.chain[0].transaction_hash).into_string()).unwrap().is_none());
-    assert!(storage.voucher_root(&chain.layer2_voucher_id).unwrap().is_some());
-    let original = storage.voucher_root(&chain.layer2_voucher_id).unwrap().unwrap();
+    assert!(
+        envelope.quorum_certificate.is_none(),
+        "a root spends nothing and receives no spend votes"
+    );
+    assert!(storage
+        .get_hmc_lock(&bs58::encode(chain.chain[0].transaction_hash).into_string())
+        .unwrap()
+        .is_none());
+    assert!(storage
+        .voucher_root(&chain.layer2_voucher_id)
+        .unwrap()
+        .is_some());
+    let original = storage
+        .voucher_root(&chain.layer2_voucher_id)
+        .unwrap()
+        .unwrap();
     let attacker = SigningKey::from_bytes(&[99; 32]);
     let mut forged = chain.clone();
     forged.chain[0].sender_ephemeral_pub = attacker.verifying_key().to_bytes();
     forged.chain[0].auth.ephemeral_pubkey = attacker.verifying_key().to_bytes();
     forged.chain[0].causal_output = None;
-    forged.chain[0].layer2_signature = attacker.sign(&calculate_l2_payload_hash(&forged.chain[0])).to_bytes();
-    assert!(humoco_node::api::hmc::verify_l2_lock_signature(&forged.chain[0]));
-    assert_eq!(post_causal_fixture(&app, &forged).await.0, StatusCode::BAD_REQUEST);
-    assert_eq!(storage.voucher_root(&chain.layer2_voucher_id).unwrap().unwrap(), original);
+    forged.chain[0].layer2_signature = attacker
+        .sign(&calculate_l2_payload_hash(&forged.chain[0]))
+        .to_bytes();
+    assert!(humoco_node::api::hmc::verify_l2_lock_signature(
+        &forged.chain[0]
+    ));
+    assert_eq!(
+        post_causal_fixture(&app, &forged).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        storage
+            .voucher_root(&chain.layer2_voucher_id)
+            .unwrap()
+            .unwrap(),
+        original
+    );
     assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::OK);
-
 }
 
 #[tokio::test]
@@ -2270,8 +2690,20 @@ async fn test_checkout_case_3_offline_voucher_full_chain() {
     let mut chain = real_causal_fixture();
     let (status, envelope) = post_causal_fixture(&app, &chain).await;
     assert_eq!(status, StatusCode::CREATED, "{:?}", envelope.verdict);
-    for hop in chain.chain.iter().skip(1) { assert_eq!(storage.get_hmc_lock(hop.ds_tag.as_deref().unwrap()).unwrap().unwrap().t_id, hop.transaction_hash); }
-    assert!(storage.get_hmc_lock(&bs58::encode(chain.chain[0].transaction_hash).into_string()).unwrap().is_none());
+    for hop in chain.chain.iter().skip(1) {
+        assert_eq!(
+            storage
+                .get_hmc_lock(hop.ds_tag.as_deref().unwrap())
+                .unwrap()
+                .unwrap()
+                .t_id,
+            hop.transaction_hash
+        );
+    }
+    assert!(storage
+        .get_hmc_lock(&bs58::encode(chain.chain[0].transaction_hash).into_string())
+        .unwrap()
+        .is_none());
     chain.chain.clear();
 }
 
@@ -2280,12 +2712,23 @@ async fn test_checkout_case_4_reconcile_missing_hops() {
     let (app, storage, _, tier, _) = setup_test_app();
     tier.register_f2f_peer("causal-fixture");
     let mut chain = real_causal_fixture();
-    let mut anchor = chain.clone(); anchor.chain.truncate(1);
-    assert_eq!(post_causal_fixture(&app, &anchor).await.0, StatusCode::CREATED);
+    let mut anchor = chain.clone();
+    anchor.chain.truncate(1);
+    assert_eq!(
+        post_causal_fixture(&app, &anchor).await.0,
+        StatusCode::CREATED
+    );
     chain.chain.remove(0);
     let (status, envelope) = post_causal_fixture(&app, &chain).await;
     assert_eq!(status, StatusCode::CREATED, "{:?}", envelope.verdict);
-    assert_eq!(storage.get_hmc_lock(chain.chain[1].ds_tag.as_deref().unwrap()).unwrap().unwrap().t_id, chain.chain[1].transaction_hash);
+    assert_eq!(
+        storage
+            .get_hmc_lock(chain.chain[1].ds_tag.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .t_id,
+        chain.chain[1].transaction_hash
+    );
 }
 
 #[tokio::test]
@@ -2293,11 +2736,24 @@ async fn test_checkout_case_5_exponential_overlap_deduplication() {
     let (app, storage, _, tier, _) = setup_test_app();
     tier.register_f2f_peer("causal-fixture");
     let mut chain = real_causal_fixture();
-    let mut prefix = chain.clone(); prefix.chain.truncate(2);
-    assert_eq!(post_causal_fixture(&app, &prefix).await.0, StatusCode::CREATED);
-    assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::CREATED);
+    let mut prefix = chain.clone();
+    prefix.chain.truncate(2);
+    assert_eq!(
+        post_causal_fixture(&app, &prefix).await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        post_causal_fixture(&app, &chain).await.0,
+        StatusCode::CREATED
+    );
     assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::OK);
-    assert_eq!(storage.get_hmc_locks_for_voucher(&chain.layer2_voucher_id).unwrap().len(), 2);
+    assert_eq!(
+        storage
+            .get_hmc_locks_for_voucher(&chain.layer2_voucher_id)
+            .unwrap()
+            .len(),
+        2
+    );
     chain.chain.clear();
 }
 
@@ -2306,18 +2762,57 @@ async fn test_checkout_case_6_intermediate_conflict_preserves_valid_prefix() {
     let (app, storage, _, tier, _) = setup_test_app();
     tier.register_f2f_peer("causal-fixture");
     let mut chain = real_causal_fixture();
-    let mut anchor = chain.clone(); anchor.chain.truncate(1);
-    assert_eq!(post_causal_fixture(&app, &anchor).await.0, StatusCode::CREATED);
+    let mut anchor = chain.clone();
+    anchor.chain.truncate(1);
+    assert_eq!(
+        post_causal_fixture(&app, &anchor).await.0,
+        StatusCode::CREATED
+    );
     // The prepared collision row arrived before its causal prefix. This test
     // checks prefix publication, not source-complete recovery admission.
-    let mut competing = chain.chain[2].clone(); competing.transaction_hash = [99; 32];
-    sign_fixture_output(&mut competing, &causal_fixture_key(2), chain.chain[0].causal_output.as_ref().unwrap().root_valid_until_ms);
-    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", "causal-fixture").body(Body::from(serde_json::to_vec(&competing).unwrap())).unwrap()).await.unwrap();
+    let mut competing = chain.chain[2].clone();
+    competing.transaction_hash = [99; 32];
+    sign_fixture_output(
+        &mut competing,
+        &causal_fixture_key(2),
+        chain.chain[0]
+            .causal_output
+            .as_ref()
+            .unwrap()
+            .root_valid_until_ms,
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "causal-fixture")
+                .body(Body::from(serde_json::to_vec(&competing).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let (status, verdict) = post_causal_fixture(&app, &chain).await;
     assert_eq!(status, StatusCode::CONFLICT, "{:?}", verdict.verdict);
-    assert_eq!(storage.get_hmc_lock(chain.chain[1].ds_tag.as_deref().unwrap()).unwrap().unwrap().t_id, chain.chain[1].transaction_hash);
-    assert_eq!(storage.get_hmc_lock(competing.ds_tag.as_deref().unwrap()).unwrap().unwrap().t_id, competing.transaction_hash);
+    assert_eq!(
+        storage
+            .get_hmc_lock(chain.chain[1].ds_tag.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .t_id,
+        chain.chain[1].transaction_hash
+    );
+    assert_eq!(
+        storage
+            .get_hmc_lock(competing.ds_tag.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .t_id,
+        competing.transaction_hash
+    );
     chain.chain.clear();
 }
 
@@ -2328,11 +2823,24 @@ async fn test_checkout_ciphertext_order_does_not_replace_authenticated_causality
     let mut chain = real_causal_fixture();
     for (index, hop) in chain.chain.iter_mut().enumerate() {
         hop.encrypted_timestamp = [900, 1, 700][index];
-        hop.layer2_signature = causal_fixture_key(index as u8).sign(&calculate_l2_payload_hash(hop)).to_bytes();
+        hop.layer2_signature = causal_fixture_key(index as u8)
+            .sign(&calculate_l2_payload_hash(hop))
+            .to_bytes();
     }
     let (status, envelope) = post_causal_fixture(&app, &chain).await;
-    assert_eq!(status, StatusCode::CREATED, "ciphertext ordering is not causality: {:?}", envelope.verdict);
-    assert_eq!(storage.get_hmc_locks_for_voucher(&chain.layer2_voucher_id).unwrap().len(), 2);
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "ciphertext ordering is not causality: {:?}",
+        envelope.verdict
+    );
+    assert_eq!(
+        storage
+            .get_hmc_locks_for_voucher(&chain.layer2_voucher_id)
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -2342,21 +2850,38 @@ async fn test_checkout_edge_case_split_dag_change_branch() {
     let mut chain = real_causal_fixture();
     use sha3::{Digest, Sha3_256};
     let change_key = causal_fixture_key(3);
-    let ttl = chain.chain[0].causal_output.as_ref().unwrap().root_valid_until_ms;
-    chain.chain[1].change_ephemeral_pub_hash = Some(Sha3_256::digest(change_key.verifying_key().as_bytes()).into());
+    let ttl = chain.chain[0]
+        .causal_output
+        .as_ref()
+        .unwrap()
+        .root_valid_until_ms;
+    chain.chain[1].change_ephemeral_pub_hash =
+        Some(Sha3_256::digest(change_key.verifying_key().as_bytes()).into());
     sign_fixture_output(&mut chain.chain[1], &causal_fixture_key(1), ttl);
     let change = causal_fixture_spend(&chain.chain[1], &change_key, 4);
     let receive_tag = chain.chain[2].ds_tag.clone().unwrap();
     assert_ne!(change.ds_tag.as_ref().unwrap(), &receive_tag);
-    assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::CREATED);
+    assert_eq!(
+        post_causal_fixture(&app, &chain).await.0,
+        StatusCode::CREATED
+    );
     chain.chain[2] = change;
-    assert_eq!(post_causal_fixture(&app, &chain).await.0, StatusCode::CREATED);
-    assert_eq!(storage.get_hmc_locks_for_voucher(&chain.layer2_voucher_id).unwrap().len(), 3);
+    assert_eq!(
+        post_causal_fixture(&app, &chain).await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        storage
+            .get_hmc_locks_for_voucher(&chain.layer2_voucher_id)
+            .unwrap()
+            .len(),
+        3
+    );
 }
 
 #[tokio::test]
 async fn test_checkout_edge_case_empty_and_single_hop_chains() {
-    use humoco_node::api::hmc::{L2ChainLockRequest, L2AuthPayload, L2ResponseEnvelope, L2Verdict};
+    use humoco_node::api::hmc::{L2AuthPayload, L2ChainLockRequest, L2ResponseEnvelope, L2Verdict};
     let (app, _storage, _identity, tier_controller, _) = setup_test_app();
     tier_controller.register_f2f_peer("checkout_edge3");
     let voucher_id = format!("voucher_edge3_{}", test_now_ms());
@@ -2364,24 +2889,86 @@ async fn test_checkout_edge_case_empty_and_single_hop_chains() {
     let k1 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
     let sender_pub = k1.verifying_key().to_bytes();
     // empty chain -> 400 Bad Request
-    let empty_chain = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![] };
-    let res_empty = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_edge3").body(Body::from(serde_json::to_vec(&empty_chain).unwrap())).unwrap()).await.unwrap();
+    let empty_chain = L2ChainLockRequest {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.clone(),
+        chain: vec![],
+    };
+    let res_empty = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock/chain")
+                .header("content-type", "application/json")
+                .header("X-Peer-Token", "checkout_edge3")
+                .body(Body::from(serde_json::to_vec(&empty_chain).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_empty.status(), StatusCode::BAD_REQUEST);
     let env_empty: L2ResponseEnvelope = response_json(res_empty).await;
-    match env_empty.verdict { L2Verdict::Rejected { reason } => assert!(reason.contains("Empty")), _ => panic!("empty chain should be Rejected") };
+    match env_empty.verdict {
+        L2Verdict::Rejected { reason } => assert!(reason.contains("Empty")),
+        _ => panic!("empty chain should be Rejected"),
+    };
     // single hop chain via generic /v1/lock route (delegated)
     let genesis = make_genesis_hmc_req(&voucher_id, &k1, valid_until, 500);
-    let single_chain = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![genesis.clone()] };
-    let res_single = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type","application/json").header("X-Peer-Token","checkout_edge3").body(Body::from(serde_json::to_vec(&single_chain).unwrap())).unwrap()).await.unwrap();
+    let single_chain = L2ChainLockRequest {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.clone(),
+        chain: vec![genesis.clone()],
+    };
+    let res_single = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("X-Peer-Token", "checkout_edge3")
+                .body(Body::from(serde_json::to_vec(&single_chain).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_single.status(), StatusCode::CREATED);
     let env_single: L2ResponseEnvelope = response_json(res_single).await;
-    match env_single.verdict { L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, genesis.transaction_hash), _ => panic!("single hop chain should be Verified") };
+    match env_single.verdict {
+        L2Verdict::Verified { lock_entry } => assert_eq!(lock_entry.t_id, genesis.transaction_hash),
+        _ => panic!("single hop chain should be Verified"),
+    };
     // single follow hop chain (after genesis) -> should also work
     let k2 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
     let tag = format!("ds_tag_single_follow_{}", test_now_ms());
     let follow = make_follow_hmc_req(&voucher_id, tag, &k2, 600, None, None);
-    let single_follow = L2ChainLockRequest { auth: L2AuthPayload { ephemeral_pubkey: sender_pub, auth_signature: None }, layer2_voucher_id: voucher_id.clone(), chain: vec![follow.clone()] };
-    let res_follow = app.oneshot(Request::builder().method("POST").uri("/v1/lock/chain").header("content-type","application/json").header("X-Peer-Token","checkout_edge3").body(Body::from(serde_json::to_vec(&single_follow).unwrap())).unwrap()).await.unwrap();
+    let single_follow = L2ChainLockRequest {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.clone(),
+        chain: vec![follow.clone()],
+    };
+    let res_follow = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock/chain")
+                .header("content-type", "application/json")
+                .header("X-Peer-Token", "checkout_edge3")
+                .body(Body::from(serde_json::to_vec(&single_follow).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_follow.status(), StatusCode::CREATED);
 }
 
@@ -2401,15 +2988,19 @@ async fn test_max_11_years_ttl_ingress_boundary_enforcement() {
     let valid_10y_ms = now_ms + (10 * 31_536_000 * 1_000);
     let req_10y = make_genesis_hmc_req(&voucher_valid, &k_gen, valid_10y_ms, 100);
 
-    let res_valid = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/v1/lock")
-            .header("content-type", "application/json")
-            .header("X-Peer-Token", "ttl_test_peer")
-            .body(Body::from(serde_json::to_vec(&req_10y).unwrap()))
-            .unwrap()
-    ).await.unwrap();
+    let res_valid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("X-Peer-Token", "ttl_test_peer")
+                .body(Body::from(serde_json::to_vec(&req_10y).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(res_valid.status(), StatusCode::CREATED);
     let env_valid: L2ResponseEnvelope = response_json(res_valid).await;
@@ -2423,21 +3014,29 @@ async fn test_max_11_years_ttl_ingress_boundary_enforcement() {
     let exceed_ms = now_ms + MAX_LOCK_TTL_MS + (10 * 86_400 * 1_000);
     let req_exceed = make_genesis_hmc_req(&voucher_exceed, &k_gen, exceed_ms, 200);
 
-    let res_exceed = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/v1/lock")
-            .header("content-type", "application/json")
-            .header("X-Peer-Token", "ttl_test_peer")
-            .body(Body::from(serde_json::to_vec(&req_exceed).unwrap()))
-            .unwrap()
-    ).await.unwrap();
+    let res_exceed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("X-Peer-Token", "ttl_test_peer")
+                .body(Body::from(serde_json::to_vec(&req_exceed).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(res_exceed.status(), StatusCode::BAD_REQUEST);
     let env_exceed: L2ResponseEnvelope = response_json(res_exceed).await;
     match env_exceed.verdict {
         L2Verdict::Rejected { reason } => {
-            assert!(reason.contains("Invalid ingress time window"), "Rejection must specify time window violation: {}", reason);
+            assert!(
+                reason.contains("Invalid ingress time window"),
+                "Rejection must specify time window violation: {}",
+                reason
+            );
         }
         _ => panic!("Lock exceeding 11 years must be rejected"),
     }
@@ -2448,25 +3047,33 @@ async fn test_node_status_and_metrics_telemetry_gauges() {
     let (app, _storage, _identity, _tier_controller, _pow_engine) = setup_test_operator_app();
 
     // 1. Check /v1/node-status returns free_tier_enabled: true
-    let res_status = app.clone().oneshot(
-        Request::builder()
-            .method("GET")
-            .uri("/health")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res_status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_status.status(), StatusCode::OK);
     let status_dto: NodeStatusResponse = response_json(res_status).await;
     assert!(status_dto.free_tier_enabled);
 
     // 2. Check /metrics contains the 3 new gauges
-    let res_metrics = app.clone().oneshot(
-        Request::builder()
-            .method("GET")
-            .uri("/metrics")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res_metrics = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_metrics.status(), StatusCode::OK);
     let body_bytes = res_metrics.into_body().collect().await.unwrap().to_bytes();
     let body_str = String::from_utf8_lossy(&body_bytes);
@@ -2475,13 +3082,17 @@ async fn test_node_status_and_metrics_telemetry_gauges() {
     assert!(body_str.contains("humoco_free_tier_enabled 1"));
 
     // 3. Check /dashboard/data contains telemetry fields
-    let res_dash = app.clone().oneshot(
-        Request::builder()
-            .method("GET")
-            .uri("/dashboard/data")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res_dash = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/data")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_dash.status(), StatusCode::OK);
     let dash_bytes = res_dash.into_body().collect().await.unwrap().to_bytes();
     let dash_json: serde_json::Value = serde_json::from_slice(&dash_bytes).unwrap();
@@ -2491,17 +3102,22 @@ async fn test_node_status_and_metrics_telemetry_gauges() {
     assert!(dash_json.get("warnings").is_some());
 
     // 4. Check HTML dashboard renders
-    let res_html = app.oneshot(
-        Request::builder()
-            .method("GET")
-            .uri("/dashboard")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res_html = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_html.status(), StatusCode::OK);
     let html_bytes = res_html.into_body().collect().await.unwrap().to_bytes();
     let html_str = String::from_utf8_lossy(&html_bytes);
-    assert!(html_str.contains("Netzwerk-Thermometer") || html_str.contains("Ingress &amp; Telemetrie"));
+    assert!(
+        html_str.contains("Netzwerk-Thermometer") || html_str.contains("Ingress &amp; Telemetrie")
+    );
     assert!(html_str.contains("Top-2 Konzentration"));
 }
 
@@ -2515,7 +3131,10 @@ async fn test_admin_verify_token_endpoint() {
     let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
-    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("secret_token_42", false));
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
+        "secret_token_42",
+        false,
+    ));
     let mut state = AppState::new(
         engine,
         storage.clone(),
@@ -2528,52 +3147,71 @@ async fn test_admin_verify_token_endpoint() {
     let app = build_operator_router(state.clone());
 
     // 1. Without Authorization header -> 401
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/verify-token")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/verify-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // 2. With invalid token -> 401
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/verify-token")
-            .header("Authorization", "Bearer wrong_token")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/verify-token")
+                .header("Authorization", "Bearer wrong_token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // 3. With valid Bearer token -> 200
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/verify-token")
-            .header("Authorization", "Bearer secret_token_42")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/verify-token")
+                .header("Authorization", "Bearer secret_token_42")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
     // 4. With raw token -> 200
-    let res = app.oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/verify-token")
-            .header("Authorization", "secret_token_42")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/verify-token")
+                .header("Authorization", "secret_token_42")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
     // Verify audit events recorded in event_log
     let events = state.event_log.list();
-    assert!(events.iter().any(|e| e.message == "Fehlgeschlagene Admin-Authentifizierung"));
-    assert!(events.iter().any(|e| e.message == "Erfolgreiche Admin-Authentifizierung"));
+    assert!(events
+        .iter()
+        .any(|e| e.message == "Fehlgeschlagene Admin-Authentifizierung"));
+    assert!(events
+        .iter()
+        .any(|e| e.message == "Erfolgreiche Admin-Authentifizierung"));
 }
 
 #[tokio::test]
@@ -2604,33 +3242,45 @@ async fn test_admin_verify_token_rate_limiting() {
 
     // 5 consecutive failed attempts
     for _ in 0..5 {
-        let res = app.clone().oneshot(
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/dashboard/admin/verify-token")
+                    .header("Authorization", "Bearer invalid_pass")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // 6th attempt should be blocked by rate-limiter with 429
+    let res = app
+        .clone()
+        .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/dashboard/admin/verify-token")
                 .header("Authorization", "Bearer invalid_pass")
                 .body(Body::empty())
                 .unwrap(),
-        ).await.unwrap();
-        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    // 6th attempt should be blocked by rate-limiter with 429
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/verify-token")
-            .header("Authorization", "Bearer invalid_pass")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
 
     // Verify rate limit and auth failure events were logged
     assert!(event_log.len() >= 6);
     let events = event_log.list();
-    assert!(events.iter().any(|e| e.message.contains("Fehlgeschlagene Admin-Authentifizierung")));
-    assert!(events.iter().any(|e| e.message.contains("Rate-Limit für Admin-Authentifizierung")));
+    assert!(events.iter().any(|e| e
+        .message
+        .contains("Fehlgeschlagene Admin-Authentifizierung")));
+    assert!(events
+        .iter()
+        .any(|e| e.message.contains("Rate-Limit für Admin-Authentifizierung")));
 }
 
 #[tokio::test]
@@ -2644,7 +3294,10 @@ async fn test_admin_friends_mutation() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
 
-    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("admin_secret_99", false));
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
+        "admin_secret_99",
+        false,
+    ));
     let mut state = AppState::new(
         engine,
         storage.clone(),
@@ -2661,38 +3314,56 @@ async fn test_admin_friends_mutation() {
     let test_friend_hex = hex::encode(test_friend_key);
 
     // 1. POST without auth -> 401
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/friends")
-            .header("Content-Type", "application/json")
-            .body(Body::from(format!(r#"{{"pubkey": "{}"}}"#, test_friend_hex)))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/friends")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"pubkey": "{}"}}"#,
+                    test_friend_hex
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // 2. POST with invalid hex -> 400
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/friends")
-            .header("Authorization", "Bearer admin_secret_99")
-            .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"pubkey": "not_hex"}"#))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/friends")
+                .header("Authorization", "Bearer admin_secret_99")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"pubkey": "not_hex"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     // 3. POST with valid auth and valid pubkey -> 200
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/friends")
-            .header("Authorization", "Bearer admin_secret_99")
-            .header("Content-Type", "application/json")
-            .body(Body::from(format!(r#"{{"pubkey": "{}", "label": "Bob"}}"#, test_friend_hex)))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/friends")
+                .header("Authorization", "Bearer admin_secret_99")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"pubkey": "{}", "label": "Bob"}}"#,
+                    test_friend_hex
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -2703,35 +3374,46 @@ async fn test_admin_friends_mutation() {
     assert!(peer_manager.is_f2f_friend(&test_friend_key).await);
 
     // 4. DELETE with invalid hex -> 400
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("DELETE")
-            .uri("/dashboard/admin/friends/invalid_key")
-            .header("Authorization", "Bearer admin_secret_99")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/dashboard/admin/friends/invalid_key")
+                .header("Authorization", "Bearer admin_secret_99")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     // 5. DELETE without auth -> 401
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("DELETE")
-            .uri(format!("/dashboard/admin/friends/{}", test_friend_hex))
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/dashboard/admin/friends/{}", test_friend_hex))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // 6. DELETE with valid auth -> 200
-    let res = app.oneshot(
-        Request::builder()
-            .method("DELETE")
-            .uri(format!("/dashboard/admin/friends/{}", test_friend_hex))
-            .header("Authorization", "Bearer admin_secret_99")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/dashboard/admin/friends/{}", test_friend_hex))
+                .header("Authorization", "Bearer admin_secret_99")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
     // Verify peer_manager removed the friend
@@ -2749,7 +3431,10 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
 
-    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("admin_secret_99", false));
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
+        "admin_secret_99",
+        false,
+    ));
     let event_log = Arc::new(humoco_node::api::events::EventLog::default());
     let mut state = AppState::new(
         engine,
@@ -2767,18 +3452,22 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     let test_peer_hex = hex::encode(test_peer_key);
 
     // 1. POST /dashboard/admin/mesh/peers (Pure mesh peer registration, no dual-role)
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/mesh/peers")
-            .header("Authorization", "Bearer admin_secret_99")
-            .header("Content-Type", "application/json")
-            .body(Body::from(format!(
-                r#"{{"pubkey": "{}", "label": "PeerAlice"}}"#,
-                test_peer_hex
-            )))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/mesh/peers")
+                .header("Authorization", "Bearer admin_secret_99")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"pubkey": "{}", "label": "PeerAlice"}}"#,
+                    test_peer_hex
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -2792,46 +3481,66 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     assert!(!event_log.is_empty());
 
     // 2. DELETE /dashboard/admin/mesh/peers/:key
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("DELETE")
-            .uri(format!("/dashboard/admin/mesh/peers/{}", test_peer_hex))
-            .header("Authorization", "Bearer admin_secret_99")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/dashboard/admin/mesh/peers/{}", test_peer_hex))
+                .header("Authorization", "Bearer admin_secret_99")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert!(!peer_manager.is_f2f_friend(&test_peer_key).await);
 
     // 3. POST /dashboard/admin/ingress/clients with explicit token
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/ingress/clients")
-            .header("Authorization", "Bearer admin_secret_99")
-            .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"label": "Bob Wallet", "token": "f2f_custom_token_12345"}"#))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/ingress/clients")
+                .header("Authorization", "Bearer admin_secret_99")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"label": "Bob Wallet", "token": "f2f_custom_token_12345"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let bob_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(bob_json["status"], "ok");
     assert_eq!(bob_json["token"], "f2f_custom_token_12345");
     assert_eq!(bob_json["label"], "Bob Wallet");
-    assert!(bob_json["wallet_uri"].as_str().unwrap().starts_with("humoco://"));
-    assert!(bob_json["wallet_uri"].as_str().unwrap().contains("token=f2f_custom_token_12345"));
+    assert!(bob_json["wallet_uri"]
+        .as_str()
+        .unwrap()
+        .starts_with("humoco://"));
+    assert!(bob_json["wallet_uri"]
+        .as_str()
+        .unwrap()
+        .contains("token=f2f_custom_token_12345"));
 
     // 4. POST /dashboard/admin/ingress/clients without token -> auto-generated f2f_... token
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/ingress/clients")
-            .header("Authorization", "Bearer admin_secret_99")
-            .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"label": "Charlie PoS"}"#))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/ingress/clients")
+                .header("Authorization", "Bearer admin_secret_99")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"label": "Charlie PoS"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let charlie_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -2839,7 +3548,10 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     let gen_token = charlie_json["token"].as_str().unwrap();
     assert!(gen_token.starts_with("f2f_"));
     assert_eq!(gen_token.len(), 4 + 32); // f2f_ + 32 hex chars
-    assert!(charlie_json["wallet_uri"].as_str().unwrap().contains(gen_token));
+    assert!(charlie_json["wallet_uri"]
+        .as_str()
+        .unwrap()
+        .contains(gen_token));
 
     // Verify Bob and Charlie in list_f2f_clients
     let clients = tier_controller.list_f2f_clients(1000, 0);
@@ -2847,20 +3559,29 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     assert!(clients.iter().any(|c| c.label == "Charlie PoS"));
 
     // Verify GET /dashboard/data NEVER leaks plaintext tokens in f2f_clients
-    let res_dash = app.clone().oneshot(
-        Request::builder()
-            .method("GET")
-            .uri("/dashboard/data")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res_dash = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/data")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res_dash.status(), StatusCode::OK);
     let dash_bytes = res_dash.into_body().collect().await.unwrap().to_bytes();
     let dash_json: serde_json::Value = serde_json::from_slice(&dash_bytes).unwrap();
-    let dash_clients = dash_json["f2f_clients"].as_array().expect("f2f_clients array");
+    let dash_clients = dash_json["f2f_clients"]
+        .as_array()
+        .expect("f2f_clients array");
     assert_eq!(dash_clients.len(), 2);
     for client in dash_clients {
-        assert!(client["token"].is_null(), "Token leak detected! Plaintext token must be null in /dashboard/data");
+        assert!(
+            client["token"].is_null(),
+            "Token leak detected! Plaintext token must be null in /dashboard/data"
+        );
         assert!(client["token_hash"].as_str().is_some());
     }
 
@@ -2868,14 +3589,18 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     let bob_hash = bob_client.token_hash.clone();
 
     // 5. DELETE /dashboard/admin/ingress/clients/:token_hash
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("DELETE")
-            .uri(format!("/dashboard/admin/ingress/clients/{}", bob_hash))
-            .header("Authorization", "Bearer admin_secret_99")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/dashboard/admin/ingress/clients/{}", bob_hash))
+                .header("Authorization", "Bearer admin_secret_99")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let del_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -2898,7 +3623,10 @@ async fn test_admin_quota_mutation() {
     let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
-    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("admin_secret_vip", false));
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
+        "admin_secret_vip",
+        false,
+    ));
     let mut state = AppState::new(
         engine,
         storage.clone(),
@@ -2914,26 +3642,39 @@ async fn test_admin_quota_mutation() {
     let test_tag_hex = hex::encode(test_account_tag);
 
     // 1. POST /dashboard/admin/quota without auth -> 401
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/quota")
-            .header("Content-Type", "application/json")
-            .body(Body::from(format!(r#"{{"account_tag": "{}", "byte_years": 5000}}"#, test_tag_hex)))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/quota")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"account_tag": "{}", "byte_years": 5000}}"#,
+                    test_tag_hex
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // 2. POST with plain-text token name -> 200 OK
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/quota")
-            .header("Authorization", "Bearer admin_secret_vip")
-            .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"account_tag": "pos_terminal_vip_1", "byte_years": 1000}"#))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/quota")
+                .header("Authorization", "Bearer admin_secret_vip")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"account_tag": "pos_terminal_vip_1", "byte_years": 1000}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -2942,15 +3683,22 @@ async fn test_admin_quota_mutation() {
     assert_eq!(body_json["new_balance"], 1000);
 
     // 3. POST top-up 5000 byte-years -> 200
-    let res = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/quota")
-            .header("Authorization", "Bearer admin_secret_vip")
-            .header("Content-Type", "application/json")
-            .body(Body::from(format!(r#"{{"account_tag": "{}", "byte_years": 5000}}"#, test_tag_hex)))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/quota")
+                .header("Authorization", "Bearer admin_secret_vip")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"account_tag": "{}", "byte_years": 5000}}"#,
+                    test_tag_hex
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -2959,27 +3707,41 @@ async fn test_admin_quota_mutation() {
     assert_eq!(body_json["new_balance"], 5000);
 
     // 4. POST another 2500 byte-years -> 200 (balance 7500)
-    let res = app.oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/dashboard/admin/quota")
-            .header("Authorization", "Bearer admin_secret_vip")
-            .header("Content-Type", "application/json")
-            .body(Body::from(format!(r#"{{"account_tag": "{}", "byte_years": 2500}}"#, test_tag_hex)))
-            .unwrap(),
-    ).await.unwrap();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/admin/quota")
+                .header("Authorization", "Bearer admin_secret_vip")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"account_tag": "{}", "byte_years": 2500}}"#,
+                    test_tag_hex
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body_json["new_balance"], 7500);
 
     // Verify cache in tier_controller
-    assert_eq!(tier_controller.get_cached_vip_quota(&test_account_tag), Some(7500));
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&test_account_tag),
+        Some(7500)
+    );
 
     // Verify audit events recorded in event_log
     let events = state.event_log.list();
-    assert!(events.iter().any(|e| e.message == "Fehlgeschlagene Admin-Authentifizierung"));
-    assert!(events.iter().any(|e| e.kind == humoco_node::api::events::EventKind::QuotaTopup && e.message.contains("VIP Quota aufgeladen")));
+    assert!(events
+        .iter()
+        .any(|e| e.message == "Fehlgeschlagene Admin-Authentifizierung"));
+    assert!(events.iter().any(
+        |e| e.kind == humoco_node::api::events::EventKind::QuotaTopup
+            && e.message.contains("VIP Quota aufgeladen")
+    ));
 }
 
 // ============================================================================
@@ -2998,13 +3760,25 @@ fn test_qa_key_parsing_formats() {
     // 1. Hex parsing (lower, upper, 0x, 0X, with whitespace)
     assert_eq!(parse_pubkey(&hex_lower).unwrap(), sample_key);
     assert_eq!(parse_pubkey(&hex_upper).unwrap(), sample_key);
-    assert_eq!(parse_pubkey(&format!("0x{}", hex_lower)).unwrap(), sample_key);
-    assert_eq!(parse_pubkey(&format!("0X{}", hex_upper)).unwrap(), sample_key);
-    assert_eq!(parse_pubkey(&format!("  \n  {} \t ", hex_lower)).unwrap(), sample_key);
+    assert_eq!(
+        parse_pubkey(&format!("0x{}", hex_lower)).unwrap(),
+        sample_key
+    );
+    assert_eq!(
+        parse_pubkey(&format!("0X{}", hex_upper)).unwrap(),
+        sample_key
+    );
+    assert_eq!(
+        parse_pubkey(&format!("  \n  {} \t ", hex_lower)).unwrap(),
+        sample_key
+    );
 
     // 2. Base58 parsing (plain and with whitespace)
     assert_eq!(parse_pubkey(&b58_str).unwrap(), sample_key);
-    assert_eq!(parse_pubkey(&format!("  \t {} \n ", b58_str)).unwrap(), sample_key);
+    assert_eq!(
+        parse_pubkey(&format!("  \t {} \n ", b58_str)).unwrap(),
+        sample_key
+    );
 
     // 3. Peering string formats (<pubkey>@<ip_or_host>:<port>)
     let peering_b58 = format!("{}@127.0.0.1:9090", b58_str);
@@ -3035,8 +3809,14 @@ fn test_qa_key_parsing_formats() {
     assert_eq!(b, b58_str);
 
     // 6. Client token parsing
-    assert_eq!(parse_client_token("f2f_test_token_123").unwrap(), "f2f_test_token_123");
-    assert_eq!(parse_client_token("  token_with_whitespace  ").unwrap(), "token_with_whitespace");
+    assert_eq!(
+        parse_client_token("f2f_test_token_123").unwrap(),
+        "f2f_test_token_123"
+    );
+    assert_eq!(
+        parse_client_token("  token_with_whitespace  ").unwrap(),
+        "token_with_whitespace"
+    );
     assert!(parse_client_token("").is_err());
     assert!(parse_client_token("short").is_err()); // < 8 chars
     let long_token = "a".repeat(129);
@@ -3044,8 +3824,8 @@ fn test_qa_key_parsing_formats() {
 }
 
 fn create_qa_mock_dashboard_data() -> humoco_node::api::DashboardData {
-    use humoco_node::api::*;
     use humoco_node::api::metrics::LatencyTierStats;
+    use humoco_node::api::*;
 
     DashboardData {
         status: "ONLINE".to_string(),
@@ -3098,14 +3878,12 @@ fn create_qa_mock_dashboard_data() -> humoco_node::api::DashboardData {
         total_shards: 65536,
         shard_mode: "Community-Mesh (N < 20)".to_string(),
         shard_responsibility_ratio: 1.0,
-        sample_shard_scores: vec![
-            ShardScoreSampleDto {
-                shard_id: 0,
-                score: 0.85,
-                is_responsible: true,
-                rank: 1,
-            },
-        ],
+        sample_shard_scores: vec![ShardScoreSampleDto {
+            shard_id: 0,
+            score: 0.85,
+            is_responsible: true,
+            rank: 1,
+        }],
         disk_free_gb: 10.0,
         quorum_display: "14/20 (Final)".to_string(),
         network_nodes: Vec::new(),
@@ -3236,14 +4014,20 @@ fn test_qa_health_evaluation_all_levels() {
     data_q_crit.flush_queue_depth = 9500;
     let s_q_crit = evaluate_health(&data_q_crit);
     assert_eq!(s_q_crit.level, HealthLevel::Crit);
-    assert!(s_q_crit.items.iter().any(|i| i.code == "QUEUE_HIGH" && i.severity == HealthLevel::Crit));
+    assert!(s_q_crit
+        .items
+        .iter()
+        .any(|i| i.code == "QUEUE_HIGH" && i.severity == HealthLevel::Crit));
 
     // 3c. Extreme clock drift (> 30,000 ms)
     let mut data_drift_crit = base_data.clone();
     data_drift_crit.clock_drift_ms = -35_000;
     let s_drift_crit = evaluate_health(&data_drift_crit);
     assert_eq!(s_drift_crit.level, HealthLevel::Crit);
-    assert!(s_drift_crit.items.iter().any(|i| i.code == "CLOCK_DRIFT" && i.severity == HealthLevel::Crit));
+    assert!(s_drift_crit
+        .items
+        .iter()
+        .any(|i| i.code == "CLOCK_DRIFT" && i.severity == HealthLevel::Crit));
 
     // 3d. Dashboard exposed on non-loopback
     let mut data_exposed = base_data.clone();
@@ -3251,13 +4035,16 @@ fn test_qa_health_evaluation_all_levels() {
     data_exposed.config_view.loopback_only = false;
     let s_exposed = evaluate_health(&data_exposed);
     assert_eq!(s_exposed.level, HealthLevel::Crit);
-    assert!(s_exposed.items.iter().any(|i| i.code == "DASHBOARD_EXPOSED"));
+    assert!(s_exposed
+        .items
+        .iter()
+        .any(|i| i.code == "DASHBOARD_EXPOSED"));
 }
 
 #[test]
 fn test_qa_dashboard_data_dto_backward_compatibility() {
-    use humoco_node::api::DashboardData;
     use humoco_node::api::health::HealthLevel;
+    use humoco_node::api::DashboardData;
 
     // Minimal JSON representing DashboardData before Phase 1-4 additions:
     // Missing: f2f_clients, health, config_view, clock_drift_ms, thermometer extended counters, recent_locks extended fields
@@ -3370,7 +4157,11 @@ fn test_qa_dashboard_data_dto_backward_compatibility() {
     }"#;
 
     let parsed: Result<DashboardData, _> = serde_json::from_str(legacy_json);
-    assert!(parsed.is_ok(), "Failed to deserialize legacy DashboardData: {:?}", parsed.err());
+    assert!(
+        parsed.is_ok(),
+        "Failed to deserialize legacy DashboardData: {:?}",
+        parsed.err()
+    );
 
     let dto = parsed.unwrap();
     // Verify default populated fields
@@ -3408,7 +4199,11 @@ fn test_qa_dashboard_data_dto_backward_compatibility() {
     use humoco_node::api::ShardScoreSampleDto;
     let legacy_shard_json = r#"{"shard_id": 42, "score": 0.85, "is_responsible": true}"#;
     let parsed_shard: Result<ShardScoreSampleDto, _> = serde_json::from_str(legacy_shard_json);
-    assert!(parsed_shard.is_ok(), "Failed to deserialize legacy ShardScoreSampleDto: {:?}", parsed_shard.err());
+    assert!(
+        parsed_shard.is_ok(),
+        "Failed to deserialize legacy ShardScoreSampleDto: {:?}",
+        parsed_shard.err()
+    );
     let shard_dto = parsed_shard.unwrap();
     assert_eq!(shard_dto.shard_id, 42);
     assert_eq!(shard_dto.score, 0.85);
@@ -3418,15 +4213,28 @@ fn test_qa_dashboard_data_dto_backward_compatibility() {
 
 #[test]
 fn test_qa_dashboard_status_badges_and_quorum_display() {
-    let compute_badge_and_quorum = |connected_peers: usize, configured_peers: usize, total_active: usize, is_stable_24h: bool| -> (String, String, String) {
+    let compute_badge_and_quorum = |connected_peers: usize,
+                                    configured_peers: usize,
+                                    total_active: usize,
+                                    is_stable_24h: bool|
+     -> (String, String, String) {
         let (status, status_badge) = if connected_peers == 0 && configured_peers > 0 {
             ("DEGRADED".to_string(), "DEGRADED (0 Peers)".to_string())
         } else if total_active == 1 || configured_peers == 0 {
-            ("STANDALONE".to_string(), "STANDALONE (N=1, PROVISIONAL)".to_string())
+            (
+                "STANDALONE".to_string(),
+                "STANDALONE (N=1, PROVISIONAL)".to_string(),
+            )
         } else if total_active < 20 {
-            ("COMMUNITY MESH".to_string(), format!("COMMUNITY-MESH (N={}, PROVISIONAL)", total_active))
+            (
+                "COMMUNITY MESH".to_string(),
+                format!("COMMUNITY-MESH (N={}, PROVISIONAL)", total_active),
+            )
         } else if !is_stable_24h {
-            ("STABILIZING".to_string(), "WELTNETZ (24h-Stabilisierung)".to_string())
+            (
+                "STABILIZING".to_string(),
+                "WELTNETZ (24h-Stabilisierung)".to_string(),
+            )
         } else {
             ("ONLINE".to_string(), "WELTNETZ (FINAL)".to_string())
         };
@@ -3522,7 +4330,10 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
 
-    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("qa_admin_secret", false));
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
+        "qa_admin_secret",
+        false,
+    ));
     let event_log = Arc::new(humoco_node::api::events::EventLog::default());
     let mut state = AppState::new(
         engine,
@@ -3541,11 +4352,23 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
 
     // 1. Unauthorized requests (no token / wrong token)
     let endpoints_to_test = vec![
-        ("POST", "/dashboard/admin/mesh/peers", r#"{"pubkey": "test"}"#),
+        (
+            "POST",
+            "/dashboard/admin/mesh/peers",
+            r#"{"pubkey": "test"}"#,
+        ),
         ("DELETE", "/dashboard/admin/mesh/peers/somekey", ""),
-        ("POST", "/dashboard/admin/ingress/clients", r#"{"label": "test"}"#),
+        (
+            "POST",
+            "/dashboard/admin/ingress/clients",
+            r#"{"label": "test"}"#,
+        ),
         ("DELETE", "/dashboard/admin/ingress/clients/somehash", ""),
-        ("POST", "/dashboard/admin/quota", r#"{"account_tag": "test", "byte_years": 100}"#),
+        (
+            "POST",
+            "/dashboard/admin/quota",
+            r#"{"account_tag": "test", "byte_years": 100}"#,
+        ),
     ];
 
     for (meth, uri, body) in endpoints_to_test {
@@ -3594,13 +4417,15 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
         .uri("/dashboard/admin/ingress/clients")
         .header("Authorization", "Bearer qa_admin_secret")
         .header("Content-Type", "application/json")
-        .body(Body::from(r#"{"label": "Kasse-A", "token": "f2f_kasse_a_secret_token"}"#))
+        .body(Body::from(
+            r#"{"label": "Kasse-A", "token": "f2f_kasse_a_secret_token"}"#,
+        ))
         .unwrap();
     let res_client = app.clone().oneshot(req_add_client).await.unwrap();
     assert_eq!(res_client.status(), StatusCode::OK);
-    let client_json: serde_json::Value = serde_json::from_slice(
-        &res_client.into_body().collect().await.unwrap().to_bytes(),
-    ).unwrap();
+    let client_json: serde_json::Value =
+        serde_json::from_slice(&res_client.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
     assert_eq!(client_json["label"], "Kasse-A");
 
     let client_list = tier_controller.list_f2f_clients(1000, 0);
@@ -3616,14 +4441,17 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
         .unwrap();
     let res_del = app.oneshot(req_del).await.unwrap();
     assert_eq!(res_del.status(), StatusCode::OK);
-    assert!(!tier_controller.list_f2f_clients(1000, 0).iter().any(|c| c.label == "Kasse-A"));
+    assert!(!tier_controller
+        .list_f2f_clients(1000, 0)
+        .iter()
+        .any(|c| c.label == "Kasse-A"));
 }
 
 #[test]
 fn test_qa_ring_buffer_boundary_conditions() {
-    use humoco_node::api::history::{HistoryPoint, HistorySampler, HISTORY_CAPACITY};
     use humoco_node::api::events::{EventKind, EventLog, EVENT_LOG_CAPACITY};
     use humoco_node::api::health::HealthLevel;
+    use humoco_node::api::history::{HistoryPoint, HistorySampler, HISTORY_CAPACITY};
 
     // 1. HistorySampler: exact 1440 limit
     assert_eq!(HISTORY_CAPACITY, 1440);
@@ -3689,12 +4517,7 @@ fn test_qa_ring_buffer_boundary_conditions() {
     assert_eq!(events[999].id, 1000);
 
     // Overflow by 1: event id 1 must be evicted, event 2 is first, event 1001 is last
-    log.record_at(
-        11001,
-        EventKind::PeerConnect,
-        HealthLevel::Ok,
-        "Event 1001",
-    );
+    log.record_at(11001, EventKind::PeerConnect, HealthLevel::Ok, "Event 1001");
     assert_eq!(log.len(), 1000);
     let overflow_events = log.query(None, None);
     assert_eq!(overflow_events.len(), 1000);
@@ -3713,7 +4536,10 @@ async fn test_admin_peer_reset_and_ping_endpoints() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
 
-    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token("test_admin_token", false));
+    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
+        "test_admin_token",
+        false,
+    ));
     let event_log = Arc::new(humoco_node::api::events::EventLog::default());
     let mut state = AppState::new(
         engine,
@@ -3782,8 +4608,12 @@ async fn test_admin_peer_reset_and_ping_endpoints() {
     peer_manager.add_peer(test_addr).await;
     let t0 = std::time::Instant::now();
     peer_manager.record_failure_at(test_addr, t0).await;
-    peer_manager.record_failure_at(test_addr, t0 + std::time::Duration::from_secs(65)).await;
-    peer_manager.record_failure_at(test_addr, t0 + std::time::Duration::from_secs(130)).await;
+    peer_manager
+        .record_failure_at(test_addr, t0 + std::time::Duration::from_secs(65))
+        .await;
+    peer_manager
+        .record_failure_at(test_addr, t0 + std::time::Duration::from_secs(130))
+        .await;
     let p = peer_manager.get_peer(&test_addr).await.unwrap();
     assert_eq!(p.missing_count, 3);
     assert_eq!(p.status, humoco_node::network::peer::PeerStatus::Suspended);
@@ -3804,17 +4634,24 @@ async fn test_admin_peer_reset_and_ping_endpoints() {
     let p_after = peer_manager.get_peer(&test_addr).await.unwrap();
     assert_eq!(p_after.missing_count, 0);
     assert_eq!(p_after.last_failure, None);
-    assert_eq!(p_after.status, humoco_node::network::peer::PeerStatus::Degrading);
+    assert_eq!(
+        p_after.status,
+        humoco_node::network::peer::PeerStatus::Degrading
+    );
 
     // Verify event log recorded the action
     let events = event_log.query(None, None);
-    assert!(events.iter().any(|e| e.message.contains(&format!("Admin reset suspension for peer {}", test_addr))));
+    assert!(events.iter().any(|e| e
+        .message
+        .contains(&format!("Admin reset suspension for peer {}", test_addr))));
 
     // 5. Banned peer check for reset
     let banned_addr: std::net::SocketAddr = "127.0.0.1:9096".parse().unwrap();
     let banned_nid = [88u8; 32];
     peer_manager.add_peer(banned_addr).await;
-    peer_manager.record_success(banned_addr, Some(banned_nid), None).await;
+    peer_manager
+        .record_success(banned_addr, Some(banned_nid), None)
+        .await;
     peer_manager.ban_node(&banned_nid).await;
 
     let req_banned = Request::builder()
@@ -3876,28 +4713,49 @@ async fn test_event_log_persister_and_populate() {
 
     // Ok severity, normal kind -> should NOT persist
     let _id_ok = log.record(EventKind::System, HealthLevel::Ok, "Normal info");
-    assert!(rx.try_recv().is_err(), "Ok system events must not be sent to persister");
+    assert!(
+        rx.try_recv().is_err(),
+        "Ok system events must not be sent to persister"
+    );
 
     // Warn severity -> should persist
-    let id_warn = log.record(EventKind::HealthWarning, HealthLevel::Warn, "Disk space low");
+    let id_warn = log.record(
+        EventKind::HealthWarning,
+        HealthLevel::Warn,
+        "Disk space low",
+    );
     let item_warn = rx.try_recv().expect("Warn event must be sent to persister");
     assert_eq!(item_warn.id, id_warn);
     assert_eq!(item_warn.severity, HealthLevel::Warn);
 
     // PeerBan kind (even if Ok severity) -> should persist
     let id_ban = log.record(EventKind::PeerBan, HealthLevel::Ok, "Peer banned");
-    let item_ban = rx.try_recv().expect("PeerBan event must be sent to persister");
+    let item_ban = rx
+        .try_recv()
+        .expect("PeerBan event must be sent to persister");
     assert_eq!(item_ban.id, id_ban);
     assert_eq!(item_ban.kind, EventKind::PeerBan);
 
     // EquivocationFraud kind -> should persist
-    let id_fraud = log.record(EventKind::EquivocationFraud, HealthLevel::Crit, "Double spend fraud");
-    let item_fraud = rx.try_recv().expect("EquivocationFraud event must be sent to persister");
+    let id_fraud = log.record(
+        EventKind::EquivocationFraud,
+        HealthLevel::Crit,
+        "Double spend fraud",
+    );
+    let item_fraud = rx
+        .try_recv()
+        .expect("EquivocationFraud event must be sent to persister");
     assert_eq!(item_fraud.id, id_fraud);
 
     // ClientRegistered kind -> should persist
-    let id_reg = log.record(EventKind::ClientRegistered, HealthLevel::Ok, "Client token registered");
-    let item_reg = rx.try_recv().expect("ClientRegistered event must be sent to persister");
+    let id_reg = log.record(
+        EventKind::ClientRegistered,
+        HealthLevel::Ok,
+        "Client token registered",
+    );
+    let item_reg = rx
+        .try_recv()
+        .expect("ClientRegistered event must be sent to persister");
     assert_eq!(item_reg.id, id_reg);
 }
 
@@ -3921,19 +4779,52 @@ async fn test_dashboard_sre_monitoring_and_conflict_deep_link() {
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
 
     // 409 Conflict deep link checks
-    assert!(body_str.contains("jumpToConflictLocks()"), "Dashboard must contain jumpToConflictLocks");
-    assert!(body_str.contains("setLockFilter"), "Dashboard must contain setLockFilter");
+    assert!(
+        body_str.contains("jumpToConflictLocks()"),
+        "Dashboard must contain jumpToConflictLocks"
+    );
+    assert!(
+        body_str.contains("setLockFilter"),
+        "Dashboard must contain setLockFilter"
+    );
 
     // SRE Monitoring & Ecosystem checks
-    assert!(body_str.contains("📡 Externe Monitoring- &amp; Alerting-Schnittstellen") || body_str.contains("Externe Monitoring-"));
-    assert!(body_str.contains("scrape_configs:"), "Must contain prometheus scrape snippet");
-    assert!(body_str.contains("/metrics"), "Must reference /metrics endpoint");
-    assert!(body_str.contains("/healthz"), "Must reference /healthz endpoint");
-    assert!(body_str.contains("/health/ready"), "Must reference /health/ready endpoint");
-    assert!(body_str.contains("deploy/grafana/dashboard.json"), "Must reference Grafana template path");
-    assert!(body_str.contains("/tmp/humoco.sock"), "Must reference UNIX control socket");
-    assert!(body_str.contains("journalctl -u humoco-node -f"), "Must reference journalctl command");
-    assert!(body_str.contains("copySnippet"), "Must contain copySnippet helper");
+    assert!(
+        body_str.contains("📡 Externe Monitoring- &amp; Alerting-Schnittstellen")
+            || body_str.contains("Externe Monitoring-")
+    );
+    assert!(
+        body_str.contains("scrape_configs:"),
+        "Must contain prometheus scrape snippet"
+    );
+    assert!(
+        body_str.contains("/metrics"),
+        "Must reference /metrics endpoint"
+    );
+    assert!(
+        body_str.contains("/healthz"),
+        "Must reference /healthz endpoint"
+    );
+    assert!(
+        body_str.contains("/health/ready"),
+        "Must reference /health/ready endpoint"
+    );
+    assert!(
+        body_str.contains("deploy/grafana/dashboard.json"),
+        "Must reference Grafana template path"
+    );
+    assert!(
+        body_str.contains("/tmp/humoco.sock"),
+        "Must reference UNIX control socket"
+    );
+    assert!(
+        body_str.contains("journalctl -u humoco-node -f"),
+        "Must reference journalctl command"
+    );
+    assert!(
+        body_str.contains("copySnippet"),
+        "Must contain copySnippet helper"
+    );
 }
 
 #[tokio::test]
@@ -3995,7 +4886,10 @@ async fn test_dashboard_etag_and_304_not_modified() {
             Request::builder()
                 .method("GET")
                 .uri("/dashboard/data")
-                .header(axum::http::header::IF_NONE_MATCH, "\"mismatched-etag-12345\"")
+                .header(
+                    axum::http::header::IF_NONE_MATCH,
+                    "\"mismatched-etag-12345\"",
+                )
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4012,8 +4906,6 @@ async fn test_dashboard_etag_and_304_not_modified() {
     assert_eq!(mismatch_etag, etag);
 }
 
-
-
 /// An immature observer has no eligible committee, even with a valid owner request.
 /// An empty signature vector must never satisfy a fabricated zero-of-zero quorum.
 #[tokio::test]
@@ -4026,22 +4918,59 @@ async fn test_empty_immature_committee_never_confirms_zero_of_zero() {
     let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     tiers.register_f2f_peer("authorized_immature_test_client");
-    let owner = SigningKey::from_bytes(&[92;32]);
-    let request = make_test_hmc_genesis("empty-committee-valid-owner", test_now_ms() + 600_000, &owner);
+    let owner = SigningKey::from_bytes(&[92; 32]);
+    let request = make_test_hmc_genesis(
+        "empty-committee-valid-owner",
+        test_now_ms() + 600_000,
+        &owner,
+    );
     assert!(humoco_node::api::hmc::verify_l2_lock_signature(&request));
     let tag = bs58::encode(request.transaction_hash).into_string();
-    let shard_id = humoco_sim_core::types::extract_shard_id(blake3::hash(tag.as_bytes()).as_bytes());
-    let (committee, _, active) = pm.shard_committee(*identity.node_pubkey(), *identity.hrw_routing_id(), shard_id).await;
+    let shard_id =
+        humoco_sim_core::types::extract_shard_id(blake3::hash(tag.as_bytes()).as_bytes());
+    let (committee, _, active) = pm
+        .shard_committee(
+            *identity.node_pubkey(),
+            *identity.hrw_routing_id(),
+            shard_id,
+        )
+        .await;
     assert_eq!(active, 0);
     assert!(committee.is_empty());
-    let (root_verdict, _) = engine.ingress_hmc_lock_durable(tag.clone(), (&request).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(test_now_ms()), None, None, None).await;
+    let (root_verdict, _) = engine
+        .ingress_hmc_lock_durable(
+            tag.clone(),
+            (&request).into(),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(test_now_ms()),
+            None,
+            None,
+            None,
+        )
+        .await;
     assert!(matches!(root_verdict, L2Verdict::Verified { .. }));
-    let request = make_test_hmc_spend(&request.layer2_voucher_id, "immature-spend", [94; 32], &owner);
+    let request = make_test_hmc_spend(
+        &request.layer2_voucher_id,
+        "immature-spend",
+        [94; 32],
+        &owner,
+    );
     let tag = request.ds_tag.clone().unwrap();
     let mut state = AppState::new(engine, storage.clone(), identity, tiers, pow);
     state.peer_manager = Some(pm);
     // No readiness or ticket maturity is manufactured for this negative fixture.
-    let response = build_router(state).oneshot(Request::builder().method("POST").uri("/v1/lock").header("content-type", "application/json").header("x-peer-token", "authorized_immature_test_client").body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap()).await.unwrap();
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "authorized_immature_test_client")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let envelope: L2ResponseEnvelope = response_json(response).await;
     if let Some(certificate) = envelope.quorum_certificate {
@@ -4050,7 +4979,10 @@ async fn test_empty_immature_committee_never_confirms_zero_of_zero() {
         assert!(!certificate.is_quorum_reached());
         assert_eq!(certificate.status, 0);
     }
-    assert!(storage.get_hmc_lock(&tag).unwrap().is_none(), "an ineligible gateway must not act as a shard writer");
+    assert!(
+        storage.get_hmc_lock(&tag).unwrap().is_none(),
+        "an ineligible gateway must not act as a shard writer"
+    );
 }
 
 #[tokio::test]
@@ -4064,19 +4996,46 @@ async fn test_storage_failure_never_returns_success_for_single_or_chain_ingress(
     tiers.register_f2f_peer("storage_fault_test");
     let state = isolated_ready_state(AppState::new(engine.clone(), storage, identity, tiers, pow));
     // Fault injection affects storage health, not owner validity or shard readiness.
-    engine.stats.signing_failed.store(true, std::sync::atomic::Ordering::Release);
+    engine
+        .stats
+        .signing_failed
+        .store(true, std::sync::atomic::Ordering::Release);
     let app = build_router(state);
-    let owner = SigningKey::from_bytes(&[93;32]);
-    let request = make_test_hmc_genesis("failed-store-valid-owner", test_now_ms()+600_000, &owner);
-    let chain = humoco_node::api::L2ChainLockRequest {auth:request.auth.clone(),layer2_voucher_id:request.layer2_voucher_id.clone(),chain:vec![request.clone()]};
-    for (route, bytes) in [("/v1/lock",serde_json::to_vec(&request).unwrap()),("/v1/lock/chain",serde_json::to_vec(&chain).unwrap())] {
-        let response = app.clone().oneshot(Request::builder().method("POST").uri(route).header("content-type","application/json").header("x-peer-token","storage_fault_test").body(Body::from(bytes)).unwrap()).await.unwrap();
-        assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE,"{route}");
+    let owner = SigningKey::from_bytes(&[93; 32]);
+    let request =
+        make_test_hmc_genesis("failed-store-valid-owner", test_now_ms() + 600_000, &owner);
+    let chain = humoco_node::api::L2ChainLockRequest {
+        auth: request.auth.clone(),
+        layer2_voucher_id: request.layer2_voucher_id.clone(),
+        chain: vec![request.clone()],
+    };
+    for (route, bytes) in [
+        ("/v1/lock", serde_json::to_vec(&request).unwrap()),
+        ("/v1/lock/chain", serde_json::to_vec(&chain).unwrap()),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(route)
+                    .header("content-type", "application/json")
+                    .header("x-peer-token", "storage_fault_test")
+                    .body(Body::from(bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{route}"
+        );
         let envelope: L2ResponseEnvelope = response_json(response).await;
-        assert!(matches!(envelope.verdict,L2Verdict::Rejected {..}));
+        assert!(matches!(envelope.verdict, L2Verdict::Rejected { .. }));
         assert!(envelope.quorum_certificate.is_none());
     }
-    let tag=bs58::encode(request.transaction_hash).into_string();
+    let tag = bs58::encode(request.transaction_hash).into_string();
     assert!(engine.get_hmc_ram_lock(&tag).await.is_none());
 }
 
@@ -4094,32 +5053,47 @@ async fn test_api_retained_own_choice_read_only_endpoint() {
     let tag = hex::encode(parent);
 
     // 1. Not found initially
-    let response = app.clone().oneshot(
-        Request::builder()
-            .method("GET")
-            .uri(format!("/v1/retained-choice/{tag}"))
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/retained-choice/{tag}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     // 2. Commit own approval
     let shard = u16::from_be_bytes([parent[0], parent[1]]);
     let approval = humoco_node::api::routes::create_attestation_for_network(
-        &identity, record.id, parent, shard, 0, 1_000,
+        &identity,
+        record.id,
+        parent,
+        shard,
+        0,
+        1_000,
         humoco_sim_core::types::NetworkId::Mainnet,
     );
     let original = bincode::serialize(&approval).unwrap();
-    storage.commit_original_record_approval(&record, 600_000, identity.node_pubkey(), &original, 0).unwrap();
+    storage
+        .commit_original_record_approval(&record, 600_000, identity.node_pubkey(), &original, 0)
+        .unwrap();
 
     // 3. Now found and truthfully reported without state mutations!
-    let response2 = app.clone().oneshot(
-        Request::builder()
-            .method("GET")
-            .uri(format!("/v1/retained-choice/{tag}"))
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let response2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/retained-choice/{tag}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response2.status(), StatusCode::OK);
     let body: serde_json::Value = response_json(response2).await;
     assert_eq!(body["found"], true);
@@ -4131,15 +5105,25 @@ async fn test_api_retained_own_choice_read_only_endpoint() {
     assert_eq!(body["network"], 0);
     assert_eq!(body["purpose"], "original_approval");
     assert_eq!(body["provisional_approval"], hex::encode(&original));
-    assert_eq!(storage.own_signing_choice(identity.node_pubkey(), &tag).unwrap().unwrap().approvals[0], Some(original.clone()));
+    assert_eq!(
+        storage
+            .own_signing_choice(identity.node_pubkey(), &tag)
+            .unwrap()
+            .unwrap()
+            .approvals[0],
+        Some(original.clone())
+    );
     let returned = hex::decode(body["provisional_approval"].as_str().unwrap()).unwrap();
     let decoded: humoco_node::api::dto::AttestationDto = bincode::deserialize(&returned).unwrap();
-    let digest = humoco_proto::live::original_approval_digest(0, shard, 0, &parent, &record.id).unwrap();
-    let signature = ed25519_dalek::Signature::from_slice(&hex::decode(decoded.signature).unwrap()).unwrap();
-    identity.verifying_key().verify_strict(&digest, &signature).expect("retained original verifies with shared protocol");
-
+    let digest =
+        humoco_proto::live::original_approval_digest(0, shard, 0, &parent, &record.id).unwrap();
+    let signature =
+        ed25519_dalek::Signature::from_slice(&hex::decode(decoded.signature).unwrap()).unwrap();
+    identity
+        .verifying_key()
+        .verify_strict(&digest, &signature)
+        .expect("retained original verifies with shared protocol");
 }
-
 
 #[tokio::test]
 async fn retained_choice_capacity_refuses_before_disk_and_recovers_after_release() {
@@ -4150,12 +5134,27 @@ async fn retained_choice_capacity_refuses_before_disk_and_recovers_after_release
     let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine, storage, identity, tiers, pow);
-    let held = state.retained_choice_reads.clone().try_acquire_many_owned(8).unwrap();
+    let held = state
+        .retained_choice_reads
+        .clone()
+        .try_acquire_many_owned(8)
+        .unwrap();
     let app = build_router(state);
-    let request = || Request::builder().uri("/v1/retained-choice/unknown").body(Body::empty()).unwrap();
-    assert_eq!(app.clone().oneshot(request()).await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+    let request = || {
+        Request::builder()
+            .uri("/v1/retained-choice/unknown")
+            .body(Body::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone().oneshot(request()).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
     drop(held);
-    assert_eq!(app.oneshot(request()).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.oneshot(request()).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -4164,13 +5163,28 @@ async fn signed_missing_or_stale_wallet_time_is_rejected_without_rewriting() {
     tiers.register_f2f_peer("wallet-time-test");
     let key = SigningKey::from_bytes(&[97; 32]);
     for created_at in [0, test_now_ms() - 31_000] {
-        let mut request = make_test_hmc_spend("time-fixture", &format!("time-{created_at}"), [97; 32], &key);
+        let mut request = make_test_hmc_spend(
+            "time-fixture",
+            &format!("time-{created_at}"),
+            [97; 32],
+            &key,
+        );
         request.created_at_ms = created_at;
         request.layer2_signature = key.sign(&calculate_l2_payload_hash(&request)).to_bytes();
         let tag = request.ds_tag.clone().unwrap();
-        let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/lock")
-            .header("content-type", "application/json").header("x-peer-token", "wallet-time-test")
-            .body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap()).await.unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lock")
+                    .header("content-type", "application/json")
+                    .header("x-peer-token", "wallet-time-test")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(storage.get_hmc_lock(&tag).unwrap().is_none());
     }

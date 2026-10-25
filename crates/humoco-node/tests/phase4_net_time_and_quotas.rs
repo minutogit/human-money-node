@@ -400,17 +400,20 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
 
 #[tokio::test]
 async fn test_phase4_adversarial_5x_whale_limit_flooding() {
-use humoco_node::DualTierEngine;
-use humoco_node::identity::NodeIdentity;
-use humoco_node::network::{NodeRequestHandler, RequestHandler};
-use humoco_sim_core::wire::{FLAG_QUOTA_EXCEEDED, MsgType};
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::{NodeRequestHandler, RequestHandler};
+    use humoco_node::DualTierEngine;
+    use humoco_sim_core::wire::{MsgType, FLAG_QUOTA_EXCEEDED};
 
     let temp = tempdir().unwrap();
     let db_path = temp.path().join("adversarial_whale.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let (engine, _drain) = DualTierEngine::new(storage.clone());
     let pow = Arc::new(humoco_node::ingress::pow::PowEngine::new([0x55; 32], 8));
-    let tier_controller = Arc::new(humoco_node::ingress::tier::TierController::new(storage.clone(), pow));
+    let tier_controller = Arc::new(humoco_node::ingress::tier::TierController::new(
+        storage.clone(),
+        pow,
+    ));
 
     let identity_shard = NodeIdentity::generate();
     let identity_client = NodeIdentity::generate();
@@ -419,13 +422,14 @@ use humoco_sim_core::wire::{FLAG_QUOTA_EXCEEDED, MsgType};
         Vec::new(),
         vec![*identity_client.node_pubkey()],
     ));
-    pm_shard.learn_node_from_gossip(
-        *identity_client.node_pubkey(),
-        "127.0.0.1:9001".parse().unwrap(),
-        0,
-        None,
-    )
-    .await;
+    pm_shard
+        .learn_node_from_gossip(
+            *identity_client.node_pubkey(),
+            "127.0.0.1:9001".parse().unwrap(),
+            0,
+            None,
+        )
+        .await;
 
     admit_mature_local(&pm_shard, &identity_shard).await;
     let handler_shard = Arc::new(
@@ -475,22 +479,23 @@ use humoco_sim_core::wire::{FLAG_QUOTA_EXCEEDED, MsgType};
             privacy_guard: None,
         };
 
-        let hmc_payload = bincode::serialize(&humoco_node::network::framing::LockWirePayload::Hmc {
-            req: hmc_req,
-            chain: None,
-            root_valid_until: 86_400_000,
-            epoch_day: 0,
-            epoch_seq: 0,
-            cumulative_micro_byte_years: 0,
-            prev_day_final_bytes: 0,
-            current_anl_24h: extremely_high_ema,
-            declared_write_ema_micro_bj: extremely_high_ema,
-            declared_read_ema_credits: 0,
-            sender_pubkey: *identity_client.node_pubkey(),
-            sender_signature: [0; 64],
-            timestamp_ms: 1000,
-        })
-        .unwrap();
+        let hmc_payload =
+            bincode::serialize(&humoco_node::network::framing::LockWirePayload::Hmc {
+                req: hmc_req,
+                chain: None,
+                root_valid_until: 86_400_000,
+                epoch_day: 0,
+                epoch_seq: 0,
+                cumulative_micro_byte_years: 0,
+                prev_day_final_bytes: 0,
+                current_anl_24h: extremely_high_ema,
+                declared_write_ema_micro_bj: extremely_high_ema,
+                declared_read_ema_credits: 0,
+                sender_pubkey: *identity_client.node_pubkey(),
+                sender_signature: [0; 64],
+                timestamp_ms: 1000,
+            })
+            .unwrap();
 
         let req_header = humoco_sim_core::WireHeader::new(
             MsgType::LockVerifyRequest as u16,
@@ -512,14 +517,15 @@ use humoco_sim_core::wire::{FLAG_QUOTA_EXCEEDED, MsgType};
         assert_eq!(
             resp_header.msg_type,
             MsgType::LockVerifyResponse as u16,
-            "Attempt {}: expected LockVerifyResponse", attempt
+            "Attempt {}: expected LockVerifyResponse",
+            attempt
         );
         assert_eq!(
             resp_header.flags & FLAG_QUOTA_EXCEEDED,
             FLAG_QUOTA_EXCEEDED,
             "Attempt {}: shard must return FLAG_QUOTA_EXCEEDED when write load far exceeds 5x whale brake", attempt
         );
-assert!(
+        assert!(
             resp_payload.is_empty(),
             "Attempt {}: payload must be empty on quota rejection",
             attempt

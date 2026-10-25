@@ -23,15 +23,15 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use humoco_node::api::hmc::{
-    L2AuthPayload, L2LockEntry, L2LockRequest, L2ResponseEnvelope, L2StatusQuery, L2Verdict,
-    calculate_l2_payload_hash,
+    calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest, L2ResponseEnvelope,
+    L2StatusQuery, L2Verdict,
 };
-use humoco_node::api::{AppState, build_router};
+use humoco_node::api::{build_router, AppState};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::ingress::{PowEngine, TierController};
 use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, RedbStorage};
-use humoco_proto::live::{LiveStateContext, LiveStateProof, verify_live_state_proof};
+use humoco_proto::live::{verify_live_state_proof, LiveStateContext, LiveStateProof};
 
 fn test_now_ms() -> u64 {
     std::time::SystemTime::now()

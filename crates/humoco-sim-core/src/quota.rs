@@ -48,7 +48,8 @@ impl ByteYears {
             return 1;
         }
         let total_byte_seconds = (STORED_LOCK_BYTES as u128) * (ttl_seconds as u128);
-        let byte_years = (total_byte_seconds + (SECONDS_PER_YEAR as u128 / 2)) / (SECONDS_PER_YEAR as u128);
+        let byte_years =
+            (total_byte_seconds + (SECONDS_PER_YEAR as u128 / 2)) / (SECONDS_PER_YEAR as u128);
         (byte_years as u64).max(1)
     }
 
@@ -58,8 +59,10 @@ impl ByteYears {
         if ttl_seconds == 0 {
             return 1;
         }
-        let total_micro_byte_seconds = (STORED_LOCK_BYTES as u128) * (ttl_seconds as u128) * 1_000_000u128;
-        let micro_byte_years = (total_micro_byte_seconds + (SECONDS_PER_YEAR as u128 / 2)) / (SECONDS_PER_YEAR as u128);
+        let total_micro_byte_seconds =
+            (STORED_LOCK_BYTES as u128) * (ttl_seconds as u128) * 1_000_000u128;
+        let micro_byte_years = (total_micro_byte_seconds + (SECONDS_PER_YEAR as u128 / 2))
+            / (SECONDS_PER_YEAR as u128);
         (micro_byte_years as u64).max(1)
     }
 
@@ -262,14 +265,70 @@ impl SlottedMedianRingBuffer {
 /// Represents 64 uniform intervals of length 1,350s within a 24h half-life (86,400s).
 /// Interpolation error across the entire 24h domain is strictly bounded < 0.002%.
 const DYADIC_HALF_LIFE_TABLE: [u64; 65] = [
-    0x100000000, 0xfd3e0c0d, 0xfa83b2db, 0xf7d0df73, 0xf5257d15, 0xf281773c, 0xefe4b99c, 0xed4f301f,
-    0xeac0c6e8, 0xe8396a50, 0xe5b906e7, 0xe33f8973, 0xe0ccdeec, 0xde60f482, 0xdbfbb798, 0xd99d15c2,
-    0xd744fccb, 0xd4f35aac, 0xd2a81d92, 0xd06333db, 0xce248c15, 0xcbec14ff, 0xc9b9bd86, 0xc78d74c9,
-    0xc5672a11, 0xc346ccda, 0xc12c4cca, 0xbf1799b6, 0xbd08a39f, 0xbaff5ab2, 0xb8fbaf47, 0xb6fd91e3,
-    0xb504f334, 0xb311c413, 0xb123f582, 0xaf3b78ad, 0xad583eea, 0xab7a39b6, 0xa9a15ab5, 0xa7cd93b5,
-    0xa5fed6aa, 0xa43515ae, 0xa2704303, 0xa0b05110, 0x9ef53261, 0x9d3ed9a7, 0x9b8d39ba, 0x99e04593,
-    0x9837f052, 0x96942d37, 0x94f4efa9, 0x935a2b2f, 0x91c3d374, 0x9031dc43, 0x8ea4398b, 0x8d1adf5b,
-    0x8b95c1e4, 0x8a14d575, 0x88980e81, 0x871f6197, 0x85aac368, 0x843a28c4, 0x82cd8699, 0x8164d1f4,
+    0x100000000,
+    0xfd3e0c0d,
+    0xfa83b2db,
+    0xf7d0df73,
+    0xf5257d15,
+    0xf281773c,
+    0xefe4b99c,
+    0xed4f301f,
+    0xeac0c6e8,
+    0xe8396a50,
+    0xe5b906e7,
+    0xe33f8973,
+    0xe0ccdeec,
+    0xde60f482,
+    0xdbfbb798,
+    0xd99d15c2,
+    0xd744fccb,
+    0xd4f35aac,
+    0xd2a81d92,
+    0xd06333db,
+    0xce248c15,
+    0xcbec14ff,
+    0xc9b9bd86,
+    0xc78d74c9,
+    0xc5672a11,
+    0xc346ccda,
+    0xc12c4cca,
+    0xbf1799b6,
+    0xbd08a39f,
+    0xbaff5ab2,
+    0xb8fbaf47,
+    0xb6fd91e3,
+    0xb504f334,
+    0xb311c413,
+    0xb123f582,
+    0xaf3b78ad,
+    0xad583eea,
+    0xab7a39b6,
+    0xa9a15ab5,
+    0xa7cd93b5,
+    0xa5fed6aa,
+    0xa43515ae,
+    0xa2704303,
+    0xa0b05110,
+    0x9ef53261,
+    0x9d3ed9a7,
+    0x9b8d39ba,
+    0x99e04593,
+    0x9837f052,
+    0x96942d37,
+    0x94f4efa9,
+    0x935a2b2f,
+    0x91c3d374,
+    0x9031dc43,
+    0x8ea4398b,
+    0x8d1adf5b,
+    0x8b95c1e4,
+    0x8a14d575,
+    0x88980e81,
+    0x871f6197,
+    0x85aac368,
+    0x843a28c4,
+    0x82cd8699,
+    0x8164d1f4,
     0x80000000,
 ];
 
@@ -418,7 +477,10 @@ impl QuotaPlausibilityVerdict {
 /// - < 75% of limit: fraud / refusal to work (malus +8)
 /// - 75% .. 125% of limit: tolerant boundary band / honest frontrunner (malus 0)
 /// - > 125% of limit: genuine overload (malus 0)
-pub fn evaluate_quota_exceeded_claim(sender_volume: u64, quota_limit: u64) -> QuotaPlausibilityVerdict {
+pub fn evaluate_quota_exceeded_claim(
+    sender_volume: u64,
+    quota_limit: u64,
+) -> QuotaPlausibilityVerdict {
     let lower_tolerance = (quota_limit as u128 * 75 / 100) as u64; // 75%
     let upper_tolerance = (quota_limit as u128 * 125 / 100) as u64; // 125%
 
@@ -470,7 +532,10 @@ impl NetworkThermometer {
     /// Fast re-seed on network merges (e.g. village A docks onto the global mesh)
     pub fn fast_reseed_on_merge(&mut self, global_median: u64) {
         self.ring_buffer.seed(global_median);
-        self.read_ring_buffer.seed_with_floor(global_median / READ_TO_WRITE_RATIO, HARD_FLOOR_READ_BASELINE_DAILY);
+        self.read_ring_buffer.seed_with_floor(
+            global_median / READ_TO_WRITE_RATIO,
+            HARD_FLOOR_READ_BASELINE_DAILY,
+        );
     }
 
     /// Adds a daily median (called at the end of a day)
@@ -491,7 +556,10 @@ impl NetworkThermometer {
 
     /// Computes the effective reference value NCB_read_eff = max(Moving_Read_Median, HARD_FLOOR_READ_BASELINE_DAILY)
     pub fn effective_read_ncb(&self) -> u64 {
-        let moving_read_median = self.read_ring_buffer.moving_average().unwrap_or(HARD_FLOOR_READ_BASELINE_DAILY);
+        let moving_read_median = self
+            .read_ring_buffer
+            .moving_average()
+            .unwrap_or(HARD_FLOOR_READ_BASELINE_DAILY);
         moving_read_median.max(HARD_FLOOR_READ_BASELINE_DAILY)
     }
 
@@ -587,7 +655,10 @@ impl NetworkThermometer {
 
     /// Returns the current daily read usage of a node
     pub fn get_node_read_usage(&self, node_id: NodeId) -> u64 {
-        self.node_daily_read_usage.get(&node_id).copied().unwrap_or(0)
+        self.node_daily_read_usage
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Returns the total daily read usage across all nodes in the network
@@ -597,12 +668,16 @@ impl NetworkThermometer {
 
     /// Initializes the read thermometer of a new node with the current peer read median
     pub fn seed_read_from_peers(&mut self, peer_median: u64) {
-        self.read_ring_buffer.seed_with_floor(peer_median, HARD_FLOOR_READ_BASELINE_DAILY);
+        self.read_ring_buffer
+            .seed_with_floor(peer_median, HARD_FLOOR_READ_BASELINE_DAILY);
     }
 
     /// Fast re-seed for the read thermometer on network merge
     pub fn fast_reseed_read_on_merge(&mut self, global_median: u64) {
-        self.read_ring_buffer.seed_with_floor(global_median / READ_TO_WRITE_RATIO, HARD_FLOOR_READ_BASELINE_DAILY);
+        self.read_ring_buffer.seed_with_floor(
+            global_median / READ_TO_WRITE_RATIO,
+            HARD_FLOOR_READ_BASELINE_DAILY,
+        );
     }
 
     /// Computes sync read credits based on the number of locks:
@@ -622,7 +697,8 @@ impl NetworkThermometer {
         } else {
             now_sec.saturating_sub(self.last_write_ema_sec)
         };
-        self.write_ema_micro_bj = calculate_integer_ema(self.write_ema_micro_bj, delta, footprint_micro_bj);
+        self.write_ema_micro_bj =
+            calculate_integer_ema(self.write_ema_micro_bj, delta, footprint_micro_bj);
         self.last_write_ema_sec = now_sec.max(self.last_write_ema_sec);
     }
 
@@ -727,9 +803,15 @@ mod tests {
     #[test]
     fn test_micro_from_ttl_seconds() {
         // 1 year = 192 Byte-Years = 192_000_000 micro-Byte-Years
-        assert_eq!(ByteYears::micro_from_ttl_seconds(SECONDS_PER_YEAR), 192_000_000);
+        assert_eq!(
+            ByteYears::micro_from_ttl_seconds(SECONDS_PER_YEAR),
+            192_000_000
+        );
         // 5 years = 960 Byte-Years = 960_000_000 micro-Byte-Years
-        assert_eq!(ByteYears::micro_from_ttl_seconds(5 * SECONDS_PER_YEAR), 960_000_000);
+        assert_eq!(
+            ByteYears::micro_from_ttl_seconds(5 * SECONDS_PER_YEAR),
+            960_000_000
+        );
         // 0 seconds = at least 1 micro-Byte-Year
         assert_eq!(ByteYears::micro_from_ttl_seconds(0), 1);
     }
@@ -896,25 +978,49 @@ mod tests {
 
         // Spread damper edge cases
         // 1. q3 == 0 -> 0.5
-        let zero_q3 = QuartileStats { q1: 0, median: 0, q3: 0 };
+        let zero_q3 = QuartileStats {
+            q1: 0,
+            median: 0,
+            q3: 0,
+        };
         assert_eq!(zero_q3.spread_damper(), 0.5);
 
         // 2. q1 >= q3 -> 0.5
-        let equal_q = QuartileStats { q1: 100, median: 100, q3: 100 };
+        let equal_q = QuartileStats {
+            q1: 100,
+            median: 100,
+            q3: 100,
+        };
         assert_eq!(equal_q.spread_damper(), 0.5);
-        let inverted_q = QuartileStats { q1: 200, median: 100, q3: 100 };
+        let inverted_q = QuartileStats {
+            q1: 200,
+            median: 100,
+            q3: 100,
+        };
         assert_eq!(inverted_q.spread_damper(), 0.5);
 
         // 3. (1.0 - ratio) / 0.66 < 0.5 (e.g. ratio = 0.9 -> damper ~0.1515 -> clamped to 0.5)
-        let high_ratio = QuartileStats { q1: 900, median: 950, q3: 1000 };
+        let high_ratio = QuartileStats {
+            q1: 900,
+            median: 950,
+            q3: 1000,
+        };
         assert_eq!(high_ratio.spread_damper(), 0.5);
 
         // 4. (1.0 - ratio) / 0.66 > 1.0 (e.g. ratio = 0.0 -> damper ~1.515 -> clamped to 1.0)
-        let zero_ratio = QuartileStats { q1: 0, median: 500, q3: 1000 };
+        let zero_ratio = QuartileStats {
+            q1: 0,
+            median: 500,
+            q3: 1000,
+        };
         assert_eq!(zero_ratio.spread_damper(), 1.0);
 
         // 5. Exactly 1.0 damper when ratio = 0.34 ((1.0 - 0.34) / 0.66 = 1.0)
-        let exact_one = QuartileStats { q1: 340, median: 500, q3: 1000 };
+        let exact_one = QuartileStats {
+            q1: 340,
+            median: 500,
+            q3: 1000,
+        };
         let damper = exact_one.spread_damper();
         assert!((damper - 1.0).abs() < 1e-6);
     }
@@ -1021,27 +1127,42 @@ mod tests {
 
         // Zone 1: < 75% (FraudulentRejection)
         let v1 = evaluate_quota_exceeded_claim(749, limit);
-        assert_eq!(v1, QuotaPlausibilityVerdict::FraudulentRejection { malus_increment: 8 });
+        assert_eq!(
+            v1,
+            QuotaPlausibilityVerdict::FraudulentRejection { malus_increment: 8 }
+        );
         assert_eq!(v1.malus(), 8);
 
         // Zone 2: == 75% (BoundaryCutoff)
         let v2 = evaluate_quota_exceeded_claim(750, limit);
-        assert_eq!(v2, QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 });
+        assert_eq!(
+            v2,
+            QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
+        );
         assert_eq!(v2.malus(), 0);
 
         // Zone 2: within [75%, 125%]
         let v3 = evaluate_quota_exceeded_claim(1000, limit);
-        assert_eq!(v3, QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 });
+        assert_eq!(
+            v3,
+            QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
+        );
         assert_eq!(v3.malus(), 0);
 
         // Zone 2: == 125% (BoundaryCutoff)
         let v4 = evaluate_quota_exceeded_claim(1250, limit);
-        assert_eq!(v4, QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 });
+        assert_eq!(
+            v4,
+            QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
+        );
         assert_eq!(v4.malus(), 0);
 
         // Zone 3: > 125% (LegitimateOverload)
         let v5 = evaluate_quota_exceeded_claim(1251, limit);
-        assert_eq!(v5, QuotaPlausibilityVerdict::LegitimateOverload { malus_increment: 0 });
+        assert_eq!(
+            v5,
+            QuotaPlausibilityVerdict::LegitimateOverload { malus_increment: 0 }
+        );
         assert_eq!(v5.malus(), 0);
     }
 

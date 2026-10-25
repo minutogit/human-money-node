@@ -101,11 +101,22 @@ fn chain(key: &NodeIdentity, voucher: &str, now: u64, failure: usize) -> L2Chain
     }
 }
 fn assert_prefix(db: &RedbStorage, chain: &L2ChainLockRequest, complete: bool) {
-    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&bs58::encode(chain.chain[0].transaction_hash).into_string());
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+        &bs58::encode(chain.chain[0].transaction_hash).into_string(),
+    );
     let shard = humoco_sim_core::types::canonical_voucher_shard(&parent);
-    let records = db.committed_shard_records(shard, chain.chain[0].created_at_ms).unwrap();
-    assert_eq!(records.len(), if complete { 2 } else { 1 }, "root proof is not a spend; all SST slots belong to the root shard");
-    assert!(db.committed_shard_records(shard.wrapping_add(1), chain.chain[0].created_at_ms).unwrap().is_empty());
+    let records = db
+        .committed_shard_records(shard, chain.chain[0].created_at_ms)
+        .unwrap();
+    assert_eq!(
+        records.len(),
+        if complete { 2 } else { 1 },
+        "root proof is not a spend; all SST slots belong to the root shard"
+    );
+    assert!(db
+        .committed_shard_records(shard.wrapping_add(1), chain.chain[0].created_at_ms)
+        .unwrap()
+        .is_empty());
     for (i, req) in chain.chain.iter().enumerate() {
         let tag = if req.is_genesis {
             bs58::encode(req.transaction_hash).into_string()
@@ -196,10 +207,22 @@ async fn http_bad_suffix_retains_exact_durable_prefix_after_restart() {
             proof.transaction_id = spend.transaction_hash;
             proof.state_hash = spend.transaction_hash;
             proof.signature = id.signing_key().sign(&proof.digest().unwrap()).to_bytes();
-            spend.layer2_signature = id.signing_key().sign(&calculate_l2_payload_hash(spend)).to_bytes();
-            let response = reqwest::Client::new().post(format!("http://{addr}/v1/lock/chain"))
-                .header("X-Peer-Token", "prefix-test").json(&alternate).send().await.unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "a second genuine spend must collide");
+            spend.layer2_signature = id
+                .signing_key()
+                .sign(&calculate_l2_payload_hash(spend))
+                .to_bytes();
+            let response = reqwest::Client::new()
+                .post(format!("http://{addr}/v1/lock/chain"))
+                .header("X-Peer-Token", "prefix-test")
+                .json(&alternate)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::CONFLICT,
+                "a second genuine spend must collide"
+            );
         }
         assert_prefix(&db, &req, failure == 0);
         server.abort();
@@ -383,27 +406,51 @@ async fn historical_prefix_requires_complete_authentic_path_to_fresh_wallet_tip(
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(RedbStorage::open(&dir.path().join("node.redb")).unwrap());
         let cancel = CancellationToken::new();
-        let (engine,worker) = DualTierEngine::new_with_token(db.clone(),cancel.clone());
+        let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
         let author = NodeIdentity::generate();
         let now = 1_000_000;
-        let mut request = chain(&author,&format!("historical-{invalid}"),now,0);
+        let mut request = chain(&author, &format!("historical-{invalid}"), now, 0);
         request.chain[1].created_at_ms = now - 120_000;
-        request.chain[1].layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&request.chain[1])).to_bytes();
-        if invalid == 1 { request.chain[2].created_at_ms = now - 31_000; request.chain[2].layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&request.chain[2])).to_bytes(); }
-        if invalid == 2 { request.chain[2].layer2_signature = [0;64]; }
-        let (verdict,_) = engine.ingress_hmc_chain_lock_durable(request.clone(),humoco_node::storage::IngressOrigin::ClientApi,Some(now)).await;
+        request.chain[1].layer2_signature = author
+            .signing_key()
+            .sign(&calculate_l2_payload_hash(&request.chain[1]))
+            .to_bytes();
+        if invalid == 1 {
+            request.chain[2].created_at_ms = now - 31_000;
+            request.chain[2].layer2_signature = author
+                .signing_key()
+                .sign(&calculate_l2_payload_hash(&request.chain[2]))
+                .to_bytes();
+        }
+        if invalid == 2 {
+            request.chain[2].layer2_signature = [0; 64];
+        }
+        let (verdict, _) = engine
+            .ingress_hmc_chain_lock_durable(
+                request.clone(),
+                humoco_node::storage::IngressOrigin::ClientApi,
+                Some(now),
+            )
+            .await;
         let prefix_tag = request.chain[1].ds_tag.as_ref().unwrap();
         let tip_tag = request.chain[2].ds_tag.as_ref().unwrap();
         if invalid == 0 {
-            assert!(matches!(verdict,L2Verdict::Verified { .. }));
-            assert_eq!(db.get_hmc_lock(prefix_tag).unwrap().unwrap().created_at_ms,now-120_000);
+            assert!(matches!(verdict, L2Verdict::Verified { .. }));
+            assert_eq!(
+                db.get_hmc_lock(prefix_tag).unwrap().unwrap().created_at_ms,
+                now - 120_000
+            );
             assert!(db.get_hmc_lock(tip_tag).unwrap().is_some());
         } else {
-            assert!(matches!(verdict,L2Verdict::Rejected { .. }));
-            assert!(db.get_hmc_lock(prefix_tag).unwrap().is_none(),"stale history needs the entire authentic fresh descendant path");
+            assert!(matches!(verdict, L2Verdict::Rejected { .. }));
+            assert!(
+                db.get_hmc_lock(prefix_tag).unwrap().is_none(),
+                "stale history needs the entire authentic fresh descendant path"
+            );
             assert!(db.get_hmc_lock(tip_tag).unwrap().is_none());
         }
-        cancel.cancel(); worker.await.unwrap();
+        cancel.cancel();
+        worker.await.unwrap();
     }
 }
 
@@ -494,25 +541,49 @@ async fn http_historical_predecessor_fresh_terminal_and_rfc3339_root_ttl() {
     root.deletable_at = Some(rfc3339_expiry.to_string());
     if let Some(proof) = root.causal_output.as_mut() {
         proof.root_valid_until_ms = expected_expiry_ms;
-        proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+        proof.signature = author
+            .signing_key()
+            .sign(&proof.digest().unwrap())
+            .to_bytes();
     }
-    root.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&root)).to_bytes();
+    root.layer2_signature = author
+        .signing_key()
+        .sign(&calculate_l2_payload_hash(&root))
+        .to_bytes();
 
     // Historical predecessor created 2 minutes ago
-    let mut pred = hop(&author, voucher, 2, Some(root.transaction_hash), now - 120_000);
+    let mut pred = hop(
+        &author,
+        voucher,
+        2,
+        Some(root.transaction_hash),
+        now - 120_000,
+    );
     if let Some(proof) = pred.causal_output.as_mut() {
         proof.root_valid_until_ms = expected_expiry_ms;
-        proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+        proof.signature = author
+            .signing_key()
+            .sign(&proof.digest().unwrap())
+            .to_bytes();
     }
-    pred.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&pred)).to_bytes();
+    pred.layer2_signature = author
+        .signing_key()
+        .sign(&calculate_l2_payload_hash(&pred))
+        .to_bytes();
 
     // Fresh terminal created right now (fresh within 30s)
     let mut tip = hop(&author, voucher, 3, Some(pred.transaction_hash), now);
     if let Some(proof) = tip.causal_output.as_mut() {
         proof.root_valid_until_ms = expected_expiry_ms;
-        proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
+        proof.signature = author
+            .signing_key()
+            .sign(&proof.digest().unwrap())
+            .to_bytes();
     }
-    tip.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&tip)).to_bytes();
+    tip.layer2_signature = author
+        .signing_key()
+        .sign(&calculate_l2_payload_hash(&tip))
+        .to_bytes();
 
     let chain_req = L2ChainLockRequest {
         auth: root.auth.clone(),
@@ -543,19 +614,34 @@ async fn http_historical_predecessor_fresh_terminal_and_rfc3339_root_ttl() {
 
     // Genesis is in voucher_roots and NOT in locks
     let genesis_tag = bs58::encode(root.transaction_hash).into_string();
-    assert!(db.get_hmc_lock(&genesis_tag).unwrap().is_none(), "genesis must never occupy a collision lock");
-    let stored_root = db.voucher_root(voucher).unwrap().expect("root must be registered");
+    assert!(
+        db.get_hmc_lock(&genesis_tag).unwrap().is_none(),
+        "genesis must never occupy a collision lock"
+    );
+    let stored_root = db
+        .voucher_root(voucher)
+        .unwrap()
+        .expect("root must be registered");
     assert_eq!(stored_root.t_id, root.transaction_hash);
     let stored_validity = humoco_node::storage::db::roots::root_valid_until(&stored_root).unwrap();
-    assert_eq!(stored_validity, expected_expiry_ms, "RFC3339 root TTL parsed exactly");
+    assert_eq!(
+        stored_validity, expected_expiry_ms,
+        "RFC3339 root TTL parsed exactly"
+    );
 
     // Historical predecessor and fresh terminal are durably committed in locks
     let pred_tag = pred.ds_tag.as_ref().unwrap();
     let tip_tag = tip.ds_tag.as_ref().unwrap();
-    let pred_lock = db.get_hmc_lock(pred_tag).unwrap().expect("pred lock committed");
+    let pred_lock = db
+        .get_hmc_lock(pred_tag)
+        .unwrap()
+        .expect("pred lock committed");
     assert_eq!(pred_lock.created_at_ms, now - 120_000);
     assert_eq!(pred_lock.t_id, pred.transaction_hash);
-    let tip_lock = db.get_hmc_lock(tip_tag).unwrap().expect("tip lock committed");
+    let tip_lock = db
+        .get_hmc_lock(tip_tag)
+        .unwrap()
+        .expect("tip lock committed");
     assert_eq!(tip_lock.t_id, tip.transaction_hash);
 
     server.abort();
@@ -596,8 +682,14 @@ async fn http_independent_receiver_and_change_branches_do_not_collide() {
     let proof = root.causal_output.as_mut().unwrap();
     proof.receiver_pubkey_hash = Some(sha3::Sha3_256::digest(receiver.node_pubkey()).into());
     proof.change_pubkey_hash = Some(sha3::Sha3_256::digest(change.node_pubkey()).into());
-    proof.signature = author.signing_key().sign(&proof.digest().unwrap()).to_bytes();
-    root.layer2_signature = author.signing_key().sign(&calculate_l2_payload_hash(&root)).to_bytes();
+    proof.signature = author
+        .signing_key()
+        .sign(&proof.digest().unwrap())
+        .to_bytes();
+    root.layer2_signature = author
+        .signing_key()
+        .sign(&calculate_l2_payload_hash(&root))
+        .to_bytes();
 
     let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
         &bs58::encode(root.transaction_hash).into_string(),
@@ -622,11 +714,18 @@ async fn http_independent_receiver_and_change_branches_do_not_collide() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res_rec.status(), reqwest::StatusCode::CREATED, "receiver branch must succeed");
+    assert_eq!(
+        res_rec.status(),
+        reqwest::StatusCode::CREATED,
+        "receiver branch must succeed"
+    );
 
     // 2. Change branch chain on the SAME voucher root
     let change_spend = hop(&change, voucher, 23, Some(root.transaction_hash), now);
-    assert_ne!(receive_spend.ds_tag, change_spend.ds_tag, "independent ds_tags");
+    assert_ne!(
+        receive_spend.ds_tag, change_spend.ds_tag,
+        "independent ds_tags"
+    );
     let change_chain = L2ChainLockRequest {
         auth: root.auth.clone(),
         layer2_voucher_id: voucher.into(),
@@ -639,7 +738,11 @@ async fn http_independent_receiver_and_change_branches_do_not_collide() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res_chg.status(), reqwest::StatusCode::CREATED, "change branch must succeed without colliding with receiver");
+    assert_eq!(
+        res_chg.status(),
+        reqwest::StatusCode::CREATED,
+        "change branch must succeed without colliding with receiver"
+    );
 
     // 3. Double-spend on receiver branch must produce 409 Conflict
     let mut double_spend = receive_spend.clone();
@@ -647,8 +750,14 @@ async fn http_independent_receiver_and_change_branches_do_not_collide() {
     let proof = double_spend.causal_output.as_mut().unwrap();
     proof.transaction_id = double_spend.transaction_hash;
     proof.state_hash = double_spend.transaction_hash;
-    proof.signature = receiver.signing_key().sign(&proof.digest().unwrap()).to_bytes();
-    double_spend.layer2_signature = receiver.signing_key().sign(&calculate_l2_payload_hash(&double_spend)).to_bytes();
+    proof.signature = receiver
+        .signing_key()
+        .sign(&proof.digest().unwrap())
+        .to_bytes();
+    double_spend.layer2_signature = receiver
+        .signing_key()
+        .sign(&calculate_l2_payload_hash(&double_spend))
+        .to_bytes();
 
     let conflict_chain = L2ChainLockRequest {
         auth: root.auth.clone(),
@@ -662,7 +771,11 @@ async fn http_independent_receiver_and_change_branches_do_not_collide() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res_conf.status(), reqwest::StatusCode::CONFLICT, "double-spend on receiver branch must collide");
+    assert_eq!(
+        res_conf.status(),
+        reqwest::StatusCode::CONFLICT,
+        "double-spend on receiver branch must collide"
+    );
 
     server.abort();
     let _ = server.await;

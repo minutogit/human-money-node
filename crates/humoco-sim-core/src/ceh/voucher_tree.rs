@@ -25,7 +25,9 @@ use crate::ceh::crypto::{
 /// Hops represent atomic spends from a `parent_lock` to one or more `children`.
 /// Direct payments have 1 child (`parent -> [child]`), while split payments
 /// have 2 children (`parent -> [payment_child, change_child]`).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct VoucherHop {
     pub parent_lock: [u8; 32],
     /// Canonically sorted children locks in ascending byte order.
@@ -124,10 +126,7 @@ impl VoucherSplitTree {
 
     /// Creates a `VoucherSplitTree` with the given hops.
     pub fn with_hops(voucher_root: [u8; 32], hops: BTreeSet<VoucherHop>) -> Self {
-        Self {
-            voucher_root,
-            hops,
-        }
+        Self { voucher_root, hops }
     }
 
     /// Inserts a hop into the split tree. Returns true if the hop was newly inserted.
@@ -140,7 +139,8 @@ impl VoucherSplitTree {
     /// First hashes each hop deterministically under `HUMOCO_V1_CEH_VOUCHER_HOP`,
     /// then hashes the sorted hop digests along with `voucher_root`.
     pub fn compute_tree_root(&self) -> [u8; 32] {
-        let mut hop_hashes: Vec<[u8; 32]> = self.hops.iter().map(|h| h.compute_hop_hash()).collect();
+        let mut hop_hashes: Vec<[u8; 32]> =
+            self.hops.iter().map(|h| h.compute_hop_hash()).collect();
         hop_hashes.sort();
 
         let mut hasher = blake3::Hasher::new();
@@ -459,7 +459,10 @@ mod tests {
 
         // When compared against self, difference is empty
         assert!(snap1.find_divergent_vouchers(&snap1).is_empty());
-        assert_eq!(v1_root_hash, snap1.voucher_trees[&v1_root].compute_tree_root());
+        assert_eq!(
+            v1_root_hash,
+            snap1.voucher_trees[&v1_root].compute_tree_root()
+        );
     }
 
     #[test]

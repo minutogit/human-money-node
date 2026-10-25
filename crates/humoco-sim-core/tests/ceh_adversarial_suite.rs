@@ -9,9 +9,9 @@
 //! 3. Scenario 3 (8/6 Split + View Change & Late Redemption): Progress under Byzantine split.
 //! 4. Scenario 4 (Pioneer Mode Unified Manifest at N=20): 65,536-shard Merkle root & 16-hash proofs.
 
-use std::collections::BTreeSet;
 use ed25519_dalek::SigningKey;
 use humoco_sim_core::ceh::*;
+use std::collections::BTreeSet;
 
 fn generate_keypair(seed: u8) -> (SigningKey, NodePubKey) {
     let mut seed_bytes = [0u8; 32];
@@ -21,7 +21,12 @@ fn generate_keypair(seed: u8) -> (SigningKey, NodePubKey) {
     (signing_key, pubkey)
 }
 
-fn generate_committee(start_seed: u8) -> ([SigningKey; CEH_COMMITTEE_SIZE], [NodePubKey; CEH_COMMITTEE_SIZE]) {
+fn generate_committee(
+    start_seed: u8,
+) -> (
+    [SigningKey; CEH_COMMITTEE_SIZE],
+    [NodePubKey; CEH_COMMITTEE_SIZE],
+) {
     let mut signers = Vec::with_capacity(CEH_COMMITTEE_SIZE);
     let mut pubkeys = Vec::with_capacity(CEH_COMMITTEE_SIZE);
     for i in 0..CEH_COMMITTEE_SIZE {
@@ -30,8 +35,14 @@ fn generate_committee(start_seed: u8) -> ([SigningKey; CEH_COMMITTEE_SIZE], [Nod
         pubkeys.push(pk);
     }
     (
-        signers.try_into().map_err(|_| ()).expect("committee signers"),
-        pubkeys.try_into().map_err(|_| ()).expect("committee pubkeys"),
+        signers
+            .try_into()
+            .map_err(|_| ())
+            .expect("committee signers"),
+        pubkeys
+            .try_into()
+            .map_err(|_| ())
+            .expect("committee pubkeys"),
     )
 }
 
@@ -81,7 +92,10 @@ fn test_scenario_1_39_node_bridge_attack_split_brain_impossibility() {
     let verify_res_a = verify_lock_receipt(&receipt_a, &epoch_1_cert);
     assert_eq!(
         verify_res_a,
-        Err(CehError::QuorumNotReached { have: 10, required: 14 }),
+        Err(CehError::QuorumNotReached {
+            have: 10,
+            required: 14
+        }),
         "Partition A cannot reach quorum without Partition B"
     );
 
@@ -94,7 +108,10 @@ fn test_scenario_1_39_node_bridge_attack_split_brain_impossibility() {
     let verify_res_b = verify_lock_receipt(&receipt_b, &epoch_1_cert);
     assert_eq!(
         verify_res_b,
-        Err(CehError::QuorumNotReached { have: 10, required: 14 }),
+        Err(CehError::QuorumNotReached {
+            have: 10,
+            required: 14
+        }),
         "Partition B cannot reach quorum without Partition A"
     );
 
@@ -146,19 +163,39 @@ fn test_scenario_1_39_node_bridge_attack_split_brain_impossibility() {
     assert_eq!(byzantine_receipt_b.attestations.len(), 13);
     assert_eq!(
         verify_lock_receipt(&byzantine_receipt_a, &epoch_1_cert),
-        Err(CehError::QuorumNotReached { have: 13, required: 14 })
+        Err(CehError::QuorumNotReached {
+            have: 13,
+            required: 14
+        })
     );
     assert_eq!(
         verify_lock_receipt(&byzantine_receipt_b, &epoch_1_cert),
-        Err(CehError::QuorumNotReached { have: 13, required: 14 })
+        Err(CehError::QuorumNotReached {
+            have: 13,
+            required: 14
+        })
     );
 
     // 5. Conflicting successor certificates:
     // Partition A tries to certify Successor Committee A, Partition B tries to certify Successor Committee B.
     let (_, successor_comm_a) = generate_committee(40);
     let (_, successor_comm_b) = generate_committee(70);
-    let mut cert_a = EpochCertificate::new(1, 2, 0, epoch_1_cert.canonical_hash(), [0x33; 32], successor_comm_a);
-    let mut cert_b = EpochCertificate::new(1, 2, 0, epoch_1_cert.canonical_hash(), [0x44; 32], successor_comm_b);
+    let mut cert_a = EpochCertificate::new(
+        1,
+        2,
+        0,
+        epoch_1_cert.canonical_hash(),
+        [0x33; 32],
+        successor_comm_a,
+    );
+    let mut cert_b = EpochCertificate::new(
+        1,
+        2,
+        0,
+        epoch_1_cert.canonical_hash(),
+        [0x44; 32],
+        successor_comm_b,
+    );
 
     for sk in authorized_signers.iter().take(13) {
         let (pk, sig) = sign_epoch_certificate(sk, &cert_a);
@@ -170,11 +207,17 @@ fn test_scenario_1_39_node_bridge_attack_split_brain_impossibility() {
     }
     assert_eq!(
         verify_epoch_certificate_signatures(&cert_a, &authorized_committee, 14),
-        Err(CehError::QuorumNotReached { have: 13, required: 14 })
+        Err(CehError::QuorumNotReached {
+            have: 13,
+            required: 14
+        })
     );
     assert_eq!(
         verify_epoch_certificate_signatures(&cert_b, &authorized_committee, 14),
-        Err(CehError::QuorumNotReached { have: 13, required: 14 })
+        Err(CehError::QuorumNotReached {
+            have: 13,
+            required: 14
+        })
     );
 
     // Proves Theorem 1: Split-brain cannot produce conflicting certified finality.
@@ -221,7 +264,9 @@ fn test_scenario_2_22_node_newcomer_activation_race() {
     let ingress_err = barrier.acquire_write();
     assert_eq!(
         ingress_err.err(),
-        Some(BarrierError::Draining { retry_after_secs: 2 }),
+        Some(BarrierError::Draining {
+            retry_after_secs: 2
+        }),
         "Incoming requests during drain must receive HTTP 503 Retry-After"
     );
 
@@ -229,13 +274,19 @@ fn test_scenario_2_22_node_newcomer_activation_race() {
     let premature_lock = barrier.lock();
     assert_eq!(
         premature_lock,
-        Err(BarrierError::DrainPending { remaining_in_flight: 1 }),
+        Err(BarrierError::DrainPending {
+            remaining_in_flight: 1
+        }),
         "State cannot freeze while in-flight writes are pending"
     );
 
     // In-flight task durably writes to active lock set and completes
     let mut active_locks = BTreeSet::new();
-    active_locks.insert(ActiveLockEntry::new(parent_lock, child_lock_legit, valid_until));
+    active_locks.insert(ActiveLockEntry::new(
+        parent_lock,
+        child_lock_legit,
+        valid_until,
+    ));
     drop(in_flight_guard);
     assert_eq!(barrier.active_in_flight_writes(), 0);
     assert!(barrier.is_drained());
@@ -276,8 +327,7 @@ fn test_scenario_2_22_node_newcomer_activation_race() {
 
     // Newcomer state root matches the frozen root in the EpochCertificate
     assert_eq!(
-        newcomer_snapshot.closed_state_root,
-        epoch_6_cert.closed_state_root,
+        newcomer_snapshot.closed_state_root, epoch_6_cert.closed_state_root,
         "Newcomer reconciled state root must match the certified closed state root"
     );
 
@@ -316,7 +366,8 @@ fn test_scenario_3_8_6_split_view_change_and_late_redemption() {
     }
 
     // 8 honest replicas prepare proposal A
-    let proposal_a = EpochProposal::new(shard_id, epoch, 0, [0xaa; 32], committee, Vec::new(), None);
+    let proposal_a =
+        EpochProposal::new(shard_id, epoch, 0, [0xaa; 32], committee, Vec::new(), None);
     let mut prepares_a = Vec::new();
     for r in replicas.iter_mut().take(8) {
         let vote = r.handle_proposal(&proposal_a).expect("prepare A");
@@ -324,7 +375,8 @@ fn test_scenario_3_8_6_split_view_change_and_late_redemption() {
     }
 
     // 6 honest replicas prepare proposal B
-    let proposal_b = EpochProposal::new(shard_id, epoch, 0, [0xbb; 32], committee, Vec::new(), None);
+    let proposal_b =
+        EpochProposal::new(shard_id, epoch, 0, [0xbb; 32], committee, Vec::new(), None);
     let mut prepares_b = Vec::new();
     for r in replicas.iter_mut().skip(8).take(6) {
         let vote = r.handle_proposal(&proposal_b).expect("prepare B");
@@ -355,7 +407,10 @@ fn test_scenario_3_8_6_split_view_change_and_late_redemption() {
     let proposer_round_1 = 1;
     let mut nvc = None;
     for rc in round_changes {
-        if let Some(cert) = replicas[proposer_round_1].add_round_change(rc).expect("add round change") {
+        if let Some(cert) = replicas[proposer_round_1]
+            .add_round_change(rc)
+            .expect("add round change")
+        {
             nvc = Some(cert);
         }
     }
@@ -397,7 +452,8 @@ fn test_scenario_3_8_6_split_view_change_and_late_redemption() {
         15,
         15 * 86_400,
         &committee,
-    ).expect("redemption within 30 days must succeed");
+    )
+    .expect("redemption within 30 days must succeed");
 
     assert_eq!(
         settled_state,
@@ -412,7 +468,8 @@ fn test_scenario_3_8_6_split_view_change_and_late_redemption() {
         45,
         45 * 86_400,
         &committee,
-    ).expect("conflict resolution past window");
+    )
+    .expect("conflict resolution past window");
 
     assert_eq!(
         frozen_state,
@@ -430,7 +487,8 @@ fn test_scenario_3_8_6_split_view_change_and_late_redemption() {
         46,
         46 * 86_400,
         &committee,
-    ).expect("permanently frozen rejects modification");
+    )
+    .expect("permanently frozen rejects modification");
 
     assert_eq!(blocked_retry, frozen_state);
 }
@@ -457,13 +515,8 @@ fn test_scenario_4_pioneer_mode_unified_manifest_at_n20() {
     assert_ne!(shards_merkle_root, [0u8; 32]);
 
     // Pioneer committee creates and signs UnifiedNetworkEpochManifest for Epoch 1
-    let mut manifest = UnifiedNetworkEpochManifest::new(
-        1,
-        0,
-        [0x12; 32],
-        shards_merkle_root,
-        pioneer_committee,
-    );
+    let mut manifest =
+        UnifiedNetworkEpochManifest::new(1, 0, [0x12; 32], shards_merkle_root, pioneer_committee);
 
     for sk in pioneer_signers.iter().take(CEH_BFT_QUORUM) {
         let (pk, sig) = sign_unified_manifest(sk, &manifest);
@@ -471,7 +524,9 @@ fn test_scenario_4_pioneer_mode_unified_manifest_at_n20() {
     }
 
     // Verify manifest signatures
-    manifest.verify(&pioneer_committee).expect("pioneer manifest signatures valid");
+    manifest
+        .verify(&pioneer_committee)
+        .expect("pioneer manifest signatures valid");
 
     // Test Merkle proofs across diverse shard IDs (boundary, power of 2, prime, max)
     let test_shards = [0u16, 1, 15, 42, 255, 1024, 1337, 32767, 32768, 65534, 65535];
@@ -479,7 +534,11 @@ fn test_scenario_4_pioneer_mode_unified_manifest_at_n20() {
         let proof = generate_shard_merkle_proof(&shard_roots, shard_id);
         assert_eq!(proof.shard_id, shard_id);
         assert_eq!(proof.closed_state_root, shard_roots[shard_id as usize]);
-        assert_eq!(proof.audit_path.len(), CEH_MERKLE_TREE_DEPTH, "Audit path depth must be exactly 16");
+        assert_eq!(
+            proof.audit_path.len(),
+            CEH_MERKLE_TREE_DEPTH,
+            "Audit path depth must be exactly 16"
+        );
 
         // 1. Valid leaf proof succeeds
         let verify_res = verify_unified_manifest_shard(
@@ -504,7 +563,12 @@ fn test_scenario_4_pioneer_mode_unified_manifest_at_n20() {
         let mut tampered_path = proof.audit_path.clone();
         tampered_path[0][0] ^= 0xbb;
         assert_eq!(
-            verify_unified_manifest_shard(&manifest, shard_id, &proof.closed_state_root, &tampered_path),
+            verify_unified_manifest_shard(
+                &manifest,
+                shard_id,
+                &proof.closed_state_root,
+                &tampered_path
+            ),
             Err(CehError::InvalidMerkleProof),
             "Tampered audit path must be rejected"
         );
@@ -512,7 +576,12 @@ fn test_scenario_4_pioneer_mode_unified_manifest_at_n20() {
         // 4. Tampered shard ID fails
         let wrong_shard = shard_id ^ 0x01;
         assert_eq!(
-            verify_unified_manifest_shard(&manifest, wrong_shard, &proof.closed_state_root, &proof.audit_path),
+            verify_unified_manifest_shard(
+                &manifest,
+                wrong_shard,
+                &proof.closed_state_root,
+                &proof.audit_path
+            ),
             Err(CehError::InvalidMerkleProof),
             "Tampered shard ID must be rejected"
         );

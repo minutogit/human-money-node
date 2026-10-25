@@ -184,7 +184,10 @@ fn test_split_brain_class_precedence_outranks_lower_min_canon_hash() {
         SimTime(0),
         SimTime(100_000),
     );
-    lock_provisional.status = LockStatus::Provisional { sigs: 7, required: 7 };
+    lock_provisional.status = LockStatus::Provisional {
+        sigs: 7,
+        required: 7,
+    };
 
     let mut lock_unconfirmed = LockRecord::new(
         parent_lock,
@@ -219,7 +222,10 @@ fn test_split_brain_class_precedence_outranks_lower_min_canon_hash() {
         SimTime(0),
         SimTime(100_000),
     );
-    lock_prov2.status = LockStatus::Provisional { sigs: 8, required: 8 };
+    lock_prov2.status = LockStatus::Provisional {
+        sigs: 8,
+        required: 8,
+    };
 
     // Final (Class 2) MUST outrank Provisional (Class 1)
     let res2 = resolve_split_brain(&mut lock_prov2, &mut lock_final);

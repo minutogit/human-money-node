@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
+use std::sync::Arc;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
@@ -33,7 +33,9 @@ fn now_secs() -> u64 {
 /// Explicit test-only readiness for a fresh, isolated registry with no peers.
 /// This does not model activation after transfer or dynamic committee changes.
 fn isolated_ready(state: &AppState) {
-    for shard in 0..=u16::MAX { state.readiness_manager.mark_shard_ready(shard); }
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
 }
 
 fn setup_with_lifecycle(lifecycle: LifecycleConfig) -> axum::Router {
@@ -75,8 +77,8 @@ fn make_lock_request(
     is_bridge: Option<bool>,
     pqc_receiver: Option<String>,
 ) -> L2LockRequest {
-    use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest};
     use ed25519_dalek::Signer;
+    use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest};
     let sender_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
     let sender_pub = sender_key.verifying_key().to_bytes();
     let tx_hash = *blake3::hash(parent_hex.as_bytes()).as_bytes();
@@ -242,7 +244,9 @@ async fn test_reject_suite1_after_sunset_400() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let err: ErrorResponse = response_json(res).await;
     assert_eq!(err.error, "CryptoSuiteDeprecated");
-    assert!(err.message.contains("Suite 1 (Ed25519) has reached final sunset"));
+    assert!(err
+        .message
+        .contains("Suite 1 (Ed25519) has reached final sunset"));
 
     let parent2 = "ef".repeat(32);
     let req_payload2 = make_lock_request(&parent2, None, None, None);

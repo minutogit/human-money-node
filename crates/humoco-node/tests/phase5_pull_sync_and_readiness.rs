@@ -8,12 +8,13 @@ use humoco_node::identity::NodeIdentity;
 use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 use humoco_sim_core::types::{LockRecord, SimTime};
-use humoco_sim_core::wire::{FLAG_NOT_READY, MsgType, WireHeader};
+use humoco_sim_core::wire::{MsgType, WireHeader, FLAG_NOT_READY};
 
 #[tokio::test]
 async fn test_boot_readiness_barrier_wire_flag() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("barrier.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("barrier.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     let server_id = NodeIdentity::generate();
@@ -30,8 +31,21 @@ async fn test_boot_readiness_barrier_wire_flag() {
     ));
 
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
-    pm_server.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
-    pm_server.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    pm_server
+        .learn_node_from_gossip_with_hrw(
+            *server_id.node_pubkey(),
+            *server_id.hrw_routing_id(),
+            "127.0.0.1:1".parse().unwrap(),
+            0,
+            None,
+        )
+        .await;
+    pm_server
+        .set_first_seen_for_test(
+            server_id.node_pubkey(),
+            std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+        )
+        .await;
     let is_sync_ready = Arc::new(AtomicBool::new(false));
 
     let handler = Arc::new(
@@ -68,8 +82,12 @@ async fn test_boot_readiness_barrier_wire_flag() {
     let client_addr = client_transport.local_addr().expect("client addr");
     client_transport.spawn_accept_loop();
 
-    pm_server.register_f2f_friend(*client_id.node_id(), Some(client_addr)).await;
-    pm_client.register_f2f_friend(*server_id.node_id(), Some(server_addr)).await;
+    pm_server
+        .register_f2f_friend(*client_id.node_id(), Some(client_addr))
+        .await;
+    pm_client
+        .register_f2f_friend(*server_id.node_id(), Some(server_addr))
+        .await;
 
     let conn = client_transport
         .connect_peer(server_addr)
@@ -83,16 +101,30 @@ async fn test_boot_readiness_barrier_wire_flag() {
     let mut parent = [0u8; 32];
     parent[..2].copy_from_slice(&witness_shard.to_be_bytes());
     let pending = LockRecord::new(parent, [8; 32], vec![1], now, SimTime(now.0 + 60_000));
-    engine.ram.write().await.try_insert(pending, now, SimTime(now.0 + 60_000)).expect("pending RAM fixture");
+    engine
+        .ram
+        .write()
+        .await
+        .try_insert(pending, now, SimTime(now.0 + 60_000))
+        .expect("pending RAM fixture");
     readiness.mark_shard_ready(witness_shard);
     assert!(!is_sync_ready.load(Ordering::Acquire));
     let header = WireHeader::new(MsgType::ShardDigestRequest as u16, 90, 0, 0, 2);
-    let (reply, bytes) = client_transport.send_request(&conn, &header, &witness_shard.to_le_bytes()).await.expect("ready shard digest");
+    let (reply, bytes) = client_transport
+        .send_request(&conn, &header, &witness_shard.to_le_bytes())
+        .await
+        .expect("ready shard digest");
     assert_eq!(reply.flags & FLAG_NOT_READY, 0);
     let (digest, count): ([u8; 32], u64) = bincode::deserialize(&bytes).expect("digest payload");
     assert_eq!(count, 0, "uncommitted RAM entry must not enter a witness");
-    assert_eq!(digest, humoco_sim_core::crypto::compute_shard_digest_at(witness_shard, &[], now));
-    let (reply, _) = client_transport.send_request(&conn, &header, &(witness_shard + 1).to_le_bytes()).await.expect("unready shard digest");
+    assert_eq!(
+        digest,
+        humoco_sim_core::crypto::compute_shard_digest_at(witness_shard, &[], now)
+    );
+    let (reply, _) = client_transport
+        .send_request(&conn, &header, &(witness_shard + 1).to_le_bytes())
+        .await
+        .expect("unready shard digest");
     assert_ne!(reply.flags & FLAG_NOT_READY, 0);
     engine.ram.write().await.remove(&parent);
 
@@ -126,13 +158,18 @@ async fn test_boot_readiness_barrier_wire_flag() {
     }
     // Register metadata separately, then exercise the readiness barrier on a spend.
     let root_tag = bs58::encode(hmc_req.transaction_hash).into_string();
-    let (verdict, _) = engine.ingress_hmc_lock(root_tag.clone(), L2LockEntry::from(&hmc_req)).await;
+    let (verdict, _) = engine
+        .ingress_hmc_lock(root_tag.clone(), L2LockEntry::from(&hmc_req))
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
     hmc_req.is_genesis = false;
     hmc_req.ds_tag = Some("readiness-spend-slot".into());
-    hmc_req.transaction_hash = [0x77;32];
+    hmc_req.transaction_hash = [0x77; 32];
     hmc_req.deletable_at = None;
-    hmc_req.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req)).to_bytes();
+    hmc_req.layer2_signature = client_id
+        .signing_key()
+        .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req))
+        .to_bytes();
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
     let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
@@ -166,8 +203,17 @@ async fn test_boot_readiness_barrier_wire_flag() {
     let raw_payload = bincode::serialize(&wire).unwrap();
 
     // 1. When is_sync_ready is false, LockVerifyRequest MUST return FLAG_NOT_READY
-    let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, raw_payload.len() as u32);
-    let (resp_hdr, _) = client_transport.send_request(&conn, &header, &raw_payload).await.expect("send request");
+    let header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        1,
+        0,
+        0,
+        raw_payload.len() as u32,
+    );
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &header, &raw_payload)
+        .await
+        .expect("send request");
 
     assert_eq!(
         resp_hdr.msg_type,
@@ -182,7 +228,9 @@ async fn test_boot_readiness_barrier_wire_flag() {
 
     // An isolated prepared-state fixture, not a recovery-completeness proof.
     let tag = bs58::encode(&[0x55u8; 32]).into_string();
-    readiness.mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag)));
+    readiness.mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(
+        &humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag),
+    ));
     // 2. Now transition is_sync_ready to true
     is_sync_ready.store(true, Ordering::SeqCst);
     server_transport.set_sync_ready(true);
@@ -192,30 +240,58 @@ async fn test_boot_readiness_barrier_wire_flag() {
     let mut stale = wire.clone();
     if let humoco_node::network::framing::LockWirePayload::Hmc { req, .. } = &mut stale {
         req.created_at_ms = now_ms - 31_000;
-        req.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req)).to_bytes();
+        req.layer2_signature = client_id
+            .signing_key()
+            .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req))
+            .to_bytes();
     }
     let stale_bytes = bincode::serialize(&stale).unwrap();
-    let stale_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 95, 0, 0, stale_bytes.len() as u32);
-    let (stale_reply, stale_payload) = client_transport.send_request(&conn, &stale_header, &stale_bytes).await.expect("stale wallet request");
-    assert_ne!(stale_reply.flags & humoco_sim_core::wire::FLAG_UNAUTHORIZED, 0);
+    let stale_header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        95,
+        0,
+        0,
+        stale_bytes.len() as u32,
+    );
+    let (stale_reply, stale_payload) = client_transport
+        .send_request(&conn, &stale_header, &stale_bytes)
+        .await
+        .expect("stale wallet request");
+    assert_ne!(
+        stale_reply.flags & humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+        0
+    );
     assert!(stale_payload.is_empty());
     assert!(storage.get_hmc_lock(&tag).unwrap().is_none());
 
-    let header2 = WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 0, raw_payload.len() as u32);
-    let (resp_hdr2, resp_payload2) = client_transport.send_request(&conn, &header2, &raw_payload).await.expect("send request after ready");
+    let header2 = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        2,
+        0,
+        0,
+        raw_payload.len() as u32,
+    );
+    let (resp_hdr2, resp_payload2) = client_transport
+        .send_request(&conn, &header2, &raw_payload)
+        .await
+        .expect("send request after ready");
 
     assert_eq!(
         resp_hdr2.flags & FLAG_NOT_READY,
         0,
         "FLAG_NOT_READY must be cleared once recovery completes"
     );
-    assert!(!resp_payload2.is_empty(), "Expected attestation payload on successful lock verify");
+    assert!(
+        !resp_payload2.is_empty(),
+        "Expected attestation payload on successful lock verify"
+    );
 }
 
 #[tokio::test]
 async fn test_paginated_active_sync_streaming_chunks() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("paginated.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("paginated.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     // Insert 1250 test locks into storage
@@ -232,7 +308,9 @@ async fn test_paginated_active_sync_streaming_chunks() {
             now,
             SimTime(500_000),
         );
-        storage.put_lock(&rec, root_valid.0).expect("committed source row");
+        storage
+            .put_lock(&rec, root_valid.0)
+            .expect("committed source row");
     }
 
     let server_id = NodeIdentity::generate();
@@ -281,8 +359,12 @@ async fn test_paginated_active_sync_streaming_chunks() {
     let client_addr = client_transport.local_addr().expect("client addr");
     client_transport.spawn_accept_loop();
 
-    pm_server.register_f2f_friend(*client_id.node_id(), Some(client_addr)).await;
-    pm_client.register_f2f_friend(*server_id.node_id(), Some(server_addr)).await;
+    pm_server
+        .register_f2f_friend(*client_id.node_id(), Some(client_addr))
+        .await;
+    pm_client
+        .register_f2f_friend(*server_id.node_id(), Some(server_addr))
+        .await;
 
     let conn = client_transport
         .connect_peer(server_addr)
@@ -311,16 +393,23 @@ async fn test_paginated_active_sync_streaming_chunks() {
         if !page.has_more {
             break;
         }
-        cursor = page.next_cursor.expect("next_cursor must be Some when has_more is true");
+        cursor = page
+            .next_cursor
+            .expect("next_cursor must be Some when has_more is true");
     }
 
-    assert_eq!(all_received.len(), 1250, "Must have received all 1250 locks across pages");
+    assert_eq!(
+        all_received.len(),
+        1250,
+        "Must have received all 1250 locks across pages"
+    );
 }
 
 #[tokio::test]
 async fn test_cryptographic_verification_on_partition_sync() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("crypto_sync.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("crypto_sync.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     let now = SimTime(10_000);
@@ -328,32 +417,26 @@ async fn test_cryptographic_verification_on_partition_sync() {
 
     // 1. Sim LockRecord with invalid LockId (tampered hash)
     let parent = [0x99; 32];
-    let mut invalid_rec = LockRecord::new(
-        parent,
-        [0x77; 32],
-        vec![1, 2, 3],
-        now,
-        SimTime(50_000),
-    );
+    let mut invalid_rec = LockRecord::new(parent, [0x77; 32], vec![1, 2, 3], now, SimTime(50_000));
     invalid_rec.id = [0xFF; 32]; // deliberate corrupt ID
 
     let res = engine
         .ingress_lock_with_origin(invalid_rec, now, root_valid, IngressOrigin::PartitionSync)
         .await;
-    assert!(res.is_err(), "Ingress of corrupt LockId under PartitionSync must be rejected");
+    assert!(
+        res.is_err(),
+        "Ingress of corrupt LockId under PartitionSync must be rejected"
+    );
 
     // 2. Sim LockRecord with valid LockId
-    let valid_rec = LockRecord::new(
-        parent,
-        [0x77; 32],
-        vec![1, 2, 3],
-        now,
-        SimTime(50_000),
-    );
+    let valid_rec = LockRecord::new(parent, [0x77; 32], vec![1, 2, 3], now, SimTime(50_000));
     let res2 = engine
         .ingress_lock_with_origin(valid_rec, now, root_valid, IngressOrigin::PartitionSync)
         .await;
-    assert!(res2.is_ok(), "Ingress of valid LockId under PartitionSync must succeed");
+    assert!(
+        res2.is_ok(),
+        "Ingress of valid LockId under PartitionSync must succeed"
+    );
 
     // 3. HMC L2LockEntry with invalid cryptographic signature
     let invalid_hmc_entry = L2LockEntry {
@@ -372,10 +455,18 @@ async fn test_cryptographic_verification_on_partition_sync() {
         privacy_guard: None,
     };
     let (verdict, is_new) = engine
-        .ingress_hmc_lock_with_origin("tag1".into(), invalid_hmc_entry, IngressOrigin::PartitionSync, Some(10_000))
+        .ingress_hmc_lock_with_origin(
+            "tag1".into(),
+            invalid_hmc_entry,
+            IngressOrigin::PartitionSync,
+            Some(10_000),
+        )
         .await;
     assert!(!is_new, "Invalid signature HMC lock must not be inserted");
-    assert!(matches!(verdict, L2Verdict::Rejected { .. }), "Invalid signature must return Rejected verdict");
+    assert!(
+        matches!(verdict, L2Verdict::Rejected { .. }),
+        "Invalid signature must return Rejected verdict"
+    );
 }
 
 #[tokio::test]
@@ -387,7 +478,8 @@ async fn test_boot_readiness_barrier_http_api_503() {
     use tower::ServiceExt;
 
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("api_barrier.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("api_barrier.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     let server_id = NodeIdentity::generate();
@@ -417,15 +509,10 @@ async fn test_boot_readiness_barrier_http_api_503() {
     let pow_engine = Arc::new(PowEngine::new(*server_id.node_id(), 8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
-    let mut state = AppState::new(
-        engine,
-        storage,
-        server_id,
-        tier_controller,
-        pow_engine,
-    );
+    let mut state = AppState::new(engine, storage, server_id, tier_controller, pow_engine);
     state.transport = Some(server_transport.clone());
-    let router = build_router(state.clone()).merge(humoco_node::api::routes::build_operator_router(state));
+    let router =
+        build_router(state.clone()).merge(humoco_node::api::routes::build_operator_router(state));
 
     // 1. While not ready, /health/ready MUST return 503 Service Unavailable
     let req_health = Request::builder()
@@ -434,7 +521,11 @@ async fn test_boot_readiness_barrier_http_api_503() {
         .body(Body::empty())
         .unwrap();
     let resp_health = router.clone().oneshot(req_health).await.unwrap();
-    assert_eq!(resp_health.status(), StatusCode::SERVICE_UNAVAILABLE, "/health/ready must return 503 during boot recovery");
+    assert_eq!(
+        resp_health.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "/health/ready must return 503 during boot recovery"
+    );
 
     // 2. While not ready, POST /v1/lock MUST return 503 Service Unavailable
     let req_lock = Request::builder()
@@ -444,7 +535,11 @@ async fn test_boot_readiness_barrier_http_api_503() {
         .body(Body::from("{}"))
         .unwrap();
     let resp_lock = router.clone().oneshot(req_lock).await.unwrap();
-    assert_eq!(resp_lock.status(), StatusCode::BAD_REQUEST, "Malformed input is rejected before a shard-specific recovery decision");
+    assert_eq!(
+        resp_lock.status(),
+        StatusCode::BAD_REQUEST,
+        "Malformed input is rejected before a shard-specific recovery decision"
+    );
 
     // 3. Set is_sync_ready to true
     is_sync_ready.store(true, Ordering::SeqCst);
@@ -457,7 +552,11 @@ async fn test_boot_readiness_barrier_http_api_503() {
         .body(Body::empty())
         .unwrap();
     let resp_health2 = router.clone().oneshot(req_health2).await.unwrap();
-    assert_eq!(resp_health2.status(), StatusCode::OK, "/health/ready must return 200 once recovery completes");
+    assert_eq!(
+        resp_health2.status(),
+        StatusCode::OK,
+        "/health/ready must return 200 once recovery completes"
+    );
 
     // 5. Once ready, POST /v1/lock accepts requests (returns 400 for empty JSON instead of 503)
     let req_lock2 = Request::builder()
@@ -467,7 +566,11 @@ async fn test_boot_readiness_barrier_http_api_503() {
         .body(Body::from("{}"))
         .unwrap();
     let resp_lock2 = router.clone().oneshot(req_lock2).await.unwrap();
-    assert_eq!(resp_lock2.status(), StatusCode::BAD_REQUEST, "POST /v1/lock must no longer return 503 once recovery completes");
+    assert_eq!(
+        resp_lock2.status(),
+        StatusCode::BAD_REQUEST,
+        "POST /v1/lock must no longer return 503 once recovery completes"
+    );
 }
 
 #[tokio::test]
@@ -475,14 +578,18 @@ async fn test_per_shard_readiness_demand_sync_503() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use ed25519_dalek::{Signer, SigningKey};
-    use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest, L2ResponseEnvelope};
+    use humoco_node::api::hmc::{
+        calculate_l2_payload_hash, L2AuthPayload, L2LockRequest, L2ResponseEnvelope,
+    };
     use humoco_node::api::{build_router, AppState};
     use humoco_node::daemon::ShardReadinessManager;
     use humoco_node::ingress::{PowEngine, TierController};
     use tower::ServiceExt;
 
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("per_shard_barrier.redb")).expect("open redb"));
+    let storage = Arc::new(
+        RedbStorage::open(&temp.path().join("per_shard_barrier.redb")).expect("open redb"),
+    );
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     let server_id = NodeIdentity::generate();
@@ -514,16 +621,21 @@ async fn test_per_shard_readiness_demand_sync_503() {
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("test_f2f_token");
 
-    pm.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
-    pm.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    pm.learn_node_from_gossip_with_hrw(
+        *server_id.node_pubkey(),
+        *server_id.hrw_routing_id(),
+        "127.0.0.1:1".parse().unwrap(),
+        0,
+        None,
+    )
+    .await;
+    pm.set_first_seen_for_test(
+        server_id.node_pubkey(),
+        std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+    )
+    .await;
     let readiness_manager = Arc::new(ShardReadinessManager::new());
-    let mut state = AppState::new(
-        engine,
-        storage,
-        server_id,
-        tier_controller,
-        pow_engine,
-    );
+    let mut state = AppState::new(engine, storage, server_id, tier_controller, pow_engine);
     state.transport = Some(server_transport.clone());
     state.peer_manager = Some(pm);
     state.readiness_manager = readiness_manager.clone();
@@ -566,15 +678,29 @@ async fn test_per_shard_readiness_demand_sync_503() {
     let parent_bytes = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
     let shard_id = humoco_sim_core::types::extract_shard_id(&parent_bytes);
 
-    let root_registration = Request::builder().method("POST").uri("/v1/lock")
-        .header("content-type", "application/json").header("x-peer-token", "test_f2f_token")
-        .body(Body::from(serde_json::to_vec(&req_payload).unwrap())).unwrap();
-    assert_eq!(router.clone().oneshot(root_registration).await.unwrap().status(), StatusCode::CREATED);
+    let root_registration = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_f2f_token")
+        .body(Body::from(serde_json::to_vec(&req_payload).unwrap()))
+        .unwrap();
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(root_registration)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
     req_payload.is_genesis = false;
     req_payload.ds_tag = Some("http-readiness-spend-slot".into());
-    req_payload.transaction_hash = [0x78;32];
+    req_payload.transaction_hash = [0x78; 32];
     req_payload.deletable_at = None;
-    req_payload.layer2_signature = sender_key.sign(&calculate_l2_payload_hash(&req_payload)).to_bytes();
+    req_payload.layer2_signature = sender_key
+        .sign(&calculate_l2_payload_hash(&req_payload))
+        .to_bytes();
 
     // 1. Shard is not ready initially
     assert!(!readiness_manager.is_shard_ready(shard_id));
@@ -590,7 +716,9 @@ async fn test_per_shard_readiness_demand_sync_503() {
     let resp = router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+        .await
+        .unwrap();
     let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).unwrap();
     match env.verdict {
         L2Verdict::Rejected { reason } => {
@@ -628,7 +756,8 @@ async fn test_per_shard_readiness_demand_sync_503() {
 #[tokio::test]
 async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("barrier.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("barrier.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     let server_id = NodeIdentity::generate();
@@ -645,14 +774,44 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
     ));
 
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
-    pm_server.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
-    pm_server.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    pm_server
+        .learn_node_from_gossip_with_hrw(
+            *server_id.node_pubkey(),
+            *server_id.hrw_routing_id(),
+            "127.0.0.1:1".parse().unwrap(),
+            0,
+            None,
+        )
+        .await;
+    pm_server
+        .set_first_seen_for_test(
+            server_id.node_pubkey(),
+            std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+        )
+        .await;
     // Conditional fixture: a fully mature 20-member local view. This proves
     // gate separation only, not independent authority or recovery coverage.
     for seed in 1..20u8 {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
-        pm_server.learn_node_from_gossip_with_hrw(key, key, format!("127.0.0.1:{}", 32000 + u16::from(seed)).parse().unwrap(), 0, None).await;
-        pm_server.set_first_seen_for_test(&key, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes();
+        pm_server
+            .learn_node_from_gossip_with_hrw(
+                key,
+                key,
+                format!("127.0.0.1:{}", 32000 + u16::from(seed))
+                    .parse()
+                    .unwrap(),
+                0,
+                None,
+            )
+            .await;
+        pm_server
+            .set_first_seen_for_test(
+                &key,
+                std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+            )
+            .await;
     }
     let stable_now = pm_server.net_time_ms();
     pm_server.set_ge20_anchor_for_test(stable_now.saturating_sub(86_400_001));
@@ -694,8 +853,12 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
     let client_addr = client_transport.local_addr().expect("client addr");
     client_transport.spawn_accept_loop();
 
-    pm_server.register_f2f_friend(*client_id.node_id(), Some(client_addr)).await;
-    pm_client.register_f2f_friend(*server_id.node_id(), Some(server_addr)).await;
+    pm_server
+        .register_f2f_friend(*client_id.node_id(), Some(client_addr))
+        .await;
+    pm_client
+        .register_f2f_friend(*server_id.node_id(), Some(server_addr))
+        .await;
 
     let conn = client_transport
         .connect_peer(server_addr)
@@ -732,13 +895,18 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
     }
     // Register metadata separately, then exercise the readiness barrier on a spend.
     let root_tag = bs58::encode(hmc_req.transaction_hash).into_string();
-    let (verdict, _) = engine.ingress_hmc_lock(root_tag.clone(), L2LockEntry::from(&hmc_req)).await;
+    let (verdict, _) = engine
+        .ingress_hmc_lock(root_tag.clone(), L2LockEntry::from(&hmc_req))
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
     hmc_req.is_genesis = false;
     hmc_req.ds_tag = Some("readiness-spend-slot".into());
-    hmc_req.transaction_hash = [0x77;32];
+    hmc_req.transaction_hash = [0x77; 32];
     hmc_req.deletable_at = None;
-    hmc_req.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req)).to_bytes();
+    hmc_req.layer2_signature = client_id
+        .signing_key()
+        .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&hmc_req))
+        .to_bytes();
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
     let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
@@ -772,8 +940,17 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
     let raw_payload = bincode::serialize(&wire).unwrap();
 
     // 1. When is_sync_ready is false, LockVerifyRequest MUST return FLAG_NOT_READY
-    let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, raw_payload.len() as u32);
-    let (resp_hdr, _) = client_transport.send_request(&conn, &header, &raw_payload).await.expect("send request");
+    let header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        1,
+        0,
+        0,
+        raw_payload.len() as u32,
+    );
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &header, &raw_payload)
+        .await
+        .expect("send request");
 
     assert_eq!(
         resp_hdr.msg_type,
@@ -788,26 +965,61 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
 
     // An isolated prepared-state fixture, not a recovery-completeness proof.
     let tag = bs58::encode(&[0x55u8; 32]).into_string();
-    readiness.mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag)));
+    readiness.mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(
+        &humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag),
+    ));
     // 2. Now transition is_sync_ready to true
     // Global readiness intentionally remains false; only this shard is ready.
 
-    let header2 = WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 1, raw_payload.len() as u32);
-    let (resp_hdr2, resp_payload2) = client_transport.send_request(&conn, &header2, &raw_payload).await.expect("send request after ready");
+    let header2 = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        2,
+        0,
+        1,
+        raw_payload.len() as u32,
+    );
+    let (resp_hdr2, resp_payload2) = client_transport
+        .send_request(&conn, &header2, &raw_payload)
+        .await
+        .expect("send request after ready");
 
     assert_eq!(
         resp_hdr2.flags & FLAG_NOT_READY,
         0,
         "FLAG_NOT_READY must be cleared once recovery completes"
     );
-    assert!(!resp_payload2.is_empty(), "Expected attestation payload on successful lock verify");
-    let attestation = humoco_node::api::dto::AttestationDto::from_wire_bytes(&resp_payload2).expect("original approval");
-    let parent: [u8; 32] = hex::decode(&attestation.parent_lock).unwrap().try_into().unwrap();
-    let lock: [u8; 32] = hex::decode(&attestation.lock_id).unwrap().try_into().unwrap();
+    assert!(
+        !resp_payload2.is_empty(),
+        "Expected attestation payload on successful lock verify"
+    );
+    let attestation = humoco_node::api::dto::AttestationDto::from_wire_bytes(&resp_payload2)
+        .expect("original approval");
+    let parent: [u8; 32] = hex::decode(&attestation.parent_lock)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let lock: [u8; 32] = hex::decode(&attestation.lock_id)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent, &lock);
-    let final_digest = humoco_sim_core::crypto::compute_sig_digest(humoco_sim_core::crypto::domain_approve_final(humoco_sim_core::types::NetworkId::Mainnet), 0, 0, 0, attestation.shard_id, 1, &payload);
-    let bytes: [u8; 64] = hex::decode(&attestation.signature).unwrap().try_into().unwrap();
-    server_id.verifying_key().verify_strict(&final_digest, &ed25519_dalek::Signature::from_bytes(&bytes)).expect("ready shard signs FINAL domain despite global false");
+    let final_digest = humoco_sim_core::crypto::compute_sig_digest(
+        humoco_sim_core::crypto::domain_approve_final(humoco_sim_core::types::NetworkId::Mainnet),
+        0,
+        0,
+        0,
+        attestation.shard_id,
+        1,
+        &payload,
+    );
+    let bytes: [u8; 64] = hex::decode(&attestation.signature)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    server_id
+        .verifying_key()
+        .verify_strict(&final_digest, &ed25519_dalek::Signature::from_bytes(&bytes))
+        .expect("ready shard signs FINAL domain despite global false");
     assert!(!is_sync_ready.load(Ordering::SeqCst));
     let mut neighbor_root = match &wire {
         humoco_node::network::framing::LockWirePayload::Hmc { req, .. } => req.clone(),
@@ -815,33 +1027,68 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
     };
     neighbor_root.is_genesis = true;
     neighbor_root.ds_tag = None;
-    neighbor_root.transaction_hash = [0x56;32];
-    neighbor_root.layer2_voucher_id.push_str("_neighbouring_unready_root");
+    neighbor_root.transaction_hash = [0x56; 32];
+    neighbor_root
+        .layer2_voucher_id
+        .push_str("_neighbouring_unready_root");
     neighbor_root.deletable_at = Some(root_valid_until.to_string());
-    neighbor_root.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&neighbor_root)).to_bytes();
+    neighbor_root.layer2_signature = client_id
+        .signing_key()
+        .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(
+            &neighbor_root,
+        ))
+        .to_bytes();
     let neighbor_tag = bs58::encode(neighbor_root.transaction_hash).into_string();
-    let (verdict, _) = engine.ingress_hmc_lock(neighbor_tag, L2LockEntry::from(&neighbor_root)).await;
+    let (verdict, _) = engine
+        .ingress_hmc_lock(neighbor_tag, L2LockEntry::from(&neighbor_root))
+        .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
     let mut neighbouring_wire = wire;
-    if let humoco_node::network::framing::LockWirePayload::Hmc { req, sender_signature, .. } = &mut neighbouring_wire {
+    if let humoco_node::network::framing::LockWirePayload::Hmc {
+        req,
+        sender_signature,
+        ..
+    } = &mut neighbouring_wire
+    {
         req.transaction_hash = [0x56; 32];
         req.layer2_voucher_id.push_str("_neighbouring_unready_root");
-        req.layer2_signature = client_id.signing_key().sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req)).to_bytes();
+        req.layer2_signature = client_id
+            .signing_key()
+            .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req))
+            .to_bytes();
         let entry = humoco_node::api::hmc::L2LockEntry::from(&*req);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(client_id.node_pubkey(), 0, 0, now_ms, 0, 0, footprint, false, &entry.t_id);
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+            client_id.node_pubkey(),
+            0,
+            0,
+            now_ms,
+            0,
+            0,
+            footprint,
+            false,
+            &entry.t_id,
+        );
         *sender_signature = client_id.signing_key().sign(&digest).to_bytes();
     }
     let raw = bincode::serialize(&neighbouring_wire).unwrap();
     let next_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 3, 0, 1, raw.len() as u32);
-    let (next_response, next_bytes) = client_transport.send_request(&conn, &next_header, &raw).await.expect("neighboring shard request");
-    assert_ne!(next_response.flags & FLAG_NOT_READY, 0, "stable network status does not authorize another unready shard");
+    let (next_response, next_bytes) = client_transport
+        .send_request(&conn, &next_header, &raw)
+        .await
+        .expect("neighboring shard request");
+    assert_ne!(
+        next_response.flags & FLAG_NOT_READY,
+        0,
+        "stable network status does not authorize another unready shard"
+    );
     assert!(next_bytes.is_empty());
 }
 
 #[tokio::test]
 async fn recovering_self_cannot_supply_missing_quorum_vote() {
     let temp_server = tempdir().expect("tempdir");
-    let storage_server = Arc::new(RedbStorage::open(&temp_server.path().join("server.redb")).expect("open redb"));
+    let storage_server =
+        Arc::new(RedbStorage::open(&temp_server.path().join("server.redb")).expect("open redb"));
     let (engine_server, _worker_server) = DualTierEngine::new(storage_server.clone());
 
     let server_id = NodeIdentity::generate();
@@ -873,7 +1120,8 @@ async fn recovering_self_cannot_supply_missing_quorum_vote() {
     );
 
     let temp_client = tempdir().expect("tempdir");
-    let storage_client = Arc::new(RedbStorage::open(&temp_client.path().join("client.redb")).expect("open redb"));
+    let storage_client =
+        Arc::new(RedbStorage::open(&temp_client.path().join("client.redb")).expect("open redb"));
     let (engine_client, _worker_client) = DualTierEngine::new(storage_client.clone());
 
     let handler_client = Arc::new(
@@ -909,13 +1157,43 @@ async fn recovering_self_cannot_supply_missing_quorum_vote() {
     let client_addr = client_transport.local_addr().expect("client addr");
     client_transport.spawn_accept_loop();
 
-    pm_client.register_f2f_friend(*server_id.node_id(), Some(server_addr)).await;
-    pm_server.register_f2f_friend(*client_id.node_id(), Some(client_addr)).await;
+    pm_client
+        .register_f2f_friend(*server_id.node_id(), Some(server_addr))
+        .await;
+    pm_server
+        .register_f2f_friend(*client_id.node_id(), Some(client_addr))
+        .await;
 
-    pm_client.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), server_addr, 0, None).await;
-    pm_client.set_first_seen_for_test(server_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
-    pm_client.learn_node_from_gossip_with_hrw(*client_id.node_pubkey(), *client_id.hrw_routing_id(), client_addr, 0, None).await;
-    pm_client.set_first_seen_for_test(client_id.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    pm_client
+        .learn_node_from_gossip_with_hrw(
+            *server_id.node_pubkey(),
+            *server_id.hrw_routing_id(),
+            server_addr,
+            0,
+            None,
+        )
+        .await;
+    pm_client
+        .set_first_seen_for_test(
+            server_id.node_pubkey(),
+            std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+        )
+        .await;
+    pm_client
+        .learn_node_from_gossip_with_hrw(
+            *client_id.node_pubkey(),
+            *client_id.hrw_routing_id(),
+            client_addr,
+            0,
+            None,
+        )
+        .await;
+    pm_client
+        .set_first_seen_for_test(
+            client_id.node_pubkey(),
+            std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+        )
+        .await;
 
     // Q(2) = 2. Only the ready server may witness; the recovering self
     // cannot turn one matching empty response into a quorum.
@@ -929,9 +1207,14 @@ async fn recovering_self_cannot_supply_missing_quorum_vote() {
         &client_id,
         &readiness_client,
         &cancel,
-    ).await.expect("sync_single_shard");
+    )
+    .await
+    .expect("sync_single_shard");
 
-    assert!(!ready, "one witness plus unready self is not a recovery quorum");
+    assert!(
+        !ready,
+        "one witness plus unready self is not a recovery quorum"
+    );
     assert!(!readiness_client.is_shard_ready(42));
     cancel.cancel();
 }

@@ -109,7 +109,7 @@ impl SimWallet {
         );
         let sig = self.signing_key.sign(&payload_hash);
         L2LockRequest {
-        causal_output: None,
+            causal_output: None,
             auth: L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -133,11 +133,7 @@ impl SimWallet {
 
     /// Creates a successor (is_genesis = false) that spends `parent_ds_tag`.
     /// Uses a fresh random t_id.
-    pub fn create_successor_lock(
-        &self,
-        voucher_id: &str,
-        parent_ds_tag: &str,
-    ) -> L2LockRequest {
+    pub fn create_successor_lock(&self, voucher_id: &str, parent_ds_tag: &str) -> L2LockRequest {
         let mut rng = OsRng;
         let mut t_id = [0u8; 32];
         rng.fill_bytes(&mut t_id);
@@ -156,7 +152,7 @@ impl SimWallet {
         );
         let sig = self.signing_key.sign(&payload_hash);
         L2LockRequest {
-        causal_output: None,
+            causal_output: None,
             auth: L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -257,7 +253,7 @@ impl SimWallet {
             );
             let sig = self.signing_key.sign(&payload_hash);
             let req = L2LockRequest {
-        causal_output: None,
+                causal_output: None,
                 auth: L2AuthPayload {
                     ephemeral_pubkey: sender_pub,
                     auth_signature: None,

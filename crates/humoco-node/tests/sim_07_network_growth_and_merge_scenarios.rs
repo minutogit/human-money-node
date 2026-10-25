@@ -19,18 +19,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use humoco_node::api::hmc::{L2AuthPayload, L2LockRequest, L2ResponseEnvelope, L2StatusQuery, L2Verdict};
+use humoco_node::api::hmc::{
+    L2AuthPayload, L2LockRequest, L2ResponseEnvelope, L2StatusQuery, L2Verdict,
+};
+use humoco_node::config::NodeConfig;
 use humoco_node::daemon::{sync_single_shard, ShardReadinessManager};
 use humoco_node::error::NodeError;
 use humoco_node::identity::NodeIdentity;
 use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
-use humoco_node::config::NodeConfig;
 use simulation::node_handle::SIM_F2F_TOKEN;
 use simulation::SimWallet;
 use tempfile::tempdir;
-use tokio_util::sync::CancellationToken;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
 /// Self-contained cluster test node with real HTTP (Axum) and real QUIC transports.
 struct MergeTestNode {
@@ -64,7 +66,10 @@ impl MergeTestNode {
 
         let mut req_str = format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
-            method, path, self.rpc_addr, body_bytes.len()
+            method,
+            path,
+            self.rpc_addr,
+            body_bytes.len()
         );
         for (k, v) in headers {
             req_str.push_str(&format!("{}: {}\r\n", k, v));
@@ -101,7 +106,8 @@ impl MergeTestNode {
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(500);
 
-        let status = StatusCode::from_u16(status_code_u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(status_code_u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         Ok((status, body_part.to_vec()))
     }
 
@@ -179,13 +185,20 @@ async fn spawn_test_node(
     config.f2f.tokens.push(SIM_F2F_TOKEN.to_string());
 
     std::fs::create_dir_all(&config.storage.data_dir)?;
-    let storage = Arc::new(RedbStorage::open(&config.storage.data_dir.join("humoco.redb"))?);
+    let storage = Arc::new(RedbStorage::open(
+        &config.storage.data_dir.join("humoco.redb"),
+    )?);
     let flush_cancel = CancellationToken::new();
-    let (engine, flush_worker) = DualTierEngine::new_with_token(storage.clone(), flush_cancel.clone());
+    let (engine, flush_worker) =
+        DualTierEngine::new_with_token(storage.clone(), flush_cancel.clone());
     let cancel_token = CancellationToken::new();
     let manager = Arc::new(PeerManager::new(Vec::new()));
-    let readiness = Arc::new(ShardReadinessManager::with_cancel_token(cancel_token.clone()));
-    for shard in 0..=u16::MAX { readiness.mark_shard_ready(shard); }
+    let readiness = Arc::new(ShardReadinessManager::with_cancel_token(
+        cancel_token.clone(),
+    ));
+    for shard in 0..=u16::MAX {
+        readiness.mark_shard_ready(shard);
+    }
 
     let handler = Arc::new(
         NodeRequestHandler::with_peer_manager(
@@ -209,23 +222,36 @@ async fn spawn_test_node(
     let p2p_addr = transport.local_addr()?;
     transport.spawn_accept_loop();
 
-    manager.learn_node_from_gossip_with_hrw(
-        *identity.node_pubkey(),
-        *identity.hrw_routing_id(),
-        p2p_addr,
-        0,
-        None,
-    ).await;
-    manager.set_first_seen_for_test(
-        identity.node_pubkey(),
-        std::time::Instant::now() - Duration::from_secs(25 * 3600),
-    ).await;
+    manager
+        .learn_node_from_gossip_with_hrw(
+            *identity.node_pubkey(),
+            *identity.hrw_routing_id(),
+            p2p_addr,
+            0,
+            None,
+        )
+        .await;
+    manager
+        .set_first_seen_for_test(
+            identity.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(25 * 3600),
+        )
+        .await;
 
     let pow = Arc::new(humoco_node::ingress::PowEngine::new(*identity.node_id(), 8));
-    let tier = Arc::new(humoco_node::ingress::TierController::new(storage.clone(), pow.clone()));
+    let tier = Arc::new(humoco_node::ingress::TierController::new(
+        storage.clone(),
+        pow.clone(),
+    ));
     tier.register_f2f_peer(SIM_F2F_TOKEN);
 
-    let mut state = humoco_node::api::AppState::new(engine.clone(), storage.clone(), identity.clone(), tier, pow);
+    let mut state = humoco_node::api::AppState::new(
+        engine.clone(),
+        storage.clone(),
+        identity.clone(),
+        tier,
+        pow,
+    );
     state.peer_manager = Some(manager.clone());
     state.transport = Some(transport.clone());
     state.readiness_manager = readiness.clone();
@@ -237,7 +263,9 @@ async fn spawn_test_node(
     let task_handle = tokio::spawn(async move {
         let shutdown = server_cancel.clone();
         let result = axum::serve(listener, app)
-            .with_graceful_shutdown(async move { shutdown.cancelled().await; })
+            .with_graceful_shutdown(async move {
+                shutdown.cancelled().await;
+            })
             .await;
         transport_close.close();
         flush_cancel.cancel();
@@ -262,12 +290,42 @@ async fn spawn_test_node(
 }
 
 async fn peer_nodes(a: &MergeTestNode, b: &MergeTestNode) {
-    a.manager.register_f2f_friend(*b.identity.node_pubkey(), Some(b.p2p_addr)).await;
-    b.manager.register_f2f_friend(*a.identity.node_pubkey(), Some(a.p2p_addr)).await;
-    a.manager.learn_node_from_gossip_with_hrw(*b.identity.node_pubkey(), *b.identity.hrw_routing_id(), b.p2p_addr, 0, None).await;
-    b.manager.learn_node_from_gossip_with_hrw(*a.identity.node_pubkey(), *a.identity.hrw_routing_id(), a.p2p_addr, 0, None).await;
-    a.manager.set_first_seen_for_test(b.identity.node_pubkey(), std::time::Instant::now() - Duration::from_secs(25 * 3600)).await;
-    b.manager.set_first_seen_for_test(a.identity.node_pubkey(), std::time::Instant::now() - Duration::from_secs(25 * 3600)).await;
+    a.manager
+        .register_f2f_friend(*b.identity.node_pubkey(), Some(b.p2p_addr))
+        .await;
+    b.manager
+        .register_f2f_friend(*a.identity.node_pubkey(), Some(a.p2p_addr))
+        .await;
+    a.manager
+        .learn_node_from_gossip_with_hrw(
+            *b.identity.node_pubkey(),
+            *b.identity.hrw_routing_id(),
+            b.p2p_addr,
+            0,
+            None,
+        )
+        .await;
+    b.manager
+        .learn_node_from_gossip_with_hrw(
+            *a.identity.node_pubkey(),
+            *a.identity.hrw_routing_id(),
+            a.p2p_addr,
+            0,
+            None,
+        )
+        .await;
+    a.manager
+        .set_first_seen_for_test(
+            b.identity.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(25 * 3600),
+        )
+        .await;
+    b.manager
+        .set_first_seen_for_test(
+            a.identity.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(25 * 3600),
+        )
+        .await;
 }
 
 fn status_query(voucher: &str, challenge: &str) -> L2StatusQuery {
@@ -344,7 +402,10 @@ async fn test_sync_single_shard_quarantines_minority_locks_and_converges() {
         }
     };
     nodes[3].readiness.mark_shard_ready(shard_id);
-    let (st_b, _) = nodes[3].post_lock(&genesis_b).await.expect("post genesis_b");
+    let (st_b, _) = nodes[3]
+        .post_lock(&genesis_b)
+        .await
+        .expect("post genesis_b");
     assert!(st_b == StatusCode::CREATED || st_b == StatusCode::OK);
     let spend_req_b = wallet_b.create_successor_lock(&voucher_b, &tag_b);
     let spend_b = humoco_node::api::hmc::L2LockEntry::from(&spend_req_b);
@@ -363,30 +424,60 @@ async fn test_sync_single_shard_quarantines_minority_locks_and_converges() {
     assert!(matches!(v_b, L2Verdict::Verified { .. }));
 
     // Pre-condition: Minority node has Voucher B spend in storage
-    assert!(nodes[3].storage.all_valid_hmc_locks(0).unwrap().iter().any(|(t, _)| t == &tag_b));
+    assert!(nodes[3]
+        .storage
+        .all_valid_hmc_locks(0)
+        .unwrap()
+        .iter()
+        .any(|(t, _)| t == &tag_b));
 
     // Run sync_shard on minority node 3
     nodes[3].readiness.invalidate_shard(shard_id);
     assert!(!nodes[3].readiness.is_shard_ready(shard_id));
 
-    let ready = nodes[3].sync_shard(shard_id).await.expect("sync_shard must succeed");
+    let ready = nodes[3]
+        .sync_shard(shard_id)
+        .await
+        .expect("sync_shard must succeed");
 
     // Fix verification:
     // 1. Shard readiness must activate upon dominant digest convergence (post_digest == dominant_digest)
-    assert!(ready, "Dominant quorum convergence must activate shard readiness on minority node");
+    assert!(
+        ready,
+        "Dominant quorum convergence must activate shard readiness on minority node"
+    );
     assert!(nodes[3].readiness.is_shard_ready(shard_id));
 
     // 2. Dominant Voucher A must be Installed in minority node's active storage and RAM
-    let v_res_a = nodes[3].engine.hmc_ram.read().await.query_status(&voucher_a, &tag_a, &[]);
-    assert!(matches!(v_res_a, L2Verdict::Verified { .. }), "Dominant Voucher A spend must be Verified");
+    let v_res_a = nodes[3]
+        .engine
+        .hmc_ram
+        .read()
+        .await
+        .query_status(&voucher_a, &tag_a, &[]);
+    assert!(
+        matches!(v_res_a, L2Verdict::Verified { .. }),
+        "Dominant Voucher A spend must be Verified"
+    );
 
     // 3. Minority Voucher B must be quarantined from active storage into TABLE_PROVISIONAL_HMC_LOCKS
     assert!(
-        !nodes[3].storage.all_valid_hmc_locks(0).unwrap().iter().any(|(t, _)| t == &tag_b),
+        !nodes[3]
+            .storage
+            .all_valid_hmc_locks(0)
+            .unwrap()
+            .iter()
+            .any(|(t, _)| t == &tag_b),
         "Unconfirmed minority lock B must NOT be in active TABLE_HMC_LOCKS"
     );
     assert!(
-        !nodes[3].engine.hmc_ram.read().await.locks.contains_key(&tag_b),
+        !nodes[3]
+            .engine
+            .hmc_ram
+            .read()
+            .await
+            .locks
+            .contains_key(&tag_b),
         "Unconfirmed minority lock B must NOT be in active HmcRamIndex"
     );
     assert!(
@@ -507,7 +598,10 @@ async fn test_sc02_asymmetric_merge_10_vs_3_dominant_quorum_convergence() {
     // Now N=13, Q(13)=9. Network A has 10 nodes (>= 9, dominant quorum!).
     // Node 10 runs sync_single_shard to pull active state:
     let ready = nodes[10].sync_shard(shard_id).await.expect("sync shard 10");
-    assert!(ready, "Dominant convergence must activate shard readiness on node 10");
+    assert!(
+        ready,
+        "Dominant convergence must activate shard readiness on node 10"
+    );
 
     // Dominant Voucher A spend is now verified on Node 10!
     let (st_10_a, env_10_a) = nodes[10].query_status(&q_a).await.expect("query n10 V_A");
@@ -516,11 +610,20 @@ async fn test_sc02_asymmetric_merge_10_vs_3_dominant_quorum_convergence() {
 
     // Minority Voucher B spend is quarantined from active storage on Node 10:
     assert!(
-        !nodes[10].storage.all_valid_hmc_locks(0).unwrap().iter().any(|(t, _)| t == &tag_b),
+        !nodes[10]
+            .storage
+            .all_valid_hmc_locks(0)
+            .unwrap()
+            .iter()
+            .any(|(t, _)| t == &tag_b),
         "Minority lock B must NOT be in active storage on Node 10"
     );
     assert!(
-        nodes[10].storage.get_provisional_hmc_lock(&tag_b).unwrap().is_some(),
+        nodes[10]
+            .storage
+            .get_provisional_hmc_lock(&tag_b)
+            .unwrap()
+            .is_some(),
         "Minority lock B must be preserved in TABLE_PROVISIONAL_HMC_LOCKS on Node 10"
     );
 }
@@ -559,7 +662,10 @@ async fn test_sc03_symmetric_stalemate_5_vs_5_wallet_reconciliation() {
     let wallet_a = SimWallet::new();
     let (voucher_a, genesis_a) = wallet_a.genesis_with_voucher(Some(600_000));
     let tag_a = SimWallet::t_id_to_tag(&genesis_a.transaction_hash);
-    let (st_a, env_a) = nodes[0].post_lock(&genesis_a).await.expect("post V_A on n0");
+    let (st_a, env_a) = nodes[0]
+        .post_lock(&genesis_a)
+        .await
+        .expect("post V_A on n0");
     assert_eq!(st_a, StatusCode::CREATED);
     assert!(matches!(env_a.verdict, L2Verdict::Verified { .. }));
 
@@ -567,7 +673,10 @@ async fn test_sc03_symmetric_stalemate_5_vs_5_wallet_reconciliation() {
     let wallet_b = SimWallet::new();
     let (voucher_b, genesis_b) = wallet_b.genesis_with_voucher(Some(600_000));
     let tag_b = SimWallet::t_id_to_tag(&genesis_b.transaction_hash);
-    let (st_b, env_b) = nodes[5].post_lock(&genesis_b).await.expect("post V_B on n5");
+    let (st_b, env_b) = nodes[5]
+        .post_lock(&genesis_b)
+        .await
+        .expect("post V_B on n5");
     assert_eq!(st_b, StatusCode::CREATED);
     assert!(matches!(env_b.verdict, L2Verdict::Verified { .. }));
 
@@ -581,7 +690,10 @@ async fn test_sc03_symmetric_stalemate_5_vs_5_wallet_reconciliation() {
     // In a 5:5 split, N=10, Q(10)=7.
     // Node 0 does NOT know V_B yet (UnknownVoucher):
     let q_b = status_query(&voucher_b, &tag_b);
-    let (st_pre, env_pre) = nodes[0].query_status(&q_b).await.expect("query n0 pre-reconcile");
+    let (st_pre, env_pre) = nodes[0]
+        .query_status(&q_b)
+        .await
+        .expect("query n0 pre-reconcile");
     assert!(
         st_pre != StatusCode::OK || !matches!(env_pre.verdict, L2Verdict::Verified { .. }),
         "Pre-reconciliation: 5:5 stalemate must prevent automated adoption without Q=7 quorum"
@@ -589,12 +701,18 @@ async fn test_sc03_symmetric_stalemate_5_vs_5_wallet_reconciliation() {
 
     // Client-side custody / Wallet Reconciliation:
     // Wallet A submits V_A to Gateway in Net B (Node 5)
-    let (st_cross_a, env_cross_a) = nodes[5].post_lock(&genesis_a).await.expect("post V_A to n5");
+    let (st_cross_a, env_cross_a) = nodes[5]
+        .post_lock(&genesis_a)
+        .await
+        .expect("post V_A to n5");
     assert!(st_cross_a == StatusCode::CREATED || st_cross_a == StatusCode::OK);
     assert!(matches!(env_cross_a.verdict, L2Verdict::Verified { .. }));
 
     // Wallet B submits V_B to Gateway in Net A (Node 0)
-    let (st_cross_b, env_cross_b) = nodes[0].post_lock(&genesis_b).await.expect("post V_B to n0");
+    let (st_cross_b, env_cross_b) = nodes[0]
+        .post_lock(&genesis_b)
+        .await
+        .expect("post V_B to n0");
     assert!(st_cross_b == StatusCode::CREATED || st_cross_b == StatusCode::OK);
     assert!(matches!(env_cross_b.verdict, L2Verdict::Verified { .. }));
 

@@ -18,10 +18,7 @@ async fn test_sim_01_evolutionary_growth() {
     sim.reporter.begin_phase("Phase 1 - N=1 Genesis");
 
     // --- Phase 1: N=1 isolated node, create genesis ---
-    let n0 = sim
-        .spawn_node()
-        .await
-        .expect("spawn N=1 genesis node");
+    let n0 = sim.spawn_node().await.expect("spawn N=1 genesis node");
     assert_eq!(n0, 0);
     sim.reporter.step(format!(
         "Spawned node 0 at rpc={} p2p={}",
@@ -51,10 +48,16 @@ async fn test_sim_01_evolutionary_growth() {
     let is_verified = matches!(envelope.verdict, L2Verdict::Verified { .. });
     sim.reporter.check(
         is_verified,
-        format!("Phase1 genesis must be Verified, got {:?}", envelope.verdict),
+        format!(
+            "Phase1 genesis must be Verified, got {:?}",
+            envelope.verdict
+        ),
     );
     if is_verified {
-        println!("[Phase1] Genesis verified on node 0: voucher={} tag={}", voucher_v1, genesis_tag);
+        println!(
+            "[Phase1] Genesis verified on node 0: voucher={} tag={}",
+            voucher_v1, genesis_tag
+        );
     }
 
     // Query status on same node
@@ -134,7 +137,10 @@ async fn test_sim_01_evolutionary_growth() {
         );
         sim.reporter.check(
             matches!(env.verdict, L2Verdict::Verified { .. }),
-            format!("Re-anchored genesis must be Verified, got {:?}", env.verdict),
+            format!(
+                "Re-anchored genesis must be Verified, got {:?}",
+                env.verdict
+            ),
         );
     } else {
         sim.reporter.check(true, "Phase2 genesis visible on node 1");
@@ -183,17 +189,17 @@ async fn test_sim_01_evolutionary_growth() {
     }
     if !v2_on_n0 {
         // Fallback: node 0 should at least accept re-anchoring (idempotent)
-        sim.reporter.step("Phase2: V2 not yet synced to node 0, checking direct ingress idempotence on node0");
+        sim.reporter.step(
+            "Phase2: V2 not yet synced to node 0, checking direct ingress idempotence on node0",
+        );
         let (st, _env) = sim
             .node(n0)
             .post_lock(&genesis2_req)
             .await
             .expect("re-anchor V2 on node0");
         let ok = st == StatusCode::CREATED || st == StatusCode::OK;
-        sim.reporter.check(
-            ok,
-            format!("Re-anchor V2 on node0 must succeed, got {st}"),
-        );
+        sim.reporter
+            .check(ok, format!("Re-anchor V2 on node0 must succeed, got {st}"));
         if ok {
             println!("[Phase2] V2 re-anchored on node0 via direct post (converged)");
         }
@@ -205,7 +211,8 @@ async fn test_sim_01_evolutionary_growth() {
     sim.reporter.end_phase_ok();
 
     // --- Phase 3: N=3 Chain with middle-node crash and healing ---
-    sim.reporter.begin_phase("Phase 3 - N=3 Chain + Middle Crash & Healing");
+    sim.reporter
+        .begin_phase("Phase 3 - N=3 Chain + Middle Crash & Healing");
     // Spawn node2 chained to node1 only (linear 0-1-2)
     let n2 = sim
         .spawn_node_with_f2f(&[n1])
@@ -268,15 +275,16 @@ async fn test_sim_01_evolutionary_growth() {
     if matches!(env_q3_pre.verdict, L2Verdict::UnknownVoucher) {
         println!("[Phase3] As expected, isolated node2 does not know V3 yet (UnknownVoucher)");
     } else {
-        println!("[Phase3] Note: node2 already knows V3 pre-healing: {:?}", env_q3_pre.verdict);
+        println!(
+            "[Phase3] Note: node2 already knows V3 pre-healing: {:?}",
+            env_q3_pre.verdict
+        );
     }
     let _ = st_q3_pre;
 
     // Heal: restart middle node
     sim.reporter.step("Healing: restarting middle node 1...");
-    sim.restart_node(n1)
-        .await
-        .expect("restart middle node");
+    sim.restart_node(n1).await.expect("restart middle node");
     sim.reporter.step(format!(
         "Middle node 1 restarted at rpc={} p2p={}",
         sim.node(n1).rpc_addr,
@@ -294,7 +302,10 @@ async fn test_sim_01_evolutionary_growth() {
             if let Ok((st, env)) = sim.node(n1).query_status(&q3).await {
                 if st == StatusCode::OK && matches!(env.verdict, L2Verdict::Verified { .. }) {
                     healed_on_n1 = true;
-                    println!("[Phase3] Healing: node1 now has V3 (after {:?})", start.elapsed());
+                    println!(
+                        "[Phase3] Healing: node1 now has V3 (after {:?})",
+                        start.elapsed()
+                    );
                 }
             }
         }
@@ -302,7 +313,10 @@ async fn test_sim_01_evolutionary_growth() {
             if let Ok((st, env)) = sim.node(n2).query_status(&q3).await {
                 if st == StatusCode::OK && matches!(env.verdict, L2Verdict::Verified { .. }) {
                     healed_on_n2 = true;
-                    println!("[Phase3] Healing: node2 now has V3 (after {:?})", start.elapsed());
+                    println!(
+                        "[Phase3] Healing: node2 now has V3 (after {:?})",
+                        start.elapsed()
+                    );
                 }
             }
         }
@@ -314,7 +328,9 @@ async fn test_sim_01_evolutionary_growth() {
 
     // Soft assertions – healing should succeed, but allow fallback re-anchor if sync is slow due to incubation
     if !healed_on_n1 {
-        sim.reporter.warn("Middle node did not pull V3 via sync within deadline – attempting direct re-anchor");
+        sim.reporter.warn(
+            "Middle node did not pull V3 via sync within deadline – attempting direct re-anchor",
+        );
         // Direct re-anchor ensures data exists; not a protocol failure, but we check that direct post succeeds
         let (st, _env) = sim
             .node(n1)
@@ -360,7 +376,8 @@ async fn test_sim_01_evolutionary_growth() {
                 println!("[Phase3] Fallback re-anchor ensured V3 on leaf node 2");
             }
         } else {
-            sim.reporter.check(true, "Phase3 V3 healed on leaf after retry");
+            sim.reporter
+                .check(true, "Phase3 V3 healed on leaf after retry");
         }
     } else {
         sim.reporter.check(true, "Phase3 V3 healed on leaf node");
@@ -384,10 +401,17 @@ async fn test_sim_01_evolutionary_growth() {
             locator_prefixes: vec![],
             read_quorum: 1,
         };
-        let (st, env) = sim.node(idx).query_status(&qq).await.expect("final convergence query");
+        let (st, env) = sim
+            .node(idx)
+            .query_status(&qq)
+            .await
+            .expect("final convergence query");
         sim.reporter.check(
             st == StatusCode::OK && matches!(env.verdict, L2Verdict::Verified { .. }),
-            format!("Final convergence {label} must be Verified, got {st} {:?}", env.verdict),
+            format!(
+                "Final convergence {label} must be Verified, got {st} {:?}",
+                env.verdict
+            ),
         );
     }
 

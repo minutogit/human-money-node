@@ -1701,7 +1701,7 @@ impl DualTierEngine {
     /// A transaction ID is NOT an output key. Receiver and change must stay
     /// independent. Unsigned legacy receiver/change hints cannot prove causality;
     /// the predecessor author authenticates them in the versioned L2 sidecar.
-    fn verify_chain_step(
+    pub(crate) fn verify_chain_step(
         chain: &crate::api::hmc::L2ChainLockRequest,
         index: usize,
     ) -> Result<(), String> {

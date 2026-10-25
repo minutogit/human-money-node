@@ -19,9 +19,7 @@ use std::sync::Arc;
 use ed25519_dalek::{Signer, SigningKey};
 use tempfile::tempdir;
 
-use humoco_node::api::hmc::{
-    calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest,
-};
+use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest};
 use humoco_node::storage::engine::compute_hmc_canonical_hash;
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 use humoco_sim_core::crypto::compute_canonical_hash;
@@ -130,7 +128,10 @@ async fn test_subquorum_hmc_13_vs_7_minority_with_lower_hash_prevails() {
             .ingress_hmc_lock(genesis_tag.clone(), L2LockEntry::from(&genesis_req))
             .await;
         assert!(is_new);
-        assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+        assert!(matches!(
+            verdict,
+            humoco_node::api::hmc::L2Verdict::Verified { .. }
+        ));
     }
 
     // Prepare double-spending wallet on the same parent tag
@@ -188,9 +189,15 @@ async fn test_subquorum_hmc_13_vs_7_minority_with_lower_hash_prevails() {
             )
             .await;
         assert!(is_new);
-        assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+        assert!(matches!(
+            verdict,
+            humoco_node::api::hmc::L2Verdict::Verified { .. }
+        ));
         assert_eq!(
-            engines[i].get_hmc_ram_lock(&parent_hex).await.map(|e| e.t_id),
+            engines[i]
+                .get_hmc_ram_lock(&parent_hex)
+                .await
+                .map(|e| e.t_id),
             Some(tx_hash_a)
         );
     }
@@ -208,9 +215,15 @@ async fn test_subquorum_hmc_13_vs_7_minority_with_lower_hash_prevails() {
             )
             .await;
         assert!(is_new);
-        assert!(matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+        assert!(matches!(
+            verdict,
+            humoco_node::api::hmc::L2Verdict::Verified { .. }
+        ));
         assert_eq!(
-            engines[i].get_hmc_ram_lock(&parent_hex).await.map(|e| e.t_id),
+            engines[i]
+                .get_hmc_ram_lock(&parent_hex)
+                .await
+                .map(|e| e.t_id),
             Some(tx_hash_b)
         );
     }
@@ -219,13 +232,19 @@ async fn test_subquorum_hmc_13_vs_7_minority_with_lower_hash_prevails() {
     // 7 nodes hold Lock A, 13 nodes hold Lock B. Neither reached 14 (sub-quorum).
     for i in 0..7 {
         assert_eq!(
-            engines[i].get_hmc_ram_lock(&parent_hex).await.map(|e| e.t_id),
+            engines[i]
+                .get_hmc_ram_lock(&parent_hex)
+                .await
+                .map(|e| e.t_id),
             Some(tx_hash_a)
         );
     }
     for i in 7..20 {
         assert_eq!(
-            engines[i].get_hmc_ram_lock(&parent_hex).await.map(|e| e.t_id),
+            engines[i]
+                .get_hmc_ram_lock(&parent_hex)
+                .await
+                .map(|e| e.t_id),
             Some(tx_hash_b)
         );
     }
@@ -357,50 +376,105 @@ async fn test_subquorum_core_lock_record_13_vs_7_minority_with_lower_hash_prevai
         *hasher.finalize().as_bytes()
     };
 
-    let mut lock_a = LockRecord::new(parent_lock, receiver_pub, nonce_1.to_vec(), now, valid_until);
-    lock_a.status = LockStatus::Provisional { sigs: 7, required: 14 };
+    let mut lock_a = LockRecord::new(
+        parent_lock,
+        receiver_pub,
+        nonce_1.to_vec(),
+        now,
+        valid_until,
+    );
+    lock_a.status = LockStatus::Provisional {
+        sigs: 7,
+        required: 14,
+    };
 
-    let mut lock_b = LockRecord::new(parent_lock, receiver_pub, nonce_2.to_vec(), now, valid_until);
-    lock_b.status = LockStatus::Provisional { sigs: 13, required: 14 };
+    let mut lock_b = LockRecord::new(
+        parent_lock,
+        receiver_pub,
+        nonce_2.to_vec(),
+        now,
+        valid_until,
+    );
+    lock_b.status = LockStatus::Provisional {
+        sigs: 13,
+        required: 14,
+    };
 
     // Partition A (7 nodes) ingests Lock A
     for i in 0..7 {
         let res = engines[i]
-            .ingress_lock_with_origin(lock_a.clone(), now, root_valid_until, IngressOrigin::ClientApi)
+            .ingress_lock_with_origin(
+                lock_a.clone(),
+                now,
+                root_valid_until,
+                IngressOrigin::ClientApi,
+            )
             .await;
         assert_eq!(res, Ok(IngressVerdictLow::AcceptedNew));
-        assert_eq!(engines[i].get_ram_lock(&parent_lock).await.map(|r| r.id), Some(id_a));
+        assert_eq!(
+            engines[i].get_ram_lock(&parent_lock).await.map(|r| r.id),
+            Some(id_a)
+        );
     }
 
     // Partition B (13 nodes) ingests Lock B
     for i in 7..20 {
         let res = engines[i]
-            .ingress_lock_with_origin(lock_b.clone(), now, root_valid_until, IngressOrigin::ClientApi)
+            .ingress_lock_with_origin(
+                lock_b.clone(),
+                now,
+                root_valid_until,
+                IngressOrigin::ClientApi,
+            )
             .await;
         assert_eq!(res, Ok(IngressVerdictLow::AcceptedNew));
-        assert_eq!(engines[i].get_ram_lock(&parent_lock).await.map(|r| r.id), Some(id_b));
+        assert_eq!(
+            engines[i].get_ram_lock(&parent_lock).await.map(|r| r.id),
+            Some(id_b)
+        );
     }
 
     // P2P PartitionSync:
     // Partition B receives Lock A
     for i in 7..20 {
         let res = engines[i]
-            .ingress_lock_with_origin(lock_a.clone(), now, root_valid_until, IngressOrigin::PartitionSync)
+            .ingress_lock_with_origin(
+                lock_a.clone(),
+                now,
+                root_valid_until,
+                IngressOrigin::PartitionSync,
+            )
             .await;
-        assert_eq!(res, Ok(IngressVerdictLow::AcceptedNew), "Node {i} must replace Lock B with winning Lock A");
+        assert_eq!(
+            res,
+            Ok(IngressVerdictLow::AcceptedNew),
+            "Node {i} must replace Lock B with winning Lock A"
+        );
     }
 
     // Partition A receives Lock B
     for i in 0..7 {
         let res = engines[i]
-            .ingress_lock_with_origin(lock_b.clone(), now, root_valid_until, IngressOrigin::PartitionSync)
+            .ingress_lock_with_origin(
+                lock_b.clone(),
+                now,
+                root_valid_until,
+                IngressOrigin::PartitionSync,
+            )
             .await;
-        assert_eq!(res, Err(IngressVerdictLow::RejectedCollision), "Node {i} must reject losing Lock B");
+        assert_eq!(
+            res,
+            Err(IngressVerdictLow::RejectedCollision),
+            "Node {i} must reject losing Lock B"
+        );
     }
 
     // All 20 nodes deterministically hold Lock A
     for (i, engine) in engines.iter().enumerate() {
-        let rec = engine.get_ram_lock(&parent_lock).await.expect("record must exist");
+        let rec = engine
+            .get_ram_lock(&parent_lock)
+            .await
+            .expect("record must exist");
         assert_eq!(rec.id, id_a, "Node {i} must hold Lock A");
         assert_ne!(rec.id, id_b, "Node {i} must not hold Lock B");
     }

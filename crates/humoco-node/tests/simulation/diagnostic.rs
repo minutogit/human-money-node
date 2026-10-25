@@ -84,12 +84,7 @@ impl DiagnosticReporter {
             self.checks_passed += 1;
             true
         } else {
-            let msg = format!(
-                "{}: left = {:?}, right = {:?}",
-                context.into(),
-                left,
-                right
-            );
+            let msg = format!("{}: left = {:?}, right = {:?}", context.into(), left, right);
             self.check(false, msg)
         }
     }

@@ -10,22 +10,21 @@
 //! 3. Ingress request with `|created_at_ms - now_ms| > 30_000` is rejected with 400 Bad Request.
 //! 4. Idempotent retries with identical `created_at_ms` return 200 OK in the same bucket.
 
-use std::sync::Arc;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use tower::ServiceExt;
-use tempfile::tempdir;
 use ed25519_dalek::{Signer, SigningKey};
+use std::sync::Arc;
+use tempfile::tempdir;
+use tower::ServiceExt;
 
 use humoco_node::{
     api::{
         build_router,
         hmc::{
-            calculate_l2_payload_hash_raw, L2AuthPayload,
-            L2ChainLockRequest, L2LockEntry, L2LockRequest, L2ResponseEnvelope, L2Verdict,
-            TRAP_NONE_PLACEHOLDER,
+            calculate_l2_payload_hash_raw, L2AuthPayload, L2ChainLockRequest, L2LockEntry,
+            L2LockRequest, L2ResponseEnvelope, L2Verdict, TRAP_NONE_PLACEHOLDER,
         },
         AppState,
     },
@@ -42,7 +41,9 @@ use humoco_sim_core::wire::{MsgType, WireHeader};
 /// Explicit test-only readiness for a fresh, isolated registry with no peers.
 /// This does not model activation after transfer or dynamic committee changes.
 fn isolated_ready(state: &AppState) {
-    for shard in 0..=u16::MAX { state.readiness_manager.mark_shard_ready(shard); }
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
 }
 
 fn setup_test_app() -> (
@@ -71,7 +72,14 @@ fn setup_test_app() -> (
 
     isolated_ready(&state);
     let router = build_router(state);
-    (router, storage, identity, tier_controller, pow_engine, engine)
+    (
+        router,
+        storage,
+        identity,
+        tier_controller,
+        pow_engine,
+        engine,
+    )
 }
 
 fn test_now_ms() -> u64 {
@@ -91,35 +99,98 @@ async fn response_json<T: serde::de::DeserializeOwned>(resp: axum::response::Res
 fn find_two_tags_for_same_shard(prefix: &str) -> (String, String, u16) {
     // SST collision keys no longer select the voucher's shard. Both output
     // rows belong to the separate root below, regardless of their tag hashes.
-    let root = humoco_sim_core::types::genesis_parent_bytes_from_tag(&bs58::encode([0xF0; 32]).into_string());
-    (format!("{prefix}_a"), format!("{prefix}_b"), humoco_sim_core::types::canonical_voucher_shard(&root))
+    let root = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+        &bs58::encode([0xF0; 32]).into_string(),
+    );
+    (
+        format!("{prefix}_a"),
+        format!("{prefix}_b"),
+        humoco_sim_core::types::canonical_voucher_shard(&root),
+    )
 }
 fn put_bucket_fixture(storage: &RedbStorage, tag: &str, entry: &L2LockEntry) {
     // Typed storage fixture, not a claim of L1 authentication or recovery.
-    let mut root = entry.clone(); root.t_id = [0xF0; 32]; root.sender_ephemeral_pub = [0xF1; 32]; root.layer2_signature = [0; 64]; root.created_at_ms = 0; root.encrypted_timestamp = 0; root.trap_r = None; root.trap_s = None;
-    storage.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root).unwrap();
+    let mut root = entry.clone();
+    root.t_id = [0xF0; 32];
+    root.sender_ephemeral_pub = [0xF1; 32];
+    root.layer2_signature = [0; 64];
+    root.created_at_ms = 0;
+    root.encrypted_timestamp = 0;
+    root.trap_r = None;
+    root.trap_s = None;
+    storage
+        .put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root)
+        .unwrap();
     storage.put_hmc_lock(tag, entry).unwrap();
 }
-struct BucketWire { client: humoco_node::network::QuicTransport, server: humoco_node::network::QuicTransport, connection: humoco_node::network::pool::PeerConnectionLease, cancel: tokio_util::sync::CancellationToken }
+struct BucketWire {
+    client: humoco_node::network::QuicTransport,
+    server: humoco_node::network::QuicTransport,
+    connection: humoco_node::network::pool::PeerConnectionLease,
+    cancel: tokio_util::sync::CancellationToken,
+}
 impl BucketWire {
     async fn new(handler: NodeRequestHandler, identity: &NodeIdentity) -> Self {
-        use humoco_node::network::{QuicTransport, PeerManager, DefaultRequestHandler};
+        use humoco_node::network::{DefaultRequestHandler, PeerManager, QuicTransport};
         let client_id = NodeIdentity::generate();
-        let server_pm = Arc::new(PeerManager::with_f2f(vec![], vec![*client_id.node_pubkey()]));
+        let server_pm = Arc::new(PeerManager::with_f2f(
+            vec![],
+            vec![*client_id.node_pubkey()],
+        ));
         let client_pm = Arc::new(PeerManager::with_f2f(vec![], vec![*identity.node_pubkey()]));
         let cancel = tokio_util::sync::CancellationToken::new();
-        let server = QuicTransport::bind_with_options("127.0.0.1:0".parse().unwrap(), identity, server_pm.clone(), Arc::new(handler), cancel.clone()).unwrap();
-        let client = QuicTransport::bind_with_options("127.0.0.1:0".parse().unwrap(), &client_id, client_pm.clone(), Arc::new(DefaultRequestHandler), cancel.clone()).unwrap();
-        server_pm.register_f2f_friend(*client_id.node_pubkey(), Some(client.local_addr().unwrap())).await;
-        client_pm.register_f2f_friend(*identity.node_pubkey(), Some(server.local_addr().unwrap())).await;
-        server.spawn_accept_loop(); client.spawn_accept_loop();
-        let connection = client.connect_peer(server.local_addr().unwrap()).await.unwrap();
-        Self { client, server, connection, cancel }
+        let server = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            identity,
+            server_pm.clone(),
+            Arc::new(handler),
+            cancel.clone(),
+        )
+        .unwrap();
+        let client = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            &client_id,
+            client_pm.clone(),
+            Arc::new(DefaultRequestHandler),
+            cancel.clone(),
+        )
+        .unwrap();
+        server_pm
+            .register_f2f_friend(*client_id.node_pubkey(), Some(client.local_addr().unwrap()))
+            .await;
+        client_pm
+            .register_f2f_friend(*identity.node_pubkey(), Some(server.local_addr().unwrap()))
+            .await;
+        server.spawn_accept_loop();
+        client.spawn_accept_loop();
+        let connection = client
+            .connect_peer(server.local_addr().unwrap())
+            .await
+            .unwrap();
+        Self {
+            client,
+            server,
+            connection,
+            cancel,
+        }
     }
-    async fn request(&self, header: WireHeader, payload: Vec<u8>) -> Result<(WireHeader, Vec<u8>), humoco_node::error::NodeError> { self.client.send_request(&self.connection, &header, &payload).await }
+    async fn request(
+        &self,
+        header: WireHeader,
+        payload: Vec<u8>,
+    ) -> Result<(WireHeader, Vec<u8>), humoco_node::error::NodeError> {
+        self.client
+            .send_request(&self.connection, &header, &payload)
+            .await
+    }
 }
-impl Drop for BucketWire { fn drop(&mut self) { self.cancel.cancel(); self.server.close(); self.client.close(); } }
-
+impl Drop for BucketWire {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.server.close();
+        self.client.close();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Test 1: created_at_ms determines bucket ID (floor(created_at_ms / 300_000))
@@ -185,12 +256,25 @@ async fn test_created_at_determines_bucket_id() {
         bucket_count: 1,
     };
     let payload = bincode::serialize(&bucket_req_2).unwrap();
-    let header = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 1, 0, 0, payload.len() as u32);
-    let (_, resp_bytes) = wire.request(header, payload).await.expect("handle bucket range");
-    let resp: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&resp_bytes).expect("deserialize");
+    let header = WireHeader::new(
+        MsgType::ShardBucketRangeRequest as u16,
+        1,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    let (_, resp_bytes) = wire
+        .request(header, payload)
+        .await
+        .expect("handle bucket range");
+    let resp: humoco_sim_core::types::ShardBucketRangeResponse =
+        bincode::deserialize(&resp_bytes).expect("deserialize");
     assert_eq!(resp.buckets.len(), 1);
     assert_eq!(resp.buckets[0].bucket_id, 2);
-    assert_eq!(resp.buckets[0].lock_count, 1, "Bucket 2 must contain exactly 1 lock");
+    assert_eq!(
+        resp.buckets[0].lock_count, 1,
+        "Bucket 2 must contain exactly 1 lock"
+    );
     assert_ne!(resp.buckets[0].digest, [0u8; 32]);
 
     // 2. ShardBucketRangeRequest for bucket 3 (count 1)
@@ -200,12 +284,25 @@ async fn test_created_at_determines_bucket_id() {
         bucket_count: 1,
     };
     let payload = bincode::serialize(&bucket_req_3).unwrap();
-    let header = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 2, 0, 0, payload.len() as u32);
-    let (_, resp_bytes) = wire.request(header, payload).await.expect("handle bucket range");
-    let resp: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&resp_bytes).expect("deserialize");
+    let header = WireHeader::new(
+        MsgType::ShardBucketRangeRequest as u16,
+        2,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    let (_, resp_bytes) = wire
+        .request(header, payload)
+        .await
+        .expect("handle bucket range");
+    let resp: humoco_sim_core::types::ShardBucketRangeResponse =
+        bincode::deserialize(&resp_bytes).expect("deserialize");
     assert_eq!(resp.buckets.len(), 1);
     assert_eq!(resp.buckets[0].bucket_id, 3);
-    assert_eq!(resp.buckets[0].lock_count, 1, "Bucket 3 must contain exactly 1 lock");
+    assert_eq!(
+        resp.buckets[0].lock_count, 1,
+        "Bucket 3 must contain exactly 1 lock"
+    );
     assert_ne!(resp.buckets[0].digest, [0u8; 32]);
 
     // 3. ShardBucketRangeRequest for bucket 1 (count 1) -> must be empty
@@ -215,29 +312,71 @@ async fn test_created_at_determines_bucket_id() {
         bucket_count: 1,
     };
     let payload = bincode::serialize(&bucket_req_1).unwrap();
-    let header = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 3, 0, 0, payload.len() as u32);
-    let (_, resp_bytes) = wire.request(header, payload).await.expect("handle bucket range");
-    let resp: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&resp_bytes).expect("deserialize");
+    let header = WireHeader::new(
+        MsgType::ShardBucketRangeRequest as u16,
+        3,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    let (_, resp_bytes) = wire
+        .request(header, payload)
+        .await
+        .expect("handle bucket range");
+    let resp: humoco_sim_core::types::ShardBucketRangeResponse =
+        bincode::deserialize(&resp_bytes).expect("deserialize");
     assert_eq!(resp.buckets.len(), 1);
     assert_eq!(resp.buckets[0].lock_count, 0, "Bucket 1 must be empty");
 
     // 4. ActiveSyncRequest filtering by target_bucket_id
     let sync_req_b2 = ActiveSyncRequest::with_bucket(0, 100, Some(2));
     let sync_payload = sync_req_b2.to_bytes().unwrap();
-    let sync_hdr = WireHeader::new(MsgType::ActiveSyncRequest as u16, 4, 0, 0, sync_payload.len() as u32);
-    let (_, resp_bytes) = wire.request(sync_hdr, sync_payload).await.expect("handle active sync");
+    let sync_hdr = WireHeader::new(
+        MsgType::ActiveSyncRequest as u16,
+        4,
+        0,
+        0,
+        sync_payload.len() as u32,
+    );
+    let (_, resp_bytes) = wire
+        .request(sync_hdr, sync_payload)
+        .await
+        .expect("handle active sync");
     let mut sync_resp = ActiveSyncResponse::from_bytes(&resp_bytes).expect("deserialize sync resp");
-    sync_resp.payload.hmc_locks.retain(|(tag, entry)| !humoco_node::storage::db::roots::is_root(tag, entry));
-    assert_eq!(sync_resp.payload.hmc_locks.len(), 1, "ActiveSync target_bucket_id=2 must return only Lock 1");
+    sync_resp
+        .payload
+        .hmc_locks
+        .retain(|(tag, entry)| !humoco_node::storage::db::roots::is_root(tag, entry));
+    assert_eq!(
+        sync_resp.payload.hmc_locks.len(),
+        1,
+        "ActiveSync target_bucket_id=2 must return only Lock 1"
+    );
     assert_eq!(sync_resp.payload.hmc_locks[0].1.t_id, [0x22; 32]);
 
     let sync_req_b3 = ActiveSyncRequest::with_bucket(0, 100, Some(3));
     let sync_payload = sync_req_b3.to_bytes().unwrap();
-    let sync_hdr = WireHeader::new(MsgType::ActiveSyncRequest as u16, 5, 0, 0, sync_payload.len() as u32);
-    let (_, resp_bytes) = wire.request(sync_hdr, sync_payload).await.expect("handle active sync");
+    let sync_hdr = WireHeader::new(
+        MsgType::ActiveSyncRequest as u16,
+        5,
+        0,
+        0,
+        sync_payload.len() as u32,
+    );
+    let (_, resp_bytes) = wire
+        .request(sync_hdr, sync_payload)
+        .await
+        .expect("handle active sync");
     let mut sync_resp = ActiveSyncResponse::from_bytes(&resp_bytes).expect("deserialize sync resp");
-    sync_resp.payload.hmc_locks.retain(|(tag, entry)| !humoco_node::storage::db::roots::is_root(tag, entry));
-    assert_eq!(sync_resp.payload.hmc_locks.len(), 1, "ActiveSync target_bucket_id=3 must return only Lock 2");
+    sync_resp
+        .payload
+        .hmc_locks
+        .retain(|(tag, entry)| !humoco_node::storage::db::roots::is_root(tag, entry));
+    assert_eq!(
+        sync_resp.payload.hmc_locks.len(),
+        1,
+        "ActiveSync target_bucket_id=3 must return only Lock 2"
+    );
     assert_eq!(sync_resp.payload.hmc_locks[0].1.t_id, [0x33; 32]);
 }
 
@@ -307,12 +446,25 @@ async fn test_arbitrary_encrypted_timestamp_does_not_affect_bucket() {
         bucket_count: 1,
     };
     let payload = bincode::serialize(&bucket_req).unwrap();
-    let header = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 1, 0, 0, payload.len() as u32);
-    let (_, resp_bytes) = wire.request(header, payload).await.expect("handle bucket range");
-    let resp: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&resp_bytes).expect("deserialize");
+    let header = WireHeader::new(
+        MsgType::ShardBucketRangeRequest as u16,
+        1,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    let (_, resp_bytes) = wire
+        .request(header, payload)
+        .await
+        .expect("handle bucket range");
+    let resp: humoco_sim_core::types::ShardBucketRangeResponse =
+        bincode::deserialize(&resp_bytes).expect("deserialize");
     assert_eq!(resp.buckets.len(), 1);
     assert_eq!(resp.buckets[0].bucket_id, 2);
-    assert_eq!(resp.buckets[0].lock_count, 2, "Both locks must be in bucket 2 regardless of encrypted_timestamp ciphertext");
+    assert_eq!(
+        resp.buckets[0].lock_count, 2,
+        "Both locks must be in bucket 2 regardless of encrypted_timestamp ciphertext"
+    );
 
     // 2. ShardBucketRangeRequest for the spurious bucket corresponding to encrypted_timestamp as u64
     let spurious_bucket = (massive_ciphertext as u64) / 300_000;
@@ -322,19 +474,48 @@ async fn test_arbitrary_encrypted_timestamp_does_not_affect_bucket() {
         bucket_count: 1,
     };
     let payload = bincode::serialize(&spurious_req).unwrap();
-    let header = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 2, 0, 0, payload.len() as u32);
-    let (_, resp_bytes) = wire.request(header, payload).await.expect("handle bucket range");
-    let resp: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&resp_bytes).expect("deserialize");
-    assert_eq!(resp.buckets[0].lock_count, 0, "Spurious bucket derived from encrypted_timestamp must be completely empty");
+    let header = WireHeader::new(
+        MsgType::ShardBucketRangeRequest as u16,
+        2,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    let (_, resp_bytes) = wire
+        .request(header, payload)
+        .await
+        .expect("handle bucket range");
+    let resp: humoco_sim_core::types::ShardBucketRangeResponse =
+        bincode::deserialize(&resp_bytes).expect("deserialize");
+    assert_eq!(
+        resp.buckets[0].lock_count, 0,
+        "Spurious bucket derived from encrypted_timestamp must be completely empty"
+    );
 
     // 3. ActiveSyncRequest with target_bucket_id = Some(2) must return BOTH locks
     let sync_req = ActiveSyncRequest::with_bucket(0, 100, Some(2));
     let sync_payload = sync_req.to_bytes().unwrap();
-    let sync_hdr = WireHeader::new(MsgType::ActiveSyncRequest as u16, 3, 0, 0, sync_payload.len() as u32);
-    let (_, resp_bytes) = wire.request(sync_hdr, sync_payload).await.expect("handle active sync");
+    let sync_hdr = WireHeader::new(
+        MsgType::ActiveSyncRequest as u16,
+        3,
+        0,
+        0,
+        sync_payload.len() as u32,
+    );
+    let (_, resp_bytes) = wire
+        .request(sync_hdr, sync_payload)
+        .await
+        .expect("handle active sync");
     let mut sync_resp = ActiveSyncResponse::from_bytes(&resp_bytes).expect("deserialize sync resp");
-    sync_resp.payload.hmc_locks.retain(|(tag, entry)| !humoco_node::storage::db::roots::is_root(tag, entry));
-    assert_eq!(sync_resp.payload.hmc_locks.len(), 2, "ActiveSync for bucket 2 must return both locks");
+    sync_resp
+        .payload
+        .hmc_locks
+        .retain(|(tag, entry)| !humoco_node::storage::db::roots::is_root(tag, entry));
+    assert_eq!(
+        sync_resp.payload.hmc_locks.len(),
+        2,
+        "ActiveSync for bucket 2 must return both locks"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +548,7 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         );
         let sig = sender_key.sign(&payload_hash);
         L2LockRequest {
-        causal_output: None,
+            causal_output: None,
             auth: L2AuthPayload {
                 ephemeral_pubkey: sender_pub,
                 auth_signature: None,
@@ -389,9 +570,29 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         }
     };
 
-    let mut root = make_lock_req(now); root.is_genesis = true; root.ds_tag = None; root.transaction_hash = [0x78; 32]; root.deletable_at = Some(valid_until_str.clone());
-    root.layer2_signature = sender_key.sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&root)).to_bytes();
-    assert!(matches!(engine.ingress_hmc_lock_durable(bs58::encode(root.transaction_hash).into_string(), (&root).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(now), None, None, None).await.0, L2Verdict::Verified { .. }));
+    let mut root = make_lock_req(now);
+    root.is_genesis = true;
+    root.ds_tag = None;
+    root.transaction_hash = [0x78; 32];
+    root.deletable_at = Some(valid_until_str.clone());
+    root.layer2_signature = sender_key
+        .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&root))
+        .to_bytes();
+    assert!(matches!(
+        engine
+            .ingress_hmc_lock_durable(
+                bs58::encode(root.transaction_hash).into_string(),
+                (&root).into(),
+                humoco_node::storage::IngressOrigin::ClientApi,
+                Some(now),
+                None,
+                None,
+                None
+            )
+            .await
+            .0,
+        L2Verdict::Verified { .. }
+    ));
     // Case A: Future drift exceeded (> 30s) -> 35 seconds in future
     let req_future_drift = make_lock_req(now + 35_000);
     let res = app
@@ -407,7 +608,11 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "Future clock drift > 30s must be rejected with 400 Bad Request");
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "Future clock drift > 30s must be rejected with 400 Bad Request"
+    );
     let env: L2ResponseEnvelope = response_json(res).await;
     match env.verdict {
         L2Verdict::Rejected { reason } => {
@@ -435,7 +640,11 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "Past clock drift > 30s must be rejected with 400 Bad Request");
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "Past clock drift > 30s must be rejected with 400 Bad Request"
+    );
     let env: L2ResponseEnvelope = response_json(res).await;
     match env.verdict {
         L2Verdict::Rejected { reason } => {
@@ -467,7 +676,11 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "Chain lock with hop drifting > 30s must be rejected with 400");
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "Chain lock with hop drifting > 30s must be rejected with 400"
+    );
     let env: L2ResponseEnvelope = response_json(res).await;
     match env.verdict {
         L2Verdict::Rejected { reason } => {
@@ -495,12 +708,20 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::CREATED, "Clock drift within 30s must be accepted");
+    assert_eq!(
+        res.status(),
+        StatusCode::CREATED,
+        "Clock drift within 30s must be accepted"
+    );
 
     // Case E: an omitted signed creation time cannot be rewritten by the server.
     let mut req_zero_drift = make_lock_req(0);
     req_zero_drift.transaction_hash = [0x88; 32];
-    req_zero_drift.layer2_signature = sender_key.sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&req_zero_drift)).to_bytes();
+    req_zero_drift.layer2_signature = sender_key
+        .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(
+            &req_zero_drift,
+        ))
+        .to_bytes();
     let res = app
         .clone()
         .oneshot(
@@ -514,7 +735,11 @@ async fn test_ingress_clock_drift_30s_window_enforced() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "created_at_ms = 0 must fail without rewriting signed bytes");
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "created_at_ms = 0 must fail without rewriting signed bytes"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -570,11 +795,32 @@ async fn test_idempotent_retries_with_identical_created_at_returns_200() {
         privacy_guard: None,
     };
 
-    let mut root = req.clone(); root.transaction_hash = [0x45; 32];
-    root.layer2_signature = sender_key.sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&root)).to_bytes();
-    assert!(matches!(engine.ingress_hmc_lock_durable(bs58::encode(root.transaction_hash).into_string(), (&root).into(), humoco_node::storage::IngressOrigin::ClientApi, Some(now), None, None, None).await.0, L2Verdict::Verified { .. }));
-    req.is_genesis = false; req.ds_tag = Some("idempotent-parent".into()); req.deletable_at = None;
-    req.layer2_signature = sender_key.sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&req)).to_bytes();
+    let mut root = req.clone();
+    root.transaction_hash = [0x45; 32];
+    root.layer2_signature = sender_key
+        .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&root))
+        .to_bytes();
+    assert!(matches!(
+        engine
+            .ingress_hmc_lock_durable(
+                bs58::encode(root.transaction_hash).into_string(),
+                (&root).into(),
+                humoco_node::storage::IngressOrigin::ClientApi,
+                Some(now),
+                None,
+                None,
+                None
+            )
+            .await
+            .0,
+        L2Verdict::Verified { .. }
+    ));
+    req.is_genesis = false;
+    req.ds_tag = Some("idempotent-parent".into());
+    req.deletable_at = None;
+    req.layer2_signature = sender_key
+        .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(&req))
+        .to_bytes();
     let lookup_tag = req.ds_tag.clone().unwrap();
     // 1. First submission -> 201 Created
     let res1 = app
@@ -614,7 +860,11 @@ async fn test_idempotent_retries_with_identical_created_at_returns_200() {
         )
         .await
         .unwrap();
-    assert_eq!(res2.status(), StatusCode::OK, "Retry of same lock must return 200 OK");
+    assert_eq!(
+        res2.status(),
+        StatusCode::OK,
+        "Retry of same lock must return 200 OK"
+    );
     let env2: L2ResponseEnvelope = response_json(res2).await;
     match env2.verdict {
         L2Verdict::Verified { ref lock_entry } => {
@@ -626,7 +876,10 @@ async fn test_idempotent_retries_with_identical_created_at_returns_200() {
 
     // 3. Verify that the entry remains mapped to the correct bucket in engine RAM
     let hmc_ram = engine.hmc_ram.read().await;
-    let stored = hmc_ram.locks.get(&lookup_tag).expect("Lock must be in RAM index");
+    let stored = hmc_ram
+        .locks
+        .get(&lookup_tag)
+        .expect("Lock must be in RAM index");
     assert_eq!(stored.created_at_ms, created_at_ms);
     let expected_bucket = created_at_ms / 300_000;
     assert_eq!(

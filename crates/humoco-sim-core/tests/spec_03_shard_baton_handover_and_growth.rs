@@ -132,10 +132,8 @@ fn test_shard_baton_handover_multi_generation_growth() {
 
         // Phase 3 & 4: Stream locks from a dominant peer & commit to local RAM
         let sync_source_node = gen1_top20[0];
-        let synced_locks: Vec<LockRecord> = node_storage[&sync_source_node]
-            .values()
-            .cloned()
-            .collect();
+        let synced_locks: Vec<LockRecord> =
+            node_storage[&sync_source_node].values().cloned().collect();
         let stream_digest = compute_shard_digest(TARGET_SHARD, &synced_locks);
         assert_eq!(stream_digest, dominant_digest);
 
@@ -218,8 +216,7 @@ fn test_shard_baton_handover_multi_generation_growth() {
             .find(|p| node_storage.contains_key(p))
             .copied()
             .expect("active peer available");
-        let synced_locks: Vec<LockRecord> =
-            node_storage[&sync_peer].values().cloned().collect();
+        let synced_locks: Vec<LockRecord> = node_storage[&sync_peer].values().cloned().collect();
         assert_eq!(
             compute_shard_digest(TARGET_SHARD, &synced_locks),
             dominant_digest
@@ -331,7 +328,10 @@ fn test_shard_baton_handover_byzantine_noise_filtering() {
             votes,
             peers,
         } => {
-            assert_eq!(digest, genuine_digest, "Genuine digest must win BFT cluster");
+            assert_eq!(
+                digest, genuine_digest,
+                "Genuine digest must win BFT cluster"
+            );
             assert_eq!(votes, 14, "Dominant cluster must have 14 votes");
             assert_eq!(peers.len(), 14);
             for p in &peers {

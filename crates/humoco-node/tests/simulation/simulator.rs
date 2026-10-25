@@ -45,9 +45,7 @@ impl MeshSimulator {
     }
 
     /// Spawns a single isolated node (N=1 genesis scenario).
-    pub async fn spawn_node(
-        &mut self,
-    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn spawn_node(&mut self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         let id = self.nodes.len();
         let node = SimNodeHandle::spawn(id).await?;
         self.nodes.push(node);
@@ -174,8 +172,10 @@ impl MeshSimulator {
         &self,
         node_idx: usize,
         req: &L2LockRequest,
-    ) -> Result<(axum::http::StatusCode, L2ResponseEnvelope), Box<dyn std::error::Error + Send + Sync>>
-    {
+    ) -> Result<
+        (axum::http::StatusCode, L2ResponseEnvelope),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         self.nodes[node_idx].post_lock(req).await
     }
 

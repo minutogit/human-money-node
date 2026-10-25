@@ -7,11 +7,15 @@
 
 use humoco_sim_core::crypto::compute_shard_bucket_digest;
 use humoco_sim_core::types::{
-    is_bucket_sealed, timestamp_to_bucket_id, BUCKET_DURATION_MS,
-    LockRecord, LockStatus, SimTime,
+    is_bucket_sealed, timestamp_to_bucket_id, LockRecord, LockStatus, SimTime, BUCKET_DURATION_MS,
 };
 
-fn create_mock_lock(parent: [u8; 32], id: [u8; 32], created_at_ms: u64, valid_until_ms: u64) -> LockRecord {
+fn create_mock_lock(
+    parent: [u8; 32],
+    id: [u8; 32],
+    created_at_ms: u64,
+    valid_until_ms: u64,
+) -> LockRecord {
     LockRecord {
         id,
         parent_lock: parent,
@@ -66,7 +70,10 @@ fn test_bucket_digest_determinism_across_arrival_order() {
     let digest_1 = compute_shard_bucket_digest(shard_id, 0, &list_1);
     let digest_2 = compute_shard_bucket_digest(shard_id, 0, &list_2);
 
-    assert_eq!(digest_1, digest_2, "Bucket digest must be order-invariant (sorted by parent/id)");
+    assert_eq!(
+        digest_1, digest_2,
+        "Bucket digest must be order-invariant (sorted by parent/id)"
+    );
 }
 
 #[test]
@@ -86,12 +93,18 @@ fn test_bucket_isolation_between_time_windows() {
     // Bucket 0 should only contain lock_b0
     let digest_b0_from_all = compute_shard_bucket_digest(shard_id, 0, &all_locks);
     let digest_b0_isolated = compute_shard_bucket_digest(shard_id, 0, &[lock_b0]);
-    assert_eq!(digest_b0_from_all, digest_b0_isolated, "Bucket 0 must not be contaminated by Bucket 1 locks");
+    assert_eq!(
+        digest_b0_from_all, digest_b0_isolated,
+        "Bucket 0 must not be contaminated by Bucket 1 locks"
+    );
 
     // Bucket 1 should only contain lock_b1
     let digest_b1_from_all = compute_shard_bucket_digest(shard_id, 1, &all_locks);
     let digest_b1_isolated = compute_shard_bucket_digest(shard_id, 1, &[lock_b1]);
-    assert_eq!(digest_b1_from_all, digest_b1_isolated, "Bucket 1 must not be contaminated by Bucket 0 locks");
+    assert_eq!(
+        digest_b1_from_all, digest_b1_isolated,
+        "Bucket 1 must not be contaminated by Bucket 0 locks"
+    );
 }
 
 #[test]

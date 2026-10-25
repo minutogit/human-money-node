@@ -11,7 +11,11 @@ fn make_hash(byte: u8) -> [u8; 32] {
     [byte; 32]
 }
 
-fn make_attestation_for_hash(hash: [u8; 32], parent_lock: [u8; 32], node_id: u16) -> humoco_sim_core::types::Attestation {
+fn make_attestation_for_hash(
+    hash: [u8; 32],
+    parent_lock: [u8; 32],
+    node_id: u16,
+) -> humoco_sim_core::types::Attestation {
     sign_lock_attestation(node_id, &hash, &parent_lock, SimTime(100))
 }
 
@@ -26,7 +30,10 @@ fn build_valid_3_hop_chain() -> (CausalityProofChain, HashSet<[u8; 32]>) {
         prev_hash: genesis_root,
         next_hash: h1,
         owner_pub: make_hash(0x01),
-        quorum_signatures: vec![make_attestation_for_hash(h1, genesis_root, 1), make_attestation_for_hash(h1, genesis_root, 2)],
+        quorum_signatures: vec![
+            make_attestation_for_hash(h1, genesis_root, 1),
+            make_attestation_for_hash(h1, genesis_root, 2),
+        ],
     };
     let hop1 = ProofChainHop {
         prev_hash: h1,
@@ -67,7 +74,12 @@ fn test_lazy_ingestion_valid_3_hop_chain_accepted_in_ram() {
     // Use stateless for performance <2ms without side effect first
     let res = verify_causality_proof_chain_stateless(&chain, &allowed);
     let elapsed = start.elapsed();
-    assert_eq!(res, Ok(()), "Valid 3-hop chain must be accepted, got {:?}", res);
+    assert_eq!(
+        res,
+        Ok(()),
+        "Valid 3-hop chain must be accepted, got {:?}",
+        res
+    );
     assert!(
         elapsed.as_millis() < 2 || elapsed.as_micros() < 5000,
         "Validation must be <2ms (or at least <5ms), took {:?}",
@@ -79,7 +91,8 @@ fn test_lazy_ingestion_valid_3_hop_chain_accepted_in_ram() {
     assert_eq!(res2, Ok(()), "Stateful verification must also accept");
     assert!(seen.contains(&chain.target_lock.parent_lock));
     // Simulate RAM commit: insertion into map
-    let mut ram: std::collections::BTreeMap<[u8; 32], LockRecord> = std::collections::BTreeMap::new();
+    let mut ram: std::collections::BTreeMap<[u8; 32], LockRecord> =
+        std::collections::BTreeMap::new();
     ram.insert(chain.target_lock.id, chain.target_lock.clone());
     assert_eq!(ram.len(), 1);
 }
@@ -126,7 +139,12 @@ fn test_lazy_ingestion_first_seen_collision_detection() {
     let mut seen = HashSet::new();
     // First insertion should succeed
     let res1 = verify_causality_proof_chain(&chain, &allowed, &mut seen);
-    assert_eq!(res1, Ok(()), "First chain insertion must succeed: {:?}", res1);
+    assert_eq!(
+        res1,
+        Ok(()),
+        "First chain insertion must succeed: {:?}",
+        res1
+    );
 
     // Build second chain with same parent_lock (same genesis chain) -> collision
     let h3 = make_hash(0x33);
@@ -179,7 +197,11 @@ fn test_causality_proofchain_hop_limit_boundary() {
                 prev_hash: prev,
                 next_hash: next,
                 owner_pub: make_hash(0x01),
-                quorum_signatures: vec![make_attestation_for_hash(next, prev, ((i % 65535) + 1) as u16)],
+                quorum_signatures: vec![make_attestation_for_hash(
+                    next,
+                    prev,
+                    ((i % 65535) + 1) as u16,
+                )],
             };
             hops.push(hop);
             prev = next;
@@ -217,7 +239,12 @@ fn test_causality_proofchain_hop_limit_boundary() {
     // Also stateful variant
     let mut seen = HashSet::new();
     let res_1024_stateful = verify_causality_proof_chain(&chain_1024, &allowed_1024, &mut seen);
-    assert_eq!(res_1024_stateful, Ok(()), "Stateful verification with 1024 hops must be Ok, got {:?}", res_1024_stateful);
+    assert_eq!(
+        res_1024_stateful,
+        Ok(()),
+        "Stateful verification with 1024 hops must be Ok, got {:?}",
+        res_1024_stateful
+    );
 
     // 1025 hops must be rejected with BrokenChainLink { hop_index: 1025 }
     let (chain_1025, allowed_1025) = build_chain_with_n_hops(1025);

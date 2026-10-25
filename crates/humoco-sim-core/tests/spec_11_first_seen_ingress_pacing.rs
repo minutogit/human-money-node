@@ -99,23 +99,36 @@ fn test_inv1104_mesh_percolation_stepwise_forwarding() {
 
     // t = 0: Neuer Knoten meldet sich bei A
     let dec_a = pacer_a.handle_incoming_node_gossip(new_node, 0);
-    assert_eq!(dec_a, NodeGossipForwardDecision::ForwardDelayed { delay_seconds: 60 });
+    assert_eq!(
+        dec_a,
+        NodeGossipForwardDecision::ForwardDelayed { delay_seconds: 60 }
+    );
 
     // A schickt sofort (t=0) den ersten Neuling an B
-    let fwd_a = pacer_a.poll_next_ready_forward(0).expect("A should release node 42");
+    let fwd_a = pacer_a
+        .poll_next_ready_forward(0)
+        .expect("A should release node 42");
     assert_eq!(fwd_a, new_node);
 
     // B empfängt bei t = 0 von A
     let dec_b = pacer_b.handle_incoming_node_gossip(new_node, 0);
-    assert_eq!(dec_b, NodeGossipForwardDecision::ForwardDelayed { delay_seconds: 60 });
+    assert_eq!(
+        dec_b,
+        NodeGossipForwardDecision::ForwardDelayed { delay_seconds: 60 }
+    );
 
     // B gibt es bei t = 0 frei (erster Neuling bei B)
-    let fwd_b = pacer_b.poll_next_ready_forward(0).expect("B should release node 42");
+    let fwd_b = pacer_b
+        .poll_next_ready_forward(0)
+        .expect("B should release node 42");
     assert_eq!(fwd_b, new_node);
 
     // C empfängt bei t = 0 von B
     let dec_c = pacer_c.handle_incoming_node_gossip(new_node, 0);
-    assert_eq!(dec_c, NodeGossipForwardDecision::ForwardDelayed { delay_seconds: 60 });
+    assert_eq!(
+        dec_c,
+        NodeGossipForwardDecision::ForwardDelayed { delay_seconds: 60 }
+    );
 
     // Alle 3 Knoten kennen nun den neuen Knoten
     assert!(pacer_a.is_known(new_node));
@@ -184,4 +197,3 @@ fn test_inv1104_jitter_calculation() {
         assert!((3000..=4200).contains(&interval));
     }
 }
-

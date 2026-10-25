@@ -117,8 +117,7 @@ async fn committee_uses_three_missed_heartbeats_not_rpc_failure_score() {
     manager
         .set_last_seen_for_test(
             remote.node_pubkey(),
-            Instant::now()
-                - Duration::from_secs(humoco_node::network::PRESENCE_FRESHNESS_SECS + 1),
+            Instant::now() - Duration::from_secs(humoco_node::network::PRESENCE_FRESHNESS_SECS + 1),
         )
         .await;
     let selected = manager
@@ -302,7 +301,8 @@ async fn unknown_shard_is_rejected_over_real_quic_despite_global_readiness() {
 #[tokio::test]
 async fn unhealthy_storage_sync_never_marks_shard_ready() {
     let temp = tempfile::tempdir().expect("temp directory");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("unhealthy.redb")).expect("storage"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("unhealthy.redb")).expect("storage"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
     let manager = Arc::new(PeerManager::new(Vec::new()));
@@ -332,7 +332,8 @@ async fn unhealthy_storage_sync_never_marks_shard_ready() {
 #[tokio::test]
 async fn unassigned_node_sync_never_marks_shard_ready() {
     let temp = tempfile::tempdir().expect("temp directory");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("unassigned.redb")).expect("storage"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("unassigned.redb")).expect("storage"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
     let manager = Arc::new(PeerManager::new(Vec::new()));
@@ -350,8 +351,21 @@ async fn unassigned_node_sync_never_marks_shard_ready() {
     // Setup a remote peer address so candidate_addrs is not empty
     let remote = NodeIdentity::generate();
     let addr = "127.0.0.1:31415".parse().expect("address");
-    manager.learn_node_from_gossip_with_hrw(*remote.node_pubkey(), *remote.hrw_routing_id(), addr, 0, None).await;
-    manager.set_first_seen_for_test(remote.node_pubkey(), Instant::now() - Duration::from_secs(25 * 3600)).await;
+    manager
+        .learn_node_from_gossip_with_hrw(
+            *remote.node_pubkey(),
+            *remote.hrw_routing_id(),
+            addr,
+            0,
+            None,
+        )
+        .await;
+    manager
+        .set_first_seen_for_test(
+            remote.node_pubkey(),
+            Instant::now() - Duration::from_secs(25 * 3600),
+        )
+        .await;
 
     // Self identity is NOT registered or matured in manager -> self is not in committee
     let ready = sync_single_shard(
@@ -373,8 +387,14 @@ async fn unready_shard_returns_flag_not_ready_and_is_rejected_as_recovery_witnes
     let client_id = NodeIdentity::generate();
     let cancel = CancellationToken::new();
 
-    let pm_server = Arc::new(PeerManager::with_f2f(Vec::new(), vec![*client_id.node_id()]));
-    let pm_client = Arc::new(PeerManager::with_f2f(Vec::new(), vec![*server_id.node_id()]));
+    let pm_server = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*client_id.node_id()],
+    ));
+    let pm_client = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*server_id.node_id()],
+    ));
 
     let readiness_server = Arc::new(ShardReadinessManager::new());
     let handler = Arc::new(
@@ -409,24 +429,39 @@ async fn unready_shard_returns_flag_not_ready_and_is_rejected_as_recovery_witnes
     let client_addr = client_transport.local_addr().expect("addr");
     client_transport.spawn_accept_loop();
 
-    pm_server.register_f2f_friend(*client_id.node_id(), Some(client_addr)).await;
-    pm_client.register_f2f_friend(*server_id.node_id(), Some(server_addr)).await;
+    pm_server
+        .register_f2f_friend(*client_id.node_id(), Some(client_addr))
+        .await;
+    pm_client
+        .register_f2f_friend(*server_id.node_id(), Some(server_addr))
+        .await;
 
-    let conn = client_transport.connect_peer(server_addr).await.expect("connect");
+    let conn = client_transport
+        .connect_peer(server_addr)
+        .await
+        .expect("connect");
 
     // Shard 42 is NOT marked ready on server -> request_shard_digest must fail due to FLAG_NOT_READY
     let res = client_transport.request_shard_digest(&conn, 42, 1).await;
-    assert!(res.is_err(), "Unready shard must be rejected with FLAG_NOT_READY");
+    assert!(
+        res.is_err(),
+        "Unready shard must be rejected with FLAG_NOT_READY"
+    );
     let err_msg = res.unwrap_err().to_string();
-    assert!(err_msg.contains("FLAG_NOT_READY"), "Error must mention FLAG_NOT_READY, got: {}", err_msg);
+    assert!(
+        err_msg.contains("FLAG_NOT_READY"),
+        "Error must mention FLAG_NOT_READY, got: {}",
+        err_msg
+    );
 
     // Now mark shard 42 ready on server
     readiness_server.mark_shard_ready(42);
-    let (digest, count) = client_transport.request_shard_digest(&conn, 42, 2).await.expect("ready shard digest");
+    let (digest, count) = client_transport
+        .request_shard_digest(&conn, 42, 2)
+        .await
+        .expect("ready shard digest");
     assert_eq!(count, 0);
     assert_ne!(digest, [0u8; 32]);
 
     cancel.cancel();
 }
-
-

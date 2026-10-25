@@ -47,9 +47,12 @@ fn test_health_state_tracker_lifecycle_and_pruning() {
     assert_eq!(items[1].duration_formatted, "0s");
 
     // Simulate QUEUE_HIGH resolving, while NO_PEERS persists
-    let mut items_cycle_2 = vec![
-        HealthItem::new("NO_PEERS", HealthLevel::Crit, "No peers", "Check network"),
-    ];
+    let mut items_cycle_2 = vec![HealthItem::new(
+        "NO_PEERS",
+        HealthLevel::Crit,
+        "No peers",
+        "Check network",
+    )];
     tracker.track(&mut items_cycle_2);
     assert_eq!(items_cycle_2[0].code, "NO_PEERS");
 
@@ -59,9 +62,12 @@ fn test_health_state_tracker_lifecycle_and_pruning() {
     assert!(items_cycle_3.is_empty());
 
     // Re-occurrence of NO_PEERS starts fresh at 0s
-    let mut items_cycle_4 = vec![
-        HealthItem::new("NO_PEERS", HealthLevel::Crit, "No peers", "Check network"),
-    ];
+    let mut items_cycle_4 = vec![HealthItem::new(
+        "NO_PEERS",
+        HealthLevel::Crit,
+        "No peers",
+        "Check network",
+    )];
     tracker.track(&mut items_cycle_4);
     assert_eq!(items_cycle_4[0].active_since_sec, 0);
     assert_eq!(items_cycle_4[0].duration_formatted, "0s");
@@ -115,7 +121,10 @@ fn test_system_stats_redb_growth_and_headroom_projection() {
 
     let stats_growing = collector.get_system_stats(100, 1.0, 0);
     let growth = stats_growing.redb_growth_mb_per_day;
-    assert!((growth - 40.0).abs() < 0.5, "Expected ~40 MB/day, got {growth}");
+    assert!(
+        (growth - 40.0).abs() < 0.5,
+        "Expected ~40 MB/day, got {growth}"
+    );
     assert!(stats_growing.days_until_full.is_some());
     let days = stats_growing.days_until_full.unwrap();
     assert_eq!(stats_growing.disk_headroom_label, format!("{days} Tage"));

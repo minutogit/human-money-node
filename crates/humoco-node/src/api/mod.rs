@@ -5,8 +5,8 @@ pub mod events;
 pub mod health;
 pub mod history;
 pub mod hmc;
-pub mod live;
 pub mod keys;
+pub mod live;
 pub mod metrics;
 pub mod operator;
 pub mod operator_boundary;
@@ -16,8 +16,8 @@ pub mod system_stats;
 
 pub use auth::AdminTokenManager;
 pub use dashboard::{
-    dashboard_data, render_dashboard, ConfigViewDto, DashboardData, DashboardDataDto,
-    F2fClientDto, F2fFriendDto, F2fOverviewDto, PersistenceDto, RecentLockDto, RejectionsDto,
+    dashboard_data, render_dashboard, ConfigViewDto, DashboardData, DashboardDataDto, F2fClientDto,
+    F2fFriendDto, F2fOverviewDto, PersistenceDto, RecentLockDto, RejectionsDto,
     ShardScoreSampleDto, ThermometerStatsDto, TierOverviewDto, TierSharesDto, VipAccountDto,
 };
 pub use events::{EventItem, EventKind, EventLog, EVENT_LOG_CAPACITY};
@@ -28,8 +28,8 @@ pub use health::{
 pub use history::{HistoryPoint, HistorySampler, HISTORY_CAPACITY};
 
 pub use dto::{
-    AttestationDto, ErrorResponse, LockRecordDto,
-    NodeStatusResponse, PowChallengeResponse, SyncRequest, SyncResponse,
+    AttestationDto, ErrorResponse, LockRecordDto, NodeStatusResponse, PowChallengeResponse,
+    SyncRequest, SyncResponse,
 };
 pub use hmc::{
     calculate_l2_payload_hash, calculate_l2_payload_hash_for_entry, calculate_l2_payload_hash_raw,
@@ -40,6 +40,5 @@ pub use keys::{normalize_pubkey_display, parse_client_token, parse_pubkey};
 pub use metrics::prometheus_metrics;
 pub use routes::{build_router, AppState};
 pub use system_stats::{SparklinesDto, SystemStatsCollector, SystemStatsDto};
-
 
 pub mod history_retention;

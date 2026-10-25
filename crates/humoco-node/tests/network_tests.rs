@@ -1,11 +1,11 @@
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use humoco_node::network::{
     BoxFuture, DefaultRequestHandler, PeerManager, PeerStatus, QuicTransport, RequestHandler,
 };
 use humoco_node::NodeIdentity;
 use humoco_sim_core::wire::{MsgType, WireHeader};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -164,11 +164,8 @@ async fn test_stream_multiplexing_concurrent() {
     let server_addr = server_transport.local_addr().expect("Server local addr");
     let accept_handle = server_transport.spawn_accept_loop();
 
-    let client_transport = QuicTransport::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        &id_client,
-    )
-    .expect("Bind client transport");
+    let client_transport = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_client)
+        .expect("Bind client transport");
 
     let client_addr = client_transport.local_addr().expect("Client local addr");
     server_transport
@@ -243,14 +240,18 @@ async fn test_peer_lifecycle_and_suspension() {
     // Failures leading up to Degrading (threshold 2, spaced by >=60s to pass debouncing)
     let t0 = std::time::Instant::now();
     peer_manager.record_failure_at(addr, t0).await;
-    peer_manager.record_failure_at(addr, t0 + std::time::Duration::from_secs(60)).await;
+    peer_manager
+        .record_failure_at(addr, t0 + std::time::Duration::from_secs(60))
+        .await;
 
     let peer = peer_manager.get_peer(&addr).await.unwrap();
     assert_eq!(peer.missing_count, 2);
     assert_eq!(peer.status, PeerStatus::Degrading);
 
     // Failure reaching Suspension threshold (3 per AGENTS.md / Spec 15)
-    peer_manager.record_failure_at(addr, t0 + std::time::Duration::from_secs(120)).await;
+    peer_manager
+        .record_failure_at(addr, t0 + std::time::Duration::from_secs(120))
+        .await;
 
     let peer = peer_manager.get_peer(&addr).await.unwrap();
     assert_eq!(peer.missing_count, 3);
@@ -260,9 +261,7 @@ async fn test_peer_lifecycle_and_suspension() {
     // Phase 8 (Spec 15/19): a pure handshake must NOT reset the malus —
     // only genuinely performed shard work decays it.
     let node_id = [42u8; 32];
-    peer_manager
-        .record_success(addr, Some(node_id), None)
-        .await;
+    peer_manager.record_success(addr, Some(node_id), None).await;
 
     let peer = peer_manager.get_peer(&addr).await.unwrap();
     assert_eq!(peer.missing_count, 3);
@@ -314,4 +313,3 @@ async fn test_dns_peer_periodic_resolution() {
     assert_eq!(peer.unwrap().node_id, Some(pk));
     assert!(pm.is_f2f_friend(&pk).await);
 }
-

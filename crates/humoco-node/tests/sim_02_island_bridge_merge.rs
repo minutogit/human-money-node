@@ -9,8 +9,8 @@ use axum::http::StatusCode;
 
 use humoco_node::api::hmc::{L2AuthPayload, L2StatusQuery, L2Verdict};
 use humoco_node::storage::compute_hmc_canonical_hash;
-use simulation::{MeshSimulator, SimWallet};
 use simulation::node_handle::SIM_F2F_TOKEN;
+use simulation::{MeshSimulator, SimWallet};
 
 /// Rebuilds the entire mesh topology from an edge list.
 /// Does two full restart passes to ensure all P2P addresses are consistent
@@ -37,8 +37,17 @@ async fn rebuild_topology(sim: &mut MeshSimulator, edges: &[(usize, usize)]) {
             }
             sim.nodes[idx].config.f2f.peers = peers;
             sim.nodes[idx].config.f2f.trusted_pubkeys = trusted;
-            if !sim.nodes[idx].config.f2f.tokens.contains(&SIM_F2F_TOKEN.to_string()) {
-                sim.nodes[idx].config.f2f.tokens.push(SIM_F2F_TOKEN.to_string());
+            if !sim.nodes[idx]
+                .config
+                .f2f
+                .tokens
+                .contains(&SIM_F2F_TOKEN.to_string())
+            {
+                sim.nodes[idx]
+                    .config
+                    .f2f
+                    .tokens
+                    .push(SIM_F2F_TOKEN.to_string());
             }
             // Restart node with new topology (works for both running and stopped nodes)
             let _ = sim.restart_node(idx).await;
@@ -69,7 +78,8 @@ async fn test_sim_02_island_bridge_merge() {
     // ──────────────────────────────────────────────
     // Phase 1 – Insel B (8 Nodes 3..10 Ring) startet autark + eigener Voucher
     // ──────────────────────────────────────────────
-    sim.reporter.begin_phase("Phase 1 - Insel B Ring autark (3..10)");
+    sim.reporter
+        .begin_phase("Phase 1 - Insel B Ring autark (3..10)");
 
     // Spawn 11 nodes isolated (topology will be wired via rebuild)
     let n0 = sim.spawn_node().await.expect("spawn n0");
@@ -107,7 +117,8 @@ async fn test_sim_02_island_bridge_merge() {
         (3, 10),
     ];
     rebuild_topology(&mut sim, &edges).await;
-    sim.reporter.step("Wired initial islands: A chain 0-1-2, B ring 3..10, no bridges");
+    sim.reporter
+        .step("Wired initial islands: A chain 0-1-2, B ring 3..10, no bridges");
 
     // Allow gossip / bootstrap sync to settle
     sim.advance_and_yield(Duration::from_secs(2)).await;
@@ -116,8 +127,9 @@ async fn test_sim_02_island_bridge_merge() {
     let wallet_b = SimWallet::new();
     let (voucher_b, genesis_b) = wallet_b.genesis_with_voucher(Some(600_000));
     let tag_b = SimWallet::t_id_to_tag(&genesis_b.transaction_hash);
-    sim.reporter
-        .step(format!("Insel B Voucher V_B voucher={voucher_b} tag={tag_b} on node 3"));
+    sim.reporter.step(format!(
+        "Insel B Voucher V_B voucher={voucher_b} tag={tag_b} on node 3"
+    ));
 
     let (st, env) = sim
         .node(n3)
@@ -162,9 +174,13 @@ async fn test_sim_02_island_bridge_merge() {
                 if let Ok((s, e)) = sim.node(idx).query_status(&q_b).await {
                     if s == StatusCode::OK && matches!(e.verdict, L2Verdict::Verified { .. }) {
                         b_visible += 1;
-                        sim.reporter.step(format!("Fallback re-anchor succeeded on node {idx}"));
+                        sim.reporter
+                            .step(format!("Fallback re-anchor succeeded on node {idx}"));
                     } else {
-                        sim.reporter.warn(format!("Fallback on node {idx} still not Verified: {s} {:?}", e.verdict));
+                        sim.reporter.warn(format!(
+                            "Fallback on node {idx} still not Verified: {s} {:?}",
+                            e.verdict
+                        ));
                     }
                 }
             }
@@ -181,10 +197,14 @@ async fn test_sim_02_island_bridge_merge() {
         if let Ok((s, e)) = sim.node(idx).query_status(&q_b).await {
             sim.reporter.check(
                 s == StatusCode::OK && matches!(e.verdict, L2Verdict::Verified { .. }),
-                format!("Phase1 final V_B on node {idx} must be Verified, got {s} {:?}", e.verdict),
+                format!(
+                    "Phase1 final V_B on node {idx} must be Verified, got {s} {:?}",
+                    e.verdict
+                ),
             );
         } else {
-            sim.reporter.check(false, format!("Phase1 query failed on node {idx}"));
+            sim.reporter
+                .check(false, format!("Phase1 query failed on node {idx}"));
         }
     }
 
@@ -193,7 +213,8 @@ async fn test_sim_02_island_bridge_merge() {
     // ──────────────────────────────────────────────
     // Phase 2 – Partitionierter Double-Spend auf V_Shared / parent_ds_tag
     // ──────────────────────────────────────────────
-    sim.reporter.begin_phase("Phase 2 - Partitioned Double-Spend V_Shared");
+    sim.reporter
+        .begin_phase("Phase 2 - Partitioned Double-Spend V_Shared");
 
     // Shared voucher genesis
     let wallet_gen = SimWallet::new();
@@ -218,7 +239,10 @@ async fn test_sim_02_island_bridge_merge() {
         );
         sim.reporter.check(
             matches!(env.verdict, L2Verdict::Verified { .. }),
-            format!("Phase2 genesis V_Shared on {label} must be Verified, got {:?}", env.verdict),
+            format!(
+                "Phase2 genesis V_Shared on {label} must be Verified, got {:?}",
+                env.verdict
+            ),
         );
     }
 
@@ -300,7 +324,10 @@ async fn test_sim_02_island_bridge_merge() {
         }
     };
 
-    assert!(h_winner < h_loser, "H_winner must be < H_loser for min(H_canon)");
+    assert!(
+        h_winner < h_loser,
+        "H_winner must be < H_loser for min(H_canon)"
+    );
     sim.reporter.step(format!(
         "Double-spend pair: winner t_id={} loser t_id={} H_winner={} H_loser={} winner<H_loser={}",
         hex::encode(req_winner.transaction_hash),
@@ -322,7 +349,10 @@ async fn test_sim_02_island_bridge_merge() {
     );
     sim.reporter.check(
         matches!(env_w.verdict, L2Verdict::Verified { .. }),
-        format!("Phase2 T_winner on n0 must be Verified, got {:?}", env_w.verdict),
+        format!(
+            "Phase2 T_winner on n0 must be Verified, got {:?}",
+            env_w.verdict
+        ),
     );
 
     let (st_l, env_l) = sim
@@ -336,7 +366,10 @@ async fn test_sim_02_island_bridge_merge() {
     );
     sim.reporter.check(
         matches!(env_l.verdict, L2Verdict::Verified { .. }),
-        format!("Phase2 T_loser on n3 must be Verified, got {:?}", env_l.verdict),
+        format!(
+            "Phase2 T_loser on n3 must be Verified, got {:?}",
+            env_l.verdict
+        ),
     );
 
     // Verify isolated states
@@ -367,12 +400,14 @@ async fn test_sim_02_island_bridge_merge() {
     // ──────────────────────────────────────────────
     // Phase 3 – 1. Brücke 2<->3 + Crash von Node 3 während Sync
     // ──────────────────────────────────────────────
-    sim.reporter.begin_phase("Phase 3 - Bruecke 2<->3 + Crash Node 3");
+    sim.reporter
+        .begin_phase("Phase 3 - Bruecke 2<->3 + Crash Node 3");
 
     // Add first bridge 2<->3 and rebuild topology
     edges.push((2, 3));
     rebuild_topology(&mut sim, &edges).await;
-    sim.reporter.step("Bridge 1 activated: 2<->3 (rebuilt topology)");
+    sim.reporter
+        .step("Bridge 1 activated: 2<->3 (rebuilt topology)");
 
     // Allow sync motor to start pulling
     sim.advance_and_yield(Duration::from_millis(600)).await;
@@ -398,7 +433,8 @@ async fn test_sim_02_island_bridge_merge() {
     // ──────────────────────────────────────────────
     // Phase 4 – Multi-Path Rettung 0<->6, 1<->10 + Restart Node 3
     // ──────────────────────────────────────────────
-    sim.reporter.begin_phase("Phase 4 - Multi-Path Bridges 0<->6, 1<->10 + Restart 3");
+    sim.reporter
+        .begin_phase("Phase 4 - Multi-Path Bridges 0<->6, 1<->10 + Restart 3");
 
     edges.push((0, 6));
     edges.push((1, 10));
@@ -418,7 +454,8 @@ async fn test_sim_02_island_bridge_merge() {
     // ──────────────────────────────────────────────
     // Phase 5 – Konvergenz über alle 11 Knoten: T_winner verdrängt T_loser
     // ──────────────────────────────────────────────
-    sim.reporter.begin_phase("Phase 5 - Konvergenz min(H_canon) ueber 11 Knoten");
+    sim.reporter
+        .begin_phase("Phase 5 - Konvergenz min(H_canon) ueber 11 Knoten");
 
     // Poll until all nodes converge to winner or timeout 30s
     let winner_tid = req_winner.transaction_hash;
@@ -493,7 +530,11 @@ async fn test_sim_02_island_bridge_merge() {
     for (idx, &c) in converged.iter().enumerate() {
         sim.reporter.check(
             c,
-            format!("Phase5 node {idx} converged to T_winner min(H_canon) (winner {} vs loser {})", hex::encode(winner_tid), hex::encode(loser_tid)),
+            format!(
+                "Phase5 node {idx} converged to T_winner min(H_canon) (winner {} vs loser {})",
+                hex::encode(winner_tid),
+                hex::encode(loser_tid)
+            ),
         );
     }
 

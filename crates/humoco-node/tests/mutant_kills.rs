@@ -2,10 +2,10 @@
 //! M2-S3: SpentLockFilter post-prune consistency
 //! M2-S6: RedbStorage::prune_expired_buckets physical HMC removal
 
-use std::sync::Arc;
-use humoco_node::storage::{RedbStorage, SpentLockFilter};
 use humoco_node::api::hmc::L2LockEntry;
+use humoco_node::storage::{RedbStorage, SpentLockFilter};
 use humoco_sim_core::types::SimTime;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------------
@@ -22,7 +22,10 @@ fn test_mutant_m2s3_spent_lock_filter_post_prune_removed() {
     // Simulate prune: delete should remove
     let deleted = filter.delete(tag);
     assert!(deleted, "delete should return true for existing tag");
-    assert!(!filter.contains(tag), "filter must not contain tag after prune delete");
+    assert!(
+        !filter.contains(tag),
+        "filter must not contain tag after prune delete"
+    );
 }
 
 #[test]
@@ -72,9 +75,23 @@ async fn test_mutant_m2s3_hmc_ram_filter_consistency_after_prune() {
         deletable_at: Some("50000".to_string()), // 50s
         privacy_guard: None,
     };
-    let mut root = entry.clone(); root.t_id = [0x10; 32];
-    let (root_verdict, _) = engine.ingress_hmc_lock_durable(bs58::encode(root.t_id).into_string(), root, humoco_node::storage::IngressOrigin::ClientApi, None, None, None, None).await;
-    assert!(matches!(root_verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }));
+    let mut root = entry.clone();
+    root.t_id = [0x10; 32];
+    let (root_verdict, _) = engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root.t_id).into_string(),
+            root,
+            humoco_node::storage::IngressOrigin::ClientApi,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        root_verdict,
+        humoco_node::api::hmc::L2Verdict::Verified { .. }
+    ));
     let tag = "filter_prune_tag".to_string();
     let (_, is_new) = engine.ingress_hmc_lock(tag.clone(), entry).await;
     assert!(is_new);
@@ -82,7 +99,10 @@ async fn test_mutant_m2s3_hmc_ram_filter_consistency_after_prune() {
     // Filter must contain after ingress
     {
         let hmc = engine.hmc_ram.read().await;
-        assert!(hmc.filter.contains(&tag), "filter must contain after ingress");
+        assert!(
+            hmc.filter.contains(&tag),
+            "filter must contain after ingress"
+        );
     }
 
     // Prune at far future (100s > 50s+30s=80s)
@@ -92,7 +112,10 @@ async fn test_mutant_m2s3_hmc_ram_filter_consistency_after_prune() {
     // After prune, filter must NOT contain
     {
         let hmc = engine.hmc_ram.read().await;
-        assert!(!hmc.filter.contains(&tag), "filter must not contain pruned tag (mutant would fail)");
+        assert!(
+            !hmc.filter.contains(&tag),
+            "filter must not contain pruned tag (mutant would fail)"
+        );
         assert!(!hmc.locks.contains_key(&tag));
     }
 
@@ -142,8 +165,11 @@ fn test_mutant_m2s6_hmc_disk_prune_removes_expired() {
     };
 
     for entry in [&entry_expired, &entry_alive] {
-        let mut root = entry.clone(); root.t_id[0] ^= 0x80;
-        storage.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root).unwrap();
+        let mut root = entry.clone();
+        root.t_id[0] ^= 0x80;
+        storage
+            .put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root)
+            .unwrap();
     }
     storage.put_hmc_lock("tag_exp", &entry_expired).unwrap();
     storage.put_hmc_lock("tag_alive", &entry_alive).unwrap();
@@ -159,8 +185,14 @@ fn test_mutant_m2s6_hmc_disk_prune_removes_expired() {
     // Parents pruned is for LockRecord table, should be 0 here
     assert_eq!(pruned_parents.len(), 0);
 
-    assert!(storage.get_hmc_lock("tag_exp").unwrap().is_none(), "expired HMC must be physically deleted");
-    assert!(storage.get_hmc_lock("tag_alive").unwrap().is_some(), "alive HMC must remain");
+    assert!(
+        storage.get_hmc_lock("tag_exp").unwrap().is_none(),
+        "expired HMC must be physically deleted"
+    );
+    assert!(
+        storage.get_hmc_lock("tag_alive").unwrap().is_some(),
+        "alive HMC must remain"
+    );
 
     let all = storage.all_hmc_locks().unwrap();
     assert_eq!(all.len(), 1);
@@ -171,7 +203,7 @@ fn test_mutant_m2s6_hmc_disk_prune_removes_expired() {
 
     // Voucher index for expired voucher must be cleaned
     let all_after = storage.all_hmc_locks().unwrap();
-    assert!(!all_after.iter().any(|(k,_)| k=="tag_exp"));
+    assert!(!all_after.iter().any(|(k, _)| k == "tag_exp"));
 }
 
 #[test]
@@ -197,7 +229,9 @@ fn test_mutant_m2s6_hmc_disk_prune_retains_unexpired_until_grace() {
     };
     let mut root = entry.clone();
     root.t_id = [0x54; 32];
-    storage.put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root).unwrap();
+    storage
+        .put_hmc_lock(&bs58::encode(root.t_id).into_string(), &root)
+        .unwrap();
     storage.put_hmc_lock("tag_grace", &entry).unwrap();
 
     // Prune before grace (now=100 -> bucket 100 <130 => must retain)

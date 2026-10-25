@@ -23,7 +23,13 @@ pub struct WireHeader {
 
 impl WireHeader {
     pub const SIZE: usize = 32;
-    pub fn new(msg_type: u16, session_seq: u64, epoch_id: u32, flags: u32, payload_len: u32) -> Self {
+    pub fn new(
+        msg_type: u16,
+        session_seq: u64,
+        epoch_id: u32,
+        flags: u32,
+        payload_len: u32,
+    ) -> Self {
         Self {
             magic: WIRE_MAGIC,
             protocol_version: CURRENT_PROTOCOL_VERSION,
@@ -52,7 +58,8 @@ impl WireHeader {
             protocol_version: u16::from_le_bytes([bytes[4], bytes[5]]),
             msg_type: u16::from_le_bytes([bytes[6], bytes[7]]),
             session_seq: u64::from_le_bytes([
-                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                bytes[15],
             ]),
             epoch_id: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
             flags: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
@@ -121,7 +128,6 @@ pub const FLAG_NOT_READY: u32 = 0x0000_2000;
 /// gateway can return `409 Conflict` with first-party evidence.
 pub const FLAG_COLLISION_DETECTED: u32 = 0x0000_4000;
 
-
 /// 144-Byte LockEntry (INV-1001)
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +185,11 @@ pub enum WireError {
     CorruptedPayload,
 }
 
-pub fn parse_wire_header(raw: &[u8; 32], expected_seq: u64, is_0rtt: bool) -> Result<WireHeader, WireError> {
+pub fn parse_wire_header(
+    raw: &[u8; 32],
+    expected_seq: u64,
+    is_0rtt: bool,
+) -> Result<WireHeader, WireError> {
     let header = WireHeader::from_bytes(raw);
     if !header.is_valid_magic() {
         return Err(WireError::InvalidMagic);
@@ -199,7 +209,10 @@ pub fn parse_wire_header(raw: &[u8; 32], expected_seq: u64, is_0rtt: bool) -> Re
         }
     }
     if header.session_seq != expected_seq {
-        return Err(WireError::SequenceGap { expected: expected_seq, got: header.session_seq });
+        return Err(WireError::SequenceGap {
+            expected: expected_seq,
+            got: header.session_seq,
+        });
     }
     Ok(header)
 }
@@ -240,7 +253,13 @@ pub struct IngressAccount {
 }
 
 impl IngressAccount {
-    pub fn new(tag: AccountTag, tier: AccessTier, valid_until: u64, quota_micro_bj: u64, max_per_min: u32) -> Self {
+    pub fn new(
+        tag: AccountTag,
+        tier: AccessTier,
+        valid_until: u64,
+        quota_micro_bj: u64,
+        max_per_min: u32,
+    ) -> Self {
         Self {
             tag,
             tier,
@@ -260,7 +279,10 @@ pub struct AccessControl {
 
 impl AccessControl {
     pub fn new(node_secret: [u8; 32]) -> Self {
-        Self { vip_db: HashMap::new(), node_secret }
+        Self {
+            vip_db: HashMap::new(),
+            node_secret,
+        }
     }
     pub fn register(&mut self, tag: AccountTag, tier: AccessTier) {
         self.vip_db.insert(tag, tier);
@@ -273,7 +295,11 @@ impl AccessControl {
     /// Classify incoming request: Tier 1 VIP, Tier 2 Friend, else Tier 3 Public
     pub fn classify(&self, account_tag: Option<AccountTag>) -> AccessTier {
         match account_tag {
-            Some(tag) => self.vip_db.get(&tag).copied().unwrap_or(AccessTier::LightPublic),
+            Some(tag) => self
+                .vip_db
+                .get(&tag)
+                .copied()
+                .unwrap_or(AccessTier::LightPublic),
             None => AccessTier::LightPublic,
         }
     }
@@ -313,7 +339,12 @@ impl AccessControl {
         }
         true
     }
-    pub fn pow_challenge(client_ip_prefix: &[u8], epoch_minute: u32, difficulty: u8, node_secret: &[u8; 32]) -> [u8; 32] {
+    pub fn pow_challenge(
+        client_ip_prefix: &[u8],
+        epoch_minute: u32,
+        difficulty: u8,
+        node_secret: &[u8; 32],
+    ) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         let tag = b"HUMOCO_V1_CHALLENGE";
         hasher.update(&(tag.len() as u8).to_le_bytes());
@@ -339,7 +370,12 @@ pub struct TokenBucket {
 
 impl TokenBucket {
     pub fn new(capacity: u64, refill_per_sec: u64, now_ms: u64) -> Self {
-        Self { capacity, refill_per_sec, tokens: capacity as f64, last_refill_ms: now_ms }
+        Self {
+            capacity,
+            refill_per_sec,
+            tokens: capacity as f64,
+            last_refill_ms: now_ms,
+        }
     }
     fn refill(&mut self, now_ms: u64) {
         let elapsed_ms = now_ms.saturating_sub(self.last_refill_ms);

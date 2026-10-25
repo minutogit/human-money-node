@@ -154,17 +154,18 @@ impl SimNodeHandle {
     /// Waits until HTTP readiness (GET /health returns 200).
     pub async fn wait_ready(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for _ in 0..60 {
-            if let Ok((status, _body)) = self
-                .http_request("GET", "/healthz", None, &[])
-                .await
-            {
+            if let Ok((status, _body)) = self.http_request("GET", "/healthz", None, &[]).await {
                 if status == StatusCode::OK {
                     return Ok(());
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        Err(format!("node {} failed to become ready at {}", self.id, self.rpc_addr).into())
+        Err(format!(
+            "node {} failed to become ready at {}",
+            self.id, self.rpc_addr
+        )
+        .into())
     }
 
     /// Stops the daemon gracefully via cancellation token.
@@ -249,7 +250,10 @@ impl SimNodeHandle {
 
         let mut req_str = format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
-            method, path, self.rpc_addr, body_bytes.len()
+            method,
+            path,
+            self.rpc_addr,
+            body_bytes.len()
         );
         for (k, v) in headers {
             req_str.push_str(&format!("{}: {}\r\n", k, v));

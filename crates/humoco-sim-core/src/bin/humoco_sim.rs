@@ -27,7 +27,8 @@ fn main() {
 }
 
 fn print_help() {
-    println!(r#"
+    println!(
+        r#"
 ╔══════════════════════════════════════════════════════════════╗
 ║  HuMoCo Sim Core CLI                                          ║
 ║  crate: humoco-sim-core  |  binary: humoco_sim              ║
@@ -43,7 +44,8 @@ fn print_help() {
 ╚══════════════════════════════════════════════════════════════╝
 Usage:
   cargo run -p humoco-sim-core --bin humoco_sim -- <command>
-"#);
+"#
+    );
 }
 
 // ------------------------------------------------------------------
@@ -52,9 +54,13 @@ Usage:
 fn split_brain() {
     // Bind to core types (prevents unused-import warnings)
     let _node = sim::SimNode::new(1, 20);
-    let _status = types::LockStatus::Provisional { sigs: 8, required: 14 };
+    let _status = types::LockStatus::Provisional {
+        sigs: 8,
+        required: 14,
+    };
 
-    println!(r#"
+    println!(
+        r#"
 ╔══════════════════════════════════════════════════════════════╗
 ║  ███╗   ██╗ ██████╗ ███╗   ██╗██████╗  ██████╗ ███████╗    ║
 ║  ████╗  ██║██╔════╝ ████╗  ██║██╔══██╗██╔═══██╗██╔════╝    ║
@@ -65,7 +71,8 @@ fn split_brain() {
 ╠══════════════════════════════════════════════════════════════╣
 ║  SCENARIO: SPLIT-BRAIN  |  20 Nodes  |  60 / 40 Split        ║
 ╚══════════════════════════════════════════════════════════════╝
-"#);
+"#
+    );
 
     println!("BEFORE (Split: 12 vs 8 Nodes)\n");
     println!("  [Partition A: 12 Nodes]          [Partition B: 8 Nodes]");
@@ -100,7 +107,8 @@ fn social_defense() {
     let _node = sim::SimNode::new(10, 20);
     let _status = types::LockStatus::Pending;
 
-    println!(r#"
+    println!(
+        r#"
 ╔══════════════════════════════════════════════════════════════╗
 ║  ███╗   ██╗ ███████╗ █████╗ ███╗   ██╗    ███████╗ ██████╗      ║
 ║  ████╗  ██║ ██╔════╝██╔══██╗███║   ██║    ██╔════╝██╔══██╗     ║
@@ -111,7 +119,8 @@ fn social_defense() {
 ╠══════════════════════════════════════════════════════════════╣
 ║  SCENARIO: SOCIAL-DEFENSE / BOTNET DEFENSE                  ║
 ╚══════════════════════════════════════════════════════════════╝
-"#);
+"#
+    );
 
     println!("TOPOLOGY  —  Single-Bridge Botnet  vs.  Multi-Homed Cluster\n");
 
@@ -140,9 +149,12 @@ fn social_defense() {
 // ------------------------------------------------------------------
 fn chaos() {
     let _node = sim::SimNode::new(7, 20);
-    let _status = types::LockStatus::Void { reason: "Crash / Replacement".into() };
+    let _status = types::LockStatus::Void {
+        reason: "Crash / Replacement".into(),
+    };
 
-    println!(r#"
+    println!(
+        r#"
 ╔══════════════════════════════════════════════════════════════╗
 ║  ███╗   ██╗ ██████╗ ██╗   ██╗███╗   ███╗ ███████╗ ███████╗   ║
 ║  ████╗  ██║██╔════╝ ██║   ██║████╗ ████║ ██╔════╝ ██╔════╝   ║
@@ -153,7 +165,8 @@ fn chaos() {
 ╠══════════════════════════════════════════════════════════════╣
 ║  SCENARIO: CHAOS ENGINE  |  30% Packet Loss  |  7/20 Crash   ║
 ╚══════════════════════════════════════════════════════════════╝
-"#);
+"#
+    );
 
     println!("BEFORE (20 Nodes — intact)\n");
     println!("  N01  N02  N03  N04  N05  N06  N07  N08  N09  N10");
@@ -181,7 +194,8 @@ fn topology() {
     let _node = sim::SimNode::new(3, 20);
     let _shard: types::ShardId = 1;
 
-    println!(r#"
+    println!(
+        r#"
 ╔══════════════════════════════════════════════════════════════╗
 ║  ███╗   ██╗ ███████╗ █████╗ ███████╗ ███╗   ██╗██████╗       ║
 ║  ████╗  ██║ ██╔════╝██╔══██╗██╔════╝ ███║   ██║██╔══██╗      ║
@@ -192,9 +206,13 @@ fn topology() {
 ╠══════════════════════════════════════════════════════════════╣
 ║  SCENARIO: TOPOLOGY OVERVIEW  |  Sharding + Status             ║
 ╚══════════════════════════════════════════════════════════════╝
-"#);
+"#
+    );
 
-    println!("{:<6} {:<6} {:<14} {:<8} {:<8}", "NODE", "SHARD", "STATUS", "SIGS", "PEERS");
+    println!(
+        "{:<6} {:<6} {:<14} {:<8} {:<8}",
+        "NODE", "SHARD", "STATUS", "SIGS", "PEERS"
+    );
     println!("{}", "-".repeat(42));
     let rows = [
         ("N01", "S01", "Final", "14/14", "5"),
@@ -209,7 +227,10 @@ fn topology() {
         ("N10", "S03", "Final", "14/14", "6"),
     ];
     for (node, shard, status, sigs, peers) in &rows {
-        println!("{:<6} {:<6} {:<14} {:<8} {:<8}", node, shard, status, sigs, peers);
+        println!(
+            "{:<6} {:<6} {:<14} {:<8} {:<8}",
+            node, shard, status, sigs, peers
+        );
     }
     println!("{}", "-".repeat(42));
     println!("Shard S01: Nodes {{N01, N02, N05, N08}}  →  Quorum 14/20  (FINAL when >=20 nodes)");
@@ -379,7 +400,8 @@ fn simulate_single_reach(
 }
 
 fn percolation_sweep() {
-    println!(r#"
+    println!(
+        r#"
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  ██████╗ ███████╗██████╗  ██████╗ ██████╗ ██╗      █████╗ ████████╗ ║
 ║  ██╔══██╗██╔════╝██╔══██╗██╔════╝██╔═══██╗██║     ██╔══██╗╚══██╔══╝ ║
@@ -390,14 +412,18 @@ fn percolation_sweep() {
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  10,000-Node F2F Small-World: Monte Carlo Percolation Analysis          ║
 ╚══════════════════════════════════════════════════════════════════════╝
-"#);
+"#
+    );
 
     let mut rng = SimRng::new(1337);
     let graph = SmallWorldGraph::new(PERC_N_NODES, &mut rng);
     let total_edges: usize = graph.adj.iter().map(|s| s.len()).sum();
     let avg_deg = total_edges as f64 / PERC_N_NODES as f64;
 
-    println!("Topology: {} nodes | Avg degree: {:.2} peers | Max degree: {}", PERC_N_NODES, avg_deg, PERC_MAX_DEGREE);
+    println!(
+        "Topology: {} nodes | Avg degree: {:.2} peers | Max degree: {}",
+        PERC_N_NODES, avg_deg, PERC_MAX_DEGREE
+    );
     println!("Simulation: Monte Carlo with 100 samples per percentage point (0% to 100%).\n");
 
     let trials_per_point = 100;
@@ -405,11 +431,20 @@ fn percolation_sweep() {
     let mut total_reach = vec![0.0f64; 101];
     let mut avg_hops_vec = vec![0.0f64; 101];
 
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
     println!("1. FULL 0% TO 100% MONTE CARLO SCAN (1% STEPS)");
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
-    println!(" {:>7} │ {:>18} │ {:>18} │ {:>9} │ {:<20}", "Block %", "Reached (Honest %)", "Reached (Total %)", "Avg Max Hops", "Status");
-    println!("─────────┼────────────────────┼────────────────────┼───────────┼─────────────────────");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
+    println!(
+        " {:>7} │ {:>18} │ {:>18} │ {:>9} │ {:<20}",
+        "Block %", "Reached (Honest %)", "Reached (Total %)", "Avg Max Hops", "Status"
+    );
+    println!(
+        "─────────┼────────────────────┼────────────────────┼───────────┼─────────────────────"
+    );
 
     for pct in 0..=100 {
         let block_fraction = pct as f64 / 100.0;
@@ -431,7 +466,8 @@ fn percolation_sweep() {
                 }
             }
 
-            let (honest_reached, total_honest, max_hops) = simulate_single_reach(&graph, victim, &blocked);
+            let (honest_reached, total_honest, max_hops) =
+                simulate_single_reach(&graph, victim, &blocked);
             let h_pct = if pct == 100 || total_honest == 0 {
                 0.0
             } else {
@@ -462,7 +498,10 @@ fn percolation_sweep() {
 
         // Only print every 5th step or every step from 50% onward to keep the overview concise
         if pct % 5 == 0 || (55..=85).contains(&pct) {
-            println!(" {:>6}% │ {:>17.2}% │ {:>17.2}% │ {:>9.1} │ {}", pct, honest_reach[pct], total_reach[pct], avg_hops_vec[pct], status);
+            println!(
+                " {:>6}% │ {:>17.2}% │ {:>17.2}% │ {:>9.1} │ {}",
+                pct, honest_reach[pct], total_reach[pct], avg_hops_vec[pct], status
+            );
         }
     }
 
@@ -479,17 +518,30 @@ fn percolation_sweep() {
     }
 
     println!("\n🎯 STEEPEST TRANSITION / DERIVATIVE MAXIMUM:");
-    println!("   Steepest point (tipping point): {}% blockers (delta = -{:.2}% per 1% block increase)", steepest_pct, max_delta);
+    println!(
+        "   Steepest point (tipping point): {}% blockers (delta = -{:.2}% per 1% block increase)",
+        steepest_pct, max_delta
+    );
 
     // ±10 % Fokus-Fenster um den steilsten Punkt
     let window_min = steepest_pct.saturating_sub(10);
     let window_max = (steepest_pct + 10).min(100);
 
-    println!("\n═════════════════════════════════════════════════════════════════════════════════════");
-    println!("2. FOCUS ANALYSIS: ±10% AROUND STEEPEST TIPPING POINT ({}% to {}%)", window_min, window_max);
+    println!(
+        "\n═════════════════════════════════════════════════════════════════════════════════════"
+    );
+    println!(
+        "2. FOCUS ANALYSIS: ±10% AROUND STEEPEST TIPPING POINT ({}% to {}%)",
+        window_min, window_max
+    );
     println!("   (250 samples per percentage point for maximum statistical precision)");
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
-    println!(" {:>7} │ {:>18} │ {:>18} │ {:>10} │ {:>9} │ {:<20}", "Block %", "Reached (Honest %)", "Reached (Total %)", "Drop (Δ)", "Avg Hops", "Status");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
+    println!(
+        " {:>7} │ {:>18} │ {:>18} │ {:>10} │ {:>9} │ {:<20}",
+        "Block %", "Reached (Honest %)", "Reached (Total %)", "Drop (Δ)", "Avg Hops", "Status"
+    );
     println!("─────────┼────────────────────┼────────────────────┼────────────┼───────────┼─────────────────────");
 
     let fine_trials = 250;
@@ -515,7 +567,8 @@ fn percolation_sweep() {
                 }
             }
 
-            let (honest_reached, total_honest, max_hops) = simulate_single_reach(&graph, victim, &blocked);
+            let (honest_reached, total_honest, max_hops) =
+                simulate_single_reach(&graph, victim, &blocked);
             let h_pct = if pct == 100 || total_honest == 0 {
                 0.0
             } else {
@@ -538,7 +591,11 @@ fn percolation_sweep() {
         };
         prev_h = cur_h;
 
-        let marker = if pct == steepest_pct { "◄ STEEPEST POINT" } else { "" };
+        let marker = if pct == steepest_pct {
+            "◄ STEEPEST POINT"
+        } else {
+            ""
+        };
         let status = if cur_h > 90.0 {
             "🟢 Intact Mesh"
         } else if cur_h > 60.0 {
@@ -551,15 +608,22 @@ fn percolation_sweep() {
             "🔴 Total Isolation"
         };
 
-        println!(" {:>6}% │ {:>17.2}% │ {:>17.2}% │ {:>10} │ {:>9.1} │ {} {}", pct, cur_h, cur_t, delta_str, cur_hops, status, marker);
+        println!(
+            " {:>6}% │ {:>17.2}% │ {:>17.2}% │ {:>10} │ {:>9.1} │ {} {}",
+            pct, cur_h, cur_t, delta_str, cur_hops, status, marker
+        );
     }
 
     // ------------------------------------------------------------------
     // 3. MATHEMATISCHE MODELLIERUNG & REGRESSION
     // ------------------------------------------------------------------
-    println!("\n═════════════════════════════════════════════════════════════════════════════════════");
+    println!(
+        "\n═════════════════════════════════════════════════════════════════════════════════════"
+    );
     println!("3. MATHEMATICAL APPROXIMATION & MODEL COMPARISON");
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
 
     // Compute Total Sum of Squares (TSS) for R²
     let mean_y: f64 = honest_reach.iter().sum::<f64>() / 101.0;
@@ -598,7 +662,7 @@ fn percolation_sweep() {
             let mut sse = 0.0;
             for (pct, &actual) in honest_reach.iter().enumerate().take(101) {
                 let x = pct as f64;
-                let pred = 100.0 * (- (x / lambda).powf(k)).exp();
+                let pred = 100.0 * (-(x / lambda).powf(k)).exp();
                 sse += (pred - actual).powi(2);
             }
             let rmse = (sse / 101.0).sqrt();
@@ -655,35 +719,71 @@ fn percolation_sweep() {
 
     println!("Model evaluation (ranked by goodness / R²):\n");
     println!("  1. Hill function (percolation kinetics):");
-    println!("     Formula: R(x) = 100 / (1 + (x / {:.1})^{:.1})", best_hill.0, best_hill.1);
-    println!("     Goodness: R² = {:.5} | RMSE = {:.2}%\n", hill_r2, best_hill.2);
+    println!(
+        "     Formula: R(x) = 100 / (1 + (x / {:.1})^{:.1})",
+        best_hill.0, best_hill.1
+    );
+    println!(
+        "     Goodness: R² = {:.5} | RMSE = {:.2}%\n",
+        hill_r2, best_hill.2
+    );
 
     println!("  2. Richards curve (generalized asymmetric logistic):");
-    println!("     Formula: R(x) = 100 / (1 + exp({:.2} * (x - {:.1})))^(1 / {:.1})", best_richards.1, best_richards.0, best_richards.2);
-    println!("     Goodness: R² = {:.5} | RMSE = {:.2}%\n", richards_r2, best_richards.3);
+    println!(
+        "     Formula: R(x) = 100 / (1 + exp({:.2} * (x - {:.1})))^(1 / {:.1})",
+        best_richards.1, best_richards.0, best_richards.2
+    );
+    println!(
+        "     Goodness: R² = {:.5} | RMSE = {:.2}%\n",
+        richards_r2, best_richards.3
+    );
 
     println!("  3. Weibull survival model:");
-    println!("     Formula: R(x) = 100 * exp(-(x / {:.1})^{:.1})", best_weibull.0, best_weibull.1);
-    println!("     Goodness: R² = {:.5} | RMSE = {:.2}%\n", weibull_r2, best_weibull.2);
+    println!(
+        "     Formula: R(x) = 100 * exp(-(x / {:.1})^{:.1})",
+        best_weibull.0, best_weibull.1
+    );
+    println!(
+        "     Goodness: R² = {:.5} | RMSE = {:.2}%\n",
+        weibull_r2, best_weibull.2
+    );
 
     println!("  4. Fermi-Dirac distribution (symmetric logistic):");
-    println!("     Formula: R(x) = 100 / (1 + exp((x - {:.1}) / {:.1}))", best_fermi.0, best_fermi.1);
-    println!("     Goodness: R² = {:.5} | RMSE = {:.2}%\n", fermi_r2, best_fermi.2);
+    println!(
+        "     Formula: R(x) = 100 / (1 + exp((x - {:.1}) / {:.1}))",
+        best_fermi.0, best_fermi.1
+    );
+    println!(
+        "     Goodness: R² = {:.5} | RMSE = {:.2}%\n",
+        fermi_r2, best_fermi.2
+    );
 
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
     println!("4. COMPARISON TABLE: SIMULATION vs. FORMULAS");
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
-    println!(" {:>7} │ {:>14} │ {:>18} │ {:>18} │ {:>12}", "Block %", "Simulated (%)", "Weibull R_w(x) (%)", "Fermi R_f(x) (%)", "Deviation W");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
+    println!(
+        " {:>7} │ {:>14} │ {:>18} │ {:>18} │ {:>12}",
+        "Block %", "Simulated (%)", "Weibull R_w(x) (%)", "Fermi R_f(x) (%)", "Deviation W"
+    );
     println!("─────────┼────────────────┼────────────────────┼────────────────────┼─────────────");
 
-    let test_points = [0, 10, 20, 30, 40, 50, 55, 60, 65, 68, 70, 71, 72, 73, 74, 75, 76, 77, 78, 80, 85, 90, 100];
+    let test_points = [
+        0, 10, 20, 30, 40, 50, 55, 60, 65, 68, 70, 71, 72, 73, 74, 75, 76, 77, 78, 80, 85, 90, 100,
+    ];
     for &pct in &test_points {
         let x = pct as f64;
-        let pred_w = 100.0 * (- (x / best_weibull.0).powf(best_weibull.1)).exp();
+        let pred_w = 100.0 * (-(x / best_weibull.0).powf(best_weibull.1)).exp();
         let pred_f = 100.0 / (1.0 + ((x - best_fermi.0) / best_fermi.1).exp());
         let sim = honest_reach[pct];
         let diff_w = sim - pred_w;
-        println!(" {:>6}% │ {:>13.2}% │ {:>17.2}% │ {:>17.2}% │ {:>+11.2}%", pct, sim, pred_w, pred_f, diff_w);
+        println!(
+            " {:>6}% │ {:>13.2}% │ {:>17.2}% │ {:>17.2}% │ {:>+11.2}%",
+            pct, sim, pred_w, pred_f, diff_w
+        );
     }
 }
 
@@ -691,7 +791,8 @@ fn percolation_sweep() {
 // 6. AUSFALL-ERKENNUNG & SHARD-DYNAMIK (Gateway + Co-Shard Ingress)
 // ------------------------------------------------------------------
 fn failure_discovery_simulation() {
-    println!(r#"
+    println!(
+        r#"
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  ███████╗ █████╗ ██╗██╗     ██╗   ██╗██████╗ ███████╗                ║
 ║  ██╔════╝██╔══██╗██║██║     ██║   ██║██╔══██╗██╔════╝                ║
@@ -702,24 +803,39 @@ fn failure_discovery_simulation() {
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  Shard Distribution, Gateway Traffic & Lazy-Node Failure Detection     ║
 ╚══════════════════════════════════════════════════════════════════════╝
-"#);
+"#
+    );
 
     let n_nodes: usize = 10_000;
     let n_shards: usize = 65_536;
     let k_committee: usize = 20;
 
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
     println!("1. ANALYTICAL FORMULA: SHARD MEMBERSHIP & COLLEAGUES ACROSS NETWORK SIZES (N)");
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
     println!("  Mathematical formulas for arbitrary N (with S = 65,536 shards, K = 20 top ranks):");
     println!("    • Shards per node:        μ_S(N) = (S * K) / N = 1,310,720 / N");
     println!("    • P(node in >= 1 shard):  P_active(N) = 1 - exp(- 1,310,720 / N)");
     println!("    • Co-shard colleagues (U): U(N) = (N - 1) * (1 - exp(- 24,903,680 / N²))\n");
 
-    println!("  {:>10} │ {:>18} │ {:>18} │ {:>18} │ {:<20}", "Nodes (N)", "Avg Shards / Node", "P(in >= 1 shard)", "Co-Shard Colleagues", "Network Coverage (%)");
+    println!(
+        "  {:>10} │ {:>18} │ {:>18} │ {:>18} │ {:<20}",
+        "Nodes (N)",
+        "Avg Shards / Node",
+        "P(in >= 1 shard)",
+        "Co-Shard Colleagues",
+        "Network Coverage (%)"
+    );
     println!("  ───────────┼────────────────────┼────────────────────┼────────────────────┼─────────────────────");
 
-    let network_sizes = [100, 500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 500_000, 1_310_720, 5_000_000, 10_000_000];
+    let network_sizes = [
+        100, 500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 500_000, 1_310_720, 5_000_000,
+        10_000_000,
+    ];
     for &n in &network_sizes {
         let avg_shards = (n_shards * k_committee) as f64 / n as f64;
         let p_in_at_least_one = (1.0 - (-1_310_720.0 / n as f64).exp()) * 100.0;
@@ -735,13 +851,18 @@ fn failure_discovery_simulation() {
             "🌱 Sparse Megamesh"
         };
 
-        println!("  {:>10} │ {:>18.2} │ {:>17.4}% │ {:>18.0} │ {:>18.2}% │ {}", n, avg_shards, p_in_at_least_one, colleagues, net_pct, status);
+        println!(
+            "  {:>10} │ {:>18.2} │ {:>17.4}% │ {:>18.0} │ {:>18.2}% │ {}",
+            n, avg_shards, p_in_at_least_one, colleagues, net_pct, status
+        );
     }
 
     println!("\n  Key thresholds:");
     println!("    • N <= 1,310,720: On average, every node is active in >= 1 shard.");
     println!("    • N = 10,000:     Each node is in ~131 shards and shares direct shard duty with 2,206 nodes (22.06%)!");
-    println!("    • N > 1.31M:      Nodes spread across standby roles; shards rotate across megapools.");
+    println!(
+        "    • N > 1.31M:      Nodes spread across standby roles; shards rotate across megapools."
+    );
 
     // 2. Monte Carlo simulation over realistic time windows (5 min to 24h)
     let mut rng = SimRng::new(9999);
@@ -765,24 +886,42 @@ fn failure_discovery_simulation() {
         shard_committees.push(committee);
     }
 
-    println!("Victim node X={} is a member of {} shards.", victim, victim_shards.len());
+    println!(
+        "Victim node X={} is a member of {} shards.",
+        victim,
+        victim_shards.len()
+    );
 
-    println!("\n═════════════════════════════════════════════════════════════════════════════════════");
+    println!(
+        "\n═════════════════════════════════════════════════════════════════════════════════════"
+    );
     println!("2. FAILURE AWARENESS ACROSS THE ENTIRE NETWORK OVER REALISTIC TIME WINDOWS");
     println!("   (N = 10,000 nodes, Shards = 65,536, Weibull isolation threshold = 73.1%)");
-    println!("═════════════════════════════════════════════════════════════════════════════════════");
-    println!("  {:>14} │ {:>10} │ {:>8} │ {:>8} │ {:>8} │ {:>8} │ {:>8} │ {:>8} │ {:<18}",
-             "Volume / Day", "Rate (Tx/s)", "5 Min", "15 Min", "30 Min", "1 Hr", "2 Hrs", "6 Hrs", "Time to 73.1%");
+    println!(
+        "═════════════════════════════════════════════════════════════════════════════════════"
+    );
+    println!(
+        "  {:>14} │ {:>10} │ {:>8} │ {:>8} │ {:>8} │ {:>8} │ {:>8} │ {:>8} │ {:<18}",
+        "Volume / Day",
+        "Rate (Tx/s)",
+        "5 Min",
+        "15 Min",
+        "30 Min",
+        "1 Hr",
+        "2 Hrs",
+        "6 Hrs",
+        "Time to 73.1%"
+    );
     println!("  ───────────────┼────────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┼───────────────────");
 
     let volume_scenarios = [
-        (100_000, 1.157),       // 100k / day (0.07k / min)
-        (500_000, 5.787),       // 500k / day
-        (1_000_000, 11.574),    // 1M / day
-        (5_000_000, 57.870),    // 5M / day
-        (10_000_000, 115.741),  // 10M / day (nationwide retail)
-        (50_000_000, 578.704),  // 50M / day (large payment networks)
-        (100_000_000, 1157.407) // 100M / day (Visa scale)
+        (100_000, 1.157),        // 100k / day (0.07k / min)
+        (500_000, 5.787),        // 500k / day
+        (1_000_000, 11.574),     // 1M / day
+        (5_000_000, 57.870),     // 5M / day
+        (10_000_000, 115.741),   // 10M / day (nationwide retail)
+        (50_000_000, 578.704),   // 50M / day (large payment networks)
+        (100_000_000, 1157.407), // 100M / day (Visa scale)
     ];
 
     for &(daily_vol, tps) in &volume_scenarios {
@@ -833,12 +972,24 @@ fn failure_discovery_simulation() {
                 time_to_isolation = Some(sec);
             }
 
-            if sec == 300 { sample_5m = current_pct; }
-            if sec == 900 { sample_15m = current_pct; }
-            if sec == 1800 { sample_30m = current_pct; }
-            if sec == 3600 { sample_1h = current_pct; }
-            if sec == 7200 { sample_2h = current_pct; }
-            if sec == 21600 { sample_6h = current_pct; }
+            if sec == 300 {
+                sample_5m = current_pct;
+            }
+            if sec == 900 {
+                sample_15m = current_pct;
+            }
+            if sec == 1800 {
+                sample_30m = current_pct;
+            }
+            if sec == 3600 {
+                sample_1h = current_pct;
+            }
+            if sec == 7200 {
+                sample_2h = current_pct;
+            }
+            if sec == 21600 {
+                sample_6h = current_pct;
+            }
         }
 
         let iso_str = match time_to_isolation {
@@ -858,8 +1009,3 @@ fn failure_discovery_simulation() {
                  vol_label, tps, sample_5m, sample_15m, sample_30m, sample_1h, sample_2h, sample_6h, iso_str);
     }
 }
-
-
-
-
-

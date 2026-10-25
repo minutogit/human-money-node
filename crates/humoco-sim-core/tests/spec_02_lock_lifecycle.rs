@@ -17,7 +17,12 @@ fn test_lock_lifecycle_provisional_transition_7_nodes() {
 
     // Add 4 attestations -> still Pending
     for node_id in 0..4 {
-        let att = sign_lock_attestation(node_id, &record.id, &record.parent_lock, SimTime(100 + node_id as u64));
+        let att = sign_lock_attestation(
+            node_id,
+            &record.id,
+            &record.parent_lock,
+            SimTime(100 + node_id as u64),
+        );
         let status = apply_attestation(&mut record, att, active_nodes).unwrap();
         assert_eq!(status, LockStatus::Pending);
     }
@@ -50,7 +55,12 @@ fn test_lock_lifecycle_final_transition_20_nodes() {
     let active_nodes = 20; // Required for FINAL = 14
 
     for node_id in 0..13 {
-        let att = sign_lock_attestation(node_id, &record.id, &record.parent_lock, SimTime(100 + node_id as u64));
+        let att = sign_lock_attestation(
+            node_id,
+            &record.id,
+            &record.parent_lock,
+            SimTime(100 + node_id as u64),
+        );
         let status = apply_attestation(&mut record, att, active_nodes).unwrap();
         assert_eq!(status, LockStatus::Pending);
     }
@@ -72,7 +82,12 @@ fn test_lock_promotion_from_provisional_to_final() {
     // Phase 1: Small village net (N=10, Quorum = 7)
     let active_nodes_village = 10;
     for node_id in 0..7 {
-        let att = sign_lock_attestation(node_id, &record.id, &record.parent_lock, SimTime(50 * node_id as u64));
+        let att = sign_lock_attestation(
+            node_id,
+            &record.id,
+            &record.parent_lock,
+            SimTime(50 * node_id as u64),
+        );
         apply_attestation(&mut record, att, active_nodes_village).unwrap();
     }
     assert_eq!(
@@ -86,7 +101,12 @@ fn test_lock_promotion_from_provisional_to_final() {
     // Merge into World Net (N=20). More nodes attest to reach 14
     let active_nodes_world = 20;
     for node_id in 7..14 {
-        let att = sign_lock_attestation(node_id, &record.id, &record.parent_lock, SimTime(50 * node_id as u64));
+        let att = sign_lock_attestation(
+            node_id,
+            &record.id,
+            &record.parent_lock,
+            SimTime(50 * node_id as u64),
+        );
         apply_attestation(&mut record, att, active_nodes_world).unwrap();
     }
 

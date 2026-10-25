@@ -36,12 +36,13 @@ use humoco_node::ingress::{PowEngine, TierController};
 use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 
-
 /// Explicit isolated fixture premises: mature tickets and installed shard state.
 /// These transport/collector tests do not prove bootstrap or recovery completeness.
 fn prepared_readiness() -> Arc<humoco_node::daemon::ShardReadinessManager> {
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
-    for shard in 0..=u16::MAX { readiness.mark_shard_ready(shard); }
+    for shard in 0..=u16::MAX {
+        readiness.mark_shard_ready(shard);
+    }
     readiness
 }
 
@@ -49,12 +50,28 @@ async fn prepare_mature_fixture(pm: &PeerManager, local: &NodeIdentity) {
     for peer in pm.list_peers().await {
         if let Some(key) = peer.node_id {
             let ticket = pm.get_hrw_routing_id(&key).await.unwrap_or(key);
-            pm.learn_node_from_gossip_with_hrw(key, ticket, peer.addr, 0, None).await;
-            pm.set_first_seen_for_test(&key, std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+            pm.learn_node_from_gossip_with_hrw(key, ticket, peer.addr, 0, None)
+                .await;
+            pm.set_first_seen_for_test(
+                &key,
+                std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+            )
+            .await;
         }
     }
-    pm.learn_node_from_gossip_with_hrw(*local.node_pubkey(), *local.hrw_routing_id(), "127.0.0.1:1".parse().unwrap(), 0, None).await;
-    pm.set_first_seen_for_test(local.node_pubkey(), std::time::Instant::now() - std::time::Duration::from_secs(25*3600)).await;
+    pm.learn_node_from_gossip_with_hrw(
+        *local.node_pubkey(),
+        *local.hrw_routing_id(),
+        "127.0.0.1:1".parse().unwrap(),
+        0,
+        None,
+    )
+    .await;
+    pm.set_first_seen_for_test(
+        local.node_pubkey(),
+        std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+    )
+    .await;
 }
 
 fn test_now_ms() -> u64 {
@@ -124,13 +141,12 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
     // -----------------------------------------------------------------------
     const NUM_SHARDS: usize = 20;
     const NUM_PRE_KNOWN: usize = 9; // 9 nodes already know Lock X (return Verified/200 OK)
-    const NUM_NEW: usize = 11;      // 11 nodes receive Lock X for first time (return Verified/201 Created)
+    const NUM_NEW: usize = 11; // 11 nodes receive Lock X for first time (return Verified/201 Created)
     assert_eq!(NUM_PRE_KNOWN + NUM_NEW, NUM_SHARDS);
 
     let gw_temp = tempdir().expect("gw tempdir");
-    let gw_storage = Arc::new(
-        RedbStorage::open(&gw_temp.path().join("quorum_gw.redb")).expect("open gw redb"),
-    );
+    let gw_storage =
+        Arc::new(RedbStorage::open(&gw_temp.path().join("quorum_gw.redb")).expect("open gw redb"));
     let (gw_engine, _gw_worker) = DualTierEngine::new(gw_storage.clone());
     let gateway_id = NodeIdentity::generate();
     let gw_cancel = CancellationToken::new();
@@ -236,14 +252,22 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
     let mut counter = 0u64;
     let (_target_shard_id, root_req) = loop {
         counter += 1;
-        let req = make_hmc_genesis(&format!("lock_x_quorum_{counter}"), now + 900_000, &sender_key);
+        let req = make_hmc_genesis(
+            &format!("lock_x_quorum_{counter}"),
+            now + 900_000,
+            &sender_key,
+        );
         let tag = bs58::encode(&req.transaction_hash).into_string();
         let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
         let sid = humoco_sim_core::types::extract_shard_id(&p_bytes);
         let (comm, rem, _) = pm_gw
             .shard_committee(*gateway_id.node_pubkey(), *gateway_id.hrw_routing_id(), sid)
             .await;
-        if rem.len() == 20 && !comm.iter().any(|m| m.node_pubkey == *gateway_id.node_pubkey()) {
+        if rem.len() == 20
+            && !comm
+                .iter()
+                .any(|m| m.node_pubkey == *gateway_id.node_pubkey())
+        {
             break (sid, req);
         }
         if counter > 10_000 {
@@ -254,8 +278,14 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
     // Genesis is metadata only; the first spend owns the collision slot.
     let root_tag = bs58::encode(root_req.transaction_hash).into_string();
     for engine in std::iter::once(&gw_engine).chain(shards.iter().map(|s| &s.engine)) {
-        let (verdict, _) = engine.ingress_hmc_lock_with_origin(root_tag.clone(),
-            L2LockEntry::from(&root_req), IngressOrigin::ClientApi, Some(now)).await;
+        let (verdict, _) = engine
+            .ingress_hmc_lock_with_origin(
+                root_tag.clone(),
+                L2LockEntry::from(&root_req),
+                IngressOrigin::ClientApi,
+                Some(now),
+            )
+            .await;
         assert!(matches!(verdict, L2Verdict::Verified { .. }));
     }
     use sha3::{Digest, Sha3_256};
@@ -270,7 +300,9 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
     lock_x_req.ds_tag = Some(lookup_tag.clone());
     lock_x_req.transaction_hash = [91; 32];
     lock_x_req.deletable_at = None;
-    lock_x_req.layer2_signature = sender_key.sign(&calculate_l2_payload_hash(&lock_x_req)).to_bytes();
+    lock_x_req.layer2_signature = sender_key
+        .sign(&calculate_l2_payload_hash(&lock_x_req))
+        .to_bytes();
     let lock_x_entry = L2LockEntry::from(&lock_x_req);
 
     // Pre-populate Lock X on the first 9 shard nodes (shards 0..9).
@@ -286,7 +318,10 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
                 Some(now),
             )
             .await;
-        assert!(is_new, "Initial pre-population on shard {s} must be newly accepted");
+        assert!(
+            is_new,
+            "Initial pre-population on shard {s} must be newly accepted"
+        );
         assert!(matches!(verdict, L2Verdict::Verified { .. }));
     }
 
@@ -330,10 +365,7 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
     }
 
     let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
-    let tier_controller = Arc::new(TierController::new(
-        gw_storage.clone(),
-        pow_engine.clone(),
-    ));
+    let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("quorum_test_token");
 
     let mut state = AppState::new(
@@ -368,7 +400,12 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
         "Gateway submission must succeed with 200/201, got {status}"
     );
 
-    let body_bytes = resp.into_body().collect().await.expect("collect body").to_bytes();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
     let envelope: L2ResponseEnvelope =
         serde_json::from_slice(&body_bytes).expect("deserialize envelope");
 
@@ -403,7 +440,8 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
         "All 20 shard nodes (9 replay + 11 new) must have signed the certificate"
     );
     assert_eq!(
-        cert.signatures.len(), 20,
+        cert.signatures.len(),
+        20,
         "Exactly 20 distinct attestations must be collected"
     );
 

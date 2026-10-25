@@ -36,7 +36,8 @@ fn make_test_lock(
 #[tokio::test]
 async fn test_final_lock_immune_to_unquorated_lower_hash_displacement() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("final_immunity.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("final_immunity.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage);
 
     let parent_lock: Hash256 = [0xAAu8; 32];
@@ -78,7 +79,10 @@ async fn test_final_lock_immune_to_unquorated_lower_hash_displacement() {
         nonce_rogue,
         now,
         valid_until,
-        LockStatus::Provisional { sigs: 3, required: 14 },
+        LockStatus::Provisional {
+            sigs: 3,
+            required: 14,
+        },
     );
     let rogue_lock_id = rogue_lock.id;
 
@@ -94,7 +98,10 @@ async fn test_final_lock_immune_to_unquorated_lower_hash_displacement() {
     assert_eq!(res, Ok(IngressVerdictLow::AcceptedNew));
 
     // Verify FINAL lock is in RAM
-    let ram_lock = engine.get_ram_lock(&parent_lock).await.expect("final lock in ram");
+    let ram_lock = engine
+        .get_ram_lock(&parent_lock)
+        .await
+        .expect("final lock in ram");
     assert_eq!(ram_lock.id, final_lock_id);
     assert!(ram_lock.status.is_final());
 
@@ -132,7 +139,10 @@ async fn test_final_lock_immune_to_unquorated_lower_hash_displacement() {
     );
 
     // 4. Verify RAM state is immutable: still holds final_lock_id, never rogue_lock_id
-    let ram_after = engine.get_ram_lock(&parent_lock).await.expect("final lock in ram");
+    let ram_after = engine
+        .get_ram_lock(&parent_lock)
+        .await
+        .expect("final lock in ram");
     assert_eq!(
         ram_after.id, final_lock_id,
         "RAM index must still hold certified FINAL lock"
@@ -147,7 +157,8 @@ async fn test_final_lock_immune_to_unquorated_lower_hash_displacement() {
 #[tokio::test]
 async fn test_final_lock_displaces_provisional_lock_with_lower_hash() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("final_displaces.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("final_displaces.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage);
 
     let parent_lock: Hash256 = [0xCCu8; 32];
@@ -175,7 +186,10 @@ async fn test_final_lock_displaces_provisional_lock_with_lower_hash() {
         nonce_prov,
         now,
         valid_until,
-        LockStatus::Provisional { sigs: 7, required: 14 },
+        LockStatus::Provisional {
+            sigs: 7,
+            required: 14,
+        },
     );
     let prov_lock_id = prov_lock.id;
 
@@ -199,7 +213,10 @@ async fn test_final_lock_displaces_provisional_lock_with_lower_hash() {
         )
         .await;
     assert_eq!(res, Ok(IngressVerdictLow::AcceptedNew));
-    assert_eq!(engine.get_ram_lock(&parent_lock).await.unwrap().id, prov_lock_id);
+    assert_eq!(
+        engine.get_ram_lock(&parent_lock).await.unwrap().id,
+        prov_lock_id
+    );
 
     // 2. Incoming sync brings certified FINAL lock from global network (14 sigs)
     let sync_res = engine
@@ -247,7 +264,10 @@ async fn test_two_provisional_locks_split_brain_uses_min_canonical_hash() {
         nonce_a,
         now,
         valid_until,
-        LockStatus::Provisional { sigs: 7, required: 14 },
+        LockStatus::Provisional {
+            sigs: 7,
+            required: 14,
+        },
     );
     let mut lock_b = make_test_lock(
         parent_lock,
@@ -255,7 +275,10 @@ async fn test_two_provisional_locks_split_brain_uses_min_canonical_hash() {
         nonce_b,
         now,
         valid_until,
-        LockStatus::Provisional { sigs: 13, required: 14 },
+        LockStatus::Provisional {
+            sigs: 13,
+            required: 14,
+        },
     );
 
     let res = resolve_split_brain_canonical(&mut lock_a, &mut lock_b, None, None);

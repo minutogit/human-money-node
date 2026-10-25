@@ -389,7 +389,10 @@ impl Cli {
                 path, force, with_key, mnemonic, words, passphrase, wizard, qr, json,
             ),
             Commands::Keygen { out, force } => execute_keygen(out, force),
-            Commands::Run { config, bootstrap_new_region } => execute_run_with_bootstrap(config, bootstrap_new_region).await,
+            Commands::Run {
+                config,
+                bootstrap_new_region,
+            } => execute_run_with_bootstrap(config, bootstrap_new_region).await,
             Commands::Status { config, json, qr } => execute_status(config, json, qr).await,
             Commands::Peers { config, json } => execute_peers(config, json).await,
             Commands::Quota { command } => execute_quota(command).await,
@@ -893,7 +896,10 @@ pub async fn execute_run(config_path: Option<PathBuf>) -> Result<(), NodeError> 
     execute_run_with_bootstrap(config_path, false).await
 }
 
-async fn execute_run_with_bootstrap(config_path: Option<PathBuf>, bootstrap: bool) -> Result<(), NodeError> {
+async fn execute_run_with_bootstrap(
+    config_path: Option<PathBuf>,
+    bootstrap: bool,
+) -> Result<(), NodeError> {
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
     if !cfg_path.exists() {
         return Err(NodeError::Cli(format!(
@@ -913,7 +919,11 @@ async fn execute_run_with_bootstrap(config_path: Option<PathBuf>, bootstrap: boo
 
     let identity = NodeIdentity::load_from_file(&config.identity.key_path)?;
     let daemon = NodeDaemon::new(config, identity);
-    let daemon = if bootstrap { daemon.bootstrap_new_region() } else { daemon };
+    let daemon = if bootstrap {
+        daemon.bootstrap_new_region()
+    } else {
+        daemon
+    };
     daemon.run().await
 }
 

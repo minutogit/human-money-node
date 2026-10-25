@@ -36,10 +36,7 @@ pub fn addr_peer_string(addr: SocketAddr) -> String {
 /// `peers_per_node` where `peers_per_node[i]` is the list of peer strings
 /// that node `i` should be configured with (its immediate predecessor and
 /// successor in the chain).
-pub fn chain_peer_lists(
-    identities: &[NodeIdentity],
-    addrs: &[SocketAddr],
-) -> Vec<Vec<String>> {
+pub fn chain_peer_lists(identities: &[NodeIdentity], addrs: &[SocketAddr]) -> Vec<Vec<String>> {
     assert_eq!(identities.len(), addrs.len());
     let n = identities.len();
     let mut result: Vec<Vec<String>> = vec![Vec::new(); n];
@@ -55,10 +52,7 @@ pub fn chain_peer_lists(
 }
 
 /// Generates peer lists for a full-mesh topology.
-pub fn full_mesh_peer_lists(
-    identities: &[NodeIdentity],
-    addrs: &[SocketAddr],
-) -> Vec<Vec<String>> {
+pub fn full_mesh_peer_lists(identities: &[NodeIdentity], addrs: &[SocketAddr]) -> Vec<Vec<String>> {
     assert_eq!(identities.len(), addrs.len());
     let n = identities.len();
     let mut result: Vec<Vec<String>> = vec![Vec::new(); n];

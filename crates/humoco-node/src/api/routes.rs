@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    Json, Router,
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
+    Json, Router,
 };
 use ed25519_dalek::Signer;
 use tower_http::cors::CorsLayer;
@@ -38,8 +38,8 @@ use crate::api::dto::{
     PowChallengeResponse, QuorumCertificateDto, SyncRequest, SyncResponse,
 };
 use crate::api::hmc::{
-    L2ChainLockRequest, L2LockEntry, L2LockRequest, L2StatusQuery, L2Verdict,
     verify_l2_lock_signature, wrap_and_sign_verdict, wrap_and_sign_verdict_with_quorum,
+    L2ChainLockRequest, L2LockEntry, L2LockRequest, L2StatusQuery, L2Verdict,
 };
 use crate::identity::NodeIdentity;
 use crate::ingress::{IngressError, PowEngine, TierController};
@@ -740,14 +740,12 @@ pub fn create_attestation(
 
 /// Resolves a voucher root for a stateless gateway (Phase 2 P1):
 /// RAM already missed; check persistent disk for the signed genesis TTL
-/// before falling back to provisional forwarding. Returns the immutable
+/// Look up local voucher root from disk storage (A25-04). Returns the immutable
 /// `root.valid_until` in ms when the genesis lock is known on disk.
-async fn fetch_remote_voucher_root(state: &AppState, voucher_id: &str) -> Option<u64> {
+async fn lookup_local_voucher_root(state: &AppState, voucher_id: &str) -> Option<u64> {
     if let Ok(Some(root)) = state.storage.voucher_root(voucher_id) {
         return crate::storage::db::roots::root_valid_until(&root).ok();
     }
-    // The authoritative shard check happens during the subsequent quorum
-    // fanout (LockVerifyRequest); the shard enforces INV-1202 on `now_ms`.
     None
 }
 
@@ -1252,19 +1250,16 @@ async fn collect_peer_attestations(
                                     rank_idx,
                                     my_load = query.my_load,
                                     quota_limit = query.quota_limit,
-                                    "Shard peer quota rejection during 24h merge moratorium - penalty suppressed (INV-0908)"
+                                    "Shard peer quota rejection during 24h merge moratorium - neutral feedback (INV-0908)"
                                 );
                             } else {
-                                tracing::warn!(
+                                tracing::info!(
                                     %addr,
                                     rank_idx,
                                     my_load = query.my_load,
                                     quota_limit = query.quota_limit,
-                                    "Shard peer fraudulently claimed FLAG_QUOTA_EXCEEDED (Zone 1) - recording peer failure"
+                                    "Shard peer claimed FLAG_QUOTA_EXCEEDED (Zone 1) - neutral feedback (Spec 09 §5.2)"
                                 );
-                                if rank_idx < 20 {
-                                    query.peer_mgr.record_failure(addr).await;
-                                }
                             }
                         }
                         humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff { .. }
@@ -1849,6 +1844,83 @@ async fn submit_hmc_lock(
         return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
     }
 
+    // # Early Inexpensive Ingress Admission (A25-04 / Rule 9):
+    // Validate credentials presence before any disk lookups (get_hmc_voucher_root_valid)
+    // or asymmetric signing operations.
+    let auth_token = headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s));
+    let peer_token = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok());
+    let pow_challenge = headers.get("X-PoW-Challenge").and_then(|h| h.to_str().ok());
+    let pow_nonce = headers
+        .get("X-PoW-Nonce")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let req_q_override = headers
+        .get("X-Required-Quorum")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok());
+
+    let parent_for_pow_val = if req.is_genesis {
+        None
+    } else {
+        let tag = req.ds_tag.as_deref().unwrap_or_default();
+        Some(*blake3::hash(tag.as_bytes()).as_bytes())
+    };
+    let parent_for_pow = parent_for_pow_val.as_ref();
+
+    let has_credentials = auth_token.is_some()
+        || peer_token.is_some()
+        || (pow_challenge.is_some() && pow_nonce.is_some());
+
+    if !has_credentials {
+        let (status, reason, req_diff, chal, exp) = match state
+            .tier_controller
+            .evaluate_and_charge_with_time(None, None, None, None, 0, parent_for_pow, Some(now_ms))
+            .await
+        {
+            Err(IngressError::PoWRequired {
+                challenge,
+                difficulty,
+                expires_at,
+            }) => {
+                state.metrics.record_rejected_bad_pow_400();
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Proof-of-Work challenge response required".to_string(),
+                    Some(difficulty),
+                    Some(challenge),
+                    Some(expires_at),
+                )
+            }
+            _ => (
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized: credentials or PoW required".to_string(),
+                None,
+                None,
+                None,
+            ),
+        };
+        let err_resp = ErrorResponse {
+            error: "PoWRequired".into(),
+            message: reason,
+            challenge: chal,
+            difficulty: req_diff,
+            expires_at: exp,
+        };
+        let mut resp = (status, Json(err_resp)).into_response();
+        if let Some(req_diff) = req_diff {
+            if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
+                resp.headers_mut().insert(
+                    axum::http::HeaderName::from_static("x-required-difficulty"),
+                    hdr_val,
+                );
+            }
+        }
+        return resp;
+    }
+
     let stored_root_valid = state
         .engine
         .get_hmc_voucher_root_valid(&req.layer2_voucher_id)
@@ -1895,7 +1967,7 @@ async fn submit_hmc_lock(
                 if let Some(del) = parsed_deletable {
                     del
                 } else if let Some(disk_root) =
-                    fetch_remote_voucher_root(&state, &req.layer2_voucher_id).await
+                    lookup_local_voucher_root(&state, &req.layer2_voucher_id).await
                 {
                     disk_root
                 } else {
@@ -1989,69 +2061,7 @@ async fn submit_hmc_lock(
     }
 
     // # Architectural Invariant (Rule 9 / A09): Cheap-Checks-First
-    // 1. Validate credentials presence in RAM (< 1 µs) BEFORE expensive Ed25519 verification.
     let ttl_seconds = (root_valid_until.saturating_sub(now_ms)) / 1000;
-    let auth_token = headers
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s));
-    let peer_token = headers.get("X-Peer-Token").and_then(|h| h.to_str().ok());
-    let pow_challenge = headers.get("X-PoW-Challenge").and_then(|h| h.to_str().ok());
-    let pow_nonce = headers
-        .get("X-PoW-Nonce")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-    let req_q_override = headers
-        .get("X-Required-Quorum")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<usize>().ok());
-
-    let parent_for_pow = if req.is_genesis {
-        None
-    } else {
-        Some(&parent_bytes)
-    };
-
-    let has_credentials = auth_token.is_some()
-        || peer_token.is_some()
-        || (pow_challenge.is_some() && pow_nonce.is_some());
-
-    if !has_credentials {
-        let (status, reason, req_diff) = match state
-            .tier_controller
-            .evaluate_and_charge_with_time(
-                None,
-                None,
-                None,
-                None,
-                ttl_seconds,
-                parent_for_pow,
-                Some(now_ms),
-            )
-            .await
-        {
-            Err(IngressError::PoWRequired { difficulty, .. }) => {
-                state.metrics.record_rejected_bad_pow_400();
-                (
-                    StatusCode::UNAUTHORIZED,
-                    "Proof-of-Work challenge response required".to_string(),
-                    Some(difficulty),
-                )
-            }
-            _ => (StatusCode::UNAUTHORIZED, "Unauthorized".to_string(), None),
-        };
-        let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
-        let mut resp = (status, Json(envelope)).into_response();
-        if let Some(req_diff) = req_diff {
-            if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
-                resp.headers_mut().insert(
-                    axum::http::HeaderName::from_static("x-required-difficulty"),
-                    hdr_val,
-                );
-            }
-        }
-        return resp;
-    }
 
     // A root retry is metadata idempotency, not a new PoW purchase or vote.
     // Await an exact durable acknowledgment even if its first commit is pending.
@@ -2311,8 +2321,27 @@ async fn submit_hmc_lock(
                     }
                 }
             }
-            let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
-            let mut resp = (status, Json(envelope)).into_response();
+            if matches!(err, IngressError::QuotaExceeded { .. }) && auth_token.is_some() {
+                let envelope =
+                    wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
+                return (status, Json(envelope)).into_response();
+            }
+            let err_resp = ErrorResponse {
+                error: match &err {
+                    IngressError::QuotaExceeded { .. } => "QuotaExceeded".to_string(),
+                    IngressError::ReadQuotaExceeded { .. } => "ReadQuotaExceeded".to_string(),
+                    IngressError::InvalidPoW(..) => "InvalidPoW".to_string(),
+                    IngressError::PoWRequired { .. } => "PoWRequired".to_string(),
+                    IngressError::InvalidAuthToken => "InvalidAuthToken".to_string(),
+                    IngressError::InvalidPeerToken => "InvalidPeerToken".to_string(),
+                    _ => "AdmissionDenied".to_string(),
+                },
+                message: reason,
+                challenge: None,
+                difficulty: required_diff_hdr,
+                expires_at: None,
+            };
+            let mut resp = (status, Json(err_resp)).into_response();
             if let Some(req_diff) = required_diff_hdr {
                 if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
                     resp.headers_mut().insert(
@@ -2754,8 +2783,27 @@ async fn submit_hmc_chain_lock_inner(
                     }
                 }
             }
-            let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
-            return (status, Json(envelope)).into_response();
+            if matches!(err, IngressError::QuotaExceeded { .. }) && auth_token.is_some() {
+                let envelope =
+                    wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
+                return (status, Json(envelope)).into_response();
+            }
+            let err_resp = ErrorResponse {
+                error: match &err {
+                    IngressError::QuotaExceeded { .. } => "QuotaExceeded".to_string(),
+                    IngressError::ReadQuotaExceeded { .. } => "ReadQuotaExceeded".to_string(),
+                    IngressError::InvalidPoW(..) => "InvalidPoW".to_string(),
+                    IngressError::PoWRequired { .. } => "PoWRequired".to_string(),
+                    IngressError::InvalidAuthToken => "InvalidAuthToken".to_string(),
+                    IngressError::InvalidPeerToken => "InvalidPeerToken".to_string(),
+                    _ => "AdmissionDenied".to_string(),
+                },
+                message: reason,
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            };
+            return (status, Json(err_resp)).into_response();
         }
     };
 
@@ -2800,10 +2848,10 @@ async fn submit_hmc_chain_lock_inner(
     };
 
     let last_hop = match chain_req.chain.last() {
-                Some(h) => h,
-                None => return (StatusCode::BAD_REQUEST, "empty chain").into_response(),
-            };
-            let lookup_tag = if last_hop.is_genesis {
+        Some(h) => h,
+        None => return (StatusCode::BAD_REQUEST, "empty chain").into_response(),
+    };
+    let lookup_tag = if last_hop.is_genesis {
         bs58::encode(&last_hop.transaction_hash).into_string()
     } else {
         last_hop.ds_tag.clone().unwrap_or_default()

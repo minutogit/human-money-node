@@ -17,6 +17,10 @@ pub const HEARTBEAT_FRESHNESS_WINDOW_MS: u64 = 60_000;
 pub const DEFAULT_HANDLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Grace period given to handlers on cancellation during shutdown (100 ms)
 pub const SHUTDOWN_HANDLER_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+/// Canonical SNI used for P2P QUIC handshakes to prevent DPI firewalls from dropping external packets advertising "localhost".
+pub const P2P_QUIC_SNI: &str = "p2p.humoco.internal";
+
+use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
@@ -368,7 +372,8 @@ impl NodeRequestHandler {
     ) -> Result<bool, NodeError> {
         let now_ms = self.net_time_ms();
 
-        let proof = match bincode::deserialize::<humoco_sim_core::fraud::FraudProofPayload>(payload) {
+        let proof = match bincode::deserialize::<humoco_sim_core::fraud::FraudProofPayload>(payload)
+        {
             Ok(p) => p,
             Err(e) => {
                 warn!("EquivocationProof rejected: deserialize failed: {}", e);
@@ -396,10 +401,12 @@ impl NodeRequestHandler {
 
         // Atomic persistence of evidence + ban in redb (A20-01 / INV-1402)
         let evidence_hash = *blake3::hash(payload).as_bytes();
-        if let Err(e) = self
-            .storage
-            .commit_slashing_evidence_and_ban(&evidence_hash, payload, &offender, now_ms)
-        {
+        if let Err(e) = self.storage.commit_slashing_evidence_and_ban(
+            &evidence_hash,
+            payload,
+            &offender,
+            now_ms,
+        ) {
             warn!(
                 offender = %hex::encode(offender),
                 error = %e,
@@ -516,7 +523,8 @@ impl RequestHandler for NodeRequestHandler {
 
             // --- Phase 4: Real slashing on EquivocationProof (Spec 10 Pillar 1, A02-01, A20-01) ---
             if msg_type == MsgType::EquivocationProof as u16 {
-                this.handle_incoming_equivocation_proof(&payload, peer_identity).await?;
+                this.handle_incoming_equivocation_proof(&payload, peer_identity)
+                    .await?;
                 let resp_header = WireHeader::new(
                     MsgType::EquivocationAck as u16,
                     header.session_seq.wrapping_add(1),
@@ -1104,16 +1112,25 @@ impl RequestHandler for NodeRequestHandler {
                 // within root TTL. Retries of previously committed operations succeed idempotently
                 // without exhausting the sender's daily budget.
                 let is_exact_retry = match &wire_payload {
-                    crate::network::framing::LockWirePayload::Hmc { req, root_valid_until, chain, .. } => {
+                    crate::network::framing::LockWirePayload::Hmc {
+                        req,
+                        root_valid_until,
+                        chain,
+                        ..
+                    } => {
                         if req.is_genesis && chain.as_ref().is_none_or(|c| c.chain.len() == 1) {
                             let tag = bs58::encode(req.transaction_hash).into_string();
                             let entry = crate::api::hmc::L2LockEntry::from(req);
-                            engine.is_hmc_entry_durable(&tag, &entry, *root_valid_until).await
+                            engine
+                                .is_hmc_entry_durable(&tag, &entry, *root_valid_until)
+                                .await
                         } else if chain.is_none() {
                             let lookup_tag = req.ds_tag.clone().unwrap_or_default();
                             if !lookup_tag.trim().is_empty() {
                                 let entry = crate::api::hmc::L2LockEntry::from(req);
-                                engine.is_hmc_entry_durable(&lookup_tag, &entry, *root_valid_until).await
+                                engine
+                                    .is_hmc_entry_durable(&lookup_tag, &entry, *root_valid_until)
+                                    .await
                             } else {
                                 false
                             }
@@ -1262,7 +1279,9 @@ impl RequestHandler for NodeRequestHandler {
                                     );
                                     return Ok((resp_header, bytes));
                                 }
-                                _ => {
+                                crate::api::hmc::L2Verdict::Verified {
+                                    lock_entry: accepted_lock,
+                                } => {
                                     let last_hop = match chain_req.chain.last() {
                                         Some(h) => h,
                                         None => {
@@ -1295,7 +1314,7 @@ impl RequestHandler for NodeRequestHandler {
                                     let attestation =
                                         crate::api::routes::create_attestation_for_network(
                                             &identity,
-                                            op_hash,
+                                            accepted_lock.t_id,
                                             parent_bytes,
                                             shard_id,
                                             final_status,
@@ -1307,7 +1326,7 @@ impl RequestHandler for NodeRequestHandler {
                                     let retained = engine
                                         .persist_original_approval(
                                             lookup_tag.clone(),
-                                            crate::api::hmc::L2LockEntry::from(last_hop),
+                                            accepted_lock,
                                             *identity.node_pubkey(),
                                             candidate,
                                             final_status,
@@ -1338,6 +1357,16 @@ impl RequestHandler for NodeRequestHandler {
                                         payload_len,
                                     );
                                     return Ok((resp_header, resp_bytes));
+                                }
+                                _ => {
+                                    let resp_header = WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                        0,
+                                    );
+                                    return Ok((resp_header, Vec::new()));
                                 }
                             }
                         } else {
@@ -1427,7 +1456,9 @@ impl RequestHandler for NodeRequestHandler {
                                     );
                                     return Ok((resp_header, bytes));
                                 }
-                                _ => {
+                                crate::api::hmc::L2Verdict::Verified {
+                                    lock_entry: accepted_lock,
+                                } => {
                                     let parent_bytes =
                                         *blake3::hash(lookup_tag.as_bytes()).as_bytes();
                                     let requested_status = (header.flags & 0xFF) as u8;
@@ -1447,7 +1478,7 @@ impl RequestHandler for NodeRequestHandler {
                                     let attestation =
                                         crate::api::routes::create_attestation_for_network(
                                             &identity,
-                                            entry.t_id,
+                                            accepted_lock.t_id,
                                             parent_bytes,
                                             shard_id,
                                             final_status,
@@ -1459,7 +1490,7 @@ impl RequestHandler for NodeRequestHandler {
                                     let retained = engine
                                         .persist_original_approval(
                                             lookup_tag.clone(),
-                                            entry.clone(),
+                                            accepted_lock,
                                             *identity.node_pubkey(),
                                             candidate,
                                             final_status,
@@ -1490,6 +1521,16 @@ impl RequestHandler for NodeRequestHandler {
                                         payload_len,
                                     );
                                     return Ok((resp_header, resp_bytes));
+                                }
+                                _ => {
+                                    let resp_header = WireHeader::new(
+                                        MsgType::LockVerifyResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                        0,
+                                    );
+                                    return Ok((resp_header, Vec::new()));
                                 }
                             }
                         }
@@ -2129,7 +2170,9 @@ impl RequestHandler for NodeRequestHandler {
                 return Ok(());
             }
             if header.msg_type == MsgType::EquivocationProof as u16 {
-                let _ = this.handle_incoming_equivocation_proof(&payload, sender).await;
+                let _ = this
+                    .handle_incoming_equivocation_proof(&payload, sender)
+                    .await;
                 return Ok(());
             }
             if header.msg_type == MsgType::Heartbeat as u16 {
@@ -2177,7 +2220,7 @@ impl RequestHandler for NodeRequestHandler {
 
                     if hb.signature != [0u8; 64] {
                         let announcement_hash = hb.compute_announcement_hash();
-                        let ev_write = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                        let candidate_ev = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                             hb.node_id,
                             0,
                             0,
@@ -2189,26 +2232,31 @@ impl RequestHandler for NodeRequestHandler {
                             announcement_hash,
                             hb.signature,
                         );
-                        let valid = humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev_write)
-                            || {
-                                let legacy_ev = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
-                                    hb.node_id,
-                                    0,
-                                    0,
-                                    hb.timestamp_ms,
-                                    hb.declared_write_ema_micro_bj,
-                                    hb.declared_read_ema_credits,
-                                    0,
-                                    false,
-                                    [0u8; 32],
-                                    hb.signature,
-                                );
-                                humoco_sim_core::fraud::verify_ingress_envelope_signature(&legacy_ev)
-                            };
-                        if !valid {
-                            warn!(node = %hex::encode(hb.node_id), "Heartbeat rejected: invalid signature");
-                            return Ok(());
-                        }
+                        let ev_write = if humoco_sim_core::fraud::verify_ingress_envelope_signature(
+                            &candidate_ev,
+                        ) {
+                            candidate_ev
+                        } else {
+                            let legacy_ev = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                                hb.node_id,
+                                0,
+                                0,
+                                hb.timestamp_ms,
+                                hb.declared_write_ema_micro_bj,
+                                hb.declared_read_ema_credits,
+                                0,
+                                false,
+                                [0u8; 32],
+                                hb.signature,
+                            );
+                            if humoco_sim_core::fraud::verify_ingress_envelope_signature(&legacy_ev)
+                            {
+                                legacy_ev
+                            } else {
+                                warn!(node = %hex::encode(hb.node_id), "Heartbeat rejected: invalid signature");
+                                return Ok(());
+                            }
+                        };
 
                         if let Some(pm) = peer_manager.as_ref() {
                             if let Some(prev) = pm.get_node_write_evidence(&hb.node_id).await {
@@ -2364,6 +2412,54 @@ pub struct QuicTransport {
 /// Backwards-compatible alias for `QuicTransport` (task spec naming: `QuicP2pTransport`).
 pub type QuicP2pTransport = QuicTransport;
 
+/// Creates a Quinn server endpoint supporting dual-stack IPv6/IPv4 binding when requested.
+fn create_server_endpoint(
+    server_config: quinn::ServerConfig,
+    addr: SocketAddr,
+) -> Result<quinn::Endpoint, NodeError> {
+    if let SocketAddr::V6(v6) = addr {
+        if v6.ip().is_unspecified() {
+            let dual_stack_res: Result<quinn::Endpoint, std::io::Error> = (|| {
+                let sock = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+                let _ = sock.set_only_v6(false);
+                sock.bind(&socket2::SockAddr::from(addr))?;
+                sock.set_nonblocking(true)?;
+                let udp_sock = std::net::UdpSocket::from(sock);
+                quinn::Endpoint::new(
+                    quinn::EndpointConfig::default(),
+                    Some(server_config.clone()),
+                    udp_sock,
+                    Arc::new(quinn::TokioRuntime),
+                )
+            })();
+
+            match dual_stack_res {
+                Ok(ep) => return Ok(ep),
+                Err(err) => {
+                    warn!(
+                        "Dual-stack IPv6 socket binding on {} failed ({}); falling back to quinn::Endpoint::server",
+                        addr, err
+                    );
+                }
+            }
+        }
+    }
+
+    quinn::Endpoint::server(server_config, addr)
+        .map_err(|e| NodeError::Network(format!("Failed to bind QUIC endpoint on {}: {}", addr, e)))
+}
+
+/// Helper to map an IPv4 target address to an IPv4-mapped IPv6 address
+/// when the local endpoint is bound to an IPv6 dual-stack socket.
+fn prepare_dial_addr(local_addr: Option<SocketAddr>, remote_addr: SocketAddr) -> SocketAddr {
+    match (remote_addr, local_addr) {
+        (SocketAddr::V4(v4), Some(SocketAddr::V6(_))) => SocketAddr::V6(
+            std::net::SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0),
+        ),
+        _ => remote_addr,
+    }
+}
+
 impl QuicTransport {
     /// Returns true if the node is sync-ready after initial recovery.
     pub fn is_sync_ready(&self) -> bool {
@@ -2431,9 +2527,7 @@ impl QuicTransport {
                 identity, network_id,
             )?;
 
-        let mut endpoint = quinn::Endpoint::server(server_config, addr).map_err(|e| {
-            NodeError::Network(format!("Failed to bind QUIC endpoint on {}: {}", addr, e))
-        })?;
+        let mut endpoint = create_server_endpoint(server_config, addr)?;
 
         endpoint.set_default_client_config(client_config);
         peer_manager.set_endpoint(endpoint.clone());
@@ -2551,14 +2645,15 @@ impl QuicTransport {
         } else {
             Some(self.shard_pool.reserve()?)
         };
+        let dial_addr = prepare_dial_addr(self.endpoint.local_addr().ok(), addr);
         let connecting = if self.peer_manager.is_f2f_addr(&addr).await {
             let config = crate::network::tls::build_quinn_friend_client_config(
                 &self.identity,
                 self.network_id,
             )?;
-            self.endpoint.connect_with(config, addr, "localhost")
+            self.endpoint.connect_with(config, dial_addr, P2P_QUIC_SNI)
         } else {
-            self.endpoint.connect(addr, "localhost")
+            self.endpoint.connect(dial_addr, P2P_QUIC_SNI)
         }
         .map_err(NodeError::QuinnConnect)?;
 
@@ -2623,14 +2718,15 @@ impl QuicTransport {
         } else {
             Some(self.shard_pool.reserve()?)
         };
+        let dial_addr = prepare_dial_addr(self.endpoint.local_addr().ok(), addr);
         let connecting = if self.peer_manager.is_f2f_addr(&addr).await {
             let config = crate::network::tls::build_quinn_friend_client_config(
                 &self.identity,
                 self.network_id,
             )?;
-            self.endpoint.connect_with(config, addr, "localhost")
+            self.endpoint.connect_with(config, dial_addr, P2P_QUIC_SNI)
         } else {
-            self.endpoint.connect(addr, "localhost")
+            self.endpoint.connect(dial_addr, P2P_QUIC_SNI)
         }
         .map_err(NodeError::QuinnConnect)?;
 

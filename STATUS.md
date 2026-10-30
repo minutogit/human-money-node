@@ -3,7 +3,7 @@ project: human-money-node
 version: "0.1.1"
 phase: "active-development"
 health: "green"
-last_updated: "2026-09-14"
+last_updated: "2026-10-30"
 blocks: []
 blocked_by: []
 priority_tasks:
@@ -12,7 +12,7 @@ priority_tasks:
     status: "open"
     priority: "high"
     depends_on: []
-    description: "Integrate human-money-core client flow with human-money-node ingress API"
+    description: "Integrate human-money-core client flow with human-money-node ingress API. Requires aligning `hmc.rs` domain tag from `HMC_TX_AUTH_V3` to `HMC_TX_AUTH_V4` (per Core v0.5.1) and exposing public/feed endpoints for `RegionalMeshView`."
   - id: "NODE-002"
     title: "Multi-Node Testnet Deployment & Stress Testing"
     status: "open"

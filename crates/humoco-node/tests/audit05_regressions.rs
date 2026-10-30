@@ -147,14 +147,20 @@ fn test_a05_02_group_commit_multiple_compatible_approvals() {
         .expect("get choice")
         .expect("choice 1 present");
     assert_eq!(choice1.child, r1.id);
-    assert_eq!(choice1.approvals[0].as_deref(), Some(b"approval_r1".as_slice()));
+    assert_eq!(
+        choice1.approvals[0].as_deref(),
+        Some(b"approval_r1".as_slice())
+    );
 
     let choice3 = reopened
         .own_signing_choice(&node, &tag3)
         .expect("get choice")
         .expect("choice 3 present");
     assert_eq!(choice3.child, entry3.t_id);
-    assert_eq!(choice3.approvals[0].as_deref(), Some(b"approval_h3".as_slice()));
+    assert_eq!(
+        choice3.approvals[0].as_deref(),
+        Some(b"approval_h3".as_slice())
+    );
 }
 
 #[test]
@@ -226,7 +232,11 @@ fn test_a05_02_group_commit_conflict_isolation() {
     assert!(db.get_lock(&r2.parent_lock).expect("get").is_some());
     assert!(db.get_lock(&r3.parent_lock).expect("get").is_some());
     assert_eq!(
-        db.get_lock(&existing.parent_lock).expect("get").unwrap().0.id,
+        db.get_lock(&existing.parent_lock)
+            .expect("get")
+            .unwrap()
+            .0
+            .id,
         existing.id,
         "Conflicting choice did not alter existing record"
     );
@@ -392,8 +402,13 @@ fn test_a05_02_flush_worker_conflict_isolation_in_batch() {
     // 1 group attempt, 2 committed, conflict is non-fatal for worker health
     assert_eq!(outcome.attempts, 1);
     assert_eq!(outcome.ops_committed, 2);
-    assert!(!outcome.failed, "OwnChoiceConflict must not mark worker failed");
-    assert!(!health.signing_failed.load(std::sync::atomic::Ordering::Acquire));
+    assert!(
+        !outcome.failed,
+        "OwnChoiceConflict must not mark worker failed"
+    );
+    assert!(!health
+        .signing_failed
+        .load(std::sync::atomic::Ordering::Acquire));
 
     // Confirm completions
     assert!(c2_rx.borrow().as_ref().unwrap().is_ok());

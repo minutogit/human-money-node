@@ -951,7 +951,9 @@ pub fn hrw_score(node_id: NodeId, shard_id: ShardId) -> Hash256 {
 /// Computes the normalized HRW score in the interval [0.0, 1.0)
 pub fn hrw_score_normalized(node_id: NodeId, shard_id: ShardId) -> f64 {
     let hash = hrw_score(node_id, shard_id);
-    let val = u128::from_be_bytes(hash[0..16].try_into().unwrap());
+    let mut buf = [0u8; 16];
+    buf.copy_from_slice(&hash[0..16]);
+    let val = u128::from_be_bytes(buf);
     val as f64 / u128::MAX as f64
 }
 
@@ -968,7 +970,9 @@ pub fn hrw_score_32(routing_id: &HrwRoutingId, shard_id: ShardId) -> Hash256 {
 /// Computes the normalized HRW score for HrwRoutingId in the interval [0.0, 1.0)
 pub fn hrw_score_32_normalized(routing_id: &HrwRoutingId, shard_id: ShardId) -> f64 {
     let hash = hrw_score_32(routing_id, shard_id);
-    let val = u128::from_be_bytes(hash[0..16].try_into().unwrap());
+    let mut buf = [0u8; 16];
+    buf.copy_from_slice(&hash[0..16]);
+    let val = u128::from_be_bytes(buf);
     val as f64 / u128::MAX as f64
 }
 
@@ -1196,10 +1200,17 @@ pub fn evaluate_digest_clusters(
         }
     }
     if best_votes >= needed_votes && needed_votes != 0 {
-        ClusterResult::DominantQuorum {
-            digest: best_digest.unwrap(),
-            votes: best_votes,
-            peers: best_peers,
+        if let Some(digest) = best_digest {
+            ClusterResult::DominantQuorum {
+                digest,
+                votes: best_votes,
+                peers: best_peers,
+            }
+        } else {
+            ClusterResult::InsufficientQuorum {
+                max_votes: 0,
+                backoff_ms: 500,
+            }
         }
     } else {
         ClusterResult::InsufficientQuorum {

@@ -11,7 +11,9 @@ use ed25519_dalek::Signer;
 use humoco_node::{
     config::NodeConfig,
     control::ControlServer,
-    network::{DefaultRequestHandler, HeartbeatWirePayload, NodeRequestHandler, PeerManager, QuicTransport},
+    network::{
+        DefaultRequestHandler, HeartbeatWirePayload, NodeRequestHandler, PeerManager, QuicTransport,
+    },
     storage::{DualTierEngine, RedbStorage},
     NodeIdentity,
 };
@@ -44,11 +46,14 @@ async fn relay_probe(signed: bool) {
     .unwrap();
     let aa = a.local_addr().unwrap();
     let ba = b.local_addr().unwrap();
-    ma.register_f2f_friend(*recipient.node_pubkey(), Some(ba)).await;
-    mb.register_f2f_friend(*attacker.node_pubkey(), Some(aa)).await;
+    ma.register_f2f_friend(*recipient.node_pubkey(), Some(ba))
+        .await;
+    mb.register_f2f_friend(*attacker.node_pubkey(), Some(aa))
+        .await;
     let real = "127.0.0.1:31337".parse().unwrap();
     let forged = "127.0.0.1:31338".parse().unwrap();
-    mb.learn_node_from_gossip(*victim.node_pubkey(), real, 0, None).await;
+    mb.learn_node_from_gossip(*victim.node_pubkey(), real, 0, None)
+        .await;
     a.spawn_accept_loop();
     b.spawn_accept_loop();
     let conn = a.connect_peer(ba).await.unwrap();
@@ -195,13 +200,7 @@ async fn a09_cli_revoke_must_produce_peer_acceptable_self_evidence() {
     let conn = a.connect_peer(b.local_addr().unwrap()).await.unwrap();
     a.send_request(
         &conn,
-        &WireHeader::new(
-            MsgType::EquivocationProof as u16,
-            1,
-            0,
-            0,
-            raw.len() as u32,
-        ),
+        &WireHeader::new(MsgType::EquivocationProof as u16, 1, 0, 0, raw.len() as u32),
         &raw,
     )
     .await
@@ -370,10 +369,12 @@ async fn a10_verified_ban_must_survive_closed_persistence_worker() {
         1000,
     );
     assert!(proof.verify());
-    assert!(humoco_node::network::transport::verify_equivocation_first_party(
-        victim.verifying_key(),
-        &proof
-    ));
+    assert!(
+        humoco_node::network::transport::verify_equivocation_first_party(
+            victim.verifying_key(),
+            &proof
+        )
+    );
 
     let payload = bincode::serialize(&proof).unwrap();
     let reply = a
@@ -528,7 +529,10 @@ async fn a10_conflicting_original_attestations_trigger_automatic_shard_equivocat
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(ram_banned, "engine RAM ban must be populated asynchronously");
+    assert!(
+        ram_banned,
+        "engine RAM ban must be populated asynchronously"
+    );
 
     worker.abort();
     let _ = worker.await;

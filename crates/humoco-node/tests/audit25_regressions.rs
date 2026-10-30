@@ -284,7 +284,13 @@ async fn test_a25_r1_canonical_hash_work_accepted_and_legacy_solution_hash_rejec
     // 2. Verification with canonical nonce succeeds
     let (challenge, _, _) = pow.generate_challenge_for_parent_at(&parent, now_sec);
     let verify_res = pow
-        .verify_pow_for_parent_at(&challenge, canonical_nonce, difficulty, Some(&parent), now_sec)
+        .verify_pow_for_parent_at(
+            &challenge,
+            canonical_nonce,
+            difficulty,
+            Some(&parent),
+            now_sec,
+        )
         .await;
     assert_eq!(
         verify_res,
@@ -560,17 +566,32 @@ fn test_a25_r4_client_token_validator_enforces_strict_128bit_hex() {
 
     // Rejected: wrong lengths (less or more than 32 hex chars)
     assert!(!is_valid_client_token("f2f_0123"));
-    assert!(!is_valid_client_token("f2f_0123456789abcdef0123456789abcde")); // 31 chars
-    assert!(!is_valid_client_token("f2f_0123456789abcdef0123456789abcdef0")); // 33 chars
+    assert!(!is_valid_client_token(
+        "f2f_0123456789abcdef0123456789abcde"
+    )); // 31 chars
+    assert!(!is_valid_client_token(
+        "f2f_0123456789abcdef0123456789abcdef0"
+    )); // 33 chars
 
     // Rejected: non-hex characters
-    assert!(!is_valid_client_token("f2f_0123456789abcdef0123456789abcdeg")); // 'g' is non-hex
-    assert!(!is_valid_client_token("f2f_0123456789abcdef0123456789abcde-")); // '-' is non-hex
+    assert!(!is_valid_client_token(
+        "f2f_0123456789abcdef0123456789abcdeg"
+    )); // 'g' is non-hex
+    assert!(!is_valid_client_token(
+        "f2f_0123456789abcdef0123456789abcde-"
+    )); // '-' is non-hex
 
     // Accepted: exactly 32 hex characters (128-bit secret)
-    assert!(is_valid_client_token("f2f_0123456789abcdef0123456789abcdef"));
-    assert!(is_valid_client_token("f2f_00000000000000000000000000000000"));
-    assert!(is_valid_client_token("f2f_FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"));
-    assert!(is_valid_client_token("  f2f_0123456789abcdef0123456789abcdef  "));
+    assert!(is_valid_client_token(
+        "f2f_0123456789abcdef0123456789abcdef"
+    ));
+    assert!(is_valid_client_token(
+        "f2f_00000000000000000000000000000000"
+    ));
+    assert!(is_valid_client_token(
+        "f2f_FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    ));
+    assert!(is_valid_client_token(
+        "  f2f_0123456789abcdef0123456789abcdef  "
+    ));
 }
-

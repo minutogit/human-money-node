@@ -1107,7 +1107,13 @@ pub async fn collect_peer_attestations(
     let peer_work = async {
         let mut join_set = tokio::task::JoinSet::new();
 
-        let spawn_next = |join_set: &mut tokio::task::JoinSet<_>, idx: &mut usize, t_queried: &mut usize, in_flight: &mut std::collections::HashMap<usize, (std::net::SocketAddr, usize)>| {
+        let spawn_next = |join_set: &mut tokio::task::JoinSet<_>,
+                          idx: &mut usize,
+                          t_queried: &mut usize,
+                          in_flight: &mut std::collections::HashMap<
+            usize,
+            (std::net::SocketAddr, usize),
+        >| {
             if *idx < query.candidate_nodes.len() {
                 let (nid, addr) = query.candidate_nodes[*idx];
                 let rank_idx = *idx;
@@ -1125,7 +1131,9 @@ pub async fn collect_peer_attestations(
                         let conn = t.connect_peer(addr).await.map_err(PeerQueryError::from)?;
                         // Pillar 3: capture the actual TLS certificate key of the
                         // queried peer so the attestation signer can be bound to it.
-                        let tls_pubkey = crate::network::tls::extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
+                        let tls_pubkey =
+                            crate::network::tls::extract_peer_identity_from_connection(&conn)
+                                .map(|(nid, _)| nid);
 
                         // Bounded attempt loop: writes attempt at most 3 sends on transport failures;
                         // reads perform a single attempt. Any successful response stops retries.
@@ -1155,8 +1163,13 @@ pub async fn collect_peer_attestations(
 
                         // Phase 2 P1 (INV-0604): genuine HMC double-spend carries
                         // FLAG_COLLISION_DETECTED + colliding lock payload for 409.
-                        if (resp_header.flags & humoco_sim_core::wire::FLAG_COLLISION_DETECTED) != 0 {
-                            return Err(PeerQueryError::Collision(resp_header, resp_payload, tls_pubkey));
+                        if (resp_header.flags & humoco_sim_core::wire::FLAG_COLLISION_DETECTED) != 0
+                        {
+                            return Err(PeerQueryError::Collision(
+                                resp_header,
+                                resp_payload,
+                                tls_pubkey,
+                            ));
                         }
                         if (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0 {
                             return Err(PeerQueryError::QuotaExceeded);
@@ -1179,138 +1192,226 @@ pub async fn collect_peer_attestations(
                         Err(PeerQueryError::Generic)
                     };
                     match query_peer.await {
-                        Ok((att, tls_pubkey)) => (nid, addr, rank_idx, PeerQueryResult::Success(att, tls_pubkey)),
-                        Err(PeerQueryError::LocalCapacity) => (nid, addr, rank_idx, PeerQueryResult::LocalCapacity),
-                        Err(PeerQueryError::QuotaExceeded) => (nid, addr, rank_idx, PeerQueryResult::QuotaExceeded),
-                        Err(PeerQueryError::NotInShard) => (nid, addr, rank_idx, PeerQueryResult::NotInShard),
-                        Err(PeerQueryError::Collision(hdr, payload, tls_pk)) => {
-                            (nid, addr, rank_idx, PeerQueryResult::Collision(hdr, payload, tls_pk))
+                        Ok((att, tls_pubkey)) => (
+                            nid,
+                            addr,
+                            rank_idx,
+                            PeerQueryResult::Success(att, tls_pubkey),
+                        ),
+                        Err(PeerQueryError::LocalCapacity) => {
+                            (nid, addr, rank_idx, PeerQueryResult::LocalCapacity)
                         }
-                        Err(PeerQueryError::Generic) => (nid, addr, rank_idx, PeerQueryResult::Failure),
+                        Err(PeerQueryError::QuotaExceeded) => {
+                            (nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)
+                        }
+                        Err(PeerQueryError::NotInShard) => {
+                            (nid, addr, rank_idx, PeerQueryResult::NotInShard)
+                        }
+                        Err(PeerQueryError::Collision(hdr, payload, tls_pk)) => (
+                            nid,
+                            addr,
+                            rank_idx,
+                            PeerQueryResult::Collision(hdr, payload, tls_pk),
+                        ),
+                        Err(PeerQueryError::Generic) => {
+                            (nid, addr, rank_idx, PeerQueryResult::Failure)
+                        }
                     }
                 });
             }
         };
 
         let needed = query.required_q.saturating_sub(collected_signatures.len());
-        let initial_spawns = if is_write { query.candidate_nodes.len() } else {
-            (needed + query.shard_query_depth).min(query.candidate_nodes.len()).min(20)
+        let initial_spawns = if is_write {
+            query.candidate_nodes.len()
+        } else {
+            (needed + query.shard_query_depth)
+                .min(query.candidate_nodes.len())
+                .min(20)
         };
         for _ in 0..initial_spawns {
-            spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+            spawn_next(
+                &mut join_set,
+                &mut candidate_idx,
+                &mut total_queried,
+                &mut in_flight,
+            );
         }
         loop {
-            if is_write && collected_signatures.len() + join_set.len()
-                + query.candidate_nodes.len().saturating_sub(candidate_idx) < query.required_q {
+            if is_write
+                && collected_signatures.len()
+                    + join_set.len()
+                    + query.candidate_nodes.len().saturating_sub(candidate_idx)
+                    < query.required_q
+            {
                 join_set.abort_all();
                 in_flight.clear();
                 break;
             }
             if collected_signatures.len() >= query.required_q {
+                join_set.abort_all();
+                in_flight.clear();
                 break;
             }
             if join_set.is_empty() {
                 if candidate_idx >= query.candidate_nodes.len() {
                     break;
                 }
-                spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
+                spawn_next(
+                    &mut join_set,
+                    &mut candidate_idx,
+                    &mut total_queried,
+                    &mut in_flight,
+                );
                 continue;
             }
-            match tokio::time::timeout(std::time::Duration::from_millis(50), join_set.join_next()).await {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), join_set.join_next())
+                .await
+            {
                 Ok(Some(res)) => match res {
-                Ok((_nid, addr, rank_idx, PeerQueryResult::Success(att, tls_pubkey))) => {
-                    in_flight.remove(&rank_idx);
+                    Ok((_nid, addr, rank_idx, PeerQueryResult::Success(att, tls_pubkey))) => {
+                        in_flight.remove(&rank_idx);
 
-                    // Pillar 3: dedup strictly via 32-byte NodePubKey when
-                    // present; legacy 16-bit prefix only as fallback.
-                    let is_duplicate = match att.node_pubkey_bytes() {
-                        Some(pk) => collected_signatures.iter().any(|s| {
-                            s.node_pubkey_bytes().map(|p| p == pk).unwrap_or(false)
-                        }),
-                        None => collected_signatures.iter().any(|s| s.node_id == att.node_id),
-                    };
-                    if is_duplicate {
-                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                        continue;
-                    }
-
-                    let expected_member = query.expected_members.and_then(|members| members.get(rank_idx)).copied();
-                    if expected_member.map(|pk| Some(pk) != att.node_pubkey_bytes() || Some(pk) != tls_pubkey).unwrap_or(false)
-                        || !verify_peer_attestation(query.peer_mgr, &att, (query.lock_id, query.parent_lock), query.shard_id, query.target_status, query.network_id, tls_pubkey).await {
-                        if rank_idx < 20 {
-                            query.peer_mgr.record_failure(addr).await;
+                        // Pillar 3: dedup strictly via 32-byte NodePubKey when
+                        // present; legacy 16-bit prefix only as fallback.
+                        let is_duplicate = match att.node_pubkey_bytes() {
+                            Some(pk) => collected_signatures
+                                .iter()
+                                .any(|s| s.node_pubkey_bytes().map(|p| p == pk).unwrap_or(false)),
+                            None => collected_signatures
+                                .iter()
+                                .any(|s| s.node_id == att.node_id),
+                        };
+                        if is_duplicate {
+                            spawn_next(
+                                &mut join_set,
+                                &mut candidate_idx,
+                                &mut total_queried,
+                                &mut in_flight,
+                            );
+                            continue;
                         }
-                        spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                        continue;
-                    }
 
-                    // Phase 8 (Spec 15/19): only genuinely performed shard
-                    // work (verified attestation) decays the Tit-for-Tat
-                    // malus — a pure handshake never does.
-                    query.peer_mgr.record_shard_work(addr).await;
-                    collected_signatures.push(att);
+                        let expected_member = query
+                            .expected_members
+                            .and_then(|members| members.get(rank_idx))
+                            .copied();
+                        if expected_member
+                            .map(|pk| Some(pk) != att.node_pubkey_bytes() || Some(pk) != tls_pubkey)
+                            .unwrap_or(false)
+                            || !verify_peer_attestation(
+                                query.peer_mgr,
+                                &att,
+                                (query.lock_id, query.parent_lock),
+                                query.shard_id,
+                                query.target_status,
+                                query.network_id,
+                                tls_pubkey,
+                            )
+                            .await
+                        {
+                            if rank_idx < 20 {
+                                query.peer_mgr.record_failure(addr).await;
+                            }
+                            spawn_next(
+                                &mut join_set,
+                                &mut candidate_idx,
+                                &mut total_queried,
+                                &mut in_flight,
+                            );
+                            continue;
+                        }
 
-                    // Early return as soon as required quorum is reached
-                    if collected_signatures.len() >= query.required_q {
-                        join_set.abort_all();
-                        in_flight.clear(); // Aborted stragglers must NEVER be counted as peer failures (AGENTS.md / INV-1501)
-                        break;
-                    }
-                }
-                Ok((_nid, _addr, rank_idx, PeerQueryResult::LocalCapacity)) => {
-                    in_flight.remove(&rank_idx);
-                    // Our own full socket budget says nothing about this peer.
-                    // Do not expand a read search while local admission is full.
-                    candidate_idx = query.candidate_nodes.len();
-                }
-                Ok((_nid, _addr, rank_idx, PeerQueryResult::NotInShard)) => {
-                    in_flight.remove(&rank_idx);
-                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                }
-                Ok((_nid, addr, rank_idx, PeerQueryResult::Collision(hdr, payload, tls_pk))) => {
-                    in_flight.remove(&rank_idx);
-                    let expected_member = query.expected_members.and_then(|members| members.get(rank_idx)).copied();
-                    if let Some(entry) = validate_remote_collision(
-                        &hdr,
-                        &payload,
-                        tls_pk,
-                        expected_member,
-                        &query,
-                    ) {
-                        // Genuine shard work (verified conflict lookup) decays malus; the
-                        // colliding lock is first-party double-spend evidence.
+                        // Phase 8 (Spec 15/19): only genuinely performed shard
+                        // work (verified attestation) decays the Tit-for-Tat
+                        // malus — a pure handshake never does.
                         query.peer_mgr.record_shard_work(addr).await;
-                        if collision_entry.is_none() {
-                            collision_entry = Some(entry);
+                        collected_signatures.push(att);
+
+                        // Early return as soon as required quorum is reached
+                        if collected_signatures.len() >= query.required_q {
+                            join_set.abort_all();
+                            in_flight.clear(); // Aborted stragglers must NEVER be counted as peer failures (AGENTS.md / INV-1501)
+                            break;
                         }
                     }
-                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                }
-                Ok((_nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)) => {
-                    in_flight.remove(&rank_idx);
-                    // =========================================================================
-                    // ARCHITECTURE GUARD: Spec 09 §5.2 / INV-0909 / INV-1701 / INV-1703
-                    // (Non-Authoritative Telemetry, Quota Isolation & Strict Neutral Feedback)
-                    //
-                    // 1. NEUTRAL PROTOCOL FEEDBACK: `FLAG_QUOTA_EXCEEDED` is a cooperative capacity
-                    //    and overload signal, NOT a transport error, crash, or Byzantine equivocation.
-                    // 2. NON-AUTHORITATIVE TELEMETRY (INV-1701): Local load and thermometer estimates
-                    //    are subjective observations. Subjective load discrepancies must NEVER trigger
-                    //    automated bans or peer failure penalties (`record_failure` is strictly forbidden).
-                    // 3. THREE-ZONE IMMUNITY (Spec 09 §5.2 / INV-0909):
-                    //    - Zone 1 (FraudulentRejection / apparent load divergence): Even if our local
-                    //      load estimate appears lower than the peer's declared limit, dynamic network
-                    //      jitter or regional traffic bursts prevent proving malicious intent.
-                    //    - Zone 2 (BoundaryCutoff 75%..125%): Expected boundary fluctuation band.
-                    //    - Zone 3 (LegitimateOverload > 125%): Acknowledged network-wide saturation.
-                    // 4. 24H MERGE MORATORIUM (INV-0908): After a partition merge (Village Merge),
-                    //    divergent regional thermometers are reconciled; no quota malus may be applied.
-                    // 5. FIRST-PARTY EVIDENCE DOCTRINE: Sanctions require irrefutable cryptographic
-                    //    self-proof (EquivocationProof). Quota exhaustion never affects `missing_count`.
-                    // =========================================================================
-                    let in_moratorium = query.peer_mgr.is_in_merge_hysteresis(query.peer_mgr.net_time_ms());
-                    let verdict = humoco_sim_core::quota::evaluate_quota_exceeded_claim(query.my_load, query.quota_limit);
-                    match verdict {
+                    Ok((_nid, _addr, rank_idx, PeerQueryResult::LocalCapacity)) => {
+                        in_flight.remove(&rank_idx);
+                        // Our own full socket budget says nothing about this peer.
+                        // Do not expand a read search while local admission is full.
+                        candidate_idx = query.candidate_nodes.len();
+                    }
+                    Ok((_nid, _addr, rank_idx, PeerQueryResult::NotInShard)) => {
+                        in_flight.remove(&rank_idx);
+                        spawn_next(
+                            &mut join_set,
+                            &mut candidate_idx,
+                            &mut total_queried,
+                            &mut in_flight,
+                        );
+                    }
+                    Ok((
+                        _nid,
+                        addr,
+                        rank_idx,
+                        PeerQueryResult::Collision(hdr, payload, tls_pk),
+                    )) => {
+                        in_flight.remove(&rank_idx);
+                        let expected_member = query
+                            .expected_members
+                            .and_then(|members| members.get(rank_idx))
+                            .copied();
+                        if let Some(entry) = validate_remote_collision(
+                            &hdr,
+                            &payload,
+                            tls_pk,
+                            expected_member,
+                            &query,
+                        ) {
+                            // Genuine shard work (verified conflict lookup) decays malus; the
+                            // colliding lock is first-party double-spend evidence.
+                            query.peer_mgr.record_shard_work(addr).await;
+                            if collision_entry.is_none() {
+                                collision_entry = Some(entry);
+                            }
+                        }
+                        spawn_next(
+                            &mut join_set,
+                            &mut candidate_idx,
+                            &mut total_queried,
+                            &mut in_flight,
+                        );
+                    }
+                    Ok((_nid, addr, rank_idx, PeerQueryResult::QuotaExceeded)) => {
+                        in_flight.remove(&rank_idx);
+                        // =========================================================================
+                        // ARCHITECTURE GUARD: Spec 09 §5.2 / INV-0909 / INV-1701 / INV-1703
+                        // (Non-Authoritative Telemetry, Quota Isolation & Strict Neutral Feedback)
+                        //
+                        // 1. NEUTRAL PROTOCOL FEEDBACK: `FLAG_QUOTA_EXCEEDED` is a cooperative capacity
+                        //    and overload signal, NOT a transport error, crash, or Byzantine equivocation.
+                        // 2. NON-AUTHORITATIVE TELEMETRY (INV-1701): Local load and thermometer estimates
+                        //    are subjective observations. Subjective load discrepancies must NEVER trigger
+                        //    automated bans or peer failure penalties (`record_failure` is strictly forbidden).
+                        // 3. THREE-ZONE IMMUNITY (Spec 09 §5.2 / INV-0909):
+                        //    - Zone 1 (FraudulentRejection / apparent load divergence): Even if our local
+                        //      load estimate appears lower than the peer's declared limit, dynamic network
+                        //      jitter or regional traffic bursts prevent proving malicious intent.
+                        //    - Zone 2 (BoundaryCutoff 75%..125%): Expected boundary fluctuation band.
+                        //    - Zone 3 (LegitimateOverload > 125%): Acknowledged network-wide saturation.
+                        // 4. 24H MERGE MORATORIUM (INV-0908): After a partition merge (Village Merge),
+                        //    divergent regional thermometers are reconciled; no quota malus may be applied.
+                        // 5. FIRST-PARTY EVIDENCE DOCTRINE: Sanctions require irrefutable cryptographic
+                        //    self-proof (EquivocationProof). Quota exhaustion never affects `missing_count`.
+                        // =========================================================================
+                        let in_moratorium = query
+                            .peer_mgr
+                            .is_in_merge_hysteresis(query.peer_mgr.net_time_ms());
+                        let verdict = humoco_sim_core::quota::evaluate_quota_exceeded_claim(
+                            query.my_load,
+                            query.quota_limit,
+                        );
+                        match verdict {
                         humoco_sim_core::quota::QuotaPlausibilityVerdict::FraudulentRejection { .. } => {
                             if in_moratorium {
                                 tracing::info!(
@@ -1341,16 +1442,26 @@ pub async fn collect_peer_attestations(
                             );
                         }
                     }
-                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                }
-                Ok((_nid, addr, rank_idx, PeerQueryResult::Failure)) => {
-                    in_flight.remove(&rank_idx);
-                    timeout_addrs.push((addr, rank_idx));
-                    spawn_next(&mut join_set, &mut candidate_idx, &mut total_queried, &mut in_flight);
-                }
-                Err(_) => {
-                    // Task cancelled/panicked
-                }
+                        spawn_next(
+                            &mut join_set,
+                            &mut candidate_idx,
+                            &mut total_queried,
+                            &mut in_flight,
+                        );
+                    }
+                    Ok((_nid, addr, rank_idx, PeerQueryResult::Failure)) => {
+                        in_flight.remove(&rank_idx);
+                        timeout_addrs.push((addr, rank_idx));
+                        spawn_next(
+                            &mut join_set,
+                            &mut candidate_idx,
+                            &mut total_queried,
+                            &mut in_flight,
+                        );
+                    }
+                    Err(_) => {
+                        // Task cancelled/panicked
+                    }
                 },
                 Ok(None) => break,
                 Err(_) => continue,
@@ -1521,7 +1632,11 @@ pub async fn assemble_quorum_certificate_with_deadline(
                                 .engine
                                 .get_hmc_ram_lock(&tag)
                                 .await
-                                .filter(|e| e.t_id == lock_id)
+                                .filter(|e| {
+                                    e.t_id == lock_id
+                                        && e.layer2_voucher_id == req.layer2_voucher_id
+                                        && e.sender_ephemeral_pub == req.sender_ephemeral_pub
+                                })
                             {
                                 let fut = state.engine.persist_original_approval(
                                     tag,
@@ -2051,30 +2166,10 @@ async fn submit_hmc_lock_with_deadline(
         return resp;
     }
 
-    let stored_root_valid = state
-        .engine
-        .get_hmc_voucher_root_valid(&req.layer2_voucher_id)
-        .await;
-
-    let parsed_deletable = req
-        .causal_output
-        .as_ref()
-        .filter(|proof| proof.is_root)
-        .map(|proof| proof.root_valid_until_ms)
-        .or_else(|| {
-            req.deletable_at.as_deref().and_then(|raw| {
-                raw.parse::<u64>().ok().or_else(|| {
-                    chrono::DateTime::parse_from_rfc3339(raw)
-                        .ok()
-                        .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
-                })
-            })
-        });
-
     let (valid_until, root_valid_until) = if req.is_genesis {
         // Genesis is only a Root Anchor; its signed validity is immutable.
-        let del = match parsed_deletable {
-            Some(d) => d,
+        let raw_del = match req.deletable_at.as_deref() {
+            Some(raw) => raw,
             None => {
                 let envelope = wrap_and_sign_verdict(
                     &state.identity,
@@ -2085,12 +2180,48 @@ async fn submit_hmc_lock_with_deadline(
                 return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
             }
         };
-        (del, del)
+        if crate::storage::db::roots::parse_deletable_at_ms(raw_del).is_err() {
+            let envelope = wrap_and_sign_verdict(
+                &state.identity,
+                L2Verdict::Rejected {
+                    reason: "Genesis lock requires valid deletable_at timestamp".into(),
+                },
+            );
+            return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+        }
+        let root_valid_until_ms =
+            match crate::storage::db::roots::root_valid_until(&L2LockEntry::from(&req)) {
+                Ok(v) => v,
+                Err(e) => {
+                    let envelope = wrap_and_sign_verdict(
+                        &state.identity,
+                        L2Verdict::Rejected {
+                            reason: format!("Invalid genesis root TTL: {e}"),
+                        },
+                    );
+                    return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+                }
+            };
+        (root_valid_until_ms, root_valid_until_ms)
     } else {
         // Follow-up Lock (Transfer / Split / Spend):
         // The separate genesis Root Anchor must be registered first.
         // Without a known root (locally or from the client-supplied TTL),
         // there is no immutable TTL to inherit — reject with 400 Bad Request.
+        let stored_root_valid = state
+            .engine
+            .get_hmc_voucher_root_valid(&req.layer2_voucher_id)
+            .await;
+        let parsed_deletable = req
+            .causal_output
+            .as_ref()
+            .filter(|proof| proof.is_root)
+            .map(|proof| proof.root_valid_until_ms)
+            .or_else(|| {
+                req.deletable_at.as_deref().and_then(|raw| {
+                    crate::storage::db::roots::parse_deletable_at_ms(raw).ok()
+                })
+            });
         let root = match stored_root_valid {
             Some(r) => r,
             None => {
@@ -2918,7 +3049,12 @@ async fn submit_hmc_chain_lock_inner(
 
         if let Err(err) = state
             .pow_engine
-            .verify_pow_for_parent(challenge, nonce, dynamic_difficulty, terminal_parent_for_pow)
+            .verify_pow_for_parent(
+                challenge,
+                nonce,
+                dynamic_difficulty,
+                terminal_parent_for_pow,
+            )
             .await
         {
             state.metrics.record_rejected_bad_pow_400();
@@ -2971,15 +3107,31 @@ async fn submit_hmc_chain_lock_inner(
     }
 
     // Derive root_valid_until for Byte-Years accounting (same logic as engine)
+    let mut chain_genesis_root = None;
+    for hop in &chain_req.chain {
+        if hop.is_genesis {
+            match crate::storage::db::roots::root_valid_until(&L2LockEntry::from(hop)) {
+                Ok(valid_ms) => chain_genesis_root = Some(valid_ms),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "InvalidRequest".into(),
+                            message: format!("Invalid genesis root TTL: {e}"),
+                            challenge: None,
+                            difficulty: None,
+                            expires_at: None,
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     let stored_root = state
         .engine
         .get_hmc_voucher_root_valid(&chain_req.layer2_voucher_id)
         .await;
-    let chain_genesis_root = chain_req
-        .chain
-        .iter()
-        .find(|hop| hop.is_genesis)
-        .and_then(|hop| crate::storage::db::roots::root_valid_until(&L2LockEntry::from(hop)).ok());
     let Some(root_valid_until) = stored_root.or(chain_genesis_root) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -3205,8 +3357,7 @@ async fn submit_hmc_chain_lock_inner(
             Ok(res) => res,
             Err(_) => {
                 let reason =
-                    "504 Gateway Timeout: Chain persistence exceeded checkout budget"
-                        .to_string();
+                    "504 Gateway Timeout: Chain persistence exceeded checkout budget".to_string();
                 let rej_verdict = L2Verdict::Rejected { reason };
                 let envelope = wrap_and_sign_verdict(&state.identity, rej_verdict);
                 return (StatusCode::GATEWAY_TIMEOUT, Json(envelope)).into_response();

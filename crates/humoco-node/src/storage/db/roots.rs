@@ -31,27 +31,30 @@ pub(crate) fn same_root_deed(
             _ => true,
         }
 }
-pub fn root_valid_until(entry: &crate::api::hmc::L2LockEntry) -> Result<u64, StorageError> {
-    let raw = entry
-        .deletable_at
-        .as_deref()
-        .ok_or_else(|| StorageError::DurableCommitFailed("root validity missing".into()))?;
-    let legacy = raw
-        .parse::<u64>()
+pub fn parse_deletable_at_ms(raw: &str) -> Result<u64, StorageError> {
+    raw.parse::<u64>()
         .ok()
         .or_else(|| {
             chrono::DateTime::parse_from_rfc3339(raw)
                 .ok()
                 .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
         })
-        .ok_or_else(|| StorageError::DurableCommitFailed("invalid signed root validity".into()))?;
+        .ok_or_else(|| StorageError::DurableCommitFailed("invalid signed root validity".into()))
+}
+
+pub fn root_valid_until(entry: &crate::api::hmc::L2LockEntry) -> Result<u64, StorageError> {
+    let raw = entry
+        .deletable_at
+        .as_deref()
+        .ok_or_else(|| StorageError::DurableCommitFailed("root validity missing".into()))?;
+    let legacy = parse_deletable_at_ms(raw)?;
     if let Some(proof) = &entry.causal_output {
         if !proof.is_root
             || !proof.verify()
             || proof.transaction_id != entry.t_id
             || proof.sender_pubkey != entry.sender_ephemeral_pub
             || proof.voucher_id != entry.layer2_voucher_id
-            || proof.root_valid_until_ms > legacy
+            || proof.root_valid_until_ms != legacy
         {
             return Err(StorageError::DurableCommitFailed(
                 "invalid root output proof".into(),
@@ -84,27 +87,29 @@ pub fn root_valid_until(entry: &crate::api::hmc::L2LockEntry) -> Result<u64, Sto
         Ok(legacy)
     }
 }
-pub(super) fn put(
+pub fn put(
     txn: &redb::WriteTransaction,
     entry: &crate::api::hmc::L2LockEntry,
-) -> Result<(), StorageError> {
-    let expiry = root_valid_until(entry)?;
-    let bytes = serde_json::to_vec(entry)?;
-    let mut roots = txn.open_table(TABLE_VOUCHER_ROOTS)?;
-    if let Some(previous) = roots.get(entry.layer2_voucher_id.as_str())? {
-        let previous: crate::api::hmc::L2LockEntry = serde_json::from_slice(previous.value())?;
-        if !same_root_deed(&previous, entry) || root_valid_until(&previous)? != expiry {
-            return Err(StorageError::OwnChoiceConflict);
+) -> Result<u64, StorageError> {
+    let valid_until = root_valid_until(entry)?;
+    let mut table = txn.open_table(TABLE_VOUCHER_ROOTS)?;
+    if let Some(existing) = table.get(entry.layer2_voucher_id.as_str())? {
+        let existing: crate::api::hmc::L2LockEntry = serde_json::from_slice(existing.value())?;
+        if !same_root_deed(&existing, entry) || root_valid_until(&existing)? != valid_until {
+            return Err(StorageError::DurableCommitFailed(
+                "Immutable root proof conflict".into(),
+            ));
         }
-        if previous.causal_output.is_some() && entry.causal_output.is_none() {
-            return Ok(()); // A legacy retry cannot erase an authenticated output proof.
+        if existing.causal_output.is_some() && entry.causal_output.is_none() {
+            return Ok(valid_until);
         }
     }
-    roots.insert(entry.layer2_voucher_id.as_str(), bytes.as_slice())?;
-    let expires_sec = super::grace_expiry_bucket_sec(expiry);
+    let bytes = serde_json::to_vec(entry)?;
+    table.insert(entry.layer2_voucher_id.as_str(), bytes.as_slice())?;
+    let expires_sec = super::grace_expiry_bucket_sec(valid_until);
     txn.open_table(TABLE_VOUCHER_ROOT_TTL)?
         .insert((expires_sec, entry.layer2_voucher_id.as_str()), ())?;
-    Ok(())
+    Ok(valid_until)
 }
 /// Atomic bounded-chunk migration of old self-loop genesis records. Private old
 /// own signatures remain protected until their original TTL; no new root vote is
@@ -273,5 +278,99 @@ mod tests {
         assert!(db
             .put_hmc_lock(&bs58::encode(different.t_id).into_string(), &different)
             .is_err());
+    }
+
+    #[test]
+    fn root_ttl_exact_match_and_shortened_or_lengthened_sidecar_rejection() {
+        use ed25519_dalek::Signer;
+        use sha2::{Digest, Sha256};
+        let key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+        let t_id = [15; 32];
+        let sender = key.verifying_key().to_bytes();
+
+        // 1. Numeric deletable_at with exact matching sidecar succeeds
+        let raw_numeric = "60000";
+        let mut hash = Sha256::new();
+        hash.update(t_id);
+        hash.update(sender);
+        hash.update(raw_numeric.as_bytes());
+        let voucher_id = hex::encode(hash.finalize());
+
+        let mut proof = humoco_proto::causal::CausalOutputProof {
+            version: 1,
+            voucher_id: voucher_id.clone(),
+            transaction_id: t_id,
+            state_hash: [1; 32],
+            sender_pubkey: sender,
+            receiver_pubkey_hash: None,
+            change_pubkey_hash: None,
+            root_valid_until_ms: 60_000,
+            is_root: true,
+            signature: [0; 64],
+        };
+        proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
+
+        let entry = crate::api::hmc::L2LockEntry {
+            causal_output: Some(proof.clone()),
+            layer2_voucher_id: voucher_id.clone(),
+            t_id,
+            sender_ephemeral_pub: sender,
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 1_000,
+            deletable_at: Some(raw_numeric.into()),
+            privacy_guard: None,
+        };
+        assert_eq!(root_valid_until(&entry).unwrap(), 60_000);
+
+        // 2. RFC3339 deletable_at with exact matching sidecar succeeds
+        let rfc3339_raw = "2026-10-30T20:00:00Z";
+        let rfc3339_ms = chrono::DateTime::parse_from_rfc3339(rfc3339_raw)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let mut rfc_hash = Sha256::new();
+        rfc_hash.update(t_id);
+        rfc_hash.update(sender);
+        rfc_hash.update(rfc3339_raw.as_bytes());
+        let rfc_voucher_id = hex::encode(rfc_hash.finalize());
+
+        let mut rfc_proof = humoco_proto::causal::CausalOutputProof {
+            version: 1,
+            voucher_id: rfc_voucher_id.clone(),
+            transaction_id: t_id,
+            state_hash: [2; 32],
+            sender_pubkey: sender,
+            receiver_pubkey_hash: None,
+            change_pubkey_hash: None,
+            root_valid_until_ms: rfc3339_ms,
+            is_root: true,
+            signature: [0; 64],
+        };
+        rfc_proof.signature = key.sign(&rfc_proof.digest().unwrap()).to_bytes();
+        let mut rfc_entry = entry.clone();
+        rfc_entry.layer2_voucher_id = rfc_voucher_id;
+        rfc_entry.deletable_at = Some(rfc3339_raw.into());
+        rfc_entry.causal_output = Some(rfc_proof);
+        assert_eq!(root_valid_until(&rfc_entry).unwrap(), rfc3339_ms);
+
+        // 3. Shortened sidecar (< legacy) fails
+        let mut short_proof = proof.clone();
+        short_proof.root_valid_until_ms = 59_999;
+        short_proof.signature = key.sign(&short_proof.digest().unwrap()).to_bytes();
+        let mut short_entry = entry.clone();
+        short_entry.causal_output = Some(short_proof);
+        assert!(root_valid_until(&short_entry).is_err());
+
+        // 4. Lengthened sidecar (> legacy) fails
+        let mut long_proof = proof.clone();
+        long_proof.root_valid_until_ms = 60_001;
+        long_proof.signature = key.sign(&long_proof.digest().unwrap()).to_bytes();
+        let mut long_entry = entry.clone();
+        long_entry.causal_output = Some(long_proof);
+        assert!(root_valid_until(&long_entry).is_err());
     }
 }

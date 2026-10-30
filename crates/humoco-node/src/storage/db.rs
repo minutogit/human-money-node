@@ -27,6 +27,8 @@ pub const fn grace_expiry_bucket_sec(root_valid_until_ms: u64) -> u64 {
 pub enum StorageError {
     #[error("FAIL_CLOSED_CORRUPT: signing history integrity unavailable")]
     SigningHistoryCorrupt,
+    #[error("Unsupported database schema version: {found} (supported: {supported})")]
+    UnsupportedSchemaVersion { found: u32, supported: u32 },
     #[error("Redb database error: {0}")]
     Database(#[from] redb::DatabaseError),
 
@@ -38,6 +40,9 @@ pub enum StorageError {
 
     #[error("Redb commit error: {0}")]
     Commit(Box<redb::CommitError>),
+
+    #[error("Redb compaction error: {0}")]
+    Compaction(Box<redb::CompactionError>),
 
     #[error("Redb storage error: {0}")]
     Storage(#[from] redb::StorageError),
@@ -79,6 +84,16 @@ impl From<redb::CommitError> for StorageError {
     }
 }
 
+impl From<redb::CompactionError> for StorageError {
+    fn from(err: redb::CompactionError) -> Self {
+        StorageError::Compaction(Box::new(err))
+    }
+}
+
+pub const TABLE_SCHEMA_METADATA: TableDefinition<&str, u32> =
+    TableDefinition::new("schema_metadata");
+pub const CURRENT_DB_SCHEMA_VERSION: u32 = 1;
+
 pub const TABLE_LOCKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("locks");
 pub const TABLE_PROVISIONAL_LOCKS: TableDefinition<&[u8; 32], &[u8]> =
     TableDefinition::new("provisional_locks");
@@ -99,6 +114,8 @@ pub const TABLE_BANNED_NODES: TableDefinition<&[u8; 32], u64> =
     TableDefinition::new("banned_nodes");
 pub const TABLE_SYSTEM_AUDIT_EVENTS: TableDefinition<u64, &[u8]> =
     TableDefinition::new("system_audit_events");
+pub const TABLE_TICKET_OBSERVATIONS: TableDefinition<&[u8; 64], u64> =
+    TableDefinition::new("ticket_observations");
 
 /// Node-local original signing protection. Never included in shard synchronization.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -180,6 +197,23 @@ impl RedbStorage {
         // Initialize tables in a write transaction
         let write_txn = db.begin_write()?;
         {
+            let mut schema_table = write_txn.open_table(TABLE_SCHEMA_METADATA)?;
+            let existing_version = schema_table.get("schema_version")?.map(|g| g.value());
+            match existing_version {
+                Some(v) => {
+                    if v > CURRENT_DB_SCHEMA_VERSION {
+                        return Err(StorageError::UnsupportedSchemaVersion {
+                            found: v,
+                            supported: CURRENT_DB_SCHEMA_VERSION,
+                        });
+                    }
+                }
+                None => {
+                    schema_table.insert("schema_version", CURRENT_DB_SCHEMA_VERSION)?;
+                }
+            }
+        }
+        {
             let _ = write_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
             let _ = write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
             let _ = write_txn.open_table(TABLE_OWN_CHOICES)?;
@@ -196,6 +230,7 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
             let _ = write_txn.open_table(TABLE_BANNED_NODES)?;
             let _ = write_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
+            let _ = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
         }
         roots::initialize(&write_txn)?;
         let corrupt = signing::initialize(&write_txn)?;
@@ -238,7 +273,11 @@ impl RedbStorage {
         let mut results = Vec::with_capacity(entries.len());
 
         for entry in entries {
-            if entry.class > 1 || entry.approval.is_empty() || entry.approval.len() > 16_384 || entry.root_valid_until_ms == 0 {
+            if entry.class > 1
+                || entry.approval.is_empty()
+                || entry.approval.len() > 16_384
+                || entry.root_valid_until_ms == 0
+            {
                 results.push(Err(StorageError::DurableCommitFailed(
                     "Invalid original approval context".into(),
                 )));
@@ -246,7 +285,10 @@ impl RedbStorage {
             }
 
             match &entry.target {
-                OriginalApprovalTarget::Hmc { tag, entry: hmc_entry } => {
+                OriginalApprovalTarget::Hmc {
+                    tag,
+                    entry: hmc_entry,
+                } => {
                     if roots::is_root(tag, hmc_entry) {
                         results.push(Err(StorageError::DurableCommitFailed(
                             "genesis is a root proof, not an original spend approval".into(),
@@ -280,13 +322,20 @@ impl RedbStorage {
                     };
 
                     let mut locks = txn.open_table(TABLE_HMC_LOCKS)?;
-                    if let Some(old) = locks.get(tag.as_str())? {
-                        let old: crate::api::hmc::L2LockEntry = serde_json::from_slice(old.value())?;
-                        if old.t_id != hmc_entry.t_id {
+                    let is_new = if let Some(old) = locks.get(tag.as_str())? {
+                        let old: crate::api::hmc::L2LockEntry =
+                            serde_json::from_slice(old.value())?;
+                        if old.t_id != hmc_entry.t_id
+                            || old.layer2_voucher_id != hmc_entry.layer2_voucher_id
+                            || old.sender_ephemeral_pub != hmc_entry.sender_ephemeral_pub
+                        {
                             results.push(Err(StorageError::OwnChoiceConflict));
                             continue;
                         }
-                    }
+                        false
+                    } else {
+                        true
+                    };
 
                     if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
                         drop(locks);
@@ -295,15 +344,19 @@ impl RedbStorage {
                         return Err(e);
                     }
 
-                    let lock_bytes = serde_json::to_vec(hmc_entry)?;
-                    locks.insert(tag.as_str(), lock_bytes.as_slice())?;
-                    drop(locks);
-
-                    txn.open_table(TABLE_HMC_VOUCHER_INDEX)?
-                        .insert((hmc_entry.layer2_voucher_id.as_str(), tag.as_str()), ())?;
                     let expires_sec = grace_expiry_bucket_sec(entry.root_valid_until_ms);
-                    txn.open_table(TABLE_HMC_TTL_INDEX)?
-                        .insert(&(expires_sec, tag.as_str()), ())?;
+                    if is_new {
+                        let lock_bytes = serde_json::to_vec(hmc_entry)?;
+                        locks.insert(tag.as_str(), lock_bytes.as_slice())?;
+                        drop(locks);
+
+                        txn.open_table(TABLE_HMC_VOUCHER_INDEX)?
+                            .insert((hmc_entry.layer2_voucher_id.as_str(), tag.as_str()), ())?;
+                        txn.open_table(TABLE_HMC_TTL_INDEX)?
+                            .insert(&(expires_sec, tag.as_str()), ())?;
+                    } else {
+                        drop(locks);
+                    }
                     txn.open_table(TABLE_OWN_CHOICE_TTL)?
                         .insert(&(expires_sec, slot.as_str()), ())?;
 
@@ -650,12 +703,14 @@ impl RedbStorage {
             for (sec, parent) in expired_entries {
                 if sec <= now_sec {
                     if let Some(guard) = table_locks.get(&parent)? {
-                        let (_, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+                        let (_, root_valid_until): (LockRecord, u64) =
+                            bincode::deserialize(guard.value())?;
                         if now_sec < grace_expiry_bucket_sec(root_valid_until) {
                             continue;
                         }
                     } else if let Some(guard) = table_prov_locks.get(&parent)? {
-                        let (_, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+                        let (_, root_valid_until): (LockRecord, u64) =
+                            bincode::deserialize(guard.value())?;
                         if now_sec < grace_expiry_bucket_sec(root_valid_until) {
                             continue;
                         }
@@ -744,7 +799,7 @@ impl RedbStorage {
                 pruned_hmc_count += 1;
             }
         }
-        Self::prune_voucher_roots(&write_txn, now_sec)?;
+        self.prune_voucher_roots(&write_txn, now_sec)?;
         Self::prune_own_choices(&write_txn, now_sec)?;
         write_txn.commit()?;
         Ok((pruned, pruned_hmc_count))
@@ -910,6 +965,81 @@ impl RedbStorage {
     /// Defensive against corrupted entries: catches errors, logs a warning, and skips defective entries.
     pub fn all_slashed_nodes(&self) -> Result<Vec<[u8; 32]>, StorageError> {
         self.all_banned_nodes()
+    }
+}
+
+/// Persisted `(node_pubkey, hrw_routing_id, first_seen_ms)` maturation record.
+pub type TicketObservationRow = ([u8; 32], [u8; 32], u64);
+
+impl RedbStorage {
+    /// Persists first-seen timestamps (`first_seen_ms`) for `(node_pubkey, hrw_routing_id)` pairs
+    /// only when absent so maturation history survives daemon restarts without resetting existing
+    /// or shortening newly mined 24h incubation windows (INV-0303).
+    pub fn record_ticket_observations_if_absent(
+        &self,
+        entries: &[TicketObservationRow],
+    ) -> Result<usize, StorageError> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        // Fast read pass to skip write transaction if all entries are already recorded
+        let read_txn = self.db.begin_read()?;
+        let mut missing = Vec::new();
+        {
+            let table = read_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+            for &(pubkey, hrw, seen_ms) in entries {
+                let mut key = [0u8; 64];
+                key[..32].copy_from_slice(&pubkey);
+                key[32..].copy_from_slice(&hrw);
+                if table.get(&key)?.is_none() {
+                    missing.push((key, seen_ms));
+                }
+            }
+        }
+        drop(read_txn);
+        if missing.is_empty() {
+            return Ok(0);
+        }
+
+        let write_txn = self.db.begin_write()?;
+        let mut inserted = 0usize;
+        {
+            let mut table = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+            for (key, seen_ms) in missing {
+                if table.get(&key)?.is_none() {
+                    table.insert(&key, seen_ms)?;
+                    inserted += 1;
+                }
+            }
+        }
+        write_txn.commit()?;
+        Ok(inserted)
+    }
+
+    /// Loads all persisted `(node_pubkey, hrw_routing_id, first_seen_ms)` maturation entries.
+    pub fn all_ticket_observations(&self) -> Result<Vec<TicketObservationRow>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+        let mut results = Vec::new();
+        for item in table.iter()? {
+            let (k_guard, v_guard) = match item {
+                Ok(g) => g,
+                Err(err) => {
+                    warn!(
+                        "Corrupt entry in TABLE_TICKET_OBSERVATIONS iterator: {}",
+                        err
+                    );
+                    continue;
+                }
+            };
+            let raw = k_guard.value();
+            let mut pubkey = [0u8; 32];
+            let mut hrw = [0u8; 32];
+            pubkey.copy_from_slice(&raw[..32]);
+            hrw.copy_from_slice(&raw[32..]);
+            results.push((pubkey, hrw, v_guard.value()));
+        }
+        Ok(results)
     }
 
     /// Retrieves quota remaining byte years for an account tag. Defaults to 0 if not present.
@@ -1115,7 +1245,8 @@ impl RedbStorage {
                     continue;
                 }
             };
-            let entry: crate::api::hmc::L2LockEntry = match serde_json::from_slice(v_guard.value()) {
+            let entry: crate::api::hmc::L2LockEntry = match serde_json::from_slice(v_guard.value())
+            {
                 Ok(e) => e,
                 Err(err) => {
                     warn!(
@@ -1420,7 +1551,7 @@ impl RedbStorage {
                 }
             }
             for now_sec in prune_now_secs {
-                Self::prune_expired_in_txn(&write_txn, *now_sec)?;
+                self.prune_expired_in_txn(&write_txn, *now_sec)?;
             }
         }
         write_txn.commit()?;
@@ -1448,6 +1579,7 @@ impl RedbStorage {
     /// Shared helper called within write transactions by both `prune_expired_buckets`
     /// and `prune_expired_in_txn`. Bounded to 256 entries per pass.
     fn prune_voucher_roots(
+        &self,
         txn: &redb::WriteTransaction,
         now_sec: u64,
     ) -> Result<usize, StorageError> {
@@ -1468,10 +1600,12 @@ impl RedbStorage {
                         if let Ok(exp) = roots::root_valid_until(&entry) {
                             now_sec >= grace_expiry_bucket_sec(exp)
                         } else {
-                            true
+                            self.latch_corruption_in_txn(txn);
+                            false
                         }
                     } else {
-                        true
+                        self.latch_corruption_in_txn(txn);
+                        false
                     }
                 } else {
                     true
@@ -1488,10 +1622,11 @@ impl RedbStorage {
 
     /// Prunes expired buckets inside an already-open write transaction.
     fn prune_expired_in_txn(
+        &self,
         write_txn: &redb::WriteTransaction,
         now_sec: u64,
     ) -> Result<(), StorageError> {
-        Self::prune_voucher_roots(write_txn, now_sec)?;
+        self.prune_voucher_roots(write_txn, now_sec)?;
         Self::prune_own_choices(write_txn, now_sec)?;
         let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
         let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
@@ -1510,12 +1645,14 @@ impl RedbStorage {
         for (sec, parent) in expired_entries {
             if sec <= now_sec {
                 if let Some(guard) = table_locks.get(&parent)? {
-                    let (_, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+                    let (_, root_valid_until): (LockRecord, u64) =
+                        bincode::deserialize(guard.value())?;
                     if now_sec < grace_expiry_bucket_sec(root_valid_until) {
                         continue;
                     }
                 } else if let Some(guard) = table_prov_locks.get(&parent)? {
-                    let (_, root_valid_until): (LockRecord, u64) = bincode::deserialize(guard.value())?;
+                    let (_, root_valid_until): (LockRecord, u64) =
+                        bincode::deserialize(guard.value())?;
                     if now_sec < grace_expiry_bucket_sec(root_valid_until) {
                         continue;
                     }
@@ -1838,6 +1975,14 @@ impl RedbStorage {
                 dst_banned.insert(k.value(), v.value())?;
             }
 
+            // 8b. TABLE_TICKET_OBSERVATIONS
+            let src_tickets = read_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+            let mut dst_tickets = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+            for item in src_tickets.iter()? {
+                let (k, v) = item?;
+                dst_tickets.insert(k.value(), v.value())?;
+            }
+
             {
                 let source = read_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
                 let mut destination = write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
@@ -1899,6 +2044,14 @@ impl RedbStorage {
             for item in src_audit.iter()? {
                 let (k, v) = item?;
                 dst_audit.insert(k.value(), v.value())?;
+            }
+
+            // 10. TABLE_SCHEMA_METADATA
+            let src_schema = read_txn.open_table(TABLE_SCHEMA_METADATA)?;
+            let mut dst_schema = write_txn.open_table(TABLE_SCHEMA_METADATA)?;
+            for item in src_schema.iter()? {
+                let (k, v) = item?;
+                dst_schema.insert(k.value(), v.value())?;
             }
         }
         write_txn.commit()?;
@@ -2012,6 +2165,41 @@ impl RedbStorage {
             Ok(items)
         }
     }
+
+    /// Compacts the redb database at the specified path while offline.
+    ///
+    /// Verifies schema version compatibility before compacting.
+    /// Returns `Ok(true)` if compaction freed pages, or `Ok(false)` if no compaction was needed.
+    pub fn compact_database(path: impl AsRef<Path>) -> Result<bool, StorageError> {
+        let path = path.as_ref();
+        let mut db = Database::open(path)?;
+
+        // Verify schema version before compacting
+        {
+            let write_txn = db.begin_write()?;
+            {
+                let mut schema_table = write_txn.open_table(TABLE_SCHEMA_METADATA)?;
+                let existing_version = schema_table.get("schema_version")?.map(|g| g.value());
+                match existing_version {
+                    Some(v) => {
+                        if v > CURRENT_DB_SCHEMA_VERSION {
+                            return Err(StorageError::UnsupportedSchemaVersion {
+                                found: v,
+                                supported: CURRENT_DB_SCHEMA_VERSION,
+                            });
+                        }
+                    }
+                    None => {
+                        schema_table.insert("schema_version", CURRENT_DB_SCHEMA_VERSION)?;
+                    }
+                }
+            }
+            write_txn.commit()?;
+        }
+
+        let freed = db.compact()?;
+        Ok(freed)
+    }
 }
 
 #[cfg(test)]
@@ -2063,7 +2251,9 @@ mod tests {
             SimTime(1_000),
             SimTime(root_valid_until_ms),
         );
-        storage.put_lock(&record, root_valid_until_ms).expect("put_lock");
+        storage
+            .put_lock(&record, root_valid_until_ms)
+            .expect("put_lock");
 
         let voucher_id = "test-voucher-50000";
         let root = sample_root(voucher_id, root_valid_until_ms);
@@ -2077,27 +2267,140 @@ mod tests {
         storage.put_hmc_lock(spend_tag, &spend).expect("put spend");
 
         // now_sec = 79: must NOT delete
-        let (pruned_native_79, pruned_hmc_79) = storage.prune_expired_buckets(79).expect("prune 79");
+        let (pruned_native_79, pruned_hmc_79) =
+            storage.prune_expired_buckets(79).expect("prune 79");
         assert_eq!(pruned_native_79.len(), 0);
         assert_eq!(pruned_hmc_79, 0);
         assert!(storage.get_lock(&parent).expect("get_lock").is_some());
-        assert!(storage.get_hmc_lock(spend_tag).expect("get_hmc_lock").is_some());
-        assert!(storage.voucher_root(voucher_id).expect("voucher_root").is_some());
+        assert!(storage
+            .get_hmc_lock(spend_tag)
+            .expect("get_hmc_lock")
+            .is_some());
+        assert!(storage
+            .voucher_root(voucher_id)
+            .expect("voucher_root")
+            .is_some());
 
         // now_sec = 80: must NOT delete (grace period +30s expires strictly at >80_000 ms)
-        let (pruned_native_80, pruned_hmc_80) = storage.prune_expired_buckets(80).expect("prune 80");
+        let (pruned_native_80, pruned_hmc_80) =
+            storage.prune_expired_buckets(80).expect("prune 80");
         assert_eq!(pruned_native_80.len(), 0);
         assert_eq!(pruned_hmc_80, 0);
         assert!(storage.get_lock(&parent).expect("get_lock").is_some());
-        assert!(storage.get_hmc_lock(spend_tag).expect("get_hmc_lock").is_some());
-        assert!(storage.voucher_root(voucher_id).expect("voucher_root").is_some());
+        assert!(storage
+            .get_hmc_lock(spend_tag)
+            .expect("get_hmc_lock")
+            .is_some());
+        assert!(storage
+            .voucher_root(voucher_id)
+            .expect("voucher_root")
+            .is_some());
 
         // now_sec = 81: MUST delete
-        let (pruned_native_81, pruned_hmc_81) = storage.prune_expired_buckets(81).expect("prune 81");
+        let (pruned_native_81, pruned_hmc_81) =
+            storage.prune_expired_buckets(81).expect("prune 81");
         assert!(pruned_native_81.contains(&parent));
         assert!(pruned_hmc_81 > 0);
         assert!(storage.get_lock(&parent).expect("get_lock").is_none());
-        assert!(storage.get_hmc_lock(spend_tag).expect("get_hmc_lock").is_none());
-        assert!(storage.voucher_root(voucher_id).expect("voucher_root").is_none());
+        assert!(storage
+            .get_hmc_lock(spend_tag)
+            .expect("get_hmc_lock")
+            .is_none());
+        assert!(storage
+            .voucher_root(voucher_id)
+            .expect("voucher_root")
+            .is_none());
+    }
+
+    #[test]
+    fn test_db_schema_version_initialization_and_rejection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("schema_test.redb");
+
+        // 1. Initial open creates TABLE_SCHEMA_METADATA with CURRENT_DB_SCHEMA_VERSION
+        {
+            let storage = RedbStorage::open(&db_path).expect("open new db");
+            let read_txn = storage.db.begin_read().expect("begin_read");
+            let table = read_txn
+                .open_table(TABLE_SCHEMA_METADATA)
+                .expect("open schema table");
+            let val = table.get("schema_version").expect("get").expect("exists");
+            assert_eq!(val.value(), CURRENT_DB_SCHEMA_VERSION);
+        }
+
+        // 2. Re-opening existing DB succeeds
+        {
+            let _storage = RedbStorage::open(&db_path).expect("reopen valid db");
+        }
+
+        // 3. Modifying version to future version causes open to fail closed
+        {
+            let raw_db = Database::open(&db_path).expect("open raw db");
+            let write_txn = raw_db.begin_write().expect("begin_write");
+            {
+                let mut table = write_txn
+                    .open_table(TABLE_SCHEMA_METADATA)
+                    .expect("open table");
+                table
+                    .insert("schema_version", 99u32)
+                    .expect("insert future version");
+            }
+            write_txn.commit().expect("commit");
+        }
+
+        let reopen_res = RedbStorage::open(&db_path);
+        match reopen_res {
+            Err(StorageError::UnsupportedSchemaVersion { found, supported }) => {
+                assert_eq!(found, 99);
+                assert_eq!(supported, CURRENT_DB_SCHEMA_VERSION);
+            }
+            Ok(_) => panic!("Expected UnsupportedSchemaVersion error, got Ok"),
+            Err(err) => panic!("Expected UnsupportedSchemaVersion error, got: {err:?}"),
+        }
+
+        // 4. compact_database also fails closed on unsupported schema version
+        let compact_res = RedbStorage::compact_database(&db_path);
+        match compact_res {
+            Err(StorageError::UnsupportedSchemaVersion { found, supported }) => {
+                assert_eq!(found, 99);
+                assert_eq!(supported, CURRENT_DB_SCHEMA_VERSION);
+            }
+            other => panic!(
+                "Expected UnsupportedSchemaVersion error in compact, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_db_compaction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("compact_test.redb");
+
+        {
+            let storage = RedbStorage::open(&db_path).expect("open db");
+            for i in 0..100u8 {
+                let parent = [i; 32];
+                let record = LockRecord::new(
+                    parent,
+                    [i + 1; 32],
+                    b"payload_data".to_vec(),
+                    SimTime(1_000),
+                    SimTime(10_000),
+                );
+                storage.put_lock(&record, 10_000).expect("put_lock");
+            }
+            let _ = storage.prune_expired_buckets(50).expect("prune");
+        }
+
+        // Run offline compaction
+        let freed = RedbStorage::compact_database(&db_path).expect("compact_database");
+        // Compaction succeeds without error (freed is boolean)
+        let _ = freed;
+
+        // Re-open compacted database to verify integrity
+        let storage = RedbStorage::open(&db_path).expect("reopen after compaction");
+        let (active_locks, _, _) = storage.get_stats().expect("get_stats");
+        assert_eq!(active_locks, 0);
     }
 }

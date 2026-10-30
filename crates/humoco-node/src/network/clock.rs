@@ -235,7 +235,11 @@ impl NetworkClock {
                     "F2F clock skew exceeds 45s threshold — median damping applied"
                 );
                 let diff: i64 = offset_target.saturating_sub(state.logical_offset);
-                let step = if diff.saturating_abs() <= 1_000 { diff } else { diff / 2 };
+                let step = if diff.saturating_abs() <= 1_000 {
+                    diff
+                } else {
+                    diff / 2
+                };
                 let raw_offset = state.logical_offset.saturating_add(step);
                 // Barrier 2: Clamping to max_clamp_ms (default: 15 minutes, or adapted on merge)
                 state.logical_offset = raw_offset.clamp(-clamp_limit, clamp_limit);
@@ -245,7 +249,11 @@ impl NetworkClock {
                 // When peer clocks return within tolerance (<= 45s),
                 // smoothly decay any existing offset back to 0.
                 let diff: i64 = 0i64.saturating_sub(state.logical_offset);
-                let step = if diff.saturating_abs() <= 1_000 { diff } else { diff / 2 };
+                let step = if diff.saturating_abs() <= 1_000 {
+                    diff
+                } else {
+                    diff / 2
+                };
                 state.logical_offset =
                     (state.logical_offset.saturating_add(step)).clamp(-clamp_limit, clamp_limit);
                 if state.logical_offset.saturating_abs() <= MAX_TIME_OFFSET_CLAMP_MS {
@@ -385,7 +393,11 @@ impl NetworkClock {
                 0
             };
             let diff: i64 = target.saturating_sub(state.logical_offset);
-            let step = if diff.saturating_abs() <= 1_000 { diff } else { diff / 2 };
+            let step = if diff.saturating_abs() <= 1_000 {
+                diff
+            } else {
+                diff / 2
+            };
             let clamp_limit = state.max_clamp_ms;
             state.logical_offset =
                 (state.logical_offset.saturating_add(step)).clamp(-clamp_limit, clamp_limit);
@@ -543,13 +555,21 @@ mod tests {
 
         // Same friend sends 20 heartbeats with varying timestamps
         for i in 0..20 {
-            let accepted = clock.record_sample_for_peer(friend, true, local_time + 60_000 + i, local_time);
+            let accepted =
+                clock.record_sample_for_peer(friend, true, local_time + 60_000 + i, local_time);
             assert!(accepted);
         }
 
         // Even though 20 heartbeats were sent, they all belong to 1 peer:
-        assert_eq!(clock.sample_count(), 1, "1 friend must only occupy 1 sample slot");
-        assert!(!clock.has_quorum_samples(), "1 friend must never establish quorum");
+        assert_eq!(
+            clock.sample_count(),
+            1,
+            "1 friend must only occupy 1 sample slot"
+        );
+        assert!(
+            !clock.has_quorum_samples(),
+            "1 friend must never establish quorum"
+        );
         assert_eq!(clock.current_median_offset(), None);
         assert_eq!(clock.logical_offset_ms(), 0);
 
@@ -617,12 +637,18 @@ mod tests {
         // 1. Extreme timestamp: 1 << 63
         let extreme_1 = 1u64 << 63;
         let accepted = clock.record_sample(true, extreme_1, local_time);
-        assert!(!accepted, "Extreme timestamp 1 << 63 must be rejected cleanly without panic");
+        assert!(
+            !accepted,
+            "Extreme timestamp 1 << 63 must be rejected cleanly without panic"
+        );
 
         // 2. u64::MAX
         let extreme_max = u64::MAX;
         let accepted_max = clock.record_sample(true, extreme_max, local_time);
-        assert!(!accepted_max, "u64::MAX timestamp must be rejected cleanly without panic");
+        assert!(
+            !accepted_max,
+            "u64::MAX timestamp must be rejected cleanly without panic"
+        );
 
         // 3. calculate_median_from_slice with extreme values that would overflow i64 on addition
         let samples = vec![i64::MAX - 10, i64::MAX - 2];

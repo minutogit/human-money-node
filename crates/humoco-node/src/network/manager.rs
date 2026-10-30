@@ -26,6 +26,8 @@ pub const QUORUM_GLOBAL_TIMEOUT: Duration = Duration::from_millis(1000);
 /// 24h Incubation period for re-mining / routing ticket updates and newcomers (Spec 07 & 11).
 pub const HRW_INCUBATION_SECS: u64 = 24 * 60 * 60;
 pub const HRW_INCUBATION_DURATION: Duration = Duration::from_secs(HRW_INCUBATION_SECS);
+/// Accelerated incubation window used exclusively when `network.simulation_mode = true`.
+pub const SIM_HRW_INCUBATION_DURATION: Duration = Duration::from_secs(2);
 
 /// Presence freshness window for phase-transition counting (Spec 08/11 Phase 9 P1, DEC-056).
 /// A gossip-learned node counts toward `N_active` only while its last heartbeat
@@ -77,7 +79,7 @@ pub struct NetworkNodeDto {
 ///   do not conflate the full `NodePubKey` with `NodeIdentity::node_id()` (a BLAKE3 fingerprint)
 /// - `hrw_routing_id` = Argon2d Shard Ticket for HRW routing, may change via re-mining (24h incubation)
 /// - `pending_hrw_routing_id` + `pending_since` = 24h incubation buffer for new ticket
-/// - `first_seen` + `last_seen` = 24h IMMATURE threshold for newcomers
+/// - `first_seen` + `pre_boot_age` + `last_seen` = 24h IMMATURE threshold for newcomers
 #[derive(Clone, Debug)]
 pub struct KnownNodeInfo {
     pub(crate) addr: SocketAddr,
@@ -99,10 +101,14 @@ pub struct KnownNodeInfo {
     pub(crate) pending_work_score: Option<u64>,
     /// Timestamp of ticket switch (start of incubation).
     pub(crate) pending_since: Option<Instant>,
-    /// Incubation deadline (pending_since + 24h) — explicit field for Spec 07.
+    /// Incubation deadline (pending_since + incubation_duration) — explicit field for Spec 07.
     pub(crate) incubated_until: Option<Instant>,
-    /// First seen timestamp for IMMATURE evaluation (newcomer).
+    /// First seen timestamp in the current daemon process.
     pub(crate) first_seen: Instant,
+    /// Accumulated maturation duration observed prior to the current OS/daemon boot.
+    pub(crate) pre_boot_age: Duration,
+    /// Effective incubation requirement (`24h` in production, `2s` in `simulation_mode`).
+    pub(crate) incubation_duration: Duration,
     pub(crate) last_seen: Instant,
     pub(crate) min_hops: u8,
     pub(crate) best_ingress_peer: Option<SocketAddr>,
@@ -136,6 +142,8 @@ impl KnownNodeInfo {
             pending_since: None,
             incubated_until: None,
             first_seen: now,
+            pre_boot_age: Duration::ZERO,
+            incubation_duration: HRW_INCUBATION_DURATION,
             last_seen: now,
             min_hops: 255,
             best_ingress_peer: None,
@@ -164,6 +172,8 @@ impl KnownNodeInfo {
             pending_since: None,
             incubated_until: None,
             first_seen,
+            pre_boot_age: Duration::ZERO,
+            incubation_duration: HRW_INCUBATION_DURATION,
             last_seen,
             min_hops: 255,
             best_ingress_peer: None,
@@ -191,6 +201,11 @@ impl KnownNodeInfo {
         self.min_hops
     }
 
+    /// Total maturation age combining persisted pre-boot observation age and live uptime.
+    pub fn observed_age(&self) -> Duration {
+        self.pre_boot_age.saturating_add(self.first_seen.elapsed())
+    }
+
     /// Effective HRW for scoring: active ticket, as long as pending is not mature.
     pub fn effective_hrw(&self) -> [u8; 32] {
         // If pending is mature (>=24h), it would have been promoted already — return active here.
@@ -198,10 +213,10 @@ impl KnownNodeInfo {
         self.hrw_routing_id
     }
 
-    /// Checks if pending ticket is mature (>=24h).
+    /// Checks if pending ticket is mature.
     pub fn is_pending_mature(&self) -> bool {
         if let Some(since) = self.pending_since {
-            since.elapsed() >= HRW_INCUBATION_DURATION
+            since.elapsed() >= self.incubation_duration
         } else {
             false
         }
@@ -211,17 +226,17 @@ impl KnownNodeInfo {
     pub fn pending_remaining(&self) -> Option<Duration> {
         self.pending_since.map(|since| {
             let elapsed = since.elapsed();
-            if elapsed >= HRW_INCUBATION_DURATION {
+            if elapsed >= self.incubation_duration {
                 Duration::from_secs(0)
             } else {
-                HRW_INCUBATION_DURATION - elapsed
+                self.incubation_duration - elapsed
             }
         })
     }
 
-    /// Is node still IMMATURE (<24h since first contact)?
+    /// Is node still IMMATURE (< incubation_duration since first contact)?
     pub fn is_immature(&self) -> bool {
-        self.first_seen.elapsed() < HRW_INCUBATION_DURATION
+        self.observed_age() < self.incubation_duration
     }
 
     /// Is gossip presence still fresh (heartbeat seen within `PRESENCE_FRESHNESS_TIMEOUT`)?
@@ -372,7 +387,9 @@ impl ObservedVoteCache {
     }
 }
 
-type LocalTicketObservation = Arc<std::sync::Mutex<Option<([u8; 32], [u8; 32], Instant)>>>;
+type LocalTicketObservation =
+    Arc<std::sync::Mutex<Option<([u8; 32], [u8; 32], Instant, Duration)>>>;
+type PersistedTicketAges = Arc<parking_lot::Mutex<HashMap<([u8; 32], [u8; 32]), Duration>>>;
 
 #[derive(Clone)]
 pub struct PeerManager {
@@ -399,6 +416,7 @@ pub struct PeerManager {
     sync_notify: Arc<tokio::sync::Notify>,
     ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
     local_sync_ready: Arc<std::sync::atomic::AtomicBool>,
+    simulation_mode: Arc<std::sync::atomic::AtomicBool>,
     merge_hysteresis_until_ms: Arc<AtomicU64>,
     fraud_proof_tx:
         Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<FraudProofForwardMsg>>>>,
@@ -413,6 +431,7 @@ pub struct PeerManager {
     seen_fraud_proofs: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
     known_active_shards: Arc<RwLock<std::collections::BTreeSet<u16>>>,
     local_ticket_observation: LocalTicketObservation,
+    persisted_ticket_ages: PersistedTicketAges,
     observed_votes: Arc<parking_lot::Mutex<ObservedVoteCache>>,
     storage: Arc<parking_lot::RwLock<Option<std::sync::Weak<crate::storage::RedbStorage>>>>,
     engine_banned_nodes: Arc<parking_lot::RwLock<Option<EngineBannedNodesHandle>>>,
@@ -513,6 +532,7 @@ impl PeerManager {
             sync_notify: Arc::new(tokio::sync::Notify::new()),
             ticket_outdated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             local_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            simulation_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             merge_hysteresis_until_ms: Arc::new(AtomicU64::new(0)),
             fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
             recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(
@@ -521,11 +541,64 @@ impl PeerManager {
             seen_heartbeats: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(10_000))),
             seen_fraud_proofs: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(1024))),
             local_ticket_observation: Arc::new(std::sync::Mutex::new(None)),
+            persisted_ticket_ages: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             known_active_shards: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
             observed_votes: Arc::new(parking_lot::Mutex::new(ObservedVoteCache::new(4096))),
             storage: Arc::new(parking_lot::RwLock::new(None)),
             engine_banned_nodes: Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+
+    /// Enables or disables accelerated incubation timing for `network.simulation_mode = true`.
+    pub fn set_simulation_mode(&self, enabled: bool) {
+        self.simulation_mode
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Returns the active HRW ticket incubation window (`24h` in production, `2s` in simulation_mode).
+    pub fn effective_incubation_duration(&self) -> Duration {
+        if self
+            .simulation_mode
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            SIM_HRW_INCUBATION_DURATION
+        } else {
+            HRW_INCUBATION_DURATION
+        }
+    }
+
+    /// Restores a previously persisted maturation age for `(node_pubkey, hrw_routing_id)` on daemon boot.
+    pub fn seed_persisted_ticket_age(
+        &self,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        prior_age: Duration,
+    ) {
+        self.persisted_ticket_ages
+            .lock()
+            .insert((node_pubkey, hrw_routing_id), prior_age);
+    }
+
+    /// Restores or initializes the local node's own ticket observation age on daemon boot.
+    pub fn seed_local_ticket_age(
+        &self,
+        local_pubkey: [u8; 32],
+        local_hrw: [u8; 32],
+        prior_age: Duration,
+    ) {
+        if let Ok(mut guard) = self.local_ticket_observation.lock() {
+            *guard = Some((local_pubkey, local_hrw, Instant::now(), prior_age));
+        }
+    }
+
+    /// Snapshots active remote `(node_pubkey, hrw_routing_id)` pairs for periodic persistence.
+    pub async fn snapshot_active_tickets(&self) -> Vec<([u8; 32], [u8; 32])> {
+        let known = self.known_network_nodes.read().await;
+        known
+            .iter()
+            .filter(|(_, info)| info.addr.port() != 0)
+            .map(|(pk, info)| (*pk, info.hrw_routing_id))
+            .collect()
     }
 
     /// Sets the persistent storage handle for atomic slashing evidence and ban commits.
@@ -569,14 +642,15 @@ impl PeerManager {
         };
         let prov_domain = humoco_sim_core::crypto::domain_approve_prov(expected_network);
         let final_domain = humoco_sim_core::crypto::domain_approve_final(expected_network);
-        let is_valid = [(prov_domain, 0u8), (final_domain, 1u8)]
-            .into_iter()
-            .any(|(domain, status)| {
-                let digest = humoco_sim_core::crypto::compute_sig_digest(
-                    domain, 0, 0, 0, shard, status, &payload,
-                );
-                vk.verify_strict(&digest, &sig).is_ok()
-            });
+        let is_valid =
+            [(prov_domain, 0u8), (final_domain, 1u8)]
+                .into_iter()
+                .any(|(domain, status)| {
+                    let digest = humoco_sim_core::crypto::compute_sig_digest(
+                        domain, 0, 0, 0, shard, status, &payload,
+                    );
+                    vk.verify_strict(&digest, &sig).is_ok()
+                });
         if !is_valid {
             return None;
         }
@@ -592,11 +666,12 @@ impl PeerManager {
                     lock_b = %hex::encode(att.lock_id),
                     "CRITICAL FRAUD: Conflicting original shard attestations detected! Automatic ShardEquivocation proof generated."
                 );
-                let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
-                    prev_att,
-                    att,
-                    signer_pubkey,
-                );
+                let proof =
+                    humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+                        prev_att,
+                        att,
+                        signer_pubkey,
+                    );
                 if !crate::network::transport::verify_equivocation_first_party_network(
                     Some(expected_network),
                     &vk,
@@ -1355,14 +1430,16 @@ impl PeerManager {
     // Semantic Decoupling & 24h Incubation (Spec 07)
     // -------------------------------------------------------------------------
 
-    /// Internal promotion check: If pending >= 24h, it becomes active.
+    /// Internal promotion check: If pending >= incubation_duration, it becomes active.
     async fn maybe_promote_pending(&self, node_pubkey: &[u8; 32]) {
+        let incubation = self.effective_incubation_duration();
         let mut nodes = self.known_network_nodes.write().await;
         if let Some(entry) = nodes.get_mut(node_pubkey) {
+            entry.incubation_duration = incubation;
             if let (Some(pending), Some(since)) =
                 (entry.pending_hrw_routing_id, entry.pending_since)
             {
-                if since.elapsed() >= HRW_INCUBATION_DURATION {
+                if since.elapsed() >= incubation {
                     entry.hrw_routing_id = pending;
                     if let Some(pw) = entry.pending_work_score {
                         entry.work_score = pw;
@@ -1453,14 +1530,30 @@ impl PeerManager {
             return;
         }
 
+        let incubation = self.effective_incubation_duration();
+        let prior_age = self
+            .persisted_ticket_ages
+            .lock()
+            .get(&(node_pubkey, hrw_routing_id))
+            .copied()
+            .unwrap_or(Duration::ZERO);
+
         let now = Instant::now();
         let mut nodes = self.known_network_nodes.write().await;
         if let Some(entry) = nodes.get_mut(&node_pubkey) {
+            entry.incubation_duration = incubation;
+            if entry.addr.port() == 0 && entry.work_score == 0 {
+                // Upgrade evidence-only placeholder to real gossiped ticket
+                entry.hrw_routing_id = hrw_routing_id;
+                entry.work_score = work_score;
+                entry.pre_boot_age = prior_age;
+                entry.first_seen = now;
+            }
             // Promotion if due, before inspecting new value
             if let (Some(pending), Some(since)) =
                 (entry.pending_hrw_routing_id, entry.pending_since)
             {
-                if since.elapsed() >= HRW_INCUBATION_DURATION {
+                if since.elapsed() >= incubation {
                     entry.hrw_routing_id = pending;
                     if let Some(pw) = entry.pending_work_score {
                         entry.work_score = pw;
@@ -1500,7 +1593,7 @@ impl PeerManager {
                     entry.pending_hrw = Some(hrw_routing_id);
                     entry.pending_work_score = Some(work_score);
                     entry.pending_since = Some(now);
-                    entry.incubated_until = Some(now + HRW_INCUBATION_DURATION);
+                    entry.incubated_until = Some(now + incubation);
                 }
                 // If work_score <= current_max: Downgrade or lateral hop -> REJECTED, old active & pending remain!
             }
@@ -1525,7 +1618,7 @@ impl PeerManager {
                 let val = u32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
                 mask = 1 << (val % 32);
             }
-            // Newcomer: IMMATURE phase starts, active ticket stored immediately, but HRW-eligible only after 24h
+            // Newcomer: IMMATURE phase starts unless restored from persisted maturation history
             nodes.insert(
                 node_pubkey,
                 KnownNodeInfo {
@@ -1540,6 +1633,8 @@ impl PeerManager {
                     pending_since: None,
                     incubated_until: None,
                     first_seen: now,
+                    pre_boot_age: prior_age,
+                    incubation_duration: incubation,
                     last_seen: now,
                     min_hops: hops,
                     best_ingress_peer: ingress_peer,
@@ -1719,9 +1814,9 @@ impl PeerManager {
                 return entry.pending_remaining();
             }
             if entry.is_immature() {
-                let elapsed = entry.first_seen.elapsed();
-                if elapsed < HRW_INCUBATION_DURATION {
-                    return Some(HRW_INCUBATION_DURATION - elapsed);
+                let elapsed = entry.observed_age();
+                if elapsed < entry.incubation_duration {
+                    return Some(entry.incubation_duration - elapsed);
                 }
             }
         }
@@ -1741,14 +1836,16 @@ impl PeerManager {
 
     /// Manual promotion of all mature pending tickets (e.g., periodically from daemon).
     pub async fn promote_mature_pending_hrw(&self) -> usize {
+        let incubation = self.effective_incubation_duration();
         let mut promoted = 0usize;
         let mut nodes = self.known_network_nodes.write().await;
         let now = Instant::now();
         for entry in nodes.values_mut() {
+            entry.incubation_duration = incubation;
             if let (Some(pending), Some(since)) =
                 (entry.pending_hrw_routing_id, entry.pending_since)
             {
-                if now.duration_since(since) >= HRW_INCUBATION_DURATION {
+                if now.duration_since(since) >= incubation {
                     entry.hrw_routing_id = pending;
                     if let Some(pw) = entry.pending_work_score {
                         entry.work_score = pw;
@@ -1782,10 +1879,11 @@ impl PeerManager {
     }
 
     pub async fn set_pending_since_for_test(&self, node_pubkey: &[u8; 32], since: Instant) {
+        let incubation = self.effective_incubation_duration();
         let mut nodes = self.known_network_nodes.write().await;
         if let Some(entry) = nodes.get_mut(node_pubkey) {
             entry.pending_since = Some(since);
-            entry.incubated_until = Some(since + HRW_INCUBATION_DURATION);
+            entry.incubated_until = Some(since + incubation);
         }
     }
 
@@ -1892,9 +1990,7 @@ impl PeerManager {
 
             let hrw = info_opt.map(|k| k.hrw_routing_id).unwrap_or(*friend_id);
             let work = info_opt.map(|k| k.work_score).unwrap_or(1);
-            let is_im = info_opt
-                .map(|k| k.first_seen.elapsed() < HRW_INCUBATION_DURATION)
-                .unwrap_or(false);
+            let is_im = info_opt.map(|k| k.is_immature()).unwrap_or(false);
             let pending_bs58 = info_opt.and_then(|k| {
                 k.pending_hrw_routing_id
                     .map(|t| bs58::encode(&t).into_string())
@@ -1956,7 +2052,7 @@ impl PeerManager {
                 .pending_hrw_routing_id
                 .map(|t| bs58::encode(&t).into_string());
             let rem_sec = info.pending_remaining().map(|d| d.as_secs());
-            let is_immature = info.first_seen.elapsed() < HRW_INCUBATION_DURATION;
+            let is_immature = info.is_immature();
             let best_ingress_peer = info.best_ingress_peer.map(|a| a.to_string());
 
             map.insert(
@@ -2277,12 +2373,13 @@ impl PeerManager {
     }
 
     fn local_ticket_is_mature(&self) -> bool {
+        let required = self.effective_incubation_duration();
         self.local_ticket_observation
             .lock()
             .map(|value| {
-                value
-                    .as_ref()
-                    .is_some_and(|(_, _, since)| since.elapsed() >= HRW_INCUBATION_DURATION)
+                value.as_ref().is_some_and(|(_, _, since, prior_age)| {
+                    prior_age.saturating_add(since.elapsed()) >= required
+                })
             })
             .unwrap_or(false)
     }
@@ -2322,16 +2419,23 @@ impl PeerManager {
                 hrw_routing_id: *hrw,
             })
             .collect();
+        let required_incubation = self.effective_incubation_duration();
         let self_mature = if let Some(info) = known.get(&self_pubkey) {
             info.hrw_routing_id == self_hrw && info.is_hrw_eligible()
         } else if let Ok(mut observation) = self.local_ticket_observation.lock() {
             match *observation {
-                Some((pk, hrw, since)) if pk == self_pubkey && hrw == self_hrw => {
-                    since.elapsed() >= HRW_INCUBATION_DURATION
+                Some((pk, hrw, since, prior_age)) if pk == self_pubkey && hrw == self_hrw => {
+                    prior_age.saturating_add(since.elapsed()) >= required_incubation
                 }
                 _ => {
-                    *observation = Some((self_pubkey, self_hrw, Instant::now()));
-                    false
+                    let prior_age = self
+                        .persisted_ticket_ages
+                        .lock()
+                        .get(&(self_pubkey, self_hrw))
+                        .copied()
+                        .unwrap_or(Duration::ZERO);
+                    *observation = Some((self_pubkey, self_hrw, Instant::now(), prior_age));
+                    prior_age >= required_incubation
                 }
             }
         } else {
@@ -2566,6 +2670,8 @@ impl PeerManager {
         } else {
             let dummy_addr = SocketAddr::from(([127, 0, 0, 1], 0));
             let mut info = KnownNodeInfo::new(dummy_addr, *node_id, *node_id);
+            info.work_score = 0;
+            info.incubation_duration = self.effective_incubation_duration();
             info.update_write_evidence(ev);
             known.insert(*node_id, info);
         }
@@ -2582,6 +2688,8 @@ impl PeerManager {
         } else {
             let dummy_addr = SocketAddr::from(([127, 0, 0, 1], 0));
             let mut info = KnownNodeInfo::new(dummy_addr, *node_id, *node_id);
+            info.work_score = 0;
+            info.incubation_duration = self.effective_incubation_duration();
             info.update_read_evidence(ev);
             known.insert(*node_id, info);
         }
@@ -3165,15 +3273,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_observe_verified_original_attestation_detects_equivocation() {
+        use crate::identity::NodeIdentity;
         use ed25519_dalek::Signer;
         use humoco_sim_core::crypto::{
             compute_attestation_payload_digest, compute_sig_digest, HUMOCO_V1_APPROVE_PROV_MAINNET,
         };
         use humoco_sim_core::types::{Attestation, NetworkId, SimTime};
-        use crate::identity::NodeIdentity;
 
         let temp = tempfile::tempdir().unwrap();
-        let db = Arc::new(crate::storage::RedbStorage::open(&temp.path().join("equiv.redb")).unwrap());
+        let db =
+            Arc::new(crate::storage::RedbStorage::open(&temp.path().join("equiv.redb")).unwrap());
         let (engine, worker) = crate::storage::DualTierEngine::new(db.clone());
         let pm = Arc::new(PeerManager::new(vec![]));
         pm.set_storage(Arc::downgrade(&db));
@@ -3188,7 +3297,12 @@ mod tests {
             let payload = compute_attestation_payload_digest(&parent_lock, &lock_id);
             let digest = compute_sig_digest(
                 HUMOCO_V1_APPROVE_PROV_MAINNET,
-                0, 0, 0, shard_id, 0, &payload,
+                0,
+                0,
+                0,
+                shard_id,
+                0,
+                &payload,
             );
             Attestation {
                 lock_id,
@@ -3206,11 +3320,7 @@ mod tests {
 
         // First vote: accepted, no fraud
         assert!(pm
-            .observe_verified_original_attestation(
-                *signer.node_pubkey(),
-                att1,
-                NetworkId::Mainnet,
-            )
+            .observe_verified_original_attestation(*signer.node_pubkey(), att1, NetworkId::Mainnet,)
             .is_none());
         assert!(!db.is_node_banned(signer.node_pubkey()).unwrap());
 
@@ -3240,4 +3350,3 @@ mod tests {
         let _ = worker.await;
     }
 }
-

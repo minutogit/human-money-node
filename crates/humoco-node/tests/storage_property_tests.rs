@@ -19,11 +19,26 @@ use tempfile::tempdir;
 
 #[derive(Debug, Clone)]
 enum StorageOp {
-    InsertGenesis { voucher_idx: u8, valid_until_sec: u32 },
-    Spend { voucher_idx: u8, slot: u8 },
-    Retry { voucher_idx: u8, slot: u8 },
-    Conflict { voucher_idx: u8, slot: u8, salt: u8 },
-    Prune { advance_sec: u32 },
+    InsertGenesis {
+        voucher_idx: u8,
+        valid_until_sec: u32,
+    },
+    Spend {
+        voucher_idx: u8,
+        slot: u8,
+    },
+    Retry {
+        voucher_idx: u8,
+        slot: u8,
+    },
+    Conflict {
+        voucher_idx: u8,
+        slot: u8,
+        salt: u8,
+    },
+    Prune {
+        advance_sec: u32,
+    },
     Reopen,
 }
 
@@ -44,7 +59,12 @@ fn root_fixture(entry: &L2LockEntry) -> L2LockEntry {
     root
 }
 
-fn make_entry(voucher_id: &str, _parent: [u8; 32], t_id: [u8; 32], valid_until_ms: u64) -> L2LockEntry {
+fn make_entry(
+    voucher_id: &str,
+    _parent: [u8; 32],
+    t_id: [u8; 32],
+    valid_until_ms: u64,
+) -> L2LockEntry {
     L2LockEntry {
         causal_output: None,
         layer2_voucher_id: voucher_id.to_string(),
@@ -76,11 +96,16 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
 
     for op in ops {
         match op {
-            StorageOp::InsertGenesis { voucher_idx, valid_until_sec } => {
+            StorageOp::InsertGenesis {
+                voucher_idx,
+                valid_until_sec,
+            } => {
                 let valid_until_ms = current_time_ms + (valid_until_sec as u64) * 1_000;
                 let voucher_id = format!("v_{}", voucher_idx);
-                let genesis_t_id = *blake3::hash(format!("genesis_{}", voucher_id).as_bytes()).as_bytes();
-                let genesis_entry = make_entry(&voucher_id, [0u8; 32], genesis_t_id, valid_until_ms);
+                let genesis_t_id =
+                    *blake3::hash(format!("genesis_{}", voucher_id).as_bytes()).as_bytes();
+                let genesis_entry =
+                    make_entry(&voucher_id, [0u8; 32], genesis_t_id, valid_until_ms);
                 let root = root_fixture(&genesis_entry);
 
                 let (verdict, _) = engine
@@ -95,7 +120,9 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                     )
                     .await;
 
-                if let std::collections::hash_map::Entry::Vacant(e) = model_vouchers.entry(voucher_idx) {
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    model_vouchers.entry(voucher_idx)
+                {
                     assert!(
                         matches!(verdict, L2Verdict::Verified { .. }),
                         "Fresh genesis must verify, got: {verdict:?}"
@@ -132,11 +159,15 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                                 "First spend must verify: {verdict:?}"
                             );
                             assert!(is_new, "first spend must be marked new");
-                            model_spends.insert(tag.clone(), (voucher_idx, t_id, voucher_valid_until));
+                            model_spends
+                                .insert(tag.clone(), (voucher_idx, t_id, voucher_valid_until));
 
                             // Verify RAM and Disk state consistency immediately
                             let ram = engine.hmc_ram.read().await;
-                            assert!(ram.locks().contains_key(&tag), "RAM must contain newly spent tag");
+                            assert!(
+                                ram.locks().contains_key(&tag),
+                                "RAM must contain newly spent tag"
+                            );
                             drop(ram);
 
                             let disk = storage.get_hmc_lock(&tag).unwrap();
@@ -180,19 +211,28 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                     assert!(!is_new, "idempotent retry must not be is_new");
 
                     // Assert disk state is unaltered
-                    let disk = storage.get_hmc_lock(&tag).unwrap().expect("disk entry must exist");
+                    let disk = storage
+                        .get_hmc_lock(&tag)
+                        .unwrap()
+                        .expect("disk entry must exist");
                     assert_eq!(disk.t_id, expected_tid);
                 }
             }
 
-            StorageOp::Conflict { voucher_idx, slot, salt } => {
+            StorageOp::Conflict {
+                voucher_idx,
+                slot,
+                salt,
+            } => {
                 let tag = format!("spend_tag_{}_{}", voucher_idx, slot);
                 if let Some(&(_, original_tid, voucher_valid_until)) = model_spends.get(&tag) {
                     let parent = *blake3::hash(tag.as_bytes()).as_bytes();
-                    let conflicting_tid = *blake3::hash(format!("{}_conflict_{}", tag, salt).as_bytes()).as_bytes();
+                    let conflicting_tid =
+                        *blake3::hash(format!("{}_conflict_{}", tag, salt).as_bytes()).as_bytes();
                     if conflicting_tid != original_tid {
                         let voucher_id = format!("v_{}", voucher_idx);
-                        let conflicting_entry = make_entry(&voucher_id, parent, conflicting_tid, voucher_valid_until);
+                        let conflicting_entry =
+                            make_entry(&voucher_id, parent, conflicting_tid, voucher_valid_until);
 
                         let (verdict, is_new) = engine
                             .ingress_hmc_lock_durable(
@@ -207,7 +247,10 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                             .await;
 
                         assert!(
-                            matches!(verdict, L2Verdict::Conflict { .. } | L2Verdict::Rejected { .. }),
+                            matches!(
+                                verdict,
+                                L2Verdict::Conflict { .. } | L2Verdict::Rejected { .. }
+                            ),
                             "Conflicting double-spend must be rejected: {verdict:?}"
                         );
                         assert!(!is_new);
@@ -217,8 +260,14 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                         assert_eq!(ram.locks().get(&tag).unwrap().t_id, original_tid);
                         drop(ram);
 
-                        let disk = storage.get_hmc_lock(&tag).unwrap().expect("disk entry must exist");
-                        assert_eq!(disk.t_id, original_tid, "Disk must retain original t_id on collision");
+                        let disk = storage
+                            .get_hmc_lock(&tag)
+                            .unwrap()
+                            .expect("disk entry must exist");
+                        assert_eq!(
+                            disk.t_id, original_tid,
+                            "Disk must retain original t_id on collision"
+                        );
                     }
                 }
             }
@@ -254,7 +303,10 @@ async fn execute_stateful_test(ops: Vec<StorageOp>) {
                 worker_handle = new_worker;
 
                 // Recover state from disk at current simulated time
-                let _ = engine.recover_from_disk(SimTime(current_time_ms)).await.unwrap();
+                let _ = engine
+                    .recover_from_disk(SimTime(current_time_ms))
+                    .await
+                    .unwrap();
 
                 // Assert RAM and Disk consistency after reopen
                 let ram = engine.hmc_ram.read().await;

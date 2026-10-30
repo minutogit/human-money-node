@@ -652,7 +652,10 @@ impl NetworkThermometer {
 
     /// Returns the total daily write usage across all nodes in the network
     pub fn total_daily_write_usage(&self) -> u64 {
-        self.node_daily_usage.values().copied().sum()
+        self.node_daily_usage
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Returns the current daily read usage of a node
@@ -665,7 +668,10 @@ impl NetworkThermometer {
 
     /// Returns the total daily read usage across all nodes in the network
     pub fn total_daily_read_usage(&self) -> u64 {
-        self.node_daily_read_usage.values().copied().sum()
+        self.node_daily_read_usage
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Initializes the read thermometer of a new node with the current peer read median

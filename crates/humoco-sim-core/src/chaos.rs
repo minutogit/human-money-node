@@ -215,10 +215,20 @@ mod tests {
     fn test_merge_class_precedence() {
         use crate::types::LockStatus;
         let parent = [0xAA; 32];
-        let mut pending =
-            LockRecord::new(parent, [0x02; 32], b"pending".to_vec(), SimTime(0), SimTime(1000));
-        let mut final_lock =
-            LockRecord::new(parent, [0x03; 32], b"final".to_vec(), SimTime(0), SimTime(1000));
+        let mut pending = LockRecord::new(
+            parent,
+            [0x02; 32],
+            b"pending".to_vec(),
+            SimTime(0),
+            SimTime(1000),
+        );
+        let mut final_lock = LockRecord::new(
+            parent,
+            [0x03; 32],
+            b"final".to_vec(),
+            SimTime(0),
+            SimTime(1000),
+        );
 
         let h_pending = compute_canonical_hash(&parent, &pending.receiver_pub, &pending.nonce);
         let h_final = compute_canonical_hash(&parent, &final_lock.receiver_pub, &final_lock.nonce);
@@ -255,13 +265,17 @@ mod tests {
         final_lock.status = LockStatus::Final { sigs: 14 };
 
         // Even though pending has a smaller canonical hash, final_lock must win!
-        let merged_1 =
-            resolve_partition_merge(std::slice::from_ref(&pending), std::slice::from_ref(&final_lock));
+        let merged_1 = resolve_partition_merge(
+            std::slice::from_ref(&pending),
+            std::slice::from_ref(&final_lock),
+        );
         assert_eq!(merged_1.len(), 1);
         assert_eq!(merged_1[0].id, final_lock.id);
 
-        let merged_2 =
-            resolve_partition_merge(std::slice::from_ref(&final_lock), std::slice::from_ref(&pending));
+        let merged_2 = resolve_partition_merge(
+            std::slice::from_ref(&final_lock),
+            std::slice::from_ref(&pending),
+        );
         assert_eq!(merged_2.len(), 1);
         assert_eq!(merged_2[0].id, final_lock.id);
 
@@ -271,15 +285,19 @@ mod tests {
             sigs: 3,
             required: 3,
         };
-        let merged_3 =
-            resolve_partition_merge(std::slice::from_ref(&prov), std::slice::from_ref(&final_lock));
+        let merged_3 = resolve_partition_merge(
+            std::slice::from_ref(&prov),
+            std::slice::from_ref(&final_lock),
+        );
         assert_eq!(merged_3[0].id, final_lock.id);
 
         // Equal class (Final vs Final): min(H_canon) decides
         let mut final_a = pending.clone();
         final_a.status = LockStatus::Final { sigs: 14 };
-        let merged_final =
-            resolve_partition_merge(std::slice::from_ref(&final_a), std::slice::from_ref(&final_lock));
+        let merged_final = resolve_partition_merge(
+            std::slice::from_ref(&final_a),
+            std::slice::from_ref(&final_lock),
+        );
         assert_eq!(merged_final[0].id, final_a.id);
     }
 

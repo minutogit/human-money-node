@@ -5258,4 +5258,3 @@ async fn test_a05_01_non_blocking_voucher_root_reads() {
     drop(held_permits);
     assert_eq!(state.voucher_root_reads.available_permits(), 16);
 }
-

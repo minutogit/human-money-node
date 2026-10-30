@@ -1178,23 +1178,35 @@ mod tests {
 
         // Origin-signed
         hb.sign_origin(&identity, 12345);
-        assert!(hb.verify_origin_address_binding(), "Must verify address binding");
+        assert!(
+            hb.verify_origin_address_binding(),
+            "Must verify address binding"
+        );
         assert!(hb.verify_origin_signature(), "Must verify origin signature");
 
         // Tamper with address: forged relay attempt
         let mut tampered_addr = hb.clone();
         tampered_addr.addr = "127.0.0.1:31338".parse().unwrap();
-        assert!(!tampered_addr.verify_origin_address_binding(), "Tampered address must fail address binding");
+        assert!(
+            !tampered_addr.verify_origin_address_binding(),
+            "Tampered address must fail address binding"
+        );
 
         // Tamper with timestamp
         let mut tampered_ts = hb.clone();
         tampered_ts.timestamp_ms = 99999;
-        assert!(!tampered_ts.verify_origin_address_binding(), "Tampered timestamp must fail");
+        assert!(
+            !tampered_ts.verify_origin_address_binding(),
+            "Tampered timestamp must fail"
+        );
 
         // Tamper with EMA
         let mut tampered_ema = hb.clone();
         tampered_ema.declared_write_ema_micro_bj = 9999;
-        assert!(!tampered_ema.verify_origin_address_binding(), "Tampered EMA must fail");
+        assert!(
+            !tampered_ema.verify_origin_address_binding(),
+            "Tampered EMA must fail"
+        );
 
         // Legacy signature with op_hash = [0; 32]
         use ed25519_dalek::Signer;
@@ -1211,8 +1223,14 @@ mod tests {
         );
         let mut legacy_hb = hb.clone();
         legacy_hb.signature = identity.signing_key().sign(&legacy_digest).to_bytes();
-        assert!(!legacy_hb.verify_origin_address_binding(), "Legacy signature must NOT satisfy address binding");
-        assert!(legacy_hb.verify_origin_signature(), "Legacy signature must satisfy backward-compatible origin signature");
+        assert!(
+            !legacy_hb.verify_origin_address_binding(),
+            "Legacy signature must NOT satisfy address binding"
+        );
+        assert!(
+            legacy_hb.verify_origin_signature(),
+            "Legacy signature must satisfy backward-compatible origin signature"
+        );
     }
 }
 

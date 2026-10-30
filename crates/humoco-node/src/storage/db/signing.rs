@@ -68,6 +68,34 @@ pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<bool, StorageEr
     let choices = txn.open_table(TABLE_OWN_CHOICES)?;
     let ttl = txn.open_table(TABLE_OWN_CHOICE_TTL)?;
     let mut commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+
+    let mut valid_roots = std::collections::HashMap::new();
+    let roots_table = txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
+    for item in roots_table.iter()? {
+        let (key, value) = item?;
+        match serde_json::from_slice::<crate::api::hmc::L2LockEntry>(value.value()) {
+            Ok(root_entry) => {
+                if key.value() != root_entry.layer2_voucher_id.as_str() {
+                    measured.corrupt = true;
+                } else {
+                    match roots::root_valid_until(&root_entry) {
+                        Ok(valid_until) => {
+                            valid_roots.insert(root_entry.layer2_voucher_id, valid_until);
+                        }
+                        Err(_) => {
+                            measured.corrupt = true;
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                measured.corrupt = true;
+            }
+        }
+    }
+    let hmc_locks = txn.open_table(TABLE_HMC_LOCKS)?;
+    let prov_hmc_locks = txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
+
     for item in choices.iter()? {
         let (slot, value) = item?;
         measured.count = measured
@@ -93,6 +121,29 @@ pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<bool, StorageEr
                 let expiry = super::grace_expiry_bucket_sec(choice.valid_until_ms);
                 if ttl.get(&(expiry, slot.value()))?.is_none() {
                     measured.corrupt = true;
+                }
+                let key = slot.value();
+                if let Some((_, rest)) = key.split_once(':') {
+                    if !rest.starts_with("native:") {
+                        let raw_entry = if let Some(guard) = hmc_locks.get(rest)? {
+                            Some(guard.value().to_vec())
+                        } else {
+                            prov_hmc_locks.get(rest)?.map(|guard| guard.value().to_vec())
+                        };
+                        if let Some(raw_bytes) = raw_entry {
+                            if let Ok(hmc_entry) =
+                                serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&raw_bytes)
+                            {
+                                if let Some(&root_ttl) =
+                                    valid_roots.get(&hmc_entry.layer2_voucher_id)
+                                {
+                                    if root_ttl != choice.valid_until_ms {
+                                        measured.corrupt = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Err(_) => measured.corrupt = true,
@@ -223,10 +274,7 @@ pub(super) fn remove_choice(txn: &redb::WriteTransaction, slot: &str) -> Result<
     Ok(())
 }
 
-pub(super) fn latch_corruption_in_txn(
-    txn: &redb::WriteTransaction,
-    signing_corrupt: &AtomicBool,
-) {
+pub(super) fn latch_corruption_in_txn(txn: &redb::WriteTransaction, signing_corrupt: &AtomicBool) {
     signing_corrupt.store(true, Ordering::Release);
     let state = {
         let table = txn.open_table(TABLE_SIGNING_STATE);

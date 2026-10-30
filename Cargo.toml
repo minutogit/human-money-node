@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/humoco-proto",
     "crates/humoco-sim-core",
     "crates/humoco-node",
     "crates/clap_complete",

@@ -495,7 +495,9 @@ impl RequestHandler for DelayedHandler {
         let delay = self.delay;
         Box::pin(async move {
             tokio::time::sleep(delay).await;
-            inner.handle_authenticated(header, payload, peer_identity).await
+            inner
+                .handle_authenticated(header, payload, peer_identity)
+                .await
         })
     }
 }
@@ -509,8 +511,9 @@ async fn test_a24_r1_checkout_enforces_single_end_to_end_deadline_across_persist
     const NUM_SHARDS: usize = 20;
 
     let gw_temp = tempdir().expect("gw tempdir");
-    let gw_storage =
-        Arc::new(RedbStorage::open(&gw_temp.path().join("quorum_gw_deadline.redb")).expect("open gw redb"));
+    let gw_storage = Arc::new(
+        RedbStorage::open(&gw_temp.path().join("quorum_gw_deadline.redb")).expect("open gw redb"),
+    );
     let (gw_engine, _gw_worker) = DualTierEngine::new(gw_storage.clone());
     let gateway_id = NodeIdentity::generate();
     let gw_cancel = CancellationToken::new();
@@ -783,4 +786,3 @@ async fn test_a24_r1_checkout_enforces_single_end_to_end_deadline_across_persist
         sh.transport.close();
     }
 }
-

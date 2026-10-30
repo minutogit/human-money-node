@@ -719,4 +719,3 @@ fn test_a23_r1_semantic_row_substitution_detected_at_runtime_and_latches_corrupt
         "persisted latch must survive reopen after tampered commitment"
     );
 }
-

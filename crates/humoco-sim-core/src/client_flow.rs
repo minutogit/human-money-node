@@ -263,6 +263,9 @@ impl ConsensusBloomFilter {
     /// Inserts a node (bound to HrwRoutingId + NodePubKey) into the filter
     /// Semantically decoupled: routing ticket + permanent identity
     pub fn insert_identity(&mut self, hrw_id: &HrwRoutingId, pub_key: &NodePubKey) {
+        if self.bits.is_empty() || CONSENSUS_FILTER_BITS == 0 {
+            return;
+        }
         let binding = compute_identity_binding(hrw_id, pub_key);
         for h in 0..CONSENSUS_FILTER_K {
             let bit_idx = compute_bloom_hash(&binding, h, CONSENSUS_FILTER_BITS);
@@ -272,6 +275,9 @@ impl ConsensusBloomFilter {
 
     /// Checks whether the identity (HrwRoutingId + NodePubKey) is contained in the filter
     pub fn contains_identity(&self, hrw_id: &HrwRoutingId, pub_key: &NodePubKey) -> bool {
+        if self.bits.is_empty() || CONSENSUS_FILTER_BITS == 0 {
+            return false;
+        }
         let binding = compute_identity_binding(hrw_id, pub_key);
         for h in 0..CONSENSUS_FILTER_K {
             let bit_idx = compute_bloom_hash(&binding, h, CONSENSUS_FILTER_BITS);
@@ -321,12 +327,16 @@ pub fn compute_identity_binding(hrw_id: &HrwRoutingId, pub_key: &NodePubKey) -> 
 }
 
 pub fn compute_bloom_hash(data: &[u8; 32], index: usize, num_bits: usize) -> usize {
+    if num_bits == 0 {
+        return 0;
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"HUMOCO_BLOOM_HASH");
     hasher.update(data);
     hasher.update(&(index as u32).to_le_bytes());
     let hash = hasher.finalize();
-    let val = u32::from_le_bytes(hash.as_bytes()[0..4].try_into().unwrap()) as usize;
+    let b = hash.as_bytes();
+    let val = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
     val % num_bits
 }
 

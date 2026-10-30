@@ -326,7 +326,10 @@ async fn test_a03_01_handler_cancellation_and_clean_drain_tasks() {
             Box::pin(async move {
                 // Simulates a hanging or slow handler (e.g. 60s)
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                Ok((WireHeader::new(MsgType::StatusResponse as u16, 1, 0, 0, 0), vec![]))
+                Ok((
+                    WireHeader::new(MsgType::StatusResponse as u16, 1, 0, 0, 0),
+                    vec![],
+                ))
             })
         }
     }
@@ -363,13 +366,7 @@ async fn test_a03_01_handler_cancellation_and_clean_drain_tasks() {
 
     // Send a bi-stream request to server to trigger the hanging handler
     let (mut send, _recv) = conn.open_bi().await.expect("Open bi-stream");
-    let req_header = WireHeader::new(
-        MsgType::StatusQuery as u16,
-        1,
-        0,
-        0,
-        0,
-    );
+    let req_header = WireHeader::new(MsgType::StatusQuery as u16, 1, 0, 0, 0);
     humoco_node::network::framing::write_frame(&mut send, &req_header, &[])
         .await
         .expect("Write frame");
@@ -406,7 +403,8 @@ async fn test_a11_01_heartbeat_freshness_window_drop() {
     for i in 0..10 {
         let mut friend = [0x99u8; 32];
         friend[0] = i as u8;
-        pm_a.clock().record_sample_for_peer(friend, true, local_base, local_base);
+        pm_a.clock()
+            .record_sample_for_peer(friend, true, local_base, local_base);
     }
     assert!(pm_a.clock().has_quorum_samples());
 
@@ -432,8 +430,10 @@ async fn test_a11_01_heartbeat_freshness_window_drop() {
     .expect("Bind transport B");
     let addr_b = transport_b.local_addr().unwrap();
 
-    pm_a.register_f2f_friend(*id_b.node_id(), Some(addr_b)).await;
-    pm_b.register_f2f_friend(*id_a.node_id(), Some(addr_a)).await;
+    pm_a.register_f2f_friend(*id_b.node_id(), Some(addr_b))
+        .await;
+    pm_b.register_f2f_friend(*id_a.node_id(), Some(addr_a))
+        .await;
 
     let conn_b_to_a = transport_b.connect_peer_unchecked(addr_a).await.unwrap();
 
@@ -458,7 +458,10 @@ async fn test_a11_01_heartbeat_freshness_window_drop() {
     let mut header = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
     header.reserved = 0; // hops = 0
 
-    transport_b.send_unidirectional(&conn_b_to_a, &header, &payload).await.unwrap();
+    transport_b
+        .send_unidirectional(&conn_b_to_a, &header, &payload)
+        .await
+        .unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

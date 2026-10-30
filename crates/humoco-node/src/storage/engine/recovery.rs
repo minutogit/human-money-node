@@ -167,7 +167,13 @@ impl DualTierEngine {
         };
         self.install_closed_snapshot(
             &mut installation,
-            stage, expected, class, context, witnesses, inherited, deadline,
+            stage,
+            expected,
+            class,
+            context,
+            witnesses,
+            inherited,
+            deadline,
         )
         .await
     }

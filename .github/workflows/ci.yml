@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-test:
+    name: Check, Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Proto Sync
+        run: ./scripts/sync-humoco-proto.sh --check
+
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --workspace
+
+  docker-build:
+    name: Docker Build & Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -f deploy/docker/Dockerfile -t humoco-node:ci .
+
+      - name: Verify binary execution
+        run: docker run --rm --entrypoint humoco humoco-node:ci --version

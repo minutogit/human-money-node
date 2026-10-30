@@ -12,7 +12,8 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn test_rejected_snapshot_preserves_node_signing_health() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("recovery.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("recovery.redb")).expect("open redb"));
     let (engine_raw, _worker) = DualTierEngine::new(storage.clone());
     let engine = Arc::new(engine_raw);
 
@@ -32,7 +33,9 @@ async fn test_rejected_snapshot_preserves_node_signing_health() {
         SimTime(now + 100_000),
     );
     winner_row.status = LockStatus::Final { sigs: 14 };
-    storage.put_lock(&winner_row, now + 100_000).expect("put winner");
+    storage
+        .put_lock(&winner_row, now + 100_000)
+        .expect("put winner");
 
     // 2. Incoming snapshot attempts to overwrite or omit the confirmed choice with unconfirmed Class 1
     let mut loser_row = LockRecord::new(
@@ -42,7 +45,10 @@ async fn test_rejected_snapshot_preserves_node_signing_health() {
         SimTime(now),
         SimTime(now + 100_000),
     );
-    loser_row.status = LockStatus::Provisional { sigs: 3, required: 3 };
+    loser_row.status = LockStatus::Provisional {
+        sigs: 3,
+        required: 3,
+    };
 
     let stage = Arc::new(ShardStage::new(shard, now).expect("new stage"));
     stage
@@ -200,12 +206,16 @@ async fn test_active_hmc_locks_for_shard_filters_foreign_shards() {
     let gen_entry_a = L2LockEntry::from(&gen_req_a);
     let parent_bytes_a = humoco_sim_core::types::genesis_parent_bytes_from_tag(&gen_tag_a);
     let shard_a = humoco_sim_core::types::canonical_voucher_shard(&parent_bytes_a);
-    storage.put_hmc_lock(&gen_tag_a, &gen_entry_a).expect("anchor a");
+    storage
+        .put_hmc_lock(&gen_tag_a, &gen_entry_a)
+        .expect("anchor a");
 
     // Spend A on Genesis A
     let spend_req_a = make_spend("voucher_a", &gen_tag_a, [0x02; 32]);
     let spend_entry_a = L2LockEntry::from(&spend_req_a);
-    storage.put_hmc_lock("spend_tag_a", &spend_entry_a).expect("put spend_a");
+    storage
+        .put_hmc_lock("spend_tag_a", &spend_entry_a)
+        .expect("put spend_a");
 
     // 2. Genesis B with different hash to guarantee different shard if possible, or distinct voucher
     let gen_req_b = make_genesis("voucher_b", [0xFF; 32]);
@@ -213,15 +223,21 @@ async fn test_active_hmc_locks_for_shard_filters_foreign_shards() {
     let gen_entry_b = L2LockEntry::from(&gen_req_b);
     let parent_bytes_b = humoco_sim_core::types::genesis_parent_bytes_from_tag(&gen_tag_b);
     let shard_b = humoco_sim_core::types::canonical_voucher_shard(&parent_bytes_b);
-    storage.put_hmc_lock(&gen_tag_b, &gen_entry_b).expect("anchor b");
+    storage
+        .put_hmc_lock(&gen_tag_b, &gen_entry_b)
+        .expect("anchor b");
 
     // Spend B on Genesis B
     let spend_req_b = make_spend("voucher_b", &gen_tag_b, [0xFE; 32]);
     let spend_entry_b = L2LockEntry::from(&spend_req_b);
-    storage.put_hmc_lock("spend_tag_b", &spend_entry_b).expect("put spend_b");
+    storage
+        .put_hmc_lock("spend_tag_b", &spend_entry_b)
+        .expect("put spend_b");
 
     // 3. Query shard A
-    let locks_a = storage.active_hmc_locks_for_shard(shard_a, now).expect("query a");
+    let locks_a = storage
+        .active_hmc_locks_for_shard(shard_a, now)
+        .expect("query a");
     assert!(
         locks_a.iter().any(|(tag, _)| tag == "spend_tag_a"),
         "Shard A must contain spend_tag_a"
@@ -236,7 +252,12 @@ async fn test_active_hmc_locks_for_shard_filters_foreign_shards() {
     // 4. Query an unused shard (e.g. shard_a.wrapping_add(100))
     let unused_shard = shard_a.wrapping_add(12345);
     if unused_shard != shard_a && unused_shard != shard_b {
-        let locks_unused = storage.active_hmc_locks_for_shard(unused_shard, now).expect("query unused");
-        assert!(locks_unused.is_empty(), "Unused shard must return empty list");
+        let locks_unused = storage
+            .active_hmc_locks_for_shard(unused_shard, now)
+            .expect("query unused");
+        assert!(
+            locks_unused.is_empty(),
+            "Unused shard must return empty list"
+        );
     }
 }

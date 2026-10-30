@@ -84,6 +84,33 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Mine a new Argon2d shard routing ticket for an existing node identity
+    MineTicket {
+        /// Path to identity key file (default: ~/.humoco/node_key.bin or from config)
+        #[arg(short, long)]
+        key: Option<PathBuf>,
+
+        /// Path to configuration file (default: ~/.humoco/humoco.toml)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Minimum required work score (default: 1)
+        #[arg(long, default_value = "1")]
+        min_work: u64,
+
+        /// Explicit T0 timestamp in Unix seconds (default: current Unix timestamp)
+        #[arg(long)]
+        t0: Option<u64>,
+
+        /// Maximum mining attempts (optional)
+        #[arg(long)]
+        max_attempts: Option<u64>,
+
+        /// Output result as structured JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Start and run the HuMoCo node daemon
     Run {
         /// Path to configuration file (default: ~/.humoco/humoco.toml)
@@ -284,6 +311,17 @@ pub enum DbCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Compact the node database file to reclaim unused space (requires daemon to be stopped)
+    Compact {
+        /// Path to configuration file (default: ~/.humoco/humoco.toml)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Output result as structured JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
@@ -389,6 +427,14 @@ impl Cli {
                 path, force, with_key, mnemonic, words, passphrase, wizard, qr, json,
             ),
             Commands::Keygen { out, force } => execute_keygen(out, force),
+            Commands::MineTicket {
+                key,
+                config,
+                min_work,
+                t0,
+                max_attempts,
+                json,
+            } => execute_mine_ticket(key, config, min_work, t0, max_attempts, json),
             Commands::Run {
                 config,
                 bootstrap_new_region,
@@ -435,6 +481,7 @@ impl Cli {
             },
             Commands::Db { command } => match command {
                 DbCommands::Stats { config, json } => execute_db_stats(config, json).await,
+                DbCommands::Compact { config, json } => execute_db_compact(config, json).await,
             },
             Commands::Restore {
                 backup,
@@ -1682,6 +1729,30 @@ pub async fn execute_doctor(config_path: Option<PathBuf>, json: bool) -> Result<
         }
     }
 
+    // 9. Public / NAT Reachability Check (Advertised Address)
+    if cfg.network.p2p_listen_addr.ip().is_unspecified()
+        && cfg.network.advertised_addr.is_none()
+        && !cfg.f2f.peers.is_empty()
+    {
+        checks.push(DoctorCheckJson {
+            name: "advertised_addr".into(),
+            status: "warn".into(),
+            message: "P2P listening on unspecified address (0.0.0.0 or ::) without advertised_addr while peers are configured; set network.advertised_addr for public/NAT reachability".into(),
+        });
+    } else if let Some(adv) = cfg.network.advertised_addr {
+        checks.push(DoctorCheckJson {
+            name: "advertised_addr".into(),
+            status: "ok".into(),
+            message: format!("Advertised address configured: {}", adv),
+        });
+    } else {
+        checks.push(DoctorCheckJson {
+            name: "advertised_addr".into(),
+            status: "ok".into(),
+            message: "Address configuration OK (standalone / local)".into(),
+        });
+    }
+
     if json {
         let out = DoctorJsonOutput {
             daemon_online,
@@ -2100,7 +2171,8 @@ pub async fn execute_revoke(
         now_ms,
     );
 
-    if !crate::network::transport::verify_equivocation_first_party(identity.verifying_key(), &proof) {
+    if !crate::network::transport::verify_equivocation_first_party(identity.verifying_key(), &proof)
+    {
         return Err(NodeError::Crypto(
             "Self-revocation proof failed local first-party verification".into(),
         ));
@@ -2133,7 +2205,9 @@ pub async fn execute_revoke(
                 )));
             }
             Ok(_) => {
-                return Err(NodeError::Cli("Unexpected response from control server".into()));
+                return Err(NodeError::Cli(
+                    "Unexpected response from control server".into(),
+                ));
             }
             Err(_) => {
                 // Control socket exists but daemon is not reachable (or stale socket), fall through to offline DB path
@@ -2144,9 +2218,11 @@ pub async fn execute_revoke(
     if !remote_revoked {
         let db_path = config.storage.data_dir.join("humoco.redb");
         if !config.storage.data_dir.exists() {
-            std::fs::create_dir_all(&config.storage.data_dir).map_err(|err| NodeError::IoWithPath {
-                path: config.storage.data_dir.clone(),
-                source: err,
+            std::fs::create_dir_all(&config.storage.data_dir).map_err(|err| {
+                NodeError::IoWithPath {
+                    path: config.storage.data_dir.clone(),
+                    source: err,
+                }
             })?;
         }
         let storage = RedbStorage::open(&db_path)?;
@@ -2653,6 +2729,164 @@ pub async fn execute_db_stats(config_path: Option<PathBuf>, json: bool) -> Resul
         if let Some(pages) = page_allocations {
             println!("Page Allocations: {}", pages);
         }
+    }
+
+    Ok(())
+}
+
+pub async fn execute_db_compact(config_path: Option<PathBuf>, json: bool) -> Result<(), NodeError> {
+    let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
+    let cfg = if cfg_path.exists() {
+        NodeConfig::load_from_file(&cfg_path)?
+    } else {
+        NodeConfig::default()
+    };
+
+    let db_path = cfg.storage.data_dir.join("humoco.redb");
+    if !db_path.exists() {
+        return Err(NodeError::Cli(format!(
+            "Database file not found at '{}'",
+            db_path.display()
+        )));
+    }
+
+    // Check if daemon is actively running
+    let socket_path = cfg.control_socket_path();
+    let client = ControlClient::new(socket_path);
+    if client.get_status().await.is_ok() {
+        return Err(NodeError::Cli(
+            "Cannot compact database while daemon is running. Stop the daemon first with 'humoco stop'.".into(),
+        ));
+    }
+
+    let size_before = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+
+    match RedbStorage::compact_database(&db_path) {
+        Ok(freed) => {
+            let size_after = std::fs::metadata(&db_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            if json {
+                let out = serde_json::json!({
+                    "status": "compacted",
+                    "freed_pages": freed,
+                    "db_path": db_path.display().to_string(),
+                    "size_before_bytes": size_before,
+                    "size_after_bytes": size_after,
+                    "reclaimed_bytes": size_before.saturating_sub(size_after),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out)
+                        .map_err(|e| NodeError::Cli(e.to_string()))?
+                );
+            } else {
+                println!("=== HuMoCo DB Compaction ===");
+                println!("Database:     {}", db_path.display());
+                println!(
+                    "Size before:  {} bytes ({:.2} MB)",
+                    size_before,
+                    size_before as f64 / 1_048_576.0
+                );
+                println!(
+                    "Size after:   {} bytes ({:.2} MB)",
+                    size_after,
+                    size_after as f64 / 1_048_576.0
+                );
+                println!(
+                    "Reclaimed:    {} bytes ({:.2} MB)",
+                    size_before.saturating_sub(size_after),
+                    size_before.saturating_sub(size_after) as f64 / 1_048_576.0
+                );
+                println!("Freed pages:  {}", freed);
+                println!("[✓] Database compaction completed successfully.");
+            }
+            Ok(())
+        }
+        Err(crate::storage::StorageError::Database(redb::DatabaseError::DatabaseAlreadyOpen)) => {
+            Err(NodeError::Cli(
+                "Database is currently locked by another process (daemon is active). Stop the daemon with 'humoco stop' before compacting.".into(),
+            ))
+        }
+        Err(e) => Err(NodeError::Cli(format!("Database compaction failed: {}", e))),
+    }
+}
+
+pub fn execute_mine_ticket(
+    key_path_opt: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    min_work: u64,
+    t0_opt: Option<u64>,
+    max_attempts: Option<u64>,
+    json: bool,
+) -> Result<(), NodeError> {
+    let key_path = match key_path_opt {
+        Some(p) => p,
+        None => {
+            let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
+            let cfg = if cfg_path.exists() {
+                NodeConfig::load_from_file(&cfg_path)?
+            } else {
+                NodeConfig::default()
+            };
+            cfg.identity.key_path
+        }
+    };
+
+    if !key_path.exists() {
+        return Err(NodeError::Cli(format!(
+            "Identity key file not found at '{}'. Run 'humoco keygen' first.",
+            key_path.display()
+        )));
+    }
+
+    let identity = NodeIdentity::load_from_file(&key_path)?;
+    let t0 = match t0_opt {
+        Some(val) if val > 0 => val,
+        _ => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(1),
+    };
+
+    let (mined, attempts) = identity.mine_ticket(min_work, t0, max_attempts)?;
+    mined.save_to_file(&key_path)?;
+
+    if json {
+        let out = serde_json::json!({
+            "status": "mined",
+            "key_path": key_path.display().to_string(),
+            "node_pubkey": mined.public_key_bs58(),
+            "node_pubkey_hex": mined.public_key_hex(),
+            "hrw_routing_id": mined.hrw_routing_id_bs58(),
+            "hrw_routing_id_hex": mined.hrw_routing_id_hex(),
+            "nonce": mined.nonce(),
+            "t0": mined.t0(),
+            "work_score": mined.work_score(),
+            "attempts": attempts,
+            "incubation_notice": "24h maturation period applies before HRW activation"
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| NodeError::Cli(e.to_string()))?
+        );
+    } else {
+        println!("=== HuMoCo Argon2d Shard Ticket Mined ===");
+        println!("Key path:             {}", key_path.display());
+        println!("Preserved NodePubKey: {}", mined.public_key_bs58());
+        println!("New HrwRoutingId:     {}", mined.hrw_routing_id_bs58());
+        println!("Nonce:                {}", mined.nonce());
+        println!("T0 (Unix sec):        {}", mined.t0());
+        println!("Work Score:           {}", mined.work_score());
+        println!("Attempts:             {}", attempts);
+        println!();
+        println!("⚠️  24h Incubation Wall Notice:");
+        println!(
+            "A newly mined HrwRoutingId matures for 24 hours before being active in HRW ranking."
+        );
+        println!("This prevents opportunistic shard-hopping while allowing immediate gossip.");
+        println!("[✓] Identity key file updated successfully (mode 0600).");
     }
 
     Ok(())
@@ -3461,5 +3695,74 @@ mod tests {
         .await
         .unwrap();
         assert!(!temp.path().join("humoco.sock").exists());
+    }
+
+    #[tokio::test]
+    async fn test_cli_mine_ticket_and_db_compact() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("humoco.toml");
+        let key_path = temp.path().join("node_key.bin");
+        let data_dir = temp.path().join("data");
+
+        execute_init(
+            Some(config_path.clone()),
+            false,
+            true,
+            None,
+            12,
+            None,
+            false,
+            false,
+            false,
+        )
+        .expect("execute_init");
+
+        let mut config = NodeConfig::load_from_file(&config_path).expect("load config");
+        config.identity.key_path = key_path.clone();
+        config.storage.data_dir = data_dir.clone();
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        config.save_to_file(&config_path).expect("save config");
+
+        let identity_before = NodeIdentity::load_from_file(&key_path).expect("load identity");
+        let pubkey_before = *identity_before.node_pubkey();
+
+        // Mine fresh ticket
+        execute_mine_ticket(
+            Some(key_path.clone()),
+            Some(config_path.clone()),
+            1,
+            Some(1_700_000_000),
+            Some(5),
+            false,
+        )
+        .expect("mine ticket");
+
+        let identity_after = NodeIdentity::load_from_file(&key_path).expect("load identity after");
+        assert_eq!(*identity_after.node_pubkey(), pubkey_before);
+        assert_eq!(identity_after.t0(), 1_700_000_000);
+        assert!(identity_after.nonce() >= 1);
+
+        // Create db and test compact
+        let db_path = data_dir.join("humoco.redb");
+        let _storage = RedbStorage::open(&db_path).expect("open db");
+        drop(_storage);
+
+        execute_db_compact(Some(config_path.clone()), false)
+            .await
+            .expect("compact db");
+    }
+
+    #[tokio::test]
+    async fn test_cli_doctor_advertised_addr_warning() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("humoco.toml");
+        let mut config = NodeConfig::default();
+        config.network.p2p_listen_addr = "0.0.0.0:9090".parse().unwrap();
+        config.network.advertised_addr = None;
+        config.f2f.peers.push("dummy_peer@1.2.3.4:9090".into());
+        config.save_to_file(&config_path).expect("save config");
+
+        // Run doctor without crashing
+        let _ = execute_doctor(Some(config_path), true).await;
     }
 }

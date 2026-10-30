@@ -321,31 +321,67 @@ fn test_a22_r1_subsecond_grace_horizon_preserved_across_active_provisional_and_s
     let mut keep_hmc = std::collections::HashSet::new();
     keep_hmc.insert(hmc_tag.to_string());
 
-    let (quarantined_native, _) = db.quarantine_subquorum_locks(
-        u16::from_be_bytes([parent[0], parent[1]]),
-        &keep_native,
-        &keep_hmc,
-    ).unwrap();
+    let (quarantined_native, _) = db
+        .quarantine_subquorum_locks(
+            u16::from_be_bytes([parent[0], parent[1]]),
+            &keep_native,
+            &keep_hmc,
+        )
+        .unwrap();
     assert!(quarantined_native.contains(&prov_parent));
     assert!(db.get_provisional_lock(&prov_parent).unwrap().is_some());
 
     // Verification 1: At second 80 (80_000 ms), grace period (+30s = 80_001 ms) has NOT expired.
     // Pruning at 80 must retain all locks and roots!
     let (pruned_native_80, pruned_hmc_80) = db.prune_expired_buckets(80).unwrap();
-    assert_eq!(pruned_native_80.len(), 0, "No native locks should be pruned at 80s before 80.001s expiry");
-    assert_eq!(pruned_hmc_80, 0, "No HMC locks should be pruned at 80s before 80.001s expiry");
-    assert!(db.get_lock(&parent).unwrap().is_some(), "Native lock must be retained at 80s");
-    assert!(db.get_provisional_lock(&prov_parent).unwrap().is_some(), "Quarantined lock must be retained at 80s");
-    assert!(db.get_hmc_lock(hmc_tag).unwrap().is_some(), "HMC lock must be retained at 80s");
-    assert!(db.voucher_root(&root.layer2_voucher_id).unwrap().is_some(), "Root must be retained at 80s");
+    assert_eq!(
+        pruned_native_80.len(),
+        0,
+        "No native locks should be pruned at 80s before 80.001s expiry"
+    );
+    assert_eq!(
+        pruned_hmc_80, 0,
+        "No HMC locks should be pruned at 80s before 80.001s expiry"
+    );
+    assert!(
+        db.get_lock(&parent).unwrap().is_some(),
+        "Native lock must be retained at 80s"
+    );
+    assert!(
+        db.get_provisional_lock(&prov_parent).unwrap().is_some(),
+        "Quarantined lock must be retained at 80s"
+    );
+    assert!(
+        db.get_hmc_lock(hmc_tag).unwrap().is_some(),
+        "HMC lock must be retained at 80s"
+    );
+    assert!(
+        db.voucher_root(&root.layer2_voucher_id).unwrap().is_some(),
+        "Root must be retained at 80s"
+    );
 
     // Verification 2: At second 81 (81_000 ms), grace period HAS expired.
     // Pruning at 81 must physically remove all entries.
     let (pruned_native_81, pruned_hmc_81) = db.prune_expired_buckets(81).unwrap();
-    assert!(pruned_native_81.contains(&parent), "Native lock must be pruned at 81s");
+    assert!(
+        pruned_native_81.contains(&parent),
+        "Native lock must be pruned at 81s"
+    );
     assert!(pruned_hmc_81 > 0, "HMC lock must be pruned at 81s");
-    assert!(db.get_lock(&parent).unwrap().is_none(), "Native lock must be gone at 81s");
-    assert!(db.get_provisional_lock(&prov_parent).unwrap().is_none(), "Quarantined lock must be gone at 81s");
-    assert!(db.get_hmc_lock(hmc_tag).unwrap().is_none(), "HMC lock must be gone at 81s");
-    assert!(db.voucher_root(&root.layer2_voucher_id).unwrap().is_none(), "Root must be gone at 81s");
+    assert!(
+        db.get_lock(&parent).unwrap().is_none(),
+        "Native lock must be gone at 81s"
+    );
+    assert!(
+        db.get_provisional_lock(&prov_parent).unwrap().is_none(),
+        "Quarantined lock must be gone at 81s"
+    );
+    assert!(
+        db.get_hmc_lock(hmc_tag).unwrap().is_none(),
+        "HMC lock must be gone at 81s"
+    );
+    assert!(
+        db.voucher_root(&root.layer2_voucher_id).unwrap().is_none(),
+        "Root must be gone at 81s"
+    );
 }

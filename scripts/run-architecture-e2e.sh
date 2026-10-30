@@ -7,6 +7,7 @@ core_root="${HUMOCO_CORE_ROOT:-$(dirname "$node_root")/human-money-core}"
 app_root="${HUMOCO_APP_ROOT:-$(dirname "$node_root")/human-money-app}"
 stage_dir="$(mktemp -d /tmp/humoco-architecture-e2e.XXXXXX)"
 trap 'rm -rf "$stage_dir"' EXIT
+"$node_root/scripts/sync-humoco-proto.sh" --check
 python3 - "$node_root" "$core_root" "$app_root" "$stage_dir" <<'PY'
 import sys,json,pathlib
 node,core,app,out=map(pathlib.Path,sys.argv[1:])

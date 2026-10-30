@@ -29,7 +29,8 @@ fn sign_attestation(
 ) -> Attestation {
     let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(parent, lock_id);
     let shard = u16::from_be_bytes([parent[0], parent[1]]);
-    let digest = humoco_sim_core::crypto::compute_sig_digest(domain, 0, 0, 0, shard, status, &payload);
+    let digest =
+        humoco_sim_core::crypto::compute_sig_digest(domain, 0, 0, 0, shard, status, &payload);
     let pubkey = key.verifying_key().to_bytes();
     let node_u16 = u16::from_le_bytes([pubkey[0], pubkey[1]]);
     Attestation {
@@ -58,7 +59,8 @@ async fn setup_server(
     let server_cancel = CancellationToken::new();
     let pm = Arc::new(PeerManager::new(Vec::new()));
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("a02_a20.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("a02_a20.redb")).expect("open redb"));
     let (engine, worker) = DualTierEngine::new(storage.clone());
     let handler = Arc::new(
         NodeRequestHandler::with_peer_manager(
@@ -79,7 +81,16 @@ async fn setup_server(
     .expect("bind server");
     let addr = transport.local_addr().expect("addr");
     transport.spawn_accept_loop();
-    (storage, engine, worker, pm, server_id, transport, addr, server_cancel)
+    (
+        storage,
+        engine,
+        worker,
+        pm,
+        server_id,
+        transport,
+        addr,
+        server_cancel,
+    )
 }
 
 async fn setup_client(
@@ -101,8 +112,12 @@ async fn setup_client(
     let client_addr = client_transport.local_addr().expect("client addr");
     client_transport.spawn_accept_loop();
 
-    server_pm.register_f2f_friend(*client_id.node_pubkey(), Some(client_addr)).await;
-    client_pm.register_f2f_friend(server_pubkey, Some(server_addr)).await;
+    server_pm
+        .register_f2f_friend(*client_id.node_pubkey(), Some(client_addr))
+        .await;
+    client_pm
+        .register_f2f_friend(server_pubkey, Some(server_addr))
+        .await;
 
     let conn = client_transport
         .connect_peer(server_addr)
@@ -149,11 +164,23 @@ async fn test_a02_01_bidi_testnet_equivocation_slashes_offender() {
         offender_pub,
     );
 
-    assert!(proof.verify(), "Testnet proof must pass generic verify (A02-01)");
-    assert!(proof.verify_network(NetworkId::Testnet), "Testnet proof must pass Testnet verify");
+    assert!(
+        proof.verify(),
+        "Testnet proof must pass generic verify (A02-01)"
+    );
+    assert!(
+        proof.verify_network(NetworkId::Testnet),
+        "Testnet proof must pass Testnet verify"
+    );
 
     let payload = bincode::serialize(&proof).expect("serialize");
-    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 1, 0, 0, payload.len() as u32);
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        1,
+        0,
+        0,
+        payload.len() as u32,
+    );
 
     let (resp_hdr, _) = client_transport
         .send_request(&conn, &hdr, &payload)
@@ -163,12 +190,24 @@ async fn test_a02_01_bidi_testnet_equivocation_slashes_offender() {
     assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
 
     // Verify offender is permanently banned in RAM and disk
-    assert!(engine.is_node_banned(&offender_pub).await, "Offender must be banned in engine");
-    assert!(pm.is_banned(&offender_pub).await, "Offender must be banned in PeerManager");
-    assert!(storage.is_node_banned(&offender_pub).expect("check ban"), "Offender must be banned in redb");
+    assert!(
+        engine.is_node_banned(&offender_pub).await,
+        "Offender must be banned in engine"
+    );
+    assert!(
+        pm.is_banned(&offender_pub).await,
+        "Offender must be banned in PeerManager"
+    );
+    assert!(
+        storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Offender must be banned in redb"
+    );
 
     let evidence_hash = *blake3::hash(&payload).as_bytes();
-    assert!(storage.get_evidence(&evidence_hash).expect("get evidence").is_some());
+    assert!(storage
+        .get_evidence(&evidence_hash)
+        .expect("get evidence")
+        .is_some());
 
     server_cancel.cancel();
     server_transport.close();
@@ -214,7 +253,13 @@ async fn test_a02_01_uni_testnet_equivocation_slashes_offender() {
     );
 
     let payload = bincode::serialize(&proof).expect("serialize");
-    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 2, 0, 0, payload.len() as u32);
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        2,
+        0,
+        0,
+        payload.len() as u32,
+    );
 
     client_transport
         .send_unidirectional(&conn, &hdr, &payload)
@@ -223,9 +268,18 @@ async fn test_a02_01_uni_testnet_equivocation_slashes_offender() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    assert!(engine.is_node_banned(&offender_pub).await, "Offender must be banned in engine (uni)");
-    assert!(pm.is_banned(&offender_pub).await, "Offender must be banned in PeerManager (uni)");
-    assert!(storage.is_node_banned(&offender_pub).expect("check ban"), "Offender must be banned in redb (uni)");
+    assert!(
+        engine.is_node_banned(&offender_pub).await,
+        "Offender must be banned in engine (uni)"
+    );
+    assert!(
+        pm.is_banned(&offender_pub).await,
+        "Offender must be banned in PeerManager (uni)"
+    );
+    assert!(
+        storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Offender must be banned in redb (uni)"
+    );
 
     server_cancel.cancel();
     server_transport.close();
@@ -271,10 +325,19 @@ async fn test_a02_01_mainnet_control_slashes_offender() {
     );
 
     assert!(proof.verify(), "Mainnet proof must pass generic verify");
-    assert!(proof.verify_network(NetworkId::Mainnet), "Mainnet proof must pass Mainnet verify");
+    assert!(
+        proof.verify_network(NetworkId::Mainnet),
+        "Mainnet proof must pass Mainnet verify"
+    );
 
     let payload = bincode::serialize(&proof).expect("serialize");
-    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 3, 0, 0, payload.len() as u32);
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        3,
+        0,
+        0,
+        payload.len() as u32,
+    );
 
     let (resp_hdr, _) = client_transport
         .send_request(&conn, &hdr, &payload)
@@ -283,9 +346,18 @@ async fn test_a02_01_mainnet_control_slashes_offender() {
 
     assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
 
-    assert!(engine.is_node_banned(&offender_pub).await, "Mainnet offender banned in engine");
-    assert!(pm.is_banned(&offender_pub).await, "Mainnet offender banned in PeerManager");
-    assert!(storage.is_node_banned(&offender_pub).expect("check ban"), "Mainnet offender banned in redb");
+    assert!(
+        engine.is_node_banned(&offender_pub).await,
+        "Mainnet offender banned in engine"
+    );
+    assert!(
+        pm.is_banned(&offender_pub).await,
+        "Mainnet offender banned in PeerManager"
+    );
+    assert!(
+        storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Mainnet offender banned in redb"
+    );
 
     server_cancel.cancel();
     server_transport.close();
@@ -326,17 +398,27 @@ async fn test_a02_01_mixed_network_pair_rejected_without_mutation() {
     );
 
     let mixed = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
-        att_a,
-        att_b,
-        victim_pub,
+        att_a, att_b, victim_pub,
     );
 
     assert!(!mixed.verify(), "Mixed-network proof must fail verify");
-    assert!(!mixed.verify_network(NetworkId::Testnet), "Mixed-network proof must fail Testnet verify");
-    assert!(!mixed.verify_network(NetworkId::Mainnet), "Mixed-network proof must fail Mainnet verify");
+    assert!(
+        !mixed.verify_network(NetworkId::Testnet),
+        "Mixed-network proof must fail Testnet verify"
+    );
+    assert!(
+        !mixed.verify_network(NetworkId::Mainnet),
+        "Mixed-network proof must fail Mainnet verify"
+    );
 
     let payload = bincode::serialize(&mixed).expect("serialize");
-    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 4, 0, 0, payload.len() as u32);
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        4,
+        0,
+        0,
+        payload.len() as u32,
+    );
 
     let (resp_hdr, _) = client_transport
         .send_request(&conn, &hdr, &payload)
@@ -346,12 +428,24 @@ async fn test_a02_01_mixed_network_pair_rejected_without_mutation() {
     assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
 
     // Victim must NOT be banned, and no evidence persisted
-    assert!(!engine.is_node_banned(&victim_pub).await, "Victim must not be banned in engine on mixed proof");
-    assert!(!pm.is_banned(&victim_pub).await, "Victim must not be banned in PeerManager on mixed proof");
-    assert!(!storage.is_node_banned(&victim_pub).expect("check ban"), "Victim must not be banned in redb");
+    assert!(
+        !engine.is_node_banned(&victim_pub).await,
+        "Victim must not be banned in engine on mixed proof"
+    );
+    assert!(
+        !pm.is_banned(&victim_pub).await,
+        "Victim must not be banned in PeerManager on mixed proof"
+    );
+    assert!(
+        !storage.is_node_banned(&victim_pub).expect("check ban"),
+        "Victim must not be banned in redb"
+    );
 
     let evidence_hash = *blake3::hash(&payload).as_bytes();
-    assert!(storage.get_evidence(&evidence_hash).expect("get evidence").is_none());
+    assert!(storage
+        .get_evidence(&evidence_hash)
+        .expect("get evidence")
+        .is_none());
 
     server_cancel.cancel();
     server_transport.close();
@@ -377,15 +471,32 @@ async fn test_a02_01_forged_proof_rejected_without_mutation() {
     let lock_b = [0x88u8; 32];
 
     // Simulator BLAKE3 attestations framing the victim
-    let att_a = humoco_sim_core::crypto::sign_lock_attestation(victim_u16, &lock_a, &parent, SimTime(1_000));
-    let att_b = humoco_sim_core::crypto::sign_lock_attestation(victim_u16, &lock_b, &parent, SimTime(1_000));
+    let att_a = humoco_sim_core::crypto::sign_lock_attestation(
+        victim_u16,
+        &lock_a,
+        &parent,
+        SimTime(1_000),
+    );
+    let att_b = humoco_sim_core::crypto::sign_lock_attestation(
+        victim_u16,
+        &lock_b,
+        &parent,
+        SimTime(1_000),
+    );
 
-    let mut forged = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation(att_a, att_b);
+    let mut forged =
+        humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation(att_a, att_b);
     forged.perpetrator_node_id = victim_pub;
     forged.perpetrator = victim_u16;
 
     let payload = bincode::serialize(&forged).expect("serialize");
-    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 5, 0, 0, payload.len() as u32);
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        5,
+        0,
+        0,
+        payload.len() as u32,
+    );
 
     let (resp_hdr, _) = client_transport
         .send_request(&conn, &hdr, &payload)
@@ -394,12 +505,24 @@ async fn test_a02_01_forged_proof_rejected_without_mutation() {
 
     assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
 
-    assert!(!engine.is_node_banned(&victim_pub).await, "Victim must not be banned on forged proof");
-    assert!(!pm.is_banned(&victim_pub).await, "Victim must not be banned in PeerManager");
-    assert!(!storage.is_node_banned(&victim_pub).expect("check ban"), "Victim must not be banned in redb");
+    assert!(
+        !engine.is_node_banned(&victim_pub).await,
+        "Victim must not be banned on forged proof"
+    );
+    assert!(
+        !pm.is_banned(&victim_pub).await,
+        "Victim must not be banned in PeerManager"
+    );
+    assert!(
+        !storage.is_node_banned(&victim_pub).expect("check ban"),
+        "Victim must not be banned in redb"
+    );
 
     let evidence_hash = *blake3::hash(&payload).as_bytes();
-    assert!(storage.get_evidence(&evidence_hash).expect("get evidence").is_none());
+    assert!(storage
+        .get_evidence(&evidence_hash)
+        .expect("get evidence")
+        .is_none());
 
     server_cancel.cancel();
     server_transport.close();
@@ -449,7 +572,13 @@ async fn test_a20_01_atomic_persistence_with_aborted_worker() {
         offender_pub,
     );
     let payload = bincode::serialize(&proof).expect("serialize");
-    let hdr = WireHeader::new(MsgType::EquivocationProof as u16, 6, 0, 0, payload.len() as u32);
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        6,
+        0,
+        0,
+        payload.len() as u32,
+    );
 
     let (resp_hdr, _) = client_transport
         .send_request(&conn, &hdr, &payload)
@@ -464,13 +593,25 @@ async fn test_a20_01_atomic_persistence_with_aborted_worker() {
 
     // CRITICAL (A20-01): The ban and evidence MUST be persisted synchronously/atomically
     // to redb despite the flush worker being aborted!
-    assert!(storage.is_node_banned(&offender_pub).expect("check ban"), "Ban must be durably committed despite aborted worker");
+    assert!(
+        storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Ban must be durably committed despite aborted worker"
+    );
     let evidence_hash = *blake3::hash(&payload).as_bytes();
-    assert!(storage.get_evidence(&evidence_hash).expect("check evidence").is_some(), "Evidence must be durably committed");
+    assert!(
+        storage
+            .get_evidence(&evidence_hash)
+            .expect("check evidence")
+            .is_some(),
+        "Evidence must be durably committed"
+    );
 
     // CRITICAL: A newly constructed engine on the same storage MUST have the offender banned immediately
     let (new_engine, _new_worker) = DualTierEngine::new(storage.clone());
-    assert!(new_engine.is_node_banned(&offender_pub).await, "Newly constructed engine must load the persisted ban");
+    assert!(
+        new_engine.is_node_banned(&offender_pub).await,
+        "Newly constructed engine must load the persisted ban"
+    );
 
     server_cancel.cancel();
     server_transport.close();
@@ -484,7 +625,8 @@ async fn test_a20_01_atomic_persistence_with_aborted_worker() {
 #[tokio::test]
 async fn test_a20_01_boot_reconstruction_from_durable_evidence() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("reconstruction.redb")).expect("open redb"));
+    let storage =
+        Arc::new(RedbStorage::open(&temp.path().join("reconstruction.redb")).expect("open redb"));
 
     let offender_key = SigningKey::from_bytes(&[0x48u8; 32]);
     let offender_pub = offender_key.verifying_key().to_bytes();
@@ -516,7 +658,9 @@ async fn test_a20_01_boot_reconstruction_from_durable_evidence() {
     let evidence_hash = *blake3::hash(&payload).as_bytes();
 
     // Manually write ONLY evidence to redb, simulating a node that crashed before ban insertion
-    storage.put_evidence(&evidence_hash, &payload).expect("put evidence");
+    storage
+        .put_evidence(&evidence_hash, &payload)
+        .expect("put evidence");
 
     // Before boot reconstruction, ban does not exist in redb
     assert!(!storage.is_node_banned(&offender_pub).expect("check ban"));
@@ -525,8 +669,14 @@ async fn test_a20_01_boot_reconstruction_from_durable_evidence() {
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     // CRITICAL: Boot reconstruction MUST have reconstructed the missing ban from the valid evidence!
-    assert!(engine.is_node_banned(&offender_pub).await, "Engine must have offender banned via boot reconstruction");
-    assert!(storage.is_node_banned(&offender_pub).expect("check ban"), "Storage must now contain the reconstructed ban");
+    assert!(
+        engine.is_node_banned(&offender_pub).await,
+        "Engine must have offender banned via boot reconstruction"
+    );
+    assert!(
+        storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Storage must now contain the reconstructed ban"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +685,10 @@ async fn test_a20_01_boot_reconstruction_from_durable_evidence() {
 #[tokio::test]
 async fn test_a20_01_boot_reconstruction_rejects_forged_evidence() {
     let temp = tempdir().expect("tempdir");
-    let storage = Arc::new(RedbStorage::open(&temp.path().join("anti_framing_reconstruction.redb")).expect("open redb"));
+    let storage = Arc::new(
+        RedbStorage::open(&temp.path().join("anti_framing_reconstruction.redb"))
+            .expect("open redb"),
+    );
 
     let victim_key = SigningKey::from_bytes(&[0x49u8; 32]);
     let victim_pub = victim_key.verifying_key().to_bytes();
@@ -545,10 +698,21 @@ async fn test_a20_01_boot_reconstruction_rejects_forged_evidence() {
     let lock_b = [0x78u8; 32];
 
     // Forged simulator attestations framing the victim
-    let att_a = humoco_sim_core::crypto::sign_lock_attestation(victim_u16, &lock_a, &parent, SimTime(1_000));
-    let att_b = humoco_sim_core::crypto::sign_lock_attestation(victim_u16, &lock_b, &parent, SimTime(1_000));
+    let att_a = humoco_sim_core::crypto::sign_lock_attestation(
+        victim_u16,
+        &lock_a,
+        &parent,
+        SimTime(1_000),
+    );
+    let att_b = humoco_sim_core::crypto::sign_lock_attestation(
+        victim_u16,
+        &lock_b,
+        &parent,
+        SimTime(1_000),
+    );
 
-    let mut forged = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation(att_a, att_b);
+    let mut forged =
+        humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation(att_a, att_b);
     forged.perpetrator_node_id = victim_pub;
     forged.perpetrator = victim_u16;
 
@@ -556,12 +720,20 @@ async fn test_a20_01_boot_reconstruction_rejects_forged_evidence() {
     let evidence_hash = *blake3::hash(&payload).as_bytes();
 
     // Store forged evidence in storage
-    storage.put_evidence(&evidence_hash, &payload).expect("put forged evidence");
+    storage
+        .put_evidence(&evidence_hash, &payload)
+        .expect("put forged evidence");
 
     // Boot the engine
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
     // CRITICAL: Boot reconstruction MUST NOT ban the framed victim from forged evidence!
-    assert!(!engine.is_node_banned(&victim_pub).await, "Victim must NOT be banned by forged evidence at boot");
-    assert!(!storage.is_node_banned(&victim_pub).expect("check ban"), "Storage must NOT contain ban for framed victim");
+    assert!(
+        !engine.is_node_banned(&victim_pub).await,
+        "Victim must NOT be banned by forged evidence at boot"
+    );
+    assert!(
+        !storage.is_node_banned(&victim_pub).expect("check ban"),
+        "Storage must NOT contain ban for framed victim"
+    );
 }

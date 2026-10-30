@@ -170,11 +170,18 @@ async fn pow_positive_exact_retry_and_adversarial_tamper_rejection() {
     let bad_pow_req = make_root_request(&id, "fresh-bad-pow-voucher", now);
     let mut challenge_bytes = [0u8; 32];
     challenge_bytes.copy_from_slice(&hex::decode(&challenge).unwrap());
+    let slot = pow.current_epoch_slot(pow.now_sec());
     let bad_nonce = (0..1000)
         .find(|&n| {
             humoco_node::ingress::pow::count_leading_zero_bits(
-                &humoco_node::ingress::pow::compute_solution_hash(&challenge_bytes, n),
+                &humoco_node::ingress::pow::hash_work(&[0u8; 32], slot, n),
             ) < difficulty
+                && humoco_node::ingress::pow::count_leading_zero_bits(
+                    &humoco_node::ingress::pow::hash_work(&[0u8; 32], slot.saturating_sub(1), n),
+                ) < difficulty
+                && humoco_node::ingress::pow::count_leading_zero_bits(
+                    &humoco_node::ingress::pow::compute_solution_hash(&challenge_bytes, n),
+                ) < difficulty
         })
         .unwrap_or(99999999999);
     let bad_nonce_res = client

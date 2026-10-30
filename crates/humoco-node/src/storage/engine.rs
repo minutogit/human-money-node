@@ -331,12 +331,23 @@ impl HmcRamIndex {
         if let Some(existing) = self.locks.get(&lookup_tag) {
             // Collision check: if t_id identical -> Idempotent replay
             if existing.t_id == entry.t_id {
-                (
-                    L2Verdict::Verified {
-                        lock_entry: existing.clone(),
-                    },
-                    false,
-                )
+                if existing.layer2_voucher_id == entry.layer2_voucher_id
+                    && existing.sender_ephemeral_pub == entry.sender_ephemeral_pub
+                {
+                    (
+                        L2Verdict::Verified {
+                            lock_entry: existing.clone(),
+                        },
+                        false,
+                    )
+                } else {
+                    (
+                        L2Verdict::Conflict {
+                            existing_lock: existing.clone(),
+                        },
+                        false,
+                    )
+                }
             } else if origin == IngressOrigin::ClientApi {
                 // For ClientApi, never overwrite an existing lock via min(H_canon)!
                 // Immediately return Conflict to protect against self-equivocation in live ingress.
@@ -945,21 +956,29 @@ impl DualTierEngine {
             ));
         }
         let _activity = self.enter_hmc_activity(&tag, &entry).await?;
-        let root = {
+        let (accepted, root) = {
             let ram = self.hmc_ram.read().await;
-            if ram
-                .locks
-                .get(&tag)
-                .is_none_or(|lock| lock.t_id != entry.t_id)
-            {
-                return Err(StorageError::OwnChoiceConflict);
-            }
-            ram.voucher_roots
-                .get(&entry.layer2_voucher_id)
+            let accepted = match ram.locks.get(&tag) {
+                Some(lock) => {
+                    if lock.t_id != entry.t_id
+                        || lock.layer2_voucher_id != entry.layer2_voucher_id
+                        || lock.sender_ephemeral_pub != entry.sender_ephemeral_pub
+                    {
+                        return Err(StorageError::OwnChoiceConflict);
+                    }
+                    lock.clone()
+                }
+                None => return Err(StorageError::OwnChoiceConflict),
+            };
+            let root = ram
+                .voucher_roots
+                .get(&accepted.layer2_voucher_id)
                 .copied()
                 .or_else(|| ram.valid_until.get(&tag).copied())
-                .ok_or_else(|| StorageError::DurableCommitFailed("Unknown root lifetime".into()))?
+                .ok_or_else(|| StorageError::DurableCommitFailed("Unknown root lifetime".into()))?;
+            (accepted, root)
         };
+        let entry = accepted;
         if root <= now_ms {
             return Err(StorageError::DurableCommitFailed("Expired root".into()));
         }
@@ -987,6 +1006,16 @@ impl DualTierEngine {
             .await?;
         {
             let mut hmc = self.hmc_ram.write().await;
+            if hmc.locks.get(&committed_tag) != Some(&committed_entry)
+                || hmc
+                    .voucher_roots
+                    .get(&committed_entry.layer2_voucher_id)
+                    .copied()
+                    .or_else(|| hmc.valid_until.get(&committed_tag).copied())
+                    != Some(root)
+            {
+                return Err(StorageError::OwnChoiceConflict);
+            }
             hmc.mark_exact_durable(&committed_tag, &committed_entry, root);
             // Durability protects this node's original choice. It supplies one
             // vote, not verified committee support (DEC-022 / DEC-064).
@@ -1136,7 +1165,10 @@ impl DualTierEngine {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        if let Err(e) = self.db.commit_slashing_evidence_and_ban(&evidence_hash, raw_payload, &offender, now_ms) {
+        if let Err(e) =
+            self.db
+                .commit_slashing_evidence_and_ban(&evidence_hash, raw_payload, &offender, now_ms)
+        {
             warn!("Failed to commit slashing evidence and ban atomically to redb: {e}");
             self.ban_node_ram(&offender).await;
             return false;
@@ -1517,31 +1549,29 @@ impl DualTierEngine {
                 )
             }
         };
-        // Legacy on-disk anchors can be recovered, but a new public canonical
-        // root needs an author-bound output sidecar. Otherwise the old L1 init
-        // payload's placeholder voucher ID could be rebound by an attacker.
-        if origin == IngressOrigin::ClientApi
-            && super::db::roots::is_root(&lookup_tag, &entry)
-            && entry.causal_output.is_none()
-            && entry.layer2_voucher_id.len() == 64
+        let is_canonical_voucher_id = entry.layer2_voucher_id.len() == 64
             && entry
                 .layer2_voucher_id
                 .bytes()
-                .all(|b| b.is_ascii_hexdigit())
-            && !self
+                .all(|b| b.is_ascii_hexdigit());
+        if super::db::roots::is_root(&lookup_tag, &entry) && is_canonical_voucher_id {
+            let already_anchored = self
                 .hmc_ram
                 .read()
                 .await
                 .root_anchors
-                .contains_key(&entry.layer2_voucher_id)
-        {
-            return (
-                L2Verdict::Rejected {
-                    reason: "New canonical Root Anchor requires its original author output proof"
-                        .into(),
-                },
-                false,
-            );
+                .contains_key(&entry.layer2_voucher_id);
+            if (origin == IngressOrigin::ClientApi || !already_anchored)
+                && entry.causal_output.is_none()
+            {
+                return (
+                    L2Verdict::Rejected {
+                        reason: "New canonical Root Anchor requires its original author output proof"
+                            .into(),
+                    },
+                    false,
+                );
+            }
         }
         if let Some(proof) = &entry.causal_output {
             if !proof.verify()
@@ -1581,8 +1611,15 @@ impl DualTierEngine {
             }
         };
 
-        let (verdict, is_new, equivocation_to_slash) = {
+        let (verdict, is_new, equivocation_to_slash, root_upgraded) = {
             let mut hmc = self.hmc_ram.write().await;
+            let root_upgraded = if super::db::roots::is_root(&lookup_tag, &entry) {
+                hmc.root_anchors
+                    .get(&entry.layer2_voucher_id)
+                    .is_some_and(|old| old.causal_output.is_none() && entry.causal_output.is_some())
+            } else {
+                false
+            };
             let equivocation = if let Some(existing) = hmc.locks.get(&lookup_tag) {
                 if existing.t_id != entry.t_id
                     && existing.sender_ephemeral_pub == entry.sender_ephemeral_pub
@@ -1601,7 +1638,7 @@ impl DualTierEngine {
                 now_ms,
                 confirmation_class,
             );
-            (verdict, is_new, equivocation)
+            (verdict, is_new, equivocation, root_upgraded)
         };
 
         if let Some((existing, entry_new)) = equivocation_to_slash {
@@ -1634,16 +1671,23 @@ impl DualTierEngine {
             }
         }
 
+        let accepted_entry = match &verdict {
+            L2Verdict::Verified { lock_entry } => lock_entry.clone(),
+            _ => entry.clone(),
+        };
+
         let accepted_root = {
             let ram = self.hmc_ram.read().await;
-            ram.voucher_roots.get(&entry.layer2_voucher_id).copied()
+            ram.voucher_roots
+                .get(&accepted_entry.layer2_voucher_id)
+                .copied()
         };
-        if is_new || (durable && matches!(verdict, L2Verdict::Verified { .. })) {
+        if is_new || root_upgraded || (durable && matches!(verdict, L2Verdict::Verified { .. })) {
             if durable {
                 let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                 permit.send(FlushOp::PutHmcLockDurable {
                     lookup_tag: lookup_tag.clone(),
-                    entry: Box::new(entry.clone()),
+                    entry: Box::new(accepted_entry.clone()),
                     ack_sender: ack_tx,
                 });
                 match tokio::time::timeout(
@@ -1653,11 +1697,36 @@ impl DualTierEngine {
                 .await
                 {
                     Ok(Ok(Ok(()))) => {
-                        if let Some(root) = accepted_root {
-                            self.hmc_ram.write().await.mark_exact_durable(
-                                &lookup_tag,
-                                &entry,
-                                root,
+                        let mut ram = self.hmc_ram.write().await;
+                        let Some(root) = accepted_root else {
+                            return (
+                                L2Verdict::Rejected {
+                                    reason: "Unknown root lifetime for durable commit".into(),
+                                },
+                                false,
+                            );
+                        };
+                        ram.mark_exact_durable(&lookup_tag, &accepted_entry, root);
+                        let is_durable_active = ram
+                            .is_entry_durable(&lookup_tag, &accepted_entry, root)
+                            || (super::db::roots::is_root(&lookup_tag, &accepted_entry)
+                                && ram
+                                    .root_anchors
+                                    .get(&accepted_entry.layer2_voucher_id)
+                                    .is_some_and(|active| {
+                                        super::db::roots::same_root_deed(active, &accepted_entry)
+                                            && ram
+                                                .voucher_roots
+                                                .get(&accepted_entry.layer2_voucher_id)
+                                                .copied()
+                                                == Some(root)
+                                    }));
+                        if !is_durable_active {
+                            return (
+                                L2Verdict::Rejected {
+                                    reason: "Durable entry superseded before acknowledgment".into(),
+                                },
+                                false,
                             );
                         }
                     }
@@ -1673,7 +1742,7 @@ impl DualTierEngine {
             } else {
                 permit.send(FlushOp::PutHmcLock {
                     lookup_tag: lookup_tag.clone(),
-                    entry: Box::new(entry.clone()),
+                    entry: Box::new(accepted_entry.clone()),
                 });
             }
         }
@@ -2772,7 +2841,8 @@ impl DualTierEngine {
                 .take_while(|op| {
                     matches!(
                         op,
-                        FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. }
+                        FlushOp::OriginalHmcApproval { .. }
+                            | FlushOp::OriginalRecordApproval { .. }
                     )
                 })
                 .count();
@@ -2782,9 +2852,9 @@ impl DualTierEngine {
             let signing_unavailable = before.failed
                 || original_ops.iter().any(|op| match op {
                     FlushOp::OriginalHmcApproval { health, .. }
-                    | FlushOp::OriginalRecordApproval { health, .. } => {
-                        health.signing_failed.load(std::sync::atomic::Ordering::Acquire)
-                    }
+                    | FlushOp::OriginalRecordApproval { health, .. } => health
+                        .signing_failed
+                        .load(std::sync::atomic::Ordering::Acquire),
                     _ => false,
                 });
 
@@ -3082,10 +3152,14 @@ impl DualTierEngine {
     /// not pre-filtered as expired before their root is known.
     pub async fn recover_from_disk(&self, now: SimTime) -> Result<usize, StorageError> {
         let db = self.db.clone();
-        let (locks, hmc_locks) = tokio::task::spawn_blocking(move || {
+        let locks_res = tokio::task::spawn_blocking(move || {
             let locks = db.all_valid_locks(now.0)?;
             let mut hmc = Vec::new();
             for root in db.all_voucher_roots()? {
+                if super::db::roots::root_valid_until(&root).is_err() {
+                    db.latch_corruption();
+                    return Err(StorageError::SigningHistoryCorrupt);
+                }
                 hmc.push((bs58::encode(root.t_id).into_string(), root, None));
             }
             for (tag, entry) in db.read_all_hmc_locks()? {
@@ -3095,7 +3169,19 @@ impl DualTierEngine {
             Ok::<_, StorageError>((locks, hmc))
         })
         .await
-        .map_err(|e| StorageError::DurableCommitFailed(format!("recovery worker: {e}")))??;
+        .map_err(|e| StorageError::DurableCommitFailed(format!("recovery worker: {e}")))?;
+        let (locks, hmc_locks) = match locks_res {
+            Ok(pair) => pair,
+            Err(e) => {
+                if matches!(e, StorageError::SigningHistoryCorrupt) {
+                    self.db.latch_corruption();
+                    self.stats
+                        .signing_failed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                return Err(e);
+            }
+        };
         let count = locks.len();
         let mut ram = self.ram.write().await;
         for (lock, root_valid_until) in locks {

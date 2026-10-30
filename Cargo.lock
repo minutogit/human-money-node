@@ -830,6 +830,7 @@ dependencies = [
  "bincode",
  "blake3",
  "ed25519-dalek",
+ "rand 0.8.8",
  "serde",
 ]
 
@@ -840,7 +841,6 @@ dependencies = [
  "bincode",
  "blake3",
  "ed25519-dalek",
- "humoco-proto",
  "proptest",
  "serde",
  "thiserror 1.0.69",

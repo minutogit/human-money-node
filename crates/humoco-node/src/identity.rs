@@ -202,6 +202,49 @@ impl NodeIdentity {
         Ok((identity, phrase))
     }
 
+    /// Mines a fresh Argon2d shard routing ticket for this node identity while strictly preserving
+    /// the permanent `NodePubKey` (Ed25519 signing key).
+    ///
+    /// Iterates monotonic `nonce` starting from 1 with `t0_unix_sec > 0` (Argon2d path)
+    /// until `work_score >= min_work_score` or `max_attempts` is reached.
+    /// Returns the updated `NodeIdentity` with the newly mined ticket and the attempt count.
+    pub fn mine_ticket(
+        &self,
+        min_work_score: u64,
+        t0_unix_sec: u64,
+        max_attempts: Option<u64>,
+    ) -> Result<(Self, u64), NodeError> {
+        let t0 = if t0_unix_sec == 0 { 1 } else { t0_unix_sec };
+        let mut nonce = 1u64;
+        let mut attempts = 0u64;
+
+        loop {
+            if let Some(max) = max_attempts {
+                if attempts >= max {
+                    return Err(NodeError::Identity(format!(
+                        "Mining ticket exceeded maximum attempts ({}) without reaching target work score {}",
+                        max, min_work_score
+                    )));
+                }
+            }
+
+            attempts = attempts.saturating_add(1);
+            let pow_proof = compute_pow_proof(self.node_pubkey(), nonce, t0)?;
+            let work = humoco_sim_core::crypto::compute_work_from_hash(&pow_proof);
+            if work >= min_work_score {
+                let mined = Self::from_signing_key_with_pow(self.signing_key.clone(), nonce, t0);
+                return Ok((mined, attempts));
+            }
+
+            nonce = nonce.saturating_add(1);
+            if nonce == 0 {
+                return Err(NodeError::Identity(
+                    "Nonce overflow during ticket mining".into(),
+                ));
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Getter
     // -------------------------------------------------------------------------
@@ -491,11 +534,7 @@ pub fn build_self_revocation_fraud_proof(
         shard_id,
     };
 
-    FraudProofPayload::new_shard_equivocation_with_pubkey(
-        att_a,
-        att_b,
-        *identity.node_pubkey(),
-    )
+    FraudProofPayload::new_shard_equivocation_with_pubkey(att_a, att_b, *identity.node_pubkey())
 }
 
 #[cfg(test)]
@@ -730,5 +769,36 @@ mod tests {
             &proof
         ));
     }
-}
 
+    #[test]
+    fn test_mine_ticket_basic() {
+        let identity = NodeIdentity::generate();
+        let pubkey_before = *identity.node_pubkey();
+        let signing_bytes_before = identity.signing_key().to_bytes();
+
+        let (mined, attempts) = identity
+            .mine_ticket(1, 1_700_000_000, Some(5))
+            .expect("mine ticket");
+
+        assert_eq!(*mined.node_pubkey(), pubkey_before);
+        assert_eq!(mined.signing_key().to_bytes(), signing_bytes_before);
+        assert_eq!(mined.t0(), 1_700_000_000);
+        assert!(mined.nonce() >= 1);
+        assert!(attempts >= 1);
+        assert!(mined.work_score() >= 1);
+    }
+
+    #[test]
+    fn test_mine_ticket_max_attempts_exceeded() {
+        let identity = NodeIdentity::generate();
+        // Target an impossibly high work score with max_attempts = 1
+        let res = identity.mine_ticket(u64::MAX, 1_700_000_000, Some(1));
+        assert!(res.is_err());
+        match res {
+            Err(NodeError::Identity(msg)) => {
+                assert!(msg.contains("exceeded maximum attempts"));
+            }
+            other => panic!("Expected NodeError::Identity, got: {:?}", other),
+        }
+    }
+}

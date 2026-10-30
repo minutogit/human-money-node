@@ -126,6 +126,35 @@ impl ShardReadinessManager {
         }
     }
 
+    pub fn syncing_count(&self) -> usize {
+        let Ok(states) = self.shard_states.lock() else {
+            return 0;
+        };
+        states
+            .values()
+            .filter(|status| **status == ShardStatus::Syncing)
+            .count()
+    }
+
+    pub fn invalidate_ready_shards(&self) -> usize {
+        let Ok(mut states) = self.shard_states.lock() else {
+            return 0;
+        };
+        let before = states.len();
+        states.retain(|_, status| *status != ShardStatus::Ready);
+        before.saturating_sub(states.len())
+    }
+
+    pub fn is_shard_ready_or_syncing(&self, shard_id: u16) -> bool {
+        let Ok(states) = self.shard_states.lock() else {
+            return false;
+        };
+        matches!(
+            states.get(&shard_id),
+            Some(ShardStatus::Ready | ShardStatus::Syncing)
+        )
+    }
+
     pub fn mark_syncing(&self, shard_id: u16) {
         if let Ok(mut states) = self.shard_states.lock() {
             states.insert(shard_id, ShardStatus::Syncing);
@@ -393,6 +422,12 @@ impl NodeDaemon {
                     "new-region bootstrap refuses an existing database".into(),
                 ));
             }
+            std::fs::create_dir_all(&self.config.storage.data_dir).map_err(|source| {
+                NodeError::IoWithPath {
+                    path: self.config.storage.data_dir.clone(),
+                    source,
+                }
+            })?;
             let marker = self.config.storage.data_dir.join("region-bootstrap-used");
             let reservation = std::fs::OpenOptions::new()
                 .write(true)
@@ -466,6 +501,44 @@ impl NodeDaemon {
             trusted_pubkeys,
             dns_peers,
         ));
+        peer_manager.set_simulation_mode(self.config.network.simulation_mode);
+
+        // Restore persisted HRW ticket maturation timestamps from redb so restarts do not
+        // reset 24h incubation across the cluster, while newly mined tickets still incubate.
+        {
+            let boot_now_ms = peer_manager.net_time_ms();
+            let local_pk = *self.identity.node_pubkey();
+            let local_hrw = *self.identity.hrw_routing_id();
+            let mut local_prior_age = std::time::Duration::ZERO;
+            match storage.all_ticket_observations() {
+                Ok(observations) => {
+                    for (pk, hrw, first_seen_ms) in &observations {
+                        let age = std::time::Duration::from_millis(
+                            boot_now_ms.saturating_sub(*first_seen_ms),
+                        );
+                        peer_manager.seed_persisted_ticket_age(*pk, *hrw, age);
+                        if *pk == local_pk && *hrw == local_hrw {
+                            local_prior_age = age;
+                        }
+                    }
+                    if !observations.is_empty() {
+                        info!(
+                            restored = observations.len(),
+                            "Restored persisted HRW ticket observations into PeerManager"
+                        );
+                    }
+                }
+                Err(err) => {
+                    warn!(error = %err, "Failed to load persisted HRW ticket observations from redb");
+                }
+            }
+            peer_manager.seed_local_ticket_age(local_pk, local_hrw, local_prior_age);
+            if let Err(err) =
+                storage.record_ticket_observations_if_absent(&[(local_pk, local_hrw, boot_now_ms)])
+            {
+                warn!(error = %err, "Failed to persist initial local HRW ticket observation");
+            }
+        }
 
         // Phase 8 (Spec 10/19): load persisted permanent bans from redb
         // directly into the PeerManager at boot so equivocation offenders stay
@@ -594,6 +667,14 @@ impl NodeDaemon {
         let thermo_pm = peer_manager.clone();
         let thermo_cancel = self.cancel_token.clone();
         let thermo_sync_flag = is_sync_ready.clone();
+        let thermo_rm = readiness_manager.clone();
+        let thermo_engine = engine.clone();
+        let thermo_storage = storage.clone();
+        let thermo_self_ticket = (
+            *self.identity.node_pubkey(),
+            *self.identity.hrw_routing_id(),
+        );
+        let init_bootstrap = self.bootstrap_new_region;
         let thermo_interval_secs = if is_simulation { 5 } else { 60 };
         let thermometer_handle = tokio::spawn(async move {
             let mut interval =
@@ -601,6 +682,7 @@ impl NodeDaemon {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await;
             let mut prev_total = thermo_pm.total_network_size().await;
+            let mut max_seen_total = prev_total;
             loop {
                 tokio::select! {
                     _ = thermo_cancel.cancelled() => {
@@ -609,6 +691,19 @@ impl NodeDaemon {
                     }
                     _ = interval.tick() => {
                         let now_ms = thermo_pm.net_time_ms();
+                        // Persist observed HRW tickets off the Tokio async worker thread.
+                        let mut active_tickets: Vec<([u8; 32], [u8; 32], u64)> = thermo_pm
+                            .snapshot_active_tickets()
+                            .await
+                            .into_iter()
+                            .map(|(pk, hrw)| (pk, hrw, now_ms))
+                            .collect();
+                        active_tickets.push((thermo_self_ticket.0, thermo_self_ticket.1, now_ms));
+                        let persist_storage = thermo_storage.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            persist_storage.record_ticket_observations_if_absent(&active_tickets)
+                        })
+                        .await;
                         // Mirror sync-readiness for the Provisional -> Final gate.
                         thermo_pm.set_local_sync_ready(
                             thermo_sync_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -625,14 +720,34 @@ impl NodeDaemon {
                                 thermo_pm.effective_network_medians(now_sec).await;
                             thermo_tc.fast_reseed_on_merge(write_median);
                             thermo_pm.note_merge_detected(now_ms);
+                            // Only drop local Ready state when the remote partition alone holds
+                            // at least `needed` witnesses (cur_total - prev_total >= needed) so
+                            // symmetric merges or 3-node clusters never deadlock with 0 Ready
+                            // witnesses, and skip invalidation on the first peer discovery of an
+                            // empty newly-bootstrapped region.
+                            let (needed, _) = humoco_sim_core::types::required_quorum(cur_total);
+                            let remote_dominant_quorum =
+                                needed > 0 && cur_total.saturating_sub(prev_total) >= needed;
+                            let empty_initial_bootstrap = init_bootstrap
+                                && max_seen_total <= 1
+                                && thermo_engine.ram.read().await.is_empty()
+                                && thermo_engine.hmc_ram.read().await.locks.is_empty();
+                            let invalidated = if remote_dominant_quorum && !empty_initial_bootstrap {
+                                thermo_rm.invalidate_ready_shards()
+                            } else {
+                                0
+                            };
+                            thermo_pm.notify_sync_trigger();
                             info!(
                                 prev_total,
                                 cur_total,
                                 write_median,
+                                invalidated_shards = invalidated,
                                 "Partition merge detected: thermometer fast-reseeded, 24h quota moratorium armed"
                             );
                         }
                         prev_total = cur_total;
+                        max_seen_total = max_seen_total.max(cur_total);
                     }
                 }
             }
@@ -644,18 +759,51 @@ impl NodeDaemon {
         let hb_transport = transport.clone();
         let hb_identity = self.identity.clone();
         let hb_cancel = self.cancel_token.clone();
-        let hb_local_addr = p2p_bound_addr;
+        let hb_local_addr = if let Some(mut adv) = self.config.network.advertised_addr {
+            if adv.port() == 0 {
+                adv.set_port(p2p_bound_addr.port());
+            }
+            adv
+        } else {
+            p2p_bound_addr
+        };
         let hb_sim_mode = is_simulation;
         let hb_tc = tier_controller.clone();
+
+        if !is_simulation
+            && hb_local_addr.ip().is_unspecified()
+            && !self.config.f2f.peers.is_empty()
+        {
+            warn!(
+                bound_addr = %p2p_bound_addr,
+                "Node P2P listen_addr is unspecified (0.0.0.0 / ::) without network.advertised_addr configured; peers on remote hosts will not be able to dial this node via gossiped address"
+            );
+        }
         let heartbeat_handle = tokio::spawn(async move {
             let mut seq: u64 = 0;
+            let mut boot_attempts_left: u8 = 2;
             loop {
-                let sleep_secs = if hb_sim_mode {
-                    rand::thread_rng().gen_range(4..=6)
+                let sleep_dur = if boot_attempts_left == 2 {
+                    let ms = if hb_sim_mode {
+                        rand::thread_rng().gen_range(300..=600)
+                    } else {
+                        rand::thread_rng().gen_range(1000..=3000)
+                    };
+                    std::time::Duration::from_millis(ms)
+                } else if boot_attempts_left == 1 {
+                    if hb_sim_mode {
+                        std::time::Duration::from_millis(800)
+                    } else {
+                        std::time::Duration::from_secs(5)
+                    }
                 } else {
-                    crate::network::PeerManager::heartbeat_jitter_secs()
+                    let sleep_secs = if hb_sim_mode {
+                        rand::thread_rng().gen_range(4..=6)
+                    } else {
+                        crate::network::PeerManager::heartbeat_jitter_secs()
+                    };
+                    std::time::Duration::from_secs(sleep_secs)
                 };
-                let sleep_dur = std::time::Duration::from_secs(sleep_secs);
                 tokio::select! {
                     _ = hb_cancel.cancelled() => {
                         info!("F2F heartbeat emitter shutting down");
@@ -664,6 +812,7 @@ impl NodeDaemon {
                     _ = tokio::time::sleep(sleep_dur) => {
                         let peers = hb_pm.f2f_peer_addrs().await;
                         if peers.is_empty() {
+                            boot_attempts_left = 0;
                             debug!("Heartbeat tick: no F2F friends configured");
                             continue;
                         }
@@ -693,6 +842,7 @@ impl NodeDaemon {
                         let signature = hb_identity.signing_key().sign(&digest).to_bytes();
                         let piggyback = hb_pm.sample_piggyback_evidences(2).await;
 
+                        let mut any_failed = false;
                         for peer_addr in peers {
                             if hb_cancel.is_cancelled() { break; }
                             seq = seq.wrapping_add(1);
@@ -711,8 +861,16 @@ impl NodeDaemon {
                                     debug!(peer=%peer_addr, seq, "F2F heartbeat sent");
                                 }
                                 Err(e) => {
+                                    any_failed = true;
                                     debug!(peer=%peer_addr, error=%e, "Heartbeat send failed");
                                 }
+                            }
+                        }
+                        if boot_attempts_left > 0 {
+                            if any_failed && boot_attempts_left == 2 {
+                                boot_attempts_left = 1;
+                            } else {
+                                boot_attempts_left = 0;
                             }
                         }
                     }
@@ -879,6 +1037,92 @@ impl NodeDaemon {
             }
         });
         cleanup.producer(&shard_sync_handle);
+
+        // 3.1 Throttled background shard warmup for assigned HRW committee shards
+        let warmup_pm = peer_manager.clone();
+        let warmup_rm = readiness_manager.clone();
+        let warmup_identity = self.identity.clone();
+        let warmup_cancel = self.cancel_token.clone();
+        let warmup_notify = peer_manager.sync_notifier();
+        let warmup_initial_delay_secs = if is_simulation { 2 } else { 5 };
+        let warmup_interval_secs = if is_simulation { 5 } else { 30 };
+
+        let shard_warmup_handle = tokio::spawn(async move {
+            // Initial startup settling delay
+            tokio::select! {
+                _ = warmup_cancel.cancelled() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(warmup_initial_delay_secs)) => {}
+            }
+            if warmup_cancel.is_cancelled() {
+                return;
+            }
+
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(warmup_interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            let mut next_shard_cursor: u16 = 0;
+            const MAX_BACKGROUND_WARMUP_SYNCS: usize = 4;
+            const SHARDS_PER_TICK: u16 = 256;
+            let self_pubkey = *warmup_identity.node_pubkey();
+            let self_hrw = *warmup_identity.hrw_routing_id();
+
+            loop {
+                tokio::select! {
+                    _ = warmup_cancel.cancelled() => {
+                        info!("Shard warmup background worker shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {}
+                    _ = warmup_notify.notified() => {}
+                }
+
+                // Only attempt warmup when peer_manager actually has at least 1 connected/active
+                // remote peer (if N <= 1 or 0 remote peers, do nothing so G2 empty-network safety holds strictly).
+                let total_nodes = warmup_pm.total_network_size().await;
+                if total_nodes <= 1 {
+                    continue;
+                }
+                let has_remote = warmup_pm.connected_peer_count().await > 0
+                    || !warmup_pm.active_known_nodes().await.is_empty();
+                if !has_remote {
+                    continue;
+                }
+
+                let mut scanned: u16 = 0;
+                while scanned < SHARDS_PER_TICK {
+                    // Strict throttle: leave 28 of 32 sync slots reserved for live checkout demand sync (DEC-024)
+                    if warmup_rm.syncing_count() >= MAX_BACKGROUND_WARMUP_SYNCS {
+                        break;
+                    }
+
+                    let shard_id = next_shard_cursor;
+                    next_shard_cursor = next_shard_cursor.wrapping_add(1);
+                    scanned = scanned.saturating_add(1);
+
+                    if warmup_rm.is_shard_ready_or_syncing(shard_id) {
+                        continue;
+                    }
+
+                    if warmup_pm
+                        .is_local_committee_member(self_pubkey, self_hrw, shard_id)
+                        .await
+                    {
+                        if warmup_rm.syncing_count() < MAX_BACKGROUND_WARMUP_SYNCS {
+                            if warmup_rm.request_sync(shard_id) {
+                                debug!(
+                                    shard_id,
+                                    "Background warmup sync requested for assigned HRW shard"
+                                );
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        cleanup.producer(&shard_warmup_handle);
         // Initialize Admin Token Manager
         let admin_token_mgr = Arc::new(
             crate::api::AdminTokenManager::load_or_create(&self.config.storage.data_dir, false)
@@ -1126,6 +1370,7 @@ impl NodeDaemon {
             heartbeat_handle,
             ttl_prune_handle,
             shard_sync_handle,
+            shard_warmup_handle,
             thermometer_handle,
             malus_decay_handle,
             dns_re_resolve_handle,
@@ -1690,7 +1935,7 @@ pub async fn sync_single_shard(
             if !compatible_supports.contains(&staged_support) {
                 continue;
             }
-            engine
+            if let Err(err) = engine
                 .install_shard_snapshot(
                     stage,
                     digest,
@@ -1700,7 +1945,14 @@ pub async fn sync_single_shard(
                     Some(inherited.clone()),
                     Some(deadline),
                 )
-                .await?;
+                .await
+            {
+                if !engine.is_signing_healthy() {
+                    return Err(err.into());
+                }
+                warn!("Active-sync witness install failed: {err}; trying next witness");
+                continue;
+            }
             if cancel_token.is_cancelled()
                 || Instant::now() >= deadline
                 || !engine.is_signing_healthy()
@@ -1747,23 +1999,13 @@ pub async fn sync_single_shard(
     result
 }
 
-type ReconciledRootFacts = std::collections::HashMap<
-    (String, [u8; 32]),
-    (
-        crate::api::hmc::L2LockEntry,
-        u32,
-    ),
->;
-type ReconciledNativeFacts = std::collections::HashMap<
-    ([u8; 32], [u8; 32]),
-    ((LockRecord, u64, u8), u32),
->;
+type ReconciledRootFacts =
+    std::collections::HashMap<(String, [u8; 32]), (crate::api::hmc::L2LockEntry, u32)>;
+type ReconciledNativeFacts =
+    std::collections::HashMap<([u8; 32], [u8; 32]), ((LockRecord, u64, u8), u32)>;
 type ReconciledHmcFacts = std::collections::HashMap<
     (String, [u8; 32]),
-    (
-        (String, crate::api::hmc::L2LockEntry, u8),
-        u32,
-    ),
+    ((String, crate::api::hmc::L2LockEntry, u8), u32),
 >;
 type ReconciledStage = (
     Arc<crate::storage::db::install::ShardStage>,
@@ -1887,6 +2129,14 @@ fn reconcile_distributed_stage(
      -> Result<(), crate::storage::StorageError> {
         let facts = read_reconciled_cut_facts(storage, shard_id, now)?;
         for root in facts.roots {
+            let voucher = &root.layer2_voucher_id;
+            if voucher.len() == 64
+                && voucher.bytes().all(|b| b.is_ascii_hexdigit())
+                && root.causal_output.is_none()
+                && target.voucher_root(voucher)?.is_none()
+            {
+                continue;
+            }
             let digest = *blake3::hash(&serde_json::to_vec(&root)?).as_bytes();
             root_facts
                 .entry((root.layer2_voucher_id.clone(), digest))
@@ -1939,13 +2189,22 @@ fn reconcile_distributed_stage(
     // A21-R2: Cap reconciliation working memory against malicious/unbounded cuts
     const MAX_RECONCILE_ENTRY_CAP: usize = 50_000;
     if root_facts.len() + native_facts.len() + hmc_facts.len() > MAX_RECONCILE_ENTRY_CAP {
-        return Err(NodeError::Storage(crate::storage::StorageError::DurableCommitFailed(
-            "reconciliation fact memory budget exceeded".into(),
-        )));
+        return Err(NodeError::Storage(
+            crate::storage::StorageError::DurableCommitFailed(
+                "reconciliation fact memory budget exceeded".into(),
+            ),
+        ));
     }
 
     let mut selected_roots: HashMap<String, (L2LockEntry, [u8; 32], usize)> = HashMap::new();
     for ((voucher, digest), (entry, witnesses)) in &root_facts {
+        if voucher.len() == 64
+            && voucher.bytes().all(|b| b.is_ascii_hexdigit())
+            && entry.causal_output.is_none()
+            && target.voucher_root(voucher)?.is_none()
+        {
+            continue;
+        }
         let count = witnesses.count_ones() as usize;
         if count < needed {
             continue;

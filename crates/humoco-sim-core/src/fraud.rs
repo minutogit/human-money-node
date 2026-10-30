@@ -1,8 +1,7 @@
-use crate::crypto::{
-    compute_attestation_payload_digest, compute_sig_digest, verify_attestation,
-    DOMAIN_INGRESS_DECL,
-};
 pub use crate::crypto::DOMAIN_HB_ANNOUNCE;
+use crate::crypto::{
+    compute_attestation_payload_digest, compute_sig_digest, verify_attestation, DOMAIN_INGRESS_DECL,
+};
 use crate::types::{Attestation, NetworkId, NodeId, SimTime};
 
 // ---------------------------------------------------------------------------
@@ -681,7 +680,10 @@ impl FraudProofPayload {
     }
 
     /// Try creating pillar 1 proof from two attestations (L3A != L3B, same parent_lock)
-    pub fn try_new_shard_equivocation(a: Attestation, b: Attestation) -> Result<Self, FraudBuildError> {
+    pub fn try_new_shard_equivocation(
+        a: Attestation,
+        b: Attestation,
+    ) -> Result<Self, FraudBuildError> {
         if a.node_id != b.node_id {
             return Err(FraudBuildError::SignerMismatch);
         }
@@ -703,7 +705,22 @@ impl FraudProofPayload {
 
     /// Create pillar 1 proof from two attestations (L3A != L3B, same parent_lock)
     pub fn new_shard_equivocation(a: Attestation, b: Attestation) -> Self {
-        Self::try_new_shard_equivocation(a, b).expect("equivocation requires same signer")
+        Self::try_new_shard_equivocation(a.clone(), b.clone()).unwrap_or_else(|_| {
+            let perpetrator = a.node_id;
+            let perpetrator_node_id = Self::pubkey_from_node_id(perpetrator);
+            let pillar = FraudProofPillar::ShardEquivocation;
+            Self {
+                perpetrator_node_id,
+                proof_pillar: pillar,
+                _padding: [0u8; 7],
+                evidence_packet_a: encode_attestation(&a),
+                evidence_packet_b: encode_attestation(&b),
+                reporter_node_id: [0u8; 32],
+                reporter_signature: [0u8; 64],
+                perpetrator,
+                pillar,
+            }
+        })
     }
 
     /// Alternative constructor with explicit perpetrator pubkey
@@ -722,8 +739,9 @@ impl FraudProofPayload {
         b: Attestation,
         perpetrator_pubkey: [u8; 32],
     ) -> Self {
-        Self::try_new_shard_equivocation_with_pubkey(a, b, perpetrator_pubkey)
-            .expect("equivocation requires same signer")
+        let mut p = Self::new_shard_equivocation(a, b);
+        p.perpetrator_node_id = perpetrator_pubkey;
+        p
     }
 
     /// Alternative constructor with explicit reporter
@@ -742,8 +760,9 @@ impl FraudProofPayload {
         b: Attestation,
         reporter: NodeId,
     ) -> Self {
-        Self::try_new_shard_equivocation_with_reporter(a, b, reporter)
-            .expect("equivocation requires same signer")
+        let mut p = Self::new_shard_equivocation(a, b);
+        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
+        p
     }
 
     /// Try creating pillar 3 proof from two heartbeats
@@ -769,7 +788,22 @@ impl FraudProofPayload {
 
     /// Create pillar 3 proof from two heartbeats
     pub fn new_heartbeat_spam(a: Heartbeat, b: Heartbeat) -> Self {
-        Self::try_new_heartbeat_spam(a, b).expect("heartbeat spam requires same node")
+        Self::try_new_heartbeat_spam(a.clone(), b.clone()).unwrap_or_else(|_| {
+            let perpetrator = a.node_id;
+            let perpetrator_node_id = Self::pubkey_from_node_id(perpetrator);
+            let pillar = FraudProofPillar::HeartbeatSpam;
+            Self {
+                perpetrator_node_id,
+                proof_pillar: pillar,
+                _padding: [0u8; 7],
+                evidence_packet_a: encode_heartbeat(&a),
+                evidence_packet_b: encode_heartbeat(&b),
+                reporter_node_id: [0u8; 32],
+                reporter_signature: [0u8; 64],
+                perpetrator,
+                pillar,
+            }
+        })
     }
 
     pub fn try_new_heartbeat_spam_with_reporter(
@@ -783,8 +817,9 @@ impl FraudProofPayload {
     }
 
     pub fn new_heartbeat_spam_with_reporter(a: Heartbeat, b: Heartbeat, reporter: NodeId) -> Self {
-        Self::try_new_heartbeat_spam_with_reporter(a, b, reporter)
-            .expect("heartbeat spam requires same node")
+        let mut p = Self::new_heartbeat_spam(a, b);
+        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
+        p
     }
 
     /// Try creating pillar 2 proof from two ingress evidences (IngressCounterConflict)
@@ -816,8 +851,22 @@ impl FraudProofPayload {
         a: IngressEnvelopeEvidence,
         b: IngressEnvelopeEvidence,
     ) -> Self {
-        Self::try_new_ingress_counter_conflict(a, b)
-            .expect("ingress counter conflict requires same gateway signer")
+        Self::try_new_ingress_counter_conflict(a.clone(), b.clone()).unwrap_or_else(|_| {
+            let perpetrator_node_id = a.gateway_pubkey;
+            let perpetrator = Self::node_id_from_pubkey(&perpetrator_node_id);
+            let pillar = FraudProofPillar::IngressCounterConflict;
+            Self {
+                perpetrator_node_id,
+                proof_pillar: pillar,
+                _padding: [0u8; 7],
+                evidence_packet_a: encode_ingress_envelope(&a),
+                evidence_packet_b: encode_ingress_envelope(&b),
+                reporter_node_id: [0u8; 32],
+                reporter_signature: [0u8; 64],
+                perpetrator,
+                pillar,
+            }
+        })
     }
 
     pub fn try_new_ingress_counter_conflict_with_reporter(
@@ -835,8 +884,9 @@ impl FraudProofPayload {
         b: IngressEnvelopeEvidence,
         reporter: NodeId,
     ) -> Self {
-        Self::try_new_ingress_counter_conflict_with_reporter(a, b, reporter)
-            .expect("ingress counter conflict requires same gateway signer")
+        let mut p = Self::new_ingress_counter_conflict(a, b);
+        p.reporter_node_id = Self::pubkey_from_node_id(reporter);
+        p
     }
 
     /// Checks if two ingress evidences constitute an under-reporting or rollback fraud conflict.
@@ -850,7 +900,13 @@ impl FraudProofPayload {
         proof.verify_ingress_counter_conflict()
     }
 
-    /// Generic verify dispatcher
+    /// Generic verify dispatcher across known networks and simulator fallbacks.
+    ///
+    /// For simulation-mode test suites, this verifies shard equivocation across `Mainnet`
+    /// or `Testnet`, and falls back to deterministic simulator signatures (`verify_attestation`).
+    /// In production daemon hot-paths and P2P mesh validation, callers MUST use
+    /// [`verify_shard_equivocation_network`] or [`verify_network`] with an explicit [`NetworkId`]
+    /// to avoid cross-universe domain confusion.
     pub fn verify(&self) -> bool {
         match self.proof_pillar {
             FraudProofPillar::ShardEquivocation => self.verify_shard_equivocation(),
@@ -862,7 +918,9 @@ impl FraudProofPayload {
     /// Verifies the fraud proof under the designated network universe (A02-01).
     pub fn verify_network(&self, network_id: NetworkId) -> bool {
         match self.proof_pillar {
-            FraudProofPillar::ShardEquivocation => self.verify_shard_equivocation_network(network_id),
+            FraudProofPillar::ShardEquivocation => {
+                self.verify_shard_equivocation_network(network_id)
+            }
             FraudProofPillar::HeartbeatSpam => self.verify_heartbeat_spam(),
             FraudProofPillar::IngressCounterConflict => self.verify_ingress_counter_conflict(),
         }
@@ -871,7 +929,9 @@ impl FraudProofPayload {
     /// Verifies shard equivocation for a specific network (Testnet or Mainnet) (A02-01).
     ///
     /// # Architectural Invariant: A02-01 (Spec 10, Pillar 1)
-    /// Both attestations MUST belong to the specified network domain.
+    /// Both attestations MUST belong strictly to the specified network domain tag.
+    /// Unlike simulation-only [`verify`], this method enforces strict Ed25519 signature
+    /// verification and does NOT fall back to deterministic test keys.
     pub fn verify_shard_equivocation_network(&self, network_id: NetworkId) -> bool {
         let a = match decode_attestation(&self.evidence_packet_a) {
             Some(v) => v,
@@ -910,24 +970,10 @@ impl FraudProofPayload {
                 let payload_digest =
                     compute_attestation_payload_digest(&att.parent_lock, &att.lock_id);
                 shard_candidates.iter().any(|&shard_id| {
-                    let d_prov = compute_sig_digest(
-                        prov_domain,
-                        0,
-                        0,
-                        0,
-                        shard_id,
-                        0,
-                        &payload_digest,
-                    );
-                    let d_final = compute_sig_digest(
-                        final_domain,
-                        0,
-                        0,
-                        0,
-                        shard_id,
-                        1,
-                        &payload_digest,
-                    );
+                    let d_prov =
+                        compute_sig_digest(prov_domain, 0, 0, 0, shard_id, 0, &payload_digest);
+                    let d_final =
+                        compute_sig_digest(final_domain, 0, 0, 0, shard_id, 1, &payload_digest);
                     vk.verify_strict(&d_prov, &sig).is_ok()
                         || vk.verify_strict(&d_final, &sig).is_ok()
                 })
@@ -1414,8 +1460,10 @@ mod tests {
         );
 
         let read3_concurrent = sign_ingress_envelope(pk, 0, 0, 0, 0, 10, 1000, hash_b);
-        let proof_read_concurrent =
-            FraudProofPayload::new_ingress_counter_conflict(read1.clone(), read3_concurrent.clone());
+        let proof_read_concurrent = FraudProofPayload::new_ingress_counter_conflict(
+            read1.clone(),
+            read3_concurrent.clone(),
+        );
         assert!(
             !proof_read_concurrent.verify(),
             "concurrent reads within same millisecond must not be flagged as fraud"
@@ -1776,13 +1824,24 @@ mod tests {
         let h2 = compute_heartbeat_announcement_hash(&addr_v4, 12345, &routing_id, 1_700_000_000);
         assert_eq!(h1, h2, "Announcement hash must be deterministic");
 
-        let h_diff_port = compute_heartbeat_announcement_hash(&addr_v4_other, 12345, &routing_id, 1_700_000_000);
-        assert_ne!(h1, h_diff_port, "Changing address port must change announcement hash");
+        let h_diff_port =
+            compute_heartbeat_announcement_hash(&addr_v4_other, 12345, &routing_id, 1_700_000_000);
+        assert_ne!(
+            h1, h_diff_port,
+            "Changing address port must change announcement hash"
+        );
 
         let h_v6 = compute_heartbeat_announcement_hash(&addr_v6, 12345, &routing_id, 1_700_000_000);
-        assert_ne!(h1, h_v6, "IPv4 vs IPv6 must yield different announcement hash");
+        assert_ne!(
+            h1, h_v6,
+            "IPv4 vs IPv6 must yield different announcement hash"
+        );
 
-        let h_diff_nonce = compute_heartbeat_announcement_hash(&addr_v4, 12346, &routing_id, 1_700_000_000);
-        assert_ne!(h1, h_diff_nonce, "Different nonce must change announcement hash");
+        let h_diff_nonce =
+            compute_heartbeat_announcement_hash(&addr_v4, 12346, &routing_id, 1_700_000_000);
+        assert_ne!(
+            h1, h_diff_nonce,
+            "Different nonce must change announcement hash"
+        );
     }
 }

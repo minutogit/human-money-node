@@ -157,7 +157,9 @@ impl LockEntry144 {
         parent_lock.copy_from_slice(&bytes[0..32]);
         let mut receiver_pub = [0u8; 32];
         receiver_pub.copy_from_slice(&bytes[32..64]);
-        let valid_until = u64::from_le_bytes(bytes[64..72].try_into().unwrap());
+        let mut valid_until_bytes = [0u8; 8];
+        valid_until_bytes.copy_from_slice(&bytes[64..72]);
+        let valid_until = u64::from_le_bytes(valid_until_bytes);
         let mut owner_signature = [0u8; 64];
         owner_signature.copy_from_slice(&bytes[72..136]);
         let status = bytes[136];

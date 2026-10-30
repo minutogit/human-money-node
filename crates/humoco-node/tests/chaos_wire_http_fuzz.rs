@@ -224,7 +224,10 @@ async fn test_chaos_wire_malicious_payload_len_bounded() {
     let res_over = read_frame(&mut cursor_over).await;
     assert!(res_over.is_err(), "65_537 payload must be rejected");
     assert!(
-        res_over.unwrap_err().to_string().contains("exceeds maximum limit"),
+        res_over
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum limit"),
         "error must indicate exceeded limit"
     );
 
@@ -239,8 +242,15 @@ async fn test_chaos_wire_malicious_payload_len_bounded() {
         Some((sync_sem.clone(), rpc_sem.clone())),
     )
     .await;
-    assert!(res_admitted.is_err(), "u32::MAX must be rejected by read_frame_admitted");
-    assert_eq!(rpc_sem.available_permits(), 10, "permits must not leak on header rejection");
+    assert!(
+        res_admitted.is_err(),
+        "u32::MAX must be rejected by read_frame_admitted"
+    );
+    assert_eq!(
+        rpc_sem.available_permits(),
+        10,
+        "permits must not leak on header rejection"
+    );
 
     // Boundary 5: Short header (< 32 bytes)
     let short_header_bytes = vec![0x48, 0x4D, 0x43, 0x31, 0x01, 0x00];
@@ -257,7 +267,10 @@ async fn test_chaos_wire_malicious_payload_len_bounded() {
     let res_magic = read_frame(&mut cursor_magic).await;
     assert!(res_magic.is_err(), "invalid magic must be rejected");
     assert!(
-        res_magic.unwrap_err().to_string().contains("Invalid wire magic"),
+        res_magic
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid wire magic"),
         "error must identify invalid magic"
     );
 }
@@ -564,7 +577,11 @@ async fn test_chaos_ingress_quota_exhaustion_concurrent_barrier_flood() {
         let app = app.clone();
         let barrier = barrier.clone();
         let k = SigningKey::from_bytes(&[(20 + i) as u8; 32]);
-        let req = make_genesis(&format!("{:02x}", i + 10).repeat(32), now + 31_536_000_000, &k);
+        let req = make_genesis(
+            &format!("{:02x}", i + 10).repeat(32),
+            now + 31_536_000_000,
+            &k,
+        );
         let token_str = token.to_string();
 
         handles.push(tokio::spawn(async move {
@@ -594,8 +611,14 @@ async fn test_chaos_ingress_quota_exhaustion_concurrent_barrier_flood() {
         }
     }
 
-    assert_eq!(created_count, 2, "exactly 2 requests must succeed (2 * 192 = 384 <= 500)");
-    assert_eq!(rate_limited_count, 8, "remaining 8 requests must be rate limited (429)");
+    assert_eq!(
+        created_count, 2,
+        "exactly 2 requests must succeed (2 * 192 = 384 <= 500)"
+    );
+    assert_eq!(
+        rate_limited_count, 8,
+        "remaining 8 requests must be rate limited (429)"
+    );
 
     // Give background VIP quota persistence worker time to flush to disk
     tokio::time::sleep(Duration::from_millis(200)).await;

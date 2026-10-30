@@ -263,8 +263,33 @@ impl RedbStorage {
         // All validation, omission quarantine, replacement, indexes and support
         // share ONE transaction. Every error below rolls the entire cut back.
         for item in source.open_table(roots::TABLE_VOUCHER_ROOTS)?.iter()? {
-            let (_, value) = item?;
-            roots::put(&tx, &serde_json::from_slice::<L2LockEntry>(value.value())?)?;
+            let (key, value) = item?;
+            let root: L2LockEntry = serde_json::from_slice(value.value())?;
+            if key.value() != root.layer2_voucher_id.as_str() {
+                return Err(invalid("sync root key mismatch"));
+            }
+            let root_tag = bs58::encode(root.t_id).into_string();
+            if !roots::is_root(&root_tag, &root)
+                || !crate::api::hmc::verify_l2_lock_entry_signature(&root, &root_tag)
+                || humoco_sim_core::types::canonical_voucher_shard(
+                    &humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag),
+                ) != stage.shard
+            {
+                return Err(invalid("invalid sync root"));
+            }
+            let is_canonical = root.layer2_voucher_id.len() == 64
+                && root
+                    .layer2_voucher_id
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit());
+            let is_new = tx
+                .open_table(roots::TABLE_VOUCHER_ROOTS)?
+                .get(root.layer2_voucher_id.as_str())?
+                .is_none();
+            if is_new && is_canonical && root.causal_output.is_none() {
+                return Err(invalid("new canonical sync root lacks author output proof"));
+            }
+            roots::put(&tx, &root)?;
         }
         let mut after = None;
         loop {

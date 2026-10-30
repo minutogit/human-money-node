@@ -117,7 +117,11 @@ pub fn solve_blake3_hashcash(
         .as_secs();
     let current_slot = now_sec / DEFAULT_EPOCH_DURATION_SEC;
 
-    for slot in [current_slot, current_slot.saturating_sub(1), current_slot + 1] {
+    for slot in [
+        current_slot,
+        current_slot.saturating_sub(1),
+        current_slot + 1,
+    ] {
         if challenge == compute_stateless_challenge(&[0u8; 32], slot) {
             return solve_canonical_hashcash(&[0u8; 32], slot, difficulty, max_iterations);
         }
@@ -293,7 +297,10 @@ impl PowEngine {
 
         let expected_curr = compute_stateless_challenge(effective_parent, current_slot);
         let expected_prev = if current_slot > 0 {
-            Some(compute_stateless_challenge(effective_parent, current_slot - 1))
+            Some(compute_stateless_challenge(
+                effective_parent,
+                current_slot - 1,
+            ))
         } else {
             None
         };

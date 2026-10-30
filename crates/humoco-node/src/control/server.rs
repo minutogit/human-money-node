@@ -80,8 +80,28 @@ impl ControlServer {
     }
 
     pub async fn run(&self) -> Result<(), NodeError> {
-        // Remove stale socket file if present
+        // Active daemon guard: check if another daemon is already running before unlinking
         if self.socket_path.exists() {
+            let probe_result = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                tokio::net::UnixStream::connect(&self.socket_path),
+            )
+            .await;
+
+            if let Ok(Ok(_stream)) = probe_result {
+                return Err(NodeError::IoWithPath {
+                    path: self.socket_path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!(
+                            "Active daemon already listening on control socket '{}'",
+                            self.socket_path.display()
+                        ),
+                    ),
+                });
+            }
+
+            // Stale socket from crashed/terminated process: remove it safely
             let _ = std::fs::remove_file(&self.socket_path);
         }
 
@@ -498,14 +518,18 @@ impl ControlServer {
                         Ok(proof) => {
                             if proof.perpetrator_node_id != *state.identity.node_pubkey() {
                                 ControlResponse::Error {
-                                    message: "Perpetrator public key does not match daemon identity".into(),
+                                    message:
+                                        "Perpetrator public key does not match daemon identity"
+                                            .into(),
                                 }
                             } else if !crate::network::transport::verify_equivocation_first_party(
                                 state.identity.verifying_key(),
                                 &proof,
                             ) {
                                 ControlResponse::Error {
-                                    message: "Cryptographic verification of self-revocation proof failed".into(),
+                                    message:
+                                        "Cryptographic verification of self-revocation proof failed"
+                                            .into(),
                                 }
                             } else {
                                 let now_ms = state.peer_manager.net_time_ms();
@@ -518,23 +542,34 @@ impl ControlServer {
                                     now_ms,
                                 ) {
                                     ControlResponse::Error {
-                                        message: format!("Failed to commit slashing evidence and ban: {}", e),
+                                        message: format!(
+                                            "Failed to commit slashing evidence and ban: {}",
+                                            e
+                                        ),
                                     }
                                 } else {
-                                    state.engine.ban_node_ram(state.identity.node_pubkey()).await;
-                                    state.peer_manager.ban_node(state.identity.node_pubkey()).await;
+                                    state
+                                        .engine
+                                        .ban_node_ram(state.identity.node_pubkey())
+                                        .await;
+                                    state
+                                        .peer_manager
+                                        .ban_node(state.identity.node_pubkey())
+                                        .await;
                                     state
                                         .engine
                                         .stats
                                         .signing_failed
                                         .store(true, std::sync::atomic::Ordering::Release);
 
-                                    let broadcast_peers = state.peer_manager.connected_peer_count().await;
+                                    let broadcast_peers =
+                                        state.peer_manager.connected_peer_count().await;
                                     state.peer_manager.broadcast_fraud_proof(proof);
 
                                     let cancel = state.cancel_token.clone();
                                     tokio::spawn(async move {
-                                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                        tokio::time::sleep(std::time::Duration::from_millis(150))
+                                            .await;
                                         cancel.cancel();
                                     });
 

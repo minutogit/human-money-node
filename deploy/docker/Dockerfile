@@ -29,7 +29,7 @@ RUN groupadd -g 10001 humoco && \
     chown -R humoco:humoco /data /config
 
 # Copy compiled binary from builder
-COPY --from=builder /usr/src/humoco/target/release/humoco-node /usr/local/bin/humoco
+COPY --from=builder /usr/src/humoco/target/release/humoco /usr/local/bin/humoco
 RUN ln -s /usr/local/bin/humoco /usr/local/bin/humoco-node
 
 # Expose QUIC P2P (UDP) and Client Ingress (TCP)

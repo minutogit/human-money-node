@@ -165,10 +165,8 @@ impl TierController {
                 }
                 let batch: Vec<([u8; 32], u64)> = latest_balances.into_iter().collect();
                 let storage = persist_storage.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    storage.set_quotas_batch(&batch)
-                })
-                .await;
+                let res =
+                    tokio::task::spawn_blocking(move || storage.set_quotas_batch(&batch)).await;
                 if !matches!(res, Ok(Ok(()))) {
                     worker_failed.store(true, Ordering::Release);
                     tracing::warn!(?res, "FIFO VIP quota persistence batch failed");
@@ -345,7 +343,10 @@ impl TierController {
     /// Ensures that the specified VIP account tag is hydrated in the in-memory cache.
     /// If not present (cold miss), loads it asynchronously from durable storage via spawn_blocking,
     /// avoiding synchronous disk I/O under the cache write lock (A05-01).
-    pub async fn ensure_vip_quota_cached(&self, account_tag: &[u8; 32]) -> Result<(), IngressError> {
+    pub async fn ensure_vip_quota_cached(
+        &self,
+        account_tag: &[u8; 32],
+    ) -> Result<(), IngressError> {
         if self.vip_quota_cache.read().contains_key(account_tag) {
             return Ok(());
         }
@@ -1395,8 +1396,14 @@ mod tests {
             }
         }
 
-        assert!(saturated, "1025th charge must trigger QuotaPersistenceUnavailable");
-        assert_eq!(success_count, 1024, "Exactly 1,024 charges must succeed before saturation");
+        assert!(
+            saturated,
+            "1025th charge must trigger QuotaPersistenceUnavailable"
+        );
+        assert_eq!(
+            success_count, 1024,
+            "Exactly 1,024 charges must succeed before saturation"
+        );
 
         // Crucial invariant: Rejected debit must NOT decrement RAM balance!
         let ram_balance = controller.get_cached_vip_quota(&account_tag).unwrap();

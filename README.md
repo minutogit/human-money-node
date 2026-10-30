@@ -28,22 +28,22 @@ cargo build --release -p humoco-node
 ### 2. Initialize Node & Generate Identity
 ```bash
 # Create working directory and generate default configuration
-./target/release/humoco-node init --path ~/.humoco
+./target/release/humoco init --path ~/.humoco
 
 # Generate Ed25519 key pair for the node (secured with POSIX 0600)
-./target/release/humoco-node keygen --out ~/.humoco/node_key.bin
+./target/release/humoco keygen --out ~/.humoco/node_key.bin
 ```
 
 ### 3. Start the Node
 ```bash
-./target/release/humoco-node run --config ~/.humoco/humoco.toml
+./target/release/humoco run --config ~/.humoco/humoco.toml
 ```
 
 ### 4. Query Status & Peers via Local Control Socket
-Control the running node via the local Unix Domain Socket (`/tmp/humoco.sock`):
+Control the running node via the local Unix Domain Socket (`~/.humoco/data/humoco.sock`):
 ```bash
-./target/release/humoco-node status
-./target/release/humoco-node peers
+./target/release/humoco status
+./target/release/humoco peers
 ```
 
 ---

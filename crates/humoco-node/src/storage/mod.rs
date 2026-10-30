@@ -6,7 +6,7 @@ pub mod recent;
 
 pub use db::{
     OriginalApprovalBatchEntry, OriginalApprovalTarget, RedbStorage, StorageError,
-    TABLE_OWN_CHOICE_COMMITMENTS, TABLE_OWN_CHOICES, TABLE_SIGNING_STATE,
+    TABLE_OWN_CHOICES, TABLE_OWN_CHOICE_COMMITMENTS, TABLE_SIGNING_STATE,
 };
 pub use engine::{compute_hmc_canonical_hash, DualTierEngine, FlushOp, HmcRamIndex, IngressOrigin};
 pub use filter::SpentLockFilter;

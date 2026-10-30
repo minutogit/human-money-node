@@ -1351,6 +1351,7 @@ struct QuorumWireNode {
     identity: NodeIdentity,
     pm: Arc<PeerManager>,
     transport: QuicTransport,
+    cancel: CancellationToken,
     ready: Arc<AtomicBool>,
     attack: Arc<std::sync::atomic::AtomicU8>,
     forged: Arc<std::sync::atomic::AtomicUsize>,
@@ -1367,6 +1368,7 @@ struct QuorumWireNode {
 
 impl Drop for QuorumWireNode {
     fn drop(&mut self) {
+        self.cancel.cancel();
         self.transport.close();
     }
 }
@@ -1378,7 +1380,8 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
         let storage = Arc::new(
             RedbStorage::open(&temp.path().join(format!("committee{i}.redb"))).expect("storage"),
         );
-        let (engine, _worker) = DualTierEngine::new(storage.clone());
+        let cancel = CancellationToken::new();
+        let (engine, _worker) = DualTierEngine::new_with_token(storage.clone(), cancel.clone());
         let mut identity = NodeIdentity::generate();
         while nodes
             .iter()
@@ -1420,7 +1423,7 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             &identity,
             pm.clone(),
             handler,
-            CancellationToken::new(),
+            cancel.clone(),
         )
         .expect("bind");
         transport.set_sync_ready(true);
@@ -1432,6 +1435,7 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             identity,
             pm,
             transport,
+            cancel,
             ready,
             attack,
             forged,

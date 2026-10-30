@@ -14,6 +14,13 @@ pub const ALPN_HUMOCO_L2: &[u8] = b"humoco-l2-mainnet";
 /// sessions via keep-alive.
 pub const TIER2_QUIC_IDLE_TIMEOUT_SECS: u64 = 15;
 
+/// Tier-1 (F2F Friend) QUIC idle timeout (Spec 15/19).
+/// Persistent F2F sessions survive brief WAN jitter and transient loss.
+pub const TIER1_F2F_IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// Tier-1 (F2F Friend) QUIC keep-alive interval (Spec 15/19).
+pub const TIER1_F2F_KEEP_ALIVE_SECS: u64 = 10;
+
 /// Returns the ALPN protocol identifier for the given network.
 /// - Mainnet => `humoco-l2-mainnet`
 /// - Testnet => `humoco-l2-testnet`
@@ -259,7 +266,7 @@ pub fn build_quinn_server_config_with_network(
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(
-        std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
+        std::time::Duration::from_secs(TIER1_F2F_IDLE_TIMEOUT_SECS)
             .try_into()
             .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
     ));
@@ -288,11 +295,13 @@ pub fn build_quinn_friend_client_config(
     let mut config = build_quinn_client_config_with_identity_and_network(identity, network_id)?;
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(
-        std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
+        std::time::Duration::from_secs(TIER1_F2F_IDLE_TIMEOUT_SECS)
             .try_into()
             .map_err(|error| NodeError::Tls(format!("Invalid idle timeout: {error}")))?,
     ));
-    transport.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(
+        TIER1_F2F_KEEP_ALIVE_SECS,
+    )));
     config.transport_config(Arc::new(transport));
     Ok(config)
 }

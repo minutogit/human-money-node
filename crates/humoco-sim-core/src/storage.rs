@@ -39,6 +39,8 @@ pub struct RamIndex {
     root_valid: HashMap<Hash256, SimTime>,
     /// Bucket index: valid_until_seconds / 60 -> Vec<parent_lock> for O(1) bucket pruning (INV-1203)
     ttl_buckets: BTreeMap<u64, Vec<Hash256>>,
+    /// Output ID reference count: record.id -> count of active records with this id
+    output_counts: HashMap<Hash256, usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -56,6 +58,7 @@ impl RamIndex {
             map: HashMap::new(),
             root_valid: HashMap::new(),
             ttl_buckets: BTreeMap::new(),
+            output_counts: HashMap::new(),
         }
     }
     /// Insert with First-Seen semantics and ingress window check
@@ -81,6 +84,7 @@ impl RamIndex {
         let bucket_sec = prune_threshold_ms / 1_000; // 1-second prune buckets
         self.ttl_buckets.entry(bucket_sec).or_default().push(parent);
         self.root_valid.insert(parent, root_valid_until);
+        *self.output_counts.entry(record.id).or_default() += 1;
         self.map.insert(parent, record);
         Ok(IngressVerdictLow::AcceptedNew)
     }
@@ -96,7 +100,22 @@ impl RamIndex {
         let bucket_sec = prune_threshold_ms / 1_000;
         self.ttl_buckets.entry(bucket_sec).or_default().push(parent);
         self.root_valid.insert(parent, root_valid_until);
-        self.map.insert(parent, record);
+        if let Some(old) = self.map.insert(parent, record.clone()) {
+            if old.id != record.id {
+                if let std::collections::hash_map::Entry::Occupied(mut e) =
+                    self.output_counts.entry(old.id)
+                {
+                    if *e.get() <= 1 {
+                        e.remove();
+                    } else {
+                        *e.get_mut() -= 1;
+                    }
+                }
+                *self.output_counts.entry(record.id).or_default() += 1;
+            }
+        } else {
+            *self.output_counts.entry(record.id).or_default() += 1;
+        }
     }
     /// Cold-start recovery from disk persistence: bypasses ingress window check (INV-1202 only applies to new ingress)
     pub fn insert_recovered(&mut self, record: LockRecord, root_valid_until: SimTime) {
@@ -105,7 +124,22 @@ impl RamIndex {
         let bucket_sec = prune_threshold_ms / 1_000;
         self.ttl_buckets.entry(bucket_sec).or_default().push(parent);
         self.root_valid.insert(parent, root_valid_until);
-        self.map.insert(parent, record);
+        if let Some(old) = self.map.insert(parent, record.clone()) {
+            if old.id != record.id {
+                if let std::collections::hash_map::Entry::Occupied(mut e) =
+                    self.output_counts.entry(old.id)
+                {
+                    if *e.get() <= 1 {
+                        e.remove();
+                    } else {
+                        *e.get_mut() -= 1;
+                    }
+                }
+                *self.output_counts.entry(record.id).or_default() += 1;
+            }
+        } else {
+            *self.output_counts.entry(record.id).or_default() += 1;
+        }
     }
     pub fn len(&self) -> usize {
         self.map.len()
@@ -150,10 +184,28 @@ impl RamIndex {
                 for p in parents {
                     if let Some(rv) = self.root_valid.get(&p) {
                         if should_prune(now, *rv) {
-                            self.map.remove(&p);
+                            if let Some(rec) = self.map.remove(&p) {
+                                if let std::collections::hash_map::Entry::Occupied(mut e) =
+                                    self.output_counts.entry(rec.id)
+                                {
+                                    if *e.get() <= 1 {
+                                        e.remove();
+                                    } else {
+                                        *e.get_mut() -= 1;
+                                    }
+                                }
+                            }
                             self.root_valid.remove(&p);
                         } else {
-                            remaining.push(p);
+                            let actual_bucket = rv.0.saturating_add(30_000) / 1_000;
+                            if actual_bucket > bucket {
+                                let vec = self.ttl_buckets.entry(actual_bucket).or_default();
+                                if !vec.contains(&p) {
+                                    vec.push(p);
+                                }
+                            } else {
+                                remaining.push(p);
+                            }
                         }
                     }
                 }
@@ -181,14 +233,30 @@ impl RamIndex {
                 self.ttl_buckets.remove(&bucket);
             }
             if let Some(parent) = parent {
-                if self
-                    .root_valid
-                    .get(&parent)
-                    .is_some_and(|rv| should_prune(now, *rv))
-                {
-                    self.map.remove(&parent);
-                    self.root_valid.remove(&parent);
-                    pruned += 1;
+                if let Some(rv) = self.root_valid.get(&parent) {
+                    if should_prune(now, *rv) {
+                        if let Some(rec) = self.map.remove(&parent) {
+                            if let std::collections::hash_map::Entry::Occupied(mut e) =
+                                self.output_counts.entry(rec.id)
+                            {
+                                if *e.get() <= 1 {
+                                    e.remove();
+                                } else {
+                                    *e.get_mut() -= 1;
+                                }
+                            }
+                        }
+                        self.root_valid.remove(&parent);
+                        pruned += 1;
+                    } else {
+                        let actual_bucket = rv.0.saturating_add(30_000) / 1_000;
+                        if actual_bucket > bucket {
+                            let vec = self.ttl_buckets.entry(actual_bucket).or_default();
+                            if !vec.contains(&parent) {
+                                vec.push(parent);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -216,7 +284,26 @@ impl RamIndex {
     pub fn remove(&mut self, parent: &Hash256) -> Option<LockRecord> {
         let rec = self.map.remove(parent)?;
         self.root_valid.remove(parent);
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.output_counts.entry(rec.id)
+        {
+            if *e.get() <= 1 {
+                e.remove();
+            } else {
+                *e.get_mut() -= 1;
+            }
+        }
         Some(rec)
+    }
+    /// Checks in O(1) time whether any stored lock record produced `id` as its output lock ID.
+    pub fn has_output_id(&self, id: &Hash256) -> bool {
+        self.output_counts.get(id).copied().unwrap_or(0) > 0
+    }
+    /// Clears all stored records, TTL tracking, and output indices.
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.root_valid.clear();
+        self.ttl_buckets.clear();
+        self.output_counts.clear();
     }
 }
 
@@ -254,8 +341,7 @@ impl DualRamIndex {
 
     /// Checks if a parent lock exists in final state, either as an active lock key or as an output ID.
     pub fn has_final_predecessor(&self, parent_lock: &Hash256) -> bool {
-        self.final_index.get(parent_lock).is_some()
-            || self.final_index.iter().any(|r| &r.id == parent_lock)
+        self.final_index.get(parent_lock).is_some() || self.final_index.has_output_id(parent_lock)
     }
 
     /// Inserts a lock directly into final index.
@@ -489,5 +575,84 @@ mod tests {
 
         assert!(!should_prune(SimTime(90000), rv)); // 90000 == 60000+30000 not >, so false
         assert!(should_prune(SimTime(90001), rv));
+    }
+
+    #[test]
+    fn test_ram_index_output_counts_and_dual_ram_predecessor() {
+        let mut ram = RamIndex::new();
+        let parent = [0x11; 32];
+        let receiver = [0x22; 32];
+        let now = SimTime(1000);
+        let valid_until = SimTime(60_000);
+        let root_valid = SimTime(120_000);
+
+        let rec = LockRecord::new(parent, receiver, vec![1], now, valid_until);
+        let rec_id = rec.id;
+
+        assert!(!ram.has_output_id(&rec_id));
+        assert_eq!(
+            ram.try_insert(rec.clone(), now, root_valid),
+            Ok(IngressVerdictLow::AcceptedNew)
+        );
+        assert!(ram.has_output_id(&rec_id));
+
+        // DualRamIndex test
+        let mut dual = DualRamIndex::new();
+        assert!(!dual.has_final_predecessor(&rec_id));
+        assert!(!dual.has_final_predecessor(&parent));
+
+        assert!(dual
+            .insert_final(rec.clone(), now, root_valid, true)
+            .is_ok());
+        // Both parent and rec.id (as output ID) are now recognized in O(1)
+        assert!(dual.has_final_predecessor(&parent));
+        assert!(dual.has_final_predecessor(&rec_id));
+
+        // Removal from ram
+        assert!(ram.remove(&parent).is_some());
+        assert!(!ram.has_output_id(&rec_id));
+    }
+
+    #[test]
+    fn test_prune_expired_bucket_migration_on_extension() {
+        let mut ram = RamIndex::new();
+        let parent = [0x33; 32];
+        let receiver = [0x44; 32];
+        let now = SimTime(1000);
+        let valid_until = SimTime(40_000);
+        let root_valid_short = SimTime(50_000);
+
+        let rec = LockRecord::new(parent, receiver, vec![2], now, valid_until);
+        assert_eq!(
+            ram.try_insert(rec.clone(), now, root_valid_short),
+            Ok(IngressVerdictLow::AcceptedNew)
+        );
+
+        // Extend lock via replace_lock before short prune threshold
+        let root_valid_extended = SimTime(200_000);
+        let extended_rec = LockRecord::new(parent, receiver, vec![2], now, SimTime(150_000));
+        let extended_id = extended_rec.id;
+        ram.replace_lock(extended_rec, root_valid_extended);
+
+        // Prune at time past short threshold (50_000 + 30_000 = 80_000)
+        let prune_time = SimTime(85_000);
+        let pruned = ram.prune_expired(prune_time);
+        assert_eq!(pruned, 0, "Extended lock must not be pruned");
+        assert!(ram.get(&parent).is_some(), "Lock still present");
+        assert!(
+            ram.has_output_id(&extended_id),
+            "Extended output ID still present"
+        );
+        assert!(
+            !ram.has_output_id(&rec.id),
+            "Superseded output ID must be removed"
+        );
+
+        // Old bucket should not be lingering in ttl_buckets as stale
+        let old_bucket_sec = 80_000 / 1_000;
+        assert!(
+            !ram.ttl_buckets.contains_key(&old_bucket_sec),
+            "Expired bucket key must be purged, not kept indefinitely"
+        );
     }
 }

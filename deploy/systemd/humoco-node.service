@@ -22,6 +22,8 @@ WorkingDirectory=/var/lib/humoco
 # Linux Sandboxing & Hardening
 ProtectSystem=full
 ProtectHome=true
+# Note: control_socket must stay inside /var/lib/humoco (default) or /run/humoco,
+# NOT /tmp, because PrivateTmp=true isolates /tmp from host CLI invocations.
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectKernelModules=true

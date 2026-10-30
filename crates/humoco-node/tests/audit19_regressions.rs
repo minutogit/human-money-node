@@ -468,7 +468,8 @@ impl humoco_node::network::RequestHandler for QuotaCollectorMockHandler {
         _header: WireHeader,
         _payload: Vec<u8>,
         _peer_identity: Option<[u8; 32]>,
-    ) -> humoco_node::network::BoxFuture<Result<(WireHeader, Vec<u8>), humoco_node::NodeError>> {
+    ) -> humoco_node::network::BoxFuture<Result<(WireHeader, Vec<u8>), humoco_node::NodeError>>
+    {
         let mode = self.mode.load(std::sync::atomic::Ordering::SeqCst);
         let peer_pubkey = *self.peer_identity.node_pubkey();
         let lock_id = self.lock_id;
@@ -607,9 +608,10 @@ async fn test_a19_03_neutral_quota_feedback_does_not_penalize_peer() {
 
     // 1. Zone 1: Apparent under-load / FraudulentRejection outside merge moratorium
     // my_load = 100 < 75% of 10_000 -> evaluate_quota_exceeded_claim yields FraudulentRejection
-    mock_handler
-        .mode
-        .store(QuotaCollectorMockHandler::MODE_QUOTA_EXCEEDED, std::sync::atomic::Ordering::SeqCst);
+    mock_handler.mode.store(
+        QuotaCollectorMockHandler::MODE_QUOTA_EXCEEDED,
+        std::sync::atomic::Ordering::SeqCst,
+    );
     {
         let mut collected = Vec::new();
         let query = humoco_node::PeerAttestationQuery {
@@ -749,9 +751,10 @@ async fn test_a19_03_neutral_quota_feedback_does_not_penalize_peer() {
     }
 
     // 5. FLAG_NOT_READY: Shard is recovering or unready (neutral abstention)
-    mock_handler
-        .mode
-        .store(QuotaCollectorMockHandler::MODE_NOT_READY, std::sync::atomic::Ordering::SeqCst);
+    mock_handler.mode.store(
+        QuotaCollectorMockHandler::MODE_NOT_READY,
+        std::sync::atomic::Ordering::SeqCst,
+    );
     {
         let mut collected = Vec::new();
         let query = humoco_node::PeerAttestationQuery {
@@ -785,9 +788,10 @@ async fn test_a19_03_neutral_quota_feedback_does_not_penalize_peer() {
     }
 
     // 6. Control Case: Forged signature MUST trigger record_failure -> missing_count == 1
-    mock_handler
-        .mode
-        .store(QuotaCollectorMockHandler::MODE_FORGED_SIGNATURE, std::sync::atomic::Ordering::SeqCst);
+    mock_handler.mode.store(
+        QuotaCollectorMockHandler::MODE_FORGED_SIGNATURE,
+        std::sync::atomic::Ordering::SeqCst,
+    );
     {
         let mut collected = Vec::new();
         let query = humoco_node::PeerAttestationQuery {
@@ -1187,7 +1191,11 @@ async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
 
     // Pre-seed sender usage to limit minus exactly one operation
     let initial_usage = daily_limit.saturating_sub(op_by);
-    let _ = tier_controller.evaluate_node_write_quota(client_id.node_pubkey(), initial_usage, epoch_day);
+    let _ = tier_controller.evaluate_node_write_quota(
+        client_id.node_pubkey(),
+        initial_usage,
+        epoch_day,
+    );
 
     let fp = ByteYears::micro_from_ttl_seconds(ttl_s);
     let ev = sign_ingress_evidence_with_key(
@@ -1223,7 +1231,13 @@ async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
     let (resp1, _) = client_trans
         .send_request(
             &conn,
-            &WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, payload.len() as u32),
+            &WireHeader::new(
+                MsgType::LockVerifyRequest as u16,
+                1,
+                0,
+                0,
+                payload.len() as u32,
+            ),
             &payload,
         )
         .await
@@ -1234,7 +1248,13 @@ async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
     let (resp2, _) = client_trans
         .send_request(
             &conn,
-            &WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 0, payload.len() as u32),
+            &WireHeader::new(
+                MsgType::LockVerifyRequest as u16,
+                2,
+                0,
+                0,
+                payload.len() as u32,
+            ),
             &payload,
         )
         .await
@@ -1285,7 +1305,13 @@ async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
     let (resp3, _) = client_trans
         .send_request(
             &conn,
-            &WireHeader::new(MsgType::LockVerifyRequest as u16, 3, 0, 0, payload_new.len() as u32),
+            &WireHeader::new(
+                MsgType::LockVerifyRequest as u16,
+                3,
+                0,
+                0,
+                payload_new.len() as u32,
+            ),
             &payload_new,
         )
         .await
@@ -1333,7 +1359,8 @@ async fn test_a19_r3_quic_write_budget_exhaustion_before_mutation() {
     let daily_limit = tier_controller.calculate_daily_quota(5.0, 1.0);
 
     // Completely exhaust sender's observed write budget
-    let _ = tier_controller.evaluate_node_write_quota(client_id.node_pubkey(), daily_limit, epoch_day);
+    let _ =
+        tier_controller.evaluate_node_write_quota(client_id.node_pubkey(), daily_limit, epoch_day);
 
     let ttl_s = auth_root_valid_until.saturating_sub(now) / 1000;
     let fp = ByteYears::micro_from_ttl_seconds(ttl_s);
@@ -1369,7 +1396,13 @@ async fn test_a19_r3_quic_write_budget_exhaustion_before_mutation() {
     let (resp, _) = client_trans
         .send_request(
             &conn,
-            &WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, payload.len() as u32),
+            &WireHeader::new(
+                MsgType::LockVerifyRequest as u16,
+                1,
+                0,
+                0,
+                payload.len() as u32,
+            ),
             &payload,
         )
         .await
@@ -1381,7 +1414,11 @@ async fn test_a19_r3_quic_write_budget_exhaustion_before_mutation() {
     );
 
     // Assert that the database remains unmutated (Reservation-First)
-    let stored = engine.get_hmc_voucher_root_valid(&genesis_req.layer2_voucher_id).await;
-    assert_eq!(stored, None, "RAM index and database must remain unmutated after quota denial");
+    let stored = engine
+        .get_hmc_voucher_root_valid(&genesis_req.layer2_voucher_id)
+        .await;
+    assert_eq!(
+        stored, None,
+        "RAM index and database must remain unmutated after quota denial"
+    );
 }
-

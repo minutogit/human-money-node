@@ -232,10 +232,13 @@ impl DualTierEngine {
                 installation.uncertain = true;
             }
             Ok(Err(storage_err)) => {
-                // Deterministic pre-commit validation rejection or rollback in install_shard_cut.
-                // The redb transaction was cleanly dropped and rolled back without committing.
-                // Node state and signing history remain healthy.
-                installation.uncertain = false;
+                // Only explicit pre-commit validation rejections establish that
+                // the productive cut is unchanged. A commit/storage error can
+                // follow writes to the commit header; keep signing fail-closed.
+                installation.uncertain = !matches!(
+                    &storage_err,
+                    StorageError::DurableCommitFailed(_) | StorageError::OwnChoiceConflict
+                );
                 return Err(storage_err);
             }
             Err(join_err) => {

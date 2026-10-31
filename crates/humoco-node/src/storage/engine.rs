@@ -1611,7 +1611,7 @@ impl DualTierEngine {
             }
         };
 
-        let (verdict, is_new, equivocation_to_slash, root_upgraded) = {
+        let (verdict, is_new, equivocation_to_slash, accepted_entry, accepted_root, ack_rx) = {
             let mut hmc = self.hmc_ram.write().await;
             let root_upgraded = if super::db::roots::is_root(&lookup_tag, &entry) {
                 hmc.root_anchors
@@ -1638,7 +1638,46 @@ impl DualTierEngine {
                 now_ms,
                 confirmation_class,
             );
-            (verdict, is_new, equivocation, root_upgraded)
+            // Publish the accepted RAM version and its queue operation without an
+            // intervening await. Cancellation can only leave an operation that
+            // the persistence worker already owns.
+            let accepted_entry = match &verdict {
+                L2Verdict::Verified { lock_entry } => lock_entry.clone(),
+                _ => entry.clone(),
+            };
+            let accepted_root = hmc
+                .voucher_roots
+                .get(&accepted_entry.layer2_voucher_id)
+                .copied();
+            let ack_rx = if matches!(&verdict, L2Verdict::Verified { .. })
+                && (is_new || root_upgraded || durable)
+            {
+                if durable {
+                    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                    permit.send(FlushOp::PutHmcLockDurable {
+                        lookup_tag: lookup_tag.clone(),
+                        entry: Box::new(accepted_entry.clone()),
+                        ack_sender: ack_tx,
+                    });
+                    Some(ack_rx)
+                } else {
+                    permit.send(FlushOp::PutHmcLock {
+                        lookup_tag: lookup_tag.clone(),
+                        entry: Box::new(accepted_entry.clone()),
+                    });
+                    None
+                }
+            } else {
+                None
+            };
+            (
+                verdict,
+                is_new,
+                equivocation,
+                accepted_entry,
+                accepted_root,
+                ack_rx,
+            )
         };
 
         if let Some((existing, entry_new)) = equivocation_to_slash {
@@ -1671,44 +1710,26 @@ impl DualTierEngine {
             }
         }
 
-        let accepted_entry = match &verdict {
-            L2Verdict::Verified { lock_entry } => lock_entry.clone(),
-            _ => entry.clone(),
-        };
-
-        let accepted_root = {
-            let ram = self.hmc_ram.read().await;
-            ram.voucher_roots
-                .get(&accepted_entry.layer2_voucher_id)
-                .copied()
-        };
-        if is_new || root_upgraded || (durable && matches!(verdict, L2Verdict::Verified { .. })) {
-            if durable {
-                let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                permit.send(FlushOp::PutHmcLockDurable {
-                    lookup_tag: lookup_tag.clone(),
-                    entry: Box::new(accepted_entry.clone()),
-                    ack_sender: ack_tx,
-                });
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(DURABLE_ACK_TIMEOUT_MS),
-                    ack_rx,
-                )
-                .await
-                {
-                    Ok(Ok(Ok(()))) => {
-                        let mut ram = self.hmc_ram.write().await;
-                        let Some(root) = accepted_root else {
-                            return (
-                                L2Verdict::Rejected {
-                                    reason: "Unknown root lifetime for durable commit".into(),
-                                },
-                                false,
-                            );
-                        };
-                        ram.mark_exact_durable(&lookup_tag, &accepted_entry, root);
-                        let is_durable_active = ram
-                            .is_entry_durable(&lookup_tag, &accepted_entry, root)
+        if let Some(ack_rx) = ack_rx {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(DURABLE_ACK_TIMEOUT_MS),
+                ack_rx,
+            )
+            .await
+            {
+                Ok(Ok(Ok(()))) => {
+                    let mut ram = self.hmc_ram.write().await;
+                    let Some(root) = accepted_root else {
+                        return (
+                            L2Verdict::Rejected {
+                                reason: "Unknown root lifetime for durable commit".into(),
+                            },
+                            false,
+                        );
+                    };
+                    ram.mark_exact_durable(&lookup_tag, &accepted_entry, root);
+                    let is_durable_active =
+                        ram.is_entry_durable(&lookup_tag, &accepted_entry, root)
                             || (super::db::roots::is_root(&lookup_tag, &accepted_entry)
                                 && ram
                                     .root_anchors
@@ -1721,29 +1742,23 @@ impl DualTierEngine {
                                                 .copied()
                                                 == Some(root)
                                     }));
-                        if !is_durable_active {
-                            return (
-                                L2Verdict::Rejected {
-                                    reason: "Durable entry superseded before acknowledgment".into(),
-                                },
-                                false,
-                            );
-                        }
-                    }
-                    _ => {
+                    if !is_durable_active {
                         return (
                             L2Verdict::Rejected {
-                                reason: "Durable commit unavailable; state remains pending".into(),
+                                reason: "Durable entry superseded before acknowledgment".into(),
                             },
                             false,
-                        )
+                        );
                     }
                 }
-            } else {
-                permit.send(FlushOp::PutHmcLock {
-                    lookup_tag: lookup_tag.clone(),
-                    entry: Box::new(accepted_entry.clone()),
-                });
+                _ => {
+                    return (
+                        L2Verdict::Rejected {
+                            reason: "Durable commit unavailable; state remains pending".into(),
+                        },
+                        false,
+                    )
+                }
             }
         }
 

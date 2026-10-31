@@ -695,6 +695,115 @@ impl RedbStorage {
 }
 
 #[cfg(test)]
+mod review_commit_fault {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct SyncFault {
+        inner: Arc<redb::backends::InMemoryBackend>,
+        armed: Arc<AtomicBool>,
+    }
+
+    impl redb::StorageBackend for SyncFault {
+        fn len(&self) -> std::io::Result<u64> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+            self.inner.read(offset, len)
+        }
+        fn set_len(&self, len: u64) -> std::io::Result<()> {
+            self.inner.set_len(len)
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(offset, data)
+        }
+        fn sync_data(&self, eventual: bool) -> std::io::Result<()> {
+            self.inner.sync_data(eventual)?;
+            if self.armed.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected commit sync failure"));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_install_commit_must_latch_signing_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let armed = Arc::new(AtomicBool::new(false));
+        let inner = Arc::new(redb::backends::InMemoryBackend::new());
+        let database = redb::Database::builder()
+            .create_with_backend(SyncFault {
+                inner: inner.clone(),
+                armed: armed.clone(),
+            })
+            .unwrap();
+        let db = Arc::new(
+            RedbStorage::initialize_database(database, &dir.path().join("fault.redb")).unwrap(),
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (engine, worker) = crate::storage::DualTierEngine::new_with_token(db, cancel.clone());
+        let row = LockRecord::new(
+            [17; 32],
+            [18; 32],
+            vec![19],
+            SimTime(1_000),
+            SimTime(600_000),
+        );
+        let stage = Arc::new(ShardStage::new(u16::from_be_bytes([17, 17]), 1_000).unwrap());
+        let parent = row.parent_lock;
+        let child = row.id;
+        stage
+            .append(SyncPayload {
+                locks: vec![(row, 600_000)],
+                hmc_locks: vec![],
+                support: vec![],
+            })
+            .unwrap();
+        let expected = stage.digest().unwrap();
+        armed.store(true, Ordering::SeqCst);
+        let result = engine
+            .install_shard_snapshot(stage, expected, 1, [1; 32], 1, None, None)
+            .await;
+        assert!(
+            matches!(result, Err(StorageError::Commit(_))),
+            "fault must occur at commit: {result:?}"
+        );
+        let healthy = engine.is_signing_healthy();
+        // Snapshot the bytes already written before the sync error, modelling
+        // crash recovery independently of the still-running old RAM index.
+        use redb::StorageBackend;
+        let image = inner.read(0, inner.len().unwrap() as usize).unwrap();
+        let recovered_backend = redb::backends::InMemoryBackend::new();
+        recovered_backend.set_len(image.len() as u64).unwrap();
+        recovered_backend.write(0, &image).unwrap();
+        let recovered_database = redb::Database::builder()
+            .create_with_backend(recovered_backend)
+            .unwrap();
+        let recovered = RedbStorage::initialize_database(
+            recovered_database,
+            &dir.path().join("recovered.redb"),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered.get_lock(&parent).unwrap().unwrap().0.id,
+            child,
+            "the failed sync may leave the new cut recoverable on storage"
+        );
+        assert!(
+            engine.get_ram_lock(&parent).await.is_none(),
+            "old RAM cut is still active"
+        );
+        cancel.cancel();
+        worker.await.unwrap();
+        assert!(
+            !healthy,
+            "uncertain failed commit must not reopen signing admission"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::NodeIdentity;

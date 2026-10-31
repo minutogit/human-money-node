@@ -94,6 +94,33 @@ pub const TABLE_SCHEMA_METADATA: TableDefinition<&str, u32> =
     TableDefinition::new("schema_metadata");
 pub const CURRENT_DB_SCHEMA_VERSION: u32 = 1;
 
+pub const MAX_SYNC_TAG_BYTES: usize = 128;
+pub const MAX_SYNC_ROW_BYTES: usize = 16 * 1024;
+
+pub(crate) fn validate_sync_shape(
+    tag: &str,
+    entry: &crate::api::hmc::L2LockEntry,
+) -> Result<(), StorageError> {
+    if tag.len() > MAX_SYNC_TAG_BYTES || serde_json::to_vec(entry)?.len() > MAX_SYNC_ROW_BYTES {
+        return Err(StorageError::DurableCommitFailed(
+            "HMC entry exceeds synchronization limits".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_native_sync_shape(
+    lock: &LockRecord,
+    root_valid_until: u64,
+) -> Result<(), StorageError> {
+    if bincode::serialized_size(&(lock, root_valid_until))? as usize > MAX_SYNC_ROW_BYTES {
+        return Err(StorageError::DurableCommitFailed(
+            "Native lock entry exceeds synchronization limits".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub const TABLE_LOCKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("locks");
 pub const TABLE_PROVISIONAL_LOCKS: TableDefinition<&[u8; 32], &[u8]> =
     TableDefinition::new("provisional_locks");
@@ -190,6 +217,15 @@ impl RedbStorage {
             .create_new(true)
             .open(path)?;
         let db = Database::builder().create_file(file)?;
+        Self::initialize_database(db, path)
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_backend(
+        backend: impl redb::StorageBackend,
+        path: &Path,
+    ) -> Result<Self, StorageError> {
+        let db = Database::builder().create_with_backend(backend)?;
         Self::initialize_database(db, path)
     }
 
@@ -616,6 +652,7 @@ impl RedbStorage {
 
     /// Stores a lock record and updates the TTL index.
     pub fn put_lock(&self, lock: &LockRecord, root_valid_until: u64) -> Result<(), StorageError> {
+        validate_native_sync_shape(lock, root_valid_until)?;
         let value_bytes = bincode::serialize(&(lock, root_valid_until))?;
         let bucket_sec = grace_expiry_bucket_sec(root_valid_until);
 
@@ -645,6 +682,7 @@ impl RedbStorage {
             let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
 
             for (lock, root_valid_until) in locks {
+                validate_native_sync_shape(lock, root_valid_until)?;
                 let value_bytes = bincode::serialize(&(lock, root_valid_until))?;
                 let bucket_sec = grace_expiry_bucket_sec(root_valid_until);
 
@@ -1430,6 +1468,7 @@ impl RedbStorage {
         lookup_tag: &str,
         entry: &crate::api::hmc::L2LockEntry,
     ) -> Result<(), StorageError> {
+        validate_sync_shape(lookup_tag, entry)?;
         if roots::is_root(lookup_tag, entry) {
             let txn = self.db.begin_write()?;
             roots::put(&txn, entry)?;
@@ -1445,6 +1484,15 @@ impl RedbStorage {
                 StorageError::DurableCommitFailed("spend requires a committed Root Anchor".into())
             })?;
         let valid_until_ms = roots::root_valid_until(&root)?;
+        if entry
+            .causal_output
+            .as_ref()
+            .is_some_and(|proof| proof.root_valid_until_ms != valid_until_ms)
+        {
+            return Err(StorageError::DurableCommitFailed(
+                "Output proof lifetime differs from voucher root".into(),
+            ));
+        }
         let bucket_sec = grace_expiry_bucket_sec(valid_until_ms);
 
         let write_txn = self.db.begin_write()?;
@@ -1497,6 +1545,11 @@ impl RedbStorage {
                 let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
                 let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
                 for (lock, root_valid_until, bytes) in locks {
+                    if bytes.len() > MAX_SYNC_ROW_BYTES {
+                        return Err(StorageError::DurableCommitFailed(
+                            "Native lock entry exceeds synchronization limits".into(),
+                        ));
+                    }
                     let bucket_sec = grace_expiry_bucket_sec(*root_valid_until);
                     table_locks.insert(&lock.parent_lock, *bytes)?;
                     table_ttl.insert(&(bucket_sec, &lock.parent_lock), ())?;
@@ -1507,6 +1560,11 @@ impl RedbStorage {
                 let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
                 let mut table_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
                 for (tag, entry, bytes, valid_until_ms) in hmc {
+                    if tag.len() > MAX_SYNC_TAG_BYTES || bytes.len() > MAX_SYNC_ROW_BYTES {
+                        return Err(StorageError::DurableCommitFailed(
+                            "HMC entry exceeds synchronization limits".into(),
+                        ));
+                    }
                     if roots::is_root(tag, entry) {
                         roots::put(&write_txn, entry)?;
                         continue;
@@ -1524,6 +1582,15 @@ impl RedbStorage {
                     if inherited != *valid_until_ms {
                         return Err(StorageError::DurableCommitFailed(
                             "spend root lifetime mismatch".into(),
+                        ));
+                    }
+                    if entry
+                        .causal_output
+                        .as_ref()
+                        .is_some_and(|proof| proof.root_valid_until_ms != inherited)
+                    {
+                        return Err(StorageError::DurableCommitFailed(
+                            "Output proof lifetime differs from voucher root".into(),
                         ));
                     }
                     let bucket_sec = grace_expiry_bucket_sec(inherited);
@@ -2402,5 +2469,70 @@ mod tests {
         let storage = RedbStorage::open(&db_path).expect("reopen after compaction");
         let (active_locks, _, _) = storage.get_stats().expect("get_stats");
         assert_eq!(active_locks, 0);
+    }
+
+    #[test]
+    fn test_sync_limits_and_f2_lifetime_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("f1_f2_test.redb");
+        let storage = RedbStorage::open(&db_path).expect("open db");
+
+        let root = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-v1".into(),
+            t_id: [1; 32],
+            sender_ephemeral_pub: [2; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 1_000,
+            deletable_at: Some("50000".into()),
+            privacy_guard: None,
+        };
+        let root_tag = bs58::encode(root.t_id).into_string();
+        storage.put_hmc_lock(&root_tag, &root).expect("put root");
+
+        // 1. Oversize tag is rejected by put_hmc_lock
+        let long_tag = "x".repeat(MAX_SYNC_TAG_BYTES + 1);
+        let mut spend = root.clone();
+        spend.t_id = [3; 32];
+        spend.deletable_at = None;
+        assert!(storage.put_hmc_lock(&long_tag, &spend).is_err());
+
+        // 2. F2: Spend with causal_output lifetime differing from voucher root is rejected
+        let proof = humoco_proto::causal::CausalOutputProof {
+            version: 1,
+            voucher_id: root.layer2_voucher_id.clone(),
+            transaction_id: spend.t_id,
+            state_hash: [4; 32],
+            sender_pubkey: spend.sender_ephemeral_pub,
+            receiver_pubkey_hash: None,
+            change_pubkey_hash: None,
+            root_valid_until_ms: 60_000, // root is 50_000!
+            is_root: false,
+            signature: [0; 64],
+        };
+        spend.causal_output = Some(proof);
+        let spend_tag = "spend_tag_1";
+        let res = storage.put_hmc_lock(spend_tag, &spend);
+        match res {
+            Err(StorageError::DurableCommitFailed(msg)) => {
+                assert_eq!(msg, "Output proof lifetime differs from voucher root");
+            }
+            other => panic!("expected lifetime mismatch error, got {other:?}"),
+        }
+
+        // 3. Oversize native lock is rejected by put_lock
+        let big_record = LockRecord::new(
+            [5; 32],
+            [6; 32],
+            vec![0u8; MAX_SYNC_ROW_BYTES + 1],
+            SimTime(1_000),
+            SimTime(50_000),
+        );
+        assert!(storage.put_lock(&big_record, 50_000).is_err());
     }
 }

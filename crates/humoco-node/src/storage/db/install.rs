@@ -68,7 +68,7 @@ impl ShardStage {
         }
         let tx = self.storage.db.begin_write()?;
         for (kind, key, fact) in page.support {
-            if kind > 1 || key.len() > 128 || !(1..=2).contains(&fact.class) {
+            if kind > 1 || key.len() > MAX_SYNC_TAG_BYTES || !(1..=2).contains(&fact.class) {
                 return Err(invalid("invalid support metadata"));
             }
             let bytes = serde_json::to_vec(&fact)?;
@@ -85,8 +85,8 @@ impl ShardStage {
             }
         }
         for (tag, entry) in page.hmc_locks {
-            if tag.len() > 128
-                || serde_json::to_vec(&entry)?.len() > 16 * 1024
+            if tag.len() > MAX_SYNC_TAG_BYTES
+                || serde_json::to_vec(&entry)?.len() > MAX_SYNC_ROW_BYTES
                 || !verify_l2_lock_entry_signature(&entry, &tag)
             {
                 return Err(invalid("invalid staged HMC row"));
@@ -142,7 +142,7 @@ impl ShardStage {
             );
             if record.id != expected.id
                 || record.valid_until.0 > root
-                || record.nonce.len() > 16 * 1024
+                || record.nonce.len() > MAX_SYNC_ROW_BYTES
                 || u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]) != self.shard
             {
                 return Err(invalid("invalid staged native row"));
@@ -151,6 +151,9 @@ impl ShardStage {
             record.signers.clear();
             Self::project(&tx, &record, self.now)?;
             let bytes = bincode::serialize(&(record.clone(), root))?;
+            if bytes.len() > MAX_SYNC_ROW_BYTES {
+                return Err(invalid("invalid staged native row"));
+            }
             if tx
                 .open_table(TABLE_LOCKS)?
                 .insert(&record.parent_lock, bytes.as_slice())?
@@ -304,7 +307,7 @@ impl RedbStorage {
                     .take(16)
                 {
                     let (key, value) = row?;
-                    if value.value().len() > 16 * 1024 {
+                    if value.value().len() > MAX_SYNC_ROW_BYTES {
                         return Err(invalid("oversize local native row"));
                     }
                     page.push((*key.value(), value.value().to_vec()));
@@ -396,7 +399,9 @@ impl RedbStorage {
                     .take(16)
                 {
                     let (key, value) = row?;
-                    if value.value().len() > 16 * 1024 || key.value().len() > 128 {
+                    if value.value().len() > MAX_SYNC_ROW_BYTES
+                        || key.value().len() > MAX_SYNC_TAG_BYTES
+                    {
                         return Err(invalid("oversize local HMC row"));
                     }
                     page.push((key.value().to_string(), value.value().to_vec()));

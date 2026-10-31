@@ -1566,16 +1566,23 @@ pub async fn sync_single_shard(
                         if cancel_token.is_cancelled() || Instant::now() >= expires {
                             break;
                         }
-                        let (Ok(_bytes), Ok(_entries)) = (
-                            readiness_manager
-                                .sync_bytes
-                                .clone()
-                                .try_acquire_many_owned(512 * 1024),
-                            readiness_manager
-                                .sync_entries
-                                .clone()
-                                .try_acquire_many_owned(500),
-                        ) else {
+                        let permit_deadline = tokio::time::Instant::from_std(expires);
+                        let Some(_bytes) = (tokio::select! {
+                            _ = cancel_token.cancelled() => None,
+                            res = tokio::time::timeout_at(
+                                permit_deadline,
+                                readiness_manager.sync_bytes.clone().acquire_many_owned(512 * 1024),
+                            ) => res.ok().and_then(Result::ok),
+                        }) else {
+                            break;
+                        };
+                        let Some(_entries) = (tokio::select! {
+                            _ = cancel_token.cancelled() => None,
+                            res = tokio::time::timeout_at(
+                                permit_deadline,
+                                readiness_manager.sync_entries.clone().acquire_many_owned(500),
+                            ) => res.ok().and_then(Result::ok),
+                        }) else {
                             break;
                         };
                         let page = match tokio::time::timeout(

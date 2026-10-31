@@ -30,7 +30,7 @@ use humoco_node::api::{build_router, AppState};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::ingress::{PowEngine, TierController};
 use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
-use humoco_node::storage::{DualTierEngine, RedbStorage};
+use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 use humoco_proto::live::{verify_live_state_proof, LiveStateContext, LiveStateProof};
 
 fn test_now_ms() -> u64 {
@@ -161,7 +161,15 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     let voucher_id = genesis_req.layer2_voucher_id.clone();
 
     let (v_gen, is_new_gen) = engine
-        .ingress_hmc_lock(genesis_tag.clone(), L2LockEntry::from(&genesis_req))
+        .ingress_hmc_lock_durable(
+            genesis_tag.clone(),
+            L2LockEntry::from(&genesis_req),
+            IngressOrigin::ClientApi,
+            None,
+            None,
+            None,
+            None,
+        )
         .await;
     assert!(is_new_gen);
     assert!(matches!(v_gen, L2Verdict::Verified { .. }));
@@ -243,7 +251,15 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     );
 
     let (v_spend, is_new_spend) = engine
-        .ingress_hmc_lock(parent_spent.to_string(), L2LockEntry::from(&spend_req))
+        .ingress_hmc_lock_durable(
+            parent_spent.to_string(),
+            L2LockEntry::from(&spend_req),
+            IngressOrigin::ClientApi,
+            None,
+            None,
+            None,
+            None,
+        )
         .await;
     assert!(is_new_spend);
     assert!(matches!(v_spend, L2Verdict::Verified { .. }));

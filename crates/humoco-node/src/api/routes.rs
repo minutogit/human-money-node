@@ -1628,11 +1628,8 @@ pub async fn assemble_quorum_certificate_with_deadline(
                     };
                     if let Some(tag) = tag {
                         if *blake3::hash(tag.as_bytes()).as_bytes() == parent_lock {
-                            if let Some(entry) = state
-                                .engine
-                                .get_hmc_ram_lock(&tag)
-                                .await
-                                .filter(|e| {
+                            if let Some(entry) =
+                                state.engine.get_hmc_ram_lock(&tag).await.filter(|e| {
                                     e.t_id == lock_id
                                         && e.layer2_voucher_id == req.layer2_voucher_id
                                         && e.sender_ephemeral_pub == req.sender_ephemeral_pub
@@ -1870,6 +1867,16 @@ async fn query_status(
         return (StatusCode::TOO_MANY_REQUESTS, Json(envelope)).into_response();
     }
 
+    if !state.engine.is_signing_healthy() {
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: "Storage signing unavailable".into(),
+            },
+        );
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+    }
+
     let hmc = state.engine.hmc_ram.read().await;
     let mut verdict = hmc.query_status(
         &payload.layer2_voucher_id,
@@ -1978,6 +1985,16 @@ async fn query_status(
                 }
             }
         }
+    }
+
+    if !state.engine.is_signing_healthy() {
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: "Storage signing unavailable".into(),
+            },
+        );
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
     }
 
     // Legacy lookup never manufactures a write approval as fresh read evidence.
@@ -2218,9 +2235,9 @@ async fn submit_hmc_lock_with_deadline(
             .filter(|proof| proof.is_root)
             .map(|proof| proof.root_valid_until_ms)
             .or_else(|| {
-                req.deletable_at.as_deref().and_then(|raw| {
-                    crate::storage::db::roots::parse_deletable_at_ms(raw).ok()
-                })
+                req.deletable_at
+                    .as_deref()
+                    .and_then(|raw| crate::storage::db::roots::parse_deletable_at_ms(raw).ok())
             });
         let root = match stored_root_valid {
             Some(r) => r,

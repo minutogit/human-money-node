@@ -91,6 +91,13 @@ pub fn put(
     txn: &redb::WriteTransaction,
     entry: &crate::api::hmc::L2LockEntry,
 ) -> Result<u64, StorageError> {
+    let tag = bs58::encode(entry.t_id).into_string();
+    let bytes = serde_json::to_vec(entry)?;
+    if tag.len() > MAX_SYNC_TAG_BYTES || bytes.len() > MAX_SYNC_ROW_BYTES {
+        return Err(StorageError::DurableCommitFailed(
+            "HMC entry exceeds synchronization limits".into(),
+        ));
+    }
     let valid_until = root_valid_until(entry)?;
     let mut table = txn.open_table(TABLE_VOUCHER_ROOTS)?;
     if let Some(existing) = table.get(entry.layer2_voucher_id.as_str())? {
@@ -104,7 +111,6 @@ pub fn put(
             return Ok(valid_until);
         }
     }
-    let bytes = serde_json::to_vec(entry)?;
     table.insert(entry.layer2_voucher_id.as_str(), bytes.as_slice())?;
     let expires_sec = super::grace_expiry_bucket_sec(valid_until);
     txn.open_table(TABLE_VOUCHER_ROOT_TTL)?
@@ -372,5 +378,29 @@ mod tests {
         let mut long_entry = entry.clone();
         long_entry.causal_output = Some(long_proof);
         assert!(root_valid_until(&long_entry).is_err());
+    }
+
+    #[test]
+    fn oversize_root_fails_persistence_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversize.redb");
+        let db = RedbStorage::open(&path).unwrap();
+        let txn = db.db.begin_write().unwrap();
+        let root = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "a".repeat(MAX_SYNC_ROW_BYTES + 1),
+            t_id: [1; 32],
+            sender_ephemeral_pub: [2; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 1_000,
+            deletable_at: Some("50000".into()),
+            privacy_guard: None,
+        };
+        assert!(put(&txn, &root).is_err());
     }
 }

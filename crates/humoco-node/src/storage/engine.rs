@@ -66,6 +66,18 @@ pub fn compute_hmc_canonical_hash(
     *hasher.finalize().as_bytes()
 }
 
+const MAX_SYNC_TAG_BYTES: usize = 128;
+const MAX_SYNC_ROW_BYTES: usize = 16 * 1024;
+
+pub(crate) fn validate_hmc_sync_shape(tag: &str, entry: &L2LockEntry) -> Result<(), StorageError> {
+    if tag.len() > MAX_SYNC_TAG_BYTES || serde_json::to_vec(entry)?.len() > MAX_SYNC_ROW_BYTES {
+        return Err(StorageError::DurableCommitFailed(
+            "HMC entry exceeds synchronization limits".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl HmcRamIndex {
     pub fn new() -> Self {
         Self::default()
@@ -297,6 +309,19 @@ impl HmcRamIndex {
                 )
             }
         };
+
+        if entry
+            .causal_output
+            .as_ref()
+            .is_some_and(|proof| proof.root_valid_until_ms != valid_until_ms)
+        {
+            return (
+                L2Verdict::Rejected {
+                    reason: "Output proof lifetime differs from voucher root".into(),
+                },
+                false,
+            );
+        }
 
         // HMC ingress window enforcement for client ingress (INV-1202):
         // Only for ClientApi and when both root_valid and now_ms are available.
@@ -581,6 +606,27 @@ impl HmcRamIndex {
         before - self.locks.len()
     }
 
+    fn status_for_entry(&self, tag: &str, entry: &L2LockEntry) -> L2Verdict {
+        let durable = self
+            .voucher_roots
+            .get(&entry.layer2_voucher_id)
+            .is_some_and(|root| {
+                self.durable_entries
+                    .get(tag)
+                    .is_some_and(|(_, committed_root)| committed_root == root)
+            });
+
+        if durable {
+            L2Verdict::Verified {
+                lock_entry: entry.clone(),
+            }
+        } else {
+            L2Verdict::Rejected {
+                reason: "Durable state pending".into(),
+            }
+        }
+    }
+
     pub fn query_status(
         &self,
         voucher_id: &str,
@@ -594,9 +640,7 @@ impl HmcRamIndex {
 
         // If challenge_ds_tag exists directly as lookup_tag
         if let Some(entry) = self.locks.get(challenge_ds_tag) {
-            return L2Verdict::Verified {
-                lock_entry: entry.clone(),
-            };
+            return self.status_for_entry(challenge_ds_tag, entry);
         }
 
         // Fast-forward leap lock support: check if challenge_ds_tag matches the transaction_hash (t_id) of any lock in this voucher
@@ -608,9 +652,7 @@ impl HmcRamIndex {
             for tag in voucher_tags {
                 if let Some(entry) = self.locks.get(tag) {
                     if entry.t_id == challenge_tid {
-                        return L2Verdict::Verified {
-                            lock_entry: entry.clone(),
-                        };
+                        return self.status_for_entry(tag, entry);
                     }
                 }
             }
@@ -746,6 +788,21 @@ pub struct PersistenceStats {
     pub flush_errors_total: std::sync::atomic::AtomicU64,
     pub flush_ops_total: std::sync::atomic::AtomicU64,
     pub signing_failed: std::sync::atomic::AtomicBool,
+}
+
+struct PublicationGuard {
+    health: Arc<PersistenceStats>,
+    uncertain: bool,
+}
+
+impl Drop for PublicationGuard {
+    fn drop(&mut self) {
+        if self.uncertain {
+            self.health
+                .signing_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1217,6 +1274,12 @@ impl DualTierEngine {
             return Err(IngressVerdictLow::RejectedCapacity);
         };
 
+        if bincode::serialized_size(&(&record, root_valid_until.0))
+            .map_or(true, |len| len as usize > MAX_SYNC_ROW_BYTES)
+        {
+            return Err(IngressVerdictLow::RejectedCapacity);
+        }
+
         // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
         let permit = match self.tx.try_reserve() {
             Ok(p) => p,
@@ -1258,6 +1321,9 @@ impl DualTierEngine {
         let (verdict, to_flush) = {
             let mut ram = self.ram.write().await;
             match ram.try_insert(record.clone(), now, root_valid_until) {
+                Ok(IngressVerdictLow::IdempotentReplay) => {
+                    (Ok(IngressVerdictLow::IdempotentReplay), None)
+                }
                 Ok(v) => (Ok(v), Some(record)),
                 Err(IngressVerdictLow::RejectedCollision) => {
                     // Split-brain collision on parent_lock!
@@ -1393,12 +1459,32 @@ impl DualTierEngine {
             .try_acquire_owned()
             .map_err(|_| StorageError::DurableCommitFailed("support capacity exhausted".into()))?;
         let db = self.db.clone();
-        let fact = tokio::task::spawn_blocking(move || {
+        let mut publication = PublicationGuard {
+            health: self.stats.clone(),
+            uncertain: true,
+        };
+        let res = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             db.commit_confirmation_support(verified)
         })
-        .await
-        .map_err(|e| StorageError::DurableCommitFailed(format!("support worker: {e}")))??;
+        .await;
+
+        let fact = match res {
+            Err(join_err) => {
+                return Err(StorageError::DurableCommitFailed(format!(
+                    "support worker: {join_err}"
+                )));
+            }
+            Ok(Err(storage_err)) => {
+                publication.uncertain = !matches!(
+                    &storage_err,
+                    StorageError::DurableCommitFailed(_) | StorageError::OwnChoiceConflict
+                );
+                return Err(storage_err);
+            }
+            Ok(Ok(fact)) => fact,
+        };
+
         let mut ram = self.hmc_ram.write().await;
         if ram
             .locks
@@ -1407,6 +1493,7 @@ impl DualTierEngine {
         {
             ram.set_confirmation_class(&tag, fact.class);
         }
+        publication.uncertain = false;
         Ok(())
     }
 
@@ -1566,8 +1653,9 @@ impl DualTierEngine {
             {
                 return (
                     L2Verdict::Rejected {
-                        reason: "New canonical Root Anchor requires its original author output proof"
-                            .into(),
+                        reason:
+                            "New canonical Root Anchor requires its original author output proof"
+                                .into(),
                     },
                     false,
                 );
@@ -1588,6 +1676,15 @@ impl DualTierEngine {
                 );
             }
         }
+        if let Err(error) = validate_hmc_sync_shape(&lookup_tag, &entry) {
+            return (
+                L2Verdict::Rejected {
+                    reason: error.to_string(),
+                },
+                false,
+            );
+        }
+
         // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
         let permit = match self.tx.try_reserve() {
             Ok(p) => p,

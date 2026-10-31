@@ -2368,7 +2368,9 @@ async fn submit_hmc_lock_with_deadline(
             hmc.locks.get(&lookup_tag).cloned()
         };
         if let Some(existing) = existing_opt {
-            if existing.t_id == entry.t_id && existing.layer2_voucher_id == entry.layer2_voucher_id
+            if existing.t_id == entry.t_id
+                && existing.layer2_voucher_id == entry.layer2_voucher_id
+                && existing.sender_ephemeral_pub == entry.sender_ephemeral_pub
             {
                 // Verify signature on idempotent retry so caller cannot forge verdicts with invalid signatures
                 if !verify_l2_lock_signature(&req) {

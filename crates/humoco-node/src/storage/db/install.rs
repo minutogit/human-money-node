@@ -461,6 +461,12 @@ impl RedbStorage {
                         return Err(invalid("quorum cut omits verified support"));
                     }
                     if let Some(new) = &incoming {
+                        if old.t_id == new.t_id
+                            && (old.sender_ephemeral_pub != new.sender_ephemeral_pub
+                                || old.layer2_voucher_id != new.layer2_voucher_id)
+                        {
+                            return Err(invalid("inconsistent HMC child identity"));
+                        }
                         let parent = *blake3::hash(tag.as_bytes()).as_bytes();
                         if old.t_id != new.t_id
                             && (old_class > new_class
@@ -489,6 +495,11 @@ impl RedbStorage {
         for item in source.open_table(TABLE_LOCKS)?.iter()? {
             let (key, value) = item?;
             let (mut row, root): (LockRecord, u64) = bincode::deserialize(value.value())?;
+            if u16::from_be_bytes([key.value()[0], key.value()[1]]) != stage.shard
+                || key.value() != &row.parent_lock
+            {
+                return Err(invalid("staged native lock shard mismatch"));
+            }
             if !row.has_valid_id() {
                 return Err(invalid("staged native lock has invalid lock ID"));
             }
@@ -568,6 +579,35 @@ impl RedbStorage {
             let validity = roots::root_valid_until(&root)?;
             if validity <= stage.now {
                 continue;
+            }
+            // Same-shard occupants were moved to provisional storage above.
+            // Any surviving occupant belongs to another shard and is protected
+            // by a different admission fence.
+            if tx.open_table(TABLE_HMC_LOCKS)?.get(tag.value())?.is_some() {
+                return Err(invalid("HMC collision key belongs to another shard"));
+            }
+            if let Some(prov_bytes) = tx
+                .open_table(TABLE_PROVISIONAL_HMC_LOCKS)?
+                .get(tag.value())?
+                .map(|g| g.value().to_vec())
+            {
+                let prov: L2LockEntry = serde_json::from_slice(&prov_bytes)?;
+                if let Some(prov_root_bytes) = tx
+                    .open_table(roots::TABLE_VOUCHER_ROOTS)?
+                    .get(prov.layer2_voucher_id.as_str())?
+                    .map(|g| g.value().to_vec())
+                {
+                    let prov_root: L2LockEntry = serde_json::from_slice(&prov_root_bytes)?;
+                    let prov_parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
+                        &bs58::encode(prov_root.t_id).into_string(),
+                    );
+                    if humoco_sim_core::types::canonical_voucher_shard(&prov_parent) != stage.shard
+                    {
+                        return Err(invalid(
+                            "provisional HMC collision key belongs to another shard",
+                        ));
+                    }
+                }
             }
             tx.open_table(TABLE_HMC_LOCKS)?
                 .insert(tag.value(), value.value())?;

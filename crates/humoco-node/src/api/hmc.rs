@@ -651,6 +651,11 @@ pub fn verify_l2_lock_signature(req: &L2LockRequest) -> bool {
         return true;
     }
 
+    // Fresh spend authorization must authenticate the exact wallet timestamp.
+    if !req.is_genesis {
+        return false;
+    }
+
     let challenge_ds_tag = if req.is_genesis {
         bs58::encode(req.transaction_hash).into_string()
     } else {
@@ -725,6 +730,11 @@ pub fn verify_l2_lock_entry_signature(entry: &L2LockEntry, lookup_tag: &str) -> 
     );
     if verifying_key.verify(&payload_hash, &sig).is_ok() {
         return true;
+    }
+
+    // Legacy timestamp fallbacks are root metadata compatibility only.
+    if !crate::storage::db::roots::is_root(lookup_tag, entry) {
+        return false;
     }
 
     if entry.created_at_ms > 0 {

@@ -970,7 +970,7 @@ async fn signed_http_status_rejects_uncommitted_spend_until_durable_and_checks_h
                 .body(Body::from(serde_json::to_vec(&query)?))?,
         )
         .await?;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let bytes = http_body_util::BodyExt::collect(response.into_body())
         .await?
         .to_bytes();

@@ -1810,6 +1810,29 @@ impl RequestHandler for NodeRequestHandler {
                                 let p_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
                                 shard_id == v_shard || shard_id == p_shard
                             };
+                            let committed = hmc
+                                .get_voucher_root_valid(&entry.layer2_voucher_id)
+                                .is_some_and(|root| {
+                                    root > now_ms && hmc.is_entry_durable(lookup_tag, entry, root)
+                                });
+
+                            if shard_ok
+                                && is_tag_only
+                                && (!committed
+                                    || !engine.is_signing_healthy()
+                                    || !readiness_manager.is_shard_ready(shard_id))
+                            {
+                                return Ok((
+                                    WireHeader::new(
+                                        MsgType::StatusResponse as u16,
+                                        header.session_seq.wrapping_add(1),
+                                        header.epoch_id,
+                                        humoco_sim_core::wire::FLAG_NOT_READY,
+                                        0,
+                                    ),
+                                    Vec::new(),
+                                ));
+                            }
                             let valid = entry
                                 .deletable_at
                                 .as_deref()

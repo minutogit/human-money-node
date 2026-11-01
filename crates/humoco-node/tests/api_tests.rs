@@ -587,6 +587,7 @@ async fn test_api_status_and_sync() {
         sync_resp.locks.is_empty(),
         "a root anchor is not a sync collision row"
     );
+    assert!(sync_resp.hmc_locks.is_empty());
     assert!(_storage
         .voucher_root(&req_lock.layer2_voucher_id)
         .unwrap()
@@ -610,6 +611,7 @@ async fn test_api_status_and_sync() {
     assert_eq!(res_sync_filt.status(), StatusCode::OK);
     let sync_resp_filt: SyncResponse = response_json(res_sync_filt).await;
     assert!(sync_resp_filt.locks.is_empty());
+    assert!(sync_resp_filt.hmc_locks.is_empty());
 }
 
 #[tokio::test]

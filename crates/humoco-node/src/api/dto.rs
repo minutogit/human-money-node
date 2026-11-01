@@ -176,10 +176,21 @@ impl LockRecordDto {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HmcSyncRow {
+    pub lookup_tag: String,
+    pub entry: crate::api::hmc::L2LockEntry,
+    pub root_anchor: crate::api::hmc::L2LockEntry,
+    pub root_valid_until_ms: u64,
+    pub confirmation_class: u8,
+}
+
 /// Response returned from sync endpoint containing list of active locks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncResponse {
     pub locks: Vec<LockRecordDto>,
+    #[serde(default)]
+    pub hmc_locks: Vec<HmcSyncRow>,
 }
 
 /// Response for Proof-of-Work challenge requests.

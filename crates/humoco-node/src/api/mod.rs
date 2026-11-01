@@ -28,8 +28,8 @@ pub use health::{
 pub use history::{HistoryPoint, HistorySampler, HISTORY_CAPACITY};
 
 pub use dto::{
-    AttestationDto, ErrorResponse, LockRecordDto, NodeStatusResponse, PowChallengeResponse,
-    SyncRequest, SyncResponse,
+    AttestationDto, ErrorResponse, HmcSyncRow, LockRecordDto, NodeStatusResponse,
+    PowChallengeResponse, SyncRequest, SyncResponse,
 };
 pub use hmc::{
     calculate_l2_payload_hash, calculate_l2_payload_hash_for_entry, calculate_l2_payload_hash_raw,

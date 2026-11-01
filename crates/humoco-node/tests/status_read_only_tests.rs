@@ -324,12 +324,37 @@ async fn hmc_tag_and_exact_diagnostics_return_no_new_node_signature() {
         deletable_at: Some((now + 600_000).to_string()),
         privacy_guard: None,
     };
+    let root = L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: "diagnostic-voucher".into(),
+        t_id: [41; 32],
+        sender_ephemeral_pub: [4; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [5; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: now,
+        deletable_at: Some((now + 600_000).to_string()),
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root.t_id).into_string();
+    source.db.put_hmc_lock(&root_tag, &root).unwrap();
+    source.db.put_hmc_lock(tag, &entry).unwrap();
     source
         .engine
-        .hmc_ram
-        .write()
+        .recover_from_disk(humoco_sim_core::types::SimTime(now))
         .await
-        .insert_lock_for_test(tag.into(), entry.clone());
+        .unwrap();
+    let mut anchor = [0; 32];
+    anchor[..2].copy_from_slice(&shard.to_be_bytes());
+    source
+        .engine
+        .record_hmc_voucher_genesis_parent("diagnostic-voucher", anchor)
+        .await;
+    source.readiness.mark_shard_ready(shard);
+
     source
         .engine
         .stats
@@ -344,6 +369,27 @@ async fn hmc_tag_and_exact_diagnostics_return_no_new_node_signature() {
         entry.t_id
     );
     let tag_only = bincode::serialize(&([0u8; 32], parent, shard)).unwrap();
+    let conn = reader
+        .network
+        .connect_peer(source.network.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (header, _) = reader
+        .network
+        .send_request(
+            &conn,
+            &WireHeader::new(MsgType::StatusQuery as u16, 1, 0, 1, tag_only.len() as u32),
+            &tag_only,
+        )
+        .await
+        .unwrap();
+    assert_eq!(header.flags, humoco_sim_core::wire::FLAG_NOT_READY);
+
+    source
+        .engine
+        .stats
+        .signing_failed
+        .store(false, Ordering::Release);
     let reply = observe(reader, source, &tag_only, 1).await;
     let observed: L2LockEntry = serde_json::from_slice(&reply).unwrap();
     assert_eq!(
@@ -519,10 +565,24 @@ async fn gateway_full_entry_lookup_works_and_rejects_legacy_original_as_entry() 
     let tag = "remote-only-parent";
     let mut anchor = [0; 32];
     anchor[..2].copy_from_slice(&shard.to_be_bytes());
-    source
-        .engine
-        .record_hmc_voucher_genesis_parent(voucher, anchor)
-        .await;
+    let root = L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: voucher.into(),
+        t_id: [41; 32],
+        sender_ephemeral_pub: [4; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [5; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: now,
+        deletable_at: Some((now + 600_000).to_string()),
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root.t_id).into_string();
+    source.db.put_hmc_lock(&root_tag, &root).unwrap();
+
     let entry = L2LockEntry {
         causal_output: None,
         layer2_voucher_id: voucher.into(),
@@ -538,12 +598,17 @@ async fn gateway_full_entry_lookup_works_and_rejects_legacy_original_as_entry() 
         deletable_at: Some((now + 600_000).to_string()),
         privacy_guard: None,
     };
+    source.db.put_hmc_lock(tag, &entry).unwrap();
     source
         .engine
-        .hmc_ram
-        .write()
+        .recover_from_disk(humoco_sim_core::types::SimTime(now))
         .await
-        .insert_lock_for_test(tag.into(), entry.clone());
+        .unwrap();
+    source
+        .engine
+        .record_hmc_voucher_genesis_parent(voucher, anchor)
+        .await;
+    source.readiness.mark_shard_ready(shard);
     let pow = Arc::new(PowEngine::new(*reader.identity.node_id(), 8));
     let tiers = Arc::new(TierController::new(reader.db.clone(), pow.clone()));
     let mut state = AppState::new(

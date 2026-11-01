@@ -1949,6 +1949,61 @@ impl RedbStorage {
         self.all_hmc_locks()
     }
 
+    /// Single-transaction committed MVCC snapshot of native and HMC locks for /v1/sync.
+    /// Fails closed on redb or integrity errors instead of returning an incomplete view.
+    #[allow(clippy::type_complexity)]
+    pub fn read_committed_sync_snapshot(
+        &self,
+        now_ms: u64,
+    ) -> Result<(Vec<(LockRecord, u64)>, Vec<crate::api::dto::HmcSyncRow>), StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
+        let mut native_locks = Vec::new();
+
+        for item in table_locks.iter()? {
+            let (_k_guard, v_guard) = item?;
+            let (record, root_valid_until): (LockRecord, u64) =
+                bincode::deserialize(v_guard.value())?;
+            if !should_prune(SimTime(now_ms), SimTime(root_valid_until))
+                && record.valid_until.0 > now_ms
+            {
+                native_locks.push((record, root_valid_until));
+            }
+        }
+
+        let table_hmc = read_txn.open_table(TABLE_HMC_LOCKS)?;
+        let table_roots = read_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
+        let table_support = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
+        let mut hmc_locks = Vec::new();
+
+        for item in table_hmc.iter()? {
+            let (k_guard, v_guard) = item?;
+            let tag = k_guard.value().to_string();
+            let entry: crate::api::hmc::L2LockEntry = serde_json::from_slice(v_guard.value())?;
+            let root_guard = table_roots
+                .get(entry.layer2_voucher_id.as_str())?
+                .ok_or_else(|| {
+                    StorageError::DurableCommitFailed("sync HMC lock missing root anchor".into())
+                })?;
+            let root_anchor: crate::api::hmc::L2LockEntry =
+                serde_json::from_slice(root_guard.value())?;
+            let root_valid_until_ms = roots::root_valid_until(&root_anchor)?;
+            if should_prune(SimTime(now_ms), SimTime(root_valid_until_ms))
+                || root_valid_until_ms <= now_ms
+            {
+                continue;
+            }
+            let support = table_support
+                .get(tag.as_str())?
+                .map(|g| serde_json::from_slice::<support::ConfirmationSupport>(g.value()))
+                .transpose()?;
+            let row = encode_hmc_sync_row(tag, entry, root_anchor, support)?;
+            hmc_locks.push(row);
+        }
+
+        Ok((native_locks, hmc_locks))
+    }
+
     /// Performs a consistent snapshot backup of all tables to destination_path using a read transaction.
     /// Returns the total number of locks backed up.
     pub fn create_backup(&self, destination_path: &Path) -> Result<usize, StorageError> {
@@ -2267,6 +2322,37 @@ impl RedbStorage {
         let freed = db.compact()?;
         Ok(freed)
     }
+}
+
+fn encode_hmc_sync_row(
+    tag: String,
+    entry: crate::api::hmc::L2LockEntry,
+    root_anchor: crate::api::hmc::L2LockEntry,
+    support: Option<support::ConfirmationSupport>,
+) -> Result<crate::api::dto::HmcSyncRow, StorageError> {
+    if entry.layer2_voucher_id != root_anchor.layer2_voucher_id {
+        return Err(StorageError::DurableCommitFailed(
+            "sync root identity mismatch".into(),
+        ));
+    }
+
+    let root_valid_until_ms = roots::root_valid_until(&root_anchor)?;
+    let parent = *blake3::hash(tag.as_bytes()).as_bytes();
+    let confirmation_class = support
+        .filter(|fact| {
+            fact.parent == parent
+                && fact.child == entry.t_id
+                && fact.root_valid_until_ms == root_valid_until_ms
+        })
+        .map_or(0, |fact| fact.class);
+
+    Ok(crate::api::dto::HmcSyncRow {
+        lookup_tag: tag,
+        entry,
+        root_anchor,
+        root_valid_until_ms,
+        confirmation_class,
+    })
 }
 
 #[cfg(test)]

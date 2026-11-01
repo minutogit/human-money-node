@@ -511,22 +511,36 @@ async fn sync_locks(
         .filter(|l| l.len() <= MAX_SYNC_LOCATOR_LEN)
         .collect();
 
-    let mut lock_map = std::collections::HashMap::new();
-
-    // 1. Read from persistent disk storage
-    if let Ok(disk_locks) = state.storage.all_valid_locks(now_ms) {
-        for (rec, rv) in disk_locks {
-            lock_map.insert(rec.parent_lock, (rec, rv));
-        }
-    }
-
-    // 2. Read from in-memory RAM index
-    for (rec, rv) in state.engine.ram.read().await.all_locks() {
-        lock_map.entry(rec.parent_lock).or_insert((rec, rv.0));
-    }
+    let storage = state.storage.clone();
+    let (disk_locks, disk_hmc_locks) =
+        match tokio::task::spawn_blocking(move || storage.read_committed_sync_snapshot(now_ms))
+            .await
+        {
+            Ok(Ok(res)) => res,
+            Ok(Err(err)) => {
+                let err_resp = ErrorResponse {
+                    error: "StorageError".into(),
+                    message: err.to_string(),
+                    challenge: None,
+                    difficulty: None,
+                    expires_at: None,
+                };
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(err_resp)).into_response();
+            }
+            Err(err) => {
+                let err_resp = ErrorResponse {
+                    error: "StorageError".into(),
+                    message: err.to_string(),
+                    challenge: None,
+                    difficulty: None,
+                    expires_at: None,
+                };
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(err_resp)).into_response();
+            }
+        };
 
     let mut locks = Vec::new();
-    for (record, root_valid_until) in lock_map.into_values() {
+    for (record, root_valid_until) in disk_locks {
         let parent_hex = hex::encode(record.parent_lock);
         let id_hex = hex::encode(record.id);
         if !locators.contains(&parent_hex) && !locators.contains(&id_hex) {
@@ -536,53 +550,20 @@ async fn sync_locks(
     const MAX_SYNC_LOCKS: usize = 10_000;
     locks.truncate(MAX_SYNC_LOCKS);
 
-    // Read HMC locks from persistent disk storage and in-memory RAM
-    let mut hmc_map = std::collections::HashMap::new();
-    if let Ok(disk_hmc_locks) = state.storage.all_valid_hmc_locks(now_ms) {
-        for (tag, entry) in disk_hmc_locks {
-            hmc_map.insert(tag, entry);
-        }
-    }
-    {
-        let hmc_guard = state.engine.hmc_ram.read().await;
-        for (tag, entry) in &hmc_guard.locks {
-            hmc_map.entry(tag.clone()).or_insert_with(|| entry.clone());
-        }
-    }
-
-    for (tag, entry) in hmc_map {
-        let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
-        let parent_hex = hex::encode(parent_bytes);
-        let id_hex = hex::encode(entry.t_id);
+    let mut hmc_locks = Vec::new();
+    for row in disk_hmc_locks {
+        let parent_hex = hex::encode(blake3::hash(row.lookup_tag.as_bytes()).as_bytes());
+        let id_hex = hex::encode(row.entry.t_id);
         if !locators.contains(&parent_hex)
-            && !locators.contains(&tag)
+            && !locators.contains(&row.lookup_tag)
             && !locators.contains(&id_hex)
         {
-            let valid_until_ms = entry
-                .deletable_at
-                .as_deref()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let created_at_ms = if entry.created_at_ms > 0 {
-                entry.created_at_ms
-            } else {
-                entry.encrypted_timestamp as u64
-            };
-            let rec = humoco_sim_core::types::LockRecord {
-                id: entry.t_id,
-                parent_lock: parent_bytes,
-                receiver_pub: entry.receiver_ephemeral_pub_hash.unwrap_or_default(),
-                nonce: blake3::hash(entry.t_id.as_slice()).as_bytes().to_vec(),
-                created_at: SimTime(created_at_ms),
-                valid_until: SimTime(valid_until_ms),
-                status: humoco_sim_core::types::LockStatus::Final { sigs: 1 },
-                signers: Default::default(),
-            };
-            locks.push(LockRecordDto::from_record(&rec, valid_until_ms));
+            hmc_locks.push(row);
         }
     }
+    hmc_locks.truncate(MAX_SYNC_LOCKS);
 
-    (StatusCode::OK, Json(SyncResponse { locks })).into_response()
+    (StatusCode::OK, Json(SyncResponse { locks, hmc_locks })).into_response()
 }
 
 /// Handler for GET /v1/pow-challenge
@@ -1956,10 +1937,17 @@ async fn query_status(
                             .ok()?
                             .ok()?;
                     if resp_header.msg_type != humoco_sim_core::wire::MsgType::StatusResponse as u16
-                        || resp_payload.is_empty()
+                    {
+                        return None;
+                    }
+                    if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0 {
+                        return Some(L2Verdict::Rejected {
+                            reason: "Remote durable state pending".into(),
+                        });
+                    }
+                    if resp_payload.is_empty()
                         || (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0
                         || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED) != 0
-                        || (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0
                     {
                         return None;
                     }
@@ -1998,9 +1986,14 @@ async fn query_status(
     }
 
     // Legacy lookup never manufactures a write approval as fresh read evidence.
+    let status = if matches!(&verdict, L2Verdict::Rejected { .. }) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
     let quorum_certificate = None;
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
-    (StatusCode::OK, Json(envelope)).into_response()
+    (status, Json(envelope)).into_response()
 }
 
 /// Dedicated handler for HMC L2LockRequest.

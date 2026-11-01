@@ -487,13 +487,23 @@ async fn test_e2e_cluster_lock_and_sync() {
         .await
         .expect("Sync on Node 1");
     assert_eq!(status_sync0, StatusCode::OK);
-    assert!(sync_resp0.locks.iter().any(|l| l.id == tx_id_hex));
+    assert!(sync_resp0
+        .hmc_locks
+        .iter()
+        .any(|r| hex::encode(r.entry.t_id) == tx_id_hex));
+    assert!(sync_resp0.locks.is_empty());
 
     // 3. Verify lock presence after shard-direct collection; exact client replay may repair a missing replica.
     let mut found_node2 = false;
     for _ in 0..50 {
         if let Ok((status, sync_resp)) = harness.nodes[1].post_sync(&sync_req).await {
-            if status == StatusCode::OK && sync_resp.locks.iter().any(|l| l.id == tx_id_hex) {
+            if status == StatusCode::OK
+                && sync_resp
+                    .hmc_locks
+                    .iter()
+                    .any(|r| hex::encode(r.entry.t_id) == tx_id_hex)
+                && sync_resp.locks.is_empty()
+            {
                 found_node2 = true;
                 break;
             }
@@ -506,14 +516,23 @@ async fn test_e2e_cluster_lock_and_sync() {
         // Explicit same-payload client replay.
         let _ = harness.nodes[1].post_lock(&lock_req).await;
         let (_, sync_resp) = harness.nodes[1].post_sync(&sync_req).await.unwrap();
-        found_node2 = sync_resp.locks.iter().any(|l| l.id == tx_id_hex);
+        found_node2 = sync_resp
+            .hmc_locks
+            .iter()
+            .any(|r| hex::encode(r.entry.t_id) == tx_id_hex);
     }
     assert!(found_node2, "Lock must be present on Node 2");
 
     let mut found_node3 = false;
     for _ in 0..50 {
         if let Ok((status, sync_resp)) = harness.nodes[2].post_sync(&sync_req).await {
-            if status == StatusCode::OK && sync_resp.locks.iter().any(|l| l.id == tx_id_hex) {
+            if status == StatusCode::OK
+                && sync_resp
+                    .hmc_locks
+                    .iter()
+                    .any(|r| hex::encode(r.entry.t_id) == tx_id_hex)
+                && sync_resp.locks.is_empty()
+            {
                 found_node3 = true;
                 break;
             }
@@ -524,7 +543,10 @@ async fn test_e2e_cluster_lock_and_sync() {
     if !found_node3 {
         let _ = harness.nodes[2].post_lock(&lock_req).await;
         let (_, sync_resp) = harness.nodes[2].post_sync(&sync_req).await.unwrap();
-        found_node3 = sync_resp.locks.iter().any(|l| l.id == tx_id_hex);
+        found_node3 = sync_resp
+            .hmc_locks
+            .iter()
+            .any(|r| hex::encode(r.entry.t_id) == tx_id_hex);
     }
     assert!(found_node3, "Lock must be present on Node 3");
 }
@@ -971,7 +993,13 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     let mut synced = false;
     for _ in 0..100 {
         if let Ok((status, sync_resp)) = node_b.post_sync(&sync_req).await {
-            if status == StatusCode::OK && sync_resp.locks.iter().any(|l| l.id == tx_id_hex) {
+            if status == StatusCode::OK
+                && (sync_resp.locks.iter().any(|l| l.id == tx_id_hex)
+                    || sync_resp
+                        .hmc_locks
+                        .iter()
+                        .any(|r| hex::encode(r.entry.t_id) == tx_id_hex))
+            {
                 synced = true;
                 break;
             }
@@ -1079,7 +1107,13 @@ async fn test_e2e_churn_preserves_frozen_quorum_and_restart_gate() {
     let mut has_lock_2 = false;
     for _ in 0..100 {
         if let Ok((status, sync_resp)) = node_2_respawned.post_sync(&sync_req).await {
-            if status == StatusCode::OK && sync_resp.locks.iter().any(|l| l.id == tx_id_2) {
+            if status == StatusCode::OK
+                && (sync_resp.locks.iter().any(|l| l.id == tx_id_2)
+                    || sync_resp
+                        .hmc_locks
+                        .iter()
+                        .any(|r| hex::encode(r.entry.t_id) == tx_id_2))
+            {
                 has_lock_2 = true;
                 break;
             }

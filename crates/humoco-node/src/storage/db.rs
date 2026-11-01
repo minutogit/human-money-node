@@ -96,6 +96,9 @@ pub const CURRENT_DB_SCHEMA_VERSION: u32 = 1;
 
 pub const MAX_SYNC_TAG_BYTES: usize = 128;
 pub const MAX_SYNC_ROW_BYTES: usize = 16 * 1024;
+pub const DEFAULT_MAX_SYNC_LOCKS: usize = 10_000;
+pub const DEFAULT_MAX_SYNC_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
 
 pub(crate) fn validate_sync_shape(
     tag: &str,
@@ -1999,6 +2002,112 @@ impl RedbStorage {
                 .transpose()?;
             let row = encode_hmc_sync_row(tag, entry, root_anchor, support)?;
             hmc_locks.push(row);
+        }
+
+        Ok((native_locks, hmc_locks))
+    }
+
+    /// Single-transaction committed MVCC snapshot of native and HMC locks for /v1/sync,
+    /// bounded strictly before materialization by max_locks_per_kind and max_total_bytes (S01-03).
+    /// Known sparse locators are filtered early during iteration so they do not consume limit budget.
+    #[allow(clippy::type_complexity)]
+    pub fn read_committed_sync_snapshot_bounded(
+        &self,
+        now_ms: u64,
+        locators: &std::collections::HashSet<String>,
+        max_locks_per_kind: usize,
+        max_total_bytes: usize,
+    ) -> Result<(Vec<crate::api::dto::LockRecordDto>, Vec<crate::api::dto::HmcSyncRow>), StorageError> {
+        const MIN_SYNC_ENVELOPE_OVERHEAD: usize = 64;
+        let content_cap = max_total_bytes.saturating_sub(MIN_SYNC_ENVELOPE_OVERHEAD);
+
+        let read_txn = self.db.begin_read()?;
+        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
+        let mut accumulated_bytes: usize = 0;
+        let mut native_locks = Vec::new();
+
+        if max_locks_per_kind > 0 && content_cap > 0 {
+            for item in table_locks.iter()? {
+                if native_locks.len() >= max_locks_per_kind {
+                    break;
+                }
+                let (_k_guard, v_guard) = item?;
+                let (record, root_valid_until): (LockRecord, u64) =
+                    bincode::deserialize(v_guard.value())?;
+                if should_prune(SimTime(now_ms), SimTime(root_valid_until))
+                    || record.valid_until.0 <= now_ms
+                {
+                    continue;
+                }
+                let parent_hex = hex::encode(record.parent_lock);
+                let id_hex = hex::encode(record.id);
+                if locators.contains(&parent_hex) || locators.contains(&id_hex) {
+                    continue;
+                }
+                let dto = crate::api::dto::LockRecordDto::from_record(&record, root_valid_until);
+                let dto_bytes = serde_json::to_vec(&dto)?.len();
+                let row_cost = dto_bytes.saturating_add(1);
+                let Some(next_total) = accumulated_bytes.checked_add(row_cost) else {
+                    break;
+                };
+                if next_total > content_cap {
+                    break;
+                }
+                accumulated_bytes = next_total;
+                native_locks.push(dto);
+            }
+        }
+
+        let table_hmc = read_txn.open_table(TABLE_HMC_LOCKS)?;
+        let table_roots = read_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
+        let table_support = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
+        let mut hmc_locks = Vec::new();
+
+        if max_locks_per_kind > 0 && accumulated_bytes < content_cap {
+            for item in table_hmc.iter()? {
+                if hmc_locks.len() >= max_locks_per_kind {
+                    break;
+                }
+                let (k_guard, v_guard) = item?;
+                let tag = k_guard.value().to_string();
+                let parent_hex = hex::encode(blake3::hash(tag.as_bytes()).as_bytes());
+                if locators.contains(&parent_hex) || locators.contains(&tag) {
+                    continue;
+                }
+                let entry: crate::api::hmc::L2LockEntry = serde_json::from_slice(v_guard.value())?;
+                let id_hex = hex::encode(entry.t_id);
+                if locators.contains(&id_hex) {
+                    continue;
+                }
+                let root_guard = table_roots
+                    .get(entry.layer2_voucher_id.as_str())?
+                    .ok_or_else(|| {
+                        StorageError::DurableCommitFailed("sync HMC lock missing root anchor".into())
+                    })?;
+                let root_anchor: crate::api::hmc::L2LockEntry =
+                    serde_json::from_slice(root_guard.value())?;
+                let root_valid_until_ms = roots::root_valid_until(&root_anchor)?;
+                if should_prune(SimTime(now_ms), SimTime(root_valid_until_ms))
+                    || root_valid_until_ms <= now_ms
+                {
+                    continue;
+                }
+                let support = table_support
+                    .get(tag.as_str())?
+                    .map(|g| serde_json::from_slice::<support::ConfirmationSupport>(g.value()))
+                    .transpose()?;
+                let row = encode_hmc_sync_row(tag, entry, root_anchor, support)?;
+                let row_bytes = serde_json::to_vec(&row)?.len();
+                let row_cost = row_bytes.saturating_add(1);
+                let Some(next_total) = accumulated_bytes.checked_add(row_cost) else {
+                    break;
+                };
+                if next_total > content_cap {
+                    break;
+                }
+                accumulated_bytes = next_total;
+                hmc_locks.push(row);
+            }
         }
 
         Ok((native_locks, hmc_locks))

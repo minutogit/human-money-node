@@ -486,6 +486,7 @@ async fn successful_retry_after_cancelled_root_and_spend_survives_recovery() {
     let identity = NodeIdentity::generate();
     let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
+    tiers.register_f2f_client("retry", None);
     let state = AppState::new(engine.clone(), db.clone(), identity, tiers, pow);
     let shard = humoco_sim_core::types::canonical_voucher_shard(
         &humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag),

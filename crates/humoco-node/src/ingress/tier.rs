@@ -918,6 +918,34 @@ impl TierController {
         parent_lock: Option<&[u8; 32]>,
         now_ms: Option<u64>,
     ) -> Result<IngressTier, IngressError> {
+        self.evaluate_and_charge_with_time_and_retry(
+            auth_token,
+            peer_token,
+            pow_challenge,
+            pow_nonce,
+            ttl_seconds,
+            parent_lock,
+            now_ms,
+            false,
+        )
+        .await
+    }
+
+    /// [INV-0929] Evaluates tier credentials with decentralized network time, validates authorization,
+    /// deducts quota (for VIP non-retries), or validates PoW (for Public).
+    /// When `is_retry` is true, validates credentials and rate admission without double-charging storage or daily writes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate_and_charge_with_time_and_retry(
+        &self,
+        auth_token: Option<&str>,
+        peer_token: Option<&str>,
+        pow_challenge: Option<&str>,
+        pow_nonce: Option<u64>,
+        ttl_seconds: u64,
+        parent_lock: Option<&[u8; 32]>,
+        now_ms: Option<u64>,
+        is_retry: bool,
+    ) -> Result<IngressTier, IngressError> {
         let now_sec = match now_ms {
             Some(ms) => ms / 1000,
             None => std::time::SystemTime::now()
@@ -930,6 +958,10 @@ impl TierController {
         // 1. Check Tier 1 (VIP) - in-memory atomic cache, no synchronous fsync stall (INV-0929 hot-path)
         if let Some(token) = auth_token {
             let account_tag = self.resolve_account_tag(token)?;
+            if is_retry {
+                // Idempotent retry: valid VIP token authenticated, do not double-charge storage quota or write slots
+                return Ok(IngressTier::Tier1Vip);
+            }
             // Hydrate cold miss asynchronously before acquiring write lock (A05-01)
             self.ensure_vip_quota_cached(&account_tag).await?;
             let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
@@ -955,41 +987,60 @@ impl TierController {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .contains(token_trimmed);
-            if is_valid {
-                let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
-                let epoch_day = match now_ms {
-                    Some(ms) => self.current_epoch_day_at(ms),
-                    None => self.current_epoch_day(),
-                };
-                self.evaluate_f2f_quota(token_trimmed, required_byte_years, epoch_day)?;
-                self.f2f_writes_today.fetch_add(1, Ordering::Relaxed);
-                self.thermometer
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .record_write_ingress(now_sec, footprint_micro_bj);
-
-                // Update last active timestamp
-                let token_hash = hex::encode(blake3::hash(token_trimmed.as_bytes()).as_bytes());
-                let activity_ms = match now_ms {
-                    Some(ms) => ms,
-                    None => std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0),
-                };
-                if let Some(meta) = self
-                    .f2f_clients
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get_mut(&token_hash)
-                {
-                    meta.last_active_ms = Some(activity_ms);
-                }
-
-                return Ok(IngressTier::Tier2F2F);
-            } else {
+            if !is_valid {
                 return Err(IngressError::InvalidPeerToken);
             }
+
+            let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
+            let epoch_day = match now_ms {
+                Some(ms) => self.current_epoch_day_at(ms),
+                None => self.current_epoch_day(),
+            };
+            let token_hash = *blake3::hash(token_trimmed.as_bytes()).as_bytes();
+            let peer_node_id: NodeId = u16::from_be_bytes([token_hash[0], token_hash[1]]);
+            let daily_quota = self.calculate_daily_quota(1.0, 1.0);
+
+            let token_hash_hex = hex::encode(token_hash);
+            let activity_ms = match now_ms {
+                Some(ms) => ms,
+                None => std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            };
+            if let Some(meta) = self
+                .f2f_clients
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(&token_hash_hex)
+            {
+                meta.last_active_ms = Some(activity_ms);
+            }
+
+            if is_retry {
+                // Idempotent retry: verify whale-brake admission (rolling over stale epoch_day)
+                // without double-charging storage or daily writes.
+                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+                let _ = thermo.try_accept_lock(epoch_day, peer_node_id, 0, daily_quota);
+                let used = thermo.get_node_usage(peer_node_id);
+                if used >= daily_quota {
+                    let available = daily_quota.saturating_sub(used);
+                    return Err(IngressError::QuotaExceeded {
+                        available,
+                        required: required_byte_years,
+                    });
+                }
+                return Ok(IngressTier::Tier2F2F);
+            }
+
+            self.evaluate_f2f_quota(token_trimmed, required_byte_years, epoch_day)?;
+            self.f2f_writes_today.fetch_add(1, Ordering::Relaxed);
+            self.thermometer
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .record_write_ingress(now_sec, footprint_micro_bj);
+
+            return Ok(IngressTier::Tier2F2F);
         }
 
         // 3. Check Tier 3 (Public - BLAKE3 PoW)
@@ -1003,6 +1054,20 @@ impl TierController {
         let daily_quota = self.calculate_daily_quota(1.0, 1.0);
 
         if self.pow_engine.default_difficulty() == 0 {
+            if is_retry {
+                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+                let _ = thermo.try_accept_lock(epoch_day, free_node_id, 0, daily_quota);
+                let used = thermo.get_node_usage(free_node_id);
+                if used >= daily_quota {
+                    let available = daily_quota.saturating_sub(used);
+                    return Err(IngressError::QuotaExceeded {
+                        available,
+                        required: required_byte_years,
+                    });
+                }
+                return Ok(IngressTier::Tier3Public);
+            }
+
             let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
             let accepted =
                 thermo.try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
@@ -1029,6 +1094,21 @@ impl TierController {
                 self.pow_engine
                     .verify_pow_for_parent(challenge, nonce, dynamic_difficulty, parent_lock)
                     .await?;
+
+                if is_retry {
+                    let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+                    let _ = thermo.try_accept_lock(epoch_day, free_node_id, 0, daily_quota);
+                    let used = thermo.get_node_usage(free_node_id);
+                    if used >= daily_quota {
+                        let available = daily_quota.saturating_sub(used);
+                        return Err(IngressError::QuotaExceeded {
+                            available,
+                            required: required_byte_years,
+                        });
+                    }
+                    return Ok(IngressTier::Tier3Public);
+                }
+
                 let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
                 let accepted = thermo.try_accept_lock(
                     epoch_day,

@@ -34,7 +34,7 @@ use tower_http::trace::TraceLayer;
 use humoco_sim_core::types::SimTime;
 
 use crate::api::dto::{
-    AttestationDto, ErrorResponse, LockRecordDto, NodeStatusResponse, PeerEntryDto, PeersResponse,
+    AttestationDto, ErrorResponse, NodeStatusResponse, PeerEntryDto, PeersResponse,
     PowChallengeResponse, QuorumCertificateDto, SyncRequest, SyncResponse,
 };
 use crate::api::hmc::{
@@ -72,6 +72,8 @@ pub struct AppState {
     pub retained_choice_reads: Arc<tokio::sync::Semaphore>,
     /// Bound fallback disk reads for voucher roots independently of hot-path (A05-01).
     pub voucher_root_reads: Arc<tokio::sync::Semaphore>,
+    /// Bound concurrent blocking /v1/sync snapshot workers to protect memory (S01-03).
+    pub sync_reads: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -134,6 +136,7 @@ impl AppState {
             readiness_manager,
             retained_choice_reads: Arc::new(tokio::sync::Semaphore::new(8)),
             voucher_root_reads: Arc::new(tokio::sync::Semaphore::new(16)),
+            sync_reads: Arc::new(tokio::sync::Semaphore::new(4)),
         }
     }
 
@@ -511,10 +514,31 @@ async fn sync_locks(
         .filter(|l| l.len() <= MAX_SYNC_LOCATOR_LEN)
         .collect();
 
+    // Bound concurrent blocking snapshot readers (S01-03)
+    let Ok(permit) = state.sync_reads.clone().try_acquire_owned() else {
+        tracing::warn!("Sync snapshot worker capacity exhausted");
+        let err_resp = ErrorResponse {
+            error: "SyncBusy".into(),
+            message: "Sync snapshot reader capacity exhausted; retry shortly".into(),
+            challenge: None,
+            difficulty: None,
+            expires_at: None,
+        };
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(err_resp)).into_response();
+    };
+
     let storage = state.storage.clone();
-    let (disk_locks, disk_hmc_locks) =
-        match tokio::task::spawn_blocking(move || storage.read_committed_sync_snapshot(now_ms))
-            .await
+    let (locks, hmc_locks) =
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            storage.read_committed_sync_snapshot_bounded(
+                now_ms,
+                &locators,
+                MAX_SYNC_LOCKS,
+                MAX_SYNC_RESPONSE_BYTES,
+            )
+        })
+        .await
         {
             Ok(Ok(res)) => res,
             Ok(Err(err)) => {
@@ -539,32 +563,11 @@ async fn sync_locks(
             }
         };
 
-    let mut locks = Vec::new();
-    for (record, root_valid_until) in disk_locks {
-        let parent_hex = hex::encode(record.parent_lock);
-        let id_hex = hex::encode(record.id);
-        if !locators.contains(&parent_hex) && !locators.contains(&id_hex) {
-            locks.push(LockRecordDto::from_record(&record, root_valid_until));
-        }
-    }
-    const MAX_SYNC_LOCKS: usize = 10_000;
-    locks.truncate(MAX_SYNC_LOCKS);
-
-    let mut hmc_locks = Vec::new();
-    for row in disk_hmc_locks {
-        let parent_hex = hex::encode(blake3::hash(row.lookup_tag.as_bytes()).as_bytes());
-        let id_hex = hex::encode(row.entry.t_id);
-        if !locators.contains(&parent_hex)
-            && !locators.contains(&row.lookup_tag)
-            && !locators.contains(&id_hex)
-        {
-            hmc_locks.push(row);
-        }
-    }
-    hmc_locks.truncate(MAX_SYNC_LOCKS);
-
     (StatusCode::OK, Json(SyncResponse { locks, hmc_locks })).into_response()
 }
+
+pub const MAX_SYNC_LOCKS: usize = crate::storage::db::DEFAULT_MAX_SYNC_LOCKS;
+pub const MAX_SYNC_RESPONSE_BYTES: usize = crate::storage::db::DEFAULT_MAX_SYNC_RESPONSE_BYTES;
 
 /// Handler for GET /v1/pow-challenge
 async fn get_pow_challenge(
@@ -1752,13 +1755,14 @@ pub async fn assemble_quorum_certificate_with_deadline(
                 if state.engine.get_hmc_ram_lock(&tag).await.is_some() {
                     if let Err(error) = state
                         .engine
-                        .persist_confirmation_support(
+                        .persist_confirmation_support_with_deadline(
                             tag,
                             cert.clone(),
                             &state.identity,
                             now_ms,
                             state.network_id,
                             state.peer_manager.clone(),
+                            checkout_deadline,
                         )
                         .await
                     {
@@ -1996,6 +2000,136 @@ async fn query_status(
     (status, Json(envelope)).into_response()
 }
 
+fn map_ingress_error(
+    state: &AppState,
+    err: IngressError,
+    has_auth_token: bool,
+) -> Response {
+    let mut required_diff_hdr = None;
+    let mut challenge_opt = None;
+    let mut expires_at_opt = None;
+
+    let (status, reason) = match &err {
+        IngressError::PoWRequired {
+            challenge,
+            difficulty,
+            expires_at,
+        } => {
+            required_diff_hdr = Some(*difficulty);
+            challenge_opt = Some(challenge.clone());
+            expires_at_opt = Some(*expires_at);
+            (
+                StatusCode::UNAUTHORIZED,
+                "Proof-of-Work challenge response required".into(),
+            )
+        }
+        IngressError::InvalidPoW(err) => {
+            if let crate::ingress::pow::PowError::InsufficientDifficulty {
+                required,
+                provided,
+            } = err
+            {
+                required_diff_hdr = Some(*required);
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Gateway under load: insufficient PoW difficulty (provided: {}, required: {})",
+                        provided, required
+                    ),
+                )
+            } else {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    format!("Invalid Proof of Work: {}", err),
+                )
+            }
+        }
+        IngressError::QuotaExceeded {
+            available,
+            required,
+        } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "VIP Quota exceeded: required {} byte-years, available {}",
+                required, available
+            ),
+        ),
+        IngressError::ReadQuotaExceeded {
+            available,
+            required,
+        } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Read quota exceeded: required {} reads, available {}",
+                required, available
+            ),
+        ),
+        IngressError::InvalidAuthToken => (
+            StatusCode::UNAUTHORIZED,
+            "Invalid VIP authentication token".into(),
+        ),
+        IngressError::InvalidPeerToken => {
+            (StatusCode::UNAUTHORIZED, "Invalid F2F peer token".into())
+        }
+        IngressError::Storage(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Storage error: {}", e),
+        ),
+        IngressError::QuotaPersistenceUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "VIP Quota persistence queue is full or closed".into(),
+        ),
+    };
+
+    match &err {
+        IngressError::QuotaExceeded { .. } | IngressError::ReadQuotaExceeded { .. } => {
+            state.metrics.record_rejected_quota_429();
+        }
+        IngressError::InvalidPoW(..) | IngressError::PoWRequired { .. } => {
+            state.metrics.record_rejected_bad_pow_400();
+        }
+        _ => {
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                state.metrics.record_rejected_capacity_429();
+            }
+        }
+    }
+
+    if matches!(err, IngressError::QuotaExceeded { .. }) && has_auth_token {
+        let envelope = wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
+        return (status, Json(envelope)).into_response();
+    }
+
+    let err_resp = ErrorResponse {
+        error: match &err {
+            IngressError::QuotaExceeded { .. } => "QuotaExceeded".to_string(),
+            IngressError::ReadQuotaExceeded { .. } => "ReadQuotaExceeded".to_string(),
+            IngressError::InvalidPoW(..) => "InvalidPoW".to_string(),
+            IngressError::PoWRequired { .. } => "PoWRequired".to_string(),
+            IngressError::InvalidAuthToken => "InvalidAuthToken".to_string(),
+            IngressError::InvalidPeerToken => "InvalidPeerToken".to_string(),
+            IngressError::QuotaPersistenceUnavailable => {
+                "QuotaPersistenceUnavailable".to_string()
+            }
+            _ => "AdmissionDenied".to_string(),
+        },
+        message: reason,
+        challenge: challenge_opt,
+        difficulty: required_diff_hdr,
+        expires_at: expires_at_opt,
+    };
+    let mut resp = (status, Json(err_resp)).into_response();
+    if let Some(req_diff) = required_diff_hdr {
+        if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
+            resp.headers_mut().insert(
+                axum::http::HeaderName::from_static("x-required-difficulty"),
+                hdr_val,
+            );
+        }
+    }
+    resp
+}
+
 /// Dedicated handler for HMC L2LockRequest.
 ///
 /// 📜 ARCHITECTURAL INVARIANT:
@@ -2129,51 +2263,19 @@ async fn submit_hmc_lock_with_deadline(
         || peer_token.is_some()
         || (pow_challenge.is_some() && pow_nonce.is_some());
 
-    if !has_credentials {
-        let (status, reason, req_diff, chal, exp) = match state
-            .tier_controller
-            .evaluate_and_charge_with_time(None, None, None, None, 0, parent_for_pow, Some(now_ms))
-            .await
-        {
-            Err(IngressError::PoWRequired {
+    if !has_credentials && state.pow_engine.default_difficulty() > 0 {
+        let (challenge, difficulty, expires_at) = state
+            .pow_engine
+            .generate_challenge_for_parent(parent_for_pow.unwrap_or(&[0u8; 32]));
+        return map_ingress_error(
+            &state,
+            IngressError::PoWRequired {
                 challenge,
                 difficulty,
                 expires_at,
-            }) => {
-                state.metrics.record_rejected_bad_pow_400();
-                (
-                    StatusCode::UNAUTHORIZED,
-                    "Proof-of-Work challenge response required".to_string(),
-                    Some(difficulty),
-                    Some(challenge),
-                    Some(expires_at),
-                )
-            }
-            _ => (
-                StatusCode::UNAUTHORIZED,
-                "Unauthorized: credentials or PoW required".to_string(),
-                None,
-                None,
-                None,
-            ),
-        };
-        let err_resp = ErrorResponse {
-            error: "PoWRequired".into(),
-            message: reason,
-            challenge: chal,
-            difficulty: req_diff,
-            expires_at: exp,
-        };
-        let mut resp = (status, Json(err_resp)).into_response();
-        if let Some(req_diff) = req_diff {
-            if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
-                resp.headers_mut().insert(
-                    axum::http::HeaderName::from_static("x-required-difficulty"),
-                    hdr_val,
-                );
-            }
-        }
-        return resp;
+            },
+            false,
+        );
     }
 
     let (valid_until, root_valid_until) = if req.is_genesis {
@@ -2336,15 +2438,61 @@ async fn submit_hmc_lock_with_deadline(
 
     // A root retry is metadata idempotency, not a new PoW purchase or vote.
     // Await an exact durable acknowledgment even if its first commit is pending.
-    if req.is_genesis
-        && state
-            .engine
-            .hmc_ram
-            .read()
-            .await
-            .root_anchors
-            .contains_key(&req.layer2_voucher_id)
+    let is_root_retry = if req.is_genesis {
+        let hmc = state.engine.hmc_ram.read().await;
+        hmc.root_anchors
+            .get(&req.layer2_voucher_id)
+            .is_some_and(|existing| {
+                crate::storage::db::roots::same_root_deed(existing, &entry)
+                    && hmc.voucher_roots.get(&req.layer2_voucher_id).copied()
+                        == Some(root_valid_until)
+            })
+    } else {
+        false
+    };
+
+    let existing_spend_retry = if is_responsible {
+        let hmc = state.engine.hmc_ram.read().await;
+        hmc.locks.get(&lookup_tag).and_then(|existing| {
+            if existing.t_id == entry.t_id
+                && existing.layer2_voucher_id == entry.layer2_voucher_id
+                && existing.sender_ephemeral_pub == entry.sender_ephemeral_pub
+            {
+                Some(existing.clone())
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
+    let is_spend_retry = existing_spend_retry.is_some();
+    let is_retry = is_root_retry || is_spend_retry;
+
+    // Validate token/work and rate admission before both retry branches (S01-02).
+    // Duplicate storage quota is not charged on idempotent retries.
+    let ingress_tier = match state
+        .tier_controller
+        .evaluate_and_charge_with_time_and_retry(
+            auth_token,
+            peer_token,
+            pow_challenge,
+            pow_nonce,
+            ttl_seconds,
+            parent_for_pow,
+            Some(now_ms),
+            is_retry,
+        )
+        .await
     {
+        Ok(tier) => tier,
+        Err(err) => {
+            return map_ingress_error(&state, err, auth_token.is_some());
+        }
+    };
+
+    if is_root_retry {
         if !verify_l2_lock_signature(&req) {
             return (
                 StatusCode::BAD_REQUEST,
@@ -2372,268 +2520,130 @@ async fn submit_hmc_lock_with_deadline(
     // Phase 10 (Hot-Path-Locks): the RAM read guard is cloned and dropped
     // BEFORE any network await (`assemble_quorum_certificate`), so writers
     // are never blocked while this gateway waits for quorum.
-    if is_responsible {
-        let existing_opt = {
-            let hmc = state.engine.hmc_ram.read().await;
-            hmc.locks.get(&lookup_tag).cloned()
-        };
-        if let Some(existing) = existing_opt {
-            if existing.t_id == entry.t_id
-                && existing.layer2_voucher_id == entry.layer2_voucher_id
-                && existing.sender_ephemeral_pub == entry.sender_ephemeral_pub
-            {
-                // Verify signature on idempotent retry so caller cannot forge verdicts with invalid signatures
-                if !verify_l2_lock_signature(&req) {
-                    let envelope = wrap_and_sign_verdict(
-                        &state.identity,
-                        L2Verdict::Rejected {
-                            reason: "Invalid cryptographic signature".into(),
-                        },
-                    );
-                    return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
-                }
-
-                let verdict = L2Verdict::Verified {
-                    lock_entry: existing.clone(),
-                };
-                let now_ms = state.net_time_ms();
-                let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-                let declared_read_ema = state.tier_controller.current_read_ema_credits();
-                let sender_pubkey = *state.identity.node_pubkey();
-                let ttl_sec = (root_valid_until.saturating_sub(now_ms)) / 1000;
-                let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
-                let op_hash = entry.t_id;
-                // Epoch-bound envelope (Phase 1 P0): reserve epoch first so the
-                // signed digest and the wire payload commit to the same
-                // (epoch_day, epoch_seq).
-                let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-                    state
-                        .tier_controller
-                        .record_declared_usage(now_ms, footprint);
-                let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-                    &sender_pubkey,
-                    epoch_day,
-                    epoch_seq,
-                    now_ms,
-                    declared_write_ema,
-                    declared_read_ema,
-                    footprint,
-                    false,
-                    &op_hash,
-                );
-                let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-                let current_anl_24h = declared_write_ema;
-                let wire_payload =
-                    bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                        req: req.clone(),
-                        chain: None,
-                        root_valid_until,
-                        epoch_day,
-                        epoch_seq,
-                        cumulative_micro_byte_years,
-                        prev_day_final_bytes,
-                        current_anl_24h,
-                        declared_write_ema_micro_bj: declared_write_ema,
-                        declared_read_ema_credits: declared_read_ema,
-                        sender_pubkey,
-                        sender_signature,
-                        timestamp_ms: now_ms,
-                    })
-                    .ok();
-                let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
-                    &state,
-                    entry.t_id,
-                    parent_bytes,
-                    shard_id,
-                    now_ms,
-                    wire_payload,
-                    req_q_override,
-                    Some(checkout_deadline),
-                )
-                .await;
-                state.metrics.record_quorum_latency(start_quorum.elapsed());
-                state
-                    .metrics
-                    .record_local_latency(std::time::Duration::from_micros(1));
-
-                // Remote double-spend evidence overrides idempotent fast-path.
-                if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached())
-                {
-                    let verdict = L2Verdict::Conflict { existing_lock };
-                    let envelope =
-                        wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
-                    state.metrics.record_rejected_conflict_409();
-                    state.metrics.record_e2e_latency(start.elapsed());
-                    return (StatusCode::CONFLICT, Json(envelope)).into_response();
-                }
-
-                if !cert.is_quorum_reached() {
-                    let reason = format!(
-                        "Quorum not reached: required {} signatures, collected {}",
-                        cert.required_quorum(),
-                        cert.signatures.len()
-                    );
-                    let rej_verdict = L2Verdict::Rejected { reason };
-                    let envelope =
-                        wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert));
-                    state.metrics.record_e2e_latency(start.elapsed());
-                    let mut resp =
-                        (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
-                    if should_warn {
-                        resp.headers_mut().insert(
-                            axum::http::HeaderName::from_static("x-deprecation-warning"),
-                            axum::http::HeaderValue::from_static(
-                                "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-                            ),
-                        );
-                    }
-                    return resp;
-                }
-
-                let envelope =
-                    wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
-                state.metrics.record_e2e_latency(start.elapsed());
-                let mut resp = (StatusCode::OK, Json(envelope)).into_response();
-                if should_warn {
-                    resp.headers_mut().insert(
-                        axum::http::HeaderName::from_static("x-deprecation-warning"),
-                        axum::http::HeaderValue::from_static(
-                            "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-                        ),
-                    );
-                }
-                return resp;
-            }
-        }
-    }
-
-    let ingress_tier = match state
-        .tier_controller
-        .evaluate_and_charge_with_time(
-            auth_token,
-            peer_token,
-            pow_challenge,
-            pow_nonce,
-            ttl_seconds,
-            parent_for_pow,
-            Some(now_ms),
-        )
-        .await
-    {
-        Ok(tier) => tier,
-        Err(err) => {
-            let mut required_diff_hdr = None;
-            let (status, reason) = match &err {
-                IngressError::PoWRequired { .. } => (
-                    StatusCode::UNAUTHORIZED,
-                    "Proof-of-Work challenge response required".into(),
-                ),
-                IngressError::InvalidPoW(err) => {
-                    if let crate::ingress::pow::PowError::InsufficientDifficulty {
-                        required,
-                        provided,
-                    } = err
-                    {
-                        required_diff_hdr = Some(*required);
-                        (
-                            StatusCode::TOO_MANY_REQUESTS,
-                            format!(
-                                "Gateway under load: insufficient PoW difficulty (provided: {}, required: {})",
-                                provided, required
-                            ),
-                        )
-                    } else {
-                        (
-                            StatusCode::UNAUTHORIZED,
-                            format!("Invalid Proof of Work: {}", err),
-                        )
-                    }
-                }
-                IngressError::QuotaExceeded {
-                    available,
-                    required,
-                } => (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    format!(
-                        "VIP Quota exceeded: required {} byte-years, available {}",
-                        required, available
-                    ),
-                ),
-                IngressError::ReadQuotaExceeded {
-                    available,
-                    required,
-                } => (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    format!(
-                        "Read quota exceeded: required {} reads, available {}",
-                        required, available
-                    ),
-                ),
-                IngressError::InvalidAuthToken => (
-                    StatusCode::UNAUTHORIZED,
-                    "Invalid VIP authentication token".into(),
-                ),
-                IngressError::InvalidPeerToken => {
-                    (StatusCode::UNAUTHORIZED, "Invalid F2F peer token".into())
-                }
-                IngressError::Storage(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Storage error: {}", e),
-                ),
-                IngressError::QuotaPersistenceUnavailable => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "VIP Quota persistence queue is full or closed".into(),
-                ),
-            };
-            match &err {
-                IngressError::QuotaExceeded { .. } | IngressError::ReadQuotaExceeded { .. } => {
-                    state.metrics.record_rejected_quota_429();
-                }
-                IngressError::InvalidPoW(..) | IngressError::PoWRequired { .. } => {
-                    state.metrics.record_rejected_bad_pow_400();
-                }
-                _ => {
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        state.metrics.record_rejected_capacity_429();
-                    }
-                }
-            }
-            if matches!(err, IngressError::QuotaExceeded { .. }) && auth_token.is_some() {
-                let envelope =
-                    wrap_and_sign_verdict(&state.identity, L2Verdict::Rejected { reason });
-                return (status, Json(envelope)).into_response();
-            }
-            let err_resp = ErrorResponse {
-                error: match &err {
-                    IngressError::QuotaExceeded { .. } => "QuotaExceeded".to_string(),
-                    IngressError::ReadQuotaExceeded { .. } => "ReadQuotaExceeded".to_string(),
-                    IngressError::InvalidPoW(..) => "InvalidPoW".to_string(),
-                    IngressError::PoWRequired { .. } => "PoWRequired".to_string(),
-                    IngressError::InvalidAuthToken => "InvalidAuthToken".to_string(),
-                    IngressError::InvalidPeerToken => "InvalidPeerToken".to_string(),
-                    IngressError::QuotaPersistenceUnavailable => {
-                        "QuotaPersistenceUnavailable".to_string()
-                    }
-                    _ => "AdmissionDenied".to_string(),
+    if let Some(existing) = existing_spend_retry {
+        // Verify signature on idempotent retry so caller cannot forge verdicts with invalid signatures
+        if !verify_l2_lock_signature(&req) {
+            let envelope = wrap_and_sign_verdict(
+                &state.identity,
+                L2Verdict::Rejected {
+                    reason: "Invalid cryptographic signature".into(),
                 },
-                message: reason,
-                challenge: None,
-                difficulty: required_diff_hdr,
-                expires_at: None,
-            };
-            let mut resp = (status, Json(err_resp)).into_response();
-            if let Some(req_diff) = required_diff_hdr {
-                if let Ok(hdr_val) = axum::http::HeaderValue::from_str(&req_diff.to_string()) {
-                    resp.headers_mut().insert(
-                        axum::http::HeaderName::from_static("x-required-difficulty"),
-                        hdr_val,
-                    );
-                }
+            );
+            return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+        }
+
+        let verdict = L2Verdict::Verified {
+            lock_entry: existing,
+        };
+        let now_ms = state.net_time_ms();
+        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+        let declared_read_ema = state.tier_controller.current_read_ema_credits();
+        let sender_pubkey = *state.identity.node_pubkey();
+        let ttl_sec = (root_valid_until.saturating_sub(now_ms)) / 1000;
+        let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
+        let op_hash = entry.t_id;
+        // Epoch-bound envelope (Phase 1 P0): reserve epoch first so the
+        // signed digest and the wire payload commit to the same
+        // (epoch_day, epoch_seq).
+        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+            state
+                .tier_controller
+                .record_declared_usage(now_ms, footprint);
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+            &sender_pubkey,
+            epoch_day,
+            epoch_seq,
+            now_ms,
+            declared_write_ema,
+            declared_read_ema,
+            footprint,
+            false,
+            &op_hash,
+        );
+        let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
+        let current_anl_24h = declared_write_ema;
+        let wire_payload =
+            bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+                req: req.clone(),
+                chain: None,
+                root_valid_until,
+                epoch_day,
+                epoch_seq,
+                cumulative_micro_byte_years,
+                prev_day_final_bytes,
+                current_anl_24h,
+                declared_write_ema_micro_bj: declared_write_ema,
+                declared_read_ema_credits: declared_read_ema,
+                sender_pubkey,
+                sender_signature,
+                timestamp_ms: now_ms,
+            })
+            .ok();
+        let start_quorum = std::time::Instant::now();
+        let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
+            &state,
+            entry.t_id,
+            parent_bytes,
+            shard_id,
+            now_ms,
+            wire_payload,
+            req_q_override,
+            Some(checkout_deadline),
+        )
+        .await;
+        state.metrics.record_quorum_latency(start_quorum.elapsed());
+        state
+            .metrics
+            .record_local_latency(std::time::Duration::from_micros(1));
+
+        // Remote double-spend evidence overrides idempotent fast-path.
+        if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached())
+        {
+            let verdict = L2Verdict::Conflict { existing_lock };
+            let envelope =
+                wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
+            state.metrics.record_rejected_conflict_409();
+            state.metrics.record_e2e_latency(start.elapsed());
+            return (StatusCode::CONFLICT, Json(envelope)).into_response();
+        }
+
+        if !cert.is_quorum_reached() {
+            let reason = format!(
+                "Quorum not reached: required {} signatures, collected {}",
+                cert.required_quorum(),
+                cert.signatures.len()
+            );
+            let rej_verdict = L2Verdict::Rejected { reason };
+            let envelope =
+                wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert));
+            state.metrics.record_e2e_latency(start.elapsed());
+            let mut resp =
+                (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+            if should_warn {
+                resp.headers_mut().insert(
+                    axum::http::HeaderName::from_static("x-deprecation-warning"),
+                    axum::http::HeaderValue::from_static(
+                        "Suite 1 (Ed25519) deprecated - migrate to suite 2",
+                    ),
+                );
             }
             return resp;
         }
-    };
+
+        let envelope =
+            wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
+        state.metrics.record_e2e_latency(start.elapsed());
+        let mut resp = (StatusCode::OK, Json(envelope)).into_response();
+        if should_warn {
+            resp.headers_mut().insert(
+                axum::http::HeaderName::from_static("x-deprecation-warning"),
+                axum::http::HeaderValue::from_static(
+                    "Suite 1 (Ed25519) deprecated - migrate to suite 2",
+                ),
+            );
+        }
+        return resp;
+    }
 
     // 2. Verify V3 signature: only executed after cheap credential check passes!
     if !verify_l2_lock_signature(&req) {

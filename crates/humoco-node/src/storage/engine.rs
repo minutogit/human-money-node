@@ -986,6 +986,12 @@ impl DualTierEngine {
         self.is_signing_healthy()
     }
 
+    /// Test-only hook to inspect available support update permits.
+    #[doc(hidden)]
+    pub fn support_updates_available_for_test(&self) -> usize {
+        self.support_updates.available_permits()
+    }
+
     async fn wait_original_approval(
         &self,
         key: [u8; 32],
@@ -1451,6 +1457,172 @@ impl DualTierEngine {
         }
 
         verdict
+    }
+
+    /// Verify active committee support independently of any caller-supplied class
+    /// within an optional checkout deadline (S01-01).
+    ///
+    /// Persists only the compact admitted fact; historical signature bundles are
+    /// neither synchronized nor retained after this admission.
+    ///
+    /// Cancellation Safety (S01-01):
+    /// - If the deadline expires while the blocking database commit or RAM update is in flight,
+    ///   the caller future times out and returns an error without stalling checkout.
+    /// - The background task retains the `support_updates` permit and completes the durable
+    ///   commit and RAM promotion asynchronously.
+    /// - Caller timeout NEVER trips the fail-closed `PublicationGuard` signing health latch.
+    ///   `PublicationGuard` remains owned by the background worker and only trips if the worker
+    ///   itself panics or encounters ambiguous storage corruption.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_confirmation_support_with_deadline(
+        &self,
+        tag: String,
+        certificate: crate::api::dto::QuorumCertificateDto,
+        identity: &crate::identity::NodeIdentity,
+        now_ms: u64,
+        network: humoco_sim_core::types::NetworkId,
+        manager: Option<Arc<crate::network::PeerManager>>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), StorageError> {
+        if let Some(dl) = deadline {
+            if tokio::time::Instant::now() >= dl {
+                return Err(StorageError::DurableCommitFailed(
+                    "support commit deadline exceeded".into(),
+                ));
+            }
+        }
+        let _activity = self.activity.enter(certificate.shard_id).ok_or_else(|| {
+            StorageError::DurableCommitFailed("FLAG_NOT_READY: installing shard".into())
+        })?;
+        let entry = self
+            .get_hmc_ram_lock(&tag)
+            .await
+            .ok_or_else(|| StorageError::DurableCommitFailed("support lock missing".into()))?;
+        let root = self
+            .get_hmc_voucher_root_valid(&entry.layer2_voucher_id)
+            .await
+            .ok_or_else(|| StorageError::DurableCommitFailed("support root missing".into()))?;
+        if self
+            .get_hmc_voucher_genesis_shard(&entry.layer2_voucher_id)
+            .await
+            != Some(certificate.shard_id)
+        {
+            return Err(StorageError::DurableCommitFailed(
+                "support committee is not the canonical root shard".into(),
+            ));
+        }
+        let (committee, total, final_allowed) = if let Some(manager) = manager {
+            let (committee, _, total) = manager
+                .shard_committee(
+                    *identity.node_pubkey(),
+                    *identity.hrw_routing_id(),
+                    certificate.shard_id,
+                )
+                .await;
+            (
+                committee
+                    .into_iter()
+                    .map(|m| m.node_pubkey)
+                    .collect::<Vec<_>>(),
+                total,
+                manager.is_network_stable_ge20_for_24h(now_ms),
+            )
+        } else {
+            (vec![*identity.node_pubkey()], 1, false)
+        };
+        let quorum = humoco_sim_core::types::required_quorum(total).0;
+        let verified = crate::storage::db::support::VerifiedSupport::verify(
+            tag.clone(),
+            entry.t_id,
+            root,
+            &certificate,
+            &committee,
+            quorum,
+            final_allowed,
+            network,
+        )?;
+
+        if let Some(dl) = deadline {
+            if tokio::time::Instant::now() >= dl {
+                return Err(StorageError::DurableCommitFailed(
+                    "support commit deadline exceeded".into(),
+                ));
+            }
+        }
+
+        let permit = self
+            .support_updates
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| StorageError::DurableCommitFailed("support capacity exhausted".into()))?;
+
+        let db = self.db.clone();
+        let hmc_ram = self.hmc_ram.clone();
+        let health = self.stats.clone();
+        let background_tag = tag.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            let _activity = _activity;
+            let mut publication = PublicationGuard {
+                health,
+                uncertain: true,
+            };
+
+            let res = tokio::task::spawn_blocking(move || {
+                db.commit_confirmation_support(verified)
+            })
+            .await;
+
+            let fact = match res {
+                Err(join_err) => {
+                    let err = StorageError::DurableCommitFailed(format!(
+                        "support worker: {join_err}"
+                    ));
+                    let _ = tx.send(Err(err));
+                    return;
+                }
+                Ok(Err(storage_err)) => {
+                    publication.uncertain = !matches!(
+                        &storage_err,
+                        StorageError::DurableCommitFailed(_) | StorageError::OwnChoiceConflict
+                    );
+                    let _ = tx.send(Err(storage_err));
+                    return;
+                }
+                Ok(Ok(fact)) => fact,
+            };
+
+            let mut ram = hmc_ram.write().await;
+            if ram
+                .locks
+                .get(&background_tag)
+                .is_some_and(|current| current.t_id == fact.child)
+            {
+                ram.set_confirmation_class(&background_tag, fact.class);
+            }
+            publication.uncertain = false;
+            let _ = tx.send(Ok(()));
+        });
+
+        match deadline {
+            Some(dl) => match tokio::time::timeout_at(dl, rx).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_oneshot_closed)) => Err(StorageError::DurableCommitFailed(
+                    "support persistence worker dropped channel".into(),
+                )),
+                Err(_timeout) => Err(StorageError::DurableCommitFailed(
+                    "support commit deadline exceeded".into(),
+                )),
+            },
+            None => match rx.await {
+                Ok(result) => result,
+                Err(_oneshot_closed) => Err(StorageError::DurableCommitFailed(
+                    "support persistence worker dropped channel".into(),
+                )),
+            },
+        }
     }
 
     /// Verify active committee support independently of any caller-supplied class.

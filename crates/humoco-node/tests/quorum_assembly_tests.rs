@@ -786,3 +786,370 @@ async fn test_a24_r1_checkout_enforces_single_end_to_end_deadline_across_persist
         sh.transport.close();
     }
 }
+
+/// S01-01: Bounded checkout completion respecting deadline during support persistence write contention,
+/// with neutral cancellation (no false signing disablement) and safe eventual persistence.
+#[tokio::test]
+async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_without_poisoning_signing_health() {
+    const NUM_SHARDS: usize = 20;
+
+    let gw_temp = tempdir().expect("gw tempdir");
+    let gw_storage = Arc::new(
+        RedbStorage::open(&gw_temp.path().join("quorum_gw_s01.redb")).expect("open gw redb"),
+    );
+    let (gw_engine, _gw_worker) = DualTierEngine::new(gw_storage.clone());
+    let gateway_id = NodeIdentity::generate();
+    let gw_cancel = CancellationToken::new();
+    let pm_gw = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+
+    struct Shard {
+        identity: NodeIdentity,
+        addr: SocketAddr,
+        transport: QuicTransport,
+        cancel: CancellationToken,
+        engine: DualTierEngine,
+        _storage: Arc<RedbStorage>,
+    }
+
+    let mut shards: Vec<Shard> = Vec::new();
+
+    for s in 0..NUM_SHARDS {
+        let tmp = tempdir().expect("shard tempdir");
+        let storage = Arc::new(
+            RedbStorage::open(&tmp.path().join(format!("quorum_s01_shard{s}.redb")))
+                .expect("open shard redb"),
+        );
+        std::mem::forget(tmp);
+        let (engine, _worker) = DualTierEngine::new(storage.clone());
+        let identity = NodeIdentity::generate();
+        let cancel = CancellationToken::new();
+        let pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+
+        pm.register_f2f_friend(
+            *gateway_id.node_pubkey(),
+            Some("127.0.0.1:1".parse().expect("addr")),
+        )
+        .await;
+
+        for i in 0u64..18 {
+            pm.register_f2f_friend(
+                fake_pubkey(90_000 + (s as u64) * 100 + i),
+                Some(fake_addr((57001 + i) as u16)),
+            )
+            .await;
+        }
+        prepare_mature_fixture(&pm, &identity).await;
+        force_stable_ge20(&pm).await;
+
+        let handler = Arc::new(
+            NodeRequestHandler::with_peer_manager(
+                engine.clone(),
+                storage.clone(),
+                identity.clone(),
+                pm.clone(),
+            )
+            .with_sync_ready(Arc::new(AtomicBool::new(true)))
+            .with_readiness_manager(prepared_readiness()),
+        );
+
+        let transport = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().expect("addr"),
+            &identity,
+            pm.clone(),
+            handler,
+            cancel.clone(),
+        )
+        .expect("bind shard transport");
+        transport.set_sync_ready(true);
+        let addr = transport.local_addr().expect("shard local addr");
+        transport.spawn_accept_loop();
+
+        shards.push(Shard {
+            identity,
+            addr,
+            transport,
+            cancel,
+            engine,
+            _storage: storage,
+        });
+    }
+
+    for sh in &shards {
+        pm_gw
+            .register_f2f_friend(*sh.identity.node_pubkey(), Some(sh.addr))
+            .await;
+    }
+    prepare_mature_fixture(&pm_gw, &gateway_id).await;
+    force_stable_ge20(&pm_gw).await;
+
+    let sender_key = SigningKey::from_bytes(&[44u8; 32]);
+    let now = test_now_ms();
+
+    let mut counter = 0u64;
+    let (target_shard_id, root_req) = loop {
+        counter += 1;
+        let req = make_hmc_genesis(
+            &format!("lock_s01_{counter}"),
+            now + 900_000,
+            &sender_key,
+        );
+        let tag = bs58::encode(&req.transaction_hash).into_string();
+        let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+        let sid = humoco_sim_core::types::extract_shard_id(&p_bytes);
+        let (comm, rem, _) = pm_gw
+            .shard_committee(*gateway_id.node_pubkey(), *gateway_id.hrw_routing_id(), sid)
+            .await;
+        if rem.len() == 20
+            && !comm
+                .iter()
+                .any(|m| m.node_pubkey == *gateway_id.node_pubkey())
+        {
+            break (sid, req);
+        }
+        if counter > 10_000 {
+            panic!("Could not find shard committee outside gateway");
+        }
+    };
+
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    for engine in std::iter::once(&gw_engine).chain(shards.iter().map(|s| &s.engine)) {
+        let (verdict, _) = engine
+            .ingress_hmc_lock_durable(
+                root_tag.clone(),
+                L2LockEntry::from(&root_req),
+                IngressOrigin::ClientApi,
+                Some(now),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+
+    use sha3::{Digest, Sha3_256};
+    let mut hash = Sha3_256::new();
+    hash.update(32u32.to_le_bytes());
+    hash.update(root_req.transaction_hash);
+    hash.update(32u32.to_le_bytes());
+    hash.update(sender_key.verifying_key().to_bytes());
+    let lookup_tag = bs58::encode(hash.finalize()).into_string();
+    let mut lock_req = root_req.clone();
+    lock_req.is_genesis = false;
+    lock_req.ds_tag = Some(lookup_tag.clone());
+    lock_req.transaction_hash = [93; 32];
+    lock_req.deletable_at = None;
+    lock_req.layer2_signature = sender_key
+        .sign(&calculate_l2_payload_hash(&lock_req))
+        .to_bytes();
+
+    let lock_entry = L2LockEntry::from(&lock_req);
+
+    for sh in &shards {
+        let (verdict, _) = sh
+            .engine
+            .ingress_hmc_lock_durable(
+                lookup_tag.clone(),
+                lock_entry.clone(),
+                IngressOrigin::ClientApi,
+                Some(now),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+
+    let (gw_verdict, _) = gw_engine
+        .ingress_hmc_lock_durable(
+            lookup_tag.clone(),
+            lock_entry.clone(),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(gw_verdict, L2Verdict::Verified { .. }));
+
+    let gw_handler = Arc::new(NodeRequestHandler::with_peer_manager(
+        gw_engine.clone(),
+        gw_storage.clone(),
+        gateway_id.clone(),
+        pm_gw.clone(),
+    ));
+
+    let gw_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &gateway_id,
+        pm_gw.clone(),
+        gw_handler,
+        gw_cancel.clone(),
+    )
+    .expect("bind gateway transport");
+    let gw_addr = gw_transport.local_addr().expect("gw addr");
+    gw_transport.spawn_accept_loop();
+
+    for sh in &shards {
+        sh.transport
+            .peer_manager()
+            .register_f2f_friend(*gateway_id.node_pubkey(), Some(gw_addr))
+            .await;
+        gw_transport
+            .connect_peer(sh.addr)
+            .await
+            .expect("preconnect shard");
+    }
+
+    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
+
+    let mut state = AppState::new(
+        gw_engine.clone(),
+        gw_storage.clone(),
+        gateway_id.clone(),
+        tier_controller.clone(),
+        pow_engine,
+    );
+    state.peer_manager = Some(pm_gw.clone());
+    state.transport = Some(gw_transport.clone());
+
+    let declared_write_ema = tier_controller.current_write_ema_micro_bj();
+    let declared_read_ema = tier_controller.current_read_ema_credits();
+    let sender_pubkey = *gateway_id.node_pubkey();
+    let root_valid_until = now + 900_000;
+    let ttl_sec = 900;
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
+    let op_hash = lock_req.transaction_hash;
+    let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
+        tier_controller.record_declared_usage(now, footprint);
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        &sender_pubkey,
+        epoch_day,
+        epoch_seq,
+        now,
+        declared_write_ema,
+        declared_read_ema,
+        footprint,
+        false,
+        &op_hash,
+    );
+    let sender_signature = gateway_id.signing_key().sign(&digest).to_bytes();
+    let current_anl_24h = declared_write_ema;
+
+    let wire_payload = bincode::serialize(&humoco_node::network::framing::LockWirePayload::Hmc {
+        req: lock_req.clone(),
+        chain: None,
+        root_valid_until,
+        epoch_day,
+        epoch_seq,
+        cumulative_micro_byte_years,
+        prev_day_final_bytes,
+        current_anl_24h,
+        declared_write_ema_micro_bj: declared_write_ema,
+        declared_read_ema_credits: declared_read_ema,
+        sender_pubkey,
+        sender_signature,
+        timestamp_ms: now,
+    })
+    .expect("serialize wire payload");
+
+    assert_eq!(gw_engine.support_updates_available_for_test(), 32);
+    assert!(gw_engine.is_signing_healthy());
+
+    // 1. Hold exclusive write transaction on local RedbStorage
+    let blocking_write_txn = gw_storage
+        .raw_database_for_test()
+        .begin_write()
+        .expect("hold blocking write txn");
+
+    // 2. Call assemble_quorum_certificate_with_deadline with a 300ms deadline
+    let checkout_deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    let start = std::time::Instant::now();
+
+    let (cert, _) = assemble_quorum_certificate_with_deadline(
+        &state,
+        lock_req.transaction_hash,
+        *blake3::hash(lookup_tag.as_bytes()).as_bytes(),
+        target_shard_id,
+        now,
+        Some(wire_payload),
+        Some(14),
+        Some(checkout_deadline),
+    )
+    .await;
+
+    let elapsed = start.elapsed();
+
+    // Must complete bounded by the deadline, not stall on the blocked write txn
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "Checkout must respect the deadline and not stall on blocked write txn! Elapsed: {elapsed:?}"
+    );
+
+    // Returns degraded status 0 and empty signatures
+    assert_eq!(
+        cert.status, 0,
+        "Certificate status must be degraded to 0 when support was not durably admitted within deadline"
+    );
+    assert_eq!(
+        cert.signatures.len(), 0,
+        "Signatures must be cleared when support persistence fails"
+    );
+
+    // 3. Neutral cancellation & no false signing disablement
+    assert!(
+        gw_engine.is_signing_healthy(),
+        "Timeout waiting for support persistence must NOT trip signing health latch"
+    );
+    assert_eq!(
+        gw_engine.support_updates_available_for_test(), 31,
+        "support_updates permit must remain held while background commit is blocked"
+    );
+
+    // 4. Release blocking write txn and assert eventual safe persistence
+    drop(blocking_write_txn);
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while gw_storage
+            .confirmation_support(&lookup_tag)
+            .unwrap()
+            .is_none()
+            || gw_engine.support_updates_available_for_test() < 32
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background worker must complete and persist confirmation support");
+
+    let class = gw_engine
+        .hmc_ram
+        .read()
+        .await
+        .get_confirmation_class(&lookup_tag);
+    assert!(
+        class > 0,
+        "RAM confirmation class must be promoted once unblocked commit completes"
+    );
+
+    assert_eq!(
+        gw_engine.support_updates_available_for_test(), 32,
+        "support_updates permit must be released after completion"
+    );
+
+    assert!(
+        gw_engine.is_signing_healthy(),
+        "Signing must remain healthy after eventual support persistence"
+    );
+
+    // Cleanup
+    gw_cancel.cancel();
+    gw_transport.close();
+    for sh in shards {
+        sh.cancel.cancel();
+        sh.transport.close();
+    }
+}

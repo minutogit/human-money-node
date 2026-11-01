@@ -19,7 +19,7 @@
 
 | Slice | Weight | Target Files (`crates/...`) | Key Invariants & In-Scope Focus | Clean_Streak | Total_Finds | Last_Run | Status |
 |---|---|---|---|---|---|---|---|
-| **S01** | P1 | `humoco-node/src/api/{routes,hmc,dto,live,events}.rs` | PoS 800ms budget, 14/20 fast-exit, HTTP 200/201/409 idempotency, cancellation safety (`JoinSet`), INV-0310 | 0 | 0 | never | `🟢 Clean` |
+| **S01** | P1 | `humoco-node/src/api/{routes,hmc,dto,live,events}.rs` | PoS 800ms budget, 14/20 fast-exit, HTTP 200/201/409 idempotency, cancellation safety (`JoinSet`), INV-0310 | 0 | 3 | 2026-11-01 | `🟡 ReCheck` |
 | **S02** | P1 | `humoco-node/src/storage/{engine.rs,db.rs,db/signing.rs,activity.rs,recent.rs}` | DEC-029 Durable-before-Vote (<20ms), atomic RAM CAS, G5 fail-closed signing history latch, rollback on I/O error | 0 | 0 | never | `🟢 Clean` |
 | **S03** | P1 | `humoco-node/src/storage/{engine/recovery.rs,db/install.rs,db/projection.rs,db/roots.rs,db/snapshot.rs,db/support.rs,filter.rs}` | DEC-064/DEC-022 monotonic classes (2>1>0), `min(H_canon)` tie-breaker, `TABLE_PROVISIONAL_HMC_LOCKS` quarantine, TTL + 30s grace pruning | 0 | 0 | never | `🟢 Clean` |
 | **S04** | P1 | `humoco-node/src/network/{transport,framing,pool}.rs` | Pre-allocation 64 KiB cap, safe `from_le_bytes`/`checked_*`, QUIC stream deadlines, LRU pool cleanup, TLS `NodePubKey` binding, neutral quota flags | 0 | 0 | never | `🟢 Clean` |

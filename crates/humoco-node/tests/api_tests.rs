@@ -5260,3 +5260,709 @@ async fn test_a05_01_non_blocking_voucher_root_reads() {
     drop(held_permits);
     assert_eq!(state.voucher_root_reads.available_permits(), 16);
 }
+
+#[tokio::test]
+async fn test_s01_02_genesis_root_retry_ingress_admission() {
+    let (app, storage, _identity, tier_controller, pow_engine) = setup_test_app();
+
+    let account_tag = [0x51u8; 32];
+    let valid_vip_token = "vip_s01_02_genesis_token";
+    tier_controller.register_vip_token(valid_vip_token, account_tag);
+
+    let f2f_token = "f2f_00112233445566778899aabbccddeeff";
+    tier_controller.register_f2f_client(f2f_token, Some("f2f_genesis_client"));
+
+    let now = test_now_ms();
+    let ttl_ms = 600_000u64; // 600s
+    let ttl_sec = ttl_ms / 1000;
+    let required_byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_sec);
+
+    // Give VIP account exactly enough Byte-Years for 1 genesis lock
+    storage.set_quota(&account_tag, required_byte_years).unwrap();
+
+    let sender_key = SigningKey::from_bytes(&[0x51; 32]);
+    let genesis_req = make_test_hmc_genesis(&"51".repeat(32), now + ttl_ms, &sender_key);
+
+    // 1. Initial valid genesis submission via VIP -> 201 Created
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", valid_vip_token))
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // Verify VIP quota was deducted to 0
+    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(0));
+
+    // 2. Retry genesis with unregistered/invalid VIP token -> MUST BE REJECTED (401), NOT 200 OK
+    let res_invalid_vip = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer invalid_vip_fake_token")
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_invalid_vip.status(),
+        StatusCode::UNAUTHORIZED,
+        "Genesis retry with invalid VIP token must be rejected with 401 Unauthorized"
+    );
+
+    // 3. Retry genesis with unregistered / revoked F2F token -> MUST BE REJECTED (401), NOT 200 OK
+    let res_unreg_f2f = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "f2f_unregistered_client_token")
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_unreg_f2f.status(),
+        StatusCode::UNAUTHORIZED,
+        "Genesis retry with unregistered F2F token must be rejected with 401 Unauthorized"
+    );
+
+    // Now revoke the registered F2F client and retry with revoked token -> 401
+    assert!(tier_controller.remove_f2f_client(f2f_token));
+    let res_revoked_f2f = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", f2f_token)
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_revoked_f2f.status(),
+        StatusCode::UNAUTHORIZED,
+        "Genesis retry with revoked F2F token must be rejected with 401 Unauthorized"
+    );
+
+    // 4. Retry genesis with invalid PoW (wrong nonce or invalid challenge) -> MUST BE REJECTED (401), NOT 200 OK
+    let res_bad_pow = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-pow-challenge", "fake_challenge_1234")
+                .header("x-pow-nonce", "42")
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_bad_pow.status(),
+        StatusCode::UNAUTHORIZED,
+        "Genesis retry with invalid PoW must be rejected with 401 Unauthorized"
+    );
+
+    // 5. Valid idempotent retries MUST still succeed (200 OK):
+    // 5a. Valid VIP retry: remaining quota is 0, but duplicate storage is NOT charged again -> 200 OK
+    let res_valid_vip = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", valid_vip_token))
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_valid_vip.status(),
+        StatusCode::OK,
+        "Genesis retry with valid VIP token must succeed with 200 OK without double-charging storage"
+    );
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(0),
+        "VIP quota must remain 0 and not underflow or double charge"
+    );
+
+    // 5b. Valid F2F retry: re-register F2F token -> 200 OK
+    tier_controller.register_f2f_client(f2f_token, Some("f2f_genesis_client"));
+    let res_valid_f2f = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", f2f_token)
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_valid_f2f.status(),
+        StatusCode::OK,
+        "Genesis retry with valid F2F token must succeed with 200 OK"
+    );
+
+    // 5c. Valid PoW retry: solve valid PoW for genesis parent ([0u8; 32]) -> 200 OK
+    let parent_zero = [0u8; 32];
+    let (challenge, difficulty, _) = pow_engine.generate_challenge_for_parent(&parent_zero);
+    let nonce = PowEngine::solve_blake3_hashcash(&challenge, difficulty, 50_000).expect("solve pow");
+    let res_valid_pow = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-pow-challenge", &challenge)
+                .header("x-pow-nonce", nonce.to_string())
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_valid_pow.status(),
+        StatusCode::OK,
+        "Genesis retry with valid PoW must succeed with 200 OK"
+    );
+}
+
+#[tokio::test]
+async fn test_s01_02_spend_retry_ingress_admission() {
+    let (app, storage, _identity, tier_controller, pow_engine) = setup_test_app();
+
+    let account_tag = [0x52u8; 32];
+    let valid_vip_token = "vip_s01_02_spend_token";
+    tier_controller.register_vip_token(valid_vip_token, account_tag);
+
+    let f2f_token = "f2f_99887766554433221100aabbccddeeff";
+    tier_controller.register_f2f_client(f2f_token, Some("f2f_spend_client"));
+
+    let now = test_now_ms();
+    let ttl_ms = 600_000u64; // 600s
+    let ttl_sec = ttl_ms / 1000;
+    let required_byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_sec);
+
+    // Initial VIP quota for 1 genesis + 1 spend: 2 * required_byte_years
+    storage.set_quota(&account_tag, required_byte_years * 2).unwrap();
+
+    let genesis_key = SigningKey::from_bytes(&[0x52; 32]);
+    let genesis_req = make_test_hmc_genesis(&"52".repeat(32), now + ttl_ms, &genesis_key);
+
+    // Anchor genesis root
+    let res_gen = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", valid_vip_token))
+                .body(Body::from(serde_json::to_vec(&genesis_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_gen.status(), StatusCode::CREATED);
+
+    // Spend lock
+    let spend_key = SigningKey::from_bytes(&[0x53; 32]);
+    let spend_req = make_test_hmc_spend(
+        &genesis_req.layer2_voucher_id,
+        "spent_tag_s01_02",
+        [0x54; 32],
+        &spend_key,
+    );
+
+    // 1. Initial valid spend submission via VIP -> 201 Created
+    let res_spend = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", valid_vip_token))
+                .body(Body::from(serde_json::to_vec(&spend_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_spend.status(), StatusCode::CREATED);
+
+    // VIP quota should now be exactly 0 (initial 2 * BY - genesis 1 * BY - spend 1 * BY = 0)
+    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(0));
+
+    // 2. Retry spend with unregistered/invalid VIP token -> MUST BE REJECTED (401), NOT 200 OK
+    let res_invalid_vip = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer invalid_vip_fake_spend_token")
+                .body(Body::from(serde_json::to_vec(&spend_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_invalid_vip.status(),
+        StatusCode::UNAUTHORIZED,
+        "Spend retry with invalid VIP token must be rejected with 401 Unauthorized"
+    );
+
+    // 3. Retry spend with unregistered / revoked F2F token -> MUST BE REJECTED (401), NOT 200 OK
+    let res_unreg_f2f = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", "f2f_unregistered_spend_client")
+                .body(Body::from(serde_json::to_vec(&spend_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_unreg_f2f.status(),
+        StatusCode::UNAUTHORIZED,
+        "Spend retry with unregistered F2F token must be rejected with 401 Unauthorized"
+    );
+
+    // Revoke F2F token and retry -> 401
+    assert!(tier_controller.remove_f2f_client(f2f_token));
+    let res_revoked_f2f = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", f2f_token)
+                .body(Body::from(serde_json::to_vec(&spend_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_revoked_f2f.status(),
+        StatusCode::UNAUTHORIZED,
+        "Spend retry with revoked F2F token must be rejected with 401 Unauthorized"
+    );
+
+    // 4. Retry spend with invalid PoW -> MUST BE REJECTED (401), NOT 200 OK
+    let res_bad_pow = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-pow-challenge", "fake_spend_challenge_5678")
+                .header("x-pow-nonce", "99")
+                .body(Body::from(serde_json::to_vec(&spend_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_bad_pow.status(),
+        StatusCode::UNAUTHORIZED,
+        "Spend retry with invalid PoW must be rejected with 401 Unauthorized"
+    );
+
+    // 5. Valid idempotent retries MUST still succeed (200 OK):
+    // 5a. Valid VIP retry: remaining quota is 0, but duplicate storage is NOT charged again -> 200 OK
+    let res_valid_vip = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", valid_vip_token))
+                .body(Body::from(serde_json::to_vec(&spend_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_valid_vip.status(),
+        StatusCode::OK,
+        "Spend retry with valid VIP token must succeed with 200 OK without double-charging storage"
+    );
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(0),
+        "VIP quota must remain 0 and not underflow or double charge"
+    );
+
+    // 5b. Valid F2F retry: re-register F2F token -> 200 OK
+    tier_controller.register_f2f_client(f2f_token, Some("f2f_spend_client"));
+    let res_valid_f2f = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-peer-token", f2f_token)
+                .body(Body::from(serde_json::to_vec(&spend_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_valid_f2f.status(),
+        StatusCode::OK,
+        "Spend retry with valid F2F token must succeed with 200 OK"
+    );
+
+    // 5c. Valid PoW retry: solve valid PoW for spend ds_tag parent hash -> 200 OK
+    let tag = spend_req.ds_tag.as_deref().unwrap();
+    let parent_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
+    let (challenge, difficulty, _) = pow_engine.generate_challenge_for_parent(&parent_bytes);
+    let nonce = pow_engine
+        .solve_blake3_hashcash_for_parent(&parent_bytes, difficulty, 50_000)
+        .expect("solve pow");
+    let res_valid_pow = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .header("x-pow-challenge", &challenge)
+                .header("x-pow-nonce", nonce.to_string())
+                .body(Body::from(serde_json::to_vec(&spend_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_valid_pow.status(),
+        StatusCode::OK,
+        "Spend retry with valid PoW must succeed with 200 OK"
+    );
+}
+
+#[tokio::test]
+async fn test_s01_03_bounded_materialization_and_locator_semantics() {
+    let (app, storage, _, _, _) = setup_test_app();
+    let now = test_now_ms();
+    let ttl_ms = 600_000u64;
+
+    // 1. Populate storage with native locks (12 locks)
+    let mut native_parent_hexes = Vec::new();
+    let mut native_id_hexes = Vec::new();
+    for i in 0..12u8 {
+        let parent = [i + 1; 32];
+        let id = [i + 100; 32];
+        let rec = humoco_sim_core::types::LockRecord::new(
+            parent,
+            id,
+            vec![i],
+            humoco_sim_core::types::SimTime(now),
+            humoco_sim_core::types::SimTime(now + ttl_ms),
+        );
+        storage.put_lock(&rec, now + ttl_ms).expect("put lock");
+        native_parent_hexes.push(hex::encode(parent));
+        native_id_hexes.push(hex::encode(id));
+    }
+
+    // 2. Populate storage with HMC locks (1 root + 12 spend locks)
+    let root_key = SigningKey::from_bytes(&[0x60; 32]);
+    let root_voucher = "voucher_s01_03_mat";
+    let root_req = make_test_hmc_genesis(&root_voucher.repeat(2), now + ttl_ms, &root_key);
+    let root_entry = humoco_node::api::hmc::L2LockEntry::from(&root_req);
+    let root_tag = bs58::encode(root_entry.t_id).into_string();
+    storage.put_hmc_lock(&root_tag, &root_entry).expect("put root");
+
+    let mut hmc_tags = Vec::new();
+    let mut hmc_id_hexes = Vec::new();
+    for i in 0..12u8 {
+        let spend_key = SigningKey::from_bytes(&[0x70 + i; 32]);
+        let tag = format!("tag_s01_03_mat_{i}");
+        let spend_req = make_test_hmc_spend(
+            &root_req.layer2_voucher_id,
+            &tag,
+            [0x80 + i; 32],
+            &spend_key,
+        );
+        let spend_entry = humoco_node::api::hmc::L2LockEntry::from(&spend_req);
+        storage.put_hmc_lock(&tag, &spend_entry).expect("put spend");
+        hmc_tags.push(tag);
+        hmc_id_hexes.push(hex::encode(spend_entry.t_id));
+    }
+
+    // Direct helper check with locators and max_locks_per_kind = 4
+    let mut locators = std::collections::HashSet::new();
+    locators.insert(native_parent_hexes[0].clone());
+    locators.insert(native_id_hexes[1].clone());
+    locators.insert(hmc_tags[0].clone());
+    locators.insert(hmc_id_hexes[1].clone());
+
+    let (locks, hmc_locks) = storage
+        .read_committed_sync_snapshot_bounded(now, &locators, 4, 10_000_000)
+        .expect("read bounded snapshot");
+
+    // Must be bounded exactly by max_locks_per_kind (4)
+    assert_eq!(locks.len(), 4, "native locks must be capped at 4");
+    assert_eq!(hmc_locks.len(), 4, "hmc locks must be capped at 4");
+
+    // Filtered locators must NOT be present in results
+    for lock in &locks {
+        assert_ne!(lock.parent_lock, native_parent_hexes[0]);
+        assert_ne!(lock.id, native_id_hexes[1]);
+    }
+    for hmc in &hmc_locks {
+        assert_ne!(hmc.lookup_tag, hmc_tags[0]);
+        assert_ne!(hex::encode(hmc.entry.t_id), hmc_id_hexes[1]);
+    }
+
+    // HTTP /v1/sync check:
+    let sync_req = SyncRequest {
+        sparse_locators: vec![
+            native_parent_hexes[0].clone(),
+            hmc_tags[0].clone(),
+        ],
+    };
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&sync_req).expect("serialize req")))
+                .expect("build req"),
+        )
+        .await
+        .expect("send req");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = resp.into_body().collect().await.expect("read body").to_bytes();
+    let sync_resp: SyncResponse = serde_json::from_slice(&body_bytes).expect("deserialize body");
+
+    // Filtered locators must be absent in response
+    assert!(!sync_resp.locks.iter().any(|l| l.parent_lock == native_parent_hexes[0]));
+    assert!(!sync_resp.hmc_locks.iter().any(|l| l.lookup_tag == hmc_tags[0]));
+}
+
+#[tokio::test]
+async fn test_s01_03_bounded_serialized_response_bytes() {
+    let (app, storage, _, _, _) = setup_test_app();
+    let now = test_now_ms();
+    let ttl_ms = 600_000u64;
+
+    // Anchor a root
+    let root_key = SigningKey::from_bytes(&[0x61; 32]);
+    let root_voucher = "voucher_s01_03_bytes";
+    let root_req = make_test_hmc_genesis(&root_voucher.repeat(2), now + ttl_ms, &root_key);
+    let root_entry = humoco_node::api::hmc::L2LockEntry::from(&root_req);
+    let root_tag = bs58::encode(root_entry.t_id).into_string();
+    storage.put_hmc_lock(&root_tag, &root_entry).expect("put root");
+
+    // Insert 20 HMC spend locks
+    for i in 0..20u8 {
+        let spend_key = SigningKey::from_bytes(&[0x80 + i; 32]);
+        let tag = format!("tag_s01_03_bytes_{i}");
+        let spend_req = make_test_hmc_spend(
+            &root_req.layer2_voucher_id,
+            &tag,
+            [0x90 + i; 32],
+            &spend_key,
+        );
+        let spend_entry = humoco_node::api::hmc::L2LockEntry::from(&spend_req);
+        storage.put_hmc_lock(&tag, &spend_entry).expect("put spend");
+    }
+
+    // 1. Direct helper: pass a tight byte budget of 5000 bytes (each HMC row is ~1.5-2 KiB JSON)
+    let byte_cap = 5000;
+    let (locks, hmc_locks) = storage
+        .read_committed_sync_snapshot_bounded(now, &std::collections::HashSet::new(), 10_000, byte_cap)
+        .expect("read bounded snapshot");
+
+    assert!(locks.is_empty());
+    assert!(!hmc_locks.is_empty(), "should contain as many as fit");
+    assert!(hmc_locks.len() < 20, "must be truncated well before all 20 rows");
+
+    let sync_resp = SyncResponse { locks, hmc_locks };
+    let serialized_len = serde_json::to_vec(&sync_resp).expect("serialize").len();
+    assert!(
+        serialized_len <= byte_cap,
+        "Total serialized SyncResponse ({serialized_len} bytes) must NOT exceed byte_cap ({byte_cap} bytes)!"
+    );
+
+    // 2. HTTP /v1/sync response byte size invariant:
+    let sync_req = SyncRequest {
+        sparse_locators: vec![],
+    };
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&sync_req).expect("serialize req")))
+                .expect("build req"),
+        )
+        .await
+        .expect("send req");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = resp.into_body().collect().await.expect("read body").to_bytes();
+    assert!(
+        body_bytes.len() <= humoco_node::api::routes::MAX_SYNC_RESPONSE_BYTES,
+        "HTTP sync response body size must not exceed MAX_SYNC_RESPONSE_BYTES"
+    );
+}
+
+#[tokio::test]
+async fn test_s01_03_bounded_concurrent_sync_workers() {
+    let (_, _, identity, tier_controller, pow_engine) = setup_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_sync_workers.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+
+    let state = AppState::new(
+        engine,
+        storage.clone(),
+        identity,
+        tier_controller,
+        pow_engine,
+    );
+    let state = isolated_ready_state(state);
+    let app = build_router(state.clone());
+
+    // 1. Initial permits must be 4
+    assert_eq!(state.sync_reads.available_permits(), 4);
+
+    // 2. Exhaust all 4 permits
+    let p1 = state.sync_reads.clone().try_acquire_owned().expect("p1");
+    let p2 = state.sync_reads.clone().try_acquire_owned().expect("p2");
+    let p3 = state.sync_reads.clone().try_acquire_owned().expect("p3");
+    let p4 = state.sync_reads.clone().try_acquire_owned().expect("p4");
+    assert_eq!(state.sync_reads.available_permits(), 0);
+
+    // 3. Excess request must fail fast with 503 SERVICE_UNAVAILABLE and "SyncBusy"
+    let sync_req = SyncRequest {
+        sparse_locators: vec![],
+    };
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&sync_req).expect("serialize req")))
+                .expect("build req"),
+        )
+        .await
+        .expect("send req");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Saturated sync worker permits must fail fast with 503"
+    );
+    let body_bytes = resp.into_body().collect().await.expect("read body").to_bytes();
+    let err_resp: humoco_node::api::ErrorResponse =
+        serde_json::from_slice(&body_bytes).expect("deserialize error response");
+    assert_eq!(err_resp.error, "SyncBusy");
+
+    // 4. Release one permit -> request must now succeed with 200 OK
+    drop(p4);
+    assert_eq!(state.sync_reads.available_permits(), 1);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&sync_req).expect("serialize req")))
+                .expect("build req"),
+        )
+        .await
+        .expect("send req");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // After completion, permit must be returned
+    assert_eq!(state.sync_reads.available_permits(), 1);
+
+    // Drop remaining permits
+    drop(p1);
+    drop(p2);
+    drop(p3);
+    assert_eq!(state.sync_reads.available_permits(), 4);
+
+    // 5. Cancellation safety: if an in-flight client is dropped, permit remains held
+    // by the blocking thread until it finishes.
+    let permit = state.sync_reads.clone().try_acquire_owned().expect("permit");
+    let (tx_start, rx_start) = tokio::sync::oneshot::channel::<()>();
+    let (tx_finish, rx_finish) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _ = tx_start.send(());
+        let _ = rx_finish.blocking_recv();
+    });
+    rx_start.await.expect("worker started");
+    assert_eq!(state.sync_reads.available_permits(), 3);
+
+    // Abort the task join handle (simulating client cancellation)
+    handle.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(
+        state.sync_reads.available_permits(),
+        3,
+        "Permit must NOT be released while blocking thread is still running"
+    );
+
+    // Unblock the worker and assert eventual release
+    let _ = tx_finish.send(());
+    let mut released = false;
+    for _ in 0..50 {
+        if state.sync_reads.available_permits() == 4 {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(released, "Permit must be released once blocking worker actually terminates");
+}
+
+

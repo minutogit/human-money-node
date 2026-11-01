@@ -1230,6 +1230,7 @@ impl NodeDaemon {
             retained_choice_reads: Arc::new(tokio::sync::Semaphore::new(8)),
             voucher_root_reads: Arc::new(tokio::sync::Semaphore::new(16)),
             sync_reads: Arc::new(tokio::sync::Semaphore::new(4)),
+            mesh_view_cache: Arc::new(parking_lot::RwLock::new(None)),
         };
 
         // Spawn history sampling task (60s tick in normal mode, 5s in simulation mode)

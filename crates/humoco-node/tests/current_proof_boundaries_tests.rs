@@ -50,6 +50,7 @@ fn recipient_context_full_keys_and_exact_fourteen_are_required() {
                 signature: k.sign(&digest).to_bytes(),
             })
             .collect(),
+        occupancy: humoco_proto::live::LiveSlotOccupancy::Occupied,
     };
     assert!(verify_live_state_proof(&proof, &expected).is_ok());
     let mut changed = proof.clone();

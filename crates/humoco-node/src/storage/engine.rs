@@ -670,19 +670,23 @@ impl HmcRamIndex {
                 continue;
             }
             // Root anchors are locator metadata, never Verified spend rows.
-            if self
-                .root_anchors
-                .get(voucher_id)
-                .is_some_and(|root| bs58::encode(root.t_id).into_string().starts_with(prefix))
-            {
-                return L2Verdict::MissingLocks {
-                    sync_point: prefix.clone(),
-                };
+            if let Some(root) = self.root_anchors.get(voucher_id) {
+                if bs58::encode(root.t_id).into_string().starts_with(prefix) {
+                    return L2Verdict::MissingLocks {
+                        sync_point: prefix.clone(),
+                        anchor_lock: Some(root.clone()),
+                    };
+                }
             }
             for tag in voucher_tags {
                 if tag.starts_with(prefix) {
                     return L2Verdict::MissingLocks {
                         sync_point: prefix.clone(),
+                        anchor_lock: self
+                            .locks
+                            .get(tag)
+                            .cloned()
+                            .or_else(|| self.root_anchors.get(voucher_id).cloned()),
                     };
                 }
             }
@@ -691,6 +695,7 @@ impl HmcRamIndex {
         // No match found -> sync from genesis
         L2Verdict::MissingLocks {
             sync_point: "genesis".to_string(),
+            anchor_lock: self.root_anchors.get(voucher_id).cloned(),
         }
     }
 }

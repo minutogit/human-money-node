@@ -39,7 +39,8 @@ use crate::api::dto::{
 };
 use crate::api::hmc::{
     verify_l2_lock_signature, wrap_and_sign_verdict, wrap_and_sign_verdict_with_quorum,
-    L2ChainLockRequest, L2LockEntry, L2LockRequest, L2StatusQuery, L2Verdict,
+    L2ChainLockRequest, L2CheckoutRequest, L2CheckoutResponse, L2LockEntry, L2LockRequest,
+    L2ResponseEnvelope, L2StatusQuery, L2Verdict,
 };
 use crate::identity::NodeIdentity;
 use crate::ingress::{IngressError, PowEngine, TierController};
@@ -74,6 +75,8 @@ pub struct AppState {
     pub voucher_root_reads: Arc<tokio::sync::Semaphore>,
     /// Bound concurrent blocking /v1/sync snapshot workers to protect memory (S01-03).
     pub sync_reads: Arc<tokio::sync::Semaphore>,
+    /// In-memory cache for regional mesh views (5-second TTL).
+    pub mesh_view_cache: Arc<parking_lot::RwLock<Option<(u64, humoco_proto::mesh::RegionalMeshView)>>>,
 }
 
 impl AppState {
@@ -137,6 +140,7 @@ impl AppState {
             retained_choice_reads: Arc::new(tokio::sync::Semaphore::new(8)),
             voucher_root_reads: Arc::new(tokio::sync::Semaphore::new(16)),
             sync_reads: Arc::new(tokio::sync::Semaphore::new(4)),
+            mesh_view_cache: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -260,6 +264,8 @@ pub fn public_router(state: AppState) -> Router {
             post(crate::api::live::verify_current)
                 .layer(axum::middleware::from_fn(live_deadline_middleware)),
         )
+        .route("/v1/regional-mesh-view", get(public_regional_mesh_view))
+        .route("/v1/checkout", post(checkout))
         .route("/v1/gateways", get(public_gateways))
         .route("/v1/retained-choice/:tag", get(get_retained_choice))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -2318,7 +2324,7 @@ async fn submit_hmc_lock_with_deadline(
     const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
     if !req.is_genesis
         && (req.created_at_ms == 0
-            || req.created_at_ms.abs_diff(now_ms) > MAX_SENDER_CLOCK_DRIFT_MS)
+            || req.created_at_ms > now_ms.saturating_add(MAX_SENDER_CLOCK_DRIFT_MS))
     {
         let envelope = wrap_and_sign_verdict(
             &state.identity,
@@ -4094,6 +4100,113 @@ mod public_retained_evidence_tests {
                 "http://c.example".to_string()
             ]
         );
+    }
+}
+
+/// Public cached regional mesh view (5-second cache TTL).
+async fn public_regional_mesh_view(State(state): State<AppState>) -> Response {
+    state.metrics.record_read();
+    let now_ms = state.net_time_ms();
+    {
+        let cache = state.mesh_view_cache.read();
+        if let Some((cached_at_ms, ref view)) = *cache {
+            if now_ms.saturating_sub(cached_at_ms) < 5_000 && view.valid_until_ms > now_ms + 15_000 {
+                return Json(view.clone()).into_response();
+            }
+        }
+    }
+
+    if !state.engine.is_signing_healthy() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "signing unavailable").into_response();
+    }
+    let Some(manager) = &state.peer_manager else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mesh unavailable").into_response();
+    };
+    let network = match state.network_id {
+        humoco_sim_core::types::NetworkId::Mainnet => 0,
+        humoco_sim_core::types::NetworkId::Testnet => 1,
+    };
+    match manager.regional_mesh_view(&state.identity, network).await {
+        Ok(view) if state.engine.is_signing_healthy() => {
+            *state.mesh_view_cache.write() = Some((now_ms, view.clone()));
+            Json(view).into_response()
+        }
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "mesh view unavailable").into_response(),
+    }
+}
+
+/// 1-RTT PoS Checkout endpoint for offline buyers.
+/// Anchors buyer's lock chain and returns a 14/20 LiveStateProof in a single roundtrip.
+async fn checkout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<L2CheckoutRequest>,
+) -> Response {
+    let checkout_deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(780);
+
+    if let Err(e) = humoco_proto::live::validate_live_context(&req.live_context) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    if req.live_context.child_lock == [0; 32] {
+        return (StatusCode::BAD_REQUEST, "Checkout requires non-zero child_lock").into_response();
+    }
+
+    let mut conflicting_lock: Option<L2LockEntry> = None;
+
+    if let Some(chain_req) = req.lock_chain {
+        let is_already_anchored = {
+            let ram = state.engine.hmc_ram.read().await;
+            if let Some(existing) = ram.locks.get(&req.live_context.lookup_tag) {
+                existing.t_id == req.live_context.child_lock
+                    && existing.layer2_voucher_id == req.live_context.voucher_id
+            } else {
+                false
+            }
+        };
+
+        if !is_already_anchored {
+            let start = std::time::Instant::now();
+            let chain_resp =
+                submit_hmc_chain_lock_inner(state.clone(), headers, chain_req, start).await;
+            let status = chain_resp.status();
+            if status == StatusCode::CONFLICT {
+                let body_bytes = axum::body::to_bytes(chain_resp.into_body(), 64 * 1024)
+                    .await
+                    .unwrap_or_default();
+                if let Ok(env) = serde_json::from_slice::<L2ResponseEnvelope>(&body_bytes) {
+                    if let L2Verdict::Conflict { existing_lock } = env.verdict {
+                        conflicting_lock = Some(existing_lock);
+                    }
+                }
+            } else if !status.is_success() {
+                return chain_resp;
+            }
+        }
+    }
+
+    match crate::api::live::collect_live_state_proof(
+        &state,
+        req.live_context,
+        checkout_deadline,
+    )
+    .await
+    {
+        Ok(proof) => (
+            StatusCode::OK,
+            Json(L2CheckoutResponse {
+                proof,
+                conflicting_lock,
+            }),
+        )
+            .into_response(),
+        Err((status, msg)) => {
+            if conflicting_lock.is_some() && status == StatusCode::CONFLICT {
+                StatusCode::CONFLICT.into_response()
+            } else {
+                (status, msg).into_response()
+            }
+        }
     }
 }
 

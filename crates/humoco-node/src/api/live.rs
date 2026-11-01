@@ -11,7 +11,10 @@ use axum::{
 };
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use humoco_proto::{
-    live::{live_state_digest, verify_live_state_proof, LiveStateContext, LiveStateProof},
+    live::{
+        live_state_digest, live_unoccupied_digest, verify_live_state_proof,
+        verify_live_unoccupied_proof, LiveSlotOccupancy, LiveStateContext, LiveStateProof,
+    },
     AttestationVote,
 };
 use std::sync::Arc;
@@ -26,7 +29,15 @@ pub async fn sign_current_state(
     network: humoco_sim_core::types::NetworkId,
     context: &LiveStateContext,
 ) -> Option<AttestationVote> {
-    let digest = live_state_digest(context).ok()?;
+    let is_unoccupied = context.child_lock == [0; 32];
+    if is_unoccupied && (context.state_digest != [0; 32] || context.root_valid_until != 0) {
+        return None;
+    }
+    let digest = if is_unoccupied {
+        live_unoccupied_digest(context).ok()?
+    } else {
+        live_state_digest(context).ok()?
+    };
     let expected_network = match network {
         humoco_sim_core::types::NetworkId::Mainnet => 0,
         humoco_sim_core::types::NetworkId::Testnet => 1,
@@ -40,7 +51,7 @@ pub async fn sign_current_state(
     }
     let pm = pm?;
     let now = pm.net_time_ms();
-    if context.root_valid_until <= now || !pm.is_network_stable_ge20_for_24h(now) {
+    if (!is_unoccupied && context.root_valid_until <= now) || !pm.is_network_stable_ge20_for_24h(now) {
         return None;
     }
     let (committee, _, total) = pm
@@ -58,24 +69,33 @@ pub async fn sign_current_state(
     // insertion or combine an entry with a root from another state version.
     // No disk access or network await occurs while this read guard is held.
     let ram = engine.hmc_ram.read().await;
-    let entry = ram.locks.get(&context.lookup_tag)?;
-    if entry.layer2_voucher_id != context.voucher_id
-        || entry.t_id != context.child_lock
-        || ram.voucher_roots.get(&context.voucher_id).copied()? != context.root_valid_until
-        || humoco_sim_core::types::extract_shard_id(
-            ram.voucher_genesis_parents.get(&context.voucher_id)?,
-        ) != context.shard_id
-        || context.root_valid_until <= pm.net_time_ms()
-        || ram.durable_entries.get(&context.lookup_tag)
-            != Some(&(context.state_digest, context.root_valid_until))
-        || !engine.is_signing_healthy()
-        || !readiness.is_shard_ready(context.shard_id)
-    {
-        return None;
-    }
-    let state = serde_json::to_vec(entry).ok()?;
-    if *blake3::hash(&state).as_bytes() != context.state_digest {
-        return None;
+    if is_unoccupied {
+        if ram.locks.contains_key(&context.lookup_tag)
+            || !engine.is_signing_healthy()
+            || !readiness.is_shard_ready(context.shard_id)
+        {
+            return None;
+        }
+    } else {
+        let entry = ram.locks.get(&context.lookup_tag)?;
+        if entry.layer2_voucher_id != context.voucher_id
+            || entry.t_id != context.child_lock
+            || ram.voucher_roots.get(&context.voucher_id).copied()? != context.root_valid_until
+            || humoco_sim_core::types::extract_shard_id(
+                ram.voucher_genesis_parents.get(&context.voucher_id)?,
+            ) != context.shard_id
+            || context.root_valid_until <= pm.net_time_ms()
+            || ram.durable_entries.get(&context.lookup_tag)
+                != Some(&(context.state_digest, context.root_valid_until))
+            || !engine.is_signing_healthy()
+            || !readiness.is_shard_ready(context.shard_id)
+        {
+            return None;
+        }
+        let state = serde_json::to_vec(entry).ok()?;
+        if *blake3::hash(&state).as_bytes() != context.state_digest {
+            return None;
+        }
     }
     Some(AttestationVote {
         signer_pubkey: *identity.node_pubkey(),
@@ -140,13 +160,19 @@ async fn query_member_live_vote(
     {
         let vote: AttestationVote = bincode::deserialize(&bytes).ok()?;
         if vote.signer_pubkey == query.member_pubkey {
-            let digest = live_state_digest(&query.requested_context).ok()?;
-            let key = VerifyingKey::from_bytes(&vote.signer_pubkey).ok()?;
-            if key
-                .verify_strict(&digest, &Signature::from_bytes(&vote.signature))
-                .is_ok()
-            {
-                return Some((query.requested_context, vote));
+            let digest_res = if query.requested_context.child_lock == [0; 32] {
+                humoco_proto::live::live_unoccupied_digest(&query.requested_context)
+            } else {
+                live_state_digest(&query.requested_context)
+            };
+            if let Ok(digest) = digest_res {
+                let key = VerifyingKey::from_bytes(&vote.signer_pubkey).ok()?;
+                if key
+                    .verify_strict(&digest, &Signature::from_bytes(&vote.signature))
+                    .is_ok()
+                {
+                    return Some((query.requested_context, vote));
+                }
             }
         }
     }
@@ -206,7 +232,6 @@ async fn query_member_live_vote(
         .await
         .ok()?;
     if status_resp_h.msg_type != humoco_sim_core::wire::MsgType::StatusResponse as u16
-        || status_resp_bytes.is_empty()
         || (status_resp_h.flags
             & (humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
                 | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
@@ -215,6 +240,50 @@ async fn query_member_live_vote(
     {
         return None;
     }
+
+    // Case A: The ready remote custodian reports NO lock at parent_lock!
+    if status_resp_bytes.is_empty() {
+        let mut unoccupied_ctx = query.requested_context.clone();
+        unoccupied_ctx.child_lock = [0; 32];
+        unoccupied_ctx.state_digest = [0; 32];
+        unoccupied_ctx.root_valid_until = 0;
+
+        if tokio::time::Instant::now() >= query.deadline {
+            return None;
+        }
+        let cand_payload = serde_json::to_vec(&unoccupied_ctx).ok()?;
+        let cand_header = humoco_sim_core::wire::WireHeader::new(
+            humoco_sim_core::wire::MsgType::LiveStateRequest as u16,
+            3,
+            0,
+            0,
+            cand_payload.len() as u32,
+        );
+        let (cand_h, cand_bytes) = query
+            .transport
+            .send_request(&conn, &cand_header, &cand_payload)
+            .await
+            .ok()?;
+        if cand_h.msg_type == humoco_sim_core::wire::MsgType::LiveStateResponse as u16
+            && cand_h.flags == 0
+            && !cand_bytes.is_empty()
+        {
+            let vote: AttestationVote = bincode::deserialize(&cand_bytes).ok()?;
+            if vote.signer_pubkey == query.member_pubkey {
+                let digest = humoco_proto::live::live_unoccupied_digest(&unoccupied_ctx).ok()?;
+                let key = VerifyingKey::from_bytes(&vote.signer_pubkey).ok()?;
+                if key
+                    .verify_strict(&digest, &Signature::from_bytes(&vote.signature))
+                    .is_ok()
+                {
+                    return Some((unoccupied_ctx, vote));
+                }
+            }
+        }
+        return None;
+    }
+
+    // Case B: Existing rival lock discovery!
     let entry = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&status_resp_bytes)
         .ok()
         .or_else(|| bincode::deserialize(&status_resp_bytes).ok())?;
@@ -230,6 +299,13 @@ async fn query_member_live_vote(
     let mut candidate_context = query.requested_context.clone();
     candidate_context.child_lock = entry.t_id;
     candidate_context.state_digest = *blake3::hash(&state_bytes).as_bytes();
+    if candidate_context.root_valid_until == 0 {
+        if let Some(ref del) = entry.deletable_at {
+            if let Ok(ts) = del.parse::<u64>() {
+                candidate_context.root_valid_until = ts;
+            }
+        }
+    }
 
     // RPC 3: Request signature on discovered candidate from this same member
     if tokio::time::Instant::now() >= query.deadline {
@@ -268,25 +344,27 @@ async fn query_member_live_vote(
 }
 
 /// Collects a FINAL live proof; supplied roster is checked locally and must be independently justified by the recipient.
-/// Enforces a single absolute request deadline and groups candidate votes by exact signed context.
-pub async fn verify_current(
-    State(state): State<AppState>,
-    deadline_ext: Option<axum::extract::Extension<LiveDeadline>>,
-    Json(context): Json<LiveStateContext>,
-) -> Response {
-    let deadline = deadline_ext
-        .map(|ext| ext.0 .0)
-        .unwrap_or_else(|| tokio::time::Instant::now() + LIVE_PROOF_SERVER_BUDGET);
-
+/// Reusable by both GET /v1/verify-current and POST /v1/checkout.
+pub async fn collect_live_state_proof(
+    state: &AppState,
+    context: LiveStateContext,
+    deadline: tokio::time::Instant,
+) -> Result<LiveStateProof, (StatusCode, &'static str)> {
     if tokio::time::Instant::now() >= deadline {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "Deadline exceeded"));
     }
 
-    let Ok(_) = live_state_digest(&context) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
+    let is_unoccupied = context.child_lock == [0; 32];
+    if is_unoccupied {
+        if humoco_proto::live::live_unoccupied_digest(&context).is_err() {
+            return Err((StatusCode::BAD_REQUEST, "Invalid unoccupied live context"));
+        }
+    } else if live_state_digest(&context).is_err() {
+        return Err((StatusCode::BAD_REQUEST, "Invalid occupied live context"));
+    }
+
     let Some(pm) = state.peer_manager.as_ref() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "Peer manager unavailable"));
     };
     let client_bucket = u16::from_le_bytes([context.parent_lock[0], context.parent_lock[1]]);
     let now_ms = state.net_time_ms();
@@ -296,7 +374,7 @@ pub async fn verify_current(
         .evaluate_read_quota_with_time(client_bucket, 60, day, 1.0, Some(now_ms))
         .is_err()
     {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+        return Err((StatusCode::TOO_MANY_REQUESTS, "Read quota exceeded"));
     }
     let (committee, remotes, total) = pm
         .shard_committee(
@@ -308,7 +386,7 @@ pub async fn verify_current(
     if total < 20
         || committee.iter().map(|m| m.node_pubkey).collect::<Vec<_>>() != context.committee
     {
-        return StatusCode::CONFLICT.into_response();
+        return Err((StatusCode::CONFLICT, "Committee mismatch or unstable"));
     }
 
     let mut groups: std::collections::HashMap<[u8; 32], (LiveStateContext, Vec<AttestationVote>)> =
@@ -327,7 +405,12 @@ pub async fn verify_current(
         )
         .await
         {
-            if let Ok(digest) = live_state_digest(&context) {
+            let digest_res = if context.child_lock == [0; 32] {
+                humoco_proto::live::live_unoccupied_digest(&context)
+            } else {
+                live_state_digest(&context)
+            };
+            if let Ok(digest) = digest_res {
                 groups.insert(digest, (context.clone(), vec![vote]));
             }
         } else {
@@ -358,6 +441,12 @@ pub async fn verify_current(
                     } else {
                         None
                     }
+                } else if context.child_lock != [0; 32] {
+                    let mut alt = context.clone();
+                    alt.child_lock = [0; 32];
+                    alt.state_digest = [0; 32];
+                    alt.root_valid_until = 0;
+                    Some(alt)
                 } else {
                     None
                 }
@@ -373,7 +462,12 @@ pub async fn verify_current(
                 )
                 .await
                 {
-                    if let Ok(digest) = live_state_digest(&alt_ctx) {
+                    let digest_res = if alt_ctx.child_lock == [0; 32] {
+                        humoco_proto::live::live_unoccupied_digest(&alt_ctx)
+                    } else {
+                        live_state_digest(&alt_ctx)
+                    };
+                    if let Ok(digest) = digest_res {
                         groups.insert(digest, (alt_ctx, vec![vote]));
                     }
                 }
@@ -382,7 +476,7 @@ pub async fn verify_current(
     }
 
     let Some(transport) = state.transport.as_ref() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "Transport unavailable"));
     };
 
     let mut jobs = tokio::task::JoinSet::new();
@@ -412,7 +506,12 @@ pub async fn verify_current(
         while let Some(res) = jobs.join_next().await {
             unresolved_members = unresolved_members.saturating_sub(1);
             if let Ok(Some((v_ctx, vote))) = res {
-                if let Ok(digest) = live_state_digest(&v_ctx) {
+                let digest_res = if v_ctx.child_lock == [0; 32] {
+                    humoco_proto::live::live_unoccupied_digest(&v_ctx)
+                } else {
+                    live_state_digest(&v_ctx)
+                };
+                if let Ok(digest) = digest_res {
                     let group = groups
                         .entry(digest)
                         .or_insert_with(|| (v_ctx.clone(), Vec::new()));
@@ -424,14 +523,28 @@ pub async fn verify_current(
                         group.1.push(vote);
                     }
                     if group.1.len() >= 14 {
-                        let candidate_proof = LiveStateProof {
-                            context: group.0.clone(),
-                            votes: group.1.clone(),
-                        };
-                        if verify_live_state_proof(&candidate_proof, &group.0).is_ok() {
-                            completed_proof = Some(candidate_proof);
-                            jobs.abort_all();
-                            break;
+                        if group.0.child_lock == [0; 32] {
+                            let candidate_proof = LiveStateProof {
+                                context: group.0.clone(),
+                                votes: group.1.clone(),
+                                occupancy: LiveSlotOccupancy::Unoccupied,
+                            };
+                            if verify_live_unoccupied_proof(&candidate_proof, &context).is_ok() {
+                                completed_proof = Some(candidate_proof);
+                                jobs.abort_all();
+                                break;
+                            }
+                        } else {
+                            let candidate_proof = LiveStateProof {
+                                context: group.0.clone(),
+                                votes: group.1.clone(),
+                                occupancy: LiveSlotOccupancy::Occupied,
+                            };
+                            if verify_live_state_proof(&candidate_proof, &group.0).is_ok() {
+                                completed_proof = Some(candidate_proof);
+                                jobs.abort_all();
+                                break;
+                            }
                         }
                     }
                 }
@@ -448,8 +561,25 @@ pub async fn verify_current(
     jobs.abort_all();
 
     if let Some(proof) = completed_proof {
-        (StatusCode::OK, Json(proof)).into_response()
+        Ok(proof)
     } else {
-        StatusCode::SERVICE_UNAVAILABLE.into_response()
+        Err((StatusCode::SERVICE_UNAVAILABLE, "Quorum not reached"))
+    }
+}
+
+/// Collects a FINAL live proof; supplied roster is checked locally and must be independently justified by the recipient.
+/// Enforces a single absolute request deadline and groups candidate votes by exact signed context.
+pub async fn verify_current(
+    State(state): State<AppState>,
+    deadline_ext: Option<axum::extract::Extension<LiveDeadline>>,
+    Json(context): Json<LiveStateContext>,
+) -> Response {
+    let deadline = deadline_ext
+        .map(|ext| ext.0 .0)
+        .unwrap_or_else(|| tokio::time::Instant::now() + LIVE_PROOF_SERVER_BUDGET);
+
+    match collect_live_state_proof(&state, context, deadline).await {
+        Ok(proof) => (StatusCode::OK, Json(proof)).into_response(),
+        Err((status, msg)) => (status, msg).into_response(),
     }
 }

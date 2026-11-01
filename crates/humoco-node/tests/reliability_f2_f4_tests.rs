@@ -446,7 +446,7 @@ async fn status_never_returns_another_vouchers_entry() {
             std::slice::from_ref(&prefix),
         );
         assert!(
-            matches!(&status_locator, L2Verdict::MissingLocks { sync_point } if sync_point == &prefix),
+            matches!(&status_locator, L2Verdict::MissingLocks { sync_point, .. } if sync_point == &prefix),
             "query_status with locator prefix matching parent-A1 must return MissingLocks with sync_point, got: {:?}",
             status_locator
         );

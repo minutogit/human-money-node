@@ -502,6 +502,20 @@ pub struct L2ChainLockRequest {
     pub chain: Vec<L2LockRequest>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct L2CheckoutRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_chain: Option<L2ChainLockRequest>,
+    pub live_context: humoco_proto::live::LiveStateContext,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct L2CheckoutResponse {
+    pub proof: humoco_proto::live::LiveStateProof,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_lock: Option<L2LockEntry>,
+}
+
 /// Response: The verdict of the L2 server regarding the state of a tag or the chain.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -515,6 +529,8 @@ pub enum L2Verdict {
     },
     MissingLocks {
         sync_point: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_lock: Option<L2LockEntry>,
     },
     UnknownVoucher,
     #[serde(rename = "Ok")]
@@ -538,11 +554,10 @@ pub struct L2ResponseEnvelope {
 }
 
 // =============================================================================
-// V3 Cryptography & Hashing Helpers
+// V4 Cryptography & Hashing Helpers
 // =============================================================================
 
-pub const HMC_TX_AUTH_V3_DOMAIN: &[u8] = b"HMC_TX_AUTH_V3";
-pub const TRAP_NONE_PLACEHOLDER: &str = "none";
+pub use humoco_proto::crypto::{HMC_TX_AUTH_V4_DOMAIN, TRAP_NONE_PLACEHOLDER};
 
 /// Computes a SHA3-256 hash with 4-byte LE length prefix for each slice.
 pub fn get_raw_hash_from_slices(inputs: &[&[u8]]) -> [u8; 32] {
@@ -573,7 +588,7 @@ pub fn privacy_guard_commitment(privacy_guard: Option<&str>) -> String {
     }
 }
 
-/// Inner logic for hashing the L2 payload (canonical V3 definition).
+/// Inner logic for hashing the L2 payload (canonical V4 definition).
 #[allow(clippy::too_many_arguments)]
 pub fn calculate_l2_payload_hash_raw(
     layer2_voucher_id: &str,
@@ -589,7 +604,7 @@ pub fn calculate_l2_payload_hash_raw(
 ) -> [u8; 32] {
     let created_at_bytes = created_at_ms.to_le_bytes();
     get_raw_hash_from_slices(&[
-        HMC_TX_AUTH_V3_DOMAIN,
+        HMC_TX_AUTH_V4_DOMAIN,
         layer2_voucher_id.as_bytes(),
         challenge_ds_tag.as_bytes(),
         t_id_bytes,
@@ -603,34 +618,7 @@ pub fn calculate_l2_payload_hash_raw(
     ])
 }
 
-/// Legacy payload hash calculation without created_at_ms (for backward compatibility).
-#[allow(clippy::too_many_arguments)]
-pub fn calculate_l2_payload_hash_legacy_raw(
-    layer2_voucher_id: &str,
-    challenge_ds_tag: &str,
-    t_id_bytes: &[u8; 32],
-    sender_pub_bytes: &[u8; 32],
-    trap_r_str: &str,
-    trap_s_str: &str,
-    encrypted_timestamp: u128,
-    deletable_at: Option<&str>,
-    privacy_guard_commitment: &str,
-) -> [u8; 32] {
-    get_raw_hash_from_slices(&[
-        HMC_TX_AUTH_V3_DOMAIN,
-        layer2_voucher_id.as_bytes(),
-        challenge_ds_tag.as_bytes(),
-        t_id_bytes,
-        sender_pub_bytes,
-        trap_r_str.as_bytes(),
-        trap_s_str.as_bytes(),
-        &encrypted_timestamp.to_le_bytes(),
-        deletable_at.unwrap_or("").as_bytes(),
-        privacy_guard_commitment.as_bytes(),
-    ])
-}
-
-/// Computes the V3 payload hash for an L2LockRequest.
+/// Computes the V4 payload hash for an L2LockRequest.
 pub fn calculate_l2_payload_hash(req: &L2LockRequest) -> [u8; 32] {
     let challenge_ds_tag = if req.is_genesis {
         bs58::encode(req.transaction_hash).into_string()
@@ -658,7 +646,7 @@ pub fn calculate_l2_payload_hash(req: &L2LockRequest) -> [u8; 32] {
     )
 }
 
-/// Computes the V3 payload hash for an L2LockEntry.
+/// Computes the V4 payload hash for an L2LockEntry.
 pub fn calculate_l2_payload_hash_for_entry(entry: &L2LockEntry, lookup_tag: &str) -> [u8; 32] {
     let is_genesis = lookup_tag == bs58::encode(&entry.t_id).into_string();
     let effective_voucher_id = if is_genesis {
@@ -680,7 +668,7 @@ pub fn calculate_l2_payload_hash_for_entry(entry: &L2LockEntry, lookup_tag: &str
     )
 }
 
-/// Verifies the V3 client request authorization signature of an L2LockRequest.
+/// Verifies the V4 client request authorization signature of an L2LockRequest.
 ///
 /// This checks the signature under `sender_ephemeral_pub`; it does not by itself
 /// establish that the key is authorized by the predecessor output or that a shard
@@ -692,62 +680,10 @@ pub fn verify_l2_lock_signature(req: &L2LockRequest) -> bool {
     };
     let sig = Signature::from_bytes(&req.layer2_signature);
     let payload_hash = calculate_l2_payload_hash(req);
-    if verifying_key.verify(&payload_hash, &sig).is_ok() {
-        return true;
-    }
-
-    // Fresh spend authorization must authenticate the exact wallet timestamp.
-    if !req.is_genesis {
-        return false;
-    }
-
-    let challenge_ds_tag = if req.is_genesis {
-        bs58::encode(req.transaction_hash).into_string()
-    } else {
-        req.ds_tag.clone().unwrap_or_default()
-    };
-
-    let effective_voucher_id = if req.is_genesis {
-        TRAP_NONE_PLACEHOLDER
-    } else {
-        req.layer2_voucher_id.as_str()
-    };
-
-    // Backward compatibility 1: if req.created_at_ms > 0, try verifying with created_at_ms = 0
-    if req.created_at_ms > 0 {
-        let zero_hash = calculate_l2_payload_hash_raw(
-            effective_voucher_id,
-            &challenge_ds_tag,
-            &req.transaction_hash,
-            &req.sender_ephemeral_pub,
-            req.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-            req.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-            req.encrypted_timestamp,
-            0,
-            req.deletable_at.as_deref(),
-            privacy_guard_commitment(req.privacy_guard.as_deref()).as_str(),
-        );
-        if verifying_key.verify(&zero_hash, &sig).is_ok() {
-            return true;
-        }
-    }
-
-    // Backward compatibility 2: try legacy payload hash without created_at_ms
-    let legacy_hash = calculate_l2_payload_hash_legacy_raw(
-        effective_voucher_id,
-        &challenge_ds_tag,
-        &req.transaction_hash,
-        &req.sender_ephemeral_pub,
-        req.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-        req.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-        req.encrypted_timestamp,
-        req.deletable_at.as_deref(),
-        privacy_guard_commitment(req.privacy_guard.as_deref()).as_str(),
-    );
-    verifying_key.verify(&legacy_hash, &sig).is_ok()
+    verifying_key.verify(&payload_hash, &sig).is_ok()
 }
 
-/// Verifies a stored lock's V3 client request authorization signature against its lookup tag.
+/// Verifies a stored lock's V4 client request authorization signature against its lookup tag.
 /// The `challenge_ds_tag` binding is distinct from node-quorum acceptance evidence.
 pub fn verify_l2_lock_entry_signature(entry: &L2LockEntry, lookup_tag: &str) -> bool {
     let verifying_key = match VerifyingKey::from_bytes(&entry.sender_ephemeral_pub) {
@@ -773,98 +709,7 @@ pub fn verify_l2_lock_entry_signature(entry: &L2LockEntry, lookup_tag: &str) -> 
         entry.deletable_at.as_deref(),
         privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
     );
-    if verifying_key.verify(&payload_hash, &sig).is_ok() {
-        return true;
-    }
-
-    // Legacy timestamp fallbacks are root metadata compatibility only.
-    if !crate::storage::db::roots::is_root(lookup_tag, entry) {
-        return false;
-    }
-
-    if entry.created_at_ms > 0 {
-        let zero_hash = calculate_l2_payload_hash_raw(
-            effective_voucher_id,
-            lookup_tag,
-            &entry.t_id,
-            &entry.sender_ephemeral_pub,
-            entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-            entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-            entry.encrypted_timestamp,
-            0,
-            entry.deletable_at.as_deref(),
-            privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
-        );
-        if verifying_key.verify(&zero_hash, &sig).is_ok() {
-            return true;
-        }
-    }
-
-    let legacy_hash = calculate_l2_payload_hash_legacy_raw(
-        effective_voucher_id,
-        lookup_tag,
-        &entry.t_id,
-        &entry.sender_ephemeral_pub,
-        entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-        entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-        entry.encrypted_timestamp,
-        entry.deletable_at.as_deref(),
-        privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
-    );
-    if verifying_key.verify(&legacy_hash, &sig).is_ok() {
-        return true;
-    }
-
-    if is_genesis {
-        let fallback_hash = calculate_l2_payload_hash_raw(
-            &entry.layer2_voucher_id,
-            lookup_tag,
-            &entry.t_id,
-            &entry.sender_ephemeral_pub,
-            entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-            entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-            entry.encrypted_timestamp,
-            entry.created_at_ms,
-            entry.deletable_at.as_deref(),
-            privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
-        );
-        if verifying_key.verify(&fallback_hash, &sig).is_ok() {
-            return true;
-        }
-
-        if entry.created_at_ms > 0 {
-            let fallback_zero = calculate_l2_payload_hash_raw(
-                &entry.layer2_voucher_id,
-                lookup_tag,
-                &entry.t_id,
-                &entry.sender_ephemeral_pub,
-                entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-                entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-                entry.encrypted_timestamp,
-                0,
-                entry.deletable_at.as_deref(),
-                privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
-            );
-            if verifying_key.verify(&fallback_zero, &sig).is_ok() {
-                return true;
-            }
-        }
-
-        let fallback_legacy = calculate_l2_payload_hash_legacy_raw(
-            &entry.layer2_voucher_id,
-            lookup_tag,
-            &entry.t_id,
-            &entry.sender_ephemeral_pub,
-            entry.trap_r.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-            entry.trap_s.as_deref().unwrap_or(TRAP_NONE_PLACEHOLDER),
-            entry.encrypted_timestamp,
-            entry.deletable_at.as_deref(),
-            privacy_guard_commitment(entry.privacy_guard.as_deref()).as_str(),
-        );
-        verifying_key.verify(&fallback_legacy, &sig).is_ok()
-    } else {
-        false
-    }
+    verifying_key.verify(&payload_hash, &sig).is_ok()
 }
 
 /// Wraps a verdict into an L2ResponseEnvelope signed with the node identity.

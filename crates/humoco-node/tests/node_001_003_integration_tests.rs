@@ -1,0 +1,869 @@
+#![forbid(unsafe_code)]
+
+//! Integration tests for NODE-001 and NODE-003:
+//!
+//! Acceptance Criteria:
+//! 1. `GET /v1/regional-mesh-view` public endpoint + 5s cache hit (same signature, zero CPU re-signing) + valid Ed25519 signature.
+//! 2. `POST /v1/lock` accepting genuine `HMC_TX_AUTH_V4` signature with past `created_at_ms` (offline spend) and rejecting future `created_at_ms > now + 30s`, and rejecting legacy V3 domain signatures.
+//! 3. `POST /v1/verify-current` returning 14/20 `LiveSlotOccupancy::Unoccupied` proof on empty slot, and `Occupied` on locked slot.
+//! 4. `POST /v1/checkout` committing offline buyer's lock and returning valid 14/20 `LiveStateProof` in 1 single HTTP roundtrip.
+//! 5. `POST /v1/status` returning `MissingLocks { sync_point, anchor_lock: Some(...) }`.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use http_body_util::BodyExt;
+use tempfile::tempdir;
+use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
+
+use humoco_node::api::hmc::{
+    calculate_l2_payload_hash, L2AuthPayload, L2ChainLockRequest, L2CheckoutRequest,
+    L2CheckoutResponse, L2LockEntry, L2LockRequest, L2ResponseEnvelope, L2StatusQuery, L2Verdict,
+};
+use humoco_node::api::{build_router, AppState};
+use humoco_node::daemon::ShardReadinessManager;
+use humoco_node::identity::NodeIdentity;
+use humoco_node::ingress::{PowEngine, TierController};
+use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
+use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
+use humoco_proto::live::{
+    verify_live_state_proof, verify_live_unoccupied_proof, LiveSlotOccupancy, LiveStateContext,
+    LiveStateProof,
+};
+use humoco_proto::mesh::RegionalMeshView;
+
+fn test_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn make_genesis_lock(
+    voucher_tag: &str,
+    valid_until_ms: u64,
+    sender_key: &SigningKey,
+) -> L2LockRequest {
+    let sender_pub = sender_key.verifying_key().to_bytes();
+    let tx_hash = *blake3::hash(voucher_tag.as_bytes()).as_bytes();
+    let mut req = L2LockRequest {
+        causal_output: None,
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: format!("voucher_{voucher_tag}"),
+        ds_tag: None,
+        transaction_hash: tx_hash,
+        is_genesis: true,
+        sender_ephemeral_pub: sender_pub,
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms: 0,
+        deletable_at: Some(valid_until_ms.to_string()),
+        privacy_guard: Some("none".into()),
+    };
+    let payload_hash = calculate_l2_payload_hash(&req);
+    req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
+    req
+}
+
+fn make_spend_lock(
+    voucher_id: &str,
+    parent_tag: &str,
+    tx_hash: [u8; 32],
+    valid_until_ms: u64,
+    created_at_ms: u64,
+    sender_key: &SigningKey,
+) -> L2LockRequest {
+    let sender_pub = sender_key.verifying_key().to_bytes();
+    let mut req = L2LockRequest {
+        causal_output: None,
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.to_string(),
+        ds_tag: Some(parent_tag.to_string()),
+        transaction_hash: tx_hash,
+        is_genesis: false,
+        sender_ephemeral_pub: sender_pub,
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms,
+        deletable_at: Some(valid_until_ms.to_string()),
+        privacy_guard: Some("none".into()),
+    };
+    let payload_hash = calculate_l2_payload_hash(&req);
+    req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
+    req
+}
+
+async fn force_stable_ge20(pm: &PeerManager) {
+    pm.set_local_sync_ready(true);
+    let now_ms = pm.net_time_ms();
+    let anchor = now_ms.saturating_sub(86_400_001);
+    let anchor = if anchor == 0 { 1 } else { anchor };
+    pm.set_ge20_anchor_for_test(anchor);
+    assert!(
+        pm.is_network_stable_ge20_for_24h(now_ms),
+        "Network must be marked ge20 stable for 24h"
+    );
+}
+
+fn setup_standalone_app(temp: &tempfile::TempDir) -> (axum::Router, AppState, NodeIdentity) {
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("standalone.redb")).unwrap());
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(*identity.node_id(), 1));
+    let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    tc.register_f2f_peer("test_peer_token");
+
+    let state = AppState::new(engine, storage, identity.clone(), tc, pow);
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
+    let router = build_router(state.clone());
+    (router, state, identity)
+}
+
+struct TestShard {
+    id: NodeIdentity,
+    pm: Arc<PeerManager>,
+    transport: QuicTransport,
+    engine: DualTierEngine,
+    ready: Arc<ShardReadinessManager>,
+}
+
+struct TestCluster {
+    app: axum::Router,
+    shards: Vec<TestShard>,
+    gateway_engine: DualTierEngine,
+    gateway_transport: QuicTransport,
+    cancel: CancellationToken,
+    owner_key: SigningKey,
+    genesis: L2LockRequest,
+    genesis_tag: String,
+    shard_id: u16,
+    committee: Vec<[u8; 32]>,
+    root_valid_until: u64,
+}
+
+async fn setup_test_cluster(temp: &tempfile::TempDir) -> TestCluster {
+    const NUM_SHARDS: usize = 20;
+    let cancel = CancellationToken::new();
+    let gateway = NodeIdentity::generate();
+    let gateway_pm = Arc::new(PeerManager::new(Vec::new()));
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("gw.redb")).unwrap());
+    let (gateway_engine, _worker) = DualTierEngine::new(storage.clone());
+    let gateway_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &gateway,
+        gateway_pm.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let gateway_addr = gateway_transport.local_addr().unwrap();
+
+    let mut shards = Vec::new();
+    for index in 0..NUM_SHARDS {
+        let disk =
+            Arc::new(RedbStorage::open(&temp.path().join(format!("shard_{index}.redb"))).unwrap());
+        let (engine, _worker) = DualTierEngine::new(disk.clone());
+        let id = NodeIdentity::generate();
+        let pm = Arc::new(PeerManager::new(Vec::new()));
+        let ready = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
+        let handler = Arc::new(
+            NodeRequestHandler::with_peer_manager(engine.clone(), disk, id.clone(), pm.clone())
+                .with_readiness_manager(ready.clone()),
+        );
+        let transport = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            &id,
+            pm.clone(),
+            handler,
+            cancel.clone(),
+        )
+        .unwrap();
+
+        pm.register_f2f_friend(*gateway.node_pubkey(), Some(gateway_addr))
+            .await;
+        gateway_pm
+            .register_f2f_friend(*id.node_pubkey(), Some(transport.local_addr().unwrap()))
+            .await;
+
+        shards.push(TestShard {
+            id,
+            pm,
+            transport,
+            engine,
+            ready,
+        });
+    }
+
+    let mut roster: Vec<_> = shards
+        .iter()
+        .map(|sh| (sh.id.clone(), sh.transport.local_addr().unwrap()))
+        .collect();
+    roster.push((gateway.clone(), gateway_addr));
+
+    for pm in std::iter::once(gateway_pm.clone()).chain(shards.iter().map(|sh| sh.pm.clone())) {
+        for (id, addr) in &roster {
+            pm.learn_node_from_gossip_with_hrw(
+                *id.node_pubkey(),
+                *id.hrw_routing_id(),
+                *addr,
+                0,
+                None,
+            )
+            .await;
+            pm.set_first_seen_for_test(
+                id.node_pubkey(),
+                Instant::now() - Duration::from_secs(25 * 3600),
+            )
+            .await;
+        }
+        force_stable_ge20(&pm).await;
+    }
+
+    let owner_key = SigningKey::from_bytes(&[88u8; 32]);
+    let now = gateway_pm.net_time_ms();
+    let mut selected = None;
+    for index in 0..1000 {
+        let req = make_genesis_lock(&format!("cluster_{index}"), now + 2_000_000, &owner_key);
+        let tag = bs58::encode(req.transaction_hash).into_string();
+        let sid =
+            humoco_sim_core::types::extract_shard_id(blake3::hash(tag.as_bytes()).as_bytes());
+        let (committee, _, _) = gateway_pm
+            .shard_committee(*gateway.node_pubkey(), *gateway.hrw_routing_id(), sid)
+            .await;
+        if !committee
+            .iter()
+            .any(|member| member.node_pubkey == *gateway.node_pubkey())
+        {
+            selected = Some((
+                sid,
+                req,
+                tag,
+                committee
+                    .iter()
+                    .map(|m| m.node_pubkey)
+                    .collect::<Vec<_>>(),
+            ));
+            break;
+        }
+    }
+    let (shard_id, genesis, genesis_tag, committee) =
+        selected.expect("Must find committee of 20 shards excluding gateway");
+
+    let anchor = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    for shard in &shards {
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                genesis_tag.clone(),
+                L2LockEntry::from(&genesis),
+                IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(genesis.layer2_voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+        shard
+            .engine
+            .record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor)
+            .await;
+        shard.ready.mark_shard_ready(shard_id);
+        shard.transport.spawn_accept_loop();
+    }
+
+    let (verdict, _) = gateway_engine
+        .ingress_hmc_lock_durable(
+            genesis_tag.clone(),
+            L2LockEntry::from(&genesis),
+            IngressOrigin::PartitionSync,
+            Some(now),
+            None,
+            None,
+            Some(genesis.layer2_voucher_id.clone()),
+        )
+        .await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    gateway_engine
+        .record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor)
+        .await;
+    gateway_transport.spawn_accept_loop();
+
+    let pow = Arc::new(PowEngine::new(*gateway.node_id(), 1));
+    let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    tc.register_f2f_peer("test_peer_token");
+    let mut state = AppState::new(gateway_engine.clone(), storage, gateway, tc, pow);
+    state.peer_manager = Some(gateway_pm);
+    state.transport = Some(gateway_transport.clone());
+    state.readiness_manager.mark_shard_ready(shard_id);
+    let app = build_router(state);
+
+    let root_valid_until = now + 2_000_000;
+
+    TestCluster {
+        app,
+        shards,
+        gateway_engine,
+        gateway_transport,
+        cancel,
+        owner_key,
+        genesis,
+        genesis_tag,
+        shard_id,
+        committee,
+        root_valid_until,
+    }
+}
+
+// ===========================================================================
+// Test 1: GET /v1/regional-mesh-view + 5s Cache Hit + Valid Ed25519 Signature
+// ===========================================================================
+#[tokio::test]
+async fn test_public_regional_mesh_view_and_cache() {
+    let temp = tempdir().unwrap();
+    let (_app, mut state, identity) = setup_standalone_app(&temp);
+
+    let pm = Arc::new(PeerManager::new(Vec::new()));
+    for _ in 0..20 {
+        let member = NodeIdentity::generate();
+        pm.learn_node_from_gossip_with_hrw(
+            *member.node_pubkey(),
+            *member.hrw_routing_id(),
+            "127.0.0.1:1".parse().unwrap(),
+            0,
+            None,
+        )
+        .await;
+        pm.set_first_seen_for_test(
+            member.node_pubkey(),
+            Instant::now() - Duration::from_secs(25 * 3600),
+        )
+        .await;
+    }
+    force_stable_ge20(&pm).await;
+    state.peer_manager = Some(pm);
+    let app = build_router(state.clone());
+
+    // First request: Cache Miss -> Computes and signs new RegionalMeshView
+    let req1 = Request::builder()
+        .method("GET")
+        .uri("/v1/regional-mesh-view")
+        .body(Body::empty())
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK);
+    let bytes1 = resp1.into_body().collect().await.unwrap().to_bytes();
+    let view1: RegionalMeshView = serde_json::from_slice(&bytes1).unwrap();
+
+    assert_eq!(view1.source_key, *identity.node_pubkey());
+    assert!(view1.members.len() >= 20);
+
+    // Cryptographic verification of Ed25519 signature
+    let digest1 = view1.digest().expect("Digest computation must succeed");
+    let vk = VerifyingKey::from_bytes(&view1.source_key).expect("Valid source pubkey");
+    let sig1 = Signature::from_bytes(&view1.signature);
+    vk.verify_strict(&digest1, &sig1)
+        .expect("Signature must be strictly valid");
+
+    // Second request: Cache Hit (< 5s TTL) -> Returns exact cached view without re-signing
+    let req2 = Request::builder()
+        .method("GET")
+        .uri("/v1/regional-mesh-view")
+        .body(Body::empty())
+        .unwrap();
+    let resp2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let bytes2 = resp2.into_body().collect().await.unwrap().to_bytes();
+    let view2: RegionalMeshView = serde_json::from_slice(&bytes2).unwrap();
+
+    assert_eq!(
+        view2.signature, view1.signature,
+        "Cache hit must return identical signature (zero CPU re-signing)"
+    );
+    assert_eq!(
+        view2.issued_at_ms, view1.issued_at_ms,
+        "Cache hit must preserve original timestamp"
+    );
+    assert!(
+        state.mesh_view_cache.read().is_some(),
+        "mesh_view_cache must be populated in AppState"
+    );
+}
+
+// ===========================================================================
+// Test 2: POST /v1/lock with HMC_TX_AUTH_V4 + Clock Drift Window Handling
+// ===========================================================================
+#[tokio::test]
+async fn test_post_v1_lock_v4_signature_and_clock_drift() {
+    let temp = tempdir().unwrap();
+    let (app, state, _identity) = setup_standalone_app(&temp);
+    let key = SigningKey::from_bytes(&[42u8; 32]);
+    let now = test_now_ms();
+
+    // Setup Genesis anchor
+    let genesis = make_genesis_lock("v4_drift", now + 1_000_000, &key);
+    let genesis_tag = bs58::encode(genesis.transaction_hash).into_string();
+    let anchor = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    state
+        .engine
+        .ingress_hmc_lock_durable(
+            genesis_tag.clone(),
+            L2LockEntry::from(&genesis),
+            IngressOrigin::ClientApi,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    state
+        .engine
+        .record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor)
+        .await;
+
+    // Case 2a: Offline spend with past created_at_ms (5 minutes ago = 300_000 ms) -> ACCEPTED (201)
+    let past_spend = make_spend_lock(
+        &genesis.layer2_voucher_id,
+        &genesis_tag,
+        [101; 32],
+        now + 800_000,
+        now - 300_000,
+        &key,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_peer_token")
+        .body(Body::from(serde_json::to_vec(&past_spend).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "Offline spend with past created_at_ms must be accepted"
+    );
+
+    // Case 2b: Future created_at_ms exceeding 30s (+35s) -> REJECTED with 400 Bad Request
+    let future_spend = make_spend_lock(
+        &genesis.layer2_voucher_id,
+        "future_tag",
+        [102; 32],
+        now + 800_000,
+        now + 35_000,
+        &key,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_peer_token")
+        .body(Body::from(serde_json::to_vec(&future_spend).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "Spend with future created_at_ms > 30s must be rejected"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let env: L2ResponseEnvelope = serde_json::from_slice(&bytes).unwrap();
+    match env.verdict {
+        L2Verdict::Rejected { reason } => {
+            assert!(
+                reason.contains("30s"),
+                "Error message must specify 30s clock drift bound, got: {}",
+                reason
+            );
+        }
+        other => panic!("Expected Rejected verdict, got {:?}", other),
+    }
+
+    // Case 2c: Invalid signature (legacy V3 domain or corrupted) -> REJECTED with 400
+    let mut invalid_spend = make_spend_lock(
+        &genesis.layer2_voucher_id,
+        "v3_tag",
+        [103; 32],
+        now + 800_000,
+        now,
+        &key,
+    );
+    // Sign with arbitrary / wrong domain hash instead of HMC_TX_AUTH_V4_DOMAIN
+    let bogus_hash = blake3::derive_key("WRONG_LEGACY_DOMAIN_TAG", &[0u8; 32]);
+    invalid_spend.layer2_signature = key.sign(&bogus_hash).to_bytes();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_peer_token")
+        .body(Body::from(serde_json::to_vec(&invalid_spend).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "Lock signed with non-V4 domain must be rejected"
+    );
+}
+
+// ===========================================================================
+// Test 3: POST /v1/verify-current Unoccupied and Occupied 14/20 Proofs
+// ===========================================================================
+#[tokio::test]
+async fn test_post_v1_verify_current_unoccupied_and_occupied() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_test_cluster(&temp).await;
+    let now = test_now_ms();
+
+    // -----------------------------------------------------------------------
+    // Part 3a: Empty slot -> LiveSlotOccupancy::Unoccupied 14/20 Quorum Proof
+    // -----------------------------------------------------------------------
+    let empty_tag = "unoccupied_test_slot";
+    let unoccupied_ctx = LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id: cluster.shard_id,
+        voucher_id: cluster.genesis.layer2_voucher_id.clone(),
+        lookup_tag: empty_tag.to_string(),
+        parent_lock: *blake3::hash(empty_tag.as_bytes()).as_bytes(),
+        child_lock: [0; 32],
+        root_valid_until: 0,
+        state_digest: [0; 32],
+        recipient_nonce: [55; 32],
+        committee: cluster.committee.clone(),
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify-current")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&unoccupied_ctx).unwrap()))
+        .unwrap();
+    let resp = cluster.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(
+        proof.occupancy,
+        LiveSlotOccupancy::Unoccupied,
+        "Proof must be marked Unoccupied for empty slot"
+    );
+    assert!(
+        proof.votes.len() >= 14,
+        "Must accumulate >= 14 quorum votes, got {}",
+        proof.votes.len()
+    );
+    verify_live_unoccupied_proof(&proof, &unoccupied_ctx)
+        .expect("verify_live_unoccupied_proof must succeed");
+    assert!(
+        verify_live_state_proof(&proof, &unoccupied_ctx).is_err(),
+        "verify_live_state_proof must reject unoccupied proof"
+    );
+
+    // -----------------------------------------------------------------------
+    // Part 3b: Locked slot -> LiveSlotOccupancy::Occupied 14/20 Quorum Proof
+    // -----------------------------------------------------------------------
+    let spent_spend = make_spend_lock(
+        &cluster.genesis.layer2_voucher_id,
+        &cluster.genesis_tag,
+        [222; 32],
+        cluster.root_valid_until,
+        now,
+        &cluster.owner_key,
+    );
+    let entry = L2LockEntry::from(&spent_spend);
+    let entry_digest = *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes();
+
+    for shard in &cluster.shards {
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                cluster.genesis_tag.clone(),
+                entry.clone(),
+                IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(cluster.genesis.layer2_voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+    let (verdict, _) = cluster
+        .gateway_engine
+        .ingress_hmc_lock_durable(
+            cluster.genesis_tag.clone(),
+            entry.clone(),
+            IngressOrigin::PartitionSync,
+            Some(now),
+            None,
+            None,
+            Some(cluster.genesis.layer2_voucher_id.clone()),
+        )
+        .await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
+
+    let occupied_ctx = LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id: cluster.shard_id,
+        voucher_id: cluster.genesis.layer2_voucher_id.clone(),
+        lookup_tag: cluster.genesis_tag.clone(),
+        parent_lock: *blake3::hash(cluster.genesis_tag.as_bytes()).as_bytes(),
+        child_lock: entry.t_id,
+        root_valid_until: cluster.root_valid_until,
+        state_digest: entry_digest,
+        recipient_nonce: [77; 32],
+        committee: cluster.committee.clone(),
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify-current")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&occupied_ctx).unwrap()))
+        .unwrap();
+    let resp = cluster.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(
+        proof.occupancy,
+        LiveSlotOccupancy::Occupied,
+        "Proof must be marked Occupied for locked slot"
+    );
+    assert!(
+        proof.votes.len() >= 14,
+        "Must accumulate >= 14 quorum votes, got {}",
+        proof.votes.len()
+    );
+    verify_live_state_proof(&proof, &occupied_ctx).expect("verify_live_state_proof must succeed");
+
+    cluster.cancel.cancel();
+    cluster.gateway_transport.close();
+    for shard in cluster.shards {
+        shard.transport.close();
+    }
+}
+
+// ===========================================================================
+// Test 4: POST /v1/checkout 1-RTT PoS Single Roundtrip Proof
+// ===========================================================================
+#[tokio::test]
+async fn test_post_v1_checkout_single_rtt() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_test_cluster(&temp).await;
+    let now = test_now_ms();
+
+    // Populate the terminal spend in the cluster
+    let spend = make_spend_lock(
+        &cluster.genesis.layer2_voucher_id,
+        &cluster.genesis_tag,
+        [188; 32],
+        cluster.root_valid_until,
+        now,
+        &cluster.owner_key,
+    );
+    let entry = L2LockEntry::from(&spend);
+    let entry_digest = *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes();
+
+    for shard in &cluster.shards {
+        shard
+            .engine
+            .ingress_hmc_lock_durable(
+                cluster.genesis_tag.clone(),
+                entry.clone(),
+                IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(cluster.genesis.layer2_voucher_id.clone()),
+            )
+            .await;
+    }
+    cluster
+        .gateway_engine
+        .ingress_hmc_lock_durable(
+            cluster.genesis_tag.clone(),
+            entry.clone(),
+            IngressOrigin::PartitionSync,
+            Some(now),
+            None,
+            None,
+            Some(cluster.genesis.layer2_voucher_id.clone()),
+        )
+        .await;
+
+    let live_context = LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id: cluster.shard_id,
+        voucher_id: cluster.genesis.layer2_voucher_id.clone(),
+        lookup_tag: cluster.genesis_tag.clone(),
+        parent_lock: *blake3::hash(cluster.genesis_tag.as_bytes()).as_bytes(),
+        child_lock: entry.t_id,
+        root_valid_until: cluster.root_valid_until,
+        state_digest: entry_digest,
+        recipient_nonce: [99; 32],
+        committee: cluster.committee.clone(),
+    };
+
+    let chain_req = L2ChainLockRequest {
+        auth: spend.auth.clone(),
+        layer2_voucher_id: cluster.genesis.layer2_voucher_id.clone(),
+        chain: vec![spend],
+    };
+
+    let checkout_req = L2CheckoutRequest {
+        lock_chain: Some(chain_req),
+        live_context: live_context.clone(),
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/checkout")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_peer_token")
+        .body(Body::from(serde_json::to_vec(&checkout_req).unwrap()))
+        .unwrap();
+
+    let resp = cluster.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "Checkout must succeed in 1-RTT"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let checkout_resp: L2CheckoutResponse = serde_json::from_slice(&bytes).unwrap();
+
+    assert!(
+        checkout_resp.conflicting_lock.is_none(),
+        "No conflict expected on clean checkout"
+    );
+    assert_eq!(
+        checkout_resp.proof.occupancy,
+        LiveSlotOccupancy::Occupied,
+        "Checkout proof must be Occupied"
+    );
+    assert!(
+        checkout_resp.proof.votes.len() >= 14,
+        "Checkout must return >= 14 quorum votes, got {}",
+        checkout_resp.proof.votes.len()
+    );
+    verify_live_state_proof(&checkout_resp.proof, &live_context)
+        .expect("verify_live_state_proof must succeed for checkout proof");
+
+    cluster.cancel.cancel();
+    cluster.gateway_transport.close();
+    for shard in cluster.shards {
+        shard.transport.close();
+    }
+}
+
+// ===========================================================================
+// Test 5: POST /v1/status MissingLocks carries Anchor Lock
+// ===========================================================================
+#[tokio::test]
+async fn test_post_v1_status_missing_locks_returns_anchor() {
+    let temp = tempdir().unwrap();
+    let (app, state, _identity) = setup_standalone_app(&temp);
+    let key = SigningKey::from_bytes(&[77u8; 32]);
+    let now = test_now_ms();
+
+    let genesis = make_genesis_lock("anchor_test", now + 1_000_000, &key);
+    let genesis_tag = bs58::encode(genesis.transaction_hash).into_string();
+    let anchor = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+
+    let (v_gen, is_new) = state
+        .engine
+        .ingress_hmc_lock_durable(
+            genesis_tag.clone(),
+            L2LockEntry::from(&genesis),
+            IngressOrigin::ClientApi,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(is_new);
+    assert!(matches!(v_gen, L2Verdict::Verified { .. }));
+    state
+        .engine
+        .record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor)
+        .await;
+
+    // Status query on an unspent tag with empty locator prefixes
+    let status_query = L2StatusQuery {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: [1u8; 32],
+            auth_signature: None,
+        },
+        layer2_voucher_id: genesis.layer2_voucher_id.clone(),
+        challenge_ds_tag: "unspent_tag_probe".to_string(),
+        locator_prefixes: Vec::new(),
+        read_quorum: 1,
+        root_context: None,
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/status")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_peer_token")
+        .body(Body::from(serde_json::to_vec(&status_query).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let env: L2ResponseEnvelope = serde_json::from_slice(&bytes).unwrap();
+
+    match env.verdict {
+        L2Verdict::MissingLocks {
+            sync_point,
+            anchor_lock,
+        } => {
+            assert_eq!(
+                sync_point, "genesis",
+                "Unspent query with empty locators must sync from genesis"
+            );
+            assert!(
+                anchor_lock.is_some(),
+                "query_status must attach anchor_lock on MissingLocks"
+            );
+            let anchor_entry = anchor_lock.unwrap();
+            assert_eq!(
+                anchor_entry.layer2_voucher_id, genesis.layer2_voucher_id,
+                "anchor_lock must correspond to queried voucher"
+            );
+            assert_eq!(
+                anchor_entry.t_id, genesis.transaction_hash,
+                "anchor_lock must have t_id matching genesis transaction_hash"
+            );
+        }
+        other => panic!("Expected MissingLocks, got {:?}", other),
+    }
+}

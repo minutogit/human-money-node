@@ -195,10 +195,17 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).unwrap();
     match env.verdict {
-        L2Verdict::MissingLocks { sync_point } => {
+        L2Verdict::MissingLocks {
+            sync_point,
+            anchor_lock,
+        } => {
             assert_eq!(
                 sync_point, "genesis",
                 "Unspent query without matching locators must sync from genesis"
+            );
+            assert!(
+                anchor_lock.is_some(),
+                "query_status must attach anchor_lock for root anchor"
             );
         }
         other => panic!("Expected MissingLocks, got {:?}", other),
@@ -225,10 +232,17 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let env: L2ResponseEnvelope = serde_json::from_slice(&body_bytes).unwrap();
     match env.verdict {
-        L2Verdict::MissingLocks { sync_point } => {
+        L2Verdict::MissingLocks {
+            sync_point,
+            anchor_lock,
+        } => {
             assert_eq!(
                 sync_point, prefix,
                 "Unspent query with matching locator prefix must return that sync point"
+            );
+            assert!(
+                anchor_lock.is_some(),
+                "query_status must attach anchor_lock for matched locator"
             );
         }
         other => panic!(

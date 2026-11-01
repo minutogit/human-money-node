@@ -22,25 +22,16 @@ pub enum PowError {
 }
 
 /// Stateless Challenge: BLAKE3(len || "HUMOCO_V1_POW_STATELESS" || parent_lock || epoch_slot)
+#[inline]
 pub fn compute_stateless_challenge(parent_lock: &[u8; 32], epoch_slot: u64) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[STATELESS_POW_DOMAIN.len() as u8]);
-    hasher.update(STATELESS_POW_DOMAIN);
-    hasher.update(parent_lock);
-    hasher.update(&epoch_slot.to_le_bytes());
-    *hasher.finalize().as_bytes()
+    humoco_proto::crypto::compute_stateless_pow_challenge(parent_lock, epoch_slot)
 }
 
 /// Canonical Direct Stateless Hashcash (Spec 13 §4, AGENTS.md):
 /// BLAKE3(len || "HUMOCO_V1_POW_STATELESS" || parent_lock || epoch_slot || nonce)
+#[inline]
 pub fn hash_work(parent_lock: &[u8; 32], epoch_slot: u64, nonce: u64) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[STATELESS_POW_DOMAIN.len() as u8]);
-    hasher.update(STATELESS_POW_DOMAIN);
-    hasher.update(parent_lock);
-    hasher.update(&epoch_slot.to_le_bytes());
-    hasher.update(&nonce.to_le_bytes());
-    *hasher.finalize().as_bytes()
+    humoco_proto::crypto::compute_stateless_pow_work(parent_lock, epoch_slot, nonce)
 }
 
 /// Nonce-Verifikation: BLAKE3("HUMOCO_POW_SOLUTION" || challenge || nonce)
@@ -55,21 +46,15 @@ pub fn compute_solution_hash(challenge: &[u8; 32], nonce: u64) -> [u8; 32] {
 }
 
 /// Counts leading zero bits in a 32-byte hash.
+#[inline]
 pub fn count_leading_zero_bits(hash: &[u8; 32]) -> u32 {
-    let mut zeros = 0;
-    for &byte in hash {
-        let lz = byte.leading_zeros();
-        zeros += lz;
-        if lz < 8 {
-            break;
-        }
-    }
-    zeros
+    humoco_proto::crypto::count_leading_zero_bits(hash)
 }
 
 /// Checks if a hash meets the difficulty requirement (leading zero bits).
+#[inline]
 pub fn check_difficulty(hash: &[u8; 32], difficulty: u32) -> bool {
-    count_leading_zero_bits(hash) >= difficulty
+    humoco_proto::crypto::check_pow_difficulty(hash, difficulty)
 }
 
 /// Solves the canonical direct stateless hashcash for an explicit parent lock and epoch slot.

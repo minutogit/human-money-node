@@ -20,6 +20,7 @@ pub const SHUTDOWN_HANDLER_GRACE: std::time::Duration = std::time::Duration::fro
 /// Canonical SNI used for P2P QUIC handshakes to prevent DPI firewalls from dropping external packets advertising "localhost".
 pub const P2P_QUIC_SNI: &str = "p2p.humoco.internal";
 
+use ed25519_dalek::Signer;
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::error::NodeError;
@@ -1763,9 +1764,10 @@ impl RequestHandler for NodeRequestHandler {
                 // known; tag-only queries (lock_id == [0;32], INV-0310 gateway
                 // fallback) return the full L2LockEntry so a stateless gateway can
                 // answer UnknownVoucher from 1 deterministic Top-20 node.
-                let (matching_and_valid, tag_only_entry) = {
+                let (matching_and_valid, tag_only_entry, tag_only_root) = {
                     let mut is_match = false;
                     let mut tag_entry: Option<crate::api::hmc::L2LockEntry> = None;
+                    let mut tag_root: Option<u64> = None;
                     // Cheap native lookup stays in RAM; pending data is only an observation.
                     let stored = engine.get_ram_lock(&parent_lock).await;
                     if let Some(rec) = stored {
@@ -1810,15 +1812,13 @@ impl RequestHandler for NodeRequestHandler {
                                 let p_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
                                 shard_id == v_shard || shard_id == p_shard
                             };
-                            let committed = hmc
+                            let committed_root = hmc
                                 .get_voucher_root_valid(&entry.layer2_voucher_id)
-                                .is_some_and(|root| {
-                                    root > now_ms && hmc.is_entry_durable(lookup_tag, entry, root)
-                                });
+                                .filter(|&root| root > now_ms && hmc.is_entry_durable(lookup_tag, entry, root));
 
                             if shard_ok
                                 && is_tag_only
-                                && (!committed
+                                && (committed_root.is_none()
                                     || !engine.is_signing_healthy()
                                     || !readiness_manager.is_shard_ready(shard_id))
                             {
@@ -1836,25 +1836,88 @@ impl RequestHandler for NodeRequestHandler {
                             let valid = entry
                                 .deletable_at
                                 .as_deref()
-                                .and_then(|s| s.parse::<u64>().ok())
+                                .and_then(|s| crate::storage::db::roots::parse_deletable_at_ms(s).ok())
                                 .map(|del| del >= now_ms)
                                 .unwrap_or(true);
                             if shard_ok && valid {
                                 if is_tag_only {
                                     tag_entry = Some(entry.clone());
+                                    tag_root = committed_root;
                                 }
                                 is_match = true;
                                 break;
                             }
                         }
                     }
-                    (is_match, tag_entry)
+                    (is_match, tag_entry, tag_root)
                 };
 
                 // Tag-only fallback returns the full entry so the gateway can
                 // build a diagnostic verdict with the existing sender signature.
                 // It is neither a node original approval nor a current-state proof.
                 if let Some(entry) = tag_only_entry {
+                    if (header.flags & crate::network::framing::FLAG_AUTHENTICATED_DISCOVERY) != 0 {
+                        let Some(root_valid_until) = tag_only_root else {
+                            return Ok((
+                                WireHeader::new(
+                                    MsgType::StatusResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_NOT_READY,
+                                    0,
+                                ),
+                                Vec::new(),
+                            ));
+                        };
+                        let entry_bytes = serde_json::to_vec(&entry)
+                            .map_err(|e| NodeError::Network(e.to_string()))?;
+                        let state_digest = *blake3::hash(&entry_bytes).as_bytes();
+                        let network_byte = match network_id {
+                            humoco_sim_core::types::NetworkId::Mainnet => 0,
+                            humoco_sim_core::types::NetworkId::Testnet => 1,
+                        };
+                        let discovery_digest = crate::network::framing::compute_slot_discovery_digest(
+                            network_byte,
+                            shard_id,
+                            header.session_seq,
+                            &parent_lock,
+                            &entry.t_id,
+                            &state_digest,
+                            root_valid_until,
+                            identity.node_pubkey(),
+                        );
+                        let custodian_signature = identity.signing_key().sign(&discovery_digest).to_bytes();
+                        let discovery = crate::network::framing::AuthenticatedSlotDiscovery {
+                            entry,
+                            root_valid_until,
+                            custodian_pubkey: *identity.node_pubkey(),
+                            custodian_signature,
+                        };
+                        let resp_bytes = serde_json::to_vec(&discovery)
+                            .map_err(|e| NodeError::Network(e.to_string()))?;
+                        if resp_bytes.len() > crate::network::framing::MAX_AUTHENTICATED_DISCOVERY_BYTES {
+                            return Ok((
+                                WireHeader::new(
+                                    MsgType::StatusResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_NOT_READY,
+                                    0,
+                                ),
+                                Vec::new(),
+                            ));
+                        }
+                        let payload_len = checked_payload_len(resp_bytes.len())?;
+                        let resp_header = WireHeader::new(
+                            MsgType::StatusResponse as u16,
+                            header.session_seq.wrapping_add(1),
+                            header.epoch_id,
+                            crate::network::framing::FLAG_AUTHENTICATED_DISCOVERY,
+                            payload_len,
+                        );
+                        return Ok((resp_header, resp_bytes));
+                    }
+
                     // JSON preserves omitted optional DTO fields; positional
                     // bincode cannot round-trip skip_serializing_if fields.
                     let resp_bytes = serde_json::to_vec(&entry)

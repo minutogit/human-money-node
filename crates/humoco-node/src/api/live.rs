@@ -122,6 +122,7 @@ struct MemberLiveQuery {
     net_time_ms: u64,
     declared_write_ema: u64,
     declared_read_ema: u64,
+    network_id: humoco_sim_core::types::NetworkId,
 }
 
 /// Pipeline for an individual committee member over an owned QUIC connection:
@@ -223,7 +224,7 @@ async fn query_member_live_vote(
         humoco_sim_core::wire::MsgType::StatusQuery as u16,
         2,
         0,
-        0,
+        crate::network::framing::FLAG_AUTHENTICATED_DISCOVERY,
         status_payload.len() as u32,
     );
     let (status_resp_h, status_resp_bytes) = query
@@ -235,6 +236,7 @@ async fn query_member_live_vote(
         || (status_resp_h.flags
             & (humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED
                 | humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                | humoco_sim_core::wire::FLAG_UNAUTHORIZED
                 | humoco_sim_core::wire::FLAG_NOT_READY))
             != 0
     {
@@ -284,28 +286,60 @@ async fn query_member_live_vote(
     }
 
     // Case B: Existing rival lock discovery!
-    let entry = serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&status_resp_bytes)
-        .ok()
-        .or_else(|| bincode::deserialize(&status_resp_bytes).ok())?;
-    if entry.layer2_voucher_id != query.requested_context.voucher_id
+    if status_resp_bytes.len() > crate::network::framing::MAX_AUTHENTICATED_DISCOVERY_BYTES
+        || (status_resp_h.flags & crate::network::framing::FLAG_AUTHENTICATED_DISCOVERY) == 0
+    {
+        return None;
+    }
+    let discovery: crate::network::framing::AuthenticatedSlotDiscovery =
+        serde_json::from_slice(&status_resp_bytes).ok()?;
+    if discovery.custodian_pubkey != query.member_pubkey
+        || discovery.entry.layer2_voucher_id != query.requested_context.voucher_id
         || !crate::api::hmc::verify_l2_lock_entry_signature(
-            &entry,
+            &discovery.entry,
             &query.requested_context.lookup_tag,
         )
     {
         return None;
     }
-    let state_bytes = serde_json::to_vec(&entry).ok()?;
-    let mut candidate_context = query.requested_context.clone();
-    candidate_context.child_lock = entry.t_id;
-    candidate_context.state_digest = *blake3::hash(&state_bytes).as_bytes();
-    if candidate_context.root_valid_until == 0 {
-        if let Some(ref del) = entry.deletable_at {
-            if let Ok(ts) = del.parse::<u64>() {
-                candidate_context.root_valid_until = ts;
+    let state_bytes = serde_json::to_vec(&discovery.entry).ok()?;
+    let state_digest = *blake3::hash(&state_bytes).as_bytes();
+    if discovery.root_valid_until <= query.net_time_ms {
+        return None;
+    }
+    if let Some(ref del) = discovery.entry.deletable_at {
+        let del_ms = crate::storage::db::roots::parse_deletable_at_ms(del).ok()?;
+        if crate::storage::db::roots::is_root(&query.requested_context.lookup_tag, &discovery.entry) {
+            if del_ms != discovery.root_valid_until {
+                return None;
             }
+        } else if del_ms > discovery.root_valid_until || del_ms <= query.net_time_ms {
+            return None;
         }
     }
+    if let Some(ref proof) = discovery.entry.causal_output {
+        if proof.root_valid_until_ms != discovery.root_valid_until {
+            return None;
+        }
+    }
+    let expected_network = match query.network_id {
+        humoco_sim_core::types::NetworkId::Mainnet => 0,
+        humoco_sim_core::types::NetworkId::Testnet => 1,
+    };
+    if !discovery.verify_signature(
+        expected_network,
+        query.requested_context.shard_id,
+        2,
+        &query.requested_context.parent_lock,
+        &state_digest,
+    ) {
+        return None;
+    }
+
+    let mut candidate_context = query.requested_context.clone();
+    candidate_context.child_lock = discovery.entry.t_id;
+    candidate_context.state_digest = state_digest;
+    candidate_context.root_valid_until = discovery.root_valid_until;
 
     // RPC 3: Request signature on discovered candidate from this same member
     if tokio::time::Instant::now() >= query.deadline {
@@ -417,27 +451,32 @@ pub async fn collect_live_state_proof(
             let local_candidate = {
                 let ram = state.engine.hmc_ram.read().await;
                 if let Some(entry) = ram.locks.get(&context.lookup_tag) {
-                    if entry.layer2_voucher_id == context.voucher_id
-                        && (entry.t_id != context.child_lock
-                            || ram
-                                .durable_entries
-                                .get(&context.lookup_tag)
-                                .map(|(d, _)| *d)
-                                != Some(context.state_digest))
-                    {
-                        serde_json::to_vec(entry).ok().and_then(|state_bytes| {
-                            let digest = *blake3::hash(&state_bytes).as_bytes();
-                            if ram.durable_entries.get(&context.lookup_tag)
-                                == Some(&(digest, context.root_valid_until))
+                    if entry.layer2_voucher_id == context.voucher_id {
+                        let stored_root = ram.voucher_roots.get(&context.voucher_id).copied();
+                        let durable_tuple = ram.durable_entries.get(&context.lookup_tag).copied();
+                        match (stored_root, durable_tuple) {
+                            (Some(root_valid_until), Some((durable_digest, durable_root)))
+                                if durable_root == root_valid_until =>
                             {
-                                let mut alt = context.clone();
-                                alt.child_lock = entry.t_id;
-                                alt.state_digest = digest;
-                                Some(alt)
-                            } else {
-                                None
+                                serde_json::to_vec(entry).ok().and_then(|state_bytes| {
+                                    let digest = *blake3::hash(&state_bytes).as_bytes();
+                                    if digest == durable_digest
+                                        && (entry.t_id != context.child_lock
+                                            || digest != context.state_digest
+                                            || root_valid_until != context.root_valid_until)
+                                    {
+                                        let mut alt = context.clone();
+                                        alt.child_lock = entry.t_id;
+                                        alt.state_digest = digest;
+                                        alt.root_valid_until = root_valid_until;
+                                        Some(alt)
+                                    } else {
+                                        None
+                                    }
+                                })
                             }
-                        })
+                            _ => None,
+                        }
                     } else {
                         None
                     }
@@ -495,6 +534,7 @@ pub async fn collect_live_state_proof(
             net_time_ms,
             declared_write_ema,
             declared_read_ema,
+            network_id: state.network_id,
         };
         jobs.spawn(query_member_live_vote(q));
     }
@@ -540,7 +580,17 @@ pub async fn collect_live_state_proof(
                                 votes: group.1.clone(),
                                 occupancy: LiveSlotOccupancy::Occupied,
                             };
-                            if verify_live_state_proof(&candidate_proof, &group.0).is_ok() {
+                            let pinned_matches = group.0.version == context.version
+                                && group.0.network == context.network
+                                && group.0.shard_id == context.shard_id
+                                && group.0.voucher_id == context.voucher_id
+                                && group.0.lookup_tag == context.lookup_tag
+                                && group.0.parent_lock == context.parent_lock
+                                && group.0.recipient_nonce == context.recipient_nonce
+                                && group.0.committee == context.committee;
+                            if pinned_matches
+                                && verify_live_state_proof(&candidate_proof, &group.0).is_ok()
+                            {
                                 completed_proof = Some(candidate_proof);
                                 jobs.abort_all();
                                 break;

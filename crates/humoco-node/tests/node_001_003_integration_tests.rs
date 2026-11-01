@@ -43,9 +43,9 @@ fn test_now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn make_genesis_lock(
+fn make_genesis_lock_with_deletable(
     voucher_tag: &str,
-    valid_until_ms: u64,
+    deletable_at: Option<String>,
     sender_key: &SigningKey,
 ) -> L2LockRequest {
     let sender_pub = sender_key.verifying_key().to_bytes();
@@ -68,7 +68,7 @@ fn make_genesis_lock(
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
         created_at_ms: 0,
-        deletable_at: Some(valid_until_ms.to_string()),
+        deletable_at,
         privacy_guard: Some("none".into()),
     };
     let payload_hash = calculate_l2_payload_hash(&req);
@@ -76,11 +76,19 @@ fn make_genesis_lock(
     req
 }
 
-fn make_spend_lock(
+fn make_genesis_lock(
+    voucher_tag: &str,
+    valid_until_ms: u64,
+    sender_key: &SigningKey,
+) -> L2LockRequest {
+    make_genesis_lock_with_deletable(voucher_tag, Some(valid_until_ms.to_string()), sender_key)
+}
+
+fn make_spend_lock_with_deletable(
     voucher_id: &str,
     parent_tag: &str,
     tx_hash: [u8; 32],
-    valid_until_ms: u64,
+    deletable_at: Option<String>,
     created_at_ms: u64,
     sender_key: &SigningKey,
 ) -> L2LockRequest {
@@ -103,12 +111,30 @@ fn make_spend_lock(
         trap_s: Some("none".into()),
         encrypted_timestamp: 0,
         created_at_ms,
-        deletable_at: Some(valid_until_ms.to_string()),
+        deletable_at,
         privacy_guard: Some("none".into()),
     };
     let payload_hash = calculate_l2_payload_hash(&req);
     req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
     req
+}
+
+fn make_spend_lock(
+    voucher_id: &str,
+    parent_tag: &str,
+    tx_hash: [u8; 32],
+    valid_until_ms: u64,
+    created_at_ms: u64,
+    sender_key: &SigningKey,
+) -> L2LockRequest {
+    make_spend_lock_with_deletable(
+        voucher_id,
+        parent_tag,
+        tx_hash,
+        Some(valid_until_ms.to_string()),
+        created_at_ms,
+        sender_key,
+    )
 }
 
 async fn force_stable_ge20(pm: &PeerManager) {
@@ -145,6 +171,25 @@ struct TestShard {
     transport: QuicTransport,
     engine: DualTierEngine,
     ready: Arc<ShardReadinessManager>,
+    storage: Arc<RedbStorage>,
+}
+
+fn build_shard_app(shard: &TestShard, shard_id: u16) -> axum::Router {
+    let pow = Arc::new(PowEngine::new(*shard.id.node_id(), 1));
+    let tc = Arc::new(TierController::new(shard.storage.clone(), pow.clone()));
+    tc.register_f2f_peer("test_peer_token");
+    let mut state = AppState::new(
+        shard.engine.clone(),
+        shard.storage.clone(),
+        shard.id.clone(),
+        tc,
+        pow,
+    );
+    state.peer_manager = Some(shard.pm.clone());
+    state.transport = Some(shard.transport.clone());
+    state.readiness_manager = shard.ready.clone();
+    state.readiness_manager.mark_shard_ready(shard_id);
+    build_router(state)
 }
 
 struct TestCluster {
@@ -162,6 +207,13 @@ struct TestCluster {
 }
 
 async fn setup_test_cluster(temp: &tempfile::TempDir) -> TestCluster {
+    setup_test_cluster_with_root(temp, None).await
+}
+
+async fn setup_test_cluster_with_root(
+    temp: &tempfile::TempDir,
+    root_deletable_override: Option<String>,
+) -> TestCluster {
     const NUM_SHARDS: usize = 20;
     let cancel = CancellationToken::new();
     let gateway = NodeIdentity::generate();
@@ -187,7 +239,7 @@ async fn setup_test_cluster(temp: &tempfile::TempDir) -> TestCluster {
         let pm = Arc::new(PeerManager::new(Vec::new()));
         let ready = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
         let handler = Arc::new(
-            NodeRequestHandler::with_peer_manager(engine.clone(), disk, id.clone(), pm.clone())
+            NodeRequestHandler::with_peer_manager(engine.clone(), disk.clone(), id.clone(), pm.clone())
                 .with_readiness_manager(ready.clone()),
         );
         let transport = QuicTransport::bind_with_options(
@@ -211,6 +263,7 @@ async fn setup_test_cluster(temp: &tempfile::TempDir) -> TestCluster {
             transport,
             engine,
             ready,
+            storage: disk,
         });
     }
 
@@ -241,9 +294,18 @@ async fn setup_test_cluster(temp: &tempfile::TempDir) -> TestCluster {
 
     let owner_key = SigningKey::from_bytes(&[88u8; 32]);
     let now = gateway_pm.net_time_ms();
+    let root_deletable_str = root_deletable_override
+        .unwrap_or_else(|| (now + 2_000_000).to_string());
+    let root_valid_until = humoco_node::storage::db::roots::parse_deletable_at_ms(&root_deletable_str)
+        .expect("Valid root deletable_at");
+
     let mut selected = None;
     for index in 0..1000 {
-        let req = make_genesis_lock(&format!("cluster_{index}"), now + 2_000_000, &owner_key);
+        let req = make_genesis_lock_with_deletable(
+            &format!("cluster_{index}"),
+            Some(root_deletable_str.clone()),
+            &owner_key,
+        );
         let tag = bs58::encode(req.transaction_hash).into_string();
         let sid =
             humoco_sim_core::types::extract_shard_id(blake3::hash(tag.as_bytes()).as_bytes());
@@ -317,8 +379,6 @@ async fn setup_test_cluster(temp: &tempfile::TempDir) -> TestCluster {
     state.transport = Some(gateway_transport.clone());
     state.readiness_manager.mark_shard_ready(shard_id);
     let app = build_router(state);
-
-    let root_valid_until = now + 2_000_000;
 
     TestCluster {
         app,
@@ -865,5 +925,368 @@ async fn test_post_v1_status_missing_locks_returns_anchor() {
             );
         }
         other => panic!("Expected MissingLocks, got {:?}", other),
+    }
+}
+
+// ===========================================================================
+// Regression Tests for S01-06:
+// Unoccupied /v1/verify-current discovering occupied lock under 20-member committee
+// ===========================================================================
+
+#[tokio::test]
+async fn test_post_v1_verify_current_unoccupied_discovering_occupied_remote_numeric_control() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_test_cluster(&temp).await;
+    let now = test_now_ms();
+
+    let spent_spend = make_spend_lock(
+        &cluster.genesis.layer2_voucher_id,
+        &cluster.genesis_tag,
+        [211; 32],
+        cluster.root_valid_until,
+        now,
+        &cluster.owner_key,
+    );
+    let entry = L2LockEntry::from(&spent_spend);
+    let entry_digest = *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes();
+
+    // 14 remote custodians (shards 0..14) durably store the occupied spend
+    for shard in &cluster.shards[0..14] {
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                cluster.genesis_tag.clone(),
+                entry.clone(),
+                IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(cluster.genesis.layer2_voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+    // Make remaining 6 remote committee members unable to vote
+    for shard in &cluster.shards[14..20] {
+        shard.ready.invalidate_shard(cluster.shard_id);
+    }
+
+    // Collector is outside committee (gateway)
+    let unoccupied_ctx = LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id: cluster.shard_id,
+        voucher_id: cluster.genesis.layer2_voucher_id.clone(),
+        lookup_tag: cluster.genesis_tag.clone(),
+        parent_lock: *blake3::hash(cluster.genesis_tag.as_bytes()).as_bytes(),
+        child_lock: [0; 32],
+        root_valid_until: 0,
+        state_digest: [0; 32],
+        recipient_nonce: [111; 32],
+        committee: cluster.committee.clone(),
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify-current")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&unoccupied_ctx).unwrap()))
+        .unwrap();
+    let resp = cluster.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(proof.occupancy, LiveSlotOccupancy::Occupied);
+    assert!(
+        proof.votes.len() >= 14,
+        "Must have >= 14 votes, got {}",
+        proof.votes.len()
+    );
+    assert_eq!(proof.context.child_lock, entry.t_id);
+    assert_eq!(proof.context.state_digest, entry_digest);
+    assert_eq!(proof.context.root_valid_until, cluster.root_valid_until);
+    verify_live_state_proof(&proof, &proof.context).expect("verify_live_state_proof must succeed");
+
+    cluster.cancel.cancel();
+    cluster.gateway_transport.close();
+    for shard in cluster.shards {
+        shard.transport.close();
+    }
+}
+
+#[tokio::test]
+async fn test_post_v1_verify_current_unoccupied_discovering_occupied_in_committee_numeric() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_test_cluster(&temp).await;
+    let now = test_now_ms();
+
+    let collector_pubkey = *cluster.shards[0].id.node_pubkey();
+    assert!(cluster.committee.contains(&collector_pubkey));
+    let collector_app = build_shard_app(&cluster.shards[0], cluster.shard_id);
+
+    let spent_spend = make_spend_lock(
+        &cluster.genesis.layer2_voucher_id,
+        &cluster.genesis_tag,
+        [212; 32],
+        cluster.root_valid_until,
+        now,
+        &cluster.owner_key,
+    );
+    let entry = L2LockEntry::from(&spent_spend);
+    let entry_digest = *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes();
+
+    // 1 local collector (shard 0) + 13 remote custodians (shards 1..14) = 14 custodians
+    for shard in &cluster.shards[0..14] {
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                cluster.genesis_tag.clone(),
+                entry.clone(),
+                IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(cluster.genesis.layer2_voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+    // Invalidate the other 6 remote committee members
+    for shard in &cluster.shards[14..20] {
+        shard.ready.invalidate_shard(cluster.shard_id);
+    }
+
+    let unoccupied_ctx = LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id: cluster.shard_id,
+        voucher_id: cluster.genesis.layer2_voucher_id.clone(),
+        lookup_tag: cluster.genesis_tag.clone(),
+        parent_lock: *blake3::hash(cluster.genesis_tag.as_bytes()).as_bytes(),
+        child_lock: [0; 32],
+        root_valid_until: 0,
+        state_digest: [0; 32],
+        recipient_nonce: [112; 32],
+        committee: cluster.committee.clone(),
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify-current")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&unoccupied_ctx).unwrap()))
+        .unwrap();
+    let resp = collector_app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(proof.occupancy, LiveSlotOccupancy::Occupied);
+    assert!(
+        proof.votes.len() >= 14,
+        "Must have >= 14 votes, got {}",
+        proof.votes.len()
+    );
+    assert_eq!(proof.context.child_lock, entry.t_id);
+    assert_eq!(proof.context.state_digest, entry_digest);
+    assert_eq!(proof.context.root_valid_until, cluster.root_valid_until);
+    verify_live_state_proof(&proof, &proof.context).expect("verify_live_state_proof must succeed");
+    assert!(
+        proof.votes.iter().any(|v| v.signer_pubkey == collector_pubkey),
+        "Collector's own vote must be included in proof"
+    );
+
+    cluster.cancel.cancel();
+    cluster.gateway_transport.close();
+    for shard in cluster.shards {
+        shard.transport.close();
+    }
+}
+
+#[tokio::test]
+async fn test_post_v1_verify_current_unoccupied_discovering_occupied_in_committee_rfc3339() {
+    let temp = tempdir().unwrap();
+    let now = test_now_ms();
+    let root_ms = now + 3_600_000;
+    let rfc_str = chrono::DateTime::from_timestamp_millis(root_ms as i64)
+        .expect("valid timestamp")
+        .to_rfc3339();
+    let cluster = setup_test_cluster_with_root(&temp, Some(rfc_str.clone())).await;
+
+    let collector_pubkey = *cluster.shards[0].id.node_pubkey();
+    assert!(cluster.committee.contains(&collector_pubkey));
+    let collector_app = build_shard_app(&cluster.shards[0], cluster.shard_id);
+
+    let spent_spend = make_spend_lock_with_deletable(
+        &cluster.genesis.layer2_voucher_id,
+        &cluster.genesis_tag,
+        [213; 32],
+        Some(rfc_str.clone()),
+        now,
+        &cluster.owner_key,
+    );
+    let entry = L2LockEntry::from(&spent_spend);
+    let entry_digest = *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes();
+
+    // 1 local collector (shard 0) + 13 remote custodians (shards 1..14) = 14 custodians
+    for shard in &cluster.shards[0..14] {
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                cluster.genesis_tag.clone(),
+                entry.clone(),
+                IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(cluster.genesis.layer2_voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+    // Invalidate remaining 6 remote committee members
+    for shard in &cluster.shards[14..20] {
+        shard.ready.invalidate_shard(cluster.shard_id);
+    }
+
+    let unoccupied_ctx = LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id: cluster.shard_id,
+        voucher_id: cluster.genesis.layer2_voucher_id.clone(),
+        lookup_tag: cluster.genesis_tag.clone(),
+        parent_lock: *blake3::hash(cluster.genesis_tag.as_bytes()).as_bytes(),
+        child_lock: [0; 32],
+        root_valid_until: 0,
+        state_digest: [0; 32],
+        recipient_nonce: [113; 32],
+        committee: cluster.committee.clone(),
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify-current")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&unoccupied_ctx).unwrap()))
+        .unwrap();
+    let resp = collector_app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(proof.occupancy, LiveSlotOccupancy::Occupied);
+    assert!(
+        proof.votes.len() >= 14,
+        "Must have >= 14 votes, got {}",
+        proof.votes.len()
+    );
+    assert_eq!(proof.context.child_lock, entry.t_id);
+    assert_eq!(proof.context.state_digest, entry_digest);
+    assert_eq!(proof.context.root_valid_until, root_ms);
+    verify_live_state_proof(&proof, &proof.context).expect("verify_live_state_proof must succeed");
+    assert!(
+        proof.votes.iter().any(|v| v.signer_pubkey == collector_pubkey),
+        "Collector's own vote must be included in proof"
+    );
+
+    cluster.cancel.cancel();
+    cluster.gateway_transport.close();
+    for shard in cluster.shards {
+        shard.transport.close();
+    }
+}
+
+#[tokio::test]
+async fn test_post_v1_verify_current_unoccupied_discovering_occupied_in_committee_inherited_expiry() {
+    let temp = tempdir().unwrap();
+    let now = test_now_ms();
+    let root_ms = now + 3_600_000;
+    let rfc_str = chrono::DateTime::from_timestamp_millis(root_ms as i64)
+        .expect("valid timestamp")
+        .to_rfc3339();
+    let cluster = setup_test_cluster_with_root(&temp, Some(rfc_str)).await;
+
+    let collector_pubkey = *cluster.shards[0].id.node_pubkey();
+    assert!(cluster.committee.contains(&collector_pubkey));
+    let collector_app = build_shard_app(&cluster.shards[0], cluster.shard_id);
+
+    // Spend lock with deletable_at: None (inherits root validity)
+    let spent_spend = make_spend_lock_with_deletable(
+        &cluster.genesis.layer2_voucher_id,
+        &cluster.genesis_tag,
+        [214; 32],
+        None,
+        now,
+        &cluster.owner_key,
+    );
+    let entry = L2LockEntry::from(&spent_spend);
+    let entry_digest = *blake3::hash(&serde_json::to_vec(&entry).unwrap()).as_bytes();
+
+    // 1 local collector (shard 0) + 13 remote custodians (shards 1..14) = 14 custodians
+    for shard in &cluster.shards[0..14] {
+        let (verdict, _) = shard
+            .engine
+            .ingress_hmc_lock_durable(
+                cluster.genesis_tag.clone(),
+                entry.clone(),
+                IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(cluster.genesis.layer2_voucher_id.clone()),
+            )
+            .await;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+    // Invalidate remaining 6 remote committee members
+    for shard in &cluster.shards[14..20] {
+        shard.ready.invalidate_shard(cluster.shard_id);
+    }
+
+    let unoccupied_ctx = LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id: cluster.shard_id,
+        voucher_id: cluster.genesis.layer2_voucher_id.clone(),
+        lookup_tag: cluster.genesis_tag.clone(),
+        parent_lock: *blake3::hash(cluster.genesis_tag.as_bytes()).as_bytes(),
+        child_lock: [0; 32],
+        root_valid_until: 0,
+        state_digest: [0; 32],
+        recipient_nonce: [114; 32],
+        committee: cluster.committee.clone(),
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify-current")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&unoccupied_ctx).unwrap()))
+        .unwrap();
+    let resp = collector_app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let proof: LiveStateProof = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(proof.occupancy, LiveSlotOccupancy::Occupied);
+    assert!(
+        proof.votes.len() >= 14,
+        "Must have >= 14 votes, got {}",
+        proof.votes.len()
+    );
+    assert_eq!(proof.context.child_lock, entry.t_id);
+    assert_eq!(proof.context.state_digest, entry_digest);
+    assert_eq!(proof.context.root_valid_until, root_ms);
+    verify_live_state_proof(&proof, &proof.context).expect("verify_live_state_proof must succeed");
+    assert!(
+        proof.votes.iter().any(|v| v.signer_pubkey == collector_pubkey),
+        "Collector's own vote must be included in proof"
+    );
+
+    cluster.cancel.cancel();
+    cluster.gateway_transport.close();
+    for shard in cluster.shards {
+        shard.transport.close();
     }
 }

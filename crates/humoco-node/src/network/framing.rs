@@ -9,6 +9,76 @@ pub const MAX_SYNC_FRAME_PAYLOAD_LEN: usize = MAX_STANDARD_FRAME_PAYLOAD_LEN;
 pub const MAX_FRAME_PAYLOAD_LEN: usize = MAX_SYNC_FRAME_PAYLOAD_LEN;
 pub const DEFAULT_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub const FLAG_AUTHENTICATED_DISCOVERY: u32 = 1 << 16;
+pub const MAX_AUTHENTICATED_DISCOVERY_BYTES: usize = 64 * 1024;
+
+/// Pure length-prefixed BLAKE3 digest helper for custodian-authenticated slot discovery.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_slot_discovery_digest(
+    network: u8,
+    shard_id: u16,
+    request_session_seq: u64,
+    parent_lock: &[u8; 32],
+    child_lock: &[u8; 32],
+    state_digest: &[u8; 32],
+    root_valid_until: u64,
+    custodian_pubkey: &[u8; 32],
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    let tag = b"HUMOCO_V1_LIVE_SLOT_DISCOVERY";
+    hasher.update(&(tag.len() as u8).to_le_bytes());
+    hasher.update(tag);
+    hasher.update(&[network]);
+    hasher.update(&shard_id.to_le_bytes());
+    hasher.update(&request_session_seq.to_le_bytes());
+    hasher.update(parent_lock);
+    hasher.update(child_lock);
+    hasher.update(state_digest);
+    hasher.update(&root_valid_until.to_le_bytes());
+    hasher.update(custodian_pubkey);
+    *hasher.finalize().as_bytes()
+}
+
+/// Bounded custodian-authenticated rival slot discovery payload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuthenticatedSlotDiscovery {
+    pub entry: crate::api::hmc::L2LockEntry,
+    pub root_valid_until: u64,
+    pub custodian_pubkey: [u8; 32],
+    #[serde(with = "serde_sig_64")]
+    pub custodian_signature: [u8; 64],
+}
+
+impl AuthenticatedSlotDiscovery {
+    pub fn verify_signature(
+        &self,
+        expected_network: u8,
+        shard_id: u16,
+        request_session_seq: u64,
+        parent_lock: &[u8; 32],
+        state_digest: &[u8; 32],
+    ) -> bool {
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&self.custodian_pubkey) else {
+            return false;
+        };
+        let digest = compute_slot_discovery_digest(
+            expected_network,
+            shard_id,
+            request_session_seq,
+            parent_lock,
+            &self.entry.t_id,
+            state_digest,
+            self.root_valid_until,
+            &self.custodian_pubkey,
+        );
+        key.verify_strict(
+            &digest,
+            &ed25519_dalek::Signature::from_bytes(&self.custodian_signature),
+        )
+        .is_ok()
+    }
+}
+
 /// Optional self-signed signing-history checkpoint, carried on the existing
 /// heartbeat stream. It is not a vote, quorum or membership claim.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

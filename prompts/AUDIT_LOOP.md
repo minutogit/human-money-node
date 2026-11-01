@@ -13,8 +13,9 @@ You are a Principal Rust Distributed Systems & Reliability Engineer performing a
 ### Step 1: Automatic Target Selection from Memory
 1. Read `AGENTS.md` (core architecture rules) and `prompts/AUDIT_STATE.md`.
 2. Select **exactly ONE** slice from `prompts/AUDIT_STATE.md` strictly following its Selection Rules:
-   - Priority 1: Any slice with status `🟡 ReCheck` (verify recent fix before inspecting clean code).
-   - Priority 2: Among slices NOT marked `🔴 Fix_Open`, select the slice with the lowest `Clean_Streak` (tie-breaker: `P1 > P2 > P3`, then oldest `Last_Run`, then lower slice ID).
+   - **Priority 1 (Initial Baseline Sweep):** Any slice with `Last_Run == never` or status `⚪ Pending`. If multiple exist, pick in slice order (`S01` to `S09`) or higher weight (`P1 > P2 > P3`). This ensures 100% of workspace code is inspected once before getting locked into local fix loops.
+   - **Priority 2 (Re-Verifications):** Once all slices have completed their initial run (`Last_Run != never`), select any slice marked `🟡 ReCheck` (verify recent fix before inspecting clean code).
+   - **Priority 3 (Continuous Hardening):** Among remaining slices NOT marked `🔴 Fix_Open`, select the slice with the lowest `Clean_Streak` (tie-breaker: oldest `Last_Run`, higher weight `P1 > P2 > P3`, then lower slice ID).
 
 ### Step 2: Deep Code Verification (Read-Only on `crates/`)
 Do NOT modify any files in `crates/` during this pass. Inspect every target file in the selected slice (and critical direct callees) against its listed Key Invariants and these 5 universal engineering lenses:

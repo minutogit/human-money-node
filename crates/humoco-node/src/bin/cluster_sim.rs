@@ -847,6 +847,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     challenge_ds_tag: output.ds_tag.clone(),
                                     locator_prefixes: vec![],
                                     read_quorum: 1,
+                                    root_context: None,
                                 };
                                 if let Ok((_status, duration, _envelope)) = post_status_http(gateway.rpc_addr, &status_req).await {
                                     batch_reads_count += 1;

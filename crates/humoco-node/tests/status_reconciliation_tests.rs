@@ -134,6 +134,7 @@ fn make_status_query(
         challenge_ds_tag: challenge_tag.to_string(),
         locator_prefixes: locators,
         read_quorum,
+        root_context: None,
     }
 }
 

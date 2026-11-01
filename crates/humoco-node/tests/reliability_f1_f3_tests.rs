@@ -78,21 +78,66 @@ fn setup_local_test_app() -> (
 /// - Source shard not ready -> Gateway returns 503 SERVICE_UNAVAILABLE + Rejected
 #[tokio::test]
 async fn test_f1_pending_remote_never_becomes_verified() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use humoco_node::api::hmc::{calculate_l2_payload_hash, L2LockRequest};
+    use sha2::{Digest as _, Sha256};
+
     let peers = recovery::recovery_peers(2).await;
     let (reader, source) = (&peers[0], &peers[1]);
     let now = source.manager.net_time_ms();
-    let voucher = "f1-remote-voucher";
-    let shard = humoco_sim_core::types::voucher_shard_id(voucher);
-    let tag = "f1-remote-parent";
-
-    let mut anchor = [0u8; 32];
-    anchor[..2].copy_from_slice(&shard.to_be_bytes());
-
-    let root = create_sample_entry(voucher, 0x10, now, 600_000);
+    let owner = SigningKey::from_bytes(&[49; 32]);
+    let sender_pub = owner.verifying_key().to_bytes();
+    let root_tx_hash = *blake3::hash(b"f1-remote-canonical-root").as_bytes();
+    let del_str = (now + 600_000).to_string();
+    let mut id_hasher = Sha256::new();
+    id_hasher.update(root_tx_hash);
+    id_hasher.update(sender_pub);
+    id_hasher.update(del_str.as_bytes());
+    let voucher = hex::encode(id_hasher.finalize());
+    let mut root_proof = humoco_proto::causal::CausalOutputProof {
+        version: 1,
+        voucher_id: voucher.clone(),
+        transaction_id: root_tx_hash,
+        state_hash: root_tx_hash,
+        sender_pubkey: sender_pub,
+        receiver_pubkey_hash: None,
+        change_pubkey_hash: None,
+        root_valid_until_ms: now + 600_000,
+        is_root: true,
+        signature: [0; 64],
+    };
+    root_proof.signature = owner.sign(&root_proof.digest().unwrap()).to_bytes();
+    let mut root_req = L2LockRequest {
+        causal_output: Some(root_proof),
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher.clone(),
+        ds_tag: None,
+        transaction_hash: root_tx_hash,
+        is_genesis: true,
+        sender_ephemeral_pub: sender_pub,
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms: now,
+        deletable_at: Some(del_str),
+        privacy_guard: None,
+    };
+    root_req.layer2_signature = owner.sign(&calculate_l2_payload_hash(&root_req)).to_bytes();
+    let root = L2LockEntry::from(&root_req);
     let root_tag = bs58::encode(root.t_id).into_string();
+    let anchor = humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag);
+    let shard = humoco_sim_core::types::canonical_voucher_shard(&anchor);
+    assert_ne!(shard, humoco_sim_core::types::voucher_shard_id(&voucher));
+    let tag = "f1-remote-parent";
     source.db.put_hmc_lock(&root_tag, &root).unwrap();
 
-    let entry = create_sample_entry(voucher, 0x20, now, 600_000);
+    let entry = create_sample_entry(&voucher, 0x20, now, 600_000);
 
     // 1. Stage spend into source RAM ONLY (uncommitted on source disk)
     source
@@ -103,7 +148,7 @@ async fn test_f1_pending_remote_never_becomes_verified() {
         .insert_lock_for_test(tag.into(), entry.clone());
     source
         .engine
-        .record_hmc_voucher_genesis_parent(voucher, anchor)
+        .record_hmc_voucher_genesis_parent(&voucher, anchor)
         .await;
     source.readiness.mark_shard_ready(shard);
 
@@ -143,10 +188,11 @@ async fn test_f1_pending_remote_never_becomes_verified() {
             ephemeral_pubkey: [1; 32],
             auth_signature: None,
         },
-        layer2_voucher_id: voucher.into(),
+        layer2_voucher_id: voucher.clone(),
         challenge_ds_tag: tag.into(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: Some(root.clone()),
     };
 
     let make_request = || {
@@ -178,10 +224,6 @@ async fn test_f1_pending_remote_never_becomes_verified() {
     // 2. Commit spend to source disk and recover so it becomes confirmed durable
     source.db.put_hmc_lock(tag, &entry).unwrap();
     source.engine.recover_from_disk(SimTime(now)).await.unwrap();
-    source
-        .engine
-        .record_hmc_voucher_genesis_parent(voucher, anchor)
-        .await;
     source.readiness.mark_shard_ready(shard);
 
     // 2a. With committed spend and ready shard: returns 200 OK + Verified

@@ -959,6 +959,7 @@ async fn signed_http_status_rejects_uncommitted_spend_until_durable_and_checks_h
         challenge_ds_tag: "pending-parent".into(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
 
     let response = router1
@@ -1034,6 +1035,7 @@ async fn signed_http_status_rejects_uncommitted_spend_until_durable_and_checks_h
         challenge_ds_tag: "committed-parent".into(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
     let response2 = app2
         .clone()

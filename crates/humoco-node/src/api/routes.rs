@@ -528,40 +528,39 @@ async fn sync_locks(
     };
 
     let storage = state.storage.clone();
-    let (locks, hmc_locks) =
-        match tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            storage.read_committed_sync_snapshot_bounded(
-                now_ms,
-                &locators,
-                MAX_SYNC_LOCKS,
-                MAX_SYNC_RESPONSE_BYTES,
-            )
-        })
-        .await
-        {
-            Ok(Ok(res)) => res,
-            Ok(Err(err)) => {
-                let err_resp = ErrorResponse {
-                    error: "StorageError".into(),
-                    message: err.to_string(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                };
-                return (StatusCode::SERVICE_UNAVAILABLE, Json(err_resp)).into_response();
-            }
-            Err(err) => {
-                let err_resp = ErrorResponse {
-                    error: "StorageError".into(),
-                    message: err.to_string(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                };
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(err_resp)).into_response();
-            }
-        };
+    let (locks, hmc_locks) = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        storage.read_committed_sync_snapshot_bounded(
+            now_ms,
+            &locators,
+            MAX_SYNC_LOCKS,
+            MAX_SYNC_RESPONSE_BYTES,
+        )
+    })
+    .await
+    {
+        Ok(Ok(res)) => res,
+        Ok(Err(err)) => {
+            let err_resp = ErrorResponse {
+                error: "StorageError".into(),
+                message: err.to_string(),
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            };
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(err_resp)).into_response();
+        }
+        Err(err) => {
+            let err_resp = ErrorResponse {
+                error: "StorageError".into(),
+                message: err.to_string(),
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            };
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(err_resp)).into_response();
+        }
+    };
 
     (StatusCode::OK, Json(SyncResponse { locks, hmc_locks })).into_response()
 }
@@ -1862,118 +1861,223 @@ async fn query_status(
         return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
     }
 
-    let hmc = state.engine.hmc_ram.read().await;
-    let mut verdict = hmc.query_status(
-        &payload.layer2_voucher_id,
-        &payload.challenge_ds_tag,
-        &payload.locator_prefixes,
-    );
-    drop(hmc);
+    let (supplied_shard, supplied_root) = match payload.authenticated_root_shard(now_ms) {
+        Ok(Some((shard, root))) => {
+            if state
+                .engine
+                .is_node_banned(&root.sender_ephemeral_pub)
+                .await
+            {
+                let envelope = wrap_and_sign_verdict(
+                    &state.identity,
+                    L2Verdict::Rejected {
+                        reason:
+                            "403 Forbidden: Signer is slashed and banned due to equivocation fraud"
+                                .into(),
+                    },
+                );
+                return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
+            }
+            (Some(shard), Some(root))
+        }
+        Ok(None) => (None, None),
+        Err(reason) => {
+            let envelope = wrap_and_sign_verdict(
+                &state.identity,
+                L2Verdict::Rejected {
+                    reason: reason.into(),
+                },
+            );
+            return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+        }
+    };
 
-    // # Architectural Invariant: Smart Client, Dumb Server & Hydra Resilience
-    // (Phase 2 P1, Spec 06 / INV-0310)
-    //
-    // The gateway is a stateless messenger without own shard state: if the lock
-    // is unknown locally it MUST NOT blindly answer UnknownVoucher. It queries
-    // exactly 1 deterministic node from the Top-20 shard custodians via QUIC
-    // (deterministic per-lock index, no hotspot on rank 1) and returns the
-    // remote result. If the public gateway IP fails, wallets rotate to the next
-    // gateway (Hydra resilience); shard state lives only on shard custodians.
-    if matches!(verdict, L2Verdict::UnknownVoucher) {
+    let (mut verdict, ram_genesis_shard, root_conflict) = {
+        let hmc = state.engine.hmc_ram.read().await;
+        let conflict = match (
+            supplied_root,
+            hmc.root_anchors.get(&payload.layer2_voucher_id),
+        ) {
+            (Some(sr), Some(local_root)) => {
+                !crate::storage::db::roots::same_root_deed(local_root, sr)
+            }
+            _ => false,
+        };
+        let v = hmc.query_status(
+            &payload.layer2_voucher_id,
+            &payload.challenge_ds_tag,
+            &payload.locator_prefixes,
+        );
+        let sid = hmc
+            .get_voucher_genesis_parent(&payload.layer2_voucher_id)
+            .map(|p| humoco_sim_core::types::canonical_voucher_shard(&p));
+        (v, sid, conflict)
+    };
+    if root_conflict {
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: "Immutable root proof conflict".into(),
+            },
+        );
+        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+    }
+
+    if matches!(
+        verdict,
+        L2Verdict::UnknownVoucher | L2Verdict::MissingLocks { .. }
+    ) {
         if let (Some(peer_mgr), Some(transport)) =
             (state.peer_manager.as_ref(), state.transport.as_ref())
         {
-            let shard_id = if let Some(sid) = state
-                .engine
-                .get_hmc_voucher_genesis_shard(&payload.layer2_voucher_id)
-                .await
-            {
-                sid
-            } else {
-                humoco_sim_core::types::voucher_shard_id(&payload.layer2_voucher_id)
-            };
-            let candidates = peer_mgr.get_top_n_shards_for_lock(shard_id, 20).await;
-            if !candidates.is_empty() {
-                // Deterministic 1-of-20: per-lock index from BLAKE3(tag).
-                let tag_hash = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
-                let idx = (tag_hash[0] as usize) % candidates.len();
-                let (_, addr) = candidates[idx];
-                let parent_lock = *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
-                let declared_read_ema = state.tier_controller.current_read_ema_credits();
-                let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-                let sender_pubkey = *state.identity.node_pubkey();
-                let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-                    &sender_pubkey,
-                    0,
-                    0,
-                    now_ms,
-                    declared_write_ema,
-                    declared_read_ema,
-                    0,
-                    true,
-                    &[0u8; 32],
-                );
-                let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
-                let status_query = crate::network::framing::StatusQueryPayload {
-                    lock_id: [0u8; 32],
-                    parent_lock,
-                    shard_id,
-                    sender_pubkey,
-                    declared_write_ema_micro_bj: declared_write_ema,
-                    current_read_ema_credits: declared_read_ema,
-                    timestamp_ms: now_ms,
-                    sender_signature,
-                };
-                let payload_bytes = bincode::serialize(&status_query).unwrap_or_default();
-                let header = humoco_sim_core::wire::WireHeader::new(
-                    humoco_sim_core::wire::MsgType::StatusQuery as u16,
-                    1,
-                    0,
-                    0,
-                    payload_bytes.len() as u32,
-                );
-                let remote_verdict: Option<L2Verdict> = async {
-                    let conn = transport.connect_peer(addr).await.ok()?;
-                    let fut = transport.send_request(&conn, &header, &payload_bytes);
-                    let (resp_header, resp_payload) =
-                        tokio::time::timeout(std::time::Duration::from_millis(1000), fut)
-                            .await
-                            .ok()?
-                            .ok()?;
-                    if resp_header.msg_type != humoco_sim_core::wire::MsgType::StatusResponse as u16
-                    {
-                        return None;
-                    }
-                    if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0 {
-                        return Some(L2Verdict::Rejected {
-                            reason: "Remote durable state pending".into(),
-                        });
-                    }
-                    if resp_payload.is_empty()
-                        || (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED) != 0
-                        || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED) != 0
-                    {
-                        return None;
-                    }
-                    // Tag-only fallback returns the full L2LockEntry with
-                    // first-party signature evidence.
-                    if let Some(entry) =
-                        serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&resp_payload)
-                            .ok()
-                            .or_else(|| bincode::deserialize(&resp_payload).ok())
-                    {
-                        if entry.layer2_voucher_id == payload.layer2_voucher_id {
-                            return Some(L2Verdict::Verified { lock_entry: entry });
+            let mut resolved_shard = ram_genesis_shard;
+            if resolved_shard.is_none() {
+                if let Ok(permit) = state.voucher_root_reads.clone().try_acquire_owned() {
+                    let storage = state.storage.clone();
+                    let vid = payload.layer2_voucher_id.clone();
+                    let read_res = tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        storage.voucher_root(&vid)
+                    })
+                    .await;
+                    if let Ok(Ok(Some(disk_root))) = read_res {
+                        if let Some(sr) = supplied_root {
+                            if !crate::storage::db::roots::same_root_deed(&disk_root, sr) {
+                                let envelope = wrap_and_sign_verdict(
+                                    &state.identity,
+                                    L2Verdict::Rejected {
+                                        reason: "Immutable root proof conflict".into(),
+                                    },
+                                );
+                                return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+                            }
+                        }
+                        if crate::storage::db::roots::root_valid_until(&disk_root)
+                            .is_ok_and(|v| v > now_ms)
+                        {
+                            let root_tag = bs58::encode(disk_root.t_id).into_string();
+                            let gp =
+                                humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag);
+                            resolved_shard =
+                                Some(humoco_sim_core::types::canonical_voucher_shard(&gp));
                         }
                     }
-                    // Unsigned exact observations and legacy originals are not a
-                    // substitute for the requested full voucher entry, and never
-                    // establish challenge-bound current checkout authority.
-                    None
                 }
-                .await;
-                if let Some(remote) = remote_verdict {
-                    verdict = remote;
+            }
+            if resolved_shard.is_none() {
+                resolved_shard = supplied_shard;
+            }
+
+            let self_pubkey = *state.identity.node_pubkey();
+            let self_hrw = *state.identity.hrw_routing_id();
+
+            if let Some(shard_id) = resolved_shard {
+                let (committee, remote_custodians, _) = peer_mgr
+                    .shard_committee(self_pubkey, self_hrw, shard_id)
+                    .await;
+                let local_is_authoritative = committee.iter().any(|m| m.node_pubkey == self_pubkey)
+                    && state.readiness_manager.is_shard_ready(shard_id);
+
+                if !local_is_authoritative {
+                    if remote_custodians.is_empty() {
+                        verdict = L2Verdict::Rejected {
+                            reason: "No eligible shard custodians available".into(),
+                        };
+                    } else {
+                        // Deterministic 1-of-20 (INV-0310): per-lock index from BLAKE3(tag).
+                        let tag_hash =
+                            *blake3::hash(payload.challenge_ds_tag.as_bytes()).as_bytes();
+                        let idx = (tag_hash[0] as usize) % remote_custodians.len();
+                        let (_, addr) = remote_custodians[idx];
+                        let parent_lock = tag_hash;
+                        let declared_read_ema = state.tier_controller.current_read_ema_credits();
+                        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+                        let sender_pubkey = self_pubkey;
+                        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                            &sender_pubkey,
+                            0,
+                            0,
+                            now_ms,
+                            declared_write_ema,
+                            declared_read_ema,
+                            0,
+                            true,
+                            &[0u8; 32],
+                        );
+                        let sender_signature =
+                            state.identity.signing_key().sign(&digest).to_bytes();
+                        let status_query = crate::network::framing::StatusQueryPayload {
+                            lock_id: [0u8; 32],
+                            parent_lock,
+                            shard_id,
+                            sender_pubkey,
+                            declared_write_ema_micro_bj: declared_write_ema,
+                            current_read_ema_credits: declared_read_ema,
+                            timestamp_ms: now_ms,
+                            sender_signature,
+                        };
+                        let payload_bytes = bincode::serialize(&status_query).unwrap_or_default();
+                        let header = humoco_sim_core::wire::WireHeader::new(
+                            humoco_sim_core::wire::MsgType::StatusQuery as u16,
+                            1,
+                            0,
+                            0,
+                            payload_bytes.len() as u32,
+                        );
+                        let remote_verdict: Option<L2Verdict> = async {
+                            let conn = transport.connect_peer(addr).await.ok()?;
+                            let fut = transport.send_request(&conn, &header, &payload_bytes);
+                            let (resp_header, resp_payload) =
+                                tokio::time::timeout(std::time::Duration::from_millis(1000), fut)
+                                    .await
+                                    .ok()?
+                                    .ok()?;
+                            if resp_header.msg_type
+                                != humoco_sim_core::wire::MsgType::StatusResponse as u16
+                            {
+                                return None;
+                            }
+                            if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0 {
+                                return Some(L2Verdict::Rejected {
+                                    reason: "Remote durable state pending".into(),
+                                });
+                            }
+                            if resp_payload.is_empty()
+                                || (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED)
+                                    != 0
+                                || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED)
+                                    != 0
+                            {
+                                return None;
+                            }
+                            if let Some(entry) = serde_json::from_slice::<
+                                crate::api::hmc::L2LockEntry,
+                            >(&resp_payload)
+                            .ok()
+                            .or_else(|| bincode::deserialize(&resp_payload).ok())
+                            {
+                                if entry.layer2_voucher_id == payload.layer2_voucher_id {
+                                    return Some(L2Verdict::Verified { lock_entry: entry });
+                                }
+                            }
+                            None
+                        }
+                        .await;
+                        if let Some(remote) = remote_verdict {
+                            verdict = remote;
+                        }
+                    }
+                }
+            } else {
+                let (committee, remote_peers, _) =
+                    peer_mgr.shard_committee(self_pubkey, self_hrw, 0).await;
+                let sole_ready_island = remote_peers.is_empty()
+                    && committee.iter().any(|m| m.node_pubkey == self_pubkey)
+                    && state.readiness_manager.is_shard_ready(0);
+                if !sole_ready_island {
+                    verdict = L2Verdict::Rejected {
+                        reason: "Voucher root routing context unavailable".into(),
+                    };
                 }
             }
         }
@@ -2000,11 +2104,7 @@ async fn query_status(
     (status, Json(envelope)).into_response()
 }
 
-fn map_ingress_error(
-    state: &AppState,
-    err: IngressError,
-    has_auth_token: bool,
-) -> Response {
+fn map_ingress_error(state: &AppState, err: IngressError, has_auth_token: bool) -> Response {
     let mut required_diff_hdr = None;
     let mut challenge_opt = None;
     let mut expires_at_opt = None;
@@ -2024,10 +2124,8 @@ fn map_ingress_error(
             )
         }
         IngressError::InvalidPoW(err) => {
-            if let crate::ingress::pow::PowError::InsufficientDifficulty {
-                required,
-                provided,
-            } = err
+            if let crate::ingress::pow::PowError::InsufficientDifficulty { required, provided } =
+                err
             {
                 required_diff_hdr = Some(*required);
                 (
@@ -2108,9 +2206,7 @@ fn map_ingress_error(
             IngressError::PoWRequired { .. } => "PoWRequired".to_string(),
             IngressError::InvalidAuthToken => "InvalidAuthToken".to_string(),
             IngressError::InvalidPeerToken => "InvalidPeerToken".to_string(),
-            IngressError::QuotaPersistenceUnavailable => {
-                "QuotaPersistenceUnavailable".to_string()
-            }
+            IngressError::QuotaPersistenceUnavailable => "QuotaPersistenceUnavailable".to_string(),
             _ => "AdmissionDenied".to_string(),
         },
         message: reason,
@@ -2545,10 +2641,9 @@ async fn submit_hmc_lock_with_deadline(
         // Epoch-bound envelope (Phase 1 P0): reserve epoch first so the
         // signed digest and the wire payload commit to the same
         // (epoch_day, epoch_seq).
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-            state
-                .tier_controller
-                .record_declared_usage(now_ms, footprint);
+        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = state
+            .tier_controller
+            .record_declared_usage(now_ms, footprint);
         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
             &sender_pubkey,
             epoch_day,
@@ -2562,23 +2657,22 @@ async fn submit_hmc_lock_with_deadline(
         );
         let sender_signature = state.identity.signing_key().sign(&digest).to_bytes();
         let current_anl_24h = declared_write_ema;
-        let wire_payload =
-            bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
-                req: req.clone(),
-                chain: None,
-                root_valid_until,
-                epoch_day,
-                epoch_seq,
-                cumulative_micro_byte_years,
-                prev_day_final_bytes,
-                current_anl_24h,
-                declared_write_ema_micro_bj: declared_write_ema,
-                declared_read_ema_credits: declared_read_ema,
-                sender_pubkey,
-                sender_signature,
-                timestamp_ms: now_ms,
-            })
-            .ok();
+        let wire_payload = bincode::serialize(&crate::network::framing::LockWirePayload::Hmc {
+            req: req.clone(),
+            chain: None,
+            root_valid_until,
+            epoch_day,
+            epoch_seq,
+            cumulative_micro_byte_years,
+            prev_day_final_bytes,
+            current_anl_24h,
+            declared_write_ema_micro_bj: declared_write_ema,
+            declared_read_ema_credits: declared_read_ema,
+            sender_pubkey,
+            sender_signature,
+            timestamp_ms: now_ms,
+        })
+        .ok();
         let start_quorum = std::time::Instant::now();
         let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
             &state,
@@ -2597,11 +2691,9 @@ async fn submit_hmc_lock_with_deadline(
             .record_local_latency(std::time::Duration::from_micros(1));
 
         // Remote double-spend evidence overrides idempotent fast-path.
-        if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached())
-        {
+        if let Some(existing_lock) = remote_collision.filter(|_| !cert.is_quorum_reached()) {
             let verdict = L2Verdict::Conflict { existing_lock };
-            let envelope =
-                wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
+            let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
             state.metrics.record_rejected_conflict_409();
             state.metrics.record_e2e_latency(start.elapsed());
             return (StatusCode::CONFLICT, Json(envelope)).into_response();
@@ -2617,8 +2709,7 @@ async fn submit_hmc_lock_with_deadline(
             let envelope =
                 wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert));
             state.metrics.record_e2e_latency(start.elapsed());
-            let mut resp =
-                (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
+            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
             if should_warn {
                 resp.headers_mut().insert(
                     axum::http::HeaderName::from_static("x-deprecation-warning"),
@@ -2630,8 +2721,7 @@ async fn submit_hmc_lock_with_deadline(
             return resp;
         }
 
-        let envelope =
-            wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
+        let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
         state.metrics.record_e2e_latency(start.elapsed());
         let mut resp = (StatusCode::OK, Json(envelope)).into_response();
         if should_warn {

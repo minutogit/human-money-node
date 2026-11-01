@@ -161,6 +161,7 @@ impl MeshSimulator {
             challenge_ds_tag: challenge_ds_tag.to_string(),
             locator_prefixes: vec![],
             read_quorum: 1,
+            root_context: None,
         };
         self.poll_status_verified(node_idx, &query, timeout, Duration::from_millis(200))
             .await

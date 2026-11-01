@@ -70,6 +70,7 @@ async fn test_sim_01_evolutionary_growth() {
         challenge_ds_tag: genesis_tag.clone(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
     let (q_status, q_env) = sim
         .node(n0)
@@ -175,6 +176,7 @@ async fn test_sim_01_evolutionary_growth() {
         challenge_ds_tag: genesis2_tag.clone(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
     // Poll node 0 for V2
     let mut v2_on_n0 = false;
@@ -265,6 +267,7 @@ async fn test_sim_01_evolutionary_growth() {
         challenge_ds_tag: genesis3_tag.clone(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
     let (st_q3_pre, env_q3_pre) = sim
         .node(n2)
@@ -400,6 +403,7 @@ async fn test_sim_01_evolutionary_growth() {
             challenge_ds_tag: tag.to_string(),
             locator_prefixes: vec![],
             read_quorum: 1,
+            root_context: None,
         };
         let (st, env) = sim
             .node(idx)

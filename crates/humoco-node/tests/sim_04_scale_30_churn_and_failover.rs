@@ -105,6 +105,7 @@ fn status_query(voucher: &str, challenge: &str, pubkey: [u8; 32]) -> L2StatusQue
         challenge_ds_tag: challenge.to_string(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     }
 }
 

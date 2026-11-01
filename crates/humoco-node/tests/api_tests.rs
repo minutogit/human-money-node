@@ -1961,6 +1961,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         challenge_ds_tag: t_id_bs58.clone(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
     let res_q1 = app
         .clone()
@@ -1989,6 +1990,7 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         challenge_ds_tag: t_id_bs58.clone(),
         locator_prefixes: vec![],
         read_quorum: 3,
+        root_context: None,
     };
     let res_q3 = app
         .clone()
@@ -2267,6 +2269,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         challenge_ds_tag: leap_ds_tag.clone(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
     let res_qtag = app
         .clone()
@@ -2303,6 +2306,7 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         challenge_ds_tag: leap_t_id_bs58.clone(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
     let res_qtid = app
         .oneshot(
@@ -5278,7 +5282,9 @@ async fn test_s01_02_genesis_root_retry_ingress_admission() {
     let required_byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_sec);
 
     // Give VIP account exactly enough Byte-Years for 1 genesis lock
-    storage.set_quota(&account_tag, required_byte_years).unwrap();
+    storage
+        .set_quota(&account_tag, required_byte_years)
+        .unwrap();
 
     let sender_key = SigningKey::from_bytes(&[0x51; 32]);
     let genesis_req = make_test_hmc_genesis(&"51".repeat(32), now + ttl_ms, &sender_key);
@@ -5434,7 +5440,8 @@ async fn test_s01_02_genesis_root_retry_ingress_admission() {
     // 5c. Valid PoW retry: solve valid PoW for genesis parent ([0u8; 32]) -> 200 OK
     let parent_zero = [0u8; 32];
     let (challenge, difficulty, _) = pow_engine.generate_challenge_for_parent(&parent_zero);
-    let nonce = PowEngine::solve_blake3_hashcash(&challenge, difficulty, 50_000).expect("solve pow");
+    let nonce =
+        PowEngine::solve_blake3_hashcash(&challenge, difficulty, 50_000).expect("solve pow");
     let res_valid_pow = app
         .oneshot(
             Request::builder()
@@ -5472,7 +5479,9 @@ async fn test_s01_02_spend_retry_ingress_admission() {
     let required_byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_sec);
 
     // Initial VIP quota for 1 genesis + 1 spend: 2 * required_byte_years
-    storage.set_quota(&account_tag, required_byte_years * 2).unwrap();
+    storage
+        .set_quota(&account_tag, required_byte_years * 2)
+        .unwrap();
 
     let genesis_key = SigningKey::from_bytes(&[0x52; 32]);
     let genesis_req = make_test_hmc_genesis(&"52".repeat(32), now + ttl_ms, &genesis_key);
@@ -5707,7 +5716,9 @@ async fn test_s01_03_bounded_materialization_and_locator_semantics() {
     let root_req = make_test_hmc_genesis(&root_voucher.repeat(2), now + ttl_ms, &root_key);
     let root_entry = humoco_node::api::hmc::L2LockEntry::from(&root_req);
     let root_tag = bs58::encode(root_entry.t_id).into_string();
-    storage.put_hmc_lock(&root_tag, &root_entry).expect("put root");
+    storage
+        .put_hmc_lock(&root_tag, &root_entry)
+        .expect("put root");
 
     let mut hmc_tags = Vec::new();
     let mut hmc_id_hexes = Vec::new();
@@ -5753,10 +5764,7 @@ async fn test_s01_03_bounded_materialization_and_locator_semantics() {
 
     // HTTP /v1/sync check:
     let sync_req = SyncRequest {
-        sparse_locators: vec![
-            native_parent_hexes[0].clone(),
-            hmc_tags[0].clone(),
-        ],
+        sparse_locators: vec![native_parent_hexes[0].clone(), hmc_tags[0].clone()],
     };
     let resp = app
         .oneshot(
@@ -5764,19 +5772,32 @@ async fn test_s01_03_bounded_materialization_and_locator_semantics() {
                 .method("POST")
                 .uri("/v1/sync")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&sync_req).expect("serialize req")))
+                .body(Body::from(
+                    serde_json::to_vec(&sync_req).expect("serialize req"),
+                ))
                 .expect("build req"),
         )
         .await
         .expect("send req");
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = resp.into_body().collect().await.expect("read body").to_bytes();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
     let sync_resp: SyncResponse = serde_json::from_slice(&body_bytes).expect("deserialize body");
 
     // Filtered locators must be absent in response
-    assert!(!sync_resp.locks.iter().any(|l| l.parent_lock == native_parent_hexes[0]));
-    assert!(!sync_resp.hmc_locks.iter().any(|l| l.lookup_tag == hmc_tags[0]));
+    assert!(!sync_resp
+        .locks
+        .iter()
+        .any(|l| l.parent_lock == native_parent_hexes[0]));
+    assert!(!sync_resp
+        .hmc_locks
+        .iter()
+        .any(|l| l.lookup_tag == hmc_tags[0]));
 }
 
 #[tokio::test]
@@ -5791,7 +5812,9 @@ async fn test_s01_03_bounded_serialized_response_bytes() {
     let root_req = make_test_hmc_genesis(&root_voucher.repeat(2), now + ttl_ms, &root_key);
     let root_entry = humoco_node::api::hmc::L2LockEntry::from(&root_req);
     let root_tag = bs58::encode(root_entry.t_id).into_string();
-    storage.put_hmc_lock(&root_tag, &root_entry).expect("put root");
+    storage
+        .put_hmc_lock(&root_tag, &root_entry)
+        .expect("put root");
 
     // Insert 20 HMC spend locks
     for i in 0..20u8 {
@@ -5810,12 +5833,20 @@ async fn test_s01_03_bounded_serialized_response_bytes() {
     // 1. Direct helper: pass a tight byte budget of 5000 bytes (each HMC row is ~1.5-2 KiB JSON)
     let byte_cap = 5000;
     let (locks, hmc_locks) = storage
-        .read_committed_sync_snapshot_bounded(now, &std::collections::HashSet::new(), 10_000, byte_cap)
+        .read_committed_sync_snapshot_bounded(
+            now,
+            &std::collections::HashSet::new(),
+            10_000,
+            byte_cap,
+        )
         .expect("read bounded snapshot");
 
     assert!(locks.is_empty());
     assert!(!hmc_locks.is_empty(), "should contain as many as fit");
-    assert!(hmc_locks.len() < 20, "must be truncated well before all 20 rows");
+    assert!(
+        hmc_locks.len() < 20,
+        "must be truncated well before all 20 rows"
+    );
 
     let sync_resp = SyncResponse { locks, hmc_locks };
     let serialized_len = serde_json::to_vec(&sync_resp).expect("serialize").len();
@@ -5834,14 +5865,21 @@ async fn test_s01_03_bounded_serialized_response_bytes() {
                 .method("POST")
                 .uri("/v1/sync")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&sync_req).expect("serialize req")))
+                .body(Body::from(
+                    serde_json::to_vec(&sync_req).expect("serialize req"),
+                ))
                 .expect("build req"),
         )
         .await
         .expect("send req");
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = resp.into_body().collect().await.expect("read body").to_bytes();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
     assert!(
         body_bytes.len() <= humoco_node::api::routes::MAX_SYNC_RESPONSE_BYTES,
         "HTTP sync response body size must not exceed MAX_SYNC_RESPONSE_BYTES"
@@ -5887,7 +5925,9 @@ async fn test_s01_03_bounded_concurrent_sync_workers() {
                 .method("POST")
                 .uri("/v1/sync")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&sync_req).expect("serialize req")))
+                .body(Body::from(
+                    serde_json::to_vec(&sync_req).expect("serialize req"),
+                ))
                 .expect("build req"),
         )
         .await
@@ -5898,7 +5938,12 @@ async fn test_s01_03_bounded_concurrent_sync_workers() {
         StatusCode::SERVICE_UNAVAILABLE,
         "Saturated sync worker permits must fail fast with 503"
     );
-    let body_bytes = resp.into_body().collect().await.expect("read body").to_bytes();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
     let err_resp: humoco_node::api::ErrorResponse =
         serde_json::from_slice(&body_bytes).expect("deserialize error response");
     assert_eq!(err_resp.error, "SyncBusy");
@@ -5914,7 +5959,9 @@ async fn test_s01_03_bounded_concurrent_sync_workers() {
                 .method("POST")
                 .uri("/v1/sync")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&sync_req).expect("serialize req")))
+                .body(Body::from(
+                    serde_json::to_vec(&sync_req).expect("serialize req"),
+                ))
                 .expect("build req"),
         )
         .await
@@ -5932,7 +5979,11 @@ async fn test_s01_03_bounded_concurrent_sync_workers() {
 
     // 5. Cancellation safety: if an in-flight client is dropped, permit remains held
     // by the blocking thread until it finishes.
-    let permit = state.sync_reads.clone().try_acquire_owned().expect("permit");
+    let permit = state
+        .sync_reads
+        .clone()
+        .try_acquire_owned()
+        .expect("permit");
     let (tx_start, rx_start) = tokio::sync::oneshot::channel::<()>();
     let (tx_finish, rx_finish) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::task::spawn_blocking(move || {
@@ -5962,7 +6013,8 @@ async fn test_s01_03_bounded_concurrent_sync_workers() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    assert!(released, "Permit must be released once blocking worker actually terminates");
+    assert!(
+        released,
+        "Permit must be released once blocking worker actually terminates"
+    );
 }
-
-

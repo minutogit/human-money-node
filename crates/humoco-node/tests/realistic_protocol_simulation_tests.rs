@@ -440,6 +440,7 @@ impl TestNode {
             challenge_ds_tag: challenge_ds_tag.to_string(),
             locator_prefixes: vec![],
             read_quorum: 1,
+            root_context: None,
         };
         let json_body = serde_json::to_string(&query)?;
         let (status, body) = self

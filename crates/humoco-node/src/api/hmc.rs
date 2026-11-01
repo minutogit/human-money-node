@@ -447,6 +447,51 @@ pub struct L2StatusQuery {
     pub locator_prefixes: Vec<String>,
     #[serde(default = "default_read_quorum")]
     pub read_quorum: u8,
+    /// Optional bounded, authenticated voucher genesis root for cold-gateway canonical shard routing (S01-04).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_context: Option<L2LockEntry>,
+}
+
+impl L2StatusQuery {
+    /// Validates an optional client-supplied voucher genesis root for cold-gateway shard routing (S01-04).
+    /// Enforces bounded payload size, canonical root identity, authenticated output commitment,
+    /// V3 lock signature, and unexpired root validity without mutating RAM or disk state.
+    pub fn authenticated_root_shard(
+        &self,
+        now_ms: u64,
+    ) -> Result<Option<(u16, &L2LockEntry)>, &'static str> {
+        let Some(root) = self.root_context.as_ref() else {
+            return Ok(None);
+        };
+        if root.layer2_voucher_id != self.layer2_voucher_id {
+            return Err("Root routing context voucher mismatch");
+        }
+        let root_tag = bs58::encode(root.t_id).into_string();
+        if root_tag.len() > crate::storage::db::MAX_SYNC_TAG_BYTES {
+            return Err("Oversize root routing tag");
+        }
+        let encoded = serde_json::to_vec(root).map_err(|_| "Invalid root routing serialization")?;
+        if encoded.len() > crate::storage::db::MAX_SYNC_ROW_BYTES {
+            return Err("Oversize root routing context");
+        }
+        if !crate::storage::db::roots::is_root(&root_tag, root) {
+            return Err("Routing context is not a voucher root");
+        }
+        if root.causal_output.is_none() {
+            return Err("Root routing context requires authenticated output proof");
+        }
+        let valid_until_ms = crate::storage::db::roots::root_valid_until(root)
+            .map_err(|_| "Invalid root routing validity or identity")?;
+        if valid_until_ms <= now_ms {
+            return Err("Voucher root routing context expired");
+        }
+        if !verify_l2_lock_entry_signature(root, &root_tag) {
+            return Err("Invalid root routing signature");
+        }
+        let genesis_parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag);
+        let shard_id = humoco_sim_core::types::canonical_voucher_shard(&genesis_parent);
+        Ok(Some((shard_id, root)))
+    }
 }
 
 /// Ordered chain registration: a durable valid prefix survives an invalid suffix.

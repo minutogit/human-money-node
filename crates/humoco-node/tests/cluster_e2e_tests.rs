@@ -765,6 +765,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         challenge_ds_tag: spend.ds_tag.clone().unwrap(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
     let (status, body) = node
         .http_request(
@@ -800,6 +801,7 @@ async fn test_e2e_hmc_compliance_with_live_tcp() {
         challenge_ds_tag: "abcde".to_string(),
         locator_prefixes: vec![],
         read_quorum: 1,
+        root_context: None,
     };
 
     let json_body = serde_json::to_string(&unknown_query).unwrap();

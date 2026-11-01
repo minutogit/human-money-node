@@ -165,7 +165,7 @@ human-money-node/
 │       └── tests/           # Storage, network, API, control & E2E cluster integration tests
 │
 ├── docs/                    # Numbered specifications 00–20, 99 & INVARIANT_REGISTRY.md
-└── prompts/                 # Specialized AI audit prompts (Phases 0-6)
+└── prompts/                 # Universal audit loop (AUDIT_LOOP.md) & coverage ledger (AUDIT_STATE.md)
 ```
 
 ### On-Demand Specification Index:

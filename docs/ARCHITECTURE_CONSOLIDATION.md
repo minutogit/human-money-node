@@ -7,7 +7,7 @@ architectural requirements, proof gates (G1–G5), and the complete decision reg
 ## Outcome and verification status
 
 All five work blocks (DB1–DB5), safety and progress contracts ([G1–G5](SAFETY_AND_PROGRESS_CONTRACTS_G1_G5.md)),
-and all 25 adversarial architecture and security audits ([`prompts/AUDIT_REGISTRY.md`](../prompts/AUDIT_REGISTRY.md))
+and all 25 adversarial architecture and security audits ([`prompts/archive/AUDIT_REGISTRY.md`](../prompts/archive/AUDIT_REGISTRY.md))
 are completed, implemented in production code, and verified by regression test suites.
 
 The [invariant registry](INVARIANT_REGISTRY.md) maps 115 owned definitions/topics to

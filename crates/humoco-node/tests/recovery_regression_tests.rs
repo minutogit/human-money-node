@@ -9,6 +9,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
+#[path = "common/recovery.rs"]
+mod recovery;
+
+
 #[tokio::test]
 async fn test_rejected_snapshot_preserves_node_signing_health() {
     let temp = tempdir().expect("tempdir");
@@ -261,3 +265,144 @@ async fn test_active_hmc_locks_for_shard_filters_foreign_shards() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_s02_02_real_quic_shard_recovery_between_cleanup_passes() {
+    let peers = recovery::recovery_peers(2).await;
+    let (reader, source) = (&peers[0], &peers[1]);
+
+    // 1. In source node: seed an expired voucher with 257 spends (valid_until = 50_000 ms, expires at sec 81)
+    let expired_vid = "quic_voucher_expired_257";
+    let mut exp_root_tid = [0x55u8; 32];
+    exp_root_tid[0] = 0x01;
+    let exp_root_tag = bs58::encode(exp_root_tid).into_string();
+    let exp_root_entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        t_id: exp_root_tid,
+        layer2_voucher_id: expired_vid.to_string(),
+        sender_ephemeral_pub: [0x11; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x22; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 1000,
+        created_at_ms: 1000,
+        deletable_at: Some("50000".to_string()),
+        privacy_guard: None,
+    };
+    source.db.put_hmc_lock(&exp_root_tag, &exp_root_entry).unwrap();
+
+    for i in 0..257u32 {
+        let mut spend_tid = [0x66u8; 32];
+        spend_tid[..4].copy_from_slice(&i.to_le_bytes());
+        let spend_tag = bs58::encode(spend_tid).into_string();
+        let spend_entry = humoco_node::api::hmc::L2LockEntry {
+            causal_output: None,
+            t_id: spend_tid,
+            layer2_voucher_id: expired_vid.to_string(),
+            sender_ephemeral_pub: [0x33; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0x44; 64],
+            trap_r: None,
+            trap_s: None,
+        encrypted_timestamp: (1000 + i as u64) as u128,
+            created_at_ms: 1000 + i as u64,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+        source.db.put_hmc_lock(&spend_tag, &spend_entry).unwrap();
+    }
+
+    // 2. In source node: seed an unrelated live voucher in a DIFFERENT shard (valid_until = 500_000 ms)
+    let exp_parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&exp_root_tag);
+    let exp_shard = humoco_sim_core::types::canonical_voucher_shard(&exp_parent);
+
+    let mut live_root_tid = [0x77u8; 32];
+    while humoco_sim_core::types::canonical_voucher_shard(
+        &humoco_sim_core::types::genesis_parent_bytes_from_tag(&bs58::encode(live_root_tid).into_string()),
+    ) == exp_shard
+    {
+        live_root_tid[0] = live_root_tid[0].wrapping_add(1);
+    }
+    let live_root_tag = bs58::encode(live_root_tid).into_string();
+    let live_parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&live_root_tag);
+    let live_shard = humoco_sim_core::types::canonical_voucher_shard(&live_parent);
+    assert_ne!(exp_shard, live_shard);
+
+    let live_vid = "quic_voucher_live_diff_shard";
+    let live_root_entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        t_id: live_root_tid,
+        layer2_voucher_id: live_vid.to_string(),
+        sender_ephemeral_pub: [0x88; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x99; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 2000,
+        created_at_ms: 2000,
+        deletable_at: Some("500000".to_string()),
+        privacy_guard: None,
+    };
+    source.db.put_hmc_lock(&live_root_tag, &live_root_entry).unwrap();
+
+    let live_spend_tid = [0xAAu8; 32];
+    let live_spend_tag = bs58::encode(live_spend_tid).into_string();
+    let live_spend_entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        t_id: live_spend_tid,
+        layer2_voucher_id: live_vid.to_string(),
+        sender_ephemeral_pub: [0xBBu8; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0xCCu8; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 3000,
+        created_at_ms: 3000,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    source.db.put_hmc_lock(&live_spend_tag, &live_spend_entry).unwrap();
+
+    // 3. Trigger ONE bounded cleanup pass at t = 81s on the source node (leaving 1 expired spend + retained root)
+    let (_, pruned_count) = source.db.prune_expired_buckets(81).unwrap();
+    assert_eq!(pruned_count, 256, "One pass must prune 256 expired spends");
+    assert!(
+        source.db.voucher_root(expired_vid).unwrap().is_some(),
+        "Source node must retain expired root while 1 spend remains"
+    );
+
+    // 4. Over real QUIC, requesting peer pulls active sync / snapshot for the unrelated live shard!
+    let conn = reader
+        .network
+        .connect_peer(source.network.local_addr().unwrap())
+        .await
+        .unwrap();
+
+    let sync_page_res = reader
+        .network
+        .request_active_sync_page_for_shard(&conn, 1, 0, 100, live_shard)
+        .await;
+
+    assert!(
+        sync_page_res.is_ok(),
+        "Real QUIC recovery/snapshot for unrelated live shard MUST succeed between cleanup passes! Got: {:?}",
+        sync_page_res.err()
+    );
+    let sync_page = sync_page_res.unwrap();
+    assert!(
+        sync_page
+            .payload
+            .hmc_locks
+            .iter()
+            .any(|(t, e)| t == &live_spend_tag && e.layer2_voucher_id == live_vid),
+        "Snapshot response must contain the live spend entry"
+    );
+
+    recovery::stop_recovery_peers(peers).await;
+}
+

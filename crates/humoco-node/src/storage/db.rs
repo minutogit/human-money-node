@@ -29,6 +29,8 @@ pub enum StorageError {
     SigningHistoryCorrupt,
     #[error("Unsupported database schema version: {found} (supported: {supported})")]
     UnsupportedSchemaVersion { found: u32, supported: u32 },
+    #[error("Invalid backup destination: {0}")]
+    InvalidBackupDestination(String),
     #[error("Redb database error: {0}")]
     Database(#[from] redb::DatabaseError),
 
@@ -129,6 +131,8 @@ pub const TABLE_PROVISIONAL_LOCKS: TableDefinition<&[u8; 32], &[u8]> =
     TableDefinition::new("provisional_locks");
 pub const TABLE_PROVISIONAL_HMC_LOCKS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("provisional_hmc_locks");
+pub const TABLE_PROVISIONAL_HMC_VOUCHER_INDEX: TableDefinition<(&str, &str), ()> =
+    TableDefinition::new("prov_hmc_voucher_index");
 pub const TABLE_TTL_INDEX: TableDefinition<(u64, &[u8; 32]), ()> =
     TableDefinition::new("ttl_index");
 pub const TABLE_SLASHING_EVIDENCE: TableDefinition<&[u8; 32], &[u8]> =
@@ -261,6 +265,7 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_LOCKS)?;
             let _ = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
             let _ = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
+            let _ = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
             let _ = write_txn.open_table(TABLE_TTL_INDEX)?;
             let _ = write_txn.open_table(TABLE_SLASHING_EVIDENCE)?;
             let _ = write_txn.open_table(TABLE_QUOTA_ACCOUNTS)?;
@@ -270,6 +275,21 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_BANNED_NODES)?;
             let _ = write_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
             let _ = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+        }
+        // Seamless backwards-compatibility: backfill TABLE_PROVISIONAL_HMC_VOUCHER_INDEX if needed
+        {
+            let prov_locks = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
+            let mut prov_vidx = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
+            if prov_vidx.is_empty()? && !prov_locks.is_empty()? {
+                for item in prov_locks.iter()? {
+                    let (k, v) = item?;
+                    if let Ok(entry) =
+                        serde_json::from_slice::<crate::api::hmc::L2LockEntry>(v.value())
+                    {
+                        prov_vidx.insert((entry.layer2_voucher_id.as_str(), k.value()), ())?;
+                    }
+                }
+            }
         }
         roots::initialize(&write_txn)?;
         let corrupt = signing::initialize(&write_txn)?;
@@ -773,6 +793,7 @@ impl RedbStorage {
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
             let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+            let mut table_prov_vidx = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
             let roots_table = write_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
 
             let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
@@ -829,6 +850,7 @@ impl RedbStorage {
                     if let Ok(entry) =
                         serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
                     {
+                        table_prov_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
                         table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
                     }
                     prov_quarantined = true;
@@ -1373,6 +1395,7 @@ impl RedbStorage {
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
             let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+            let mut table_prov_vidx = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
 
             let mut to_remove_hmc = Vec::new();
             for item in table_hmc.iter()? {
@@ -1423,6 +1446,7 @@ impl RedbStorage {
                     serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&val_bytes)
                 {
                     let _ = table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()));
+                    table_prov_vidx.insert((entry.layer2_voucher_id.as_str(), tag.as_str()), ())?;
                     // TTL index entry (TABLE_HMC_TTL_INDEX) is preserved so the
                     // shared expiry worker purges the quarantined record at
                     // voucher expiration (F09, DEC-035, Pillar 6).
@@ -1504,7 +1528,16 @@ impl RedbStorage {
             table_hmc.insert(lookup_tag, val_bytes.as_slice())?;
 
             let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
-            let _ = table_prov_hmc.remove(lookup_tag);
+            let mut table_prov_vidx = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
+            if let Some(old_prov) = table_prov_hmc.remove(lookup_tag)? {
+                if let Ok(prov_entry) =
+                    serde_json::from_slice::<crate::api::hmc::L2LockEntry>(old_prov.value())
+                {
+                    let _ = table_prov_vidx
+                        .remove(&(prov_entry.layer2_voucher_id.as_str(), lookup_tag));
+                }
+            }
+            let _ = table_prov_vidx.remove(&(entry.layer2_voucher_id.as_str(), lookup_tag));
 
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
             table_vidx.insert((entry.layer2_voucher_id.as_str(), lookup_tag), ())?;
@@ -1647,28 +1680,67 @@ impl RedbStorage {
     /// Prunes expired voucher root records and TTL index entries (A22-03).
     ///
     /// Shared helper called within write transactions by both `prune_expired_buckets`
-    /// and `prune_expired_in_txn`. Bounded to 256 entries per pass.
+    /// and `prune_expired_in_txn`. Bounded to 256 deletions per pass, while inspecting
+    /// up to 2048 candidate expired roots to guarantee bounded work and avoid starvation from pinned roots.
     fn prune_voucher_roots(
         &self,
         txn: &redb::WriteTransaction,
         now_sec: u64,
     ) -> Result<usize, StorageError> {
-        let mut ttl = txn.open_table(roots::TABLE_VOUCHER_ROOT_TTL)?;
-        let expired = ttl
-            .range(..(now_sec.saturating_add(1), ""))?
-            .take(256)
-            .map(|row| row.map(|(key, _)| (key.value().0, key.value().1.to_string())))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut roots = txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
-        let mut count = 0;
-        for (second, voucher) in expired {
+        const MAX_PRUNED_ROOTS: usize = 256;
+        const MAX_CANDIDATE_ROOTS: usize = 2048;
+
+        // 1. Fast-path check: if no candidate roots are expired, return immediately (O(1))
+        let ttl_read = txn.open_table(roots::TABLE_VOUCHER_ROOT_TTL)?;
+        let mut candidate_iter = ttl_read.range(..(now_sec.saturating_add(1), ""))?;
+        let first_candidate = match candidate_iter.next() {
+            Some(res) => res?,
+            None => return Ok(0),
+        };
+
+        // 2. Open voucher index and provisional voucher index once for pure O(1) B-tree prefix seeks
+        let vidx = txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+        let prov_vidx = txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
+        let roots_read = txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
+
+        let voucher_has_spends = |vid: &str| -> Result<bool, StorageError> {
+            let mut prov_range = prov_vidx.range((vid, "")..)?;
+            if let Some(item) = prov_range.next() {
+                let (k, _) = item?;
+                if k.value().0 == vid {
+                    return Ok(true);
+                }
+            }
+            let mut range = vidx.range((vid, "")..)?;
+            if let Some(item) = range.next() {
+                let (k, _) = item?;
+                if k.value().0 == vid {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+
+        // 3. Stream candidate expired roots up to MAX_CANDIDATE_ROOTS to find up to MAX_PRUNED_ROOTS childless roots
+        let mut to_remove = Vec::with_capacity(MAX_PRUNED_ROOTS);
+        let mut inspected = 0usize;
+
+        let candidate_stream = std::iter::once(Ok(first_candidate)).chain(candidate_iter);
+        for item in candidate_stream {
+            inspected += 1;
+            let (key_guard, _) = item?;
+            let (second, voucher_str) = key_guard.value();
             if second <= now_sec {
-                let should_remove = if let Some(guard) = roots.get(voucher.as_str())? {
+                let should_remove = if let Some(guard) = roots_read.get(voucher_str)? {
                     if let Ok(entry) =
                         serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
                     {
                         if let Ok(exp) = roots::root_valid_until(&entry) {
-                            now_sec >= grace_expiry_bucket_sec(exp)
+                            if now_sec >= grace_expiry_bucket_sec(exp) {
+                                !voucher_has_spends(voucher_str)?
+                            } else {
+                                false
+                            }
                         } else {
                             self.latch_corruption_in_txn(txn);
                             false
@@ -1681,11 +1753,32 @@ impl RedbStorage {
                     true
                 };
                 if should_remove {
-                    roots.remove(voucher.as_str())?;
-                    ttl.remove((second, voucher.as_str()))?;
-                    count += 1;
+                    to_remove.push((second, voucher_str.to_string()));
+                    if to_remove.len() >= MAX_PRUNED_ROOTS {
+                        break;
+                    }
                 }
             }
+            if inspected >= MAX_CANDIDATE_ROOTS {
+                break;
+            }
+        }
+        drop(ttl_read);
+        drop(roots_read);
+        drop(vidx);
+        drop(prov_vidx);
+
+        if to_remove.is_empty() {
+            return Ok(0);
+        }
+
+        // 4. Atomically remove identified childless roots
+        let mut ttl = txn.open_table(roots::TABLE_VOUCHER_ROOT_TTL)?;
+        let mut roots = txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
+        let count = to_remove.len();
+        for (second, voucher) in to_remove {
+            roots.remove(voucher.as_str())?;
+            ttl.remove((second, voucher.as_str()))?;
         }
         Ok(count)
     }
@@ -1696,8 +1789,6 @@ impl RedbStorage {
         write_txn: &redb::WriteTransaction,
         now_sec: u64,
     ) -> Result<(), StorageError> {
-        self.prune_voucher_roots(write_txn, now_sec)?;
-        Self::prune_own_choices(write_txn, now_sec)?;
         let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
         let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
         let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
@@ -1745,6 +1836,7 @@ impl RedbStorage {
         let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
         let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
         let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
+        let mut table_prov_vidx = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
         let roots_table = write_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
         let expired_hmc_entries: Vec<(u64, String)> = table_hmc_ttl
             .range(..(now_sec.saturating_add(1), ""))?
@@ -1799,6 +1891,7 @@ impl RedbStorage {
                 if let Ok(entry) =
                     serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
                 {
+                    table_prov_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
                     table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
                 }
                 prov_quarantined = true;
@@ -1808,6 +1901,15 @@ impl RedbStorage {
             }
             table_hmc.remove(tag.as_str())?;
         }
+        drop(table_hmc_ttl);
+        drop(table_hmc);
+        drop(table_prov_hmc);
+        drop(table_vidx);
+        drop(table_prov_vidx);
+        drop(roots_table);
+
+        Self::prune_own_choices(write_txn, now_sec)?;
+        self.prune_voucher_roots(write_txn, now_sec)?;
         Ok(())
     }
     pub fn get_hmc_lock(
@@ -2116,7 +2218,52 @@ impl RedbStorage {
     /// Performs a consistent snapshot backup of all tables to destination_path using a read transaction.
     /// Returns the total number of locks backed up.
     pub fn create_backup(&self, destination_path: &Path) -> Result<usize, StorageError> {
-        if destination_path.exists() {
+        let file_name = destination_path.file_name().ok_or_else(|| {
+            StorageError::InvalidBackupDestination("Destination path must have a file name".into())
+        })?;
+
+        let dest_parent = match destination_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let dest_parent_canon = dest_parent.canonicalize()?;
+        let dest_resolved = dest_parent_canon.join(file_name);
+
+        let src_canon = self.path.canonicalize()?;
+        let src_meta = std::fs::metadata(&src_canon)?;
+
+        if dest_resolved == src_canon {
+            return Err(StorageError::InvalidBackupDestination(
+                "Destination path resolves to active database".into(),
+            ));
+        }
+
+        if let Ok(dest_symlink_meta) = std::fs::symlink_metadata(destination_path) {
+            if dest_symlink_meta.is_dir() {
+                return Err(StorageError::InvalidBackupDestination(
+                    "Destination cannot be a directory".into(),
+                ));
+            }
+            if let Ok(dest_canon) = std::fs::canonicalize(destination_path) {
+                if dest_canon == src_canon {
+                    return Err(StorageError::InvalidBackupDestination(
+                        "Destination path resolves to active database".into(),
+                    ));
+                }
+            }
+            if let Ok(dest_target_meta) = std::fs::metadata(destination_path) {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if (dest_target_meta.dev(), dest_target_meta.ino())
+                        == (src_meta.dev(), src_meta.ino())
+                    {
+                        return Err(StorageError::InvalidBackupDestination(
+                            "Destination path resolves to active database".into(),
+                        ));
+                    }
+                }
+            }
             let _ = std::fs::remove_file(destination_path);
         }
         let dest_storage = RedbStorage::open(destination_path)?;
@@ -2147,6 +2294,14 @@ impl RedbStorage {
             for item in src_prov_hmc.iter()? {
                 let (k, v) = item?;
                 dst_prov_hmc.insert(k.value(), v.value())?;
+            }
+
+            // 1d. TABLE_PROVISIONAL_HMC_VOUCHER_INDEX
+            let src_prov_vidx = read_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
+            let mut dst_prov_vidx = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
+            for item in src_prov_vidx.iter()? {
+                let (k, v) = item?;
+                dst_prov_vidx.insert(k.value(), v.value())?;
             }
 
             // 2. TABLE_TTL_INDEX

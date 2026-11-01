@@ -537,3 +537,131 @@ async fn a10_conflicting_original_attestations_trigger_automatic_shard_equivocat
     worker.abort();
     let _ = worker.await;
 }
+
+#[tokio::test]
+async fn a08_legacy_unsigned_tuple_relay_must_never_learn_or_authorize_third_party() {
+    use std::net::SocketAddr;
+    let cancel = CancellationToken::new();
+    let attacker = NodeIdentity::generate();
+    let recipient = NodeIdentity::generate();
+    let unseen_victim = NodeIdentity::generate();
+    let ma = Arc::new(PeerManager::new(vec![]));
+    let mb = Arc::new(PeerManager::new(vec![]));
+
+    let a = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &attacker,
+        ma.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let b = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &recipient,
+        mb.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let aa = a.local_addr().unwrap();
+    let ba = b.local_addr().unwrap();
+
+    ma.register_f2f_friend(*recipient.node_pubkey(), Some(ba)).await;
+    mb.register_f2f_friend(*attacker.node_pubkey(), Some(aa)).await;
+
+    a.spawn_accept_loop();
+    b.spawn_accept_loop();
+
+    let conn = a.connect_peer(ba).await.unwrap();
+
+    let unseen_addr: SocketAddr = "127.0.0.1:31339".parse().unwrap();
+    assert!(!mb.is_known_node(unseen_victim.node_pubkey()).await);
+
+    // Attacker sends legacy unsigned tuple ([u8; 32], SocketAddr) with hops = 1 (reserved = 1)
+    let legacy_payload = bincode::serialize(&(*unseen_victim.node_pubkey(), unseen_addr)).unwrap();
+    let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, legacy_payload.len() as u32);
+    hdr.reserved = 1; // hops = 1 (relayed)
+
+    a.send_unidirectional(&conn, &hdr, &legacy_payload).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Assert: NO entry, NO address, NO liveness refresh, NO clock sample, and NO direct-RPC authorization
+    assert!(
+        !mb.is_known_node(unseen_victim.node_pubkey()).await,
+        "Relayed legacy unsigned tuple must never insert node into known_network_nodes"
+    );
+    assert_eq!(
+        mb.get_known_node_addr(unseen_victim.node_pubkey()).await,
+        None,
+        "Relayed legacy unsigned tuple must not create address mapping"
+    );
+    assert!(
+        !mb.can_authorize_direct_rpc(&unseen_addr, Some(unseen_victim.node_pubkey())).await,
+        "Relayed legacy unsigned tuple must not authorize direct RPC by pubkey"
+    );
+    assert!(
+        !mb.can_authorize_direct_rpc(&unseen_addr, None).await,
+        "Relayed legacy unsigned tuple must not authorize direct RPC by address"
+    );
+    assert!(
+        mb.get_peer(&unseen_addr).await.is_none(),
+        "Relayed legacy unsigned tuple must not create or refresh peer info"
+    );
+    assert_eq!(
+        mb.clock().sample_count(),
+        0,
+        "Relayed legacy unsigned tuple must not contribute clock samples"
+    );
+
+    // Positive Control: Valid origin-signed relay is learned
+    let legit_relayed = NodeIdentity::generate();
+    let legit_addr: SocketAddr = "127.0.0.1:31340".parse().unwrap();
+    let time = mb.net_time_ms();
+    let mut legit_hb = HeartbeatWirePayload {
+        node_id: *legit_relayed.node_pubkey(),
+        addr: legit_addr,
+        timestamp_ms: time,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: [0; 32],
+        ticket_epoch_t0: 0,
+        ttl: 2,
+        signing_checkpoint: None,
+        gateway_advertisement: None,
+    };
+    legit_hb.sign_origin(&legit_relayed, time);
+    assert!(legit_hb.verify_origin_address_binding());
+
+    let legit_payload = bincode::serialize(&legit_hb).unwrap();
+    let mut legit_hdr = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, legit_payload.len() as u32);
+    legit_hdr.reserved = 1; // hops = 1
+
+    a.send_unidirectional(&conn, &legit_hdr, &legit_payload).await.unwrap();
+
+
+    let learned = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if mb.is_known_node(legit_relayed.node_pubkey()).await {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    assert!(learned, "Valid origin-signed relayed heartbeat must be accepted and learned");
+
+    cancel.cancel();
+    a.close();
+    b.close();
+    a.drain_tasks().await;
+    b.drain_tasks().await;
+}
+

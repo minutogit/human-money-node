@@ -421,6 +421,8 @@ impl RedbStorage {
                         warn!("Orphaned HMC spend {} lacks voucher root anchor; isolating into provisional storage", tag);
                         tx.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?
                             .insert(tag.as_str(), bytes.as_slice())?;
+                        tx.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?
+                            .insert((old.layer2_voucher_id.as_str(), tag.as_str()), ())?;
                         tx.open_table(TABLE_HMC_LOCKS)?.remove(tag.as_str())?;
                         tx.open_table(TABLE_HMC_VOUCHER_INDEX)?
                             .remove((old.layer2_voucher_id.as_str(), tag.as_str()))?;
@@ -492,6 +494,8 @@ impl RedbStorage {
                 }
                 tx.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?
                     .insert(tag.as_str(), bytes.as_slice())?;
+                tx.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?
+                    .insert((old.layer2_voucher_id.as_str(), tag.as_str()), ())?;
                 tx.open_table(TABLE_HMC_LOCKS)?.remove(tag.as_str())?;
                 tx.open_table(TABLE_HMC_VOUCHER_INDEX)?
                     .remove((old.layer2_voucher_id.as_str(), tag.as_str()))?;
@@ -591,7 +595,7 @@ impl RedbStorage {
             if tx.open_table(TABLE_HMC_LOCKS)?.get(tag.value())?.is_some() {
                 return Err(invalid("HMC collision key belongs to another shard"));
             }
-            if let Some(prov_bytes) = tx
+            let prov_voucher_id = if let Some(prov_bytes) = tx
                 .open_table(TABLE_PROVISIONAL_HMC_LOCKS)?
                 .get(tag.value())?
                 .map(|g| g.value().to_vec())
@@ -613,11 +617,21 @@ impl RedbStorage {
                         ));
                     }
                 }
-            }
+                Some(prov.layer2_voucher_id)
+            } else {
+                None
+            };
             tx.open_table(TABLE_HMC_LOCKS)?
                 .insert(tag.value(), value.value())?;
             tx.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?
                 .remove(tag.value())?;
+            if let Some(vid) = prov_voucher_id {
+                tx.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?
+                    .remove((vid.as_str(), tag.value()))?;
+            }
+            let _ = tx
+                .open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?
+                .remove((row.layer2_voucher_id.as_str(), tag.value()));
             tx.open_table(TABLE_HMC_VOUCHER_INDEX)?
                 .insert((row.layer2_voucher_id.as_str(), tag.value()), ())?;
             tx.open_table(TABLE_HMC_TTL_INDEX)?

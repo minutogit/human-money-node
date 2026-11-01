@@ -472,3 +472,163 @@ async fn test_a11_01_heartbeat_freshness_window_drop() {
         "Heartbeat deviating by >60s must be dropped at ingress and not recorded in clock"
     );
 }
+
+#[tokio::test]
+async fn test_s04_05_shard_bucket_range_amplification_and_bounds() {
+    const MAX_SHARD_BUCKET_RANGE_COUNT: u16 = 1024;
+    let cancel = CancellationToken::new();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(humoco_node::storage::RedbStorage::open(&temp.path().join("s04_05.redb")).expect("open redb"));
+    let (engine, _worker) = humoco_node::storage::DualTierEngine::new(storage.clone());
+
+    let server_id = NodeIdentity::generate();
+    let pm_server = Arc::new(PeerManager::new(Vec::new()));
+    let handler = Arc::new(
+        humoco_node::network::NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            server_id.clone(),
+            pm_server.clone(),
+        ),
+    );
+
+    let transport_server = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm_server.clone(),
+        handler.clone(),
+        cancel.clone(),
+    )
+    .expect("bind server");
+    let server_addr = transport_server.local_addr().unwrap();
+    transport_server.spawn_accept_loop();
+
+    let client_id = NodeIdentity::generate();
+    let pm_client = Arc::new(PeerManager::new(Vec::new()));
+    let transport_client = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        pm_client.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind client");
+    let client_addr = transport_client.local_addr().unwrap();
+    transport_client.spawn_accept_loop();
+
+    // Authorize client as F2F friend so direct RPC is allowed
+    pm_server.register_f2f_friend(*client_id.node_pubkey(), Some(client_addr)).await;
+    pm_client.register_f2f_friend(*server_id.node_pubkey(), Some(server_addr)).await;
+
+    let conn = transport_client.connect_peer(server_addr).await.expect("connect client");
+
+    // 1. Send ShardBucketRangeRequest with bucket_count = u16::MAX (65535) -> must be rejected
+    let req_max = humoco_sim_core::types::ShardBucketRangeRequest {
+        shard_id: 0,
+        start_bucket: 0,
+        bucket_count: u16::MAX,
+    };
+    let payload_max = bincode::serialize(&req_max).unwrap();
+    let hdr_max = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 1, 0, 0, payload_max.len() as u32);
+    let res_max = transport_client.send_request(&conn, &hdr_max, &payload_max).await;
+    assert!(
+        res_max.is_err() || res_max.as_ref().unwrap().0.msg_type != MsgType::ShardBucketRangeResponse as u16,
+        "Request with bucket_count = u16::MAX must be rejected promptly"
+    );
+
+    // 2. Send malformed payload -> must be rejected promptly, NOT deserialized to default
+    let malformed_payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    let hdr_malformed = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 2, 0, 0, malformed_payload.len() as u32);
+    let res_malformed = transport_client.send_request(&conn, &hdr_malformed, &malformed_payload).await;
+    assert!(
+        res_malformed.is_err() || res_malformed.as_ref().unwrap().0.msg_type != MsgType::ShardBucketRangeResponse as u16,
+        "Malformed ShardBucketRangeRequest must be rejected, not defaulted"
+    );
+
+    // 3. Small legitimate range positive control: bucket_count = 5
+    let req_small = humoco_sim_core::types::ShardBucketRangeRequest {
+        shard_id: 0,
+        start_bucket: 10,
+        bucket_count: 5,
+    };
+    let payload_small = bincode::serialize(&req_small).unwrap();
+    let hdr_small = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 3, 0, 0, payload_small.len() as u32);
+    let (resp_hdr_small, resp_bytes_small) = transport_client.send_request(&conn, &hdr_small, &payload_small).await.expect("small request");
+    assert_eq!(resp_hdr_small.msg_type, MsgType::ShardBucketRangeResponse as u16);
+    let resp_small: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&resp_bytes_small).expect("deserialize small resp");
+    assert_eq!(resp_small.buckets.len(), 5);
+
+    // 4. Largest supported valid bucket_count: 1024 (MAX_SHARD_BUCKET_RANGE_COUNT)
+    let req_max_valid = humoco_sim_core::types::ShardBucketRangeRequest {
+        shard_id: 0,
+        start_bucket: 0,
+        bucket_count: MAX_SHARD_BUCKET_RANGE_COUNT,
+    };
+    let payload_max_valid = bincode::serialize(&req_max_valid).unwrap();
+    let hdr_max_valid = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 4, 0, 0, payload_max_valid.len() as u32);
+    let (resp_hdr_max_valid, resp_bytes_max_valid) = transport_client.send_request(&conn, &hdr_max_valid, &payload_max_valid).await.expect("max valid request");
+    assert_eq!(resp_hdr_max_valid.msg_type, MsgType::ShardBucketRangeResponse as u16);
+    assert!(
+        resp_bytes_max_valid.len() <= 65_536,
+        "Response payload for MAX_SHARD_BUCKET_RANGE_COUNT must be <= 64 KiB (was {})",
+        resp_bytes_max_valid.len()
+    );
+    let resp_max_valid: humoco_sim_core::types::ShardBucketRangeResponse = bincode::deserialize(&resp_bytes_max_valid).expect("deserialize max valid resp");
+    assert_eq!(resp_max_valid.buckets.len(), MAX_SHARD_BUCKET_RANGE_COUNT as usize);
+
+    cancel.cancel();
+    transport_server.close();
+    transport_client.close();
+}
+
+#[tokio::test]
+async fn test_s04_05_rejection_precedes_storage_read() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(humoco_node::storage::RedbStorage::open(&temp.path().join("s04_05_struct.redb")).expect("open redb"));
+    let (engine, _worker) = humoco_node::storage::DualTierEngine::new(storage.clone());
+    let server_id = NodeIdentity::generate();
+    let pm = Arc::new(PeerManager::new(Vec::new()));
+    let handler = humoco_node::network::NodeRequestHandler::with_peer_manager(
+        engine,
+        storage,
+        server_id,
+        pm,
+    );
+
+    // Case 1: Malformed payload must fail directly on deserialization, NEVER return Ok default!
+    let malformed_hdr = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 1, 0, 0, 3);
+    let malformed_res = handler.handle_authenticated(malformed_hdr, vec![1, 2, 3], None).await;
+    assert!(
+        malformed_res.is_err(),
+        "Malformed payload must return an Err, not default to 288 buckets"
+    );
+
+    // Case 2: Excessive bucket_count must fail upfront validation before storage read
+    let excessive_req = humoco_sim_core::types::ShardBucketRangeRequest {
+        shard_id: 0,
+        start_bucket: 0,
+        bucket_count: u16::MAX,
+    };
+    let excessive_payload = bincode::serialize(&excessive_req).unwrap();
+    let excessive_hdr = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 2, 0, 0, excessive_payload.len() as u32);
+    let excessive_res = handler.handle_authenticated(excessive_hdr, excessive_payload, None).await;
+    assert!(
+        excessive_res.is_err(),
+        "Excessive bucket_count must return Err before storage read"
+    );
+
+    // Case 3: Zero bucket_count must fail upfront validation
+    let zero_req = humoco_sim_core::types::ShardBucketRangeRequest {
+        shard_id: 0,
+        start_bucket: 0,
+        bucket_count: 0,
+    };
+    let zero_payload = bincode::serialize(&zero_req).unwrap();
+    let zero_hdr = WireHeader::new(MsgType::ShardBucketRangeRequest as u16, 3, 0, 0, zero_payload.len() as u32);
+    let zero_res = handler.handle_authenticated(zero_hdr, zero_payload, None).await;
+    assert!(
+        zero_res.is_err(),
+        "Zero bucket_count must return Err"
+    );
+}
+

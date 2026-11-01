@@ -737,3 +737,163 @@ async fn test_a20_01_boot_reconstruction_rejects_forged_evidence() {
         "Storage must NOT contain ban for framed victim"
     );
 }
+
+#[tokio::test]
+async fn test_a02_01_mainnet_rejects_testnet_equivocation_proof() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let offender_key = SigningKey::from_bytes(&[0x91u8; 32]);
+    let offender_pub = offender_key.verifying_key().to_bytes();
+    let parent = [0x71u8; 32];
+    let lock_a = [0x81u8; 32];
+    let lock_b = [0x82u8; 32];
+
+    // Genuine Testnet-only attestations
+    let att_a = sign_attestation(
+        &offender_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
+        0,
+    );
+    let att_b = sign_attestation(
+        &offender_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
+        1,
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        offender_pub,
+    );
+
+    assert!(proof.verify_network(NetworkId::Testnet));
+    assert!(!proof.verify_network(NetworkId::Mainnet));
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let evidence_hash = *blake3::hash(&payload).as_bytes();
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        1,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send equivocation proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    // Assert: NO RAM ban, NO durable ban, NO evidence entry
+    assert!(
+        !engine.is_node_banned(&offender_pub).await,
+        "Mainnet node must NOT ban offender in engine RAM for Testnet proof"
+    );
+    assert!(
+        !pm.is_banned(&offender_pub).await,
+        "Mainnet node must NOT ban offender in PeerManager for Testnet proof"
+    );
+    assert!(
+        !storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Mainnet node must NOT ban offender in redb for Testnet proof"
+    );
+    assert!(
+        storage.get_evidence(&evidence_hash).expect("get evidence").is_none(),
+        "Mainnet node must NOT store slashing evidence for Testnet proof"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+#[tokio::test]
+async fn test_a02_01_testnet_rejects_mainnet_equivocation_proof() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Testnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let offender_key = SigningKey::from_bytes(&[0x92u8; 32]);
+    let offender_pub = offender_key.verifying_key().to_bytes();
+    let parent = [0x72u8; 32];
+    let lock_a = [0x83u8; 32];
+    let lock_b = [0x84u8; 32];
+
+    // Genuine Mainnet-only attestations
+    let att_a = sign_attestation(
+        &offender_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
+    );
+    let att_b = sign_attestation(
+        &offender_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+        1,
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        offender_pub,
+    );
+
+    assert!(proof.verify_network(NetworkId::Mainnet));
+    assert!(!proof.verify_network(NetworkId::Testnet));
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let evidence_hash = *blake3::hash(&payload).as_bytes();
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        1,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send equivocation proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    // Assert: NO RAM ban, NO durable ban, NO evidence entry
+    assert!(
+        !engine.is_node_banned(&offender_pub).await,
+        "Testnet node must NOT ban offender in engine RAM for Mainnet proof"
+    );
+    assert!(
+        !pm.is_banned(&offender_pub).await,
+        "Testnet node must NOT ban offender in PeerManager for Mainnet proof"
+    );
+    assert!(
+        !storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Testnet node must NOT ban offender in redb for Mainnet proof"
+    );
+    assert!(
+        storage.get_evidence(&evidence_hash).expect("get evidence").is_none(),
+        "Testnet node must NOT store slashing evidence for Mainnet proof"
+    );
+
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+

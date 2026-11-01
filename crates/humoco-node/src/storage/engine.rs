@@ -583,9 +583,15 @@ impl HmcRamIndex {
             .root_anchors
             .keys()
             .filter(|voucher| {
-                self.voucher_roots
+                let has_spends = self
+                    .vouchers
                     .get(*voucher)
-                    .is_some_and(|expiry| should_prune(now, SimTime(*expiry)))
+                    .is_some_and(|tags| !tags.is_empty());
+                !has_spends
+                    && self
+                        .voucher_roots
+                        .get(*voucher)
+                        .is_some_and(|expiry| should_prune(now, SimTime(*expiry)))
             })
             .take(256)
             .cloned()

@@ -774,3 +774,349 @@ async fn anchor_storage_fixture(
         "{verdict:?}"
     );
 }
+
+// Helper to construct deterministic HMC entries
+fn make_test_root_entry(
+    voucher_id: &str,
+    t_id: [u8; 32],
+    valid_until_ms: u64,
+) -> (String, humoco_node::api::hmc::L2LockEntry) {
+    let tag = bs58::encode(t_id).into_string();
+    let entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        t_id,
+        layer2_voucher_id: voucher_id.to_string(),
+        sender_ephemeral_pub: [0x11; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x22; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 1000,
+        created_at_ms: 1000,
+        deletable_at: Some(valid_until_ms.to_string()),
+        privacy_guard: None,
+    };
+    (tag, entry)
+}
+
+fn make_test_spend_entry(
+    voucher_id: &str,
+    t_id: [u8; 32],
+    created_at_ms: u64,
+) -> (String, humoco_node::api::hmc::L2LockEntry) {
+    let tag = bs58::encode(t_id).into_string();
+    let entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        t_id,
+        layer2_voucher_id: voucher_id.to_string(),
+        sender_ephemeral_pub: [0x33; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x44; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: created_at_ms as u128,
+        created_at_ms,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    (tag, entry)
+}
+
+fn shard_for_tid(t_id: [u8; 32]) -> u16 {
+    let tag = bs58::encode(t_id).into_string();
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+    humoco_sim_core::types::canonical_voucher_shard(&parent)
+}
+
+#[test]
+fn test_s02_01_backup_to_live_source_path_rejected_and_preserves_durability() {
+    let dir = tempdir().unwrap();
+    let sub_dir = dir.path().join("db_dir");
+    std::fs::create_dir_all(&sub_dir).unwrap();
+    let db_path = sub_dir.join("live.redb");
+    let storage = RedbStorage::open(&db_path).unwrap();
+
+    // 1. Write retained original approval + non-signing state
+    let node_key = [0x11u8; 32];
+    let parent1 = [0x22u8; 32];
+    let record1 = LockRecord::new(parent1, [0x33u8; 32], vec![1, 2, 3], SimTime(1000), SimTime(50_000));
+    storage
+        .commit_original_record_approval(&record1, 50_000, &node_key, b"approval_1", 0)
+        .unwrap();
+    storage.set_quota(&[0x44u8; 32], 5000).unwrap();
+    storage.ban_node(&[0x55u8; 32], 2000).unwrap();
+    storage.put_lock(&record1, 50_000).unwrap();
+
+    // (a) Exact source path
+    let err_exact = storage.create_backup(&db_path);
+    assert!(err_exact.is_err(), "backup to exact source path must fail");
+
+    // (b) Path with '.' component
+    let dot_path = sub_dir.join(".").join("live.redb");
+    let err_dot = storage.create_backup(&dot_path);
+    assert!(err_dot.is_err(), "backup to '.' normalized source path must fail");
+
+    // (c) Path via symlinked parent directory
+    #[cfg(unix)]
+    {
+        let symlink_dir = dir.path().join("symlink_dir");
+        std::os::unix::fs::symlink(&sub_dir, &symlink_dir).unwrap();
+        let symlink_path = symlink_dir.join("live.redb");
+        let err_symlink_dir = storage.create_backup(&symlink_path);
+        assert!(err_symlink_dir.is_err(), "backup via symlinked parent directory must fail");
+    }
+
+    // (c2) Destination symlink file pointing directly to source DB
+    #[cfg(unix)]
+    {
+        let symlink_file = dir.path().join("live_symlink.redb");
+        std::os::unix::fs::symlink(&db_path, &symlink_file).unwrap();
+        let err_symlink_file = storage.create_backup(&symlink_file);
+        assert!(err_symlink_file.is_err(), "backup via symlink file to live DB must fail");
+    }
+
+    // 2. Subsequent writes to live DB
+    let parent2 = [0x66u8; 32];
+    let record2 = LockRecord::new(parent2, [0x77u8; 32], vec![4, 5, 6], SimTime(2000), SimTime(50_000));
+    storage
+        .commit_original_record_approval(&record2, 50_000, &node_key, b"approval_2", 0)
+        .unwrap();
+    storage.ban_node(&[0x88u8; 32], 3000).unwrap();
+
+    // 3. Close and reopen DB at source path
+    drop(storage);
+    let reopened = RedbStorage::open(&db_path).unwrap();
+
+    // Verify both preexisting and subsequent writes remain intact!
+    assert!(reopened.own_signing_choice(&node_key, &hex::encode(parent1)).unwrap().is_some());
+    assert!(reopened.own_signing_choice(&node_key, &hex::encode(parent2)).unwrap().is_some());
+    assert_eq!(reopened.get_quota(&[0x44u8; 32]).unwrap(), 5000);
+    assert!(reopened.is_node_banned(&[0x55u8; 32]).unwrap());
+    assert!(reopened.is_node_banned(&[0x88u8; 32]).unwrap());
+    assert!(reopened.get_lock(&parent1).unwrap().is_some());
+
+    // 4. Distinct-destination backup succeeds (and overwriting existing distinct file succeeds)
+    let distinct_dest = dir.path().join("distinct_backup.redb");
+    let count1 = reopened.create_backup(&distinct_dest).unwrap();
+    assert!(count1 >= 1);
+    assert!(distinct_dest.exists());
+    let count2 = reopened.create_backup(&distinct_dest).unwrap();
+    assert_eq!(count1, count2);
+}
+
+#[test]
+fn test_s02_02_prune_expired_buckets_257_spends_retains_root_until_drained() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("prune_257.redb");
+    let storage = RedbStorage::open(&db_path).unwrap();
+
+    // 1. Expired voucher with 257 spends (valid_until = 50_000 ms, expires at sec 81)
+    let expired_vid = "voucher_exp_257";
+    let mut exp_root_tid = [0xAAu8; 32];
+    exp_root_tid[0] = 0x01;
+    let (exp_root_tag, exp_root) = make_test_root_entry(expired_vid, exp_root_tid, 50_000);
+    storage.put_hmc_lock(&exp_root_tag, &exp_root).unwrap();
+
+    for i in 0..257u32 {
+        let mut spend_tid = [0xBBu8; 32];
+        spend_tid[..4].copy_from_slice(&i.to_le_bytes());
+        let (spend_tag, spend) = make_test_spend_entry(expired_vid, spend_tid, 1000 + i as u64);
+        storage.put_hmc_lock(&spend_tag, &spend).unwrap();
+    }
+
+    // 2. Unrelated live voucher in a different shard (valid_until = 500_000 ms)
+    let exp_shard = shard_for_tid(exp_root_tid);
+    let mut live_root_tid = [0xCCu8; 32];
+    while shard_for_tid(live_root_tid) == exp_shard {
+        live_root_tid[0] = live_root_tid[0].wrapping_add(1);
+    }
+    let live_shard = shard_for_tid(live_root_tid);
+    let live_vid = "voucher_live_diff_shard";
+    let (live_root_tag, live_root) = make_test_root_entry(live_vid, live_root_tid, 500_000);
+    storage.put_hmc_lock(&live_root_tag, &live_root).unwrap();
+    let mut live_spend_tid = [0xDDu8; 32];
+    live_spend_tid[0] = 0x01;
+    let (live_spend_tag, live_spend) = make_test_spend_entry(live_vid, live_spend_tid, 2000);
+    storage.put_hmc_lock(&live_spend_tag, &live_spend).unwrap();
+
+    // Pass 1: Prune at sec 81 (prunes up to 256 expired spends, leaving 1 spend)
+    let (_pruned_native, pruned_hmc_pass1) = storage.prune_expired_buckets(81).unwrap();
+    assert_eq!(pruned_hmc_pass1, 256, "Pass 1 must prune exactly 256 expired spends");
+
+    // ASSERTIONS AFTER PASS 1:
+    // Root MUST be retained because 1 spend remains!
+    assert!(
+        storage.voucher_root(expired_vid).unwrap().is_some(),
+        "Expired root must be retained while dependent spends remain in DB"
+    );
+    // Unrelated live shard digest MUST succeed!
+    let live_digest = storage.committed_shard_digest(live_shard, 81_000);
+    assert!(live_digest.is_ok(), "Live shard digest must succeed after Pass 1: {:?}", live_digest.err());
+
+    // Sync reads MUST succeed without missing-root corruption!
+    let unbounded = storage.read_committed_sync_snapshot(81_000);
+    assert!(unbounded.is_ok(), "read_committed_sync_snapshot must succeed: {:?}", unbounded.err());
+    let page = storage.read_committed_sync_snapshot_bounded(81_000, &std::collections::HashSet::new(), 100, 4 * 1024 * 1024);
+    assert!(page.is_ok(), "read_committed_sync_snapshot_bounded must succeed: {:?}", page.err());
+
+    // Pass 2: Prune remaining 1 expired spend
+    let (_pruned_native, pruned_hmc_pass2) = storage.prune_expired_buckets(81).unwrap();
+    assert_eq!(pruned_hmc_pass2, 1, "Pass 2 must prune the remaining 1 expired spend");
+
+    // After all spends for expired voucher are gone, the root is pruned
+    assert!(
+        storage.voucher_root(expired_vid).unwrap().is_none(),
+        "Expired root must be pruned once all dependent spends are drained"
+    );
+
+    // Live voucher remains 100% intact!
+    assert!(storage.voucher_root(live_vid).unwrap().is_some());
+    assert!(storage.get_hmc_lock(&live_spend_tag).unwrap().is_some());
+    let live_digest_pass2 = storage.committed_shard_digest(live_shard, 81_000);
+    assert!(live_digest_pass2.is_ok());
+}
+
+#[test]
+fn test_s02_02_apply_flush_batch_atomic_prune_retains_root_until_drained() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("flush_prune_257.redb");
+    let storage = RedbStorage::open(&db_path).unwrap();
+
+    let expired_vid = "voucher_flush_257";
+    let exp_root_tid = [0x1Au8; 32];
+    let (exp_root_tag, exp_root) = make_test_root_entry(expired_vid, exp_root_tid, 50_000);
+    storage.put_hmc_lock(&exp_root_tag, &exp_root).unwrap();
+
+    for i in 0..257u32 {
+        let mut spend_tid = [0x2Bu8; 32];
+        spend_tid[..4].copy_from_slice(&i.to_le_bytes());
+        let (spend_tag, spend) = make_test_spend_entry(expired_vid, spend_tid, 1000 + i as u64);
+        storage.put_hmc_lock(&spend_tag, &spend).unwrap();
+    }
+
+    let exp_shard = shard_for_tid(exp_root_tid);
+    let mut live_root_tid = [0x3Cu8; 32];
+    while shard_for_tid(live_root_tid) == exp_shard {
+        live_root_tid[0] = live_root_tid[0].wrapping_add(1);
+    }
+    let live_shard = shard_for_tid(live_root_tid);
+    let live_vid = "voucher_flush_live";
+    let (live_root_tag, live_root) = make_test_root_entry(live_vid, live_root_tid, 500_000);
+    storage.put_hmc_lock(&live_root_tag, &live_root).unwrap();
+    let live_spend_tid = [0x4Du8; 32];
+    let (live_spend_tag, live_spend) = make_test_spend_entry(live_vid, live_spend_tid, 2000);
+    storage.put_hmc_lock(&live_spend_tag, &live_spend).unwrap();
+
+    // Pass 1 via apply_flush_batch_atomic
+    storage.apply_flush_batch_atomic(&[], &[], &[], &[], &[], &[81]).unwrap();
+
+    // After Pass 1: 1 spend remains; root MUST NOT be deleted
+    assert!(
+        storage.voucher_root(expired_vid).unwrap().is_some(),
+        "apply_flush_batch_atomic must not delete root while spends remain"
+    );
+    let live_digest = storage.committed_shard_digest(live_shard, 81_000);
+    assert!(live_digest.is_ok(), "Live shard digest must succeed after pass 1: {:?}", live_digest.err());
+
+    // Pass 2 via apply_flush_batch_atomic
+    storage.apply_flush_batch_atomic(&[], &[], &[], &[], &[], &[81]).unwrap();
+
+    // After Pass 2: all spends drained, childless root deleted
+    assert!(
+        storage.voucher_root(expired_vid).unwrap().is_none(),
+        "childless root must be deleted once spends reach zero"
+    );
+    assert!(storage.voucher_root(live_vid).unwrap().is_some());
+}
+
+#[test]
+fn test_s02_02_quarantined_provisional_spends_retain_root() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("quarantine_prune.redb");
+    let storage = RedbStorage::open(&db_path).unwrap();
+
+    let expired_vid = "voucher_quarantine";
+    let exp_root_tid = [0x5Eu8; 32];
+    let (exp_root_tag, exp_root) = make_test_root_entry(expired_vid, exp_root_tid, 50_000);
+    storage.put_hmc_lock(&exp_root_tag, &exp_root).unwrap();
+
+    let spend_tid = [0x6Fu8; 32];
+    let (spend_tag, spend) = make_test_spend_entry(expired_vid, spend_tid, 1000);
+    storage.put_hmc_lock(&spend_tag, &spend).unwrap();
+
+    let shard = shard_for_tid(exp_root_tid);
+
+    // Quarantine the spend into TABLE_PROVISIONAL_HMC_LOCKS
+    let (_q_native, q_hmc) = storage
+        .quarantine_subquorum_locks(shard, &std::collections::HashSet::new(), &std::collections::HashSet::new())
+        .unwrap();
+    assert_eq!(q_hmc.len(), 1);
+    assert!(storage.get_hmc_lock(&spend_tag).unwrap().is_none(), "Spend moved out of active locks");
+    assert!(storage.get_provisional_hmc_lock(&spend_tag).unwrap().is_some(), "Spend is in provisional locks");
+
+    // Root must be retained while provisional spend exists
+    assert!(storage.voucher_root(expired_vid).unwrap().is_some());
+
+    // Prune at sec 81: the shared worker purges provisional lock AND the root
+    let (_p_native, p_hmc) = storage.prune_expired_buckets(81).unwrap();
+    assert_eq!(p_hmc, 1, "Provisional lock must be purged at expiry");
+    assert!(storage.get_provisional_hmc_lock(&spend_tag).unwrap().is_none());
+    assert!(storage.voucher_root(expired_vid).unwrap().is_none(), "Root must be pruned once provisional lock is purged");
+}
+
+#[test]
+fn test_s02_02_multiple_vouchers_ttl_ordering_differs_from_tag_ordering() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("ordering_diff.redb");
+    let storage = RedbStorage::open(&db_path).unwrap();
+
+    // Voucher "v_zebra": TTL = 40_000 ms (expires at sec 71). 200 spends.
+    // Voucher "v_aardvark": TTL = 50_000 ms (expires at sec 81). 100 spends.
+    // Alphabetical order: v_aardvark < v_zebra.
+    // Expiry order: v_zebra (71s) < v_aardvark (81s).
+    let vid_zebra = "v_zebra";
+    let tid_zebra = [0x70u8; 32];
+    let (root_tag_z, root_z) = make_test_root_entry(vid_zebra, tid_zebra, 40_000);
+    storage.put_hmc_lock(&root_tag_z, &root_z).unwrap();
+    for i in 0..200u32 {
+        let mut spend_tid = [0x71u8; 32];
+        spend_tid[..4].copy_from_slice(&i.to_le_bytes());
+        let (spend_tag, spend) = make_test_spend_entry(vid_zebra, spend_tid, 1000 + i as u64);
+        storage.put_hmc_lock(&spend_tag, &spend).unwrap();
+    }
+
+    let vid_aardvark = "v_aardvark";
+    let tid_aardvark = [0x80u8; 32];
+    let (root_tag_a, root_a) = make_test_root_entry(vid_aardvark, tid_aardvark, 50_000);
+    storage.put_hmc_lock(&root_tag_a, &root_a).unwrap();
+    for i in 0..100u32 {
+        let mut spend_tid = [0x81u8; 32];
+        spend_tid[..4].copy_from_slice(&i.to_le_bytes());
+        let (spend_tag, spend) = make_test_spend_entry(vid_aardvark, spend_tid, 1000 + i as u64);
+        storage.put_hmc_lock(&spend_tag, &spend).unwrap();
+    }
+
+    // Prune at sec 81 (both are expired).
+    // Pass 1: prunes 256 spends (200 of zebra + 56 of aardvark).
+    let (_, pruned_pass1) = storage.prune_expired_buckets(81).unwrap();
+    assert_eq!(pruned_pass1, 256);
+
+    // v_aardvark still has 44 spends remaining, so its root MUST be present!
+    assert!(
+        storage.voucher_root(vid_aardvark).unwrap().is_some(),
+        "v_aardvark root must be retained because 44 spends remain"
+    );
+    // Every remaining spend in DB has its root anchor present!
+    assert!(storage.read_committed_sync_snapshot(81_000).is_ok());
+
+    // Pass 2: prunes remaining 44 spends of aardvark.
+    let (_, pruned_pass2) = storage.prune_expired_buckets(81).unwrap();
+    assert_eq!(pruned_pass2, 44);
+
+    // Both roots are now childless and completely pruned
+    assert!(storage.voucher_root(vid_zebra).unwrap().is_none());
+    assert!(storage.voucher_root(vid_aardvark).unwrap().is_none());
+}
+

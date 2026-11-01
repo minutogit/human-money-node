@@ -627,13 +627,11 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
         "forged simulator proof must FAIL strict Ed25519 first-party check"
     );
 
-    // Authorize stranger for the fraud-proof RPC (else closed before handling).
+    // Authorize stranger as F2F friend for the fraud-proof gossip RPC (Gossip Barrier: F2F-only).
     pm_server
-        .learn_node_from_gossip(
+        .register_f2f_friend(
             *stranger_id.node_id(),
-            transport_stranger.local_addr().expect("stranger addr"),
-            0,
-            None,
+            Some(transport_stranger.local_addr().expect("stranger addr")),
         )
         .await;
     let conn2 = transport_stranger

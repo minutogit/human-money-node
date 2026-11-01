@@ -492,3 +492,90 @@ async fn test_control_extensions_batch3() {
     ));
     let _ = server_handle.await;
 }
+
+#[tokio::test]
+async fn test_s02_01_control_backup_targeting_live_db_rejected() {
+    let temp = tempdir().expect("tempdir");
+    let db_dir = temp.path().join("db_dir");
+    std::fs::create_dir_all(&db_dir).expect("create db_dir");
+    let db_path = db_dir.join("daemon_live.redb");
+    let socket_path = temp.path().join("control_s02.sock");
+
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let peer_manager = Arc::new(PeerManager::new(vec![]));
+    let cancel_token = CancellationToken::new();
+
+    let server = ControlServer::new(
+        socket_path.clone(),
+        storage.clone(),
+        engine.clone(),
+        peer_manager.clone(),
+        identity.clone(),
+        temp.path().to_path_buf(),
+        cancel_token.clone(),
+    );
+    let server_handle = tokio::spawn(async move { server.run().await });
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let client = ControlClient::new(socket_path);
+
+    // Initial state write
+    storage.ban_node(&[0x11; 32], 1000).unwrap();
+
+    // 1. Attempt backup to exact live DB path over control socket
+    let live_path_str = db_path.display().to_string();
+    let resp_exact = client.create_backup(&live_path_str).await.expect("create_backup exact");
+    assert!(
+        matches!(resp_exact, ControlResponse::Error { .. }),
+        "Backup to exact live DB path over control socket must return Error, got: {:?}",
+        resp_exact
+    );
+
+    // 2. Attempt backup to path with '.' component
+    let dot_path = db_dir.join(".").join("daemon_live.redb");
+    let resp_dot = client.create_backup(&dot_path.display().to_string()).await.expect("create_backup dot");
+    assert!(
+        matches!(resp_dot, ControlResponse::Error { .. }),
+        "Backup to dot-normalized live DB path must return Error, got: {:?}",
+        resp_dot
+    );
+
+    // 3. Attempt backup via symlinked parent directory
+    #[cfg(unix)]
+    {
+        let symlink_dir = temp.path().join("sym_db_dir");
+        std::os::unix::fs::symlink(&db_dir, &symlink_dir).expect("symlink dir");
+        let sym_path = symlink_dir.join("daemon_live.redb");
+        let resp_sym = client.create_backup(&sym_path.display().to_string()).await.expect("create_backup sym");
+        assert!(
+            matches!(resp_sym, ControlResponse::Error { .. }),
+            "Backup to symlinked parent path must return Error, got: {:?}",
+            resp_sym
+        );
+    }
+
+    // 4. Prove live daemon DB remains usable and retains subsequent durable writes across reopen
+    storage.ban_node(&[0x22; 32], 2000).unwrap();
+    let record = LockRecord::new([0x33; 32], [0x44; 32], vec![1], SimTime(100), SimTime(100_000));
+    storage.put_lock(&record, 100_000).unwrap();
+
+    // Shutdown daemon
+    assert!(matches!(
+        client.send_request(humoco_node::ControlRequest::Shutdown).await.expect("shutdown"),
+        ControlResponse::Ok
+    ));
+    let _ = server_handle.await;
+    _flush_handle.abort();
+    let _ = _flush_handle.await;
+    drop(engine);
+    drop(storage);
+
+    // Reopen DB and verify all writes are intact
+    let reopened = RedbStorage::open(&db_path).expect("reopen redb");
+    assert!(reopened.is_node_banned(&[0x11; 32]).unwrap());
+    assert!(reopened.is_node_banned(&[0x22; 32]).unwrap());
+    assert!(reopened.get_lock(&[0x33; 32]).unwrap().is_some());
+}
+

@@ -467,3 +467,275 @@ async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
     transport_b.close();
     transport_c.close();
 }
+
+#[tokio::test]
+async fn test_s04_01_connect_peer_identity_validation() {
+    let cancel = CancellationToken::new();
+
+    // Client node C
+    let identity_c = NodeIdentity::generate();
+    let pm_c = Arc::new(PeerManager::new(Vec::new()));
+    let transport_c = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &identity_c,
+        pm_c.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("Bind client C");
+    let addr_c = transport_c.local_addr().unwrap();
+    transport_c.spawn_accept_loop();
+
+    // Node A is expected at server_addr
+    let identity_a = NodeIdentity::generate();
+    let identity_b = NodeIdentity::generate();
+
+    // Server runs with identity B
+    let pm_b = Arc::new(PeerManager::new(Vec::new()));
+    let transport_b = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &identity_b,
+        pm_b.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("Bind server B");
+    let server_addr = transport_b.local_addr().unwrap();
+    transport_b.spawn_accept_loop();
+
+    // Server B authorizes client C (F2F friend or known)
+    pm_b.register_f2f_friend(*identity_c.node_pubkey(), Some(addr_c)).await;
+
+    // --- (a) Unknown B: Client C knows node A at server_addr, but B is completely unknown ---
+    pm_c.learn_node_from_gossip(*identity_a.node_pubkey(), server_addr, 0, None).await;
+
+    let res_a = transport_c.connect_peer(server_addr).await;
+    assert!(
+        res_a.is_err(),
+        "connect_peer must reject when server presents unknown identity B instead of expected identity A"
+    );
+    // PeerManager must NOT have published B or connection for B/server_addr
+    assert!(
+        pm_c.get_peer(&server_addr).await.and_then(|p| p.node_id) != Some(*identity_b.node_pubkey()),
+        "PeerManager must not publish identity B for server_addr"
+    );
+    assert!(
+        pm_c.get_connection(&server_addr).await.is_none(),
+        "PeerManager must not publish a connection for unauthorized identity B"
+    );
+
+    // --- (b) Known-but-different B: Client C knows B at another address ---
+    let other_addr: SocketAddr = "192.0.2.1:9090".parse().unwrap();
+    pm_c.learn_node_from_gossip(*identity_b.node_pubkey(), other_addr, 0, None).await;
+
+    let res_b = transport_c.connect_peer(server_addr).await;
+    assert!(
+        res_b.is_err(),
+        "connect_peer must reject when server presents different identity B for an endpoint authorized only for A"
+    );
+    assert!(
+        pm_c.get_connection(&server_addr).await.is_none(),
+        "PeerManager must still not have an active connection for server_addr"
+    );
+
+    // --- (c) Cached-connection branch: Evict/discard mismatched cached connection ---
+    // Establish a connection directly to server_addr (holding B's identity) and insert into pm_c
+    let unauth_conn = transport_c
+        .endpoint()
+        .connect(server_addr, humoco_node::network::transport::P2P_QUIC_SNI)
+        .unwrap()
+        .await
+        .unwrap();
+    pm_c.set_connection(server_addr, unauth_conn).await;
+    assert!(pm_c.get_connection(&server_addr).await.is_some(), "Prerequisite: connection cached in PeerManager");
+
+    let res_c = transport_c.connect_peer(server_addr).await;
+    assert!(
+        res_c.is_err(),
+        "connect_peer must not return cached connection presenting mismatching identity B"
+    );
+    assert!(
+        pm_c.get_connection(&server_addr).await.is_none(),
+        "Mismatched cached connection must be evicted from PeerManager"
+    );
+
+    // --- (d) Normal endpoint migration retaining A's key (positive control) ---
+    // Node A actually starts on a new address and authorizes client C
+    let pm_a = Arc::new(PeerManager::new(Vec::new()));
+    let transport_a = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &identity_a,
+        pm_a.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("Bind server A");
+    let migrated_addr_a = transport_a.local_addr().unwrap();
+    transport_a.spawn_accept_loop();
+    pm_a.register_f2f_friend(*identity_c.node_pubkey(), Some(addr_c)).await;
+
+    // Client C learns A's updated address via signed heartbeat/gossip
+    pm_c.learn_node_from_gossip(*identity_a.node_pubkey(), migrated_addr_a, 0, None).await;
+
+    let res_d = transport_c.connect_peer(migrated_addr_a).await;
+    assert!(
+        res_d.is_ok(),
+        "connect_peer must succeed when server presents expected identity A at its migrated endpoint"
+    );
+
+    cancel.cancel();
+    transport_c.close();
+    transport_b.close();
+    transport_a.close();
+}
+
+#[tokio::test]
+async fn test_s04_03_bidirectional_and_unidirectional_gossip_barrier() {
+    use ed25519_dalek::Signer;
+    let cancel = CancellationToken::new();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(humoco_node::storage::RedbStorage::open(&temp.path().join("s04_03.redb")).expect("open redb"));
+    let (engine, _worker) = humoco_node::storage::DualTierEngine::new(storage.clone());
+
+    let server_id = NodeIdentity::generate();
+    let pm_s = Arc::new(PeerManager::new(Vec::new()));
+    let handler = Arc::new(
+        humoco_node::network::NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            server_id.clone(),
+            pm_s.clone(),
+        )
+        .with_network_id(humoco_sim_core::types::NetworkId::Mainnet),
+    );
+
+    let transport_s = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm_s.clone(),
+        handler,
+        cancel.clone(),
+    )
+    .expect("bind server");
+    let server_addr = transport_s.local_addr().unwrap();
+    transport_s.spawn_accept_loop();
+
+    // 1. Client 1 is admitted SOLELY as a learned non-F2F node (hops = 1, not in f2f_friends)
+    let non_f2f_id = NodeIdentity::generate();
+    let pm_non_f2f = Arc::new(PeerManager::new(Vec::new()));
+    let transport_non_f2f = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &non_f2f_id,
+        pm_non_f2f.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind client non-f2f");
+    let non_f2f_addr = transport_non_f2f.local_addr().unwrap();
+    transport_non_f2f.spawn_accept_loop();
+
+    // Server learns non-f2f node via gossip (hops = 1), so direct RPC is authorized, but GOSSIP IS FORBIDDEN!
+    pm_s.learn_node_from_gossip(*non_f2f_id.node_pubkey(), non_f2f_addr, 1, None).await;
+    pm_non_f2f.learn_node_from_gossip(*server_id.node_pubkey(), server_addr, 0, None).await;
+
+    let conn_non_f2f = transport_non_f2f.connect_peer(server_addr).await.expect("connect non-f2f to server");
+
+    // Construct genuine Mainnet EquivocationProof
+    let offender_key = ed25519_dalek::SigningKey::from_bytes(&[0x77u8; 32]);
+    let offender_pub = offender_key.verifying_key().to_bytes();
+    let parent = [0x11u8; 32];
+    let lock_a = [0x22u8; 32];
+    let lock_b = [0x33u8; 32];
+
+    let sign_att = |k: &ed25519_dalek::SigningKey, p: &[u8; 32], l: &[u8; 32], dom: &[u8], st: u8| {
+        let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(p, l);
+        let shard = u16::from_be_bytes([p[0], p[1]]);
+        let digest = humoco_sim_core::crypto::compute_sig_digest(dom, 0, 0, 0, shard, st, &payload);
+        let pubkey = k.verifying_key().to_bytes();
+        let node_u16 = u16::from_le_bytes([pubkey[0], pubkey[1]]);
+        humoco_sim_core::types::Attestation {
+            node_id: node_u16,
+            lock_id: *l,
+            parent_lock: *p,
+            timestamp: humoco_sim_core::types::SimTime(1_000),
+            signature: k.sign(&digest).to_bytes(),
+            shard_id: shard,
+        }
+    };
+
+    let att_a = sign_att(&offender_key, &parent, &lock_a, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET, 0);
+    let att_b = sign_att(&offender_key, &parent, &lock_b, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET, 1);
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(att_a, att_b, offender_pub);
+    assert!(proof.verify_network(humoco_sim_core::types::NetworkId::Mainnet));
+
+    let proof_payload = bincode::serialize(&proof).unwrap();
+    let evidence_hash = *blake3::hash(&proof_payload).as_bytes();
+
+    // 1a. Submit EquivocationProof over BIDIRECTIONAL real QUIC stream from learned non-F2F peer
+    let hdr_bidi = WireHeader::new(MsgType::EquivocationProof as u16, 1, 0, 0, proof_payload.len() as u32);
+    let (resp_hdr, _resp_bytes) = transport_non_f2f.send_request(&conn_non_f2f, &hdr_bidi, &proof_payload).await.expect("send request");
+    assert_ne!(
+        resp_hdr.msg_type,
+        MsgType::EquivocationAck as u16,
+        "Bidirectional EquivocationProof from non-F2F learned peer must NOT be acknowledged with EquivocationAck"
+    );
+
+    // Assert: No RAM ban, No PeerManager ban, No durable ban, No evidence entry
+    assert!(!engine.is_node_banned(&offender_pub).await, "Offender must not be banned in engine RAM");
+    assert!(!pm_s.is_banned(&offender_pub).await, "Offender must not be banned in PeerManager");
+    assert!(!storage.is_node_banned(&offender_pub).unwrap(), "Offender must not be banned in redb");
+    assert!(storage.get_evidence(&evidence_hash).unwrap().is_none(), "Evidence must not be committed");
+
+    // 1b. Submit EquivocationProof over UNIDIRECTIONAL real QUIC stream from learned non-F2F peer
+    let hdr_uni = WireHeader::new(MsgType::EquivocationProof as u16, 2, 0, 0, proof_payload.len() as u32);
+    transport_non_f2f.send_unidirectional(&conn_non_f2f, &hdr_uni, &proof_payload).await.expect("send unidirectional");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert!(!engine.is_node_banned(&offender_pub).await, "Offender must not be banned after uni stream from non-F2F");
+    assert!(!pm_s.is_banned(&offender_pub).await, "Offender must not be banned in PeerManager after uni stream from non-F2F");
+    assert!(!storage.is_node_banned(&offender_pub).unwrap(), "Offender must not be banned in redb after uni stream from non-F2F");
+    assert!(storage.get_evidence(&evidence_hash).unwrap().is_none(), "Evidence must not be committed after uni stream from non-F2F");
+
+    // 2. Positive Control: Direct F2F friend submits EquivocationProof over bidirectional stream
+    let f2f_id = NodeIdentity::generate();
+    let pm_f2f = Arc::new(PeerManager::new(Vec::new()));
+    let transport_f2f = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &f2f_id,
+        pm_f2f.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind f2f client");
+    let f2f_addr = transport_f2f.local_addr().unwrap();
+    transport_f2f.spawn_accept_loop();
+
+    pm_s.register_f2f_friend(*f2f_id.node_pubkey(), Some(f2f_addr)).await;
+    pm_f2f.register_f2f_friend(*server_id.node_pubkey(), Some(server_addr)).await;
+
+    let conn_f2f = transport_f2f.connect_peer(server_addr).await.expect("connect f2f to server");
+
+    // Different offender for positive control
+    let offender_key_2 = ed25519_dalek::SigningKey::from_bytes(&[0x88u8; 32]);
+    let offender_pub_2 = offender_key_2.verifying_key().to_bytes();
+    let att_2a = sign_att(&offender_key_2, &parent, &lock_a, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET, 0);
+    let att_2b = sign_att(&offender_key_2, &parent, &lock_b, humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET, 1);
+    let proof_2 = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(att_2a, att_2b, offender_pub_2);
+    let proof_payload_2 = bincode::serialize(&proof_2).unwrap();
+    let evidence_hash_2 = *blake3::hash(&proof_payload_2).as_bytes();
+
+    let hdr_f2f = WireHeader::new(MsgType::EquivocationProof as u16, 3, 0, 0, proof_payload_2.len() as u32);
+    let (resp_f2f, _) = transport_f2f.send_request(&conn_f2f, &hdr_f2f, &proof_payload_2).await.expect("send f2f request");
+    assert_eq!(resp_f2f.msg_type, MsgType::EquivocationAck as u16, "F2F friend must receive EquivocationAck");
+
+    assert!(engine.is_node_banned(&offender_pub_2).await, "Offender 2 must be banned in engine RAM");
+    assert!(pm_s.is_banned(&offender_pub_2).await, "Offender 2 must be banned in PeerManager");
+    assert!(storage.is_node_banned(&offender_pub_2).unwrap(), "Offender 2 must be banned in redb");
+    assert!(storage.get_evidence(&evidence_hash_2).unwrap().is_some(), "Evidence 2 must be committed");
+
+    cancel.cancel();
+    transport_s.close();
+    transport_non_f2f.close();
+    transport_f2f.close();
+}
+

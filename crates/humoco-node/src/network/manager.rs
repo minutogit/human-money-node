@@ -2178,6 +2178,61 @@ impl PeerManager {
         self.is_f2f_addr(remote_addr).await || self.is_known_addr(remote_addr).await
     }
 
+    /// Resolves the set of expected permanent NodePubKeys authorized at this endpoint.
+    ///
+    /// Includes non-banned direct F2F friends bound to `addr` and non-banned nodes
+    /// learned via gossip currently bound to `addr`.
+    /// Lock acquisitions are fully decoupled (snapshots taken sequentially) to prevent AB-BA deadlocks.
+    pub async fn expected_authorized_node_keys(&self, addr: &SocketAddr) -> HashSet<[u8; 32]> {
+        let mut expected = HashSet::new();
+        let banned = self.banned_nodes.read().await.clone();
+
+        // 1. Direct F2F friends bound to addr
+        {
+            let friends = self.f2f_friends.read().await.clone();
+            for (node_id, opt_addr) in friends {
+                if opt_addr.as_ref() == Some(addr) && !banned.contains(&node_id) {
+                    expected.insert(node_id);
+                }
+            }
+        }
+        {
+            let peers = self.peers.read().await.clone();
+            if let Some(peer) = peers.get(addr) {
+                if peer.conn_type == PeerConnectionType::FriendToFriend {
+                    if let Some(ref nid) = peer.node_id {
+                        if !banned.contains(nid) {
+                            expected.insert(*nid);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Gossip-learned nodes bound to addr
+        {
+            let known = self.known_network_nodes.read().await.clone();
+            for (node_id, info) in known {
+                if &info.addr == addr && !banned.contains(&node_id) {
+                    expected.insert(node_id);
+                }
+            }
+        }
+
+        expected
+    }
+
+    /// Evicts any active connection for `addr` (e.g. on TLS identity mismatch or stale connection).
+    pub async fn evict_connection(&self, addr: &SocketAddr) {
+        let mut peers = self.peers.write().await;
+        if let Some(peer) = peers.get_mut(addr) {
+            if let Some(conn) = peer.connection.take() {
+                conn.close(0u32.into(), b"connection identity mismatch");
+            }
+        }
+    }
+
+
     /// Checks if a node is banned due to proven equivocation/slashing.
     pub async fn is_banned(&self, node_id: &[u8; 32]) -> bool {
         let banned = self.banned_nodes.read().await;

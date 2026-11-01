@@ -19,6 +19,10 @@ pub const DEFAULT_HANDLER_TIMEOUT: std::time::Duration = std::time::Duration::fr
 pub const SHUTDOWN_HANDLER_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 /// Canonical SNI used for P2P QUIC handshakes to prevent DPI firewalls from dropping external packets advertising "localhost".
 pub const P2P_QUIC_SNI: &str = "p2p.humoco.internal";
+/// Maximum number of 5-minute bucket digests allowed in a single ShardBucketRangeRequest.
+/// Serialized bincode response size is 10 + N * 45 bytes: 1024 * 45 + 10 = 46,090 bytes,
+/// strictly fitting within the 64 KiB (65,536 bytes) maximum frame payload cap.
+pub const MAX_SHARD_BUCKET_RANGE_COUNT: u16 = 1024;
 
 use ed25519_dalek::Signer;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -391,11 +395,12 @@ impl NodeRequestHandler {
             return Ok(false);
         };
 
-        let is_first_party_valid = verify_equivocation_first_party(&vk, &proof);
+        let is_first_party_valid = verify_equivocation_first_party_network(Some(self.network_id), &vk, &proof);
         if !is_first_party_valid {
             warn!(
                 offender = %hex::encode(offender),
-                "EquivocationProof rejected: cryptographic Ed25519 signature verification failed for perpetrator (framing prevented)"
+                network_id = ?self.network_id,
+                "EquivocationProof rejected: cryptographic Ed25519 signature or network domain verification failed for perpetrator (framing prevented)"
             );
             return Ok(false);
         }
@@ -2141,51 +2146,108 @@ impl RequestHandler for NodeRequestHandler {
                 );
                 return Ok((resp_header, resp_bytes));
             } else if msg_type == MsgType::ShardBucketRangeRequest as u16 {
-                let req: humoco_sim_core::types::ShardBucketRangeRequest = bincode::deserialize(
-                    &payload,
-                )
-                .unwrap_or(humoco_sim_core::types::ShardBucketRangeRequest {
-                    shard_id: 0,
-                    start_bucket: 0,
-                    bucket_count: humoco_sim_core::types::BUCKETS_PER_DAY as u16,
-                });
+                let req: humoco_sim_core::types::ShardBucketRangeRequest =
+                    bincode::deserialize(&payload).map_err(|e| {
+                        NodeError::Network(format!("malformed ShardBucketRangeRequest: {e}"))
+                    })?;
+
+                if req.bucket_count == 0 {
+                    return Err(NodeError::Network(
+                        "ShardBucketRangeRequest bucket_count must be > 0".into(),
+                    ));
+                }
+                if req.bucket_count > MAX_SHARD_BUCKET_RANGE_COUNT {
+                    return Err(NodeError::Network(format!(
+                        "ShardBucketRangeRequest bucket_count {} exceeds maximum limit {}",
+                        req.bucket_count, MAX_SHARD_BUCKET_RANGE_COUNT
+                    )));
+                }
+                let end_bucket = req
+                    .start_bucket
+                    .checked_add(req.bucket_count as u64)
+                    .ok_or_else(|| {
+                        NodeError::Network(
+                            "ShardBucketRangeRequest start_bucket + bucket_count overflows u64"
+                                .into(),
+                        )
+                    })?;
+
                 let shard_id = req.shard_id;
+                let start_bucket = req.start_bucket;
+                let bucket_count = req.bucket_count as usize;
                 let now_ms = peer_manager
                     .as_ref()
                     .map(|pm| pm.net_time_ms())
                     .unwrap_or_else(|| clock.net_time_ms());
                 let db = storage.clone();
-                let locks = tokio::task::spawn_blocking(move || {
-                    db.committed_shard_records(shard_id, now_ms)
+
+                let (resp_bytes, payload_len) = tokio::task::spawn_blocking(move || {
+                    let locks = db
+                        .committed_shard_records(shard_id, now_ms)
+                        .map_err(|e| NodeError::Network(format!("committed buckets unavailable: {e}")))?;
+
+                    // Single O(N) partitioning pass for requested bucket range
+                    let mut partitioned: std::collections::HashMap<u64, Vec<humoco_sim_core::types::LockRecord>> =
+                        std::collections::HashMap::with_capacity(bucket_count.min(locks.len()));
+                    for lock in locks {
+                        if !lock.status.is_void() {
+                            let b_id = humoco_sim_core::types::timestamp_to_bucket_id(lock.created_at.0);
+                            if b_id >= start_bucket && b_id < end_bucket {
+                                partitioned.entry(b_id).or_default().push(lock);
+                            }
+                        }
+                    }
+
+                    let mut buckets = Vec::with_capacity(bucket_count);
+                    for b_id in start_bucket..end_bucket {
+                        let (digest, count) = if let Some(mut bucket_locks) = partitioned.remove(&b_id) {
+                            bucket_locks.sort_by(|a, b| {
+                                a.parent_lock
+                                    .cmp(&b.parent_lock)
+                                    .then_with(|| a.id.cmp(&b.id))
+                            });
+                            let mut hasher = blake3::Hasher::new();
+                            let tag = b"HUMOCO_V1_BUCKET_DIGEST";
+                            hasher.update(&[tag.len() as u8]);
+                            hasher.update(tag);
+                            hasher.update(&shard_id.to_le_bytes());
+                            hasher.update(&b_id.to_le_bytes());
+                            hasher.update(&(bucket_locks.len() as u32).to_le_bytes());
+                            for lock in &bucket_locks {
+                                hasher.update(&lock.parent_lock);
+                                hasher.update(&lock.receiver_pub);
+                                hasher.update(&lock.nonce);
+                                hasher.update(&lock.id);
+                            }
+                            (*hasher.finalize().as_bytes(), bucket_locks.len() as u32)
+                        } else {
+                            let mut hasher = blake3::Hasher::new();
+                            let tag = b"HUMOCO_V1_BUCKET_DIGEST";
+                            hasher.update(&[tag.len() as u8]);
+                            hasher.update(tag);
+                            hasher.update(&shard_id.to_le_bytes());
+                            hasher.update(&b_id.to_le_bytes());
+                            hasher.update(&0u32.to_le_bytes());
+                            (*hasher.finalize().as_bytes(), 0u32)
+                        };
+                        let is_sealed = humoco_sim_core::types::is_bucket_sealed(b_id, now_ms);
+                        buckets.push(humoco_sim_core::types::ShardBucketDigest {
+                            bucket_id: b_id,
+                            digest,
+                            lock_count: count,
+                            is_sealed,
+                        });
+                    }
+
+                    let resp = humoco_sim_core::types::ShardBucketRangeResponse { shard_id, buckets };
+                    let resp_bytes = bincode::serialize(&resp)
+                        .map_err(|e| NodeError::Network(format!("serialization failed: {e}")))?;
+                    let payload_len = checked_payload_len(resp_bytes.len())?;
+                    Ok::<_, NodeError>((resp_bytes, payload_len))
                 })
                 .await
-                .map_err(|e| NodeError::Network(format!("bucket worker: {e}")))?
-                .map_err(|e| NodeError::Network(format!("committed buckets unavailable: {e}")))?;
-                let mut buckets = Vec::new();
-                let end_bucket = req.start_bucket.saturating_add(req.bucket_count as u64);
-                for b_id in req.start_bucket..end_bucket {
-                    let digest = humoco_sim_core::crypto::compute_selected_shard_bucket_digest(
-                        shard_id, b_id, &locks,
-                    );
-                    let count = locks
-                        .iter()
-                        .filter(|l| {
-                            !l.status.is_void()
-                                && humoco_sim_core::types::timestamp_to_bucket_id(l.created_at.0)
-                                    == b_id
-                        })
-                        .count() as u32;
-                    let is_sealed = humoco_sim_core::types::is_bucket_sealed(b_id, now_ms);
-                    buckets.push(humoco_sim_core::types::ShardBucketDigest {
-                        bucket_id: b_id,
-                        digest,
-                        lock_count: count,
-                        is_sealed,
-                    });
-                }
-                let resp = humoco_sim_core::types::ShardBucketRangeResponse { shard_id, buckets };
-                let resp_bytes = bincode::serialize(&resp).unwrap_or_default();
-                let payload_len = checked_payload_len(resp_bytes.len())?;
+                .map_err(|e| NodeError::Network(format!("bucket worker: {e}")))??;
+
                 let resp_header = WireHeader::new(
                     MsgType::ShardBucketRangeResponse as u16,
                     header.session_seq.wrapping_add(1),
@@ -2194,6 +2256,7 @@ impl RequestHandler for NodeRequestHandler {
                     payload_len,
                 );
                 return Ok((resp_header, resp_bytes));
+
             } else if msg_type == MsgType::ActiveSyncRequest as u16 {
                 let req = crate::network::framing::ActiveSyncRequest::from_bytes(&payload)
                     .map_err(|e| NodeError::Network(format!("invalid sync request: {e}")))?;
@@ -2716,8 +2779,25 @@ impl QuicTransport {
             )));
         }
 
+        let expected_keys = self.peer_manager.expected_authorized_node_keys(&addr).await;
+        if expected_keys.is_empty() {
+            return Err(NodeError::Network(format!(
+                "Direct connection to {} refused: no authorized identity currently bound to endpoint",
+                addr
+            )));
+        }
+
         if let Some(conn) = self.peer_manager.get_connection(&addr).await {
-            return self.shard_pool.lease(conn);
+            let cached_id = extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
+            let is_valid = match cached_id {
+                Some(ref nid) => expected_keys.contains(nid) && !self.peer_manager.is_banned(nid).await,
+                None => false,
+            };
+            if is_valid {
+                return self.shard_pool.lease(conn);
+            } else {
+                self.peer_manager.evict_connection(&addr).await;
+            }
         }
 
         // Apply exponential backoff with jitter if reconnecting to a failed or suspended peer (Spec 15 / INV-1502)
@@ -2744,18 +2824,41 @@ impl QuicTransport {
         .map_err(NodeError::QuinnConnect)?;
 
         let connection = connecting.await.map_err(NodeError::QuinnConnection)?;
-        let remote_node_id = extract_peer_identity_from_connection(&connection).map(|(nid, _)| nid);
-        if let Some(nid) = remote_node_id {
-            if self.peer_manager.is_banned(&nid).await {
-                connection.close(0u32.into(), b"banned: equivocation proof");
+        let remote_identity = extract_peer_identity_from_connection(&connection);
+        let remote_node_id = remote_identity.as_ref().map(|(nid, _)| *nid);
+
+        let authorized_node_id = match remote_node_id {
+            Some(nid) => {
+                if self.peer_manager.is_banned(&nid).await {
+                    connection.close(0u32.into(), b"banned: equivocation proof");
+                    return Err(NodeError::Network(format!(
+                        "Peer {} is banned",
+                        hex::encode(nid)
+                    )));
+                }
+                if !expected_keys.contains(&nid) {
+                    connection.close(0u32.into(), b"unauthorized identity mismatch");
+                    return Err(NodeError::Network(format!(
+                        "Connection to {} presented unauthorized identity {} (expected one of {:?})",
+                        addr,
+                        hex::encode(nid),
+                        expected_keys.iter().map(hex::encode).collect::<Vec<_>>()
+                    )));
+                }
+                nid
+            }
+
+            None => {
+                connection.close(0u32.into(), b"missing TLS peer identity");
                 return Err(NodeError::Network(format!(
-                    "Peer {} is banned",
-                    hex::encode(nid)
+                    "Connection to {} failed: missing or invalid TLS peer identity",
+                    addr
                 )));
             }
-        }
-        if let Some((nid, vk)) = extract_peer_identity_from_connection(&connection) {
-            self.peer_manager.register_verifying_key(nid, vk).await;
+        };
+
+        if let Some((_, vk)) = remote_identity {
+            self.peer_manager.register_verifying_key(authorized_node_id, vk).await;
         }
 
         // Pin before publishing the connection for reuse by concurrent callers.
@@ -2764,7 +2867,7 @@ impl QuicTransport {
             None => self.shard_pool.lease(connection.clone())?,
         };
         self.peer_manager
-            .record_success(addr, remote_node_id, Some(connection.clone()))
+            .record_success(addr, Some(authorized_node_id), Some(connection.clone()))
             .await;
 
         let conn_clone = connection.clone();
@@ -2779,7 +2882,7 @@ impl QuicTransport {
                 handler,
                 peer_manager,
                 cancel_token,
-                remote_node_id,
+                Some(authorized_node_id),
                 stream_semaphore,
                 transport,
             )
@@ -2794,8 +2897,23 @@ impl QuicTransport {
         &self,
         addr: SocketAddr,
     ) -> Result<crate::network::pool::PeerConnectionLease, NodeError> {
+        let expected_keys = self.peer_manager.expected_authorized_node_keys(&addr).await;
+
         if let Some(conn) = self.peer_manager.get_connection(&addr).await {
-            return self.shard_pool.lease(conn);
+            let cached_id = extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
+            let is_valid = match cached_id {
+                Some(ref nid) => {
+                    let not_banned = !self.peer_manager.is_banned(nid).await;
+                    let matches_expected = expected_keys.is_empty() || expected_keys.contains(nid);
+                    not_banned && matches_expected
+                }
+                None => false,
+            };
+            if is_valid {
+                return self.shard_pool.lease(conn);
+            } else {
+                self.peer_manager.evict_connection(&addr).await;
+            }
         }
 
         // Reserve before dialing; only unleased idle sessions may be displaced.
@@ -2817,18 +2935,42 @@ impl QuicTransport {
         .map_err(NodeError::QuinnConnect)?;
 
         let connection = connecting.await.map_err(NodeError::QuinnConnection)?;
-        let remote_node_id = extract_peer_identity_from_connection(&connection).map(|(nid, _)| nid);
-        if let Some(nid) = remote_node_id {
-            if self.peer_manager.is_banned(&nid).await {
-                connection.close(0u32.into(), b"banned: equivocation proof");
+        let remote_identity = extract_peer_identity_from_connection(&connection);
+        let remote_node_id = remote_identity.as_ref().map(|(nid, _)| *nid);
+
+        let authorized_node_id = match remote_node_id {
+            Some(nid) => {
+                if self.peer_manager.is_banned(&nid).await {
+                    connection.close(0u32.into(), b"banned: equivocation proof");
+                    return Err(NodeError::Network(format!(
+                        "Peer {} is banned",
+                        hex::encode(nid)
+                    )));
+                }
+                if !expected_keys.is_empty() && !expected_keys.contains(&nid) {
+                    connection.close(0u32.into(), b"unauthorized identity mismatch");
+                    return Err(NodeError::Network(format!(
+                        "Connection to {} presented unauthorized identity {} (expected one of {:?})",
+                        addr,
+                        hex::encode(nid),
+                        expected_keys.iter().map(hex::encode).collect::<Vec<_>>()
+                    )));
+                }
+                nid
+            }
+            None => {
+                connection.close(0u32.into(), b"missing TLS peer identity");
                 return Err(NodeError::Network(format!(
-                    "Peer {} is banned",
-                    hex::encode(nid)
+                    "Connection to {} failed: missing or invalid TLS peer identity",
+                    addr
                 )));
             }
-        }
-        if let Some((nid, vk)) = extract_peer_identity_from_connection(&connection) {
-            self.peer_manager.register_verifying_key(nid, vk).await;
+        };
+
+        if let Some((_, vk)) = remote_identity {
+            self.peer_manager
+                .register_verifying_key(authorized_node_id, vk)
+                .await;
         }
 
         // Pin before publishing the connection for reuse by concurrent callers.
@@ -2837,7 +2979,7 @@ impl QuicTransport {
             None => self.shard_pool.lease(connection.clone())?,
         };
         self.peer_manager
-            .record_success(addr, remote_node_id, Some(connection.clone()))
+            .record_success(addr, Some(authorized_node_id), Some(connection.clone()))
             .await;
 
         let conn_clone = connection.clone();
@@ -2852,15 +2994,17 @@ impl QuicTransport {
                 handler,
                 peer_manager,
                 cancel_token,
-                remote_node_id,
+                Some(authorized_node_id),
                 stream_semaphore,
                 transport,
             )
             .await;
         });
 
+
         Ok(lease)
     }
+
 
     /// Sends a bi-directional request frame and awaits the response frame.
     pub async fn send_request(
@@ -3473,6 +3617,36 @@ impl QuicTransport {
                                     };
                                     match read_res {
                                         Ok(((header, payload), _service_permit)) => {
+                                            // GOSSIP BARRIER:
+                                            // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
+                                            let is_gossip = header.msg_type == MsgType::Heartbeat as u16
+                                                || header.msg_type == MsgType::EquivocationProof as u16;
+
+                                            if is_gossip
+                                                && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await
+                                            {
+                                                warn!(
+                                                    remote = %remote_addr,
+                                                    node_id = ?remote_node_id.map(hex::encode),
+                                                    msg_type = header.msg_type,
+                                                    "GOSSIP BARRIER: Rejected gossip on bidirectional stream from non-F2F connection"
+                                                );
+                                                let resp_payload = b"unauthorized gossip: F2F only";
+                                                let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
+                                                let resp_header = WireHeader::new(
+                                                    MsgType::StatusResponse as u16,
+                                                    header.session_seq.wrapping_add(1),
+                                                    header.epoch_id,
+                                                    humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                                    payload_len,
+                                                );
+                                                if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
+                                                    debug!(error = %e, "Failed to write unauthorized response frame");
+                                                }
+                                                let _ = send.finish();
+                                                return;
+                                            }
+
                                             // Shard-Direct RPC Authorization:
                                             // LockVerifyRequest, ActiveSyncRequest, and ShardDigestRequest are only allowed if peer is F2F friend or known via gossip
                                             let is_restricted_rpc = header.msg_type == MsgType::LockVerifyRequest as u16
@@ -3783,16 +3957,19 @@ impl QuicTransport {
                                                             return;
                                                         }
                                                         let is_direct = remote_node_id == Some(adv_id);
-                                                        if is_direct && hops > 0 {
-                                                            warn!("GOSSIP BARRIER: Hop-spoofing attempt by direct neighbor (hops > 0)");
+                                                        // Spec 11 / S04-02: No relayed identity (hops > 0 or claimed_pubkey != peer_pubkey)
+                                                        // may EVER be learned, refreshed, or authorized via unsigned legacy tuple!
+                                                        if hops > 0 || !is_direct {
+                                                            warn!(
+                                                                node = %hex::encode(adv_id),
+                                                                hops,
+                                                                "GOSSIP BARRIER: Dropped unsigned legacy tuple heartbeat for non-direct or relayed identity"
+                                                            );
                                                             return;
                                                         }
-                                                        if !is_direct && hops == 0 {
-                                                            warn!("GOSSIP BARRIER: Hop-spoofing attempt by forwarder (hops == 0)");
-                                                            return;
-                                                        }
-                                                        pm.learn_node_from_gossip(adv_id, adv_addr, hops as u8, Some(remote_addr)).await;
+                                                        pm.learn_node_from_gossip(adv_id, adv_addr, 0, Some(remote_addr)).await;
                                                     }
+
                                                 }
 
                                                 if let Err(e) = h.handle_unidirectional_authenticated(header, payload, remote_node_id).await {

@@ -7,6 +7,7 @@ use humoco_node::{
 use humoco_sim_core::wire::{MsgType, WireHeader};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+#[allow(dead_code)]
 pub(crate) struct RecoveryPeer {
     pub(crate) identity: NodeIdentity,
     pub(crate) manager: Arc<PeerManager>,

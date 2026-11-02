@@ -2,7 +2,9 @@
 
 > **Credo:** *"In decentralization there is no trust, only mathematical proofs."*  
 > **Doctrine:** *"Subtraction before Construction – Perfection is achieved when there is nothing left to remove."*  
-> **Status:** Production-ready consensus core & daemon (`crates/humoco-sim-core` & `crates/humoco-node`).
+> **Status:** Consensus core & daemon (`crates/humoco-sim-core` & `crates/humoco-node`) — **Pre-Launch (Network NOT live yet).**  
+> **Pre-Launch Policy (Non-Negotiable):** Zero backwards compatibility is required. Breaking changes to wire formats, `redb` tables, configs, CLI flags, and DTOs are explicitly allowed and preferred (*Subtraction before Construction*). Never add or retain `v1`/`v2` dual paths, legacy fallbacks, or migration shims.  
+> **Mandatory Audit & Cleanup Duty:** When reviewing, auditing, refactoring, or extending code, agents MUST actively identify and **completely delete** obsolete structures, superseded wire branches (`v1`/`v2` switches, `is_legacy`), legacy storage tables, fallback parsers, and migration shims rather than preserving backwards compatibility.
 
 This document is automatically loaded on every AI agent startup in the workspace. It defines the immutable **Mental Model**, the **2-Tier Network Architecture**, the **Anti-Hallucination Filters**, and the **iron-clad programming rules**.
 

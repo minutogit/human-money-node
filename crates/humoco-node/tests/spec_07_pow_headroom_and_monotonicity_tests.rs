@@ -22,6 +22,7 @@ async fn test_2_1_bootstrap_median_empty_and_single() {
 #[tokio::test]
 async fn test_2_2_bootstrap_median_1_and_2_nodes() {
     let pm = PeerManager::new(vec![]);
+    pm.set_simulation_mode(true);
     let addr1: SocketAddr = "127.0.0.1:9091".parse().unwrap();
     let addr2: SocketAddr = "127.0.0.1:9092".parse().unwrap();
     let pk1 = [1u8; 32];
@@ -53,6 +54,7 @@ async fn test_2_2_bootstrap_median_1_and_2_nodes() {
 #[tokio::test]
 async fn test_2_3_large_network_median_21_nodes() {
     let pm = PeerManager::new(vec![]);
+    pm.set_simulation_mode(true);
     // Populate 21 mature nodes with work scores 10, 20, 30, ... 210
     for i in 1..=21 {
         let mut pk = [0u8; 32];
@@ -75,6 +77,7 @@ async fn test_2_3_large_network_median_21_nodes() {
 #[tokio::test]
 async fn test_2_4_whale_immunity_3_supercomputers() {
     let pm = PeerManager::new(vec![]);
+    pm.set_simulation_mode(true);
     // 20 normal nodes with W = 100
     for i in 1..=20 {
         let mut pk = [0u8; 32];
@@ -208,6 +211,7 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
         vec![(Some(pk_a), addr_a)],
         vec![pk_a],
     ));
+    pm_b.set_simulation_mode(true);
 
     // Set a high network median on Node B (e.g. 1000)
     for i in 1..=10 {
@@ -243,6 +247,7 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
         vec![(Some(pk_b), addr_b)],
         vec![pk_b],
     ));
+    pm_a.set_simulation_mode(true);
     let cancel_a = CancellationToken::new();
     let transport_a = QuicTransport::bind_with_options(
         addr_a,
@@ -355,8 +360,17 @@ async fn test_5_1_status_pow_formatting() {
 
     let storage = Arc::new(humoco_node::storage::RedbStorage::open(&db_path).unwrap());
     let (engine, _flush) = humoco_node::storage::DualTierEngine::new(storage.clone());
-    let identity = NodeIdentity::generate();
+    let mut identity = NodeIdentity::generate();
+    for nonce in 1..100 {
+        let t0 = 1_700_000_000;
+        let proof = humoco_node::identity::compute_pow_proof(identity.node_pubkey(), nonce, t0).unwrap();
+        if humoco_sim_core::crypto::compute_work_from_hash(&proof) == 1 {
+            identity = NodeIdentity::from_signing_key_with_pow(identity.signing_key().clone(), nonce, t0);
+            break;
+        }
+    }
     let pm = Arc::new(PeerManager::new(vec![]));
+    pm.set_simulation_mode(true);
 
     let cancel = CancellationToken::new();
     let server = humoco_node::control::ControlServer::new(

@@ -35,7 +35,9 @@ pub fn compute_pow_proof(
     t0: u64,
 ) -> Result<[u8; 32], NodeError> {
     if nonce == 0 && t0 == 0 {
-        return Ok(*blake3::hash(node_pubkey).as_bytes());
+        return Err(NodeError::Identity(
+            "unmined ticket placeholder (nonce=0, t0=0) has no Argon2d proof".into(),
+        ));
     }
     // Input: pubkey || nonce_le || t0_le
     let mut input = Vec::with_capacity(48);
@@ -56,28 +58,35 @@ pub fn compute_pow_proof(
 
 /// Computes the HRW routing ID via 2-stage PoW proof + BLAKE3 whitening (or BLAKE3 fast-path).
 ///
-/// - If `nonce == 0 && t0 == 0` (fast tests / legacy): `BLAKE3(pubkey)`
+/// - If `nonce == 0 && t0 == 0` (unmined placeholder / fast simulation): `BLAKE3(pubkey)`
 /// - Otherwise: `compute_whitened_hrw_id(pubkey, nonce, t0, &compute_pow_proof(pubkey, nonce, t0))`
 pub fn compute_hrw_routing_id(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> [u8; 32] {
     if nonce == 0 && t0 == 0 {
         return *blake3::hash(node_pubkey).as_bytes();
     }
-    let pow_proof = compute_pow_proof(node_pubkey, nonce, t0).unwrap_or_else(|e| {
-        tracing::error!("compute_pow_proof failed: {e}");
-        [0u8; 32]
-    });
+    let pow_proof = match compute_pow_proof(node_pubkey, nonce, t0) {
+        Ok(proof) => proof,
+        Err(e) => {
+            tracing::error!("compute_pow_proof failed: {e}");
+            return [0u8; 32];
+        }
+    };
     humoco_sim_core::crypto::compute_whitened_hrw_id(node_pubkey, nonce, t0, &pow_proof)
 }
 
 /// Computes the work score for given identity parameters.
+/// Returns 0 for unmined placeholder tickets (nonce=0, t0=0).
 pub fn compute_work_score(node_pubkey: &[u8; 32], nonce: u64, t0: u64) -> u64 {
     if nonce == 0 && t0 == 0 {
-        return 1;
+        return 0;
     }
-    let pow_proof = compute_pow_proof(node_pubkey, nonce, t0).unwrap_or_else(|e| {
-        tracing::error!("compute_pow_proof failed: {e}");
-        [0u8; 32]
-    });
+    let pow_proof = match compute_pow_proof(node_pubkey, nonce, t0) {
+        Ok(proof) => proof,
+        Err(e) => {
+            tracing::error!("compute_pow_proof failed: {e}");
+            return 0;
+        }
+    };
     humoco_sim_core::crypto::compute_work_from_hash(&pow_proof)
 }
 
@@ -317,6 +326,11 @@ impl NodeIdentity {
     /// Returns the work score achieved by this node identity.
     pub fn work_score(&self) -> u64 {
         compute_work_score(self.node_pubkey(), self.nonce, self.t0)
+    }
+
+    /// Returns true if this identity carries a genuinely mined Argon2d ticket (Spec 07 / INV-0701).
+    pub fn has_valid_pow_ticket(&self) -> bool {
+        (self.nonce != 0 || self.t0 != 0) && self.work_score() > 0
     }
 
     /// Returns the hex-encoded representation of the public key.
@@ -730,7 +744,8 @@ mod tests {
         let identity = NodeIdentity::generate();
         assert_eq!(identity.nonce(), 0);
         assert_eq!(identity.t0(), 0);
-        assert_eq!(identity.work_score(), 1);
+        assert_eq!(identity.work_score(), 0);
+        assert!(!identity.has_valid_pow_ticket());
         let expected_blake = *blake3::hash(identity.verifying_key().as_bytes()).as_bytes();
         assert_eq!(*identity.hrw_routing_id(), expected_blake);
     }

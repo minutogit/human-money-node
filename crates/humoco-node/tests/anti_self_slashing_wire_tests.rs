@@ -114,7 +114,9 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
     let client_cancel = CancellationToken::new();
 
     let shard_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    shard_pm.set_simulation_mode(true);
     let client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    client_pm.set_simulation_mode(true);
 
     // Authorize client as F2F friend on shard node (authorizes restricted LockVerifyRequest)
     shard_pm

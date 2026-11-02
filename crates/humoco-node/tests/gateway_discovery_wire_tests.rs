@@ -52,7 +52,9 @@ async fn signed_passive_gateway_publication_arrives_over_quic_and_tampering_is_i
         DualTierEngine::new_with_token(source_db.clone(), stop.clone());
     let (engine, worker) = DualTierEngine::new_with_token(receiver_db.clone(), stop.clone());
     let source_pm = Arc::new(PeerManager::with_f2f(vec![], vec![*receiver.node_pubkey()]));
+    source_pm.set_simulation_mode(true);
     let pm = Arc::new(PeerManager::with_f2f(vec![], vec![*source.node_pubkey()]));
+    pm.set_simulation_mode(true);
     let publisher = Arc::new(
         NodeRequestHandler::with_peer_manager(
             source_engine,

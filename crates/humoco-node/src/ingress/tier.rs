@@ -118,7 +118,15 @@ struct VipQuotaPersistOp {
     remaining: u64,
 }
 
-type P2pDailyUsage = (u64, HashMap<[u8; 32], u64>);
+type DailyUsageMap = (u64, HashMap<[u8; 32], u64>);
+
+#[derive(Debug, Default)]
+struct IngressAccountingState {
+    current_day: u64,
+    epoch_seq: u64,
+    cumulative_micro_byte_years: u64,
+    prev_day_final_bytes: u64,
+}
 
 #[derive(Clone)]
 pub struct TierController {
@@ -133,26 +141,34 @@ pub struct TierController {
     vip_writes_today: Arc<AtomicU64>,
     f2f_writes_today: Arc<AtomicU64>,
     free_writes_today: Arc<AtomicU64>,
-    epoch_seq: Arc<AtomicU64>,
-    cumulative_micro_byte_years: Arc<AtomicU64>,
-    prev_day_final_bytes: Arc<AtomicU64>,
-    current_epoch_day_cached: Arc<AtomicU64>,
+    accounting_state: Arc<parking_lot::Mutex<IngressAccountingState>>,
     last_thermometer_day: Arc<AtomicU64>,
     vip_persist_tx: tokio::sync::mpsc::Sender<VipQuotaPersistOp>,
     vip_persist_worker: tokio::task::AbortHandle,
     vip_persist_failed: Arc<AtomicBool>,
-    p2p_node_usage: Arc<RwLock<P2pDailyUsage>>,
-    p2p_node_read_usage: Arc<RwLock<P2pDailyUsage>>,
+    vip_daily_usage: Arc<RwLock<DailyUsageMap>>,
+    f2f_daily_usage: Arc<RwLock<DailyUsageMap>>,
+    free_daily_usage: Arc<RwLock<DailyUsageMap>>,
+    p2p_node_usage: Arc<RwLock<DailyUsageMap>>,
+    p2p_node_read_usage: Arc<RwLock<DailyUsageMap>>,
 }
 
 impl TierController {
-    /// Creates a new TierController with storage, PoW engine, and initialized NetworkThermometer.
+    pub fn new(storage: Arc<RedbStorage>, pow_engine: Arc<PowEngine>) -> Self {
+        Self::new_with_persist_capacity(storage, pow_engine, 1_024)
+    }
+
+    /// Creates a new TierController with storage, PoW engine, and specified persist queue capacity.
     ///
     /// Spawns a FIFO-sequenced VIP quota persist worker that processes write operations
     /// in strict order, preventing out-of-order write races from unsequenced `tokio::spawn`.
-    pub fn new(storage: Arc<RedbStorage>, pow_engine: Arc<PowEngine>) -> Self {
+    pub fn new_with_persist_capacity(
+        storage: Arc<RedbStorage>,
+        pow_engine: Arc<PowEngine>,
+        persist_channel_capacity: usize,
+    ) -> Self {
         let (vip_persist_tx, mut vip_persist_rx) =
-            tokio::sync::mpsc::channel::<VipQuotaPersistOp>(1_024);
+            tokio::sync::mpsc::channel::<VipQuotaPersistOp>(persist_channel_capacity.max(1));
         let persist_storage = storage.clone();
         let vip_persist_failed = Arc::new(AtomicBool::new(false));
         let worker_failed = vip_persist_failed.clone();
@@ -193,14 +209,14 @@ impl TierController {
             vip_writes_today: Arc::new(AtomicU64::new(0)),
             f2f_writes_today: Arc::new(AtomicU64::new(0)),
             free_writes_today: Arc::new(AtomicU64::new(0)),
-            epoch_seq: Arc::new(AtomicU64::new(0)),
-            cumulative_micro_byte_years: Arc::new(AtomicU64::new(0)),
-            prev_day_final_bytes: Arc::new(AtomicU64::new(0)),
-            current_epoch_day_cached: Arc::new(AtomicU64::new(0)),
+            accounting_state: Arc::new(parking_lot::Mutex::new(IngressAccountingState::default())),
             last_thermometer_day: Arc::new(AtomicU64::new(0)),
             vip_persist_tx,
             vip_persist_worker: worker.abort_handle(),
             vip_persist_failed,
+            vip_daily_usage: Arc::new(RwLock::new((0, HashMap::new()))),
+            f2f_daily_usage: Arc::new(RwLock::new((0, HashMap::new()))),
+            free_daily_usage: Arc::new(RwLock::new((0, HashMap::new()))),
             p2p_node_usage: Arc::new(RwLock::new((0, HashMap::new()))),
             p2p_node_read_usage: Arc::new(RwLock::new((0, HashMap::new()))),
         }
@@ -219,35 +235,41 @@ impl TierController {
 
     /// Increments and returns the next epoch_seq for Spec 10 Signed Ingress Envelopes.
     pub fn next_epoch_seq(&self) -> u64 {
-        self.epoch_seq.fetch_add(1, Ordering::SeqCst) + 1
+        let mut state = self.accounting_state.lock();
+        state.epoch_seq = state.epoch_seq.saturating_add(1);
+        state.epoch_seq
     }
 
     /// Records gateway declared usage, advancing day roll-over if needed, and returns:
     /// `(epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes)`.
+    ///
+    /// Uses a single short-held mutex covering day selection/rollover, sequence allocation,
+    /// and cumulative usage. Delayed requests carrying slightly older timestamps across a
+    /// rollover are monotonically clamped to `state.current_day` to prevent sequence forks.
     pub fn record_declared_usage(
         &self,
         now_ms: u64,
         footprint_micro_bj: u64,
     ) -> (u32, u64, u64, u64) {
-        let day = self.current_epoch_day_at(now_ms);
-        let last_day = self.current_epoch_day_cached.load(Ordering::Relaxed);
-        if day > last_day
-            && self
-                .current_epoch_day_cached
-                .compare_exchange(last_day, day, Ordering::SeqCst, Ordering::Relaxed)
-                .is_ok()
-        {
-            let prev_cum = self.cumulative_micro_byte_years.swap(0, Ordering::SeqCst);
-            self.prev_day_final_bytes.store(prev_cum, Ordering::SeqCst);
-            self.epoch_seq.store(0, Ordering::SeqCst);
+        let incoming_day = self.current_epoch_day_at(now_ms);
+        let mut state = self.accounting_state.lock();
+        if state.current_day == 0 {
+            state.current_day = incoming_day;
+        } else if incoming_day > state.current_day {
+            state.prev_day_final_bytes = state.cumulative_micro_byte_years;
+            state.cumulative_micro_byte_years = 0;
+            state.epoch_seq = 0;
+            state.current_day = incoming_day;
         }
-        let seq = self.next_epoch_seq();
-        let cum = self
+        let effective_day = state.current_day;
+        let seq = state.epoch_seq.saturating_add(1);
+        state.epoch_seq = seq;
+        state.cumulative_micro_byte_years = state
             .cumulative_micro_byte_years
-            .fetch_add(footprint_micro_bj, Ordering::SeqCst)
-            + footprint_micro_bj;
-        let prev = self.prev_day_final_bytes.load(Ordering::Relaxed);
-        (day as u32, seq, cum, prev)
+            .saturating_add(footprint_micro_bj);
+        let cum = state.cumulative_micro_byte_years;
+        let prev = state.prev_day_final_bytes;
+        (effective_day as u32, seq, cum, prev)
     }
 
     /// Returns the tier write counters: (vip, f2f, free).
@@ -334,15 +356,21 @@ impl TierController {
     }
 
     /// Hydrates the in-memory cache from durable storage (read-only, no fsync).
+    /// Idempotent with respect to cached balance: preserves an already-initialized or mutated balance.
     pub fn hydrate_vip_quota(&self, account_tag: &[u8; 32]) -> Result<u64, StorageError> {
+        if let Some(existing) = self.vip_quota_cache.read().get(account_tag).copied() {
+            return Ok(existing);
+        }
         let bal = self.storage.get_quota(account_tag)?;
-        self.vip_quota_cache.write().insert(*account_tag, bal);
-        Ok(bal)
+        let mut cache = self.vip_quota_cache.write();
+        let current = *cache.entry(*account_tag).or_insert(bal);
+        Ok(current)
     }
 
     /// Ensures that the specified VIP account tag is hydrated in the in-memory cache.
     /// If not present (cold miss), loads it asynchronously from durable storage via spawn_blocking,
     /// avoiding synchronous disk I/O under the cache write lock (A05-01).
+    /// Uses `entry().or_insert()` to ensure concurrent mutations are never overwritten.
     pub async fn ensure_vip_quota_cached(
         &self,
         account_tag: &[u8; 32],
@@ -358,7 +386,7 @@ impl TierController {
                 IngressError::Storage(StorageError::Io(std::io::Error::other(e.to_string())))
             })?
             .map_err(IngressError::Storage)?;
-        self.vip_quota_cache.write().insert(*account_tag, bal);
+        self.vip_quota_cache.write().entry(*account_tag).or_insert(bal);
         Ok(())
     }
 
@@ -624,16 +652,30 @@ impl TierController {
         epoch_day: u64,
     ) -> Result<(), IngressError> {
         let token_hash = *blake3::hash(peer_token.as_bytes()).as_bytes();
-        let peer_node_id: NodeId = u16::from_be_bytes([token_hash[0], token_hash[1]]);
         let daily_quota = self.calculate_daily_quota(1.0, 1.0);
-        let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-        if thermo.try_accept_lock(epoch_day, peer_node_id, required_byte_years, daily_quota) {
-            Ok(())
+        let mut f2f_usage = self
+            .f2f_daily_usage
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if f2f_usage.0 != epoch_day {
+            f2f_usage.0 = epoch_day;
+            f2f_usage.1.clear();
+        }
+        let current_usage = f2f_usage.1.entry(token_hash).or_insert(0);
+        if let Some(new_usage) = current_usage.checked_add(required_byte_years) {
+            if new_usage <= daily_quota {
+                *current_usage = new_usage;
+                Ok(())
+            } else {
+                let available = daily_quota.saturating_sub(*current_usage);
+                Err(IngressError::QuotaExceeded {
+                    available,
+                    required: required_byte_years,
+                })
+            }
         } else {
-            let used = thermo.get_node_usage(peer_node_id);
-            let available = daily_quota.saturating_sub(used);
             Err(IngressError::QuotaExceeded {
-                available,
+                available: 0,
                 required: required_byte_years,
             })
         }
@@ -647,17 +689,31 @@ impl TierController {
         epoch_day: u64,
         k_multiplier: f64,
     ) -> Result<(), IngressError> {
-        let vip_node_id: NodeId = u16::from_be_bytes([account_tag[0], account_tag[1]]);
         let daily_quota =
             self.calculate_daily_quota(k_multiplier.clamp(0.0, MAX_WHALE_MULTIPLIER), 1.0);
-        let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-        if thermo.try_accept_lock(epoch_day, vip_node_id, required_byte_years, daily_quota) {
-            Ok(())
+        let mut vip_usage = self
+            .vip_daily_usage
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if vip_usage.0 != epoch_day {
+            vip_usage.0 = epoch_day;
+            vip_usage.1.clear();
+        }
+        let current_usage = vip_usage.1.entry(*account_tag).or_insert(0);
+        if let Some(new_usage) = current_usage.checked_add(required_byte_years) {
+            if new_usage <= daily_quota {
+                *current_usage = new_usage;
+                Ok(())
+            } else {
+                let available = daily_quota.saturating_sub(*current_usage);
+                Err(IngressError::QuotaExceeded {
+                    available,
+                    required: required_byte_years,
+                })
+            }
         } else {
-            let used = thermo.get_node_usage(vip_node_id);
-            let available = daily_quota.saturating_sub(used);
             Err(IngressError::QuotaExceeded {
-                available,
+                available: 0,
                 required: required_byte_years,
             })
         }
@@ -687,9 +743,6 @@ impl TierController {
             if new_usage <= daily_quota {
                 *current_usage = new_usage;
                 drop(p2p_usage);
-                let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
-                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-                let _ = thermo.try_accept_lock(epoch_day, node_id, required_byte_years, u64::MAX);
                 Ok(())
             } else {
                 let available = daily_quota.saturating_sub(*current_usage);
@@ -748,9 +801,6 @@ impl TierController {
             if new_usage <= daily_read_quota {
                 *current_usage = new_usage;
                 drop(p2p_read_usage);
-                let node_id: NodeId = u16::from_be_bytes([sender_pubkey[0], sender_pubkey[1]]);
-                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-                let _ = thermo.try_accept_read(epoch_day, node_id, required_credits, u64::MAX);
                 Ok(())
             } else {
                 let available = daily_read_quota.saturating_sub(*current_usage);
@@ -778,14 +828,20 @@ impl TierController {
     }
 
     /// Registers an authorized VIP account tag directly.
+    /// Idempotent with respect to cached balance: preserves an already-initialized or mutated balance.
     pub fn register_vip_tag(&self, account_tag: [u8; 32]) {
         self.vip_tags
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(account_tag);
-        if let Ok(bal) = self.storage.get_quota(&account_tag) {
-            if bal > 0 {
-                self.vip_quota_cache.write().insert(account_tag, bal);
+        if !self.vip_quota_cache.read().contains_key(&account_tag) {
+            if let Ok(bal) = self.storage.get_quota(&account_tag) {
+                if bal > 0 {
+                    self.vip_quota_cache
+                        .write()
+                        .entry(account_tag)
+                        .or_insert(bal);
+                }
             }
         }
     }
@@ -856,16 +912,22 @@ impl TierController {
     }
 
     /// Lists all registered F2F clients with their today's writes and quota status.
-    pub fn list_f2f_clients(&self, now_ms: u64, _epoch_day: u64) -> Vec<F2fClientDto> {
+    pub fn list_f2f_clients(&self, now_ms: u64, epoch_day: u64) -> Vec<F2fClientDto> {
         let clients = self.f2f_clients.read().unwrap_or_else(|e| e.into_inner());
-        let thermo = self.thermometer.read().unwrap_or_else(|e| e.into_inner());
-        let daily_limit = thermo.calculate_daily_quota(1.0, 1.0);
+        let daily_limit = self.calculate_daily_quota(1.0, 1.0);
+        let f2f_usage = self
+            .f2f_daily_usage
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
 
         let mut list = Vec::with_capacity(clients.len());
         for meta in clients.values() {
-            let raw_hash = *blake3::hash(meta.token.as_bytes()).as_bytes();
-            let peer_node_id: NodeId = u16::from_be_bytes([raw_hash[0], raw_hash[1]]);
-            let writes_today = thermo.get_node_usage(peer_node_id);
+            let token_hash = *blake3::hash(meta.token.as_bytes()).as_bytes();
+            let writes_today = if f2f_usage.0 == epoch_day {
+                f2f_usage.1.get(&token_hash).copied().unwrap_or(0)
+            } else {
+                0
+            };
             let whale_brake_active = writes_today >= daily_limit;
             let last_active_sec = meta.last_active_ms.map(|t| now_ms.saturating_sub(t) / 1000);
 
@@ -958,24 +1020,91 @@ impl TierController {
         // 1. Check Tier 1 (VIP) - in-memory atomic cache, no synchronous fsync stall (INV-0929 hot-path)
         if let Some(token) = auth_token {
             let account_tag = self.resolve_account_tag(token)?;
-            if is_retry {
-                // Idempotent retry: valid VIP token authenticated, do not double-charge storage quota or write slots
-                return Ok(IngressTier::Tier1Vip);
-            }
-            // Hydrate cold miss asynchronously before acquiring write lock (A05-01)
-            self.ensure_vip_quota_cached(&account_tag).await?;
-            let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
-            self.try_charge_vip_in_memory(&account_tag, required_byte_years)?;
-            self.vip_writes_today.fetch_add(1, Ordering::Relaxed);
-            let vip_node_id: NodeId = u16::from_be_bytes([account_tag[0], account_tag[1]]);
             let epoch_day = match now_ms {
                 Some(ms) => self.current_epoch_day_at(ms),
                 None => self.current_epoch_day(),
             };
+            let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
             let daily_quota = self.calculate_daily_quota(5.0, 1.0);
-            let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-            thermo.try_accept_lock(epoch_day, vip_node_id, required_byte_years, daily_quota);
-            thermo.record_write_ingress(now_sec, footprint_micro_bj);
+
+            if is_retry {
+                let vip_usage = self
+                    .vip_daily_usage
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let used = if vip_usage.0 == epoch_day {
+                    vip_usage.1.get(&account_tag).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                if used >= daily_quota {
+                    let available = daily_quota.saturating_sub(used);
+                    return Err(IngressError::QuotaExceeded {
+                        available,
+                        required: required_byte_years,
+                    });
+                }
+                return Ok(IngressTier::Tier1Vip);
+            }
+
+            // Hydrate cold miss asynchronously before acquiring write lock (A05-01)
+            self.ensure_vip_quota_cached(&account_tag).await?;
+
+            // 1. Check daily quota first
+            let mut vip_usage = self
+                .vip_daily_usage
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if vip_usage.0 != epoch_day {
+                vip_usage.0 = epoch_day;
+                vip_usage.1.clear();
+            }
+            let current_usage = vip_usage.1.get(&account_tag).copied().unwrap_or(0);
+            let new_usage = match current_usage.checked_add(required_byte_years) {
+                Some(n) if n <= daily_quota => n,
+                _ => {
+                    let available = daily_quota.saturating_sub(current_usage);
+                    return Err(IngressError::QuotaExceeded {
+                        available,
+                        required: required_byte_years,
+                    });
+                }
+            };
+
+            // 2. Check purchased credit balance in RAM cache
+            let mut cache = self.vip_quota_cache.write();
+            let bal = cache.entry(account_tag).or_insert(0);
+            if *bal < required_byte_years {
+                return Err(IngressError::QuotaExceeded {
+                    available: *bal,
+                    required: required_byte_years,
+                });
+            }
+
+            // 3. Reserve persistence capacity BEFORE mutating RAM balance (A02-02)
+            let permit = self
+                .vip_persist_tx
+                .try_reserve()
+                .map_err(|_| IngressError::QuotaPersistenceUnavailable)?;
+
+            // 4. All checks passed! Apply all mutations atomically with zero partial state on errors
+            *bal = bal.saturating_sub(required_byte_years);
+            let remaining = *bal;
+            permit.send(VipQuotaPersistOp {
+                account_tag,
+                remaining,
+            });
+            drop(cache);
+
+            vip_usage.1.insert(account_tag, new_usage);
+            drop(vip_usage);
+
+            self.vip_writes_today.fetch_add(1, Ordering::Relaxed);
+            self.thermometer
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .record_write_ingress(now_sec, footprint_micro_bj);
+
             return Ok(IngressTier::Tier1Vip);
         }
 
@@ -997,7 +1126,6 @@ impl TierController {
                 None => self.current_epoch_day(),
             };
             let token_hash = *blake3::hash(token_trimmed.as_bytes()).as_bytes();
-            let peer_node_id: NodeId = u16::from_be_bytes([token_hash[0], token_hash[1]]);
             let daily_quota = self.calculate_daily_quota(1.0, 1.0);
 
             let token_hash_hex = hex::encode(token_hash);
@@ -1018,11 +1146,15 @@ impl TierController {
             }
 
             if is_retry {
-                // Idempotent retry: verify whale-brake admission (rolling over stale epoch_day)
-                // without double-charging storage or daily writes.
-                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-                let _ = thermo.try_accept_lock(epoch_day, peer_node_id, 0, daily_quota);
-                let used = thermo.get_node_usage(peer_node_id);
+                let f2f_usage = self
+                    .f2f_daily_usage
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let used = if f2f_usage.0 == epoch_day {
+                    f2f_usage.1.get(&token_hash).copied().unwrap_or(0)
+                } else {
+                    0
+                };
                 if used >= daily_quota {
                     let available = daily_quota.saturating_sub(used);
                     return Err(IngressError::QuotaExceeded {
@@ -1050,14 +1182,19 @@ impl TierController {
             None => self.current_epoch_day(),
         };
         let p = parent_lock.copied().unwrap_or([0u8; 32]);
-        let free_node_id: NodeId = u16::from_be_bytes([p[0], p[1]]);
         let daily_quota = self.calculate_daily_quota(1.0, 1.0);
 
         if self.pow_engine.default_difficulty() == 0 {
             if is_retry {
-                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-                let _ = thermo.try_accept_lock(epoch_day, free_node_id, 0, daily_quota);
-                let used = thermo.get_node_usage(free_node_id);
+                let free_usage = self
+                    .free_daily_usage
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let used = if free_usage.0 == epoch_day {
+                    free_usage.1.get(&p).copied().unwrap_or(0)
+                } else {
+                    0
+                };
                 if used >= daily_quota {
                     let available = daily_quota.saturating_sub(used);
                     return Err(IngressError::QuotaExceeded {
@@ -1068,20 +1205,38 @@ impl TierController {
                 return Ok(IngressTier::Tier3Public);
             }
 
-            let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-            let accepted =
-                thermo.try_accept_lock(epoch_day, free_node_id, required_byte_years, daily_quota);
-            if !accepted {
-                let used = thermo.get_node_usage(free_node_id);
-                let available = daily_quota.saturating_sub(used);
+            let mut free_usage = self
+                .free_daily_usage
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if free_usage.0 != epoch_day {
+                free_usage.0 = epoch_day;
+                free_usage.1.clear();
+            }
+            let current_usage = free_usage.1.entry(p).or_insert(0);
+            if let Some(new_usage) = current_usage.checked_add(required_byte_years) {
+                if new_usage <= daily_quota {
+                    *current_usage = new_usage;
+                    drop(free_usage);
+                    self.free_writes_today.fetch_add(1, Ordering::Relaxed);
+                    self.thermometer
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_write_ingress(now_sec, footprint_micro_bj);
+                    return Ok(IngressTier::Tier3Public);
+                } else {
+                    let available = daily_quota.saturating_sub(*current_usage);
+                    return Err(IngressError::QuotaExceeded {
+                        available,
+                        required: required_byte_years,
+                    });
+                }
+            } else {
                 return Err(IngressError::QuotaExceeded {
-                    available,
+                    available: 0,
                     required: required_byte_years,
                 });
             }
-            self.free_writes_today.fetch_add(1, Ordering::Relaxed);
-            thermo.record_write_ingress(now_sec, footprint_micro_bj);
-            return Ok(IngressTier::Tier3Public);
         }
 
         let load_factor = (self.rolling_24h_average_at(now_sec) as f64
@@ -1096,9 +1251,15 @@ impl TierController {
                     .await?;
 
                 if is_retry {
-                    let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-                    let _ = thermo.try_accept_lock(epoch_day, free_node_id, 0, daily_quota);
-                    let used = thermo.get_node_usage(free_node_id);
+                    let free_usage = self
+                        .free_daily_usage
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let used = if free_usage.0 == epoch_day {
+                        free_usage.1.get(&p).copied().unwrap_or(0)
+                    } else {
+                        0
+                    };
                     if used >= daily_quota {
                         let available = daily_quota.saturating_sub(used);
                         return Err(IngressError::QuotaExceeded {
@@ -1109,24 +1270,38 @@ impl TierController {
                     return Ok(IngressTier::Tier3Public);
                 }
 
-                let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
-                let accepted = thermo.try_accept_lock(
-                    epoch_day,
-                    free_node_id,
-                    required_byte_years,
-                    daily_quota,
-                );
-                if !accepted {
-                    let used = thermo.get_node_usage(free_node_id);
-                    let available = daily_quota.saturating_sub(used);
-                    return Err(IngressError::QuotaExceeded {
-                        available,
-                        required: required_byte_years,
-                    });
+                let mut free_usage = self
+                    .free_daily_usage
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                if free_usage.0 != epoch_day {
+                    free_usage.0 = epoch_day;
+                    free_usage.1.clear();
                 }
-                self.free_writes_today.fetch_add(1, Ordering::Relaxed);
-                thermo.record_write_ingress(now_sec, footprint_micro_bj);
-                Ok(IngressTier::Tier3Public)
+                let current_usage = free_usage.1.entry(p).or_insert(0);
+                if let Some(new_usage) = current_usage.checked_add(required_byte_years) {
+                    if new_usage <= daily_quota {
+                        *current_usage = new_usage;
+                        drop(free_usage);
+                        self.free_writes_today.fetch_add(1, Ordering::Relaxed);
+                        self.thermometer
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record_write_ingress(now_sec, footprint_micro_bj);
+                        Ok(IngressTier::Tier3Public)
+                    } else {
+                        let available = daily_quota.saturating_sub(*current_usage);
+                        Err(IngressError::QuotaExceeded {
+                            available,
+                            required: required_byte_years,
+                        })
+                    }
+                } else {
+                    Err(IngressError::QuotaExceeded {
+                        available: 0,
+                        required: required_byte_years,
+                    })
+                }
             }
             _ => {
                 let (challenge, _, expires_at) = self.pow_engine.generate_challenge_for_parent(&p);
@@ -1171,6 +1346,23 @@ impl TierController {
         }
 
         Err(IngressError::InvalidAuthToken)
+    }
+
+    /// Returns the current epoch day and recorded VIP usage for the given account tag (for test assertion).
+    pub fn vip_daily_usage_for_test(&self, account_tag: &[u8; 32]) -> (u64, u64) {
+        let guard = self.vip_daily_usage.read().unwrap_or_else(|e| e.into_inner());
+        let usage = guard.1.get(account_tag).copied().unwrap_or(0);
+        (guard.0, usage)
+    }
+
+    /// Reserves a VIP persistence permit to simulate channel saturation for testing.
+    /// Dropping the returned guard releases the permit back to the queue.
+    pub fn reserve_persist_permit_for_test(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        self.vip_persist_tx
+            .clone()
+            .try_reserve_owned()
+            .ok()
+            .map(|permit| Box::new(permit) as Box<dyn std::any::Any + Send>)
     }
 }
 

@@ -303,6 +303,8 @@ async fn test_a23_01_real_quic_signing_release_refuses_double_signature_under_fa
 
     let shard_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
     let client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    shard_pm.set_simulation_mode(true);
+    client_pm.set_simulation_mode(true);
 
     shard_pm
         .register_f2f_friend(

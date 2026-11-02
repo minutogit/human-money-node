@@ -297,6 +297,7 @@ impl ClusterHarness {
                 DualTierEngine::new_with_token(storage.clone(), flush_cancel.clone());
             let cancel_token = CancellationToken::new();
             let manager = Arc::new(PeerManager::new(Vec::new()));
+            manager.set_simulation_mode(true);
             manager.set_local_sync_ready(true);
             let readiness = Arc::new(
                 humoco_node::daemon::ShardReadinessManager::with_cancel_token(cancel_token.clone()),

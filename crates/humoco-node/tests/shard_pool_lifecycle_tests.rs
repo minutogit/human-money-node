@@ -46,6 +46,7 @@ async fn shard_pool_capacity_idle_lru_and_inbound_busy_protection_are_neutral() 
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let client_manager = Arc::new(PeerManager::new(Vec::new()));
+    client_manager.set_simulation_mode(true);
     let client = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().unwrap(),
         &client_identity,
@@ -64,6 +65,7 @@ async fn shard_pool_capacity_idle_lru_and_inbound_busy_protection_are_neutral() 
     for index in 0..258 {
         let server_identity = NodeIdentity::generate();
         let manager = Arc::new(PeerManager::new(Vec::new()));
+        manager.set_simulation_mode(true);
         manager
             .register_f2f_friend(*client_identity.node_id(), Some(client_addr))
             .await;

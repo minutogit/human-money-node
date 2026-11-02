@@ -53,6 +53,7 @@ fn prepared_readiness() -> Arc<humoco_node::daemon::ShardReadinessManager> {
 }
 
 async fn prepare_mature_fixture(pm: &PeerManager, local: &NodeIdentity) {
+    pm.set_simulation_mode(true);
     for peer in pm.list_peers().await {
         if let Some(key) = peer.node_id {
             let ticket = pm.get_hrw_routing_id(&key).await.unwrap_or(key);
@@ -96,6 +97,7 @@ fn fake_addr(port: u16) -> SocketAddr {
 }
 
 async fn force_stable_ge20(pm: &PeerManager) {
+    pm.set_simulation_mode(true);
     pm.set_local_sync_ready(true);
     let now_ms = pm.net_time_ms();
     let anchor = now_ms.saturating_sub(86_400_001);

@@ -442,6 +442,7 @@ async fn setup_live_proof_cluster_with_custom_handlers(
         .collect();
     roster.push((gateway.clone(), gateway_addr));
     for pm in std::iter::once(gateway_pm.clone()).chain(shards.iter().map(|sh| sh.pm.clone())) {
+        pm.set_simulation_mode(true);
         for (id, addr) in &roster {
             pm.learn_node_from_gossip_with_hrw(
                 *id.node_pubkey(),

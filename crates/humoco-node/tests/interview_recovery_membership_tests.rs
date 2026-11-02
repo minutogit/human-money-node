@@ -61,6 +61,7 @@ async fn peerless_recovery_never_authorizes_empty_state() {
 #[tokio::test]
 async fn committee_uses_three_missed_heartbeats_not_rpc_failure_score() {
     let manager = PeerManager::new(Vec::new());
+    manager.set_simulation_mode(true);
     let remote = NodeIdentity::generate();
     let local = NodeIdentity::generate();
     let addr = "127.0.0.1:31415".parse().expect("address");
@@ -159,7 +160,9 @@ async fn unknown_shard_is_rejected_over_real_quic_despite_global_readiness() {
     let client_id = NodeIdentity::generate();
     let cancel = CancellationToken::new();
     let pm_server = Arc::new(PeerManager::new(Vec::new()));
+    pm_server.set_simulation_mode(true);
     let pm_client = Arc::new(PeerManager::new(Vec::new()));
+    pm_client.set_simulation_mode(true);
     let readiness = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
     let handler = Arc::new(
         NodeRequestHandler::with_peer_manager(
@@ -465,3 +468,177 @@ async fn unready_shard_returns_flag_not_ready_and_is_rejected_as_recovery_witnes
 
     cancel.cancel();
 }
+
+#[tokio::test]
+async fn test_s06_01_initial_admission_requires_24h_age_and_eight_hourly_observations() {
+    let manager = Arc::new(PeerManager::new(Vec::new()));
+    assert!(manager.effective_incubation_duration().as_secs() >= 86400);
+
+    // Mined Argon2d ticket so S06-03 does not mask S06-01
+    let (newcomer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .expect("mine ticket for newcomer");
+    let (local, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .expect("mine ticket for local");
+
+    let addr = "127.0.0.1:31417".parse().expect("address");
+    let t0_ms = 1_700_000_000_000u64;
+
+    // 1. Accept 1 valid heartbeat at t0 (hour slot = t0_ms / 3_600_000)
+    manager
+        .learn_node_from_gossip_with_hrw_and_work(
+            *newcomer.node_pubkey(),
+            *newcomer.hrw_routing_id(),
+            addr,
+            0,
+            None,
+            newcomer.work_score(),
+        )
+        .await;
+    manager
+        .record_heartbeat_hourly_observation(
+            *newcomer.node_pubkey(),
+            *newcomer.hrw_routing_id(),
+            t0_ms,
+        )
+        .await;
+
+    // Advance observed age beyond 24 hours while presence becomes stale (> 3h 15m)
+    manager
+        .set_first_seen_for_test(
+            newcomer.node_pubkey(),
+            Instant::now() - Duration::from_secs(25 * 3600),
+        )
+        .await;
+    manager
+        .set_last_seen_for_test(
+            newcomer.node_pubkey(),
+            Instant::now() - Duration::from_secs(4 * 3600),
+        )
+        .await;
+
+    // At this point: observed age >= 24h, but presence is stale
+    let (committee_stale, _, _) = manager
+        .shard_committee(*local.node_pubkey(), *local.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        !committee_stale
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "Stale newcomer must not be in shard_committee"
+    );
+
+    // Now accept just 1 fresh heartbeat at t0 + 25h (making presence fresh)
+    let t25_ms = t0_ms + 25 * 3_600_000;
+    manager
+        .set_last_seen_for_test(newcomer.node_pubkey(), Instant::now())
+        .await;
+    manager
+        .record_heartbeat_hourly_observation(
+            *newcomer.node_pubkey(),
+            *newcomer.hrw_routing_id(),
+            t25_ms,
+        )
+        .await;
+
+    // S06-01 Core Assertion: Newcomer has observed age >= 24h AND fresh presence,
+    // BUT only 1 hourly observation in the 24h window (the t0 observation is 25h old and fell out!).
+    // Must remain OUTSIDE shard_committee, active_hrw_nodes, and regional_mesh_view!
+    let (committee, _, _) = manager
+        .shard_committee(*local.node_pubkey(), *local.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        !committee
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "S06-01: Newcomer with only 1 hourly observation in 24h window must NOT be admitted to shard_committee"
+    );
+
+    let active_hrw = manager.active_hrw_nodes().await;
+    assert!(
+        !active_hrw
+            .iter()
+            .any(|(hrw, _)| hrw == newcomer.hrw_routing_id()),
+        "S06-01: Newcomer must NOT be in active_hrw_nodes before 8 hourly observations"
+    );
+
+    let mesh_view = manager.regional_mesh_view(&local, 0).await.expect("mesh view");
+    assert!(
+        !mesh_view
+            .members
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "S06-01: Newcomer must NOT be in regional_mesh_view before 8 hourly observations"
+    );
+
+    // Assert replayed heartbeats and multiple heartbeats in same canonical hour do NOT inflate count
+    for _ in 0..10 {
+        manager
+            .record_heartbeat_hourly_observation(
+                *newcomer.node_pubkey(),
+                *newcomer.hrw_routing_id(),
+                t25_ms + 10_000, // same hour
+            )
+            .await;
+    }
+    let (committee_replayed, _, _) = manager
+        .shard_committee(*local.node_pubkey(), *local.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        !committee_replayed
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "Replayed heartbeats in same hour must not inflate observation count"
+    );
+
+    // Assert generic discovery / RPC calls do NOT inflate hourly heartbeat observations
+    manager
+        .learn_node_from_gossip(*newcomer.node_pubkey(), addr, 0, None)
+        .await;
+    manager
+        .upsert_known_node(*newcomer.node_pubkey(), *newcomer.hrw_routing_id(), addr)
+        .await;
+    let (committee_discovery, _, _) = manager
+        .shard_committee(*local.node_pubkey(), *local.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        !committee_discovery
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "Generic discovery/learn_node must not inflate hourly heartbeat observations"
+    );
+
+    // Positive admission test:
+    // Supply 7 more distinct hourly observations within the 24h window (total 8: hours 18, 19, 20, 21, 22, 23, 24, 25 relative to t0)
+    for hour in 18..=24 {
+        let obs_ms = t0_ms + hour * 3_600_000;
+        manager
+            .record_heartbeat_hourly_observation(
+                *newcomer.node_pubkey(),
+                *newcomer.hrw_routing_id(),
+                obs_ms,
+            )
+            .await;
+    }
+
+    // Now newcomer has observed age >= 24h AND 8 distinct hourly observations in the 24h window!
+    let (committee_admitted, _, _) = manager
+        .shard_committee(*local.node_pubkey(), *local.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        committee_admitted
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "S06-01: Newcomer with >=24h age AND >=8 hourly observations MUST be admitted to shard_committee"
+    );
+
+    let active_hrw_admitted = manager.active_hrw_nodes().await;
+    assert!(
+        active_hrw_admitted
+            .iter()
+            .any(|(hrw, _)| hrw == newcomer.hrw_routing_id()),
+        "S06-01: Admitted newcomer MUST be in active_hrw_nodes"
+    );
+}
+

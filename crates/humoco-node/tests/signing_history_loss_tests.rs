@@ -79,6 +79,7 @@ async fn real_quic_checkpoint_detects_restore_but_rejects_framing() {
     let cancel = CancellationToken::new();
     let (engine, worker) = DualTierEngine::new_with_token(storage.clone(), cancel.clone());
     let pm = Arc::new(PeerManager::new(Vec::new()));
+    pm.set_simulation_mode(true);
     let handler = NodeRequestHandler::with_peer_manager(
         engine.clone(),
         storage.clone(),
@@ -99,6 +100,7 @@ async fn real_quic_checkpoint_detects_restore_but_rejects_framing() {
     .unwrap();
     server.spawn_accept_loop();
     let client_pm = Arc::new(PeerManager::new(Vec::new()));
+    client_pm.set_simulation_mode(true);
     let client = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().unwrap(),
         &reporter,

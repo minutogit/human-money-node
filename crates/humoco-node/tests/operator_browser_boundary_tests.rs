@@ -148,6 +148,7 @@ async fn signed_regional_view_is_private_and_matches_real_committee_selection() 
     let (engine, worker) = DualTierEngine::new_with_token(storage.clone(), stop.clone());
     let identity = NodeIdentity::generate();
     let manager = Arc::new(humoco_node::network::PeerManager::new(Vec::new()));
+    manager.set_simulation_mode(true);
     // Isolated eligibility fixture, not a proof of admission or the fault bound.
     for _ in 0..20 {
         let member = NodeIdentity::generate();

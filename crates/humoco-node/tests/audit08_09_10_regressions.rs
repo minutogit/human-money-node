@@ -546,7 +546,9 @@ async fn a08_legacy_unsigned_tuple_relay_must_never_learn_or_authorize_third_par
     let recipient = NodeIdentity::generate();
     let unseen_victim = NodeIdentity::generate();
     let ma = Arc::new(PeerManager::new(vec![]));
+    ma.set_simulation_mode(true);
     let mb = Arc::new(PeerManager::new(vec![]));
+    mb.set_simulation_mode(true);
 
     let a = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().unwrap(),

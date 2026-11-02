@@ -41,6 +41,7 @@ pub(crate) async fn recovery_peers_fault(
         let cancel = CancellationToken::new();
         let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
         let manager = Arc::new(PeerManager::new(vec![]));
+        manager.set_simulation_mode(true);
         let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
         let handler = Arc::new(
             NodeRequestHandler::with_peer_manager(

@@ -204,7 +204,9 @@ async fn live_state_signature_over_quic_requires_exact_ready_state() {
     let server = NodeIdentity::generate();
     let client = NodeIdentity::generate();
     let pm = Arc::new(PeerManager::new(Vec::new()));
+    pm.set_simulation_mode(true);
     let cm = Arc::new(PeerManager::new(Vec::new()));
+    cm.set_simulation_mode(true);
     let cancel = CancellationToken::new();
     let readiness = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
     let handler = Arc::new(

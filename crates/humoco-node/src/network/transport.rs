@@ -3889,20 +3889,40 @@ impl QuicTransport {
                                                                 return;
                                                             }
                                                             let w = crate::identity::compute_work_score(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
-                                                            (expected_hrw, w)
-                                                        } else if hb.hrw_routing_id != [0u8; 32] {
-                                                            // Fast-path / legacy BLAKE3
-                                                            let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, 0, 0);
-                                                            if expected_hrw != hb.hrw_routing_id && node_id != hb.hrw_routing_id {
+                                                            if w == 0 {
                                                                 warn!(
                                                                     node = %hex::encode(node_id),
-                                                                    "GOSSIP BARRIER: Invalid fast-path shard ticket (hrw_routing_id mismatch)"
+                                                                    "GOSSIP BARRIER: Invalid Argon2d shard ticket PoW (zero work score)"
                                                                 );
                                                                 return;
                                                             }
-                                                            (hb.hrw_routing_id, 1)
+                                                            (expected_hrw, w)
+                                                        } else if pm.is_simulation_mode() {
+                                                            // Fast-path / legacy BLAKE3 in simulation mode
+                                                            if hb.hrw_routing_id != [0u8; 32] {
+                                                                let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, 0, 0);
+                                                                if expected_hrw != hb.hrw_routing_id && node_id != hb.hrw_routing_id {
+                                                                    warn!(
+                                                                        node = %hex::encode(node_id),
+                                                                        "GOSSIP BARRIER: Invalid fast-path shard ticket (hrw_routing_id mismatch)"
+                                                                    );
+                                                                    return;
+                                                                }
+                                                                (hb.hrw_routing_id, 1)
+                                                            } else {
+                                                                (node_id, 1)
+                                                            }
                                                         } else {
-                                                            (node_id, 1)
+                                                            // In production mode, unmined shortcut tickets are dropped.
+                                                            // Nonvoting F2F peers can still contribute direct friend clock samples.
+                                                            if hops == 0 && is_f2f && is_direct {
+                                                                pm.clock().record_peer_heartbeat(node_id, true, hb.timestamp_ms);
+                                                            }
+                                                            warn!(
+                                                                node = %hex::encode(node_id),
+                                                                "GOSSIP BARRIER: Rejected unmined shortcut ticket in production (nonce=0, t0=0)"
+                                                            );
+                                                            return;
                                                         };
 
                                                         // Check ticket PoW validity against network median
@@ -3940,6 +3960,12 @@ impl QuicTransport {
                                                             work_score,
                                                         ).await;
 
+                                                        pm.record_heartbeat_hourly_observation(
+                                                            node_id,
+                                                            verified_hrw,
+                                                            pm.net_time_ms(),
+                                                        ).await;
+
                                                         // Spec 07 / Spec 11: Clock samples fed to P2pClock must originate strictly from direct authenticated F2F peers,
                                                         // never relayed third-party hops (Task 4: F2F-Only Clock Samples).
                                                         // Each authenticated direct F2F friend contributes at most 1 current sample to the median pool (A11-01).
@@ -3952,6 +3978,13 @@ impl QuicTransport {
                                                             transport_clone.forward_heartbeat_gossip(&hb, hops, remote_addr).await;
                                                         }
                                                     } else if let Ok((adv_id, adv_addr)) = res2 {
+                                                        if !pm.is_simulation_mode() {
+                                                            warn!(
+                                                                node = %hex::encode(adv_id),
+                                                                "GOSSIP BARRIER: Dropped unsigned legacy tuple heartbeat in production"
+                                                            );
+                                                            return;
+                                                        }
                                                         if pm.is_banned(&adv_id).await {
                                                             warn!(node = %hex::encode(adv_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
                                                             return;

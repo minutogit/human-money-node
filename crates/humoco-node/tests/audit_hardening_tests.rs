@@ -81,6 +81,7 @@ async fn test_anti_framing_split_brain_collision_does_not_ban_signers() {
 #[tokio::test]
 async fn test_24h_finality_hysteresis_and_immature_rejection() {
     let peer_mgr = Arc::new(PeerManager::new(vec![]));
+    peer_mgr.set_simulation_mode(true);
     let now_ms = 1_000_000_000u64;
 
     // Phase 9 P1: Provisional -> Final additionally requires local sync-readiness.

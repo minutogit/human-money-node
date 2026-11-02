@@ -50,6 +50,7 @@ fn prepared_readiness() -> Arc<humoco_node::daemon::ShardReadinessManager> {
 }
 
 async fn prepare_mature_fixture(pm: &PeerManager, local: &NodeIdentity) {
+    pm.set_simulation_mode(true);
     for peer in pm.list_peers().await {
         if let Some(key) = peer.node_id {
             let ticket = pm.get_hrw_routing_id(&key).await.unwrap_or(key);
@@ -169,6 +170,7 @@ async fn response_json<T: serde::de::DeserializeOwned>(res: axum::response::Resp
 /// Matures a PeerManager to N>=20 FINAL-readiness: sync-ready + old ge20 anchor.
 /// The caller must have populated >=19 peers beforehand so active>=20.
 async fn force_stable_ge20(pm: &PeerManager) {
+    pm.set_simulation_mode(true);
     pm.set_local_sync_ready(true);
     let now_ms = pm.net_time_ms();
     let anchor = now_ms.saturating_sub(86_400_001);
@@ -1091,6 +1093,7 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
 async fn test_phase11f_100_node_hrw_quorum_validation() {
     // Pure-math 100-node mesh.
     let pm = Arc::new(PeerManager::new(Vec::new()));
+    pm.set_simulation_mode(true);
     pm.set_local_sync_ready(true);
     for i in 0u64..100 {
         let nid = fake_pubkey(777_000 + i);
@@ -1388,6 +1391,7 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
             identity = NodeIdentity::generate();
         }
         let pm = Arc::new(PeerManager::new(Vec::new()));
+        pm.set_simulation_mode(true);
         let ready = Arc::new(AtomicBool::new(true));
         let attack = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let forged = Arc::new(std::sync::atomic::AtomicUsize::new(0));

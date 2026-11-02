@@ -165,6 +165,7 @@ async fn test_f1_pending_remote_never_becomes_verified() {
         pow,
     );
     let routing = Arc::new(PeerManager::new(vec![]));
+    routing.set_simulation_mode(true);
     routing
         .learn_node_from_gossip_with_hrw(
             *source.identity.node_pubkey(),

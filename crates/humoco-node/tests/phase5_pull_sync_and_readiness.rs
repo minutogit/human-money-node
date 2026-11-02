@@ -25,10 +25,12 @@ async fn test_boot_readiness_barrier_wire_flag() {
         Vec::new(),
         vec![*client_id.node_id()],
     ));
+    pm_server.set_simulation_mode(true);
     let pm_client = Arc::new(PeerManager::with_f2f(
         Vec::new(),
         vec![*server_id.node_id()],
     ));
+    pm_client.set_simulation_mode(true);
 
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
     pm_server
@@ -594,6 +596,7 @@ async fn test_per_shard_readiness_demand_sync_503() {
 
     let server_id = NodeIdentity::generate();
     let pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    pm.set_simulation_mode(true);
     let is_sync_ready = Arc::new(AtomicBool::new(true)); // global sync ready
 
     let handler = Arc::new(
@@ -768,10 +771,12 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
         Vec::new(),
         vec![*client_id.node_id()],
     ));
+    pm_server.set_simulation_mode(true);
     let pm_client = Arc::new(PeerManager::with_f2f(
         Vec::new(),
         vec![*server_id.node_id()],
     ));
+    pm_client.set_simulation_mode(true);
 
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
     pm_server

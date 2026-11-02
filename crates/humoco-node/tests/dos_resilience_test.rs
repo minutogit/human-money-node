@@ -50,6 +50,7 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
 
     // Configure all 20 as known F2F peers so they are eligible as active HRW nodes
     let peer_mgr = Arc::new(PeerManager::with_f2f(shard_entries, shard_pubkeys.clone()));
+    peer_mgr.set_simulation_mode(true);
 
     for (key, addr) in shard_pubkeys.iter().zip(&shard_addrs) {
         peer_mgr

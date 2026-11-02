@@ -73,6 +73,7 @@ async fn test_m2_advertised_addr_propagates_over_real_quic_heartbeat() {
     // 1. Configure and bind Node B's QUIC transport and PeerManager
     let cancel_b = CancellationToken::new();
     let pm_b = Arc::new(PeerManager::new(vec![]));
+    pm_b.set_simulation_mode(true);
     pm_b.register_f2f_friend(*identity_a.node_pubkey(), None)
         .await;
 
@@ -404,8 +405,12 @@ async fn test_persisted_ticket_observations_survive_restart_while_new_tickets_in
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("tickets.redb");
 
-    let local_id = NodeIdentity::generate();
-    let peer_id = NodeIdentity::generate();
+    let (local_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .unwrap();
+    let (peer_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .unwrap();
     let now_ms: u64 = 1_750_000_000_000;
     let mature_seen_ms = now_ms - (25 * 3600 * 1000); // observed 25h ago
 

@@ -113,6 +113,9 @@ pub struct KnownNodeInfo {
     pub(crate) min_hops: u8,
     pub(crate) best_ingress_peer: Option<SocketAddr>,
     pub(crate) ingress_diversity_mask: u32,
+    pub(crate) latest_obs_hour: Option<u64>,
+    pub(crate) obs_24h_mask: u32,
+    pub(crate) initial_admission_qualified: bool,
     pub last_write_evidence: Option<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     pub last_read_evidence: Option<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
 }
@@ -148,6 +151,9 @@ impl KnownNodeInfo {
             min_hops: 255,
             best_ingress_peer: None,
             ingress_diversity_mask: 0,
+            latest_obs_hour: None,
+            obs_24h_mask: 0,
+            initial_admission_qualified: false,
             last_write_evidence: None,
             last_read_evidence: None,
         }
@@ -178,6 +184,9 @@ impl KnownNodeInfo {
             min_hops: 255,
             best_ingress_peer: None,
             ingress_diversity_mask: 0,
+            latest_obs_hour: None,
+            obs_24h_mask: 0,
+            initial_admission_qualified: false,
             last_write_evidence: None,
             last_read_evidence: None,
         }
@@ -239,15 +248,71 @@ impl KnownNodeInfo {
         self.observed_age() < self.incubation_duration
     }
 
+    /// Records an authenticated hourly observation using approved network time.
+    /// Canonical hour slot = obs_ms / 3_600_000.
+    pub fn record_hourly_observation(&mut self, obs_ms: u64, is_simulation: bool) {
+        let hour = obs_ms / 3_600_000;
+        match self.latest_obs_hour {
+            None => {
+                self.latest_obs_hour = Some(hour);
+                self.obs_24h_mask = 1;
+            }
+            Some(latest) => {
+                if hour > latest {
+                    let delta = hour - latest;
+                    if delta >= 24 {
+                        self.obs_24h_mask = 1;
+                    } else {
+                        self.obs_24h_mask = ((self.obs_24h_mask << delta) | 1) & 0x00FF_FFFF;
+                    }
+                    self.latest_obs_hour = Some(hour);
+                } else if hour < latest {
+                    let delta = latest - hour;
+                    if delta < 24 {
+                        self.obs_24h_mask |= 1 << delta;
+                        self.obs_24h_mask &= 0x00FF_FFFF;
+                    }
+                }
+            }
+        }
+
+        if is_simulation {
+            if self.observed_age() >= self.incubation_duration {
+                self.initial_admission_qualified = true;
+            }
+        } else if self.observed_age() >= self.incubation_duration
+            && self.obs_24h_mask.count_ones() >= 8
+        {
+            self.initial_admission_qualified = true;
+        }
+    }
+
+    /// Checks if initial admission has been qualified (latched per active hrw_routing_id).
+    pub fn is_initial_admission_qualified(&self) -> bool {
+        if self.incubation_duration <= SIM_HRW_INCUBATION_DURATION {
+            return self.observed_age() >= self.incubation_duration;
+        }
+        if self.initial_admission_qualified {
+            return true;
+        }
+        if self.pre_boot_age >= self.incubation_duration {
+            return true;
+        }
+        if self.observed_age() >= self.incubation_duration && self.obs_24h_mask.count_ones() >= 8 {
+            return true;
+        }
+        false
+    }
+
     /// Is gossip presence still fresh (heartbeat seen within `PRESENCE_FRESHNESS_TIMEOUT`)?
     /// Stale ghosts must not inflate `N_active` for the Provisional -> Final transition.
     pub fn is_presence_fresh(&self) -> bool {
         self.last_seen.elapsed() < PRESENCE_FRESHNESS_TIMEOUT
     }
 
-    /// May node be used for HRW scoring? (ACTIVE, not IMMATURE)
+    /// May node be used for HRW scoring? (ACTIVE, not IMMATURE, and qualified for initial admission)
     pub fn is_hrw_eligible(&self) -> bool {
-        !self.is_immature()
+        !self.is_immature() && self.is_initial_admission_qualified()
     }
 }
 
@@ -555,6 +620,12 @@ impl PeerManager {
             .store(enabled, std::sync::atomic::Ordering::Release);
     }
 
+    /// Returns true if simulation mode is active.
+    pub fn is_simulation_mode(&self) -> bool {
+        self.simulation_mode
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Returns the active HRW ticket incubation window (`24h` in production, `2s` in simulation_mode).
     pub fn effective_incubation_duration(&self) -> Duration {
         if self
@@ -574,6 +645,12 @@ impl PeerManager {
         hrw_routing_id: [u8; 32],
         prior_age: Duration,
     ) {
+        let is_shortcut = hrw_routing_id == *blake3::hash(&node_pubkey).as_bytes()
+            || hrw_routing_id == node_pubkey
+            || hrw_routing_id == [0u8; 32];
+        if !self.is_simulation_mode() && is_shortcut {
+            return;
+        }
         self.persisted_ticket_ages
             .lock()
             .insert((node_pubkey, hrw_routing_id), prior_age);
@@ -586,6 +663,12 @@ impl PeerManager {
         local_hrw: [u8; 32],
         prior_age: Duration,
     ) {
+        let is_shortcut = local_hrw == *blake3::hash(&local_pubkey).as_bytes()
+            || local_hrw == local_pubkey
+            || local_hrw == [0u8; 32];
+        if !self.is_simulation_mode() && is_shortcut {
+            return;
+        }
         if let Ok(mut guard) = self.local_ticket_observation.lock() {
             *guard = Some((local_pubkey, local_hrw, Instant::now(), prior_age));
         }
@@ -1077,6 +1160,20 @@ impl PeerManager {
             });
         }
 
+        // 4. Revoke clock sample for removed key
+        if let Some(ref key) = key_opt {
+            self.clock.revoke_peer_sample(key);
+        } else if let Some(ref hex_key) = removed_pubkey {
+            if let Ok(bytes) = hex::decode(hex_key) {
+                if let Ok(array) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    let mut friends = self.f2f_friends.write().await;
+                    friends.remove(&array);
+                    drop(friends);
+                    self.clock.revoke_peer_sample(&array);
+                }
+            }
+        }
+
         removed_pubkey
     }
 
@@ -1346,6 +1443,7 @@ impl PeerManager {
             }
         }
         drop(peers);
+        self.clock.revoke_peer_sample(pubkey);
         self.notify_sync_trigger();
     }
 
@@ -1530,6 +1628,18 @@ impl PeerManager {
             return;
         }
 
+        let is_shortcut = hrw_routing_id == *blake3::hash(&node_pubkey).as_bytes()
+            || hrw_routing_id == node_pubkey
+            || hrw_routing_id == [0u8; 32]
+            || work_score == 0;
+        if !self.is_simulation_mode() && is_shortcut {
+            warn!(
+                node = %hex::encode(node_pubkey),
+                "GOSSIP BARRIER: Rejected unmined shortcut ticket in production"
+            );
+            return;
+        }
+
         let incubation = self.effective_incubation_duration();
         let prior_age = self
             .persisted_ticket_ages
@@ -1548,6 +1658,9 @@ impl PeerManager {
                 entry.work_score = work_score;
                 entry.pre_boot_age = prior_age;
                 entry.first_seen = now;
+                entry.latest_obs_hour = None;
+                entry.obs_24h_mask = 0;
+                entry.initial_admission_qualified = false;
             }
             // Promotion if due, before inspecting new value
             if let (Some(pending), Some(since)) =
@@ -1563,6 +1676,9 @@ impl PeerManager {
                     entry.pending_work_score = None;
                     entry.pending_since = None;
                     entry.incubated_until = None;
+                    entry.latest_obs_hour = None;
+                    entry.obs_24h_mask = 0;
+                    entry.initial_admission_qualified = false;
                 }
             }
             // Protect direct or stronger addresses from unauthorized relay downgrade:
@@ -1639,6 +1755,9 @@ impl PeerManager {
                     min_hops: hops,
                     best_ingress_peer: ingress_peer,
                     ingress_diversity_mask: mask,
+                    latest_obs_hour: None,
+                    obs_24h_mask: 0,
+                    initial_admission_qualified: prior_age >= incubation,
                     last_write_evidence: None,
                     last_read_evidence: None,
                 },
@@ -2277,6 +2396,7 @@ impl PeerManager {
                 affected += 1;
             }
         }
+        self.clock.revoke_peer_sample(node_id);
         affected
     }
 
@@ -2432,8 +2552,12 @@ impl PeerManager {
         self.local_ticket_observation
             .lock()
             .map(|value| {
-                value.as_ref().is_some_and(|(_, _, since, prior_age)| {
-                    prior_age.saturating_add(since.elapsed()) >= required
+                value.as_ref().is_some_and(|(pk, hrw, since, prior_age)| {
+                    let valid_ticket = self.is_simulation_mode()
+                        || (*hrw != *blake3::hash(pk).as_bytes()
+                            && *hrw != *pk
+                            && *hrw != [0u8; 32]);
+                    valid_ticket && prior_age.saturating_add(since.elapsed()) >= required
                 })
             })
             .unwrap_or(false)
@@ -2475,7 +2599,13 @@ impl PeerManager {
             })
             .collect();
         let required_incubation = self.effective_incubation_duration();
-        let self_mature = if let Some(info) = known.get(&self_pubkey) {
+        let self_has_valid_ticket = self.is_simulation_mode()
+            || (self_hrw != *blake3::hash(&self_pubkey).as_bytes()
+                && self_hrw != self_pubkey
+                && self_hrw != [0u8; 32]);
+        let self_mature = if !self_has_valid_ticket {
+            false
+        } else if let Some(info) = known.get(&self_pubkey) {
             info.hrw_routing_id == self_hrw && info.is_hrw_eligible()
         } else if let Ok(mut observation) = self.local_ticket_observation.lock() {
             match *observation {
@@ -2568,10 +2698,16 @@ impl PeerManager {
         let known = self.known_network_nodes.read().await;
         let banned = self.banned_nodes.read().await;
         let local = *identity.node_pubkey();
+        let local_has_valid_ticket = self.is_simulation_mode()
+            || (*identity.hrw_routing_id() != *blake3::hash(&local).as_bytes()
+                && *identity.hrw_routing_id() != local
+                && *identity.hrw_routing_id() != [0u8; 32]);
         let mut members = Vec::new();
         for (key, info) in known.iter() {
             let eligible = if *key == local {
-                info.hrw_routing_id == *identity.hrw_routing_id() && info.is_hrw_eligible()
+                local_has_valid_ticket
+                    && info.hrw_routing_id == *identity.hrw_routing_id()
+                    && info.is_hrw_eligible()
             } else {
                 info.is_hrw_eligible() && info.is_presence_fresh()
             };
@@ -2587,7 +2723,10 @@ impl PeerManager {
                 });
             }
         }
-        if !known.contains_key(&local) && self.local_ticket_is_mature() && !banned.contains(&local)
+        if local_has_valid_ticket
+            && !known.contains_key(&local)
+            && self.local_ticket_is_mature()
+            && !banned.contains(&local)
         {
             if members.len() >= humoco_proto::mesh::MAX_MESH_MEMBERS {
                 return Err(crate::error::NodeError::LocalCapacity(
@@ -3009,6 +3148,28 @@ impl PeerManager {
     /// Returns the P2P Network-Adjusted Time (`net_time`) in ms (< 1µs, lock-free).
     pub fn net_time_ms(&self) -> u64 {
         self.clock.net_time_ms()
+    }
+
+    /// Alias for net_time_ms.
+    #[inline]
+    pub fn now_ms(&self) -> u64 {
+        self.net_time_ms()
+    }
+
+    /// Records an authenticated hourly heartbeat observation for initial admission tracking.
+    pub async fn record_heartbeat_hourly_observation(
+        &self,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        obs_ms: u64,
+    ) {
+        let is_sim = self.effective_incubation_duration() <= SIM_HRW_INCUBATION_DURATION;
+        let mut nodes = self.known_network_nodes.write().await;
+        if let Some(entry) = nodes.get_mut(&node_pubkey) {
+            if entry.hrw_routing_id == hrw_routing_id {
+                entry.record_hourly_observation(obs_ms, is_sim);
+            }
+        }
     }
 
     /// Computes backoff duration with symmetric random jitter (+/-25%) and dormant cap according to Spec 15 / Spec 19.

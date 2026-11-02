@@ -1229,6 +1229,7 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
 async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let (_router, _storage, identity, _tier_controller, _pow_engine) = setup_test_app();
     let peer_mgr = Arc::new(humoco_node::network::PeerManager::new(vec![]));
+    peer_mgr.set_simulation_mode(true);
     let transport =
         humoco_node::network::QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &identity)
             .unwrap();

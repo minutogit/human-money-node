@@ -510,9 +510,16 @@ impl NodeDaemon {
             let local_pk = *self.identity.node_pubkey();
             let local_hrw = *self.identity.hrw_routing_id();
             let mut local_prior_age = std::time::Duration::ZERO;
+            let sim_mode = self.config.network.simulation_mode;
             match storage.all_ticket_observations() {
                 Ok(observations) => {
                     for (pk, hrw, first_seen_ms) in &observations {
+                        let is_shortcut = *hrw == *blake3::hash(pk).as_bytes()
+                            || *hrw == *pk
+                            || *hrw == [0u8; 32];
+                        if !sim_mode && is_shortcut {
+                            continue;
+                        }
                         let age = std::time::Duration::from_millis(
                             boot_now_ms.saturating_sub(*first_seen_ms),
                         );
@@ -532,11 +539,13 @@ impl NodeDaemon {
                     warn!(error = %err, "Failed to load persisted HRW ticket observations from redb");
                 }
             }
-            peer_manager.seed_local_ticket_age(local_pk, local_hrw, local_prior_age);
-            if let Err(err) =
-                storage.record_ticket_observations_if_absent(&[(local_pk, local_hrw, boot_now_ms)])
-            {
-                warn!(error = %err, "Failed to persist initial local HRW ticket observation");
+            if sim_mode || self.identity.has_valid_pow_ticket() {
+                peer_manager.seed_local_ticket_age(local_pk, local_hrw, local_prior_age);
+                if let Err(err) =
+                    storage.record_ticket_observations_if_absent(&[(local_pk, local_hrw, boot_now_ms)])
+                {
+                    warn!(error = %err, "Failed to persist initial local HRW ticket observation");
+                }
             }
         }
 

@@ -28,15 +28,18 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
         Vec::new(),
         vec![*identity_b.node_id()],
     ));
+    pm_a.set_simulation_mode(true);
 
     // Node B configures Node A as an F2F friend
     let pm_b = Arc::new(PeerManager::with_f2f(
         Vec::new(),
         vec![*identity_a.node_id()],
     ));
+    pm_b.set_simulation_mode(true);
 
     // Node C is a stranger (no friends yet)
     let pm_c = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    pm_c.set_simulation_mode(true);
 
     let transport_a = QuicTransport::bind_with_options(
         addr_a,
@@ -216,6 +219,7 @@ async fn test_unauthorized_active_sync_and_shard_digest_rejected() {
     let addr_a: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let cancel_a = CancellationToken::new();
     let pm_a = Arc::new(PeerManager::new(Vec::new()));
+    pm_a.set_simulation_mode(true);
 
     let transport_a = QuicTransport::bind_with_options(
         addr_a,
@@ -337,11 +341,14 @@ async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
     let addr_c: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     let pm_a = Arc::new(PeerManager::with_f2f(vec![], vec![*identity_b.node_id()]));
+    pm_a.set_simulation_mode(true);
     let pm_b = Arc::new(PeerManager::with_f2f(
         vec![],
         vec![*identity_a.node_id(), *identity_c.node_id()],
     ));
+    pm_b.set_simulation_mode(true);
     let pm_c = Arc::new(PeerManager::with_f2f(vec![], vec![*identity_b.node_id()]));
+    pm_c.set_simulation_mode(true);
 
     let transport_a = QuicTransport::bind_with_options(
         addr_a,
@@ -475,6 +482,7 @@ async fn test_s04_01_connect_peer_identity_validation() {
     // Client node C
     let identity_c = NodeIdentity::generate();
     let pm_c = Arc::new(PeerManager::new(Vec::new()));
+    pm_c.set_simulation_mode(true);
     let transport_c = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().unwrap(),
         &identity_c,
@@ -492,6 +500,7 @@ async fn test_s04_01_connect_peer_identity_validation() {
 
     // Server runs with identity B
     let pm_b = Arc::new(PeerManager::new(Vec::new()));
+    pm_b.set_simulation_mode(true);
     let transport_b = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().unwrap(),
         &identity_b,
@@ -562,6 +571,7 @@ async fn test_s04_01_connect_peer_identity_validation() {
     // --- (d) Normal endpoint migration retaining A's key (positive control) ---
     // Node A actually starts on a new address and authorizes client C
     let pm_a = Arc::new(PeerManager::new(Vec::new()));
+    pm_a.set_simulation_mode(true);
     let transport_a = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().unwrap(),
         &identity_a,
@@ -599,6 +609,7 @@ async fn test_s04_03_bidirectional_and_unidirectional_gossip_barrier() {
 
     let server_id = NodeIdentity::generate();
     let pm_s = Arc::new(PeerManager::new(Vec::new()));
+    pm_s.set_simulation_mode(true);
     let handler = Arc::new(
         humoco_node::network::NodeRequestHandler::with_peer_manager(
             engine.clone(),
@@ -623,6 +634,7 @@ async fn test_s04_03_bidirectional_and_unidirectional_gossip_barrier() {
     // 1. Client 1 is admitted SOLELY as a learned non-F2F node (hops = 1, not in f2f_friends)
     let non_f2f_id = NodeIdentity::generate();
     let pm_non_f2f = Arc::new(PeerManager::new(Vec::new()));
+    pm_non_f2f.set_simulation_mode(true);
     let transport_non_f2f = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().unwrap(),
         &non_f2f_id,
@@ -738,4 +750,563 @@ async fn test_s04_03_bidirectional_and_unidirectional_gossip_barrier() {
     transport_non_f2f.close();
     transport_f2f.close();
 }
+
+#[tokio::test]
+async fn test_s06_01_real_quic_initial_admission_hourly_observations_gate() {
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::{DefaultRequestHandler, QuicTransport};
+    use humoco_sim_core::wire::{MsgType, WireHeader};
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+    let (server_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+    let (relay_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+    let (newcomer_c, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+
+    let pm_server = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*relay_id.node_pubkey()],
+    ));
+    assert!(pm_server.effective_incubation_duration().as_secs() >= 86400);
+
+    let pm_relay = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*server_id.node_pubkey()],
+    ));
+
+    let transport_s = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm_server.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind server");
+    let addr_s = transport_s.local_addr().unwrap();
+    transport_s.spawn_accept_loop();
+
+    let transport_r = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &relay_id,
+        pm_relay.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind relay");
+    let addr_r = transport_r.local_addr().unwrap();
+    transport_r.spawn_accept_loop();
+
+    pm_server
+        .register_f2f_friend(*relay_id.node_pubkey(), Some(addr_r))
+        .await;
+    pm_relay
+        .register_f2f_friend(*server_id.node_pubkey(), Some(addr_s))
+        .await;
+
+    let conn_r_to_s = transport_r
+        .connect_peer(addr_s)
+        .await
+        .expect("connect relay to server");
+
+    let t0_ms = pm_server.net_time_ms();
+    let addr_c: SocketAddr = "127.0.0.1:39999".parse().unwrap();
+
+    // Relay sends newcomer C's valid heartbeat at t0 (hops = 1)
+    let mut hb_c = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *newcomer_c.node_pubkey(),
+        addr: addr_c,
+        timestamp_ms: t0_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: newcomer_c.nonce(),
+        hrw_routing_id: *newcomer_c.hrw_routing_id(),
+        ticket_epoch_t0: newcomer_c.t0(),
+        ttl: 16,
+    };
+    hb_c.sign_origin(&newcomer_c, t0_ms);
+    let payload = bincode::serialize(&hb_c).unwrap();
+    let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
+    hdr.reserved = 1; // hops = 1 (relayed)
+
+    transport_r
+        .send_unidirectional(&conn_r_to_s, &hdr, &payload)
+        .await
+        .expect("send heartbeat");
+    for _ in 0..20 {
+        if pm_server.is_known_node(newcomer_c.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(pm_server.is_known_node(newcomer_c.node_pubkey()).await);
+
+    // Advance C's observed age to 25h while presence goes stale
+    pm_server
+        .set_first_seen_for_test(
+            newcomer_c.node_pubkey(),
+            Instant::now() - Duration::from_secs(25 * 3600),
+        )
+        .await;
+    pm_server
+        .set_last_seen_for_test(
+            newcomer_c.node_pubkey(),
+            Instant::now() - Duration::from_secs(4 * 3600),
+        )
+        .await;
+
+    // Advance server clock by 25h
+    pm_server.clock().advance_time_for_test(25 * 3600 * 1000);
+    let t25_ms = pm_server.net_time_ms();
+
+    // Relay sends 1 fresh heartbeat for C at t0 + 25h
+    hb_c.timestamp_ms = t25_ms;
+    hb_c.sign_origin(&newcomer_c, t25_ms);
+    let payload2 = bincode::serialize(&hb_c).unwrap();
+    let mut hdr2 =
+        WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, payload2.len() as u32);
+    hdr2.reserved = 1;
+    transport_r
+        .send_unidirectional(&conn_r_to_s, &hdr2, &payload2)
+        .await
+        .expect("send second heartbeat");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Core Assertion S06-01: C has >=24h observed age AND fresh presence,
+    // but only 1 hourly observation in the 24h window (the t0 observation fell out!).
+    // Must NOT be in shard_committee or active_hrw_nodes!
+    let (committee, _, _) = pm_server
+        .shard_committee(
+            *server_id.node_pubkey(),
+            *server_id.hrw_routing_id(),
+            42,
+        )
+        .await;
+    assert!(
+        !committee
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer_c.node_pubkey()),
+        "S06-01 QUIC: Newcomer with only 1 hourly observation must NOT be in shard_committee"
+    );
+
+    let active_hrw = pm_server.active_hrw_nodes().await;
+    assert!(
+        !active_hrw
+            .iter()
+            .any(|(hrw, _)| hrw == newcomer_c.hrw_routing_id()),
+        "S06-01 QUIC: Newcomer with only 1 hourly observation must NOT be in active_hrw_nodes"
+    );
+
+    // Provide remaining 7 distinct hourly observations (total 8 in the 24h window)
+    for hour in 18..=24 {
+        let obs_ms = t0_ms + hour * 3_600_000;
+        pm_server
+            .record_heartbeat_hourly_observation(
+                *newcomer_c.node_pubkey(),
+                *newcomer_c.hrw_routing_id(),
+                obs_ms,
+            )
+            .await;
+    }
+
+    let (committee_admitted, _, _) = pm_server
+        .shard_committee(
+            *server_id.node_pubkey(),
+            *server_id.hrw_routing_id(),
+            42,
+        )
+        .await;
+    assert!(
+        committee_admitted
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer_c.node_pubkey()),
+        "S06-01 QUIC: Newcomer with >=24h age AND >=8 hourly observations MUST be admitted to shard_committee"
+    );
+
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::{DefaultRequestHandler, QuicTransport};
+    use humoco_sim_core::wire::{MsgType, WireHeader};
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+    let (server_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+    let (relay_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+    let (friend_direct, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+
+    let pm_server = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*relay_id.node_pubkey(), *friend_direct.node_pubkey()],
+    ));
+    assert!(pm_server.effective_incubation_duration().as_secs() >= 86400); // simulation_mode == false
+
+    let pm_relay = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*server_id.node_pubkey()],
+    ));
+    let pm_direct = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*server_id.node_pubkey()],
+    ));
+
+    let transport_s = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm_server.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind server");
+    let addr_s = transport_s.local_addr().unwrap();
+    transport_s.spawn_accept_loop();
+
+    let transport_r = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &relay_id,
+        pm_relay.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind relay");
+    let addr_r = transport_r.local_addr().unwrap();
+    transport_r.spawn_accept_loop();
+
+    let transport_d = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &friend_direct,
+        pm_direct.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind direct");
+    let addr_d = transport_d.local_addr().unwrap();
+    transport_d.spawn_accept_loop();
+
+    pm_server
+        .register_f2f_friend(*relay_id.node_pubkey(), Some(addr_r))
+        .await;
+    pm_relay
+        .register_f2f_friend(*server_id.node_pubkey(), Some(addr_s))
+        .await;
+    pm_server
+        .register_f2f_friend(*friend_direct.node_pubkey(), Some(addr_d))
+        .await;
+    pm_direct
+        .register_f2f_friend(*server_id.node_pubkey(), Some(addr_s))
+        .await;
+
+    let conn_r_to_s = transport_r
+        .connect_peer(addr_s)
+        .await
+        .expect("connect relay to server");
+    let conn_d_to_s = transport_d
+        .connect_peer(addr_s)
+        .await
+        .expect("connect direct to server");
+
+    let now_ms = pm_server.net_time_ms();
+
+    // Shortcut 1: hrw_routing_id = BLAKE3(pubkey) with pow_nonce=0, t0=0 via relay
+    let unmined_1 = NodeIdentity::generate();
+    let blake_hrw = *blake3::hash(unmined_1.node_pubkey()).as_bytes();
+    let mut hb_1 = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *unmined_1.node_pubkey(),
+        addr: "127.0.0.1:38001".parse().unwrap(),
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: blake_hrw,
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    hb_1.sign_origin(&unmined_1, now_ms);
+    let payload_1 = bincode::serialize(&hb_1).unwrap();
+    let mut hdr_1 =
+        WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload_1.len() as u32);
+    hdr_1.reserved = 1; // relayed
+    transport_r
+        .send_unidirectional(&conn_r_to_s, &hdr_1, &payload_1)
+        .await
+        .unwrap();
+
+    // Shortcut 2: hrw_routing_id = pubkey with pow_nonce=0, t0=0 via relay
+    let unmined_2 = NodeIdentity::generate();
+    let mut hb_2 = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *unmined_2.node_pubkey(),
+        addr: "127.0.0.1:38002".parse().unwrap(),
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *unmined_2.node_pubkey(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    hb_2.sign_origin(&unmined_2, now_ms);
+    let payload_2 = bincode::serialize(&hb_2).unwrap();
+    let mut hdr_2 =
+        WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, payload_2.len() as u32);
+    hdr_2.reserved = 1;
+    transport_r
+        .send_unidirectional(&conn_r_to_s, &hdr_2, &payload_2)
+        .await
+        .unwrap();
+
+    // Shortcut 3: hrw_routing_id = [0u8; 32] with pow_nonce=0, t0=0 via relay
+    let unmined_3 = NodeIdentity::generate();
+    let mut hb_3 = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *unmined_3.node_pubkey(),
+        addr: "127.0.0.1:38003".parse().unwrap(),
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: [0u8; 32],
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    hb_3.sign_origin(&unmined_3, now_ms);
+    let payload_3 = bincode::serialize(&hb_3).unwrap();
+    let mut hdr_3 =
+        WireHeader::new(MsgType::Heartbeat as u16, 3, 0, 0, payload_3.len() as u32);
+    hdr_3.reserved = 1;
+    transport_r
+        .send_unidirectional(&conn_r_to_s, &hdr_3, &payload_3)
+        .await
+        .unwrap();
+
+    // Direct-origin shortcut (hops == 0) with pow_nonce=0, t0=0
+    let mut hb_direct = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *friend_direct.node_pubkey(),
+        addr: addr_d,
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *friend_direct.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    hb_direct.sign_origin(&friend_direct, now_ms);
+    let payload_d = bincode::serialize(&hb_direct).unwrap();
+    let mut hdr_d =
+        WireHeader::new(MsgType::Heartbeat as u16, 4, 0, 0, payload_d.len() as u32);
+    hdr_d.reserved = 0; // hops == 0
+    transport_d
+        .send_unidirectional(&conn_d_to_s, &hdr_d, &payload_d)
+        .await
+        .unwrap();
+
+    // Unsigned direct legacy (pubkey, SocketAddr) wire path
+    let unmined_legacy = NodeIdentity::generate();
+    let legacy_payload =
+        bincode::serialize(&((*unmined_legacy.node_pubkey()), addr_d)).unwrap();
+    let mut hdr_legacy =
+        WireHeader::new(MsgType::Heartbeat as u16, 5, 0, 0, legacy_payload.len() as u32);
+    hdr_legacy.reserved = 0;
+    transport_d
+        .send_unidirectional(&conn_d_to_s, &hdr_legacy, &legacy_payload)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Simulate 25h maturation and 8 hourly observations for all shortcut candidates
+    for unmined in [&unmined_1, &unmined_2, &unmined_3, &friend_direct, &unmined_legacy] {
+        pm_server
+            .set_first_seen_for_test(
+                unmined.node_pubkey(),
+                Instant::now() - Duration::from_secs(25 * 3600),
+            )
+            .await;
+        pm_server
+            .set_last_seen_for_test(unmined.node_pubkey(), Instant::now())
+            .await;
+        for hour in 18..=25 {
+            pm_server
+                .record_heartbeat_hourly_observation(
+                    *unmined.node_pubkey(),
+                    *unmined.hrw_routing_id(),
+                    now_ms + hour * 3_600_000,
+                )
+                .await;
+        }
+    }
+
+    // Core S06-03 Assertion: NONE of the zero-work / unmined shortcut nodes may yield an admissible HRW ticket!
+    let active_hrw = pm_server.active_hrw_nodes().await;
+    let (committee, _, _) = pm_server
+        .shard_committee(
+            *server_id.node_pubkey(),
+            *server_id.hrw_routing_id(),
+            42,
+        )
+        .await;
+
+    assert!(
+        !active_hrw
+            .iter()
+            .any(|(hrw, _)| hrw == unmined_1.hrw_routing_id()),
+        "S06-03: BLAKE3(pubkey) shortcut must NOT produce an admissible HRW ticket in production"
+    );
+    assert!(
+        !active_hrw
+            .iter()
+            .any(|(hrw, _)| hrw == unmined_2.node_pubkey()),
+        "S06-03: pubkey shortcut must NOT produce an admissible HRW ticket in production"
+    );
+    assert!(
+        !active_hrw
+            .iter()
+            .any(|(hrw, _)| hrw == &[0u8; 32]),
+        "S06-03: [0; 32] shortcut must NOT produce an admissible HRW ticket in production"
+    );
+    assert!(
+        !committee
+            .iter()
+            .any(|m| m.node_pubkey == *unmined_1.node_pubkey()),
+        "S06-03: BLAKE3 shortcut identity must NOT enter shard_committee in production"
+    );
+    assert!(
+        !committee
+            .iter()
+            .any(|m| m.node_pubkey == *unmined_2.node_pubkey()),
+        "S06-03: pubkey shortcut identity must NOT enter shard_committee in production"
+    );
+    assert!(
+        !committee
+            .iter()
+            .any(|m| m.node_pubkey == *unmined_3.node_pubkey()),
+        "S06-03: [0; 32] shortcut identity must NOT enter shard_committee in production"
+    );
+    assert!(
+        !committee
+            .iter()
+            .any(|m| m.node_pubkey == *unmined_legacy.node_pubkey()),
+        "S06-03: Unsigned legacy wire tuple must NOT enter shard_committee in production"
+    );
+
+    // Positive Control: Genuinely mined Argon2d ticket over real QUIC
+    let (mined_positive, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+    let pos_ms = pm_server.net_time_ms();
+    let mut hb_pos = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *mined_positive.node_pubkey(),
+        addr: "127.0.0.1:38009".parse().unwrap(),
+        timestamp_ms: pos_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: mined_positive.nonce(),
+        hrw_routing_id: *mined_positive.hrw_routing_id(),
+        ticket_epoch_t0: mined_positive.t0(),
+        ttl: 16,
+    };
+    hb_pos.sign_origin(&mined_positive, pos_ms);
+    let payload_pos = bincode::serialize(&hb_pos).unwrap();
+    let mut hdr_pos =
+        WireHeader::new(MsgType::Heartbeat as u16, 6, 0, 0, payload_pos.len() as u32);
+    hdr_pos.reserved = 1;
+    let conn_pos = transport_r
+        .connect_peer(addr_s)
+        .await
+        .expect("connect relay to server for positive control");
+    transport_r
+        .send_unidirectional(&conn_pos, &hdr_pos, &payload_pos)
+        .await
+        .unwrap();
+
+    for _ in 0..100 {
+        if pm_server.is_known_node(mined_positive.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(pm_server.is_known_node(mined_positive.node_pubkey()).await);
+
+    // Mature positive control with 24h age + 8 hourly observations
+    pm_server
+        .set_first_seen_for_test(
+            mined_positive.node_pubkey(),
+            Instant::now() - Duration::from_secs(25 * 3600),
+        )
+        .await;
+    pm_server
+        .set_last_seen_for_test(mined_positive.node_pubkey(), Instant::now())
+        .await;
+    for hour in 18..=25 {
+        pm_server
+            .record_heartbeat_hourly_observation(
+                *mined_positive.node_pubkey(),
+                *mined_positive.hrw_routing_id(),
+                now_ms + hour * 3_600_000,
+            )
+            .await;
+    }
+
+    let (committee_after_pos, _, _) = pm_server
+        .shard_committee(
+            *server_id.node_pubkey(),
+            *server_id.hrw_routing_id(),
+            42,
+        )
+        .await;
+    assert!(
+        committee_after_pos
+            .iter()
+            .any(|m| m.node_pubkey == *mined_positive.node_pubkey()),
+        "S06-03 Positive Control: Genuinely mined Argon2d ticket MUST be admitted after maturation"
+    );
+
+    cancel.cancel();
+}
+
 

@@ -37,11 +37,14 @@ pub async fn spawn_operator_listener(
     let token = cancel;
     Ok(Some(tokio::spawn(async move {
         let shutdown = token.clone();
-        if let Err(error) = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                shutdown.cancelled().await;
-            })
-            .await
+        if let Err(error) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+        })
+        .await
         {
             tracing::error!(%error, "Private operator listener failed");
             token.cancel();

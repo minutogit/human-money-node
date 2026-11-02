@@ -117,6 +117,7 @@ async fn admit_mature_local(
     pm: &humoco_node::network::PeerManager,
     identity: &humoco_node::identity::NodeIdentity,
 ) {
+    pm.set_simulation_mode(true);
     pm.learn_node_from_gossip_with_hrw(
         *identity.node_pubkey(),
         *identity.hrw_routing_id(),
@@ -1003,3 +1004,305 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         "Broadcasted proof must be cryptographically valid"
     );
 }
+
+#[tokio::test]
+async fn test_s06_02_clock_sample_revocation_on_friend_removal_and_ban() {
+    use humoco_node::identity::NodeIdentity;
+
+    // Create 10 trusted friend identities
+    let friends: Vec<_> = (0..10).map(|_| NodeIdentity::generate()).collect();
+    let friend_keys: Vec<[u8; 32]> = friends.iter().map(|f| *f.node_pubkey()).collect();
+    let endpoints: Vec<(Option<[u8; 32]>, std::net::SocketAddr)> = friends
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            (
+                Some(*f.node_pubkey()),
+                format!("127.0.0.1:{}", 35000 + i).parse().unwrap(),
+            )
+        })
+        .collect();
+
+    let pm = Arc::new(PeerManager::with_f2f(endpoints.clone(), friend_keys.clone()));
+    let local_now = pm.clock().physical_now_ms();
+
+    // 1. Record clock samples for all 10 friends with positive offsets
+    for (i, friend) in friends.iter().enumerate() {
+        let offset: u64 = 50_000 + (i as u64) * 1_000;
+        let ok = pm
+            .clock()
+            .record_peer_heartbeat(*friend.node_pubkey(), true, local_now + offset);
+        assert!(ok, "Friend sample must be accepted");
+    }
+
+    // Confirm initial quorum
+    assert_eq!(pm.clock().sample_count(), 10);
+    assert!(pm.clock().has_quorum_samples());
+    assert!(pm.clock().current_median_offset().is_some());
+    assert!(pm.clock().is_time_corroborated(50_000));
+    let time_with_offset = pm.net_time_ms();
+
+    // 2. Revoke/remove through EACH supported friendship-removal path:
+    // Path 1: remove_trusted_f2f_peer
+    pm.remove_trusted_f2f_peer(friends[0].node_pubkey()).await;
+    assert_eq!(
+        pm.clock().sample_count(),
+        9,
+        "remove_trusted_f2f_peer must revoke clock sample"
+    );
+
+    // Path 2: remove_peer_by_spec with public key
+    pm.remove_peer_by_spec(Some(*friends[1].node_pubkey()), None)
+        .await;
+    assert_eq!(
+        pm.clock().sample_count(),
+        8,
+        "remove_peer_by_spec with pubkey must revoke clock sample"
+    );
+
+    // Path 3: operator peer removal by endpoint
+    let endpoint_str = format!("127.0.0.1:{}", 35000 + 2);
+    pm.remove_peer_by_spec(None, Some(&endpoint_str)).await;
+    assert_eq!(
+        pm.clock().sample_count(),
+        7,
+        "operator removal by endpoint must revoke clock sample"
+    );
+
+    // Path 4: permanent ban
+    pm.ban_node(friends[3].node_pubkey()).await;
+    assert_eq!(
+        pm.clock().sample_count(),
+        6,
+        "ban_node must revoke clock sample"
+    );
+
+    // With 6 samples (< 10 threshold), quorum is lost and logical offset is cleared
+    assert!(!pm.clock().has_quorum_samples());
+    assert_eq!(pm.clock().current_median_offset(), None);
+    assert!(!pm.clock().is_time_corroborated(50_000));
+    assert_eq!(
+        pm.clock().logical_offset_ms(),
+        0,
+        "Logical offset must be cleared when samples drop below MIN_SAMPLES_FOR_MEDIAN"
+    );
+
+    // Monotonicity check: net_time_ms() never steps backward when offset drops
+    let time_after_drop = pm.net_time_ms();
+    assert!(
+        time_after_drop >= time_with_offset,
+        "Monotonicity invariant: issued net_time must never step backward (after: {}, before: {})",
+        time_after_drop,
+        time_with_offset
+    );
+
+    // Repeated removal (idempotent)
+    pm.remove_trusted_f2f_peer(friends[0].node_pubkey()).await;
+    assert_eq!(
+        pm.clock().sample_count(),
+        6,
+        "Repeated removal must be idempotent"
+    );
+
+    // Revoke remaining friends so all original poisoned friends are cleared
+    for f in &friends[4..10] {
+        pm.remove_trusted_f2f_peer(f.node_pubkey()).await;
+    }
+    assert_eq!(pm.clock().sample_count(), 0);
+    assert!(!pm.clock().has_quorum_samples());
+    assert_eq!(pm.clock().current_median_offset(), None);
+    assert_eq!(pm.clock().logical_offset_ms(), 0);
+
+    // Register 10 fresh honest trusted friends with +4_000 ms offset
+    let fresh_friends: Vec<_> = (0..10).map(|_| NodeIdentity::generate()).collect();
+    let fresh_now = pm.clock().physical_now_ms();
+    for f in &fresh_friends {
+        pm.register_f2f_friend(*f.node_pubkey(), None).await;
+        let ok = pm
+            .clock()
+            .record_peer_heartbeat(*f.node_pubkey(), true, fresh_now + 4_000);
+        assert!(ok, "Fresh honest friend sample must be accepted");
+    }
+
+    assert_eq!(pm.clock().sample_count(), 10);
+    assert!(pm.clock().has_quorum_samples(), "Must regain quorum with 10 fresh friends");
+    assert_eq!(
+        pm.clock().current_median_offset(),
+        Some(4_000),
+        "Median offset must reflect the new honest friends (+4_000 ms)"
+    );
+    assert_eq!(
+        pm.clock().logical_offset_ms(),
+        0,
+        "Logical offset adjusts cleanly without dominated stale state"
+    );
+
+    // Preserved unrelated honest friends:
+    // Create clock with 10 honest friends (+0s) and 2 poisoned friends (+60s)
+    let clean_clock = NetworkClock::new();
+    let honest_friends: Vec<_> = (0..10).map(|_| NodeIdentity::generate()).collect();
+    let poisoned_friends: Vec<_> = (0..2).map(|_| NodeIdentity::generate()).collect();
+    let base_t = clean_clock.physical_now_ms();
+
+    for h in &honest_friends {
+        clean_clock.record_peer_heartbeat(*h.node_pubkey(), true, base_t);
+    }
+    for p in &poisoned_friends {
+        clean_clock.record_peer_heartbeat(*p.node_pubkey(), true, base_t + 60_000);
+    }
+    assert_eq!(clean_clock.sample_count(), 12);
+
+    // Revoke the 2 poisoned friends
+    assert!(clean_clock.revoke_peer_sample(poisoned_friends[0].node_pubkey()));
+    assert!(clean_clock.revoke_peer_sample(poisoned_friends[1].node_pubkey()));
+    assert_eq!(clean_clock.sample_count(), 10);
+    assert_eq!(
+        clean_clock.current_median_offset(),
+        Some(0),
+        "Removing poisoned friends must leave remaining 10 honest friends median clean at 0"
+    );
+}
+
+#[tokio::test]
+async fn test_s06_02_real_quic_clock_sample_revocation_and_equivocation_ban() {
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::{DefaultRequestHandler, QuicTransport};
+    use humoco_sim_core::wire::{MsgType, WireHeader};
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+    let server_id = NodeIdentity::generate();
+    let friend_b = NodeIdentity::generate();
+    let friend_c = NodeIdentity::generate();
+
+    let pm_server = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*friend_b.node_pubkey(), *friend_c.node_pubkey()],
+    ));
+    let pm_b = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*server_id.node_pubkey()],
+    ));
+
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm_server.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind server");
+    let server_addr = server_transport.local_addr().unwrap();
+    server_transport.spawn_accept_loop();
+
+    let client_transport_b = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &friend_b,
+        pm_b.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind client b");
+    let addr_b = client_transport_b.local_addr().unwrap();
+    client_transport_b.spawn_accept_loop();
+
+    pm_server
+        .register_f2f_friend(*friend_b.node_pubkey(), Some(addr_b))
+        .await;
+    pm_b.register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+        .await;
+
+    let conn_b = client_transport_b
+        .connect_peer_unchecked(server_addr)
+        .await
+        .expect("B connects to Server");
+
+    // 1. Friend B sends genuine origin-signed heartbeat over real QUIC
+    let now_ms = pm_server.net_time_ms();
+    let mut hb_b = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *friend_b.node_pubkey(),
+        addr: addr_b,
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *friend_b.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    hb_b.sign_origin(&friend_b, now_ms);
+    let payload_b = bincode::serialize(&hb_b).unwrap();
+    let mut hdr_b = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload_b.len() as u32);
+    hdr_b.reserved = 0; // hops = 0 (direct)
+
+    client_transport_b
+        .send_unidirectional(&conn_b, &hdr_b, &payload_b)
+        .await
+        .expect("Send heartbeat");
+    for _ in 0..20 {
+        if pm_server.clock().sample_count() > 0 {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
+
+    // Verify sample was recorded
+    assert_eq!(
+        pm_server.clock().sample_count(),
+        1,
+        "Direct friend heartbeat must record clock sample"
+    );
+
+    // 2. Revoke friendship of B
+    pm_server
+        .remove_trusted_f2f_peer(friend_b.node_pubkey())
+        .await;
+    assert_eq!(
+        pm_server.clock().sample_count(),
+        0,
+        "Revoking friendship must purge friend B's clock sample"
+    );
+
+    // Friend B sends another heartbeat over QUIC — must NOT be accepted into clock
+    let fresh_now = pm_server.net_time_ms();
+    hb_b.timestamp_ms = fresh_now;
+    hb_b.sign_origin(&friend_b, fresh_now);
+    let payload_b2 = bincode::serialize(&hb_b).unwrap();
+    let mut hdr_b2 =
+        WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, payload_b2.len() as u32);
+    hdr_b2.reserved = 0;
+    client_transport_b
+        .send_unidirectional(&conn_b, &hdr_b2, &payload_b2)
+        .await
+        .expect("Send second heartbeat");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    assert_eq!(
+        pm_server.clock().sample_count(),
+        0,
+        "Heartbeat from former friend must not contribute to clock"
+    );
+
+    // 3. Separately test ban_node purging clock sample
+    // Add sample for friend C
+    pm_server
+        .clock()
+        .record_peer_heartbeat(*friend_c.node_pubkey(), true, now_ms);
+    assert_eq!(pm_server.clock().sample_count(), 1);
+
+    // Ban friend C
+    pm_server.ban_node(friend_c.node_pubkey()).await;
+    assert_eq!(
+        pm_server.clock().sample_count(),
+        0,
+        "ban_node must purge friend C's clock sample"
+    );
+
+    cancel.cancel();
+}
+

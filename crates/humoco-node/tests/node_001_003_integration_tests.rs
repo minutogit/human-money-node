@@ -218,6 +218,7 @@ async fn setup_test_cluster_with_root(
     let cancel = CancellationToken::new();
     let gateway = NodeIdentity::generate();
     let gateway_pm = Arc::new(PeerManager::new(Vec::new()));
+    gateway_pm.set_simulation_mode(true);
     let storage = Arc::new(RedbStorage::open(&temp.path().join("gw.redb")).unwrap());
     let (gateway_engine, _worker) = DualTierEngine::new(storage.clone());
     let gateway_transport = QuicTransport::bind_with_options(
@@ -237,6 +238,7 @@ async fn setup_test_cluster_with_root(
         let (engine, _worker) = DualTierEngine::new(disk.clone());
         let id = NodeIdentity::generate();
         let pm = Arc::new(PeerManager::new(Vec::new()));
+        pm.set_simulation_mode(true);
         let ready = Arc::new(ShardReadinessManager::with_cancel_token(cancel.clone()));
         let handler = Arc::new(
             NodeRequestHandler::with_peer_manager(engine.clone(), disk.clone(), id.clone(), pm.clone())
@@ -404,6 +406,7 @@ async fn test_public_regional_mesh_view_and_cache() {
     let (_app, mut state, identity) = setup_standalone_app(&temp);
 
     let pm = Arc::new(PeerManager::new(Vec::new()));
+    pm.set_simulation_mode(true);
     for _ in 0..20 {
         let member = NodeIdentity::generate();
         pm.learn_node_from_gossip_with_hrw(

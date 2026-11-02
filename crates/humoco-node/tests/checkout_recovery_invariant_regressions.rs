@@ -1177,8 +1177,10 @@ async fn idempotent_variants_preserve_exact_entry_original_approval_digest_and_r
 
     // 2. Ingress variant B over REAL QUIC wire (`LockVerifyRequest`)
     let pm_server = Arc::new(PeerManager::new(vec![]));
+    pm_server.set_simulation_mode(true);
     pm_server.set_local_sync_ready(true);
     let pm_client = Arc::new(PeerManager::new(vec![]));
+    pm_client.set_simulation_mode(true);
     pm_client.set_local_sync_ready(true);
     let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
     for s in 0..=u16::MAX {

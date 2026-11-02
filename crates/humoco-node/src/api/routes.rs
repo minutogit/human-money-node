@@ -3871,6 +3871,7 @@ mod local_capacity_collector_tests {
         let peer = NodeIdentity::generate();
         let addr: std::net::SocketAddr = "127.0.0.1:9909".parse().unwrap();
         let manager = Arc::new(crate::network::PeerManager::new(Vec::new()));
+        manager.set_simulation_mode(true);
         manager
             .learn_node_from_gossip(*peer.node_pubkey(), addr, 0, None)
             .await;

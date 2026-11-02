@@ -16,6 +16,12 @@ pub const AUTH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 /// Maximum number of tracked IP addresses to prevent unbounded RAM usage.
 pub const MAX_TRACKED_AUTH_IPS: usize = 1024;
 
+#[derive(Debug, Default)]
+struct AuthFailureTracker {
+    map: HashMap<String, Vec<Instant>>,
+    overflow_failures: Vec<Instant>,
+}
+
 /// Admin Token Manager responsible for loading or generating the node operator authentication token.
 ///
 /// On initialization, it checks for an existing `admin.token` in `data_dir`. If not found,
@@ -26,7 +32,7 @@ pub struct AdminTokenManager {
     token: String,
     token_path: Option<PathBuf>,
     auth_disabled: bool,
-    failed_attempts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    failed_attempts: Arc<Mutex<AuthFailureTracker>>,
 }
 
 impl AdminTokenManager {
@@ -78,7 +84,7 @@ impl AdminTokenManager {
             token,
             token_path: Some(token_path),
             auth_disabled,
-            failed_attempts: Arc::new(Mutex::new(HashMap::new())),
+            failed_attempts: Arc::new(Mutex::new(AuthFailureTracker::default())),
         })
     }
 
@@ -88,7 +94,7 @@ impl AdminTokenManager {
             token: token.into(),
             token_path: None,
             auth_disabled,
-            failed_attempts: Arc::new(Mutex::new(HashMap::new())),
+            failed_attempts: Arc::new(Mutex::new(AuthFailureTracker::default())),
         }
     }
 
@@ -152,14 +158,23 @@ impl AdminTokenManager {
     /// Checks whether the specified client IP is currently rate-limited due to excessive failed attempts.
     /// Returns `true` if allowed, `false` if blocked (>= 5 failed attempts in the last 60 seconds).
     pub fn check_rate_limit(&self, ip: &str) -> bool {
+        self.check_rate_limit_at(ip, Instant::now())
+    }
+
+    /// Checks whether the specified client IP is currently rate-limited at a specific instant in time.
+    pub fn check_rate_limit_at(&self, ip: &str, now: Instant) -> bool {
         if self.auth_disabled {
             return true;
         }
-        let now = Instant::now();
-        let mut map = self.failed_attempts.lock();
-        if let Some(timestamps) = map.get_mut(ip) {
+        let mut tracker = self.failed_attempts.lock();
+        if let Some(timestamps) = tracker.map.get_mut(ip) {
             timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
             if timestamps.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
+                return false;
+            }
+        } else if tracker.map.len() >= MAX_TRACKED_AUTH_IPS {
+            tracker.overflow_failures.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+            if tracker.overflow_failures.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
                 return false;
             }
         }
@@ -168,20 +183,42 @@ impl AdminTokenManager {
 
     /// Records a failed authentication attempt for the given client IP.
     pub fn record_failure(&self, ip: &str) {
+        self.record_failure_at(ip, Instant::now());
+    }
+
+    /// Records a failed authentication attempt for the given client IP at a specific instant in time.
+    pub fn record_failure_at(&self, ip: &str, now: Instant) {
         if self.auth_disabled {
             return;
         }
-        let now = Instant::now();
-        let mut map = self.failed_attempts.lock();
-        if map.len() >= MAX_TRACKED_AUTH_IPS {
-            map.retain(|_, timestamps| {
+        let mut tracker = self.failed_attempts.lock();
+
+        // 1. Purge expired entries across the map if near capacity
+        if tracker.map.len() >= MAX_TRACKED_AUTH_IPS {
+            tracker.map.retain(|_, timestamps| {
                 timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
                 !timestamps.is_empty()
             });
         }
-        let timestamps = map.entry(ip.to_string()).or_default();
-        timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
-        timestamps.push(now);
+
+        // 2. If the IP is already tracked or if there is room for a new entry
+        if tracker.map.contains_key(ip) || tracker.map.len() < MAX_TRACKED_AUTH_IPS {
+            let timestamps = tracker.map.entry(ip.to_string()).or_default();
+            timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+            if timestamps.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
+                let excess = timestamps.len().saturating_sub(MAX_AUTH_FAILURES_PER_WINDOW - 1);
+                timestamps.drain(0..excess);
+            }
+            timestamps.push(now);
+        } else {
+            // Saturated: track in bounded overflow failures to prevent unbounded map growth while enforcing rate limit
+            tracker.overflow_failures.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+            if tracker.overflow_failures.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
+                let excess = tracker.overflow_failures.len().saturating_sub(MAX_AUTH_FAILURES_PER_WINDOW - 1);
+                tracker.overflow_failures.drain(0..excess);
+            }
+            tracker.overflow_failures.push(now);
+        }
     }
 
     /// Records a successful authentication, clearing any recorded failures for the given client IP.
@@ -189,10 +226,28 @@ impl AdminTokenManager {
         if self.auth_disabled {
             return;
         }
-        let mut map = self.failed_attempts.lock();
-        map.remove(ip);
+        let mut tracker = self.failed_attempts.lock();
+        tracker.map.remove(ip);
+        tracker.overflow_failures.clear();
+    }
+
+    /// Returns the number of currently tracked IP addresses (for test assertion).
+    pub fn tracked_ip_count_for_test(&self) -> usize {
+        self.failed_attempts.lock().map.len()
+    }
+
+    /// Returns the number of recorded failure timestamps for a given IP (for test assertion).
+    pub fn failure_count_for_ip_for_test(&self, ip: &str) -> usize {
+        self.failed_attempts
+            .lock()
+            .map
+            .get(ip)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 }
+
+pub type AdminAuthRateLimiter = AdminTokenManager;
 
 #[cfg(test)]
 mod tests {

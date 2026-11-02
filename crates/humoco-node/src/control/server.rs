@@ -317,7 +317,6 @@ impl ControlServer {
                     let tag_bytes = parse_account_tag(&account_tag);
                     if let Some(ref tc) = state.tier_controller {
                         tc.register_vip_token(account_tag.clone(), tag_bytes);
-                        tc.register_vip_tag(tag_bytes);
                         match tc.topup_vip_quota(tag_bytes, byte_years) {
                             Ok(new_balance) => ControlResponse::QuotaUpdated { new_balance },
                             Err(err) => ControlResponse::Error {

@@ -408,6 +408,72 @@ impl NetworkClock {
                 .store(state.logical_offset, Ordering::Release);
         }
     }
+
+    /// Returns current network time in milliseconds (< 1µs, lock-free).
+    #[inline]
+    pub fn now_ms(&self) -> u64 {
+        self.net_time_ms()
+    }
+
+    /// Advances network time offset by `delta_ms` for testing.
+    pub fn advance_time_for_test(&self, delta_ms: u64) {
+        let mut state = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let current_offset = self.time_offset.load(Ordering::Relaxed);
+        let new_offset = current_offset.saturating_add(delta_ms as i64);
+        state.max_clamp_ms = state.max_clamp_ms.max(new_offset.saturating_abs());
+        state.logical_offset = new_offset;
+        self.time_offset.store(new_offset, Ordering::Release);
+    }
+
+    /// Revokes a peer's time sample from the network clock and recomputes the median offset.
+    ///
+    /// If remaining samples fall below `MIN_SAMPLES_FOR_MEDIAN` (10), clears `logical_offset` to 0
+    /// so revoked samples no longer skew the consensus time, while preserving monotonicity in `net_time_ms()`.
+    pub fn revoke_peer_sample(&self, peer_pubkey: &[u8; 32]) -> bool {
+        let mut state = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        if state.peer_samples.remove(peer_pubkey).is_none() {
+            return false;
+        }
+        state.sample_order.retain(|k| k != peer_pubkey);
+
+        if state.peer_samples.len() < MIN_SAMPLES_FOR_MEDIAN {
+            state.logical_offset = 0;
+            self.time_offset.store(0, Ordering::Release);
+        } else {
+            let samples: Vec<i64> = state.peer_samples.values().copied().collect();
+            let offset_target = Self::calculate_median_from_slice(&samples);
+            let clamp_limit = state.max_clamp_ms;
+
+            if offset_target.saturating_abs() > CLOCK_SKEW_THRESHOLD_MS {
+                let diff = offset_target.saturating_sub(state.logical_offset);
+                let step = if diff.saturating_abs() <= 1_000 {
+                    diff
+                } else {
+                    diff / 2
+                };
+                let raw_offset = state.logical_offset.saturating_add(step);
+                state.logical_offset = raw_offset.clamp(-clamp_limit, clamp_limit);
+                self.time_offset
+                    .store(state.logical_offset, Ordering::Release);
+            } else if state.logical_offset != 0 {
+                let diff: i64 = 0i64.saturating_sub(state.logical_offset);
+                let step = if diff.saturating_abs() <= 1_000 {
+                    diff
+                } else {
+                    diff / 2
+                };
+                state.logical_offset =
+                    (state.logical_offset.saturating_add(step)).clamp(-clamp_limit, clamp_limit);
+                if state.logical_offset.saturating_abs() <= MAX_TIME_OFFSET_CLAMP_MS {
+                    state.max_clamp_ms = MAX_TIME_OFFSET_CLAMP_MS;
+                }
+                self.time_offset
+                    .store(state.logical_offset, Ordering::Release);
+            }
+        }
+
+        true
+    }
 }
 
 #[cfg(test)]

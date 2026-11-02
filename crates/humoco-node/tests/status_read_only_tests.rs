@@ -665,6 +665,7 @@ async fn gateway_full_entry_lookup_works_and_rejects_legacy_original_as_entry() 
     );
     // Only one eligible remote: assert the actual stateless gateway->QUIC path.
     let routing = Arc::new(PeerManager::new(vec![]));
+    routing.set_simulation_mode(true);
     routing
         .learn_node_from_gossip_with_hrw(
             *source.identity.node_pubkey(),
@@ -815,6 +816,7 @@ async fn cold_and_root_only_gateways_route_canonical_shard_to_single_custodian()
     let gw_db = Arc::new(RedbStorage::open(&dir.path().join("gateway.redb")).unwrap());
     let (gw_engine, gw_worker) = DualTierEngine::new_with_token(gw_db.clone(), cancel.clone());
     let gw_pm = Arc::new(PeerManager::new(vec![]));
+    gw_pm.set_simulation_mode(true);
     let gw_transport = QuicTransport::bind_with_options(
         "127.0.0.1:0".parse().unwrap(),
         &gw_identity,
@@ -921,6 +923,7 @@ async fn cold_and_root_only_gateways_route_canonical_shard_to_single_custodian()
         let (cust_engine, cust_worker) =
             DualTierEngine::new_with_token(cust_db.clone(), cancel.clone());
         let cust_pm = Arc::new(PeerManager::new(vec![]));
+        cust_pm.set_simulation_mode(true);
         let readiness = Arc::new(ShardReadinessManager::new());
         readiness.mark_shard_ready(canonical_shard);
 

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -1012,20 +1012,14 @@ pub async fn get_dashboard_data(state: &AppState) -> DashboardData {
     collect_dashboard_data(state).await
 }
 
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
-    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = forwarded.split(',').next() {
-            let trimmed = first.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-    }
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let trimmed = real_ip.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+/// Extracts the authentic client IP for operator rate limiting.
+///
+/// Invariant (S05-05): Proxy headers (`X-Forwarded-For`, `X-Real-IP`) are strictly untrusted
+/// by default to prevent authentication rate-limit spoofing and evasion. The IP is extracted
+/// directly from the underlying TCP connection info (`ConnectInfo<SocketAddr>`).
+pub fn extract_client_ip(connect_info: Option<&ConnectInfo<SocketAddr>>) -> String {
+    if let Some(ConnectInfo(addr)) = connect_info {
+        return addr.ip().to_string();
     }
     "127.0.0.1".to_string()
 }
@@ -1058,9 +1052,10 @@ fn verify_admin_auth(state: &AppState, headers: &axum::http::HeaderMap) -> Resul
 /// Handler for POST /dashboard/admin/verify-token
 pub async fn admin_verify_token(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip(connect_info.as_ref());
     if !state.auth.check_rate_limit(&client_ip) {
         state.event_log.record(
             EventKind::System,
@@ -1357,7 +1352,6 @@ pub async fn admin_topup_quota(
     let trimmed = payload.account_tag.trim();
     let tag_bytes = crate::control::parse_account_tag(trimmed);
     state.tier_controller.register_vip_token(trimmed, tag_bytes);
-    state.tier_controller.register_vip_tag(tag_bytes);
 
     match state
         .tier_controller

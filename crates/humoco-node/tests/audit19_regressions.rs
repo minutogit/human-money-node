@@ -131,7 +131,9 @@ async fn setup_quic_shard_and_client() -> (
     let client_cancel = CancellationToken::new();
 
     let shard_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    shard_pm.set_simulation_mode(true);
     let client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    client_pm.set_simulation_mode(true);
 
     // Authorize client on shard node
     shard_pm

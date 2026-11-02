@@ -1,5 +1,5 @@
 use crate::types::{
-    Attestation, Hash256, LockId, LockRecord, NetworkId, NodeId, NodePubKey, ShardId, SimTime,
+    Attestation, Hash256, LockId, NetworkId, NodeId, ShardId, SimTime,
 };
 
 pub const DOMAIN_CANON_RESOLVER: &[u8] = b"HUMOCO_V1_CANON_RESOLVER";
@@ -12,11 +12,7 @@ pub const HUMOCO_V1_ATTESTATION_MAINNET: &[u8] = b"HUMOCO_V1_ATTESTATION_MAINNET
 pub const HUMOCO_V1_ATTESTATION_TESTNET: &[u8] = b"HUMOCO_V1_ATTESTATION_TESTNET";
 pub const HUMOCO_V1_HEARTBEAT_MAINNET: &[u8] = b"HUMOCO_V1_HEARTBEAT_MAINNET";
 pub const HUMOCO_V1_HEARTBEAT_TESTNET: &[u8] = b"HUMOCO_V1_HEARTBEAT_TESTNET";
-/// Backward-compatible aliases (point to Mainnet)
-pub const DOMAIN_ATTESTATION: &[u8] = HUMOCO_V1_ATTESTATION_MAINNET;
-pub const DOMAIN_APPROVE_PROV: &[u8] = HUMOCO_V1_APPROVE_PROV_MAINNET;
-pub const DOMAIN_APPROVE_FINAL: &[u8] = HUMOCO_V1_APPROVE_FINAL_MAINNET;
-pub const DOMAIN_HEARTBEAT: &[u8] = HUMOCO_V1_HEARTBEAT_MAINNET;
+
 pub const DOMAIN_GENESIS: &[u8] = b"HUMOCO_V1_GENESIS";
 pub const DOMAIN_INGRESS_DECL: &[u8] = b"HUMOCO_V1_INGRESS_DECL";
 pub const DOMAIN_BRIDGE_LOCK: &[u8] = b"HUMOCO_V1_BRIDGE_LOCK";
@@ -295,191 +291,7 @@ pub fn verify_attestation(attestation: &Attestation) -> bool {
     verify_attestation_for_network(attestation, NetworkId::Mainnet)
 }
 
-/// Creates a deterministic test signature for a (`NodePubKey`, `LockId`) pair.
-/// The public key is an input to this simulation helper; no private key or
-/// Ed25519 signing operation is involved.
-pub fn sign_deterministic_sig(pub_key: &NodePubKey, lock_id: &LockId) -> [u8; 64] {
-    let mut hasher = blake3::Hasher::new();
-    let tag_len = DOMAIN_ATTESTATION.len() as u8;
-    hasher.update(&[tag_len]);
-    hasher.update(DOMAIN_ATTESTATION);
-    hasher.update(pub_key);
-    hasher.update(lock_id);
-    let digest = hasher.finalize();
 
-    let mut signature = [0u8; 64];
-    signature[..32].copy_from_slice(digest.as_bytes());
-    signature[32..64].copy_from_slice(pub_key);
-    signature
-}
-
-/// Checks a deterministic test signature against the public key and lock ID.
-/// This is a simulation check, not Ed25519 signature verification.
-pub fn verify_deterministic_sig(
-    pub_key: &NodePubKey,
-    lock_id: &LockId,
-    signature: &[u8; 64],
-) -> bool {
-    let mut hasher = blake3::Hasher::new();
-    let tag_len = DOMAIN_ATTESTATION.len() as u8;
-    hasher.update(&[tag_len]);
-    hasher.update(DOMAIN_ATTESTATION);
-    hasher.update(pub_key);
-    hasher.update(lock_id);
-    let digest = hasher.finalize();
-
-    let sig_digest = &signature[..32];
-    let sig_pubkey = &signature[32..64];
-    sig_digest == digest.as_bytes() && sig_pubkey == pub_key
-}
-
-/// Computes the shard digest for the 2-phase pull sync (spec_03)
-/// ShardDigest(S) = BLAKE3(0x01 || shard_id.to_le_bytes() || lock_1 || ... || lock_m)
-/// over all active locks (valid_until > now, !status.is_void()), lexicographically sorted by parent_lock.
-pub fn compute_shard_digest(shard_id: ShardId, locks: &[LockRecord]) -> Hash256 {
-    compute_shard_digest_at(shard_id, locks, SimTime(0))
-}
-
-/// # Architectural Invariant: BFT Shard Digest Pull vs. Random Storage Polling (Spec 03 & KISS)
-///
-/// Computes comparison information for the **2-phase BFT digest-pull sync**.
-/// Phase 1 compares the compact `ShardDigest(S)` across shard peers; Phase 2 pulls
-/// lock records on divergence (`evaluate_digest_clusters` / dominant quorum).
-///
-/// Filters records by shard, `valid_until > now` and non-VOID status, then sorts
-/// them by `parent_lock`. The hashed projection contains each record's
-/// `parent_lock`, `receiver_pub`, `nonce` and `id`; it is not a serialization of
-/// every record field or of node attestations and binding signing decisions.
-/// Under collision resistance, equal digests identify equal encoded projections
-/// for the supplied time-filtered inputs. They do not establish committee authority,
-/// old-write closure, complete recovery of prior votes or successor signing readiness.
-///
-/// ### Objective Lock State vs. Signature Hoarding (KISS & Anti-Bloat)
-///
-/// This digest intentionally hashes ONLY the objective double-spend collision state:
-/// `parent_lock`, `receiver_pub`, `nonce`, and `id`.
-///
-/// Node attestations and quorum signature bundles are EXPLICITLY EXCLUDED:
-/// 1. **KISS & Zero Signature Bloat:** Quorum certificates with 14–20 Ed25519 signatures
-///    weigh 896 to 1280+ bytes per lock. Synchronizing or hashing historical signature
-///    bundles across shard nodes would cause massive, unnecessary network and storage bloat.
-/// 2. **Physical Double-Spend Barrier:** The collision prevention mechanism (`parent_lock -> id`)
-///    is an objective physical barrier. Once a lock record is present in a node's local RAM
-///    index and redb storage, any colliding double-spend attempt is immediately rejected
-///    with `409 Conflict`—completely independent of which ephemeral node identities signed
-///    the checkout attestation months or weeks ago.
-/// 3. **Living Mesh vs. Ghost Nodes:** In a dynamic P2P network, nodes join, rotate keys,
-///    or go offline. Demanding historical signature chains from retired nodes ("ghost nodes")
-///    creates liveness deadlocks. Synchronizing the pure objective state allows newly joined
-///    shard custodians to take over authoritative responsibility immediately and answer live
-///    queries under their own active cryptographic identities.
-///
-/// Digest comparison avoids continuous random probing of individual storage keys.
-/// The daemon schedules pull attempts using a periodic 60s ticker and event-driven
-/// `sync_notifier`; scheduling alone does not prove eventual convergence or safe handoff.
-///
-/// Variant with an explicit time filter for validity checks.
-pub fn compute_shard_digest_at(shard_id: ShardId, locks: &[LockRecord], now: SimTime) -> Hash256 {
-    let selected: Vec<_> = locks
-        .iter()
-        .filter(|lock| u16::from_be_bytes([lock.parent_lock[0], lock.parent_lock[1]]) == shard_id)
-        .cloned()
-        .collect();
-    compute_selected_shard_digest_at(shard_id, &selected, now)
-}
-
-/// Hash objective rows whose canonical shard membership was already checked by
-/// the caller. HMC membership derives from the root, not the SST collision key.
-/// This projection does not establish committee authority or recovery readiness.
-pub fn compute_selected_shard_digest_at(
-    shard_id: ShardId,
-    locks: &[LockRecord],
-    now: SimTime,
-) -> Hash256 {
-    let mut active: Vec<&LockRecord> = locks
-        .iter()
-        .filter(|lock| !lock.status.is_void() && lock.valid_until > now)
-        .collect();
-    active.sort_by(|a, b| a.parent_lock.cmp(&b.parent_lock));
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[0x01]);
-    hasher.update(&shard_id.to_le_bytes());
-    for lock in active {
-        hasher.update(&lock.parent_lock);
-        hasher.update(&lock.receiver_pub);
-        hasher.update(&lock.nonce);
-        hasher.update(&lock.id);
-    }
-    *hasher.finalize().as_bytes()
-}
-
-/// Computes the deterministic Merkle/BLAKE3 fingerprint for a specific 5-minute bucket of a shard.
-///
-/// Filters locks matching `shard_id`, whose timestamp belongs to `bucket_id`,
-/// and sorts them canonically by `parent_lock` / `id` before hashing.
-pub fn compute_shard_bucket_digest(
-    shard_id: ShardId,
-    bucket_id: u64,
-    locks: &[LockRecord],
-) -> Hash256 {
-    let selected: Vec<_> = locks
-        .iter()
-        .filter(|lock| u16::from_be_bytes([lock.parent_lock[0], lock.parent_lock[1]]) == shard_id)
-        .cloned()
-        .collect();
-    compute_selected_shard_bucket_digest(shard_id, bucket_id, &selected)
-}
-
-/// Bucket projection for records with independently checked shard membership.
-pub fn compute_selected_shard_bucket_digest(
-    shard_id: ShardId,
-    bucket_id: u64,
-    locks: &[LockRecord],
-) -> Hash256 {
-    let mut bucket_locks: Vec<&LockRecord> = locks
-        .iter()
-        .filter(|lock| {
-            !lock.status.is_void()
-                && crate::types::timestamp_to_bucket_id(lock.created_at.0) == bucket_id
-        })
-        .collect();
-    bucket_locks.sort_by(|a, b| {
-        a.parent_lock
-            .cmp(&b.parent_lock)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-
-    let mut hasher = blake3::Hasher::new();
-    let tag = b"HUMOCO_V1_BUCKET_DIGEST";
-    hasher.update(&[tag.len() as u8]);
-    hasher.update(tag);
-    hasher.update(&shard_id.to_le_bytes());
-    hasher.update(&bucket_id.to_le_bytes());
-    hasher.update(&(bucket_locks.len() as u32).to_le_bytes());
-    for lock in bucket_locks {
-        hasher.update(&lock.parent_lock);
-        hasher.update(&lock.receiver_pub);
-        hasher.update(&lock.nonce);
-        hasher.update(&lock.id);
-    }
-    *hasher.finalize().as_bytes()
-}
-
-/// Creates a deterministic equivocation proof hash
-pub fn create_equivocation_proof(node_id: NodeId, lock_a: &Hash256, lock_b: &Hash256) -> Hash256 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[DOMAIN_EQUIVOCATION.len() as u8]);
-    hasher.update(DOMAIN_EQUIVOCATION);
-    hasher.update(&node_id.to_le_bytes());
-    if lock_a <= lock_b {
-        hasher.update(lock_a);
-        hasher.update(lock_b);
-    } else {
-        hasher.update(lock_b);
-        hasher.update(lock_a);
-    }
-    *hasher.finalize().as_bytes()
-}
 
 #[cfg(test)]
 mod tests {
@@ -554,156 +366,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_equivocation_proof_symmetry_and_determinism() {
-        let node_id = 42;
-        let mut lock_a = [0x11u8; 32];
-        let mut lock_b = [0x22u8; 32];
 
-        // lock_a < lock_b
-        let p1 = create_equivocation_proof(node_id, &lock_a, &lock_b);
-        let p2 = create_equivocation_proof(node_id, &lock_b, &lock_a);
-        assert_eq!(p1, p2, "create_equivocation_proof must be symmetric");
 
-        // lock_a == lock_b
-        let p3 = create_equivocation_proof(node_id, &lock_a, &lock_a);
-        assert_ne!(p1, p3);
 
-        // Different node_id
-        let p4 = create_equivocation_proof(node_id + 1, &lock_a, &lock_b);
-        assert_ne!(p1, p4);
 
-        // Manual verification of wire format and length prefix
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&[DOMAIN_EQUIVOCATION.len() as u8]);
-        hasher.update(DOMAIN_EQUIVOCATION);
-        hasher.update(&node_id.to_le_bytes());
-        hasher.update(&lock_a);
-        hasher.update(&lock_b);
-        assert_eq!(p1, *hasher.finalize().as_bytes());
 
-        // Test branch when lock_a > lock_b explicitly
-        lock_a[0] = 0xFF;
-        lock_b[0] = 0x01;
-        let p_gt1 = create_equivocation_proof(node_id, &lock_a, &lock_b);
-        let p_gt2 = create_equivocation_proof(node_id, &lock_b, &lock_a);
-        assert_eq!(p_gt1, p_gt2);
-    }
-
-    #[test]
-    fn test_compute_shard_digest_at_exact_boundaries() {
-        let shard_id = 7u16;
-        let now = SimTime(100);
-        let sid_bytes = shard_id.to_be_bytes();
-
-        let make_parent = |b: u8| {
-            let mut p = [b; 32];
-            p[0] = sid_bytes[0];
-            p[1] = sid_bytes[1];
-            p
-        };
-
-        // Lock 1: valid_until == now (100) -> EXCLUDED (must be strictly > now)
-        let lock_at_now = LockRecord::new(
-            make_parent(1),
-            [10u8; 32],
-            b"nonce1".to_vec(),
-            SimTime(50),
-            SimTime(100),
-        );
-
-        // Lock 2: valid_until == now + 1 (101) -> INCLUDED
-        let lock_after_now = LockRecord::new(
-            make_parent(2),
-            [20u8; 32],
-            b"nonce2".to_vec(),
-            SimTime(50),
-            SimTime(101),
-        );
-
-        // Lock 3: valid_until == now - 1 (99) -> EXCLUDED
-        let lock_before_now = LockRecord::new(
-            make_parent(3),
-            [30u8; 32],
-            b"nonce3".to_vec(),
-            SimTime(50),
-            SimTime(99),
-        );
-
-        // Lock 4: valid_until == 200 (> now), but status is VOID -> EXCLUDED
-        let mut lock_void = LockRecord::new(
-            make_parent(4),
-            [40u8; 32],
-            b"nonce4".to_vec(),
-            SimTime(50),
-            SimTime(200),
-        );
-        lock_void.status = crate::types::LockStatus::Void {
-            reason: "collision".into(),
-        };
-
-        let locks = vec![
-            lock_at_now.clone(),
-            lock_after_now.clone(),
-            lock_before_now.clone(),
-            lock_void.clone(),
-        ];
-
-        let digest_multi = compute_shard_digest_at(shard_id, &locks, now);
-        // Only lock_after_now is active; digest should match single active lock
-        let digest_single =
-            compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_after_now), now);
-        assert_eq!(digest_multi, digest_single);
-
-        // Lock from a different shard (shard 999) -> strictly EXCLUDED from shard 7 digest
-        let other_sid_bytes = 999u16.to_be_bytes();
-        let mut p_other = [2u8; 32];
-        p_other[0] = other_sid_bytes[0];
-        p_other[1] = other_sid_bytes[1];
-        let lock_other_shard = LockRecord::new(
-            p_other,
-            [20u8; 32],
-            b"nonce_other".to_vec(),
-            SimTime(50),
-            SimTime(101),
-        );
-        let digest_with_other =
-            compute_shard_digest_at(shard_id, &[lock_after_now.clone(), lock_other_shard], now);
-        assert_eq!(digest_multi, digest_with_other);
-
-        // Active locks with identical parent_lock order & lexicographical sorting
-        let mut lock_p1_a = LockRecord::new(
-            [5u8; 32],
-            [50u8; 32],
-            b"nonce_a".to_vec(),
-            SimTime(50),
-            SimTime(200),
-        );
-        lock_p1_a.parent_lock = make_parent(0xAA);
-
-        let mut lock_p1_b = LockRecord::new(
-            [6u8; 32],
-            [60u8; 32],
-            b"nonce_b".to_vec(),
-            SimTime(50),
-            SimTime(200),
-        );
-        lock_p1_b.parent_lock = make_parent(0xBB);
-
-        // Passed in reverse order: [B, A]
-        let digest_sorted1 =
-            compute_shard_digest_at(shard_id, &[lock_p1_b.clone(), lock_p1_a.clone()], now);
-        // Passed in order: [A, B]
-        let digest_sorted2 =
-            compute_shard_digest_at(shard_id, &[lock_p1_a.clone(), lock_p1_b.clone()], now);
-        assert_eq!(digest_sorted1, digest_sorted2);
-
-        // Test compute_shard_digest (defaults to SimTime(0))
-        let digest_zero = compute_shard_digest(shard_id, std::slice::from_ref(&lock_at_now));
-        let digest_zero_explicit =
-            compute_shard_digest_at(shard_id, std::slice::from_ref(&lock_at_now), SimTime(0));
-        assert_eq!(digest_zero, digest_zero_explicit);
-    }
 
     #[test]
     fn test_compute_canonical_hash_normalized() {
@@ -878,29 +545,6 @@ mod tests {
         assert_ne!(genesis_root, compute_genesis_root(2, 1_700_000_000));
         assert_ne!(genesis_root, compute_genesis_root(1, 1_700_000_001));
 
-        // Deterministic signature roundtrip
-        let pub_key = [0x55u8; 32];
-        let lock_id = [0x77u8; 32];
-        let sig = sign_deterministic_sig(&pub_key, &lock_id);
-        assert!(verify_deterministic_sig(&pub_key, &lock_id, &sig));
-
-        // Wrong pubkey or lock_id
-        let wrong_pub = [0x56u8; 32];
-        let wrong_lock = [0x78u8; 32];
-        assert!(!verify_deterministic_sig(&wrong_pub, &lock_id, &sig));
-        assert!(!verify_deterministic_sig(&pub_key, &wrong_lock, &sig));
-
-        // Tampered signature prefix vs pubkey suffix
-        let mut tampered_sig = sig;
-        tampered_sig[0] ^= 0xFF;
-        assert!(!verify_deterministic_sig(&pub_key, &lock_id, &tampered_sig));
-        let mut tampered_sig2 = sig;
-        tampered_sig2[32] ^= 0xFF;
-        assert!(!verify_deterministic_sig(
-            &pub_key,
-            &lock_id,
-            &tampered_sig2
-        ));
 
         // Canonical hash with signature
         let parent = [0x12u8; 32];

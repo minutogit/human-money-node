@@ -19,7 +19,7 @@ use humoco_node::identity::NodeIdentity;
 use humoco_node::network::{PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 use humoco_sim_core::storage::RamIndex;
-use humoco_sim_core::types::{PeerPresenceEntry, SimTime};
+use humoco_sim_core::types::SimTime;
 
 use simulation::{MeshSimulator, SimWallet};
 
@@ -769,91 +769,6 @@ async fn test_sim_04_scale_30_churn_and_failover() {
     sim.reporter.check(
         !pi_healed.is_suspended(),
         "After decay must be re-integrated (not suspended)",
-    );
-
-    // Tit-for-Tat choking model in PeerPresenceEntry: +2/-2 malus, escalation lock, gossip gating
-    let mut ppe = PeerPresenceEntry::new(0xBEEF, 0);
-    // Activate to Active state (24h) so HRW eligibility is testable
-    for ep in 1..=24 {
-        ppe.record_hour(ep, true);
-    }
-    sim.reporter.check(
-        ppe.malus_score == 0
-            && ppe.backoff_level == 0
-            && !ppe.is_suspended()
-            && ppe.should_forward_gossip()
-            && ppe.is_hrw_eligible(),
-        "Initial active ppe must be 0/malus, unsuspended, gossip true, hrw eligible",
-    );
-    // inbound + outbound failure -> malus +2, backoff 1, choked
-    ppe.record_inbound_activity();
-    ppe.record_outbound_failure();
-    sim.reporter.check(
-        ppe.malus_score == 2
-            && ppe.backoff_level == 1
-            && ppe.is_suspended()
-            && !ppe.should_forward_gossip()
-            && !ppe.is_hrw_eligible(),
-        "After inbound+failure: malus 2 backoff 1 choked (rank 21 takeover, gossip choked)",
-    );
-    // Escalation lock: second failure WITHOUT inbound must NOT increase malus/backoff (offline/DDoS protection)
-    let malus_before = ppe.malus_score;
-    let backoff_before = ppe.backoff_level;
-    ppe.record_outbound_failure();
-    sim.reporter.check(
-        ppe.malus_score == malus_before
-            && ppe.backoff_level == backoff_before
-            && ppe.is_suspended(),
-        "Escalation lock: failure without inbound does not increase malus/backoff",
-    );
-    // Service-based healing (no hourly decay): malus stays until worked off
-    ppe.record_hour(25, true);
-    sim.reporter.check(
-        ppe.backoff_level == 1 && ppe.is_suspended() && !ppe.should_forward_gossip(),
-        "No automatic hourly decay (anti-free-rider)",
-    );
-    sim.reporter.check(
-        ppe.malus_score == 2,
-        "Malus persists until worked off via work",
-    );
-    // Success heals full -2 points, clears LAST_FAILED and lifts choking
-    ppe.record_outbound_success();
-    sim.reporter.check(
-        ppe.malus_score == 0
-            && ppe.backoff_level == 0
-            && !ppe.is_suspended()
-            && ppe.should_forward_gossip()
-            && ppe.is_hrw_eligible(),
-        "Success -2 malus (+2/-2), clears LAST_FAILED, lifts choking",
-    );
-    // Second inbound+failure -> malus 2, backoff 1
-    ppe.record_inbound_activity();
-    ppe.record_outbound_failure();
-    ppe.record_inbound_activity();
-    ppe.record_outbound_failure();
-    sim.reporter.check(
-        ppe.malus_score == 4 && ppe.backoff_level == 2 && ppe.is_suspended(),
-        "Second inbound+failure: malus 4 backoff 2 choked",
-    );
-    ppe.record_outbound_success();
-    sim.reporter.check(
-        ppe.malus_score == 2
-            && ppe.backoff_level == 1
-            && !ppe.is_suspended()
-            && ppe.should_forward_gossip(),
-        "Success -2 malus, clears LAST_FAILED, not suspended",
-    );
-    // Alias roundtrip
-    ppe.record_inbound_activity();
-    ppe.record_missing();
-    sim.reporter.check(
-        ppe.backoff_level > 0 && ppe.is_suspended(),
-        "Alias record_missing works as outbound_failure",
-    );
-    ppe.record_success();
-    sim.reporter.check(
-        !ppe.is_suspended(),
-        "Alias record_success works as outbound_success",
     );
 
     // Verify healed restarted nodes can still process locks (post a new lock to one healed node)

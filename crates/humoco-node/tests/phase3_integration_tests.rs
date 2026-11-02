@@ -667,7 +667,7 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
     let p1 = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id_1);
     let p2 = humoco_sim_core::crypto::compute_attestation_payload_digest(&parent_lock, &lock_id_2);
     let d1 = humoco_sim_core::crypto::compute_sig_digest(
-        humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
         0,
         0,
         0,
@@ -676,7 +676,7 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
         &p1,
     );
     let d2 = humoco_sim_core::crypto::compute_sig_digest(
-        humoco_sim_core::crypto::DOMAIN_APPROVE_PROV,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
         0,
         0,
         0,

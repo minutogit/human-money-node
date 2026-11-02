@@ -17,8 +17,7 @@
 //! Run with: `cargo test --test proptest_invariants`
 
 use humoco_sim_core::crypto::{
-    compute_canonical_hash, compute_canonical_hash_with_sig, create_equivocation_proof,
-    DOMAIN_CANON_RESOLVER, DOMAIN_EQUIVOCATION,
+    compute_canonical_hash, compute_canonical_hash_with_sig, DOMAIN_CANON_RESOLVER,
 };
 use humoco_sim_core::quota::{
     HourlySlottedRingBuffer, NetworkThermometer, HARD_FLOOR_BASELINE_DAILY,
@@ -262,61 +261,6 @@ proptest! {
         prop_assert_eq!(res, ResolutionResult::Identical);
         prop_assert!(!lock_a.status.is_void());
         prop_assert!(!lock_b.status.is_void());
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Property 2: Equivocation Proof Symmetry & Collision Resistance
-// ---------------------------------------------------------------------------
-
-proptest! {
-    /// Property 2A: Equivocation Proof Perfect Symmetry
-    /// For any random node_id: u16 and random [u8; 32] hashes h1, h2:
-    /// create_equivocation_proof(node_id, &h1, &h2) == create_equivocation_proof(node_id, &h2, &h1).
-    #[test]
-    fn prop_equivocation_proof_symmetry(
-        node_id in any::<NodeId>(),
-        h1 in arb_hash256(),
-        h2 in arb_hash256(),
-    ) {
-        let proof_fwd = create_equivocation_proof(node_id, &h1, &h2);
-        let proof_rev = create_equivocation_proof(node_id, &h2, &h1);
-        prop_assert_eq!(proof_fwd, proof_rev, "create_equivocation_proof must be symmetric");
-    }
-
-    /// Property 2B: Equivocation Proof Collision Resistance across Node IDs
-    /// Different node_ids produce strictly different proof digests.
-    #[test]
-    fn prop_equivocation_proof_node_id_collision_resistance(
-        node_id_a in any::<NodeId>(),
-        node_id_b in any::<NodeId>(),
-        h1 in arb_hash256(),
-        h2 in arb_hash256(),
-    ) {
-        prop_assume!(node_id_a != node_id_b);
-
-        let proof_a = create_equivocation_proof(node_id_a, &h1, &h2);
-        let proof_b = create_equivocation_proof(node_id_b, &h1, &h2);
-        prop_assert_ne!(proof_a, proof_b, "different node_ids must produce different equivocation proofs");
-    }
-
-    /// Property 2C: Equivocation Proof Collision Resistance across Distinct Hash Sets
-    /// Different sets of conflicting hashes {h1, h2} != {h3, h4} produce strictly different digests.
-    #[test]
-    fn prop_equivocation_proof_hash_set_collision_resistance(
-        node_id in any::<NodeId>(),
-        h1 in arb_hash256(),
-        h2 in arb_hash256(),
-        h3 in arb_hash256(),
-        h4 in arb_hash256(),
-    ) {
-        let set_a = if h1 <= h2 { (h1, h2) } else { (h2, h1) };
-        let set_b = if h3 <= h4 { (h3, h4) } else { (h4, h3) };
-        prop_assume!(set_a != set_b);
-
-        let proof_a = create_equivocation_proof(node_id, &h1, &h2);
-        let proof_b = create_equivocation_proof(node_id, &h3, &h4);
-        prop_assert_ne!(proof_a, proof_b, "different conflicting hash pairs must produce different equivocation proofs");
     }
 }
 

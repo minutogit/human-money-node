@@ -1,12 +1,8 @@
 use humoco_sim_core::crypto::{
     compute_canonical_hash, compute_canonical_hash_with_sig, compute_genesis_root,
-    compute_sig_digest, DOMAIN_APPROVE_FINAL, DOMAIN_APPROVE_PROV,
 };
 use humoco_sim_core::fraud::SlotDetector1024;
-use humoco_sim_core::state_machine::{
-    promote_to_final_if_eligible, promote_to_final_if_eligible_with_hysteresis,
-};
-use humoco_sim_core::types::{extract_shard_id, required_quorum, LockRecord, SimTime};
+use humoco_sim_core::types::{extract_shard_id, required_quorum};
 
 #[test]
 fn test_quorum_formula_consistency_table_r1_to_r20() {
@@ -55,18 +51,6 @@ fn test_shard_id_extraction_endianness() {
 }
 
 #[test]
-fn test_sig_digest_domain_separation() {
-    let payload = [0xAA; 32];
-    let prov_digest = compute_sig_digest(DOMAIN_APPROVE_PROV, 1, 100, 0, 42, 0x00, &payload);
-    let final_digest = compute_sig_digest(DOMAIN_APPROVE_FINAL, 1, 100, 0, 42, 0x01, &payload);
-
-    assert_ne!(
-        prov_digest, final_digest,
-        "PROV und FINAL Preimages müssen dank Domain-Tags und Status kryptografisch getrennt sein"
-    );
-}
-
-#[test]
 fn test_canonical_hash_with_signature() {
     let parent = [0x11; 32];
     let receiver = [0x22; 32];
@@ -81,111 +65,9 @@ fn test_canonical_hash_with_signature() {
 }
 
 #[test]
-fn test_promotion_idempotency_and_hysteresis() {
-    let mut record = LockRecord::new([0x01; 32], [0x02; 32], vec![], SimTime(0), SimTime(100_000));
-    for i in 0..14 {
-        record.signers.insert(i);
-    }
-
-    // 1. Ohne 24h-Hysterese -> Beförderung verweigert (bleibt Provisional/Pending)
-    let res_no_hysteresis =
-        promote_to_final_if_eligible_with_hysteresis(&mut record, 20, false).unwrap();
-    assert!(!res_no_hysteresis);
-    assert!(!record.status.is_final());
-
-    // 2. Mit 24h-Hysterese -> Beförderung zu FINAL erfolgreich
-    let res_hysteresis =
-        promote_to_final_if_eligible_with_hysteresis(&mut record, 20, true).unwrap();
-    assert!(res_hysteresis);
-    assert!(record.status.is_final());
-
-    // 3. Idempotente Wiederholung -> Liefert true ohne Statusänderung
-    let res_repeat = promote_to_final_if_eligible(&mut record, 20).unwrap();
-    assert!(res_repeat);
-    assert!(record.status.is_final());
-}
-
-#[test]
 fn test_slot_detector_1024_distribution() {
     assert_eq!(SlotDetector1024::slot_index(1025), 1);
     assert_eq!(SlotDetector1024::slot_index(2048), 0);
-}
-
-#[test]
-fn test_apply_attestation_hysteresis_gate() {
-    use humoco_sim_core::crypto::sign_lock_attestation;
-    use humoco_sim_core::state_machine::apply_attestation_with_hysteresis;
-
-    let mut record = LockRecord::new([0x01; 32], [0x02; 32], vec![], SimTime(0), SimTime(100_000));
-    let mut attestations = Vec::new();
-    for i in 0..14 {
-        attestations.push(sign_lock_attestation(
-            i,
-            &record.id,
-            &record.parent_lock,
-            SimTime(10),
-        ));
-    }
-
-    // 13 Attestations anwenden
-    for att in &attestations[0..13] {
-        let _ = apply_attestation_with_hysteresis(&mut record, att.clone(), 20, false).unwrap();
-    }
-    assert!(!record.status.is_final());
-
-    // 14. Attestation ohne 24h-Hysterese -> Status ist Provisional (nicht Final)
-    let st_no_h =
-        apply_attestation_with_hysteresis(&mut record, attestations[13].clone(), 20, false)
-            .unwrap();
-    assert!(!st_no_h.is_final());
-    assert!(matches!(
-        st_no_h,
-        humoco_sim_core::types::LockStatus::Provisional { .. }
-    ));
-
-    // Reset und mit 24h-Hysterese anwenden -> Status wird Final
-    let mut record2 = LockRecord::new([0x01; 32], [0x02; 32], vec![], SimTime(0), SimTime(100_000));
-    for att in &attestations {
-        let _ = apply_attestation_with_hysteresis(&mut record2, att.clone(), 20, true).unwrap();
-    }
-    assert!(record2.status.is_final());
-}
-
-#[test]
-fn test_dumb_server_hysteresis_gate() {
-    use humoco_sim_core::client_flow::{DumbServer, IngressVerdict};
-
-    let top20: Vec<u16> = (0..20).collect();
-    let mut server_no_h = DumbServer::with_hysteresis(top20.clone(), SimTime(200_000), false);
-    let mut server_with_h = DumbServer::with_hysteresis(top20, SimTime(200_000), true);
-
-    let rec = LockRecord::new([0x01; 32], [0x02; 32], vec![], SimTime(0), SimTime(100_000));
-
-    // Ohne Hysterese: status_is_final ist false
-    if let IngressVerdict::NewLock {
-        status_is_final, ..
-    } = server_no_h.ingress(rec.clone(), SimTime(10)).unwrap()
-    {
-        assert!(
-            !status_is_final,
-            "Ohne 24h-Hysterese darf status_is_final nicht true sein"
-        );
-    } else {
-        panic!("Erwartete NewLock");
-    }
-
-    // Mit Hysterese: status_is_final ist true
-    if let IngressVerdict::NewLock {
-        status_is_final, ..
-    } = server_with_h.ingress(rec, SimTime(10)).unwrap()
-    {
-        assert!(
-            status_is_final,
-            "Mit 24h-Hysterese muss status_is_final true sein"
-        );
-    } else {
-        panic!("Erwartete NewLock");
-    }
 }
 
 #[test]

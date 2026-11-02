@@ -1152,7 +1152,7 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
     ));
     let handler = Arc::new(NodeRequestHandler::with_peer_manager(
         engine,
-        storage,
+        storage.clone(),
         server_id.clone(),
         pm_server.clone(),
     ));
@@ -1191,7 +1191,10 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
     assert_eq!(count, 0, "empty shard must report zero locks");
     assert_eq!(
         digest,
-        humoco_sim_core::crypto::compute_shard_digest(shard, &[])
+        storage
+            .committed_shard_digest(shard, 0)
+            .expect("committed shard digest")
+            .0
     );
 
     // Quorum liveness math: 14/20 FINAL fast-exit leaves 6 straggler budget.

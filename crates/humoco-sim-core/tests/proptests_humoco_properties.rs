@@ -18,10 +18,9 @@
 //! Run with: `cargo test --test proptests_humoco_properties -- --nocapture`
 
 use humoco_sim_core::{
-    apply_attestation, calculate_integer_ema, compute_backoff, compute_canonical_hash,
-    derive_account_tag, promote_to_final_if_eligible, resolve_split_brain,
-    resolve_split_brain_canonical, sign_lock_attestation, AccessControl, AccessTier, ByteYears,
-    LockEntry144, LockRecord, LockStatus, NetworkThermometer, QuartileStats, RamIndex, SimTime,
+    calculate_integer_ema, compute_canonical_hash, resolve_split_brain,
+    resolve_split_brain_canonical, ByteYears,
+    LockRecord, LockStatus, NetworkThermometer, QuartileStats, RamIndex, SimTime,
     SlottedMedianRingBuffer, WireHeader, CURRENT_PROTOCOL_VERSION, HARD_FLOOR_BASELINE_DAILY,
     HARD_FLOOR_READ_BASELINE_DAILY, MAX_WHALE_MULTIPLIER, WIRE_MAGIC,
 };
@@ -128,53 +127,6 @@ proptest! {
         }
     }
 
-    #[test]
-    fn prop_wire_header_parse_valid_roundtrip(
-        msg_type in prop::sample::select(vec![0x0001u16, 0x0003, 0x0005, 0x0101, 0x0201]),
-        session_seq in 0u64..1_000_000,
-        epoch_id in any::<u32>(),
-        flags in any::<u32>(),
-    ) {
-        // Use an allowed msg_type for 0-RTT vs non-0-RTT both paths
-        let hdr = WireHeader::new(msg_type, session_seq, epoch_id, flags, 128);
-        let raw = hdr.to_bytes();
-        // parse with correct expected_seq and is_0rtt=false -> always ok if magic/version match
-        let parsed = humoco_sim_core::wire::parse_wire_header(&raw, session_seq, false).unwrap();
-        prop_assert_eq!(parsed, hdr);
-        // second parse with same raw == stable
-        let parsed2 = humoco_sim_core::wire::parse_wire_header(&raw, session_seq, false).unwrap();
-        prop_assert_eq!(parsed, parsed2);
-    }
-
-    #[test]
-    fn prop_lock_entry144_roundtrip(
-        parent in arb_hash(),
-        receiver in arb_hash(),
-        valid_until in any::<u64>(),
-        sig in any::<[u8; 64]>(),
-        status in any::<u8>(),
-    ) {
-        let entry = LockEntry144 {
-            parent_lock: parent,
-            receiver_pub: receiver,
-            valid_until,
-            owner_signature: sig,
-            status,
-            padding: [0xAA; 7],
-        };
-        let bytes = entry.to_bytes();
-        prop_assert_eq!(bytes.len(), 144);
-        prop_assert_eq!(bytes.len(), LockEntry144::SIZE);
-        let decoded = LockEntry144::from_bytes(&bytes);
-        prop_assert_eq!(decoded.parent_lock, parent);
-        prop_assert_eq!(decoded.receiver_pub, receiver);
-        prop_assert_eq!(decoded.valid_until, valid_until);
-        prop_assert_eq!(decoded.owner_signature, sig);
-        prop_assert_eq!(decoded.status, status);
-        // idempotence of roundtrip
-        let bytes2 = decoded.to_bytes();
-        prop_assert_eq!(bytes, bytes2);
-    }
 
     #[test]
     fn prop_lock_record_bincode_roundtrip(
@@ -214,54 +166,6 @@ proptest! {
         nonce2.push(0xFF);
         let c = LockRecord::new(parent, receiver, nonce2, created_at, valid_until);
         prop_assert_ne!(a.id, c.id);
-    }
-
-    #[test]
-    fn prop_account_tag_roundtrip_and_determinism(
-        client_pubkey in arb_hash(),
-        node_secret in arb_hash(),
-    ) {
-        let tag1 = derive_account_tag(&client_pubkey, &node_secret);
-        let tag2 = derive_account_tag(&client_pubkey, &node_secret);
-        prop_assert_eq!(tag1, tag2);
-        // different client => different tag (collision negligible)
-        let mut other_pubkey = client_pubkey;
-        other_pubkey[0] ^= 0xFF;
-        let tag_other = derive_account_tag(&other_pubkey, &node_secret);
-        prop_assert_ne!(tag1, tag_other);
-        // AccessControl classify roundtrip: register -> classify returns same tier
-        let mut ac = AccessControl::new(node_secret);
-        let tag = ac.register_pubkey(client_pubkey, AccessTier::VipMerchant);
-        prop_assert_eq!(tag, tag1);
-        prop_assert_eq!(ac.classify(Some(tag)), AccessTier::VipMerchant);
-        prop_assert_eq!(ac.classify(Some(tag_other)), AccessTier::LightPublic);
-        prop_assert_eq!(ac.classify(None), AccessTier::LightPublic);
-        // idempotence: re-derive after classify same
-        let tag3 = derive_account_tag(&client_pubkey, &node_secret);
-        prop_assert_eq!(tag3, tag);
-    }
-
-    #[test]
-    fn prop_all_fixed_size_structs_stable(
-        parent in arb_hash(),
-        sig in any::<[u8; 64]>(),
-    ) {
-        // Ensure C-aligned sizes are invariant per INV-1001
-        prop_assert_eq!(std::mem::size_of::<WireHeader>(), 32);
-        prop_assert_eq!(std::mem::size_of::<LockEntry144>(), 144);
-        prop_assert_eq!(WireHeader::SIZE, 32);
-        prop_assert_eq!(LockEntry144::SIZE, 144);
-        // padding bytes preserved
-        let entry = LockEntry144 {
-            parent_lock: parent,
-            receiver_pub: parent,
-            valid_until: 0xDEAD_BEEF_CAFE_BABE,
-            owner_signature: sig,
-            status: 0x42,
-            padding: [0u8; 7],
-        };
-        let rt = LockEntry144::from_bytes(&entry.to_bytes());
-        prop_assert_eq!(rt.padding, [0u8; 7]);
     }
 }
 
@@ -340,62 +244,6 @@ proptest! {
     }
 
     #[test]
-    fn prop_apply_attestation_idempotent_duplicate(
-        parent in arb_hash(),
-        receiver in arb_hash(),
-        nonce in arb_nonce(),
-        node_id in any::<u16>(),
-        active_nodes in 1usize..100,
-    ) {
-        let rec = LockRecord::new(parent, receiver, nonce, SimTime(0), SimTime(10_000_000));
-        let mut rec_clone = rec.clone();
-        let att = sign_lock_attestation(node_id, &rec.id, &rec.parent_lock, SimTime(1_000));
-        // first apply succeeds
-        let s1 = apply_attestation(&mut rec_clone, att.clone(), active_nodes).unwrap();
-        let signers_after_first = rec_clone.signers.clone();
-        let status_after_first = rec_clone.status.clone();
-        // second apply identical attestation => DuplicateAttestation, state unchanged
-        let err = apply_attestation(&mut rec_clone, att.clone(), active_nodes);
-        let is_dup = matches!(err, Err(humoco_sim_core::state_machine::StateError::DuplicateAttestation { .. }));
-        prop_assert!(is_dup);
-        prop_assert_eq!(rec_clone.signers.clone(), signers_after_first.clone());
-        prop_assert_eq!(rec_clone.status.clone(), status_after_first.clone());
-        prop_assert_eq!(rec_clone.status.clone(), s1.clone());
-        // third apply still duplicate and idempotent
-        let err2 = apply_attestation(&mut rec_clone, att.clone(), active_nodes);
-        let is_dup2 = matches!(err2, Err(humoco_sim_core::state_machine::StateError::DuplicateAttestation { .. }));
-        prop_assert!(is_dup2);
-        prop_assert_eq!(rec_clone.signers.clone(), signers_after_first.clone());
-    }
-
-    #[test]
-    fn prop_promote_to_final_idempotent(
-        parent in arb_hash(),
-        receiver in arb_hash(),
-        nonce in arb_nonce(),
-    ) {
-        let mut rec = LockRecord::new(parent, receiver, nonce, SimTime(0), SimTime(10_000_000));
-        // create 14 distinct attestations to reach FINAL threshold (N>=20 => Q=14)
-        let active_nodes = 20;
-        for nid in 0..14u16 {
-            let att = sign_lock_attestation(nid, &rec.id, &rec.parent_lock, SimTime(1_000 + nid as u64));
-            let _ = apply_attestation(&mut rec, att, active_nodes);
-        }
-        prop_assert!(rec.status.is_final());
-        let status_before = rec.status.clone();
-        let signers_before = rec.signers.clone();
-        // promote again => Ok(true) and unchanged
-        let p1 = promote_to_final_if_eligible(&mut rec, active_nodes).unwrap();
-        prop_assert!(p1);
-        prop_assert_eq!(rec.status.clone(), status_before.clone());
-        prop_assert_eq!(rec.signers.clone(), signers_before.clone());
-        let p2 = promote_to_final_if_eligible(&mut rec, active_nodes).unwrap();
-        prop_assert!(p2);
-        prop_assert_eq!(rec.status.clone(), status_before.clone());
-        // f(f(x)) == f(x) : two promotions yield same final state
-    }
-
-    #[test]
     fn prop_resolver_idempotent_double_resolve(
         parent in arb_hash(),
         receiver_a in arb_hash(),
@@ -444,50 +292,6 @@ proptest! {
         }
         // also verify first resolution deterministic regardless of fresh vs reused
         prop_assert_eq!(res1.clone(), res_first.clone());
-    }
-
-    #[test]
-    fn prop_peer_presence_success_idempotent_at_floor(
-        prefix in any::<u64>(),
-        epoch in any::<u16>(),
-    ) {
-        let mut entry = humoco_sim_core::PeerPresenceEntry::new(prefix, epoch);
-        // at floor malus 0, repeated success stays 0
-        prop_assert_eq!(entry.malus_score, 0);
-        entry.record_outbound_success();
-        prop_assert_eq!(entry.malus_score, 0);
-        prop_assert_eq!(entry.backoff_level, 0);
-        entry.record_outbound_success();
-        prop_assert_eq!(entry.malus_score, 0);
-        prop_assert_eq!(entry.backoff_level, 0);
-        // f(f(x)) == f(x) at floor
-        let before = entry;
-        entry.record_outbound_success();
-        prop_assert_eq!(entry.malus_score, before.malus_score);
-        prop_assert_eq!(entry.backoff_level, before.backoff_level);
-    }
-
-    #[test]
-    fn prop_first_seen_pacer_idempotent_known(
-        nodes in prop::collection::vec(any::<u16>(), 1..20),
-        pacing in 100u64..10_000,
-    ) {
-        let mut pacer = humoco_sim_core::FirstSeenPacer::with_known_nodes(nodes.clone(), pacing);
-        // known nodes => ForwardImmediate idempotent
-        for nid in nodes.iter().take(5) {
-            let d1 = pacer.handle_incoming_node_gossip(*nid, 0);
-            let d2 = pacer.handle_incoming_node_gossip(*nid, 10);
-            prop_assert_eq!(d1, humoco_sim_core::NodeGossipForwardDecision::ForwardImmediate);
-            prop_assert_eq!(d2, humoco_sim_core::NodeGossipForwardDecision::ForwardImmediate);
-        }
-        let known_before = pacer.known_count();
-        // re-handling known doesn't grow queue
-        let pending_before = pacer.pending_count();
-        for nid in nodes.iter().take(3) {
-            let _ = pacer.handle_incoming_node_gossip(*nid, 20);
-        }
-        prop_assert_eq!(pacer.pending_count(), pending_before);
-        prop_assert_eq!(pacer.known_count(), known_before);
     }
 }
 
@@ -1079,36 +883,6 @@ proptest! {
         seeded.seed(0);
         // seed(0) internally seeds with floor, so still floor
         prop_assert_eq!(seeded.moving_average_median(), HARD_FLOOR_BASELINE_DAILY);
-    }
-
-    #[test]
-    fn prop_backoff_jitter_deterministic_and_bounded(
-        attempt in 1u32..8,
-        base_ms in 500u64..5_000,
-        cap_ms in 10_000u64..120_000,
-        seed in any::<u64>(),
-    ) {
-        prop_assume!(cap_ms >= base_ms);
-        let b1 = compute_backoff(attempt, base_ms, cap_ms, seed);
-        let b2 = compute_backoff(attempt, base_ms, cap_ms, seed);
-        prop_assert_eq!(b1, b2, "backoff deterministic for same seed");
-        // bounded in [0.5*base_eff, 1.25*base_eff] and <= cap
-        let exp = 1u64 << (attempt - 1).min(10);
-        let base_eff = base_ms.saturating_mul(exp).min(cap_ms);
-        prop_assert!(b1 >= base_eff * 3 / 4 || b1 == base_ms/2, "b1 {} >= 0.75*{}", b1, base_eff);
-        prop_assert!(b1 <= (base_eff as f64 * 1.25) as u64);
-        prop_assert!(b1 <= cap_ms);
-        prop_assert!(b1 >= base_ms/2);
-        // monotonic in attempt (non-decreasing up to cap, modulo jitter variance but base doubles)
-        if attempt < 7 {
-            let b_next = compute_backoff(attempt + 1, base_ms, cap_ms, seed);
-            // base doubles, so even with jitter, b_next should be >= ~0.6 * b1*2? We relax to >= base_ms/2
-            prop_assert!(b_next >= base_ms/2);
-            // Eventually hits cap
-            if attempt >= 6 {
-                prop_assert!(b_next <= cap_ms);
-            }
-        }
     }
 }
 

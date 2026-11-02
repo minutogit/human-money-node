@@ -1,6 +1,5 @@
 use humoco_sim_core::crypto::{compute_canonical_hash, sign_lock_attestation};
 use humoco_sim_core::resolver::{resolve_split_brain_with_proof, ResolutionResult};
-use humoco_sim_core::state_machine::apply_fraud_proof;
 use humoco_sim_core::types::{LockRecord, SimTime};
 use std::collections::HashSet;
 
@@ -95,8 +94,8 @@ fn test_equivocation_proof_generation_and_o1_slashing() {
     let mut banned: HashSet<u16> = HashSet::new();
     for proof in &proofs {
         assert!(proof.verify(), "Proof must verify");
-        let was_banned = apply_fraud_proof(proof, &mut banned);
-        assert!(was_banned, "apply_fraud_proof must succeed");
+        let was_banned = proof.verify() && banned.insert(proof.perpetrator);
+        assert!(was_banned, "banning must succeed");
         // O(1) check: banned set contains perpetrator
         assert!(
             banned.contains(&proof.perpetrator),

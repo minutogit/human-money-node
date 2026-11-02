@@ -121,7 +121,10 @@ async fn test_boot_readiness_barrier_wire_flag() {
     assert_eq!(count, 0, "uncommitted RAM entry must not enter a witness");
     assert_eq!(
         digest,
-        humoco_sim_core::crypto::compute_shard_digest_at(witness_shard, &[], now)
+        storage
+            .committed_shard_digest(witness_shard, now.0)
+            .expect("committed shard digest")
+            .0
     );
     let (reply, _) = client_transport
         .send_request(&conn, &header, &(witness_shard + 1).to_le_bytes())

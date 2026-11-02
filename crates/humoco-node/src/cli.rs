@@ -2385,6 +2385,56 @@ async fn wait_for_database_release(
     }
 }
 
+fn validate_cli_endpoint(endpoint: &str) -> Result<(), String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err("Endpoint cannot be empty".to_string());
+    }
+    if endpoint.parse::<std::net::SocketAddr>().is_ok() {
+        return Ok(());
+    }
+    if let Some((host, port_str)) = endpoint.rsplit_once(':') {
+        let host = host.trim_matches(|c| c == '[' || c == ']');
+        if host.is_empty() {
+            return Err(format!("Invalid endpoint '{}': empty host", endpoint));
+        }
+        if port_str.parse::<u16>().is_err() {
+            return Err(format!("Invalid endpoint '{}': invalid port", endpoint));
+        }
+        Ok(())
+    } else {
+        Err(format!("Invalid endpoint '{}': missing port", endpoint))
+    }
+}
+
+fn parse_cli_peer_spec(input: &str) -> Result<(Option<[u8; 32]>, Option<String>), String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Peer specification cannot be empty".to_string());
+    }
+
+    if let Some((pk_part, ep_part)) = trimmed.split_once('@') {
+        let pk_trimmed = pk_part.trim();
+        let ep_trimmed = ep_part.trim();
+        if pk_trimmed.is_empty() {
+            return Err("Missing public key before '@'".to_string());
+        }
+        if ep_trimmed.is_empty() {
+            return Err("Missing endpoint after '@'".to_string());
+        }
+        validate_cli_endpoint(ep_trimmed)?;
+        let pk = crate::api::keys::parse_pubkey(pk_trimmed).ok();
+        Ok((pk, Some(ep_trimmed.to_string())))
+    } else if trimmed.contains(':') {
+        validate_cli_endpoint(trimmed)?;
+        Ok((None, Some(trimmed.to_string())))
+    } else {
+        let pk = crate::api::keys::parse_pubkey(trimmed)
+            .map_err(|e| format!("Invalid peer specification '{}': {}", trimmed, e))?;
+        Ok((Some(pk), None))
+    }
+}
+
 pub async fn execute_peer_remove(
     peer: String,
     save: bool,
@@ -2392,6 +2442,14 @@ pub async fn execute_peer_remove(
     config_path: Option<PathBuf>,
     json: bool,
 ) -> Result<(), NodeError> {
+    let peer_trimmed = peer.trim();
+    if peer_trimmed.is_empty() {
+        return Err(NodeError::Cli("Peer specification cannot be empty".into()));
+    }
+
+    let (target_pubkey, target_endpoint) = parse_cli_peer_spec(peer_trimmed)
+        .map_err(NodeError::Cli)?;
+
     let should_save = save && !ephemeral;
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
     let config = if cfg_path.exists() {
@@ -2402,36 +2460,109 @@ pub async fn execute_peer_remove(
 
     let mut removed_pubkey = None;
     let mut online_removed = false;
+    let mut candidate_removed_pubkeys = Vec::new();
+    if let Some(pk) = target_pubkey {
+        candidate_removed_pubkeys.push(pk);
+    }
 
     // 1. Try removing online via control socket if daemon is running
     if let Some(ref cfg) = config {
         let socket_path = cfg.control_socket_path();
         let client = ControlClient::new(socket_path);
-        if let Ok(pubkey_hex) = client.remove_peer(&peer).await {
-            removed_pubkey = Some(pubkey_hex);
+        if let Ok(pubkey_hex) = client.remove_peer(peer_trimmed).await {
+            if !pubkey_hex.is_empty() {
+                if let Ok(vec) = hex::decode(&pubkey_hex) {
+                    if let Ok(arr) = <[u8; 32]>::try_from(vec.as_slice()) {
+                        if !candidate_removed_pubkeys.contains(&arr) {
+                            candidate_removed_pubkeys.push(arr);
+                        }
+                    }
+                }
+                removed_pubkey = Some(pubkey_hex);
+            }
             online_removed = true;
         }
     }
 
-    // 2. If should_save, remove from humoco.toml
+    // 2. If should_save, remove from humoco.toml using exact canonical matching
     let mut saved_to_file = false;
     if should_save {
         if let Some(mut cfg) = config {
-            let initial_len = cfg.f2f.peers.len();
-            cfg.f2f.peers.retain(|p| {
-                let p_clean = p.trim();
-                let target = peer.trim();
-                if p_clean == target || p_clean.contains(target) {
+            let initial_peers = cfg.f2f.peers.clone();
+            let initial_trusted = cfg.f2f.trusted_pubkeys.clone();
+
+            cfg.f2f.peers.retain(|entry_str| {
+                let entry_clean = entry_str.trim();
+                if entry_clean.is_empty() {
                     return false;
                 }
-                if let Some(ref rk) = removed_pubkey {
-                    if p_clean.contains(rk) {
-                        return false;
+                let (entry_pk, entry_ep) = match parse_cli_peer_spec(entry_clean) {
+                    Ok(parsed) => parsed,
+                    Err(_) => return true,
+                };
+
+                let matches = if entry_clean == peer_trimmed {
+                    true
+                } else {
+                    let alias_mismatch = match (entry_clean.split_once('@'), peer_trimmed.split_once('@')) {
+                        (Some((a1, _)), Some((a2, _))) => {
+                            entry_pk.is_none() && target_pubkey.is_none() && a1.trim() != a2.trim()
+                        }
+                        _ => false,
+                    };
+
+                    if alias_mismatch {
+                        false
+                    } else {
+                        match (target_pubkey, target_endpoint.as_deref()) {
+                            (Some(tpk), Some(tep)) => {
+                                entry_pk == Some(tpk) && entry_ep.as_deref() == Some(tep)
+                            }
+                            (Some(tpk), None) => {
+                                entry_pk == Some(tpk)
+                            }
+                            (None, Some(tep)) => {
+                                entry_ep.as_deref() == Some(tep)
+                            }
+                            (None, None) => false,
+                        }
                     }
+                };
+
+                if matches {
+                    if let Some(pk) = entry_pk {
+                        if !candidate_removed_pubkeys.contains(&pk) {
+                            candidate_removed_pubkeys.push(pk);
+                        }
+                    }
+                    false
+                } else {
+                    true
                 }
-                true
             });
-            if cfg.f2f.peers.len() < initial_len {
+
+            // Remove corresponding pubkey from trusted_pubkeys if removal was by pubkey or no remaining peer uses it
+            for pk in &candidate_removed_pubkeys {
+                let still_in_use = cfg.f2f.peers.iter().any(|entry| {
+                    if let Ok((Some(entry_pk), _)) = parse_cli_peer_spec(entry.trim()) {
+                        entry_pk == *pk
+                    } else {
+                        false
+                    }
+                });
+
+                if target_pubkey == Some(*pk) || !still_in_use {
+                    cfg.f2f.trusted_pubkeys.retain(|tk_str| {
+                        if let Ok(parsed_tk) = crate::api::keys::parse_pubkey(tk_str.trim()) {
+                            parsed_tk != *pk
+                        } else {
+                            true
+                        }
+                    });
+                }
+            }
+
+            if cfg.f2f.peers != initial_peers || cfg.f2f.trusted_pubkeys != initial_trusted {
                 cfg.save_to_file(&cfg_path)?;
                 saved_to_file = true;
             }
@@ -2909,6 +3040,10 @@ pub async fn execute_restore(
         )));
     }
 
+    let source_canon = source_path
+        .canonicalize()
+        .map_err(|e| NodeError::Cli(format!("Failed to resolve source path: {}", e)))?;
+
     let cfg_path = config_path.unwrap_or_else(NodeConfig::default_config_path);
     let cfg = if cfg_path.exists() {
         NodeConfig::load_from_file(&cfg_path)?
@@ -2916,19 +3051,53 @@ pub async fn execute_restore(
         NodeConfig::default()
     };
 
-    // 1. Verify backup file integrity
-    let backup_storage = match RedbStorage::open(&source_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(NodeError::Cli(format!(
-                "Backup file corrupt or invalid redb format: {}",
-                e
-            )))
+    let target_db_path = cfg.storage.data_dir.join("humoco.redb");
+    if let Some(parent) = target_db_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)?;
         }
-    };
-    let (locks_count, backup_size, _) = backup_storage.get_stats()?;
+    }
 
-    // 2. Ensure daemon is NOT running and locking the target DB
+    // Resolve target real path to handle symlinks and detect aliases
+    let target_real_path = if target_db_path.exists() {
+        target_db_path
+            .canonicalize()
+            .map_err(|e| NodeError::Cli(format!("Failed to resolve target database path: {}", e)))?
+    } else if let Ok(meta) = std::fs::symlink_metadata(&target_db_path) {
+        if meta.file_type().is_symlink() {
+            match std::fs::canonicalize(&target_db_path) {
+                Ok(p) => p,
+                Err(_) => match std::fs::read_link(&target_db_path) {
+                    Ok(mut dest) => {
+                        if dest.is_relative() {
+                            if let Some(parent) = target_db_path.parent() {
+                                dest = parent.join(dest);
+                            }
+                        }
+                        dest
+                    }
+                    Err(_) => target_db_path.clone(),
+                },
+            }
+        } else {
+            target_db_path.clone()
+        }
+    } else {
+        target_db_path.clone()
+    };
+
+    if target_real_path.exists() {
+        let target_canon = target_real_path
+            .canonicalize()
+            .unwrap_or_else(|_| target_real_path.clone());
+        if source_canon == target_canon {
+            return Err(NodeError::Cli(
+                "Source backup and target database refer to the same file".into(),
+            ));
+        }
+    }
+
+    // Check daemon control socket as early secondary check
     let socket_path = cfg.control_socket_path();
     let client = ControlClient::new(socket_path);
     if client.get_status().await.is_ok() {
@@ -2937,24 +3106,89 @@ pub async fn execute_restore(
         ));
     }
 
-    // 3. Restore to target DB path
-    let target_db_path = cfg.storage.data_dir.join("humoco.redb");
-    if let Some(parent) = target_db_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    // Stage copy of source into target directory: leaves source byte-for-byte untouched and read-only
+    let target_dir = target_real_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let staging_path = target_dir.join(format!("humoco.redb.restore_tmp.{}", std::process::id()));
+    let _ = std::fs::remove_file(&staging_path);
+
+    if let Err(e) = std::fs::copy(&source_path, &staging_path) {
+        return Err(NodeError::Cli(format!("Failed to stage backup file: {}", e)));
     }
 
-    // If target exists, backup to humoco.redb.bak first
-    if target_db_path.exists() {
-        let bak_path = cfg.storage.data_dir.join("humoco.redb.bak");
-        let _ = std::fs::copy(&target_db_path, &bak_path);
+    // Validate staged copy before touching target database
+    let (locks_count, backup_size) = match (|| -> Result<(u64, u64), NodeError> {
+        let raw_db = redb::Database::open(&staging_path).map_err(|e| {
+            NodeError::Cli(format!("Backup file corrupt or invalid redb format: {}", e))
+        })?;
+        drop(raw_db);
+
+        let staging_storage = RedbStorage::open(&staging_path).map_err(|e| {
+            NodeError::Cli(format!("Backup file corrupt or invalid redb format: {}", e))
+        })?;
+        let (count, size, _) = staging_storage.get_stats().map_err(|e| {
+            NodeError::Cli(format!("Failed to read backup database statistics: {}", e))
+        })?;
+        drop(staging_storage);
+        Ok((count, size))
+    })() {
+        Ok(stats) => stats,
+        Err(err) => {
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(err);
+        }
+    };
+
+    // Acquire exclusive ownership of the target database file (if it exists) before modifying it
+    let mut target_db_lock: Option<redb::Database> = None;
+    if target_real_path.exists() {
+        match redb::Database::open(&target_real_path) {
+            Ok(db) => {
+                target_db_lock = Some(db);
+            }
+            Err(redb::DatabaseError::DatabaseAlreadyOpen) => {
+                let _ = std::fs::remove_file(&staging_path);
+                return Err(NodeError::Cli(
+                    "Target database is currently locked by another process (daemon is active). Stop the daemon before restoring.".into(),
+                ));
+            }
+            Err(_) => {
+                // If target_real_path exists as a corrupt non-redb file, allow recovery to proceed
+            }
+        }
     }
 
-    // Copy backup file to target
-    std::fs::copy(&source_path, &target_db_path)?;
+    // Backup existing target database to .bak
+    if target_real_path.exists() {
+        let bak_path = target_dir.join("humoco.redb.bak");
+        if let Err(e) = std::fs::copy(&target_real_path, &bak_path) {
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(NodeError::Cli(format!(
+                "Failed to create target backup before restore: {}",
+                e
+            )));
+        }
+    }
+
+    // Drop lock immediately before replacing target database with validated staging file
+    drop(target_db_lock);
+
+    if let Err(e) = std::fs::rename(&staging_path, &target_real_path) {
+        if let Err(copy_err) = std::fs::copy(&staging_path, &target_real_path) {
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(NodeError::Cli(format!(
+                "Failed to replace target database: {} (copy fallback: {})",
+                e, copy_err
+            )));
+        }
+        let _ = std::fs::remove_file(&staging_path);
+    }
 
     // Verify restored target database
-    let restored_storage = RedbStorage::open(&target_db_path)?;
+    let restored_storage = RedbStorage::open(&target_real_path)?;
     let (restored_locks, restored_size, _) = restored_storage.get_stats()?;
+    drop(restored_storage);
 
     if json {
         let out = serde_json::json!({

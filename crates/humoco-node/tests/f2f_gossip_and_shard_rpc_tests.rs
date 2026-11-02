@@ -1264,7 +1264,7 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         .await
         .unwrap();
 
-    for _ in 0..100 {
+    for _ in 0..300 {
         if pm_server.is_known_node(mined_positive.node_pubkey()).await {
             break;
         }

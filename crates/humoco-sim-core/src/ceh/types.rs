@@ -108,6 +108,10 @@ pub enum CehError {
     IncompatibleGenesisManifest { local: [u8; 32], remote: [u8; 32] },
     /// Causal predecessor lock is not yet finalized in the collision lock registry.
     CausalPredecessorNotFinal([u8; 32]),
+    /// Lock collision detected during finalization.
+    LockCollision([u8; 32]),
+    /// Lock expired or root retention exceeded during finalization.
+    LockExpired([u8; 32]),
 }
 
 impl fmt::Display for CehError {
@@ -167,6 +171,12 @@ impl fmt::Display for CehError {
                     "causal predecessor lock not final: {}",
                     hex_prefix(parent)
                 )
+            }
+            Self::LockCollision(parent) => {
+                write!(f, "lock collision: {}", hex_prefix(parent))
+            }
+            Self::LockExpired(parent) => {
+                write!(f, "lock expired: {}", hex_prefix(parent))
             }
         }
     }

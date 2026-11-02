@@ -378,7 +378,7 @@ impl ControlServer {
                             .peer_manager
                             .remove_peer_by_spec(key_opt, endpoint_opt.as_deref())
                             .await;
-                        let pubkey_hex = removed_hex.unwrap_or_else(|| peer_str.clone());
+                        let pubkey_hex = removed_hex.unwrap_or_default();
                         ControlResponse::PeerRemoved { pubkey_hex }
                     }
                     Err(err) => ControlResponse::Error {
@@ -594,6 +594,28 @@ impl ControlServer {
     }
 }
 
+fn validate_endpoint(endpoint: &str) -> Result<(), String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err("Endpoint cannot be empty".to_string());
+    }
+    if endpoint.parse::<std::net::SocketAddr>().is_ok() {
+        return Ok(());
+    }
+    if let Some((host, port_str)) = endpoint.rsplit_once(':') {
+        let host = host.trim_matches(|c| c == '[' || c == ']');
+        if host.is_empty() {
+            return Err(format!("Invalid endpoint '{}': empty host", endpoint));
+        }
+        if port_str.parse::<u16>().is_err() {
+            return Err(format!("Invalid endpoint '{}': invalid port", endpoint));
+        }
+        Ok(())
+    } else {
+        Err(format!("Invalid endpoint '{}': missing port", endpoint))
+    }
+}
+
 fn parse_peer_string(peer_str: &str) -> Result<(Option<[u8; 32]>, Option<String>), String> {
     let peer_str = peer_str.trim();
     if peer_str.is_empty() {
@@ -607,8 +629,10 @@ fn parse_peer_string(peer_str: &str) -> Result<(Option<[u8; 32]>, Option<String>
         if addr_clean.is_empty() {
             return Err("Empty address part in peer string".to_string());
         }
+        validate_endpoint(addr_clean)?;
         Ok((Some(key_bytes), Some(addr_clean.to_string())))
     } else if peer_str.contains(':') {
+        validate_endpoint(peer_str)?;
         Ok((None, Some(peer_str.to_string())))
     } else if let Some(key_bytes) = parse_pubkey_bytes(peer_str) {
         Ok((Some(key_bytes), None))

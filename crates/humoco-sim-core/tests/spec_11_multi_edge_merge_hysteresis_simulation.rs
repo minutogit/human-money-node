@@ -147,7 +147,8 @@ fn test_multi_edge_merge_5_bridges_hysteresis_wave_and_convergence() {
         let bridge_id = (i % 5) as NodeId;
         if let Some(bridge_node) = nodes.get_mut(&bridge_id) {
             bridge_node.pacer.handle_incoming_node_gossip(b_node, 0);
-            bridge_node.n_local = bridge_node.pacer.known_count();
+            bridge_node.n_local =
+                bridge_node.pacer.known_count() + bridge_node.pacer.pending_count();
         }
     }
 
@@ -174,7 +175,8 @@ fn test_multi_edge_merge_5_bridges_hysteresis_wave_and_convergence() {
                 recipient
                     .pacer
                     .handle_incoming_node_gossip(new_node_id, current_time);
-                recipient.n_local = recipient.pacer.known_count();
+                recipient.n_local =
+                    recipient.pacer.known_count() + recipient.pacer.pending_count();
             }
         }
 

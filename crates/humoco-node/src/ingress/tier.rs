@@ -153,6 +153,16 @@ pub struct TierController {
     p2p_node_read_usage: Arc<RwLock<DailyUsageMap>>,
 }
 
+/// Derives a deterministic opaque diagnostic identifier for a VIP account tag.
+/// This identifier is safe to display in operator dashboards, telemetry, and event logs,
+/// as it reveals zero information about the bearer secret and cannot be used for authentication.
+pub fn vip_diagnostic_id(account_tag: &[u8; 32]) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("HUMOCO_V1_VIP_DIAG_ID");
+    hasher.update(account_tag);
+    let hash = hasher.finalize();
+    format!("vip_{}", &hex::encode(hash.as_bytes())[..16])
+}
+
 impl TierController {
     pub fn new(storage: Arc<RedbStorage>, pow_engine: Arc<PowEngine>) -> Self {
         Self::new_with_persist_capacity(storage, pow_engine, 1_024)
@@ -333,23 +343,13 @@ impl TierController {
             .collect()
     }
 
-    /// Returns all VIP accounts, resolving each registered quota tag to its friendly token name (if known) or hex-string.
+    /// Returns all VIP accounts with deterministic opaque diagnostic identifiers.
+    /// Never returns raw bearer secrets or authenticatable credentials.
     pub fn list_vip_accounts(&self) -> Vec<(String, u64)> {
-        let tokens_map = self.vip_tokens.read().unwrap_or_else(|e| e.into_inner());
-        let mut tag_to_name = HashMap::new();
-        for (name, tag) in tokens_map.iter() {
-            tag_to_name.insert(*tag, name.clone());
-        }
-        drop(tokens_map);
-
         let cache = self.vip_quota_cache.read();
         let mut list = Vec::with_capacity(cache.len());
         for (tag, balance) in cache.iter() {
-            let name = tag_to_name
-                .get(tag)
-                .cloned()
-                .unwrap_or_else(|| hex::encode(tag));
-            list.push((name, *balance));
+            list.push((vip_diagnostic_id(tag), *balance));
         }
         list.sort_by(|a, b| a.0.cmp(&b.0));
         list
@@ -1314,7 +1314,9 @@ impl TierController {
         }
     }
 
-    /// Resolves an account tag from an auth token or direct hex representation.
+    /// Resolves an account tag from an auth token.
+    /// ONLY registered bearer secrets in `vip_tokens` can authenticate VIP ingress.
+    /// Diagnostic IDs, hex representations, and unauthorized strings are strictly rejected.
     pub fn resolve_account_tag(&self, token: &str) -> Result<[u8; 32], IngressError> {
         // Strip optional "Bearer " prefix
         let token_cleaned = token.strip_prefix("Bearer ").unwrap_or(token).trim();
@@ -1327,22 +1329,6 @@ impl TierController {
             .get(token_cleaned)
         {
             return Ok(*tag);
-        }
-
-        // 2. If 64 hex characters, check direct account tag
-        if token_cleaned.len() == 64 {
-            if let Ok(bytes) = hex::decode(token_cleaned) {
-                let mut tag = [0u8; 32];
-                tag.copy_from_slice(&bytes);
-                if self
-                    .vip_tags
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&tag)
-                {
-                    return Ok(tag);
-                }
-            }
         }
 
         Err(IngressError::InvalidAuthToken)

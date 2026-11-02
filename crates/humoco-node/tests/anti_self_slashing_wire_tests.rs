@@ -346,7 +346,7 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         0,
         1,
         now,
-        0,
+        footprint,
         0,
         footprint,
         false,
@@ -366,7 +366,7 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         cumulative_micro_byte_years: 0,
         prev_day_final_bytes: 0,
         current_anl_24h: 0,
-        declared_write_ema_micro_bj: 0,
+        declared_write_ema_micro_bj: footprint,
         declared_read_ema_credits: 0,
         sender_pubkey,
         sender_signature: sender_sig_a_retry,
@@ -414,7 +414,7 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         0,
         2,
         now,
-        0,
+        footprint.saturating_mul(2),
         0,
         footprint,
         false,
@@ -431,7 +431,7 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         cumulative_micro_byte_years: 0,
         prev_day_final_bytes: 0,
         current_anl_24h: 0,
-        declared_write_ema_micro_bj: 0,
+        declared_write_ema_micro_bj: footprint.saturating_mul(2),
         declared_read_ema_credits: 0,
         sender_pubkey,
         sender_signature: sender_sig_b,
@@ -495,7 +495,7 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         0,
         3,
         now,
-        0,
+        footprint.saturating_mul(3),
         0,
         footprint,
         false,
@@ -515,7 +515,7 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         cumulative_micro_byte_years: 0,
         prev_day_final_bytes: 0,
         current_anl_24h: 0,
-        declared_write_ema_micro_bj: 0,
+        declared_write_ema_micro_bj: footprint.saturating_mul(3),
         declared_read_ema_credits: 0,
         sender_pubkey,
         sender_signature: sender_sig_b_retry,
@@ -558,4 +558,561 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
     shard_transport.close();
     client_cancel.cancel();
     client_transport.close();
+}
+
+#[tokio::test]
+async fn test_s07_01_wire_high_bit_mutated_proof_rejected_honest_subject_unbanned() {
+    let temp = tempdir().expect("tempdir");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("s07_01.redb")).expect("open redb"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+
+    let shard_identity = NodeIdentity::generate();
+    let client_identity = NodeIdentity::generate();
+    let honest_subject = NodeIdentity::generate();
+
+    let shard_cancel = CancellationToken::new();
+    let client_cancel = CancellationToken::new();
+
+    let shard_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    shard_pm.set_simulation_mode(true);
+    let client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    client_pm.set_simulation_mode(true);
+
+    // Register client as F2F friend on shard
+    shard_pm
+        .register_f2f_friend(
+            *client_identity.node_pubkey(),
+            Some("127.0.0.1:1".parse().expect("addr")),
+        )
+        .await;
+
+    // Honest subject is known and active in shard_pm
+    shard_pm
+        .learn_node_from_gossip_with_hrw(
+            *honest_subject.node_pubkey(),
+            *honest_subject.hrw_routing_id(),
+            "127.0.0.1:2".parse().unwrap(),
+            0,
+            None,
+        )
+        .await;
+    shard_pm
+        .set_first_seen_for_test(
+            honest_subject.node_pubkey(),
+            std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+        )
+        .await;
+
+    let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    let handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            shard_identity.clone(),
+            shard_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true)))
+        .with_readiness_manager(readiness.clone()),
+    );
+
+    let shard_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &shard_identity,
+        shard_pm.clone(),
+        handler,
+        shard_cancel.clone(),
+    )
+    .expect("bind shard transport");
+    let shard_addr = shard_transport.local_addr().expect("shard local addr");
+    shard_transport.spawn_accept_loop();
+
+    let client_dummy_handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            client_identity.clone(),
+            client_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &client_identity,
+        client_pm.clone(),
+        client_dummy_handler,
+        client_cancel.clone(),
+    )
+    .expect("bind client transport");
+    let client_addr = client_transport.local_addr().expect("client local addr");
+    client_transport.spawn_accept_loop();
+
+    shard_pm
+        .register_f2f_friend(*client_identity.node_pubkey(), Some(client_addr))
+        .await;
+    client_pm
+        .register_f2f_friend(*shard_identity.node_pubkey(), Some(shard_addr))
+        .await;
+
+    let conn = client_transport
+        .connect_peer(shard_addr)
+        .await
+        .expect("connect client to shard");
+
+    // Construct legacy envelopes for honest subject, then high-bit mutate p1's epoch_seq
+    let now = test_now_ms();
+    let p1 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+        honest_subject.signing_key(),
+        1,
+        10,
+        50_000,
+        0,
+        100,
+        now,
+        [0x11; 32],
+    );
+    let p2 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+        honest_subject.signing_key(),
+        1,
+        11,
+        40_000,
+        0,
+        100,
+        now + 10,
+        [0x22; 32],
+    );
+
+    let mut p1_high_bit = p1;
+    p1_high_bit.epoch_seq = (1u64 << 32) + 1;
+
+    let forged_proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(
+        p1_high_bit,
+        p2,
+    );
+    let proof_bytes = bincode::serialize(&forged_proof).expect("serialize proof");
+    let evidence_hash = *blake3::hash(&proof_bytes).as_bytes();
+
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        1,
+        0,
+        0,
+        proof_bytes.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &proof_bytes)
+        .await
+        .expect("send equivocation proof");
+
+    assert_eq!(
+        resp_hdr.msg_type,
+        MsgType::EquivocationAck as u16,
+        "Transport layer acknowledges receipt of proof message"
+    );
+
+    // CRITICAL ASSERTIONS:
+    // 1. Honest subject remains unbanned
+    assert!(
+        !engine.is_node_banned(honest_subject.node_pubkey()).await,
+        "Honest subject must not be banned in engine"
+    );
+    assert!(
+        !shard_pm.is_banned(honest_subject.node_pubkey()).await,
+        "Honest subject must not be banned in PeerManager"
+    );
+    assert!(
+        !storage
+            .is_node_banned(honest_subject.node_pubkey())
+            .expect("check ban"),
+        "Honest subject must not be banned in storage"
+    );
+
+    // 2. Routing identity remains eligible
+    assert!(
+        !shard_pm.is_banned(honest_subject.node_pubkey()).await,
+        "Honest subject routing identity must remain eligible"
+    );
+
+    // 3. No accepted fraud evidence is committed to storage
+    assert!(
+        storage
+            .get_evidence(&evidence_hash)
+            .expect("get evidence")
+            .is_none(),
+        "Mutated fraud proof must not be committed to redb storage"
+    );
+
+    shard_cancel.cancel();
+    shard_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+#[tokio::test]
+async fn test_s07_02_wire_quic_v2_ingress_accounting_refusal_vs_under_reporting_fraud() {
+    let temp = tempdir().expect("tempdir");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("s07_02.redb")).expect("open redb"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+
+    let pow = Arc::new(humoco_node::ingress::PowEngine::new([0x42; 32], 8));
+    let tier_controller = Arc::new(humoco_node::ingress::TierController::new(
+        storage.clone(),
+        pow,
+    ));
+
+    let shard_identity = NodeIdentity::generate();
+    let fraud_client = NodeIdentity::generate();
+    let quota_client = NodeIdentity::generate();
+
+    let shard_cancel = CancellationToken::new();
+    let client_cancel = CancellationToken::new();
+
+    let shard_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    shard_pm.set_simulation_mode(true);
+    let client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    client_pm.set_simulation_mode(true);
+
+    shard_pm
+        .register_f2f_friend(
+            *fraud_client.node_pubkey(),
+            Some("127.0.0.1:1".parse().expect("addr")),
+        )
+        .await;
+    shard_pm
+        .register_f2f_friend(
+            *quota_client.node_pubkey(),
+            Some("127.0.0.1:2".parse().expect("addr")),
+        )
+        .await;
+
+    let readiness = Arc::new(humoco_node::daemon::ShardReadinessManager::new());
+    shard_pm
+        .learn_node_from_gossip_with_hrw(
+            *shard_identity.node_pubkey(),
+            *shard_identity.hrw_routing_id(),
+            "127.0.0.1:1".parse().unwrap(),
+            0,
+            None,
+        )
+        .await;
+    shard_pm
+        .set_first_seen_for_test(
+            shard_identity.node_pubkey(),
+            std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
+        )
+        .await;
+
+    let handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            shard_identity.clone(),
+            shard_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true)))
+        .with_readiness_manager(readiness.clone())
+        .with_tier_controller(tier_controller.clone()),
+    );
+
+    let shard_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &shard_identity,
+        shard_pm.clone(),
+        handler,
+        shard_cancel.clone(),
+    )
+    .expect("bind shard transport");
+    let shard_addr = shard_transport.local_addr().expect("shard local addr");
+    shard_transport.spawn_accept_loop();
+
+    let client_dummy_handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            fraud_client.clone(),
+            client_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &fraud_client,
+        client_pm.clone(),
+        client_dummy_handler,
+        client_cancel.clone(),
+    )
+    .expect("bind client transport");
+    let client_addr = client_transport.local_addr().expect("client local addr");
+    client_transport.spawn_accept_loop();
+
+    shard_pm
+        .register_f2f_friend(*fraud_client.node_pubkey(), Some(client_addr))
+        .await;
+    client_pm
+        .register_f2f_friend(*shard_identity.node_pubkey(), Some(shard_addr))
+        .await;
+
+    let conn = client_transport
+        .connect_peer(shard_addr)
+        .await
+        .expect("connect client to shard");
+
+    // Anchor genesis lock on shard
+    let sender_key = SigningKey::from_bytes(&[3u8; 32]);
+    let now = test_now_ms();
+    let genesis_req = make_hmc_genesis("v2_accounting_genesis", now + 1_000_000, &sender_key);
+    let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
+    let parent = *blake3::hash(genesis_tag.as_bytes()).as_bytes();
+    let shard = humoco_sim_core::types::extract_shard_id(&parent);
+    engine
+        .record_hmc_voucher_genesis_parent(&genesis_req.layer2_voucher_id, parent)
+        .await;
+    readiness.mark_shard_ready(shard);
+
+    let (_v_gen, _) = engine
+        .ingress_hmc_lock(genesis_tag.clone(), L2LockEntry::from(&genesis_req))
+        .await;
+
+    // -----------------------------------------------------------------------
+    // Part 1: Proven Incompatible Under-Reporting Claim -> Slashing / Ban
+    // -----------------------------------------------------------------------
+    let parent_hex_1 = hex::encode([0x81u8; 32]);
+    let tx_hash_1 = *blake3::hash(b"tx_hash_honest_1").as_bytes();
+    let lock_1 = make_hmc_spend(
+        &genesis_req.layer2_voucher_id,
+        &parent_hex_1,
+        tx_hash_1,
+        now + 900_000,
+        &sender_key,
+    );
+    let root_valid_until = now + 1_000_000;
+    let ttl_s = root_valid_until.saturating_sub(now) / 1000;
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+
+    // Initial valid sequenced envelope for fraud_client
+    let fraud_pub = *fraud_client.node_pubkey();
+    let digest_1 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        &fraud_pub,
+        1,
+        1,
+        now,
+        50_000,
+        0,
+        footprint,
+        false,
+        &tx_hash_1,
+    );
+    let sig_1 = fraud_client.signing_key().sign(&digest_1).to_bytes();
+    let wire_payload_1 = bincode::serialize(&LockWirePayload::Hmc {
+        req: lock_1,
+        chain: None,
+        root_valid_until,
+        epoch_day: 1,
+        epoch_seq: 1,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 50_000,
+        declared_read_ema_credits: 0,
+        sender_pubkey: fraud_pub,
+        sender_signature: sig_1,
+        timestamp_ms: now,
+    })
+    .expect("serialize wire payload 1");
+
+    let hdr_1 = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, wire_payload_1.len() as u32);
+    let (resp_hdr_1, _) = client_transport.send_request(&conn, &hdr_1, &wire_payload_1).await.expect("send req 1");
+    assert_eq!(resp_hdr_1.flags & humoco_sim_core::wire::FLAG_QUOTA_FRAUD, 0);
+
+    // Second request: under-reporting claim (epoch_seq = 2, now + 10_000ms, declared_write_ema = 1000 << 50_000)
+    let parent_hex_2 = hex::encode([0x82u8; 32]);
+    let tx_hash_2 = *blake3::hash(b"tx_hash_under_report_2").as_bytes();
+    let lock_2 = make_hmc_spend(
+        &genesis_req.layer2_voucher_id,
+        &parent_hex_2,
+        tx_hash_2,
+        now + 900_000,
+        &sender_key,
+    );
+    let ttl_s_2 = root_valid_until.saturating_sub(now + 10_000) / 1000;
+    let footprint_2 = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s_2);
+    let digest_2 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        &fraud_pub,
+        1,
+        2,
+        now + 10_000,
+        1_000,
+        0,
+        footprint_2,
+        false,
+        &tx_hash_2,
+    );
+    let sig_2 = fraud_client.signing_key().sign(&digest_2).to_bytes();
+    let wire_payload_2 = bincode::serialize(&LockWirePayload::Hmc {
+        req: lock_2,
+        chain: None,
+        root_valid_until,
+        epoch_day: 1,
+        epoch_seq: 2,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 1_000,
+        declared_read_ema_credits: 0,
+        sender_pubkey: fraud_pub,
+        sender_signature: sig_2,
+        timestamp_ms: now + 10_000,
+    })
+    .expect("serialize wire payload 2");
+
+    let hdr_2 = WireHeader::new(MsgType::LockVerifyRequest as u16, 2, 0, 0, wire_payload_2.len() as u32);
+    let (resp_hdr_2, _) = client_transport.send_request(&conn, &hdr_2, &wire_payload_2).await.expect("send req 2");
+
+    // Under-reporting MUST set FLAG_QUOTA_FRAUD, FLAG_PEER_SUSPENDED, and ban the sender
+    assert_ne!(
+        resp_hdr_2.flags & humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
+        0,
+        "Under-reporting must set FLAG_QUOTA_FRAUD"
+    );
+    assert_ne!(
+        resp_hdr_2.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+        0,
+        "Under-reporting must set FLAG_PEER_SUSPENDED"
+    );
+    assert!(
+        engine.is_node_banned(&fraud_pub).await,
+        "Perpetrator of under-reporting must be banned in engine"
+    );
+    assert!(
+        shard_pm.is_banned(&fraud_pub).await,
+        "Perpetrator of under-reporting must be banned in PeerManager"
+    );
+
+    // -----------------------------------------------------------------------
+    // Part 2: Neutral Quota Refusal (Exceeded Daily Budget, No Fraud Claim)
+    // -----------------------------------------------------------------------
+    let quota_pub = *quota_client.node_pubkey();
+    let epoch_day = tier_controller.current_epoch_day_at(now);
+    // Exhaust quota_client's daily write allowance in tier_controller
+    let daily_limit = tier_controller.calculate_daily_quota(humoco_sim_core::MAX_WHALE_MULTIPLIER, 1.0);
+    tier_controller
+        .evaluate_node_write_quota(&quota_pub, daily_limit, epoch_day)
+        .expect("initial quota reservation");
+
+    // Quota client sends honest envelope with legitimate sequence progression (no under-reporting)
+    let parent_hex_3 = hex::encode([0x83u8; 32]);
+    let tx_hash_3 = *blake3::hash(b"tx_hash_honest_quota_exceeded").as_bytes();
+    let lock_3 = make_hmc_spend(
+        &genesis_req.layer2_voucher_id,
+        &parent_hex_3,
+        tx_hash_3,
+        now + 900_000,
+        &sender_key,
+    );
+    let digest_3 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        &quota_pub,
+        1,
+        1,
+        now,
+        50_000,
+        0,
+        footprint,
+        false,
+        &tx_hash_3,
+    );
+    let sig_3 = quota_client.signing_key().sign(&digest_3).to_bytes();
+    let wire_payload_3 = bincode::serialize(&LockWirePayload::Hmc {
+        req: lock_3,
+        chain: None,
+        root_valid_until,
+        epoch_day: 1,
+        epoch_seq: 1,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 50_000,
+        declared_read_ema_credits: 0,
+        sender_pubkey: quota_pub,
+        sender_signature: sig_3,
+        timestamp_ms: now,
+    })
+    .expect("serialize wire payload 3");
+
+    // Client sends request using quota_client identity
+    let quota_client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    quota_client_pm.set_simulation_mode(true);
+    quota_client_pm
+        .register_f2f_friend(*shard_identity.node_pubkey(), Some(shard_addr))
+        .await;
+
+    let client_dummy_handler_q = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            quota_client.clone(),
+            quota_client_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+    let quota_client_cancel = CancellationToken::new();
+    let quota_client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &quota_client,
+        quota_client_pm.clone(),
+        client_dummy_handler_q,
+        quota_client_cancel.clone(),
+    )
+    .expect("bind quota client");
+    let quota_addr = quota_client_transport.local_addr().expect("quota client addr");
+    quota_client_transport.spawn_accept_loop();
+    shard_pm.register_f2f_friend(quota_pub, Some(quota_addr)).await;
+
+    let conn_q = quota_client_transport
+        .connect_peer(shard_addr)
+        .await
+        .expect("connect quota client to shard");
+
+    let hdr_3 = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, wire_payload_3.len() as u32);
+    let (resp_hdr_3, _) = quota_client_transport.send_request(&conn_q, &hdr_3, &wire_payload_3).await.expect("send req 3");
+
+    // Neutral quota refusal:
+    // 1. FLAG_QUOTA_EXCEEDED is set
+    assert_ne!(
+        resp_hdr_3.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED,
+        0,
+        "Neutral quota refusal must set FLAG_QUOTA_EXCEEDED"
+    );
+    // 2. FLAG_QUOTA_FRAUD and FLAG_PEER_SUSPENDED are NOT set
+    assert_eq!(
+        resp_hdr_3.flags & humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
+        0,
+        "Neutral quota refusal must NOT set FLAG_QUOTA_FRAUD"
+    );
+    assert_eq!(
+        resp_hdr_3.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
+        0,
+        "Neutral quota refusal must NOT set FLAG_PEER_SUSPENDED"
+    );
+    // 3. Sender is NOT banned
+    assert!(
+        !engine.is_node_banned(&quota_pub).await,
+        "Neutral quota refusal must NOT ban the sender in engine"
+    );
+    assert!(
+        !shard_pm.is_banned(&quota_pub).await,
+        "Neutral quota refusal must NOT ban the sender in PeerManager"
+    );
+    assert!(
+        !storage.is_node_banned(&quota_pub).expect("check ban"),
+        "Neutral quota refusal must NOT ban the sender in storage"
+    );
+
+    shard_cancel.cancel();
+    shard_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+    quota_client_cancel.cancel();
+    quota_client_transport.close();
 }

@@ -6,9 +6,18 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
+
+use humoco_node::api::auth::AdminTokenManager;
 use humoco_node::api::health::{
     format_health_duration, HealthItem, HealthLevel, HealthStateTracker,
 };
+use humoco_node::api::routes::build_operator_router;
 use humoco_node::api::system_stats::SystemStatsCollector;
 use humoco_node::api::AppState;
 use humoco_node::identity::NodeIdentity;
@@ -128,4 +137,181 @@ fn test_system_stats_redb_growth_and_headroom_projection() {
     assert!(stats_growing.days_until_full.is_some());
     let days = stats_growing.days_until_full.unwrap();
     assert_eq!(stats_growing.disk_headroom_label, format!("{days} Tage"));
+}
+
+fn setup_test_operator_state() -> (AppState, Arc<AdminTokenManager>, tempfile::TempDir) {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("health_operator.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+    let auth = Arc::new(AdminTokenManager::load_or_create(temp.path(), false).unwrap());
+
+    let state = AppState::new(engine, storage, identity, tier_controller, pow_engine)
+        .with_auth(auth.clone());
+
+    (state, auth, temp)
+}
+
+#[tokio::test]
+async fn test_operator_history_window_bounds_and_overflow() {
+    let (state, _, _temp) = setup_test_operator_state();
+    let router = build_operator_router(state);
+
+    let windows = [
+        "0h",
+        "24h",
+        "1d",
+        &format!("{}h", (usize::MAX / 60).saturating_add(1)),
+        &format!("{}h", usize::MAX),
+        &format!("{}d", usize::MAX),
+    ];
+
+    for win in windows {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/dashboard/history?window={}", win))
+            .body(Body::empty())
+            .unwrap();
+
+        let res = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "Failed on window={}", win);
+
+        let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(json["points"].is_array(), "History response points must be an array for window={}", win);
+        // Ensure bounded size
+        assert!(json["points"].as_array().unwrap().len() <= 1440);
+    }
+}
+
+#[tokio::test]
+async fn test_operator_vip_credential_redaction_and_lookup_safety() {
+    let (state, auth, _temp) = setup_test_operator_state();
+    let router = build_operator_router(state.clone());
+
+    let secret_token = "vip_bearer_ultra_secret_passphrase_456789";
+
+    // Provision VIP account via POST /dashboard/admin/quota
+    let topup_body = serde_json::json!({
+        "account_tag": secret_token,
+        "byte_years": 5000
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/quota")
+        .header("Authorization", format!("Bearer {}", auth.token()))
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&topup_body).unwrap()))
+        .unwrap();
+
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 1. Check GET /dashboard/data
+    let req = Request::builder()
+        .method("GET")
+        .uri("/dashboard/data")
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(!body_str.contains(secret_token), "Raw secret bearer token must not leak into /dashboard/data");
+
+    let data_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let vip_accounts = data_json["tiers"]["vip_accounts"].as_array().unwrap();
+    assert!(!vip_accounts.is_empty(), "Must have registered VIP accounts");
+
+    for acc in vip_accounts {
+        let tag = acc["account_tag"].as_str().unwrap();
+        assert!(tag.starts_with("vip_"), "VIP account tag must be an opaque diagnostic ID starting with 'vip_'");
+        // resolve_account_tag must REJECT diagnostic ID
+        assert!(state.tier_controller.resolve_account_tag(tag).is_err(), "resolve_account_tag must reject diagnostic ID '{}'", tag);
+    }
+
+    // Raw secret authenticates
+    assert!(state.tier_controller.resolve_account_tag(secret_token).is_ok(), "Raw secret must authenticate");
+
+    // 2. Check GET /dashboard (HTML)
+    let req = Request::builder()
+        .method("GET")
+        .uri("/dashboard")
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let html_str = String::from_utf8_lossy(&body_bytes);
+    assert!(!html_str.contains(secret_token), "Raw secret bearer token must not leak into HTML dashboard");
+
+    // 3. Check GET /dashboard/events
+    let req = Request::builder()
+        .method("GET")
+        .uri("/dashboard/events")
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let events_str = String::from_utf8_lossy(&body_bytes);
+    assert!(!events_str.contains(secret_token), "Raw secret bearer token must not leak into /dashboard/events");
+}
+
+#[tokio::test]
+async fn test_operator_vip_quota_saturation_no_overflow_panic() {
+    let (state, auth, _temp) = setup_test_operator_state();
+    let router = build_operator_router(state);
+
+    // Top up VIP account 1 with near u64::MAX
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/quota")
+        .header("Authorization", format!("Bearer {}", auth.token()))
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "account_tag": "vip_user_one_token",
+            "byte_years": u64::MAX - 100
+        })).unwrap()))
+        .unwrap();
+    let res1 = router.clone().oneshot(req1).await.unwrap();
+    assert_eq!(res1.status(), StatusCode::OK);
+
+    // Top up VIP account 2 with amount that would overflow u64::MAX
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/quota")
+        .header("Authorization", format!("Bearer {}", auth.token()))
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "account_tag": "vip_user_two_token",
+            "byte_years": 500
+        })).unwrap()))
+        .unwrap();
+    let res2 = router.clone().oneshot(req2).await.unwrap();
+    assert_eq!(res2.status(), StatusCode::OK);
+
+    // GET /dashboard/data: must not panic, and total balance must saturate at u64::MAX
+    let req = Request::builder()
+        .method("GET")
+        .uri("/dashboard/data")
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let data_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(data_json["tiers"]["vip_total_balance"], u64::MAX);
+
+    // GET /dashboard (HTML): must render cleanly without overflow panic
+    let req_html = Request::builder()
+        .method("GET")
+        .uri("/dashboard")
+        .body(Body::empty())
+        .unwrap();
+    let res_html = router.oneshot(req_html).await.unwrap();
+    assert_eq!(res_html.status(), StatusCode::OK);
 }

@@ -258,6 +258,13 @@ impl IngressEnvelopeEvidence {
             self.lock_hash
         }
     }
+
+    #[inline]
+    pub fn is_legacy(&self) -> bool {
+        self.cumulative_micro_byte_years > 0
+            || self.prev_day_final_bytes > 0
+            || self.current_anl_24h > 0
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -505,14 +512,15 @@ pub fn decode_ingress_envelope(bytes: &[u8]) -> Option<IngressEnvelopeEvidence> 
 }
 
 pub fn verify_ingress_envelope_signature(env: &IngressEnvelopeEvidence) -> bool {
-    let is_legacy = env.cumulative_micro_byte_years > 0
-        || env.prev_day_final_bytes > 0
-        || env.current_anl_24h > 0;
-    let digest = if is_legacy {
+    let digest = if env.is_legacy() {
+        let legacy_seq = match u32::try_from(env.epoch_seq) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
         compute_ingress_envelope_digest(
             &env.gateway_pubkey,
             env.epoch_day,
-            env.epoch_seq as u32,
+            legacy_seq,
             env.cumulative_micro_byte_years,
             env.prev_day_final_bytes,
             env.current_anl_24h,
@@ -1046,6 +1054,9 @@ impl FraudProofPayload {
         if !verify_heartbeat(&a) || !verify_heartbeat(&b) {
             return false;
         }
+        if a == b || a.signature == b.signature {
+            return false;
+        }
         let delta = a.timestamp.0.abs_diff(b.timestamp.0);
         delta < HEARTBEAT_SPAM_THRESHOLD_MS
     }
@@ -1075,61 +1086,89 @@ impl FraudProofPayload {
             return false;
         }
 
-        // If legacy mode (day / sequence based):
-        if a.epoch_day > 0
-            || b.epoch_day > 0
-            || a.epoch_seq > 0
-            || b.epoch_seq > 0
-            || a.cumulative_micro_byte_years > 0
-            || b.cumulative_micro_byte_years > 0
-        {
-            let (p1, p2) = if (a.epoch_day, a.epoch_seq, a.timestamp_ms)
-                > (b.epoch_day, b.epoch_seq, b.timestamp_ms)
-            {
-                (b, a)
-            } else {
-                (a, b)
-            };
-
-            // Mathematically proven 8-path trichotomy matrix:
-            return if p1.epoch_day == p2.epoch_day {
-                // Case 1 (same day: p1.epoch_day == p2.epoch_day)
-                if p1.epoch_seq == p2.epoch_seq {
-                    if p1.effective_op_hash() != p2.effective_op_hash() {
-                        true // Path 2: sequence fork!
-                    } else {
-                        false // Path 1: idempotent duplicate
-                    }
-                } else {
-                    // Since normalized: p2.epoch_seq > p1.epoch_seq
-                    // Path 4: counter rollback under sequence progression
-                    p1.cumulative_micro_byte_years > 0
-                        && p2.cumulative_micro_byte_years > 0
-                        && p2.cumulative_micro_byte_years < p1.cumulative_micro_byte_years
-                }
-            } else if p2.epoch_day == p1.epoch_day + 1 {
-                // Case 2 (next day: p2.epoch_day == p1.epoch_day + 1)
-                if p1.cumulative_micro_byte_years > p2.prev_day_final_bytes {
-                    true // Path 7: prior-day embezzlement!
-                } else {
-                    false // Path 6: honest midnight transition (incl. path 5)
-                }
-            } else {
-                // Case 3 (gap >= 2 days: p2.epoch_day > p1.epoch_day + 1)
-                false // Path 8: rest day / gap >= 2 days, zero state bloat
-            };
+        // Envelopes must belong to the same protocol generation (legacy vs V2)
+        if a.is_legacy() != b.is_legacy() {
+            return false;
         }
 
-        // Exact mathematical under-reporting fraud check:
-        // Canonical normalization by timestamp_ms first: order of arrival (a, b) vs (b, a)
-        // must never alter the verdict (Order Invariance / Spec 10).
-        let (p1, p2) = if a.timestamp_ms <= b.timestamp_ms {
+        if a.is_legacy() && b.is_legacy() {
+            if u32::try_from(a.epoch_seq).is_err() || u32::try_from(b.epoch_seq).is_err() {
+                return false;
+            }
+
+            if a.epoch_day > 0
+                || b.epoch_day > 0
+                || a.epoch_seq > 0
+                || b.epoch_seq > 0
+                || a.cumulative_micro_byte_years > 0
+                || b.cumulative_micro_byte_years > 0
+            {
+                let (p1, p2) = if (a.epoch_day, a.epoch_seq, a.timestamp_ms)
+                    > (b.epoch_day, b.epoch_seq, b.timestamp_ms)
+                {
+                    (b, a)
+                } else {
+                    (a, b)
+                };
+
+                // Mathematically proven 8-path trichotomy matrix:
+                return if p1.epoch_day == p2.epoch_day {
+                    // Case 1 (same day: p1.epoch_day == p2.epoch_day)
+                    if p1.epoch_seq == p2.epoch_seq {
+                        if p1.effective_op_hash() != p2.effective_op_hash() {
+                            true // Path 2: sequence fork!
+                        } else {
+                            false // Path 1: idempotent duplicate
+                        }
+                    } else {
+                        // Since normalized: p2.epoch_seq > p1.epoch_seq
+                        // Path 4: counter rollback under sequence progression
+                        p1.cumulative_micro_byte_years > 0
+                            && p2.cumulative_micro_byte_years > 0
+                            && p2.cumulative_micro_byte_years < p1.cumulative_micro_byte_years
+                    }
+                } else if p2.epoch_day == p1.epoch_day + 1 {
+                    // Case 2 (next day: p2.epoch_day == p1.epoch_day + 1)
+                    if p1.cumulative_micro_byte_years > p2.prev_day_final_bytes {
+                        true // Path 7: prior-day embezzlement!
+                    } else {
+                        false // Path 6: honest midnight transition (incl. path 5)
+                    }
+                } else {
+                    // Case 3 (gap >= 2 days: p2.epoch_day > p1.epoch_day + 1)
+                    false // Path 8: rest day / gap >= 2 days, zero state bloat
+                };
+            }
+            return false;
+        }
+
+        // Exact mathematical under-reporting fraud check in V2 mode:
+        // Canonical normalization by (epoch_day, epoch_seq, timestamp_ms) ensures
+        // arrival order (a, b) vs (b, a) produces identical results.
+        let (p1, p2) = if (a.epoch_day, a.epoch_seq, a.timestamp_ms)
+            <= (b.epoch_day, b.epoch_seq, b.timestamp_ms)
+        {
             (a, b)
         } else {
             (b, a)
         };
 
-        if p1.timestamp_ms == p2.timestamp_ms {
+        if p1.epoch_day > 0 || p2.epoch_day > 0 || p1.epoch_seq > 0 || p2.epoch_seq > 0 {
+            if p1.epoch_day == p2.epoch_day && p1.epoch_seq == p2.epoch_seq {
+                let is_exact_duplicate = p1.effective_op_hash() == p2.effective_op_hash()
+                    && p1.timestamp_ms == p2.timestamp_ms
+                    && p1.declared_write_ema_micro_bj == p2.declared_write_ema_micro_bj
+                    && p1.declared_read_ema_credits == p2.declared_read_ema_credits
+                    && p1.footprint_micro_bj == p2.footprint_micro_bj;
+                return !is_exact_duplicate;
+            }
+
+            if (p1.epoch_day, p1.epoch_seq) < (p2.epoch_day, p2.epoch_seq)
+                && p2.timestamp_ms < p1.timestamp_ms
+            {
+                return true;
+            }
+        } else if p1.timestamp_ms == p2.timestamp_ms {
             // Concurrent operations within the same millisecond are normal for independent
             // unsequenced reads/queries; an identical duplicate is not fraud.
             return false;
@@ -1148,7 +1187,7 @@ impl FraudProofPayload {
                     return true;
                 }
             }
-        } else {
+        } else if p1.declared_write_ema_micro_bj > 0 || p2.declared_write_ema_micro_bj > 0 {
             let min_allowed =
                 crate::quota::decay_integer_ema(p1.declared_write_ema_micro_bj, delta_secs)
                     .saturating_add(p2.footprint_micro_bj);
@@ -1231,6 +1270,9 @@ impl<const N: usize> SlotDetector<N> {
                     return None;
                 }
                 // Case 2: same NodeId
+                if existing.timestamp_unix == hb.timestamp && existing.signature == hb.signature {
+                    return None;
+                }
                 let delta = hb.timestamp.0.abs_diff(existing.timestamp_unix.0);
                 if delta < HEARTBEAT_SPAM_THRESHOLD_MS {
                     // FRAUD!

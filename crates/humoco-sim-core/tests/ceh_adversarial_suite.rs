@@ -355,74 +355,70 @@ fn test_scenario_3_8_6_split_view_change_and_late_redemption() {
     let (signers, committee) = generate_committee(10);
     let shard_id = 7;
     let epoch = 3;
-    let predecessor_hash = [0x55; 32];
 
-    // Replicas for all 20 committee members
-    let mut replicas = Vec::new();
-    for sk in &signers {
-        let r = CehConsensusReplica::new(shard_id, epoch, predecessor_hash, committee, sk.clone())
-            .expect("replica creation");
-        replicas.push(r);
+    // 8 honest nodes prepare proposal A
+    let proposal_hash_a = [0xaa; 32];
+    let mut prepared_a = PreparedProof::new(shard_id, epoch, 0, proposal_hash_a);
+    for sk in signers.iter().take(8) {
+        let vote = sign_prepare_vote(sk, shard_id, epoch, 0, proposal_hash_a);
+        assert!(verify_prepare_vote(&vote));
+        prepared_a.add_signature(vote.voter, vote.signature);
     }
+    // Quorum check fails (have: 8, required: 14)
+    assert_eq!(
+        verify_prepared_proof(&prepared_a, &committee, CEH_BFT_QUORUM),
+        Err(CehError::QuorumNotReached {
+            have: 8,
+            required: 14
+        })
+    );
 
-    // 8 honest replicas prepare proposal A
-    let proposal_a =
-        EpochProposal::new(shard_id, epoch, 0, [0xaa; 32], committee, Vec::new(), None);
-    let mut prepares_a = Vec::new();
-    for r in replicas.iter_mut().take(8) {
-        let vote = r.handle_proposal(&proposal_a).expect("prepare A");
-        prepares_a.push(vote);
+    // 6 honest nodes prepare proposal B
+    let proposal_hash_b = [0xbb; 32];
+    let mut prepared_b = PreparedProof::new(shard_id, epoch, 0, proposal_hash_b);
+    for sk in signers.iter().skip(8).take(6) {
+        let vote = sign_prepare_vote(sk, shard_id, epoch, 0, proposal_hash_b);
+        assert!(verify_prepare_vote(&vote));
+        prepared_b.add_signature(vote.voter, vote.signature);
     }
-
-    // 6 honest replicas prepare proposal B
-    let proposal_b =
-        EpochProposal::new(shard_id, epoch, 0, [0xbb; 32], committee, Vec::new(), None);
-    let mut prepares_b = Vec::new();
-    for r in replicas.iter_mut().skip(8).take(6) {
-        let vote = r.handle_proposal(&proposal_b).expect("prepare B");
-        prepares_b.push(vote);
-    }
+    // Quorum check fails (have: 6, required: 14)
+    assert_eq!(
+        verify_prepared_proof(&prepared_b, &committee, CEH_BFT_QUORUM),
+        Err(CehError::QuorumNotReached {
+            have: 6,
+            required: 14
+        })
+    );
 
     // 6 Byzantine nodes (indices 14..20) withhold all votes.
-    // Result: A has 8 votes (< 14), B has 6 votes (< 14).
-    for vote in prepares_a {
-        let pp = replicas[0].add_prepare_vote(vote).expect("add prepare");
-        assert!(pp.is_none(), "8 votes cannot form PreparedProof");
-    }
-    for vote in prepares_b {
-        let pp = replicas[0].add_prepare_vote(vote).expect("add prepare");
-        assert!(pp.is_none(), "6 votes cannot form PreparedProof");
-    }
+    // Result: Round 0 times out without 14-node commit.
+    // All 14 honest nodes sign ROUND_CHANGE messages for transition from round 0 to round 1.
+    let failed_round = 0;
+    let next_round = 1;
+    let mut nvc = NewViewCertificate::new(shard_id, epoch, next_round);
 
-    // Timeout triggers View Change on all 14 honest nodes
-    let mut round_changes = Vec::new();
-    for r in replicas.iter_mut().take(14) {
-        let rc = r.on_round_timeout();
-        assert_eq!(rc.failed_round, 0);
-        assert_eq!(rc.next_round, 1);
-        round_changes.push(rc);
+    // 13 signatures is sub-quorum
+    for sk in signers.iter().take(13) {
+        let rc = sign_round_change(sk, shard_id, epoch, failed_round, next_round, None);
+        assert!(verify_round_change(&rc));
+        nvc.add_message(rc);
     }
+    assert_eq!(
+        verify_new_view_certificate(&nvc, &committee, CEH_BFT_QUORUM),
+        Err(CehError::QuorumNotReached {
+            have: 13,
+            required: 14
+        })
+    );
 
-    // Proposer for Round 1 is node 1 (round 1 % 20)
-    let proposer_round_1 = 1;
-    let mut nvc = None;
-    for rc in round_changes {
-        if let Some(cert) = replicas[proposer_round_1]
-            .add_round_change(rc)
-            .expect("add round change")
-        {
-            nvc = Some(cert);
-        }
-    }
-    let nvc = nvc.expect("14 round changes must assemble NewViewCertificate");
+    // 14th signature achieves quorum
+    let rc_14 = sign_round_change(&signers[13], shard_id, epoch, failed_round, next_round, None);
+    assert!(verify_round_change(&rc_14));
+    nvc.add_message(rc_14);
+
     assert_eq!(nvc.new_round, 1);
+    assert!(verify_new_view_certificate(&nvc, &committee, CEH_BFT_QUORUM).is_ok());
     assert!(nvc.verify(&committee).is_ok());
-
-    // All 14 honest replicas enter round 1
-    for r in replicas.iter_mut().take(14) {
-        r.enter_new_view(&nvc).expect("enter new view");
-        assert_eq!(r.round, 1);
-    }
 
     // --- Late-Certificate Redemption in spend slot ---
     let parent_lock = [0x77; 32];

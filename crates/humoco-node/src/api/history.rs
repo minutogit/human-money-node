@@ -183,9 +183,9 @@ impl HistorySampler {
 }
 
 /// Parses window query parameter into maximum point count (assuming 1 point / min).
-fn parse_window_to_points(window: &str) -> usize {
+pub(crate) fn parse_window_to_points(window: &str) -> usize {
     let s = window.trim().to_lowercase();
-    if s.is_empty() || s == "all" || s == "24h" || s == "1d" {
+    if s.is_empty() || s == "all" {
         return HISTORY_CAPACITY;
     }
     if let Some(m_str) = s.strip_suffix('m') {
@@ -195,7 +195,12 @@ fn parse_window_to_points(window: &str) -> usize {
     }
     if let Some(h_str) = s.strip_suffix('h') {
         if let Ok(h) = h_str.parse::<usize>() {
-            return (h * 60).min(HISTORY_CAPACITY);
+            return h.saturating_mul(60).min(HISTORY_CAPACITY);
+        }
+    }
+    if let Some(d_str) = s.strip_suffix('d') {
+        if let Ok(d) = d_str.parse::<usize>() {
+            return d.saturating_mul(1440).min(HISTORY_CAPACITY);
         }
     }
     // Default fallback to 60 points (1h)
@@ -293,5 +298,28 @@ mod tests {
         let json = serde_json::to_string(&pt).expect("serialize");
         let deserialized: HistoryPoint = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(pt, deserialized);
+    }
+
+    #[test]
+    fn test_parse_window_to_points_bounds_and_overflow() {
+        assert_eq!(parse_window_to_points("0h"), 0);
+        assert_eq!(parse_window_to_points("0d"), 0);
+        assert_eq!(parse_window_to_points("0m"), 0);
+        assert_eq!(parse_window_to_points("1m"), 1);
+        assert_eq!(parse_window_to_points("1h"), 60);
+        assert_eq!(parse_window_to_points("24h"), HISTORY_CAPACITY);
+        assert_eq!(parse_window_to_points("1d"), HISTORY_CAPACITY);
+        assert_eq!(parse_window_to_points("all"), HISTORY_CAPACITY);
+        assert_eq!(parse_window_to_points(""), HISTORY_CAPACITY);
+
+        // Overflow bounds
+        let overflow_h = format!("{}h", usize::MAX / 60 + 1);
+        assert_eq!(parse_window_to_points(&overflow_h), HISTORY_CAPACITY);
+        let max_h = format!("{}h", usize::MAX);
+        assert_eq!(parse_window_to_points(&max_h), HISTORY_CAPACITY);
+        let overflow_d = format!("{}d", usize::MAX / 1440 + 1);
+        assert_eq!(parse_window_to_points(&overflow_d), HISTORY_CAPACITY);
+        let max_d = format!("{}d", usize::MAX);
+        assert_eq!(parse_window_to_points(&max_d), HISTORY_CAPACITY);
     }
 }

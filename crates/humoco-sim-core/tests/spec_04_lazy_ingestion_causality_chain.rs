@@ -262,3 +262,65 @@ fn test_causality_proofchain_hop_limit_boundary() {
         CausalityError::BrokenChainLink { hop_index: 1025 }
     );
 }
+
+#[test]
+fn test_s07_09_invalid_target_lock_id_rejection() {
+    let (base_chain, allowed) = build_valid_3_hop_chain();
+
+    // 1. Mutate receiver_pub while preserving target_lock.id and resigning client_sig
+    let mut chain_mut_receiver = base_chain.clone();
+    chain_mut_receiver.target_lock.receiver_pub[0] ^= 0xFF;
+    chain_mut_receiver.client_signature = sign_causality_client_signature(
+        &chain_mut_receiver.target_lock,
+        &chain_mut_receiver.genesis_root,
+    );
+
+    let res_stateless =
+        verify_causality_proof_chain_stateless(&chain_mut_receiver, &allowed);
+    assert_eq!(res_stateless.unwrap_err(), CausalityError::InvalidTargetLockId);
+
+    let mut seen = HashSet::new();
+    let res_stateful =
+        verify_causality_proof_chain(&chain_mut_receiver, &allowed, &mut seen);
+    assert_eq!(res_stateful.unwrap_err(), CausalityError::InvalidTargetLockId);
+    assert!(
+        seen.is_empty(),
+        "seen_parents must remain unchanged when target_lock.id is invalid!"
+    );
+
+    // 2. Mutate nonce while preserving target_lock.id and resigning client_sig
+    let mut chain_mut_nonce = base_chain.clone();
+    chain_mut_nonce.target_lock.nonce.push(0x42);
+    chain_mut_nonce.client_signature = sign_causality_client_signature(
+        &chain_mut_nonce.target_lock,
+        &chain_mut_nonce.genesis_root,
+    );
+    assert_eq!(
+        verify_causality_proof_chain_stateless(&chain_mut_nonce, &allowed).unwrap_err(),
+        CausalityError::InvalidTargetLockId
+    );
+    let mut seen_nonce = HashSet::new();
+    assert_eq!(
+        verify_causality_proof_chain(&chain_mut_nonce, &allowed, &mut seen_nonce).unwrap_err(),
+        CausalityError::InvalidTargetLockId
+    );
+    assert!(seen_nonce.is_empty());
+
+    // 3. Mutate validity while preserving target_lock.id and resigning client_sig
+    let mut chain_mut_validity = base_chain.clone();
+    chain_mut_validity.target_lock.valid_until = SimTime(999_999);
+    chain_mut_validity.client_signature = sign_causality_client_signature(
+        &chain_mut_validity.target_lock,
+        &chain_mut_validity.genesis_root,
+    );
+    assert_eq!(
+        verify_causality_proof_chain_stateless(&chain_mut_validity, &allowed).unwrap_err(),
+        CausalityError::InvalidTargetLockId
+    );
+    let mut seen_val = HashSet::new();
+    assert_eq!(
+        verify_causality_proof_chain(&chain_mut_validity, &allowed, &mut seen_val).unwrap_err(),
+        CausalityError::InvalidTargetLockId
+    );
+    assert!(seen_val.is_empty());
+}

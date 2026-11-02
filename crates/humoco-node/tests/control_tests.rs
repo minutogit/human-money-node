@@ -126,7 +126,7 @@ async fn test_control_socket_status_and_peers() {
         .remove_peer(&addr2.to_string())
         .await
         .expect("remove_peer");
-    assert!(!removed.is_empty());
+    assert!(removed.is_empty());
     let peers_after = client.list_peers().await.expect("list_peers after remove");
     assert_eq!(peers_after.len(), 1);
 
@@ -577,5 +577,64 @@ async fn test_s02_01_control_backup_targeting_live_db_rejected() {
     assert!(reopened.is_node_banned(&[0x11; 32]).unwrap());
     assert!(reopened.is_node_banned(&[0x22; 32]).unwrap());
     assert!(reopened.get_lock(&[0x33; 32]).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn test_cli_peer_removal_exact_matching_and_formats() {
+    use humoco_node::cli::execute_peer_remove;
+    use humoco_node::config::NodeConfig;
+    use humoco_node::identity::NodeIdentity;
+
+    let temp = tempfile::tempdir().unwrap();
+    let cfg_path = temp.path().join("humoco.toml");
+
+    let id1 = NodeIdentity::generate();
+    let id2 = NodeIdentity::generate();
+    let id1_hex = id1.public_key_hex();
+    let id1_bs58 = id1.public_key_bs58();
+    let id2_hex = id2.public_key_hex();
+
+    let mut cfg = NodeConfig::default();
+    cfg.f2f.peers = vec![
+        "127.0.0.1:909".to_string(),
+        "127.0.0.1:9090".to_string(),
+        format!("{}@127.0.0.1:9091", id1_hex),
+        id2_hex.clone(),
+    ];
+    cfg.f2f.trusted_pubkeys = vec![id1_hex.clone(), id2_hex.clone()];
+    cfg.save_to_file(&cfg_path).unwrap();
+
+    // 1. Empty/whitespace argument returns error without modifying config
+    assert!(execute_peer_remove("".into(), true, false, Some(cfg_path.clone()), false).await.is_err());
+    assert!(execute_peer_remove("   ".into(), true, false, Some(cfg_path.clone()), false).await.is_err());
+    let loaded = NodeConfig::load_from_file(&cfg_path).unwrap();
+    assert_eq!(loaded.f2f.peers.len(), 4);
+    assert_eq!(loaded.f2f.trusted_pubkeys.len(), 2);
+
+    // 2. Removing 127.0.0.1:909 removes ONLY 127.0.0.1:909 and preserves 127.0.0.1:9090
+    execute_peer_remove("127.0.0.1:909".into(), true, false, Some(cfg_path.clone()), false).await.unwrap();
+    let loaded = NodeConfig::load_from_file(&cfg_path).unwrap();
+    assert!(!loaded.f2f.peers.contains(&"127.0.0.1:909".to_string()));
+    assert!(loaded.f2f.peers.contains(&"127.0.0.1:9090".to_string()));
+    assert_eq!(loaded.f2f.peers.len(), 3);
+    assert_eq!(loaded.f2f.trusted_pubkeys.len(), 2);
+
+    // 3. Removing id1 via Base58 removes hex-configured peer + trusted_pubkeys entry
+    execute_peer_remove(id1_bs58.clone(), true, false, Some(cfg_path.clone()), false).await.unwrap();
+    let loaded = NodeConfig::load_from_file(&cfg_path).unwrap();
+    assert!(!loaded.f2f.peers.iter().any(|p| p.contains(&id1_hex)));
+    assert!(!loaded.f2f.trusted_pubkeys.iter().any(|k| k == &id1_hex));
+    // Unrelated peer and trusted_pubkey (id2) preserved
+    assert!(loaded.f2f.peers.contains(&id2_hex));
+    assert!(loaded.f2f.trusted_pubkeys.contains(&id2_hex));
+    assert!(loaded.f2f.peers.contains(&"127.0.0.1:9090".to_string()));
+
+    // 4. Removing id2 via hex removes id2 and preserves 127.0.0.1:9090
+    execute_peer_remove(id2_hex.clone(), true, false, Some(cfg_path.clone()), false).await.unwrap();
+    let loaded = NodeConfig::load_from_file(&cfg_path).unwrap();
+    assert!(!loaded.f2f.peers.contains(&id2_hex));
+    assert!(!loaded.f2f.trusted_pubkeys.contains(&id2_hex));
+    assert_eq!(loaded.f2f.peers, vec!["127.0.0.1:9090".to_string()]);
+    assert!(loaded.f2f.trusted_pubkeys.is_empty());
 }
 

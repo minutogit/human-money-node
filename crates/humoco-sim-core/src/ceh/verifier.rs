@@ -49,43 +49,6 @@ pub enum SlotState {
     },
 }
 
-/// Verifies an `EpochCertificate` chain from an authorized root anchor/checkpoint.
-pub fn verify_epoch_certificate_chain(
-    target_cert: &EpochCertificate,
-    trusted_anchor_hash: &[u8; 32],
-    intermediate_chain: &[EpochCertificate],
-) -> Result<(), CehError> {
-    if intermediate_chain.is_empty() {
-        if target_cert.predecessor_cert_hash != *trusted_anchor_hash {
-            return Err(CehError::ProposalHashMismatch {
-                expected: *trusted_anchor_hash,
-                got: target_cert.predecessor_cert_hash,
-            });
-        }
-        return Ok(());
-    }
-
-    let mut current_expected_hash = *trusted_anchor_hash;
-    for cert in intermediate_chain {
-        if cert.predecessor_cert_hash != current_expected_hash {
-            return Err(CehError::ProposalHashMismatch {
-                expected: current_expected_hash,
-                got: cert.predecessor_cert_hash,
-            });
-        }
-        current_expected_hash = cert.canonical_hash();
-    }
-
-    if target_cert.predecessor_cert_hash != current_expected_hash {
-        return Err(CehError::ProposalHashMismatch {
-            expected: current_expected_hash,
-            got: target_cert.predecessor_cert_hash,
-        });
-    }
-
-    Ok(())
-}
-
 /// Verifies that a `LockReceipt` satisfies the BFT quorum from the committee authorized in `EpochCertificate`.
 pub fn verify_lock_receipt(
     receipt: &LockReceipt,

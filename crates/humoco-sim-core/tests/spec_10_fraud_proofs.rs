@@ -376,3 +376,190 @@ fn test_pillar_2_v2_envelope_sequence_fork_conflict_bans_immediately() {
         "A07: V2 envelope sequence fork must be detected as fraud!"
     );
 }
+
+/// S07-01: High-bit epoch_seq mutation rejected and honest progression valid
+#[test]
+fn test_s07_01_high_bit_epoch_seq_mutation_rejected_and_honest_progression_valid() {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x55; 32]);
+
+    let legacy_day = 5;
+    let legacy_seq = 10;
+    let cum_bytes = 50_000;
+    let ts = 100_000;
+    let op_hash = [0x77; 32];
+
+    let p1 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+        &signing_key,
+        legacy_day,
+        legacy_seq,
+        cum_bytes,
+        0,
+        100,
+        ts,
+        op_hash,
+    );
+    assert!(humoco_sim_core::fraud::verify_ingress_envelope_signature(&p1));
+
+    // High bit mutation on epoch_seq: (1u64 << 32) + 1
+    let mut p1_high_bit = p1.clone();
+    p1_high_bit.epoch_seq = (1u64 << 32) + 1;
+    assert!(
+        !humoco_sim_core::fraud::verify_ingress_envelope_signature(&p1_high_bit),
+        "Legacy envelope with high-bit overflow in epoch_seq must fail signature verification"
+    );
+
+    let p2 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+        &signing_key,
+        legacy_day,
+        legacy_seq + 1,
+        cum_bytes + 5_000,
+        0,
+        100,
+        ts + 1000,
+        [0x88; 32],
+    );
+
+    // FraudProofPayload with high-bit mutated packet must verify to false in both packet orders
+    let proof_ab = FraudProofPayload::new_ingress_counter_conflict(p1_high_bit.clone(), p2.clone());
+    assert!(!proof_ab.verify(), "High-bit mutated legacy envelope in (a, b) must not verify");
+
+    let proof_ba = FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p1_high_bit.clone());
+    assert!(!proof_ba.verify(), "High-bit mutated legacy envelope in (b, a) must not verify");
+
+    // Honest retry (same op_hash, same seq) -> no conflict in both orders
+    let p_retry = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+        &signing_key,
+        legacy_day,
+        legacy_seq,
+        cum_bytes,
+        0,
+        100,
+        ts + 10,
+        op_hash,
+    );
+    let proof_retry_ab = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p_retry.clone());
+    assert!(!proof_retry_ab.verify(), "Honest retry in (a, b) must not be conflict");
+    let proof_retry_ba = FraudProofPayload::new_ingress_counter_conflict(p_retry.clone(), p1.clone());
+    assert!(!proof_retry_ba.verify(), "Honest retry in (b, a) must not be conflict");
+
+    // Legitimate counter growth -> no conflict in both orders
+    let proof_growth_ab = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2.clone());
+    assert!(!proof_growth_ab.verify(), "Honest counter-growth in (a, b) must not be conflict");
+    let proof_growth_ba = FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p1.clone());
+    assert!(!proof_growth_ba.verify(), "Honest counter-growth in (b, a) must not be conflict");
+}
+
+/// S07-02: Sequenced V2 accounting under-reporting symmetry and honest progression
+#[test]
+fn test_s07_02_v2_sequenced_under_reporting_symmetry_and_honest_progression() {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x44; 32]);
+    let gateway_pubkey = signing_key.verifying_key().to_bytes();
+    let perp_id = FraudProofPayload::node_id_from_pubkey(&gateway_pubkey);
+
+    let epoch_day = 1;
+    let ts1 = 1_000_000;
+    let write_ema_1 = 50_000;
+    let read_ema_1 = 0;
+    let footprint_1 = 1_000;
+
+    // Packet 1: seq = 1
+    let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        &signing_key,
+        epoch_day,
+        1,
+        ts1,
+        write_ema_1,
+        read_ema_1,
+        footprint_1,
+        false,
+        [0x11; 32],
+    );
+
+    // Packet 2: seq = 2, 10 seconds later.
+    // Under-reporting malicious packet declares write_ema = 10_000 (< decayed(50_000, 10) + footprint).
+    let ts2 = ts1 + 10_000;
+    let fraudulent_write_ema = 10_000;
+    let p2_under_report = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        &signing_key,
+        epoch_day,
+        2,
+        ts2,
+        fraudulent_write_ema,
+        read_ema_1,
+        footprint_1,
+        false,
+        [0x22; 32],
+    );
+
+    // Both orders (p1, p2) and (p2, p1) must detect under-reporting fraud
+    let proof_ab = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_under_report.clone());
+    assert_eq!(proof_ab.perpetrator, perp_id);
+    assert!(proof_ab.verify(), "V2 under-reporting in (a, b) must verify as fraud");
+
+    let proof_ba = FraudProofPayload::new_ingress_counter_conflict(p2_under_report.clone(), p1.clone());
+    assert_eq!(proof_ba.perpetrator, perp_id);
+    assert!(proof_ba.verify(), "V2 under-reporting in (b, a) must verify as fraud");
+
+    // Honest progression: seq = 2 with declared_write_ema = write_ema_1 + footprint_1
+    let honest_write_ema = humoco_sim_core::quota::decay_integer_ema(write_ema_1, 10) + footprint_1;
+    let p2_honest = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        &signing_key,
+        epoch_day,
+        2,
+        ts2,
+        honest_write_ema,
+        read_ema_1,
+        footprint_1,
+        false,
+        [0x22; 32],
+    );
+
+    let honest_proof_ab = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_honest.clone());
+    assert!(!honest_proof_ab.verify(), "Honest V2 progression in (a, b) must not be conflict");
+
+    let honest_proof_ba = FraudProofPayload::new_ingress_counter_conflict(p2_honest.clone(), p1.clone());
+    assert!(!honest_proof_ba.verify(), "Honest V2 progression in (b, a) must not be conflict");
+}
+
+/// S07-03: Exact heartbeat replay through both SlotDetector and SimNode
+#[test]
+fn test_s07_03_exact_heartbeat_replay_no_fraud_proof_no_ban() {
+    let node_id: u16 = 77;
+    let ts = SimTime(1_000_000);
+    let hb = sign_heartbeat(node_id, ts);
+
+    // 1. Through SlotDetector128 directly
+    let mut detector = SlotDetector128::new();
+    let first_obs = detector.observe(hb.clone());
+    assert!(first_obs.is_none(), "Initial heartbeat must be stored without fraud");
+
+    // Exact identical replay
+    let replay_obs = detector.observe(hb.clone());
+    assert!(
+        replay_obs.is_none(),
+        "Exact identical heartbeat replay must return None (no fraud proof)"
+    );
+
+    // Also verify_heartbeat_spam on identical heartbeats directly
+    let identical_proof = FraudProofPayload::new_heartbeat_spam(hb.clone(), hb.clone());
+    assert!(
+        !identical_proof.verify(),
+        "verify_heartbeat_spam must reject identical heartbeats"
+    );
+
+    // 2. Through SimNode
+    let mut node = SimNode::new(10, 20);
+    assert!(!node.is_banned(node_id), "Subject must initially be unbanned");
+
+    let node_obs1 = node.observe_heartbeat(hb.clone());
+    assert!(node_obs1.is_none());
+    assert!(!node.is_banned(node_id));
+
+    // Exact replay into SimNode
+    let node_obs2 = node.observe_heartbeat(hb.clone());
+    assert!(node_obs2.is_none());
+    assert!(
+        !node.is_banned(node_id),
+        "Subject must remain unbanned after exact heartbeat replay"
+    );
+}

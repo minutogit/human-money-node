@@ -379,6 +379,7 @@ pub struct HourlySlottedRingBuffer {
     slots: SlottedRingBuffer<24>,
     epoch_hours: [u64; 24],
     last_epoch_hour: u64,
+    occupied: [bool; 24],
 }
 
 impl HourlySlottedRingBuffer {
@@ -387,6 +388,7 @@ impl HourlySlottedRingBuffer {
             slots: SlottedRingBuffer::new(),
             epoch_hours: [0; 24],
             last_epoch_hour: 0,
+            occupied: [false; 24],
         }
     }
 
@@ -395,7 +397,7 @@ impl HourlySlottedRingBuffer {
     /// - Slot index: `(epoch_hour % 24) as usize`.
     /// - Writes `slots[idx] = median` and `epoch_hours[idx] = epoch_hour`.
     /// - Updates `self.last_epoch_hour = epoch_hour.max(self.last_epoch_hour)`.
-    /// - Increments `count = (count + 1).min(24)`.
+    /// - Increments `count = (count + 1).min(24)` only when a previously unoccupied slot is populated.
     pub fn record_hourly_median(&mut self, epoch_hour: u64, median: u64) {
         if epoch_hour < self.last_epoch_hour {
             return;
@@ -405,8 +407,11 @@ impl HourlySlottedRingBuffer {
         self.slots.set_slot(idx, median);
         self.epoch_hours[idx] = epoch_hour;
         self.last_epoch_hour = epoch_hour.max(self.last_epoch_hour);
-        if self.slots.count < 24 {
-            self.slots.count += 1;
+        if !self.occupied[idx] {
+            self.occupied[idx] = true;
+            if self.slots.count < 24 {
+                self.slots.count += 1;
+            }
         }
     }
 
@@ -430,6 +435,7 @@ impl HourlySlottedRingBuffer {
         self.slots.seed(seed_hourly_median);
         self.epoch_hours = seeded_epoch_hours(current_epoch_hour);
         self.last_epoch_hour = current_epoch_hour;
+        self.occupied = [true; 24];
     }
 
     pub fn count(&self) -> usize {
@@ -483,12 +489,14 @@ pub fn evaluate_quota_exceeded_claim(
     sender_volume: u64,
     quota_limit: u64,
 ) -> QuotaPlausibilityVerdict {
-    let lower_tolerance = (quota_limit as u128 * 75 / 100) as u64; // 75%
-    let upper_tolerance = (quota_limit as u128 * 125 / 100) as u64; // 125%
+    let sender = sender_volume as u128;
+    let limit = quota_limit as u128;
+    let lower_tolerance = limit * 75 / 100; // 75%
+    let upper_tolerance = limit * 125 / 100; // 125%
 
-    if sender_volume < lower_tolerance {
+    if sender < lower_tolerance {
         QuotaPlausibilityVerdict::FraudulentRejection { malus_increment: 8 }
-    } else if sender_volume <= upper_tolerance {
+    } else if sender <= upper_tolerance {
         QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
     } else {
         QuotaPlausibilityVerdict::LegitimateOverload { malus_increment: 0 }
@@ -504,9 +512,9 @@ pub struct NetworkThermometer {
     node_daily_usage: HashMap<NodeId, u64>,
     node_daily_read_usage: HashMap<NodeId, u64>,
     write_ema_micro_bj: u64,
-    last_write_ema_sec: u64,
+    last_write_ema_sec: Option<u64>,
     read_ema_credits: u64,
-    last_read_ema_sec: u64,
+    last_read_ema_sec: Option<u64>,
 }
 
 impl NetworkThermometer {
@@ -518,9 +526,9 @@ impl NetworkThermometer {
             node_daily_usage: HashMap::new(),
             node_daily_read_usage: HashMap::new(),
             write_ema_micro_bj: 0,
-            last_write_ema_sec: 0,
+            last_write_ema_sec: None,
             read_ema_credits: 0,
-            last_read_ema_sec: 0,
+            last_read_ema_sec: None,
         }
     }
 
@@ -700,14 +708,16 @@ impl NetworkThermometer {
 
     /// Records write ingress into the continuous 24h half-life Write-EMA
     pub fn record_write_ingress(&mut self, now_sec: u64, footprint_micro_bj: u64) {
-        let delta = if self.last_write_ema_sec == 0 {
-            0
-        } else {
-            now_sec.saturating_sub(self.last_write_ema_sec)
+        let delta = match self.last_write_ema_sec {
+            None => 0,
+            Some(last) => now_sec.saturating_sub(last),
         };
         self.write_ema_micro_bj =
             calculate_integer_ema(self.write_ema_micro_bj, delta, footprint_micro_bj);
-        self.last_write_ema_sec = now_sec.max(self.last_write_ema_sec);
+        self.last_write_ema_sec = Some(match self.last_write_ema_sec {
+            None => now_sec,
+            Some(last) => now_sec.max(last),
+        });
     }
 
     /// Returns the current raw write EMA accumulator in micro-Byte-Years (µBJ)
@@ -722,10 +732,9 @@ impl NetworkThermometer {
 
     /// Computes the rolling 24-hour write daily rate in Byte-Years at a specific time `now_sec`
     pub fn rolling_24h_average_at(&self, now_sec: u64) -> u64 {
-        let delta = if self.last_write_ema_sec == 0 {
-            0
-        } else {
-            now_sec.saturating_sub(self.last_write_ema_sec)
+        let delta = match self.last_write_ema_sec {
+            None => 0,
+            Some(last) => now_sec.saturating_sub(last),
         };
         let decayed_ema_micro = decay_integer_ema(self.write_ema_micro_bj, delta);
         let daily_rate_micro = ema_to_daily_rate(decayed_ema_micro);
@@ -734,18 +743,20 @@ impl NetworkThermometer {
 
     /// Computes the current rolling 24-hour write daily rate in Byte-Years
     pub fn rolling_24h_average(&self) -> u64 {
-        self.rolling_24h_average_at(self.last_write_ema_sec)
+        self.rolling_24h_average_at(self.last_write_ema_sec.unwrap_or(0))
     }
 
     /// Records read ingress into the continuous 24h half-life Read-EMA
     pub fn record_read_ingress(&mut self, now_sec: u64, credits: u64) {
-        let delta = if self.last_read_ema_sec == 0 {
-            0
-        } else {
-            now_sec.saturating_sub(self.last_read_ema_sec)
+        let delta = match self.last_read_ema_sec {
+            None => 0,
+            Some(last) => now_sec.saturating_sub(last),
         };
         self.read_ema_credits = calculate_integer_ema(self.read_ema_credits, delta, credits);
-        self.last_read_ema_sec = now_sec.max(self.last_read_ema_sec);
+        self.last_read_ema_sec = Some(match self.last_read_ema_sec {
+            None => now_sec,
+            Some(last) => now_sec.max(last),
+        });
     }
 
     /// Returns the current raw read EMA accumulator in credits
@@ -755,10 +766,9 @@ impl NetworkThermometer {
 
     /// Computes the rolling 24-hour read daily rate in credits at a specific time `now_sec`
     pub fn rolling_24h_read_average_at(&self, now_sec: u64) -> u64 {
-        let delta = if self.last_read_ema_sec == 0 {
-            0
-        } else {
-            now_sec.saturating_sub(self.last_read_ema_sec)
+        let delta = match self.last_read_ema_sec {
+            None => 0,
+            Some(last) => now_sec.saturating_sub(last),
         };
         let decayed_read_ema = decay_integer_ema(self.read_ema_credits, delta);
         ema_to_daily_rate(decayed_read_ema)
@@ -766,7 +776,7 @@ impl NetworkThermometer {
 
     /// Computes the current rolling 24-hour read daily rate in credits
     pub fn rolling_24h_read_average(&self) -> u64 {
-        self.rolling_24h_read_average_at(self.last_read_ema_sec)
+        self.rolling_24h_read_average_at(self.last_read_ema_sec.unwrap_or(0))
     }
 }
 
@@ -1162,13 +1172,14 @@ mod tests {
         hrb.record_hourly_median(5, 750);
         assert_eq!(hrb.slots()[5], 750);
         assert_eq!(hrb.last_epoch_hour(), 5);
-        assert_eq!(hrb.count(), 2);
+        assert_eq!(hrb.count(), 1);
 
         // 3. Wrap-around (e.g. hour 29 = slot 5)
         hrb.record_hourly_median(29, 999);
         assert_eq!(hrb.last_epoch_hour(), 29);
         assert_eq!(hrb.slots()[5], 999);
         assert_eq!(hrb.epoch_hours()[5], 29);
+        assert_eq!(hrb.count(), 1);
 
         // 4. seed_with_floor
         let mut seeded_hrb = HourlySlottedRingBuffer::new();

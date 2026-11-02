@@ -31,12 +31,28 @@ fn test_inv1104_known_node_immediate_forward_vs_first_seen_delayed() {
             delay_seconds: 3600
         }
     );
-    assert!(pacer.is_known(999));
-    assert_eq!(pacer.known_count(), 6);
+    assert!(!pacer.is_known(999), "New node must not be known while still in pending queue");
+    assert_eq!(pacer.known_count(), 5);
     assert_eq!(pacer.pending_count(), 1);
 
-    // 4. Weiterer Heartbeat von Knoten 999 (nun bekannt) -> ForwardImmediate
-    let decision_now_known = pacer.handle_incoming_node_gossip(999, 150);
+    // 4. Retrying while still queued returns DuplicatePending without immediate forwarding
+    let decision_retry = pacer.handle_incoming_node_gossip(999, 150);
+    assert_eq!(
+        decision_retry,
+        NodeGossipForwardDecision::DuplicatePending
+    );
+    assert!(!pacer.is_known(999));
+    assert_eq!(pacer.pending_count(), 1);
+
+    // 5. Paced dequeue occurs -> now node 999 is forwarded and registered as known
+    let polled = pacer.poll_next_ready_forward(100);
+    assert_eq!(polled, Some(999));
+    assert!(pacer.is_known(999));
+    assert_eq!(pacer.known_count(), 6);
+    assert_eq!(pacer.pending_count(), 0);
+
+    // 6. Subsequent arrival of node 999 (now known) -> ForwardImmediate
+    let decision_now_known = pacer.handle_incoming_node_gossip(999, 200);
     assert_eq!(
         decision_now_known,
         NodeGossipForwardDecision::ForwardImmediate
@@ -59,12 +75,13 @@ fn test_inv1104_pacing_queue_rate_limits_botnet_flood() {
         );
     }
 
-    assert_eq!(pacer.known_count(), 50);
+    assert_eq!(pacer.known_count(), 0, "Queued nodes are not yet known");
     assert_eq!(pacer.pending_count(), 50);
 
     // 1. Erster Neuling wird zum Zeitpunkt t = 0 freigegeben
     let first = pacer.poll_next_ready_forward(0);
     assert_eq!(first, Some(1000));
+    assert_eq!(pacer.known_count(), 1);
     assert_eq!(pacer.pending_count(), 49);
 
     // 2. Nach 30 Minuten (t = 1800s): Noch KEINE weitere Freigabe (Intervall nicht erreicht)
@@ -74,6 +91,7 @@ fn test_inv1104_pacing_queue_rate_limits_botnet_flood() {
     // 3. Nach genau 1 Stunde (t = 3600s): Zweiter Neuling wird freigegeben
     let second = pacer.poll_next_ready_forward(3600);
     assert_eq!(second, Some(1001));
+    assert_eq!(pacer.known_count(), 2);
     assert_eq!(pacer.pending_count(), 48);
 
     // 4. Nach 1,5 Stunden (t = 5400s): Immer noch blockiert
@@ -82,6 +100,7 @@ fn test_inv1104_pacing_queue_rate_limits_botnet_flood() {
     // 5. Nach 2 Stunden (t = 7200s): Dritter Neuling wird freigegeben
     let third = pacer.poll_next_ready_forward(7200);
     assert_eq!(third, Some(1002));
+    assert_eq!(pacer.known_count(), 3);
     assert_eq!(pacer.pending_count(), 47);
 
     // Beweis: In 2 vollen Stunden wurden von 50 Angreifer-Phantomen exakt 3 weitergeleitet!
@@ -129,6 +148,12 @@ fn test_inv1104_mesh_percolation_stepwise_forwarding() {
         dec_c,
         NodeGossipForwardDecision::ForwardDelayed { delay_seconds: 60 }
     );
+
+    // C gibt es bei t = 0 frei (erster Neuling bei C)
+    let fwd_c = pacer_c
+        .poll_next_ready_forward(0)
+        .expect("C should release node 42");
+    assert_eq!(fwd_c, new_node);
 
     // Alle 3 Knoten kennen nun den neuen Knoten
     assert!(pacer_a.is_known(new_node));

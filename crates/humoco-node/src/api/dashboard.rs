@@ -851,7 +851,9 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         })
         .collect();
     let vip_accounts_count = vip_accounts.len();
-    let vip_total_balance: u64 = vip_accounts.iter().map(|a| a.balance_byte_years).sum();
+    let vip_total_balance: u64 = vip_accounts
+        .iter()
+        .fold(0u64, |acc, a| acc.saturating_add(a.balance_byte_years));
 
     let tiers = TierOverviewDto {
         free_pow_diff,
@@ -1358,12 +1360,13 @@ pub async fn admin_topup_quota(
         .topup_vip_quota(tag_bytes, payload.byte_years)
     {
         Ok(new_balance) => {
+            let diag_id = crate::ingress::tier::vip_diagnostic_id(&tag_bytes);
             state.event_log.record(
                 EventKind::QuotaTopup,
                 HealthLevel::Ok,
                 format!(
                     "VIP Quota aufgeladen für '{}' (+{} BY, Saldo: {})",
-                    trimmed, payload.byte_years, new_balance
+                    diag_id, payload.byte_years, new_balance
                 ),
             );
             (

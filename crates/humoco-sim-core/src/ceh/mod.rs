@@ -25,7 +25,6 @@
 //!    from the local active mesh view, NOT via predecessor epoch certificates ("Staffelstab").
 
 pub mod barrier;
-pub mod consensus;
 pub mod crypto;
 pub mod snapshot;
 pub mod types;
@@ -33,7 +32,6 @@ pub mod verifier;
 pub mod voucher_tree;
 
 pub use barrier::*;
-pub use consensus::*;
 pub use crypto::*;
 pub use snapshot::*;
 pub use types::*;

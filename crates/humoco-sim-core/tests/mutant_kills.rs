@@ -98,27 +98,20 @@ fn test_mutant_m1o8_epoch_hour_duplicate_overwrite() {
 
     // Overwrite same epoch_hour 5 with 9_999 -> slot must be updated, count unchanged
     buf.record_hourly_median(5, 9_999);
-    // Count stays 1 because same slot overwritten (count only increments if <24, but same hour should not double-count in future logic)
-    // However current implementation increments count on each record if count<24 regardless of duplicate.
-    // The key invariant is that slot value is overwritten:
+    assert_eq!(buf.count(), 1, "count must remain 1 after duplicate hour");
     assert_eq!(
         buf.slots()[5],
         9_999,
         "duplicate epoch_hour must overwrite slot"
     );
-    // Sum must reflect overwritten value
-    // Note: count may be 2 due to implementation counting duplicates; verify overwrite still wins
-    // After two records, sum should be 9_999 if count is 1 or 9_999 + maybe? Let's check actual sum logic.
-    // The robust check: after overwrite, rolling sum must not contain old value 1000 anywhere
-    let sum = buf.rolling_24h_sum();
-    // If count==2 (duplicate counted), sum would be 9_999 + possibly other zero slots? Actually only slot 5 is non-zero.
-    // But set_slot overwrites, so only one slot contributes 9_999 regardless of count accounting.
-    // Ensure sum is at least 9_999 and less than 20_000 (not double counted as 10_999)
-    assert!(sum >= 9_999, "sum must include overwritten value");
-    // Record a different hour to ensure normal path still works
+    assert_eq!(buf.rolling_24h_sum(), 9_999);
+    assert_eq!(buf.rolling_24h_average(), 9_999);
+
+    // Record a different hour to ensure normal path increments count
     buf.record_hourly_median(6, 2_000);
+    assert_eq!(buf.count(), 2);
     assert_eq!(buf.slots()[6], 2_000);
-    assert!(buf.rolling_24h_sum() >= 11_999);
+    assert_eq!(buf.rolling_24h_sum(), 11_999);
 }
 
 #[test]

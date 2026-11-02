@@ -242,9 +242,30 @@ pub const CONSENSUS_FILTER_BYTES: usize = 2048;
 pub const CONSENSUS_FILTER_BITS: usize = CONSENSUS_FILTER_BYTES * 8;
 pub const CONSENSUS_FILTER_K: usize = 8;
 
+/// Error type for malformed ConsensusBloomFilter bytes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsensusBloomFilterError {
+    InvalidLength { expected: usize, got: usize },
+}
+
+impl std::fmt::Display for ConsensusBloomFilterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLength { expected, got } => {
+                write!(
+                    f,
+                    "invalid consensus bloom filter length: expected {expected}, got {got}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConsensusBloomFilterError {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConsensusBloomFilter {
-    pub bits: Vec<u8>,
+    pub bits: [u8; CONSENSUS_FILTER_BYTES],
 }
 
 impl Default for ConsensusBloomFilter {
@@ -253,19 +274,50 @@ impl Default for ConsensusBloomFilter {
     }
 }
 
+impl TryFrom<Vec<u8>> for ConsensusBloomFilter {
+    type Error = ConsensusBloomFilterError;
+
+    fn try_from(vec: Vec<u8>) -> Result<Self, Self::Error> {
+        let got = vec.len();
+        match vec.try_into() {
+            Ok(bits) => Ok(Self { bits }),
+            Err(_) => Err(ConsensusBloomFilterError::InvalidLength {
+                expected: CONSENSUS_FILTER_BYTES,
+                got,
+            }),
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for ConsensusBloomFilter {
+    type Error = ConsensusBloomFilterError;
+
+    fn try_from(slice: &[u8]) -> Result<Self, Self::Error> {
+        let got = slice.len();
+        match slice.try_into() {
+            Ok(bits) => Ok(Self { bits }),
+            Err(_) => Err(ConsensusBloomFilterError::InvalidLength {
+                expected: CONSENSUS_FILTER_BYTES,
+                got,
+            }),
+        }
+    }
+}
+
 impl ConsensusBloomFilter {
     pub fn new() -> Self {
         Self {
-            bits: vec![0u8; CONSENSUS_FILTER_BYTES],
+            bits: [0u8; CONSENSUS_FILTER_BYTES],
         }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bits
     }
 
     /// Inserts a node (bound to HrwRoutingId + NodePubKey) into the filter
     /// Semantically decoupled: routing ticket + permanent identity
     pub fn insert_identity(&mut self, hrw_id: &HrwRoutingId, pub_key: &NodePubKey) {
-        if self.bits.is_empty() || CONSENSUS_FILTER_BITS == 0 {
-            return;
-        }
         let binding = compute_identity_binding(hrw_id, pub_key);
         for h in 0..CONSENSUS_FILTER_K {
             let bit_idx = compute_bloom_hash(&binding, h, CONSENSUS_FILTER_BITS);
@@ -275,9 +327,6 @@ impl ConsensusBloomFilter {
 
     /// Checks whether the identity (HrwRoutingId + NodePubKey) is contained in the filter
     pub fn contains_identity(&self, hrw_id: &HrwRoutingId, pub_key: &NodePubKey) -> bool {
-        if self.bits.is_empty() || CONSENSUS_FILTER_BITS == 0 {
-            return false;
-        }
         let binding = compute_identity_binding(hrw_id, pub_key);
         for h in 0..CONSENSUS_FILTER_K {
             let bit_idx = compute_bloom_hash(&binding, h, CONSENSUS_FILTER_BITS);

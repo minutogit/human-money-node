@@ -355,7 +355,7 @@ fn test_chaos_byzantine_equivocation_sybil_storm() {
         1005,
         "1005 identities must be queued, not forwarded immediately"
     );
-    assert_eq!(pacer.known_count(), 1005);
+    assert_eq!(pacer.known_count(), 0, "identities in pending queue are not yet known");
 
     // First item is forwarded at t=0, then strictly throttled to 1 per 3600s
     let first = pacer.poll_next_ready_forward(0);

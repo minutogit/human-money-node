@@ -587,19 +587,25 @@ impl NetworkStressThermometer {
     /// Updates the suspension pressure EMA based on time decay and a new shard response.
     /// Returns whether the node is currently under systemic network stress (>= 40%).
     pub fn update(&mut self, now_sec: u64, is_suspended: bool) -> bool {
-        let delta_secs = now_sec.saturating_sub(self.last_update_sec);
+        if now_sec <= self.last_update_sec {
+            return self.is_under_stress();
+        }
+
+        let delta_secs = now_sec - self.last_update_sec;
         self.last_update_sec = now_sec;
 
-        let elapsed = delta_secs.min(Self::WINDOW_SECS) as u32;
-        let decay = ((self.stress_level_bps as u32 * elapsed) / Self::WINDOW_SECS as u32) as u16;
-        let decayed = self.stress_level_bps.saturating_sub(decay);
+        let elapsed = delta_secs.min(Self::WINDOW_SECS);
+        let decayed = ((self.stress_level_bps as u64 * (Self::WINDOW_SECS - elapsed))
+            / Self::WINDOW_SECS) as u16;
 
-        let target = if is_suspended { 10_000u32 } else { 0u32 };
-
-        let updated = ((decayed as u32 * (10_000 - Self::EVENT_ALPHA_BPS))
-            + (target * Self::EVENT_ALPHA_BPS))
-            / 10_000;
-        self.stress_level_bps = updated.min(10_000) as u16;
+        if is_suspended {
+            let updated = ((decayed as u32 * (10_000 - Self::EVENT_ALPHA_BPS))
+                + (10_000 * Self::EVENT_ALPHA_BPS))
+                / 10_000;
+            self.stress_level_bps = updated.min(10_000) as u16;
+        } else {
+            self.stress_level_bps = decayed;
+        }
 
         self.is_under_stress()
     }
@@ -747,13 +753,13 @@ pub fn evaluate_sync_status(
     let in_sync_threshold = if n_median < 20 {
         n_median.saturating_sub(2).max(1)
     } else {
-        (95 * n_median) / 100
+        ((n_median as u128 * 95) / 100) as usize
     };
 
     let fallback_threshold = if n_median < 20 {
         n_median.saturating_sub(3).max(1)
     } else {
-        (90 * n_median) / 100
+        ((n_median as u128 * 90) / 100) as usize
     };
 
     match current {
@@ -838,15 +844,11 @@ impl FirstSeenPacer {
         if self.known_nodes.contains(&node_id) {
             // 🟢 1. Node is already known -> immediate hot path (0 ms)
             NodeGossipForwardDecision::ForwardImmediate
+        } else if self.pending_queue.iter().any(|(nid, _)| *nid == node_id) {
+            // 🟡 2. Already queued in pending queue -> duplicate pending
+            NodeGossipForwardDecision::DuplicatePending
         } else {
-            // 🟡 2. Node is completely new (first-seen)
-            self.known_nodes.insert(node_id);
-
-            // Check for duplicates in the queue
-            if self.pending_queue.iter().any(|(nid, _)| *nid == node_id) {
-                return NodeGossipForwardDecision::DuplicatePending;
-            }
-
+            // 🟡 3. Node is completely new (first-seen) -> queue and delay
             self.pending_queue.push_back((node_id, now_seconds));
             NodeGossipForwardDecision::ForwardDelayed {
                 delay_seconds: self.pacing_interval_seconds,
@@ -893,13 +895,13 @@ impl FirstSeenPacer {
             if queue_depth_at_start >= PROBE_THRESHOLD_QUEUE_DEPTH {
                 let is_alive = probe_fn(node_id);
                 if !is_alive {
-                    // 🔴 Phantom exposed! Remove from known_nodes and immediately check next
-                    self.known_nodes.remove(&node_id);
+                    // 🔴 Phantom exposed! Discard and immediately check next
                     continue;
                 }
             }
 
             // 🟢 Live node or unsuspicious queue (depth < 4)
+            self.known_nodes.insert(node_id);
             self.last_forward_timestamp = Some(now_seconds);
             return Some(node_id);
         }
@@ -1183,20 +1185,43 @@ pub fn evaluate_digest_clusters(
     responses: &[ShardDigestResponse],
     total_top20: usize,
 ) -> ClusterResult {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     let (needed_votes, _) = required_quorum(total_top20);
-    let mut groups: HashMap<Hash256, Vec<NodeId>> = HashMap::new();
+
+    // Deduplicate by peer_id: a single peer_id counts at most once.
+    // Conflicting duplicate responses disqualify the ambiguous peer.
+    let mut peer_digests: HashMap<NodeId, Option<Hash256>> = HashMap::new();
     for r in responses {
-        groups.entry(r.digest).or_default().push(r.peer_id);
+        match peer_digests.get(&r.peer_id) {
+            None => {
+                peer_digests.insert(r.peer_id, Some(r.digest));
+            }
+            Some(Some(prev_digest)) if *prev_digest == r.digest => {
+                // Identical duplicate from same peer: harmless, keep as 1 vote
+            }
+            Some(_) => {
+                // Conflicting duplicate responses: disqualify ambiguous peer completely
+                peer_digests.insert(r.peer_id, None);
+            }
+        }
     }
+
+    let mut clusters: BTreeMap<Hash256, BTreeSet<NodeId>> = BTreeMap::new();
+    for (peer_id, maybe_digest) in peer_digests {
+        if let Some(digest) = maybe_digest {
+            clusters.entry(digest).or_default().insert(peer_id);
+        }
+    }
+
     let mut best_digest: Option<Hash256> = None;
     let mut best_peers: Vec<NodeId> = Vec::new();
     let mut best_votes: usize = 0;
-    for (digest, peers) in groups {
-        if peers.len() > best_votes {
-            best_votes = peers.len();
+    for (digest, peers) in clusters {
+        let votes = peers.len();
+        if votes > best_votes {
+            best_votes = votes;
             best_digest = Some(digest);
-            best_peers = peers;
+            best_peers = peers.into_iter().collect();
         }
     }
     if best_votes >= needed_votes && needed_votes != 0 {
@@ -1237,7 +1262,7 @@ pub fn compute_f2f_median(peer_reports: &[usize]) -> usize {
     } else {
         let a = sorted[n / 2 - 1];
         let b = sorted[n / 2];
-        (a + b) / 2
+        a + (b - a) / 2
     }
 }
 
@@ -1281,6 +1306,7 @@ pub enum CausalityError {
     BrokenChainLink { hop_index: usize },
     InvalidQuorumCertificate { hop_index: usize },
     InvalidClientSignature,
+    InvalidTargetLockId,
     ParentAlreadyLocked { parent_lock: Hash256 },
 }
 
@@ -1295,6 +1321,7 @@ impl std::fmt::Display for CausalityError {
                 write!(f, "Invalid quorum certificate at hop {}", hop_index)
             }
             CausalityError::InvalidClientSignature => write!(f, "Invalid client signature"),
+            CausalityError::InvalidTargetLockId => write!(f, "Invalid target lock ID"),
             CausalityError::ParentAlreadyLocked { parent_lock } => {
                 write!(f, "Parent already locked: {:?}", parent_lock)
             }
@@ -1348,6 +1375,10 @@ pub fn verify_causality_proof_chain_stateless(
     }
     if chain.target_lock.nonce.len() > MAX_NONCE_BYTES {
         return Err(CausalityError::BrokenChainLink { hop_index: 0 });
+    }
+
+    if !chain.target_lock.has_valid_id() {
+        return Err(CausalityError::InvalidTargetLockId);
     }
 
     // 1. Genesis root check
@@ -1724,13 +1755,23 @@ mod tests {
         assert_eq!(thermo.stress_level_bps, 100, "1 choke adds 100 bps (1%)");
         assert!(!thermo.is_under_stress());
 
-        // 2. 19 OK responses in same second:
+        // 2. 19 OK responses in same second: delta_secs == 0 does NOT lower stress_level_bps
         for _ in 0..19 {
             thermo.update(3600, false);
         }
-        assert!(
-            thermo.stress_level_bps < 100,
-            "19 OK responses dampen down to < 1%"
+        assert_eq!(
+            thermo.stress_level_bps, 100,
+            "same-second OK calls do not lower stress_level_bps"
+        );
+        assert!(!thermo.is_under_stress());
+
+        // Repeated same-second true calls also do not alter stress_level_bps or cross threshold
+        for _ in 0..19 {
+            thermo.update(3600, true);
+        }
+        assert_eq!(
+            thermo.stress_level_bps, 100,
+            "same-second true calls do not alter stress_level_bps"
         );
         assert!(!thermo.is_under_stress());
 
@@ -1747,6 +1788,51 @@ mod tests {
         // 4. Attack stops -> 2 hours pass -> decays back below threshold
         thermo.update(3600 + 80 * 25 + 7200, false);
         assert!(!thermo.is_under_stress(), "2h decay clears stress state");
+    }
+
+    #[test]
+    fn test_network_stress_thermometer_zero_elapsed_time_no_drift() {
+        // Test false from 5000 bps at last_update_sec=100
+        let mut thermo = NetworkStressThermometer {
+            stress_level_bps: 5000,
+            last_update_sec: 100,
+        };
+        for _ in 0..10 {
+            let under_stress = thermo.update(100, false);
+            assert!(under_stress);
+            assert_eq!(thermo.stress_level_bps, 5000);
+            assert_eq!(thermo.last_update_sec, 100);
+        }
+
+        // Test true from 0 bps at last_update_sec=100
+        let mut thermo2 = NetworkStressThermometer {
+            stress_level_bps: 0,
+            last_update_sec: 100,
+        };
+        for _ in 0..10 {
+            let under_stress = thermo2.update(100, true);
+            assert!(!under_stress);
+            assert_eq!(thermo2.stress_level_bps, 0);
+            assert_eq!(thermo2.last_update_sec, 100);
+        }
+    }
+
+    #[test]
+    fn test_f2f_median_and_sync_status_overflow_safety() {
+        // Overflow-safe even median &[usize::MAX, usize::MAX]
+        let max_slice = [usize::MAX, usize::MAX];
+        assert_eq!(compute_f2f_median(&max_slice), usize::MAX);
+
+        // evaluate_sync_status at usize::MAX
+        let status = evaluate_sync_status(usize::MAX, usize::MAX, NodeSyncStatus::Syncing);
+        assert_eq!(status, NodeSyncStatus::InSync);
+
+        let status2 = evaluate_sync_status(
+            ((usize::MAX as u128 * 94) / 100) as usize,
+            usize::MAX,
+            NodeSyncStatus::Syncing,
+        );
+        assert_eq!(status2, NodeSyncStatus::Syncing);
     }
 
     #[test]

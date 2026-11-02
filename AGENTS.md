@@ -66,7 +66,7 @@ This document is automatically loaded on every AI agent startup in the workspace
   - *VIP Tier:* Bounded reserved queues and measured service targets via Byte-Years tokens.
 * **🔍 Read Ingress (`POST /v1/status`, `GET /v1/node-status`, `GET /v1/pow-challenge`):**
   - Extremely fast RAM-index lookup ($< 1\,\mu\text{s}$), no disk locks, no write-queue reservation.
-  - **1-of-20 Shard Randomization (`INV-0310`):** Gateways query exactly 1 deterministically random node from the top-20 shard nodes. Read traffic scales linearly with shard size. Protected by token-bucket rate limits against read DDoS.
+  - **1-of-20 Shard Randomization (`INV-0310`):** Gateways query exactly 1 deterministically random node from the top-20 shard nodes. Read traffic scales linearly with shard size. Protected by token-bucket rate limits under high read concurrency.
 * On Tier 1 *every* client is welcome; P2P ban lists or F2F rules do **not** apply here.
 
 ### Tier 2: Internal Node P2P Mesh (QUIC Port 9090)
@@ -140,9 +140,9 @@ This document is automatically loaded on every AI agent startup in the workspace
    * **Stateless Hashcash:** No PoW challenges stored in RAM. PoW is derived from `BLAKE3(len || "HUMOCO_V1_POW_STATELESS" || parent_lock || epoch_slot || nonce)` with a 10-minute time window.
    * **Time-Based EMA:** Moving averages decay strictly as a function of elapsed physical time $\Delta t_{\text{sec}}$, never per event. Under load, gateways push load back via `HTTP 429` with `X-Required-Difficulty: <N>`.
    * **Origin Lock Determines Validity:** Successor locks derive `root_valid_until` and Byte-Years strictly from the signed genesis lock of the root. Unknown root locks are rejected with `400 Bad Request`.
-7. **🧪 Mandatory Adversarial Wire-Level P2P Verification:**
-   * "Green unit tests in core do not prove server protection." No defense is complete if only verified via in-memory unit tests!
-   * Every network invariant (`INV-xxxx`) and server defense MUST have an integration test executing over real QUIC connections in `crates/humoco-node/tests/`: over-quota peers must be rejected, and malformed frames must trigger wire rejections or slashing.
+7. **🧪 Mandatory End-to-End QUIC Integration Verification:**
+   * "Green unit tests in core do not prove end-to-end transport behavior." Protocol invariants are incomplete if only verified via in-memory unit tests!
+   * Every network invariant (`INV-xxxx`) and transport rule MUST have an integration test executing over real QUIC connections in `crates/humoco-node/tests/`: over-quota peers must be rejected, and invalid frames must return deterministic wire rejections or protocol state updates.
 
 ---
 
@@ -165,7 +165,7 @@ human-money-node/
 │       └── tests/           # Storage, network, API, control & E2E cluster integration tests
 │
 ├── docs/                    # Numbered specifications 00–20, 99 & INVARIANT_REGISTRY.md
-└── prompts/                 # Universal audit loop (AUDIT_LOOP.md) & coverage ledger (AUDIT_STATE.md)
+└── prompts/                 # Universal quality review loop (AUDIT_LOOP.md) & coverage ledger (AUDIT_STATE.md)
 ```
 
 ### On-Demand Specification Index:

@@ -164,3 +164,84 @@ fn test_digest_first_pull_sync_poisoned_stream_payload_rejection() {
     }
     assert_eq!(ram.len(), 0, "Poisoned stream must not be committed to RAM");
 }
+
+#[test]
+fn test_digest_first_pull_sync_peer_deduplication_and_conflict_handling() {
+    let digest_a = [0xAA; 32];
+    let digest_b = [0xBB; 32];
+
+    // Subtest 1: 14 copies of 1 identity neither establish 14/20 quorum
+    let mut responses_single_peer = Vec::new();
+    for _ in 0..14 {
+        responses_single_peer.push(ShardDigestResponse {
+            peer_id: 1,
+            digest: digest_a,
+            lock_count: 10,
+        });
+    }
+    let res = evaluate_digest_clusters(&responses_single_peer, 20);
+    match res {
+        ClusterResult::InsufficientQuorum { max_votes, .. } => {
+            assert_eq!(max_votes, 1, "14 duplicate copies of 1 peer must count as 1 vote");
+        }
+        ClusterResult::DominantQuorum { .. } => panic!("Single peer duplication must never achieve quorum!"),
+    }
+
+    // Subtest 2: 13 distinct + 1 duplicate (total 14 responses) does NOT establish 14/20 quorum
+    let mut responses_13_distinct_plus_dup = Vec::new();
+    for i in 0..13 {
+        responses_13_distinct_plus_dup.push(ShardDigestResponse {
+            peer_id: i as u16,
+            digest: digest_a,
+            lock_count: 10,
+        });
+    }
+    // Duplicate peer 0
+    responses_13_distinct_plus_dup.push(ShardDigestResponse {
+        peer_id: 0,
+        digest: digest_a,
+        lock_count: 10,
+    });
+    assert_eq!(responses_13_distinct_plus_dup.len(), 14);
+    let res2 = evaluate_digest_clusters(&responses_13_distinct_plus_dup, 20);
+    match res2 {
+        ClusterResult::InsufficientQuorum { max_votes, .. } => {
+            assert_eq!(max_votes, 13, "13 distinct peers + 1 duplicate must yield 13 votes");
+        }
+        ClusterResult::DominantQuorum { .. } => panic!("13 distinct peers must not reach required quorum 14!"),
+    }
+
+    // Subtest 3: Conflicting duplicate peer responses handled conservatively (disqualified)
+    // 13 distinct peers (0..13) vote for digest A.
+    // Peer 99 sends conflicting votes for BOTH digest A and digest B.
+    let mut responses_conflicting = Vec::new();
+    for i in 0..13 {
+        responses_conflicting.push(ShardDigestResponse {
+            peer_id: i as u16,
+            digest: digest_a,
+            lock_count: 10,
+        });
+    }
+    responses_conflicting.push(ShardDigestResponse {
+        peer_id: 99,
+        digest: digest_a,
+        lock_count: 10,
+    });
+    responses_conflicting.push(ShardDigestResponse {
+        peer_id: 99,
+        digest: digest_b,
+        lock_count: 10,
+    });
+    let res3 = evaluate_digest_clusters(&responses_conflicting, 20);
+    match res3 {
+        ClusterResult::InsufficientQuorum { max_votes, .. } => {
+            assert_eq!(
+                max_votes, 13,
+                "Conflicting peer 99 must be disqualified and not push digest_a to 14 votes"
+            );
+        }
+        ClusterResult::DominantQuorum { .. } => {
+            panic!("Conflicting peer must not contribute to quorum!");
+        }
+    }
+}

@@ -183,15 +183,7 @@ pub fn resolve_split_brain_with_proof(
     attestations_a: &[Attestation],
     attestations_b: &[Attestation],
 ) -> (ResolutionResult, Vec<FraudProofPayload>) {
-    let sig_a = attestations_a
-        .iter()
-        .min_by_key(|a| a.node_id)
-        .map(|a| &a.signature);
-    let sig_b = attestations_b
-        .iter()
-        .min_by_key(|b| b.node_id)
-        .map(|b| &b.signature);
-    let result = resolve_split_brain_canonical(lock_a, lock_b, sig_a, sig_b);
+    let result = resolve_split_brain_canonical(lock_a, lock_b, None, None);
     // Only create proofs on a real conflict (WinnerA/B)
     let need_proofs = matches!(
         result,
@@ -684,6 +676,91 @@ mod tests {
         assert!(
             !hc_copy2.status.is_void(),
             "higher class must win in reversed order"
+        );
+    }
+
+    #[test]
+    fn test_s07_06_split_brain_with_proof_immutable_canonical_tie_breaking() {
+        use crate::crypto::sign_lock_attestation;
+
+        let parent = [0x55; 32];
+        let lock_a = LockRecord::new(
+            parent,
+            [0x11; 32],
+            b"nonce_alpha".to_vec(),
+            SimTime(100),
+            SimTime(50_000),
+        );
+        let lock_b = LockRecord::new(
+            parent,
+            [0x22; 32],
+            b"nonce_beta".to_vec(),
+            SimTime(100),
+            SimTime(50_000),
+        );
+        assert_ne!(lock_a.id, lock_b.id);
+
+        let mut a_base = lock_a.clone();
+        a_base.status = LockStatus::Final { sigs: 14 };
+        let mut b_base = lock_b.clone();
+        b_base.status = LockStatus::Final { sigs: 14 };
+
+        // Attestation subset 1..=14 for A, subset 4..=17 for B
+        let att_a_1_14: Vec<Attestation> = (1..=14)
+            .map(|nid| sign_lock_attestation(nid, &lock_a.id, &parent, SimTime(100)))
+            .collect();
+        let att_b_4_17: Vec<Attestation> = (4..=17)
+            .map(|nid| sign_lock_attestation(nid, &lock_b.id, &parent, SimTime(200)))
+            .collect();
+
+        // 1. Resolve (A, B) with subsets 1..=14 and 4..=17
+        let mut a1 = a_base.clone();
+        let mut b1 = b_base.clone();
+        let (_res_ab, proofs_ab) =
+            resolve_split_brain_with_proof(&mut a1, &mut b1, &att_a_1_14, &att_b_4_17);
+
+        // 2. Resolve (B, A) with swapped argument order
+        let mut b2 = b_base.clone();
+        let mut a2 = a_base.clone();
+        let (_res_ba, proofs_ba) =
+            resolve_split_brain_with_proof(&mut b2, &mut a2, &att_b_4_17, &att_a_1_14);
+
+        // Compute expected winner directly from immutable lock content
+        let expected_winner_id = {
+            let mut a_test = a_base.clone();
+            let mut b_test = b_base.clone();
+            let res = resolve_split_brain_canonical(&mut a_test, &mut b_test, None, None);
+            match res {
+                ResolutionResult::WinnerA { winner_hash, .. } => (a_test.id, winner_hash),
+                ResolutionResult::WinnerB { winner_hash, .. } => (b_test.id, winner_hash),
+                _ => panic!("Expected winner"),
+            }
+        };
+
+        let winner_id_ab = if a1.status.is_void() { b1.id } else { a1.id };
+        let winner_id_ba = if b2.status.is_void() { a2.id } else { b2.id };
+        assert_eq!(winner_id_ab, expected_winner_id.0);
+        assert_eq!(winner_id_ba, expected_winner_id.0);
+
+        // Verify proofs extracted overlapping double signers 4..=14 (11 signers)
+        assert_eq!(proofs_ab.len(), 11);
+        assert_eq!(proofs_ba.len(), 11);
+        for p in &proofs_ab {
+            assert!((4..=14).contains(&p.perpetrator));
+        }
+
+        // 3. Different signer subsets (e.g. 5..=18 for A) must NOT change the immutable winner
+        let att_a_5_18: Vec<Attestation> = (5..=18)
+            .map(|nid| sign_lock_attestation(nid, &lock_a.id, &parent, SimTime(100)))
+            .collect();
+        let mut a3 = a_base.clone();
+        let mut b3 = b_base.clone();
+        let (_res_ab_diff, _) =
+            resolve_split_brain_with_proof(&mut a3, &mut b3, &att_a_5_18, &att_b_4_17);
+        let winner_id_diff = if a3.status.is_void() { b3.id } else { a3.id };
+        assert_eq!(
+            winner_id_diff, expected_winner_id.0,
+            "Winner must strictly depend on immutable lock content regardless of signer subsets"
         );
     }
 }

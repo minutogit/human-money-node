@@ -395,14 +395,21 @@ impl DualRamIndex {
             ));
         }
 
-        self.provisional_index.remove(parent_lock);
-        if self
-            .final_index
-            .try_insert(rec.clone(), now, root_valid_until)
-            .is_err()
-        {
-            self.final_index.replace_lock(rec.clone(), root_valid_until);
+        if should_prune(now, root_valid_until) || rec.valid_until > root_valid_until {
+            return Err(crate::ceh::types::CehError::LockExpired(*parent_lock));
         }
+
+        if let Some(existing) = self.final_index.get(parent_lock) {
+            if existing.id == rec.id {
+                self.provisional_index.remove(parent_lock);
+                return Ok(rec);
+            }
+            return Err(crate::ceh::types::CehError::LockCollision(*parent_lock));
+        }
+
+        self.final_index
+            .insert_recovered(rec.clone(), root_valid_until);
+        self.provisional_index.remove(parent_lock);
         Ok(rec)
     }
 
@@ -533,14 +540,14 @@ impl DualTierStorage {
         self.persist_flush();
         self.ram = RamIndex::new();
         for (_parent, (rec, root_valid)) in self.disk.clone() {
-            if !should_prune(now, root_valid) && rec.valid_until > now {
-                let _ = self.ram.try_insert(rec, now, root_valid);
+            if !should_prune(now, root_valid) {
+                self.ram.insert_recovered(rec, root_valid);
             }
         }
         // Also replay wal entries that were not yet flushed (already flushed above, but keep logic)
         for entry in self.wal.clone() {
             if !should_prune(now, entry.root_valid_until) {
-                let _ = self.ram.try_insert(entry.lock, now, entry.root_valid_until);
+                self.ram.insert_recovered(entry.lock, entry.root_valid_until);
             }
         }
     }

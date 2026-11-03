@@ -117,6 +117,11 @@ pub enum MsgType {
     // --- Peer & sync control ---
     Heartbeat            = 0x0201,
     HeartbeatAck         = 0x0202,
+
+    // --- Direct F2F Collaboration (Strictly 1-Hop direct F2F, non-gossiped, INV-1006) ---
+    F2fOperatorMessage   = 0x0203,
+    F2fOperatorMessageAck = 0x0204,
+    F2fNeighborRoster    = 0x0205,
 }
 ```
 

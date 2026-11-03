@@ -74,6 +74,64 @@ pub struct NetworkNodeDto {
     pub best_ingress_peer: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HopBand {
+    Hop0,
+    Hop1,
+    Hop2Plus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum SectorSeverity {
+    Ok,
+    Warn,
+    Crit,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KnotenfreundSectorReport {
+    pub friend_pubkey: String,
+    pub friend_addr: Option<SocketAddr>,
+    pub is_connected: bool,
+    pub active_non_responder_30m: bool,
+    pub n_seen: usize,
+    pub n_tested: usize,
+    pub n_bad: usize,
+    pub bad_ratio_tested_bps: u16,
+    pub avg_min_hops: f32,
+    pub hop_band: HopBand,
+    pub exclusive_bad_count: usize,
+    pub immature_subnet_burst_max: usize,
+    pub unlisted_hop1_count: usize,
+    pub hop2_shares_roster: Option<bool>,
+    pub hop2_visible_neighbors: Vec<String>,
+    pub hop2_hidden_count: u16,
+    pub is_mega_hub: bool,
+    pub severity: SectorSeverity,
+    pub sample_unreachable_pubkeys: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TraceDirectionHit {
+    pub friend_pubkey: String,
+    pub hit_count: usize,
+    pub min_hops: u8,
+    pub exclusive_count: usize,
+    pub dominant_subnet: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TraceAnalysisReport {
+    pub total_queried: usize,
+    pub locally_tested_healthy_count: usize,
+    pub locally_unreachable_count: usize,
+    pub unknown_count: usize,
+    pub by_knotenfreund: Vec<TraceDirectionHit>,
+}
+
+/// Multi-Path directional observation TTL (6 hours).
+pub const EDGE_OBSERVATION_TTL: Duration = Duration::from_secs(6 * 3600);
+
 /// Semantically decoupled node information:
 /// - `node_pubkey` / `node_id` = stored node identity and its compatibility alias;
 ///   do not conflate the full `NodePubKey` with `NodeIdentity::node_id()` (a BLAKE3 fingerprint)
@@ -106,6 +164,7 @@ pub struct KnownNodeInfo {
     pub(crate) incubation_duration: Duration,
     pub(crate) last_seen: Instant,
     pub(crate) min_hops: u8,
+    pub(crate) edge_observations: HashMap<[u8; 32], (u8, Instant)>,
     pub(crate) best_ingress_peer: Option<SocketAddr>,
     pub(crate) ingress_diversity_mask: u32,
     pub(crate) latest_obs_hour: Option<u64>,
@@ -142,6 +201,7 @@ impl KnownNodeInfo {
             incubation_duration: HRW_INCUBATION_DURATION,
             last_seen: now,
             min_hops: 255,
+            edge_observations: HashMap::new(),
             best_ingress_peer: None,
             ingress_diversity_mask: 0,
             latest_obs_hour: None,
@@ -173,6 +233,7 @@ impl KnownNodeInfo {
             incubation_duration: HRW_INCUBATION_DURATION,
             last_seen,
             min_hops: 255,
+            edge_observations: HashMap::new(),
             best_ingress_peer: None,
             ingress_diversity_mask: 0,
             latest_obs_hour: None,
@@ -181,6 +242,39 @@ impl KnownNodeInfo {
             last_write_evidence: None,
             last_read_evidence: None,
         }
+    }
+
+    pub fn prune_edge_observations(&mut self, now: Instant) {
+        self.edge_observations
+            .retain(|_, (_, ts)| now.duration_since(*ts) < EDGE_OBSERVATION_TTL);
+        if !self.edge_observations.is_empty() {
+            self.min_hops = self
+                .edge_observations
+                .values()
+                .map(|&(h, _)| h)
+                .min()
+                .unwrap_or(255);
+        }
+    }
+
+    pub fn record_edge_observation(&mut self, friend_pk: [u8; 32], hops: u8, now: Instant) {
+        self.prune_edge_observations(now);
+        if self.edge_observations.len() >= 64 && !self.edge_observations.contains_key(&friend_pk) {
+            if let Some((&oldest_k, _)) = self
+                .edge_observations
+                .iter()
+                .min_by_key(|(_, (_, ts))| *ts)
+            {
+                self.edge_observations.remove(&oldest_k);
+            }
+        }
+        self.edge_observations.insert(friend_pk, (hops, now));
+        self.min_hops = self
+            .edge_observations
+            .values()
+            .map(|&(h, _)| h)
+            .min()
+            .unwrap_or(self.min_hops);
     }
 
     pub fn update_write_evidence(&mut self, ev: humoco_sim_core::fraud::IngressEnvelopeEvidence) {
@@ -198,7 +292,14 @@ impl KnownNodeInfo {
 
     /// Returns the minimum hop distance observed for this node.
     pub fn min_hops(&self) -> u8 {
-        self.min_hops
+        let now = Instant::now();
+        let valid_min = self
+            .edge_observations
+            .values()
+            .filter(|(_, ts)| now.duration_since(*ts) < EDGE_OBSERVATION_TTL)
+            .map(|&(h, _)| h)
+            .min();
+        valid_min.unwrap_or(self.min_hops)
     }
 
     /// Total maturation age combining persisted pre-boot observation age and live uptime.
@@ -491,6 +592,9 @@ pub struct PeerManager {
     observed_votes: Arc<parking_lot::Mutex<ObservedVoteCache>>,
     storage: Arc<parking_lot::RwLock<Option<std::sync::Weak<crate::storage::RedbStorage>>>>,
     engine_banned_nodes: Arc<parking_lot::RwLock<Option<EngineBannedNodesHandle>>>,
+    f2f_collab: Arc<parking_lot::Mutex<crate::network::f2f_collab::F2fCollabManager>>,
+    sector_anomaly_since: Arc<parking_lot::Mutex<HashMap<[u8; 32], Instant>>>,
+    alert_dispatcher: Arc<parking_lot::RwLock<Option<Arc<crate::alert::AlertDispatcher>>>>,
 }
 
 impl std::fmt::Debug for PeerManager {
@@ -602,6 +706,11 @@ impl PeerManager {
             observed_votes: Arc::new(parking_lot::Mutex::new(ObservedVoteCache::new(4096))),
             storage: Arc::new(parking_lot::RwLock::new(None)),
             engine_banned_nodes: Arc::new(parking_lot::RwLock::new(None)),
+            f2f_collab: Arc::new(parking_lot::Mutex::new(
+                crate::network::f2f_collab::F2fCollabManager::new(None, true),
+            )),
+            sector_anomaly_since: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            alert_dispatcher: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -626,6 +735,463 @@ impl PeerManager {
             SIM_HRW_INCUBATION_DURATION
         } else {
             HRW_INCUBATION_DURATION
+        }
+    }
+
+    pub fn configure_f2f_collab(
+        &self,
+        data_dir: Option<std::path::PathBuf>,
+        share_neighbor_roster: bool,
+    ) {
+        *self.f2f_collab.lock() =
+            crate::network::f2f_collab::F2fCollabManager::new(data_dir, share_neighbor_roster);
+    }
+
+    pub fn f2f_collab(
+        &self,
+    ) -> &Arc<parking_lot::Mutex<crate::network::f2f_collab::F2fCollabManager>> {
+        &self.f2f_collab
+    }
+
+    pub fn set_alert_dispatcher(&self, dispatcher: Arc<crate::alert::AlertDispatcher>) {
+        *self.alert_dispatcher.write() = Some(dispatcher);
+    }
+
+    pub fn alert_dispatcher(&self) -> Option<Arc<crate::alert::AlertDispatcher>> {
+        self.alert_dispatcher.read().clone()
+    }
+
+    pub async fn get_f2f_friend_addr(&self, friend_pk: &[u8; 32]) -> Option<SocketAddr> {
+        self.f2f_friends
+            .read()
+            .await
+            .get(friend_pk)
+            .copied()
+            .flatten()
+    }
+
+    pub async fn f2f_friend_endpoints(&self) -> Vec<([u8; 32], Option<SocketAddr>)> {
+        self.f2f_friends
+            .read()
+            .await
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .collect()
+    }
+
+    pub async fn f2f_friend_pubkey_for_addr(&self, addr: &SocketAddr) -> Option<[u8; 32]> {
+        let friends = self.f2f_friends.read().await;
+        for (&pk, opt_addr) in friends.iter() {
+            if opt_addr.as_ref() == Some(addr) {
+                return Some(pk);
+            }
+        }
+        None
+    }
+
+    /// Records a multi-path edge observation from an authenticated direct F2F friend (0 Argon2d cost).
+    pub async fn record_heartbeat_edge_observation(
+        &self,
+        node_id: [u8; 32],
+        friend_pk: [u8; 32],
+        hops: u8,
+    ) {
+        let now = Instant::now();
+        let mut nodes = self.known_network_nodes.write().await;
+        if let Some(entry) = nodes.get_mut(&node_id) {
+            entry.record_edge_observation(friend_pk, hops, now);
+        }
+    }
+
+    /// Constructs our canonical local roster for direct 1-hop exchange obeying mutual consent.
+    pub async fn build_local_f2f_roster(
+        &self,
+        self_pubkey: &[u8; 32],
+    ) -> crate::network::framing::F2fNeighborRosterPayload {
+        let friends: Vec<[u8; 32]> = self.f2f_friends.read().await.keys().cloned().collect();
+        let collab = self.f2f_collab.lock();
+        collab
+            .roster()
+            .build_local_roster(self_pubkey, &friends, self.net_time_ms())
+    }
+
+    /// Evaluates whether the local node is trapped in an isolated closed triangle bubble.
+    pub async fn is_closed_triangle_bubble(&self, self_pubkey: &[u8; 32]) -> bool {
+        let friends: Vec<[u8; 32]> = self.f2f_friends.read().await.keys().cloned().collect();
+        let collab = self.f2f_collab.lock();
+        collab.roster().is_closed_triangle_bubble(self_pubkey, &friends)
+    }
+
+    /// Returns whether this node shares its direct neighbor roster with direct F2F friends.
+    pub fn share_neighbor_roster(&self) -> bool {
+        self.f2f_collab.lock().roster().share_neighbor_roster()
+    }
+
+    pub fn subnet_prefix(addr: &SocketAddr) -> String {
+        match addr.ip() {
+            std::net::IpAddr::V4(ipv4) => {
+                let o = ipv4.octets();
+                format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                let s = ipv6.segments();
+                format!("{:x}:{:x}:{:x}::/48", s[0], s[1], s[2])
+            }
+        }
+    }
+
+    /// Computes directional sector analysis for all direct F2F friends without holding nested locks (Phase 10 deadlock freedom).
+    pub async fn compute_knotenfreund_sectors(&self) -> Vec<KnotenfreundSectorReport> {
+        let now = Instant::now();
+        let friends = self.f2f_friends.read().await.clone();
+        let peers = self.peers.read().await.clone();
+        let nodes = self.known_network_nodes.read().await.clone();
+        let rosters = {
+            let collab = self.f2f_collab.lock();
+            collab.roster().friend_rosters().clone()
+        };
+
+        // Precompute valid observations and shortest path observers per known node
+        let mut node_shortest_observers: HashMap<[u8; 32], (u8, Vec<[u8; 32]>)> = HashMap::new();
+        for (&pk, info) in &nodes {
+            let mut valid_obs: Vec<([u8; 32], u8)> = Vec::new();
+            for (&friend_pk, &(hops, ts)) in &info.edge_observations {
+                if now.duration_since(ts) < EDGE_OBSERVATION_TTL {
+                    valid_obs.push((friend_pk, hops));
+                }
+            }
+            if !valid_obs.is_empty() {
+                let min_h = valid_obs.iter().map(|(_, h)| *h).min().unwrap_or(255);
+                let shortest: Vec<[u8; 32]> = valid_obs
+                    .into_iter()
+                    .filter(|(_, h)| *h == min_h)
+                    .map(|(f_pk, _)| f_pk)
+                    .collect();
+                node_shortest_observers.insert(pk, (min_h, shortest));
+            }
+        }
+
+        let mut reports = Vec::new();
+
+        for (&friend_pk, &friend_addr) in &friends {
+            let friend_hex = hex::encode(friend_pk);
+            let peer_opt = friend_addr.and_then(|addr| peers.get(&addr));
+            let is_connected = peer_opt.is_some_and(|p| p.is_connected());
+            let active_non_responder_30m = peer_opt.is_some_and(|p| {
+                p.is_active_non_responder(now, Duration::from_secs(30 * 60))
+            });
+
+            // Domain D(F) = nodes where friend is among the shortest observers within 6h
+            let mut domain_nodes = Vec::new();
+            let mut total_hops: u64 = 0;
+
+            for (&k_pk, (min_h, shortest_list)) in &node_shortest_observers {
+                if shortest_list.contains(&friend_pk) {
+                    domain_nodes.push((k_pk, *min_h));
+                    total_hops = total_hops.saturating_add(*min_h as u64);
+                }
+            }
+
+            let n_seen = domain_nodes.len();
+            let avg_min_hops = if n_seen > 0 {
+                total_hops as f32 / n_seen as f32
+            } else {
+                0.0
+            };
+
+            let mut tested_count = 0;
+            let mut bad_nodes: Vec<([u8; 32], u8)> = Vec::new();
+            let mut immature_subnet_counts: HashMap<String, usize> = HashMap::new();
+
+            for &(k_pk, hops) in &domain_nodes {
+                let Some(k_info) = nodes.get(&k_pk) else {
+                    continue;
+                };
+
+                // Track immature subnets in D(F)
+                if k_info.is_immature() {
+                    let subnet = Self::subnet_prefix(&k_info.addr);
+                    *immature_subnet_counts.entry(subnet).or_default() += 1;
+                }
+
+                // Check if tested within 6h
+                let k_peer = peers.values().find(|p| p.node_id == Some(k_pk)).or_else(|| {
+                    peers.get(&k_info.addr)
+                });
+
+                let was_tested_within_6h = k_peer
+                    .and_then(|p| p.last_rpc_tested_at)
+                    .is_some_and(|ts| now.duration_since(ts) < Duration::from_secs(6 * 3600));
+
+                if was_tested_within_6h {
+                    tested_count += 1;
+                    if k_peer.is_some_and(|p| p.missing_count >= 3) && k_info.is_presence_fresh() {
+                        bad_nodes.push((k_pk, hops));
+                    }
+                }
+            }
+
+            let n_tested = tested_count;
+            let n_bad = bad_nodes.len();
+            let bad_ratio_tested_bps = if n_tested > 0 {
+                ((n_bad as u64 * 10000) / (n_tested as u64)) as u16
+            } else {
+                0
+            };
+
+            // Exclusive bad count: bad nodes in D(F) that have friend_pk as unique observer within 6h
+            let mut exclusive_bad_count = 0;
+            for &(bad_pk, _) in &bad_nodes {
+                if let Some(bad_info) = nodes.get(&bad_pk) {
+                    let active_obs_count = bad_info
+                        .edge_observations
+                        .values()
+                        .filter(|(_, ts)| now.duration_since(*ts) < EDGE_OBSERVATION_TTL)
+                        .count();
+                    if active_obs_count == 1 {
+                        exclusive_bad_count += 1;
+                    }
+                }
+            }
+
+            let immature_subnet_burst_max =
+                immature_subnet_counts.values().cloned().max().unwrap_or(0);
+
+            // Hop band determination
+            let hop_band = if active_non_responder_30m {
+                HopBand::Hop0
+            } else if n_bad > 0 {
+                let bad_hops_avg =
+                    bad_nodes.iter().map(|(_, h)| *h as f32).sum::<f32>() / n_bad as f32;
+                if bad_hops_avg < 1.5 {
+                    HopBand::Hop1
+                } else {
+                    HopBand::Hop2Plus
+                }
+            } else if avg_min_hops < 1.5 {
+                HopBand::Hop1
+            } else {
+                HopBand::Hop2Plus
+            };
+
+            // Roster details
+            let roster_opt = rosters.get(&friend_pk);
+            let hop2_shares_roster = roster_opt.map(|r| r.shares_roster);
+            let hop2_visible_neighbors = roster_opt
+                .map(|r| r.visible_neighbors.iter().map(hex::encode).collect())
+                .unwrap_or_default();
+            let hop2_hidden_count = roster_opt.map(|r| r.hidden_neighbor_count).unwrap_or(0);
+            let is_mega_hub = roster_opt.is_some_and(|r| {
+                r.visible_neighbors
+                    .len()
+                    .saturating_add(r.hidden_neighbor_count as usize)
+                    > 32
+            });
+
+            // Unlisted hop1 count (Liar check):
+            // nodes observed with hops == 1 from friend_pk that are NOT in friend's visible_neighbors
+            // when friend explicitly has shares_roster == true and hidden_neighbor_count == 0
+            let mut unlisted_hop1_count = 0;
+            if let Some(roster) = roster_opt {
+                if roster.shares_roster && roster.hidden_neighbor_count == 0 {
+                    for (&k_pk, k_info) in &nodes {
+                        if k_pk == friend_pk {
+                            continue;
+                        }
+                        if let Some(&(1, ts)) = k_info.edge_observations.get(&friend_pk) {
+                            if now.duration_since(ts) < EDGE_OBSERVATION_TTL
+                                && !roster.visible_neighbors.contains(&k_pk)
+                            {
+                                unlisted_hop1_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Severity calculation
+            let mut raw_crit = false;
+            let mut raw_warn = false;
+
+            if active_non_responder_30m {
+                raw_crit = true;
+            } else if (5..15).contains(&n_tested) {
+                if bad_ratio_tested_bps >= 6500 && n_bad >= 5 {
+                    raw_crit = true;
+                } else if bad_ratio_tested_bps >= 4000 && n_bad >= 3 {
+                    raw_warn = true;
+                }
+            } else if (15..50).contains(&n_tested) {
+                if bad_ratio_tested_bps >= 4000 && n_bad >= 8 {
+                    raw_crit = true;
+                } else if bad_ratio_tested_bps >= 2500 && n_bad >= 5 {
+                    raw_warn = true;
+                }
+            } else if n_tested >= 50 {
+                if bad_ratio_tested_bps >= 2500 || n_bad >= 15 {
+                    raw_crit = true;
+                } else if bad_ratio_tested_bps >= 1500 {
+                    raw_warn = true;
+                }
+            }
+
+            if immature_subnet_burst_max > 15 || unlisted_hop1_count > 0 {
+                raw_warn = true;
+            }
+
+            // 30-min stability hysteresis for Crit
+            let severity = if raw_crit {
+                let mut hysteresis = self.sector_anomaly_since.lock();
+                let since = hysteresis.entry(friend_pk).or_insert(now);
+                if now.duration_since(*since) >= Duration::from_secs(30 * 60) {
+                    SectorSeverity::Crit
+                } else {
+                    SectorSeverity::Warn
+                }
+            } else {
+                self.sector_anomaly_since.lock().remove(&friend_pk);
+                if raw_warn {
+                    SectorSeverity::Warn
+                } else {
+                    SectorSeverity::Ok
+                }
+            };
+
+            let sample_unreachable_pubkeys: Vec<String> = bad_nodes
+                .iter()
+                .take(32)
+                .map(|(pk, _)| hex::encode(pk))
+                .collect();
+
+            reports.push(KnotenfreundSectorReport {
+                friend_pubkey: friend_hex,
+                friend_addr,
+                is_connected,
+                active_non_responder_30m,
+                n_seen,
+                n_tested,
+                n_bad,
+                bad_ratio_tested_bps,
+                avg_min_hops,
+                hop_band,
+                exclusive_bad_count,
+                immature_subnet_burst_max,
+                unlisted_hop1_count,
+                hop2_shares_roster,
+                hop2_visible_neighbors,
+                hop2_hidden_count,
+                is_mega_hub,
+                severity,
+                sample_unreachable_pubkeys,
+            });
+        }
+
+        reports
+    }
+
+    /// Analyzes an attached machine-readable trace (list of pubkeys) against local routing and health state.
+    pub async fn analyze_trace_pubkeys(&self, pubkeys: &[[u8; 32]]) -> TraceAnalysisReport {
+        let now = Instant::now();
+        let friends = self.f2f_friends.read().await.clone();
+        let peers = self.peers.read().await.clone();
+        let nodes = self.known_network_nodes.read().await.clone();
+
+        let total_queried = pubkeys.len();
+        let mut locally_tested_healthy_count = 0;
+        let mut locally_unreachable_count = 0;
+        let mut unknown_count = 0;
+
+        type TraceHopHit = ([u8; 32], u8, SocketAddr);
+        let mut friend_hits: HashMap<[u8; 32], Vec<TraceHopHit>> = HashMap::new();
+
+        for &pk in pubkeys {
+            let Some(node_info) = nodes.get(&pk) else {
+                unknown_count += 1;
+                continue;
+            };
+
+            let peer_opt = peers.values().find(|p| p.node_id == Some(pk)).or_else(|| {
+                peers.get(&node_info.addr)
+            });
+
+            if let Some(peer) = peer_opt {
+                if peer
+                    .last_rpc_tested_at
+                    .is_some_and(|ts| now.duration_since(ts) < Duration::from_secs(6 * 3600))
+                    && peer.missing_count == 0
+                {
+                    locally_tested_healthy_count += 1;
+                }
+                if peer.missing_count >= 3 {
+                    locally_unreachable_count += 1;
+                }
+            }
+
+            // Find valid observations for pk
+            let valid_obs: Vec<([u8; 32], u8)> = node_info
+                .edge_observations
+                .iter()
+                .filter(|(_, (_, ts))| now.duration_since(*ts) < EDGE_OBSERVATION_TTL)
+                .map(|(&f_pk, &(hops, _))| (f_pk, hops))
+                .collect();
+
+            if !valid_obs.is_empty() {
+                let min_h = valid_obs.iter().map(|(_, h)| *h).min().unwrap_or(255);
+                for (f_pk, h) in valid_obs {
+                    if h == min_h && friends.contains_key(&f_pk) {
+                        friend_hits
+                            .entry(f_pk)
+                            .or_default()
+                            .push((pk, h, node_info.addr));
+                    }
+                }
+            }
+        }
+
+        let mut by_knotenfreund = Vec::new();
+        for (friend_pk, hit_list) in friend_hits {
+            let hit_count = hit_list.len();
+            let min_hops = hit_list.iter().map(|(_, h, _)| *h).min().unwrap_or(255);
+
+            let mut exclusive_count = 0;
+            let mut subnets: HashMap<String, usize> = HashMap::new();
+
+            for &(pk, _, addr) in &hit_list {
+                if let Some(info) = nodes.get(&pk) {
+                    let active_obs_count = info
+                        .edge_observations
+                        .values()
+                        .filter(|(_, ts)| now.duration_since(*ts) < EDGE_OBSERVATION_TTL)
+                        .count();
+                    if active_obs_count == 1 {
+                        exclusive_count += 1;
+                    }
+                }
+                *subnets.entry(Self::subnet_prefix(&addr)).or_default() += 1;
+            }
+
+            let dominant_subnet = subnets
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(sub, _)| sub);
+
+            by_knotenfreund.push(TraceDirectionHit {
+                friend_pubkey: hex::encode(friend_pk),
+                hit_count,
+                min_hops,
+                exclusive_count,
+                dominant_subnet,
+            });
+        }
+
+        by_knotenfreund.sort_by_key(|h| std::cmp::Reverse(h.hit_count));
+
+        TraceAnalysisReport {
+            total_queried,
+            locally_tested_healthy_count,
+            locally_unreachable_count,
+            unknown_count,
+            by_knotenfreund,
         }
     }
 
@@ -1736,6 +2302,7 @@ impl PeerManager {
                     incubation_duration: incubation,
                     last_seen: now,
                     min_hops: hops,
+                    edge_observations: HashMap::new(),
                     best_ingress_peer: ingress_peer,
                     ingress_diversity_mask: mask,
                     latest_obs_hour: None,
@@ -3521,5 +4088,231 @@ mod tests {
 
         worker.abort();
         let _ = worker.await;
+    }
+
+    #[tokio::test]
+    async fn test_multipath_edge_observations_and_df_domain() {
+        let pm = PeerManager::new(Vec::new());
+        let f1 = [10u8; 32];
+        let f2 = [20u8; 32];
+        let f1_addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let f2_addr: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+        pm.register_f2f_friend(f1, Some(f1_addr)).await;
+        pm.register_f2f_friend(f2, Some(f2_addr)).await;
+
+        let n1 = [1u8; 32];
+        let n2 = [2u8; 32];
+        let n1_addr: SocketAddr = "127.0.0.1:8001".parse().unwrap();
+        let n2_addr: SocketAddr = "127.0.0.1:8002".parse().unwrap();
+
+        let mut node1 = KnownNodeInfo::new(n1_addr, n1, n1);
+        let mut node2 = KnownNodeInfo::new(n2_addr, n2, n2);
+        let now = Instant::now();
+
+        // Equal-distance: both F1 and F2 observe N1 at hops = 2
+        node1.record_edge_observation(f1, 2, now);
+        node1.record_edge_observation(f2, 2, now);
+
+        // F1 observes N2 at hops = 1, F2 observes N2 at hops = 3 (F1 strictly shorter)
+        node2.record_edge_observation(f1, 1, now);
+        node2.record_edge_observation(f2, 3, now);
+
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            nodes.insert(n1, node1);
+            nodes.insert(n2, node2);
+        }
+
+        let sectors = pm.compute_knotenfreund_sectors().await;
+        let s_f1 = sectors
+            .iter()
+            .find(|s| s.friend_pubkey == hex::encode(f1))
+            .unwrap();
+        let s_f2 = sectors
+            .iter()
+            .find(|s| s.friend_pubkey == hex::encode(f2))
+            .unwrap();
+
+        // D(F1) contains N1 and N2 (both shortest observer)
+        assert_eq!(s_f1.n_seen, 2);
+        // D(F2) contains N1 (tied for shortest at hops=2), but not N2 (since F1 was shorter)
+        assert_eq!(s_f2.n_seen, 1);
+    }
+
+    #[tokio::test]
+    async fn test_sector_severity_bands_and_hysteresis() {
+        let pm = PeerManager::new(Vec::new());
+        let f1 = [99u8; 32];
+        let f1_addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        pm.register_f2f_friend(f1, Some(f1_addr)).await;
+
+        let now = Instant::now();
+
+        // Setup 10 tested nodes in D(F1) where 7 are bad (70% >= 6500 bps and bad >= 5)
+        // This triggers raw_crit in the 5..15 band.
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            let mut peers = pm.peers.write().await;
+
+            for i in 1..=10 {
+                let pk = [i as u8; 32];
+                let addr: SocketAddr = format!("127.0.0.{}:8000", i).parse().unwrap();
+                let mut node = KnownNodeInfo::new(addr, pk, pk);
+                node.record_edge_observation(f1, 2, now);
+                nodes.insert(pk, node);
+
+                let mut peer = PeerInfo::new(addr);
+                peer.node_id = Some(pk);
+                peer.last_rpc_tested_at = Some(now);
+                if i <= 7 {
+                    peer.missing_count = 3; // bad
+                } else {
+                    peer.missing_count = 0; // healthy
+                }
+                peers.insert(addr, peer);
+            }
+        }
+
+        // First evaluation: raw_crit is true, but 30-min stability hysteresis suppresses to Warn
+        let sectors1 = pm.compute_knotenfreund_sectors().await;
+        let s1 = sectors1
+            .iter()
+            .find(|s| s.friend_pubkey == hex::encode(f1))
+            .unwrap();
+        assert_eq!(s1.n_tested, 10);
+        assert_eq!(s1.n_bad, 7);
+        assert_eq!(s1.severity, SectorSeverity::Warn);
+
+        // Advance hysteresis timer by setting sector_anomaly_since 31 minutes ago
+        {
+            let mut hyst = pm.sector_anomaly_since.lock();
+            hyst.insert(f1, now - Duration::from_secs(31 * 60));
+        }
+
+        // Second evaluation: hysteresis expired (>= 30 min) -> promotes to Crit
+        let sectors2 = pm.compute_knotenfreund_sectors().await;
+        let s2 = sectors2
+            .iter()
+            .find(|s| s.friend_pubkey == hex::encode(f1))
+            .unwrap();
+        assert_eq!(s2.severity, SectorSeverity::Crit);
+
+        // Nodes recover (bad count drops to 0) -> severity drops to Ok and hysteresis clears
+        {
+            let mut peers = pm.peers.write().await;
+            for peer in peers.values_mut() {
+                peer.missing_count = 0;
+            }
+        }
+
+        let sectors3 = pm.compute_knotenfreund_sectors().await;
+        let s3 = sectors3
+            .iter()
+            .find(|s| s.friend_pubkey == hex::encode(f1))
+            .unwrap();
+        assert_eq!(s3.n_bad, 0);
+        assert_eq!(s3.severity, SectorSeverity::Ok);
+        assert!(!pm.sector_anomaly_since.lock().contains_key(&f1));
+    }
+
+    #[tokio::test]
+    async fn test_liar_consistency_check_unlisted_hop1() {
+        let pm = PeerManager::new(Vec::new());
+        let f1 = [10u8; 32];
+        let f1_addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        pm.register_f2f_friend(f1, Some(f1_addr)).await;
+
+        let n1 = [1u8; 32];
+        let n2 = [2u8; 32];
+        let n1_addr: SocketAddr = "127.0.0.1:8001".parse().unwrap();
+        let n2_addr: SocketAddr = "127.0.0.1:8002".parse().unwrap();
+        let now = Instant::now();
+
+        // Node 1 and Node 2 both observed with hops=1 from F1
+        let mut node1 = KnownNodeInfo::new(n1_addr, n1, n1);
+        node1.record_edge_observation(f1, 1, now);
+        let mut node2 = KnownNodeInfo::new(n2_addr, n2, n2);
+        node2.record_edge_observation(f1, 1, now);
+
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            nodes.insert(n1, node1);
+            nodes.insert(n2, node2);
+        }
+
+        // Friend F1 shares roster claiming only N1 is a neighbor, with hidden_neighbor_count == 0
+        let roster = crate::network::framing::F2fNeighborRosterPayload {
+            sender_pubkey: f1,
+            shares_roster: true,
+            visible_neighbors: vec![n1],
+            hidden_neighbor_count: 0,
+            timestamp_ms: 1000,
+        };
+        pm.f2f_collab()
+            .lock()
+            .roster_mut()
+            .record_roster(roster);
+
+        let sectors = pm.compute_knotenfreund_sectors().await;
+        let s = sectors
+            .iter()
+            .find(|s| s.friend_pubkey == hex::encode(f1))
+            .unwrap();
+
+        // N2 was observed at hop 1 from F1, but omitted from F1's visible_neighbors -> unlisted_hop1_count == 1
+        assert_eq!(s.unlisted_hop1_count, 1);
+        assert!(s.severity >= SectorSeverity::Warn);
+    }
+
+    #[tokio::test]
+    async fn test_trace_analysis_pubkeys_counter_fact() {
+        let pm = PeerManager::new(Vec::new());
+        let f1 = [10u8; 32];
+        let f1_addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        pm.register_f2f_friend(f1, Some(f1_addr)).await;
+
+        let n1 = [1u8; 32];
+        let n2 = [2u8; 32];
+        let n3 = [3u8; 32]; // unknown node
+        let n1_addr: SocketAddr = "127.0.0.1:8001".parse().unwrap();
+        let n2_addr: SocketAddr = "127.0.0.1:8002".parse().unwrap();
+        let now = Instant::now();
+
+        let mut node1 = KnownNodeInfo::new(n1_addr, n1, n1);
+        node1.record_edge_observation(f1, 1, now);
+        let mut node2 = KnownNodeInfo::new(n2_addr, n2, n2);
+        node2.record_edge_observation(f1, 2, now);
+
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            nodes.insert(n1, node1);
+            nodes.insert(n2, node2);
+
+            let mut peers = pm.peers.write().await;
+            let mut p1 = PeerInfo::new(n1_addr);
+            p1.node_id = Some(n1);
+            p1.last_rpc_tested_at = Some(now);
+            p1.missing_count = 0; // healthy
+            peers.insert(n1_addr, p1);
+
+            let mut p2 = PeerInfo::new(n2_addr);
+            p2.node_id = Some(n2);
+            p2.last_rpc_tested_at = Some(now);
+            p2.missing_count = 3; // bad
+            peers.insert(n2_addr, p2);
+        }
+
+        let report = pm.analyze_trace_pubkeys(&[n1, n2, n3]).await;
+        assert_eq!(report.total_queried, 3);
+        assert_eq!(report.unknown_count, 1);
+        assert_eq!(report.locally_tested_healthy_count, 1);
+        assert_eq!(report.locally_unreachable_count, 1);
+
+        assert_eq!(report.by_knotenfreund.len(), 1);
+        let hit = &report.by_knotenfreund[0];
+        assert_eq!(hit.friend_pubkey, hex::encode(f1));
+        assert_eq!(hit.hit_count, 2);
+        assert_eq!(hit.min_hops, 1);
+        assert_eq!(hit.exclusive_count, 2);
     }
 }

@@ -107,6 +107,10 @@ pub struct AlertConfig {
     pub min_peers_for_alert: usize,
     #[serde(default = "default_true")]
     pub notify_on_sunset_warning: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_f2f_messages: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_peer_anomalies: bool,
 }
 
 impl Default for AlertConfig {
@@ -119,6 +123,8 @@ impl Default for AlertConfig {
             peer_upgrade_threshold_percent: 50,
             min_peers_for_alert: 3,
             notify_on_sunset_warning: true,
+            notify_on_f2f_messages: true,
+            notify_on_peer_anomalies: true,
         }
     }
 }
@@ -142,6 +148,8 @@ impl fmt::Debug for AlertConfig {
             )
             .field("min_peers_for_alert", &self.min_peers_for_alert)
             .field("notify_on_sunset_warning", &self.notify_on_sunset_warning)
+            .field("notify_on_f2f_messages", &self.notify_on_f2f_messages)
+            .field("notify_on_peer_anomalies", &self.notify_on_peer_anomalies)
             .finish()
     }
 }
@@ -188,7 +196,7 @@ pub struct IdentityConfig {
     pub key_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct F2fConfig {
     #[serde(default)]
     pub peers: Vec<String>,
@@ -196,6 +204,19 @@ pub struct F2fConfig {
     pub trusted_pubkeys: Vec<String>,
     #[serde(default)]
     pub tokens: Vec<String>,
+    #[serde(default = "default_true")]
+    pub share_neighbor_roster: bool,
+}
+
+impl Default for F2fConfig {
+    fn default() -> Self {
+        Self {
+            peers: Vec::new(),
+            trusted_pubkeys: Vec::new(),
+            tokens: Vec::new(),
+            share_neighbor_roster: true,
+        }
+    }
 }
 
 pub type PeerEndpoint = (Option<[u8; 32]>, SocketAddr);
@@ -675,6 +696,7 @@ mod tests {
             ],
             trusted_pubkeys: vec![],
             tokens: vec![],
+            share_neighbor_roster: true,
         };
 
         let (entries, trusted) = config.parse_peers();
@@ -721,5 +743,19 @@ mod tests {
         assert_eq!(resolved[0].1.port(), 9090);
         // Ensure invalid domain didn't panic and was omitted
         assert!(resolved.len() <= 2);
+    }
+
+    #[test]
+    fn test_f2f_config_default_and_alerts() {
+        let f2f = F2fConfig::default();
+        assert!(f2f.share_neighbor_roster);
+
+        let alert = AlertConfig::default();
+        assert!(alert.notify_on_f2f_messages);
+        assert!(alert.notify_on_peer_anomalies);
+
+        // Deserializing empty TOML table uses defaults
+        let parsed_f2f: F2fConfig = toml::from_str("").unwrap();
+        assert!(parsed_f2f.share_neighbor_roster);
     }
 }

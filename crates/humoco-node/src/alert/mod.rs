@@ -10,6 +10,9 @@ use crate::config::AlertConfig;
 pub enum AlertKind {
     OutdatedVersion,
     SunsetApproaching,
+    KnotenfreundUnresponsive,
+    DirectionalSectorAnomaly,
+    KnotenfreundMessageReceived,
 }
 
 impl AlertKind {
@@ -17,6 +20,9 @@ impl AlertKind {
         match self {
             AlertKind::OutdatedVersion => "OutdatedVersion",
             AlertKind::SunsetApproaching => "SunsetApproaching",
+            AlertKind::KnotenfreundUnresponsive => "KnotenfreundUnresponsive",
+            AlertKind::DirectionalSectorAnomaly => "DirectionalSectorAnomaly",
+            AlertKind::KnotenfreundMessageReceived => "KnotenfreundMessageReceived",
         }
     }
 
@@ -24,6 +30,9 @@ impl AlertKind {
         match self {
             AlertKind::OutdatedVersion => "Node version is outdated",
             AlertKind::SunsetApproaching => "Crypto suite sunset approaching",
+            AlertKind::KnotenfreundUnresponsive => "Direct F2F friend is unresponsive on Shard-RPCs",
+            AlertKind::DirectionalSectorAnomaly => "Directional sector anomaly detected behind F2F friend",
+            AlertKind::KnotenfreundMessageReceived => "Direct F2F operator message received",
         }
     }
 }
@@ -96,23 +105,43 @@ impl AlertDispatcher {
         }
     }
 
-    pub fn is_cooldown_expired(&self, kind: AlertKind) -> bool {
-        let map = self.load_cooldowns();
-        Self::is_cooldown_expired_inner(&map, kind)
+    fn cooldown_key(kind: AlertKind, scope_key: Option<&str>) -> String {
+        match scope_key {
+            Some(k) if !k.trim().is_empty() => format!("{}:{}", kind.as_str(), k.trim()),
+            _ => kind.as_str().to_string(),
+        }
     }
 
-    fn is_cooldown_expired_inner(map: &HashMap<String, u64>, kind: AlertKind) -> bool {
-        if let Some(last) = map.get(kind.as_str()) {
+    fn cooldown_duration_secs(kind: AlertKind) -> u64 {
+        match kind {
+            AlertKind::KnotenfreundMessageReceived => 3600, // 1 hour per friend for operator messages
+            _ => COOLDOWN_SECS,                             // 24 hours standard
+        }
+    }
+
+    pub fn is_cooldown_expired(&self, kind: AlertKind) -> bool {
+        self.is_cooldown_expired_scoped(kind, None)
+    }
+
+    pub fn is_cooldown_expired_scoped(&self, kind: AlertKind, scope_key: Option<&str>) -> bool {
+        let map = self.load_cooldowns();
+        let key = Self::cooldown_key(kind, scope_key);
+        if let Some(last) = map.get(&key) {
             let now = Self::now_secs();
-            now.saturating_sub(*last) >= COOLDOWN_SECS
+            now.saturating_sub(*last) >= Self::cooldown_duration_secs(kind)
         } else {
             true
         }
     }
 
-    fn update_cooldown(&self, kind: AlertKind) {
+    pub fn update_cooldown(&self, kind: AlertKind) {
+        self.update_cooldown_scoped(kind, None);
+    }
+
+    pub fn update_cooldown_scoped(&self, kind: AlertKind, scope_key: Option<&str>) {
         let mut map = self.load_cooldowns();
-        map.insert(kind.as_str().to_string(), Self::now_secs());
+        let key = Self::cooldown_key(kind, scope_key);
+        map.insert(key, Self::now_secs());
         self.save_cooldowns(&map);
     }
 
@@ -150,8 +179,29 @@ impl AlertDispatcher {
 
     /// Core dispatch: checks 24h cooldown, sends to webhook and/or telegram, updates cooldown on success.
     pub async fn send_alert(&self, kind: AlertKind, message: &str) {
-        if !self.is_cooldown_expired(kind) {
-            tracing::debug!(kind = %kind, "Alert suppressed by 24h cooldown");
+        self.trigger_scoped(kind, None, message).await;
+    }
+
+    /// Scoped alert dispatch with per-peer or per-entity key isolation so one friend doesn't silence another.
+    pub async fn trigger_scoped(&self, kind: AlertKind, scope_key: Option<&str>, message: &str) {
+        match kind {
+            AlertKind::OutdatedVersion if !self.config.notify_on_outdated_version => return,
+            AlertKind::SunsetApproaching if !self.config.notify_on_sunset_warning => return,
+            AlertKind::KnotenfreundMessageReceived if !self.config.notify_on_f2f_messages => return,
+            AlertKind::KnotenfreundUnresponsive | AlertKind::DirectionalSectorAnomaly
+                if !self.config.notify_on_peer_anomalies =>
+            {
+                return
+            }
+            _ => {}
+        }
+
+        if !self.is_cooldown_expired_scoped(kind, scope_key) {
+            tracing::debug!(
+                kind = %kind,
+                scope = ?scope_key,
+                "Alert suppressed by cooldown"
+            );
             return;
         }
 
@@ -182,6 +232,7 @@ impl AlertDispatcher {
             if !webhook_url.trim().is_empty() {
                 let payload = serde_json::json!({
                     "kind": kind.as_str(),
+                    "scope": scope_key,
                     "message": message,
                     "timestamp": Self::now_secs(),
                 });
@@ -228,14 +279,9 @@ impl AlertDispatcher {
             }
         }
 
-        // Update cooldown after any attempt. For strict suppression we update even on failure to avoid spam,
-        // but for operational visibility we only update on success. Here we update if we attempted send (success or http success path).
-        // To guarantee 24h suppression after a successful send, we update only on success.
-        // If all sends failed, do not update cooldown so retry can happen next cycle.
         if any_success {
-            self.update_cooldown(kind);
+            self.update_cooldown_scoped(kind, scope_key);
         } else if has_webhook || has_telegram {
-            // Still log that we attempted but failed; do not update cooldown so next tick can retry.
             tracing::warn!(kind = %kind, "Alert dispatch attempted but no sink succeeded, cooldown not updated");
         }
     }
@@ -252,5 +298,39 @@ impl AlertDispatcher {
         let mut map = self.load_cooldowns();
         map.insert(kind.as_str().to_string(), secs);
         self.save_cooldowns(&map);
+    }
+
+    /// For tests: set scoped last alert timestamp
+    pub fn set_last_alert_secs_scoped(&self, kind: AlertKind, scope_key: Option<&str>, secs: u64) {
+        let mut map = self.load_cooldowns();
+        let key = Self::cooldown_key(kind, scope_key);
+        map.insert(key, secs);
+        self.save_cooldowns(&map);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scoped_cooldown_isolation() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AlertConfig::default();
+        let dispatcher = AlertDispatcher::new(config, temp.path().to_path_buf());
+
+        let friend_a = "0101010101010101010101010101010101010101010101010101010101010101";
+        let friend_b = "0202020202020202020202020202020202020202020202020202020202020202";
+
+        // Initially both expired
+        assert!(dispatcher.is_cooldown_expired_scoped(AlertKind::KnotenfreundMessageReceived, Some(friend_a)));
+        assert!(dispatcher.is_cooldown_expired_scoped(AlertKind::KnotenfreundMessageReceived, Some(friend_b)));
+
+        // Update friend A
+        dispatcher.update_cooldown_scoped(AlertKind::KnotenfreundMessageReceived, Some(friend_a));
+
+        // Friend A is in cooldown, Friend B is NOT silenced!
+        assert!(!dispatcher.is_cooldown_expired_scoped(AlertKind::KnotenfreundMessageReceived, Some(friend_a)));
+        assert!(dispatcher.is_cooldown_expired_scoped(AlertKind::KnotenfreundMessageReceived, Some(friend_b)));
     }
 }

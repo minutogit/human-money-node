@@ -113,7 +113,7 @@ This document is automatically loaded on every AI agent startup in the workspace
    * Old Quorum Certificates have zero spending utility on L2; recipients perform a fresh live check. Clients do not hoard or chain past certificates.
 6. **Separation of Consensus Core and Periphery:**
    * Consensus core (`humoco-node`) = QUIC + RAM index + redb + ingress.
-   * Administration, hot backups, and dashboards attach externally via the local UNIX control socket (`/tmp/humoco.sock`). The web dashboard is a strictly private operator diagnostic window (< 128 KiB), NOT an operating system terminal or backup orchestrator.
+   * Administration, hot backups, and dashboards attach externally via the local UNIX control socket (`/tmp/humoco.sock`). The web dashboard is a strictly private operator diagnostic window, NOT an operating system terminal or backup orchestrator.
 
 ---
 

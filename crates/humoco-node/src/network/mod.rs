@@ -1,5 +1,6 @@
 pub mod clock;
 pub mod discovery;
+pub mod f2f_collab;
 pub mod framing;
 pub mod manager;
 pub mod peer;
@@ -8,9 +9,11 @@ pub mod tls;
 pub mod transport;
 
 pub use clock::NetworkClock;
+pub use f2f_collab::*;
 pub use framing::{read_frame, write_frame, HeartbeatWirePayload, MAX_FRAME_PAYLOAD_LEN};
 pub use manager::{
-    calculate_fan_out, PeerManager, DEFAULT_BASE_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
+    calculate_fan_out, HopBand, KnotenfreundSectorReport, PeerManager, SectorSeverity,
+    TraceAnalysisReport, TraceDirectionHit, DEFAULT_BASE_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
     MAX_GOSSIP_HOPS, PRESENCE_FRESHNESS_SECS, PRESENCE_FRESHNESS_TIMEOUT,
 };
 pub use peer::{PeerConnectionType, PeerInfo, PeerStatus, FAILURE_DEBOUNCE_SECS};

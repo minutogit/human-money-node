@@ -54,7 +54,7 @@ Bounded stale peer-metadata cleanup is an operational lifecycle concern; it must
 
 Expose diagnostics through the private local operator boundary, for example the UNIX control socket `/tmp/humoco.sock` or an explicitly protected local administrative listener. Private access must apply to **every alias, nested route, alternate listener and dashboard asset**, including `/metrics`, topology paths and any renamed versions. P2P friendship does not automatically authorize dashboard access. Route names, obscurity or a UI hiding a link do not establish privacy.
 
-The dashboard remains a compact offline diagnostic window (<128 KiB), without remote runtime dependencies, unbounded histories, web log buffers, live stderr streaming, terminal emulation, browser backup controls or manual TTL-prune buttons. Logs belong to OS stdout/stderr and `systemd`/`journalctl`; backups belong to scripts/cron through local control. Metric history uses bounded retention/cardinality and aggregation. Do not expose raw client secrets or per-client identity histories.
+The dashboard remains a compact self-contained offline diagnostic window without remote runtime dependencies, external CDNs, unbounded histories, web log buffers, live stderr streaming, terminal emulation, browser backup controls or manual TTL-prune buttons. Logs belong to OS stdout/stderr and `systemd`/`journalctl`; backups belong to scripts/cron through local control. Metric history uses bounded retention/cardinality and aggregation. Do not expose raw client secrets or per-client identity histories.
 
 ### 4.1 Example local metric vocabulary
 

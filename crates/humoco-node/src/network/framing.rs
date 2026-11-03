@@ -1194,3 +1194,200 @@ impl FrozenShardReply {
         *h.finalize().as_bytes()
     }
 }
+
+pub const MAX_F2F_FRAME_PAYLOAD_LEN: usize = 2048;
+
+/// Direct F2F operator dialogue payload (human text + optional machine-readable trace).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct F2fOperatorMessagePayload {
+    pub msg_id: u64,
+    pub sender_pubkey: [u8; 32],
+    pub timestamp_ms: u64,
+    pub text: String,
+    pub trace_pubkeys: Vec<[u8; 32]>,
+    pub reply_to_msg_id: Option<u64>,
+}
+
+impl F2fOperatorMessagePayload {
+    pub fn validate(&self) -> Result<(), bincode::Error> {
+        if self.text.len() > 500 {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "F2F message text exceeds maximum length of 500 bytes".into(),
+            )));
+        }
+        if self.text.chars().any(|c| c.is_ascii_control() && c != '\n' && c != '\t') {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "F2F message text contains forbidden ASCII control characters".into(),
+            )));
+        }
+        if self.trace_pubkeys.len() > 32 {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "F2F message trace_pubkeys exceeds maximum limit of 32 items".into(),
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        self.validate()?;
+        let bytes = bincode::serialize(self)?;
+        if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("Serialized F2fOperatorMessage exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
+            )));
+        }
+        Ok(bytes)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("F2fOperatorMessage payload exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
+            )));
+        }
+        let payload: Self = bincode::deserialize(bytes)?;
+        payload.validate()?;
+        Ok(payload)
+    }
+}
+
+/// Delivery acknowledgment for an F2F operator message.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct F2fOperatorMessageAckPayload {
+    pub msg_id: u64,
+    pub receiver_pubkey: [u8; 32],
+    pub timestamp_ms: u64,
+}
+
+impl F2fOperatorMessageAckPayload {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        let bytes = bincode::serialize(self)?;
+        if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("Serialized F2fOperatorMessageAck exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
+            )));
+        }
+        Ok(bytes)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("F2fOperatorMessageAck payload exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
+            )));
+        }
+        let payload: Self = bincode::deserialize(bytes)?;
+        Ok(payload)
+    }
+}
+
+/// Direct 1-hop F2F neighbor roster payload for Hop-2 environment transparency.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct F2fNeighborRosterPayload {
+    pub sender_pubkey: [u8; 32],
+    pub timestamp_ms: u64,
+    pub shares_roster: bool,
+    pub visible_neighbors: Vec<[u8; 32]>,
+    pub hidden_neighbor_count: u16,
+}
+
+impl F2fNeighborRosterPayload {
+    pub fn validate(&self) -> Result<(), bincode::Error> {
+        if self.visible_neighbors.len() > 64 {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "F2F neighbor roster visible_neighbors exceeds maximum limit of 64 items".into(),
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        self.validate()?;
+        let bytes = bincode::serialize(self)?;
+        if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("Serialized F2fNeighborRoster exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
+            )));
+        }
+        Ok(bytes)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("F2fNeighborRoster payload exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
+            )));
+        }
+        let payload: Self = bincode::deserialize(bytes)?;
+        payload.validate()?;
+        Ok(payload)
+    }
+}
+
+#[cfg(test)]
+mod f2f_payload_tests {
+    use super::*;
+
+    #[test]
+    fn test_f2f_operator_message_roundtrip_and_validation() {
+        let msg = F2fOperatorMessagePayload {
+            msg_id: 1001,
+            sender_pubkey: [7u8; 32],
+            timestamp_ms: 1700000000000,
+            text: "Hello friend!\nWorking on server upgrade.\tOK".into(),
+            trace_pubkeys: vec![[1u8; 32], [2u8; 32]],
+            reply_to_msg_id: Some(999),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        assert!(bytes.len() <= MAX_F2F_FRAME_PAYLOAD_LEN);
+        let parsed = F2fOperatorMessagePayload::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, parsed);
+
+        // Text > 500 bytes rejected
+        let mut oversize_text = msg.clone();
+        oversize_text.text = "a".repeat(501);
+        assert!(oversize_text.to_bytes().is_err());
+
+        // Control chars other than \n and \t rejected (e.g. \r or \0 or \x1b)
+        let mut control_text = msg.clone();
+        control_text.text = "Hello\x1b[31mRed\x1b[0m".into();
+        assert!(control_text.to_bytes().is_err());
+
+        // Trace > 32 items rejected
+        let mut oversize_trace = msg.clone();
+        oversize_trace.trace_pubkeys = vec![[0u8; 32]; 33];
+        assert!(oversize_trace.to_bytes().is_err());
+    }
+
+    #[test]
+    fn test_f2f_operator_ack_roundtrip() {
+        let ack = F2fOperatorMessageAckPayload {
+            msg_id: 1001,
+            receiver_pubkey: [9u8; 32],
+            timestamp_ms: 1700000001000,
+        };
+        let bytes = ack.to_bytes().unwrap();
+        let parsed = F2fOperatorMessageAckPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(ack, parsed);
+    }
+
+    #[test]
+    fn test_f2f_neighbor_roster_roundtrip_and_validation() {
+        let roster = F2fNeighborRosterPayload {
+            sender_pubkey: [5u8; 32],
+            timestamp_ms: 1700000000000,
+            shares_roster: true,
+            visible_neighbors: vec![[1u8; 32]; 10],
+            hidden_neighbor_count: 2,
+        };
+        let bytes = roster.to_bytes().unwrap();
+        assert!(bytes.len() <= MAX_F2F_FRAME_PAYLOAD_LEN);
+        let parsed = F2fNeighborRosterPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(roster, parsed);
+
+        // > 64 visible neighbors rejected
+        let mut oversize = roster.clone();
+        oversize.visible_neighbors = vec![[1u8; 32]; 65];
+        assert!(oversize.to_bytes().is_err());
+    }
+}

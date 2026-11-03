@@ -36,6 +36,9 @@ pub struct PeerInfo {
     pub last_failure: Option<Instant>,
     pub connection: Option<quinn::Connection>,
     pub conn_type: PeerConnectionType,
+    pub last_rpc_tested_at: Option<Instant>,
+    pub last_connected_at: Option<Instant>,
+    pub active_connected_failure_since: Option<Instant>,
 }
 
 impl PeerInfo {
@@ -53,6 +56,9 @@ impl PeerInfo {
             last_failure: None,
             connection: None,
             conn_type,
+            last_rpc_tested_at: None,
+            last_connected_at: None,
+            active_connected_failure_since: None,
         }
     }
 
@@ -67,6 +73,7 @@ impl PeerInfo {
         // refreshes identity, connection handle and last-seen timestamp while
         // preserving `missing_count` / `last_failure` and the suspension state.
         self.last_seen = Some(Instant::now());
+        self.last_connected_at = Some(Instant::now());
         if node_id.is_some() {
             self.node_id = node_id;
         }
@@ -90,7 +97,10 @@ impl PeerInfo {
     /// by exactly 1 (activity-locked healing, Spec 19).
     pub fn mark_shard_work_success(&mut self) {
         self.missing_count = self.missing_count.saturating_sub(1);
-        self.last_seen = Some(Instant::now());
+        let now = Instant::now();
+        self.last_seen = Some(now);
+        self.last_rpc_tested_at = Some(now);
+        self.active_connected_failure_since = None;
         if self.missing_count == 0 {
             self.last_failure = None;
             if self.connection.is_some() {
@@ -127,6 +137,13 @@ impl PeerInfo {
 
     /// Debounced mark_failure with explicit timestamp (for tests and simulation).
     pub fn mark_failure_at(&mut self, now: Instant) {
+        self.last_rpc_tested_at = Some(now);
+        if self.connection.is_some() {
+            self.active_connected_failure_since.get_or_insert(now);
+        } else {
+            self.active_connected_failure_since = None;
+        }
+
         let should_increment = match self.last_failure {
             Some(last) => now.duration_since(last) >= Duration::from_secs(FAILURE_DEBOUNCE_SECS),
             None => true,
@@ -137,11 +154,28 @@ impl PeerInfo {
             self.missing_count = self.missing_count.saturating_add(1);
             if self.missing_count >= FAILURE_THRESHOLD_SUSPENDED {
                 self.status = PeerStatus::Suspended;
-                self.connection = None;
+                if self.conn_type != PeerConnectionType::FriendToFriend {
+                    self.connection = None;
+                }
             } else if self.missing_count >= FAILURE_THRESHOLD_DEGRADING {
                 self.status = PeerStatus::Degrading;
             }
         }
+    }
+
+    /// Returns true iff peer has reached suspension (missing_count >= 3), maintains an open QUIC connection,
+    /// and has persistently failed active RPC tests while connected for at least `min_duration`.
+    /// Protects against reboot false alarms during quiet periods (INV-1701).
+    pub fn is_active_non_responder(&self, now: Instant, min_duration: Duration) -> bool {
+        self.missing_count >= FAILURE_THRESHOLD_SUSPENDED
+            && self.connection.is_some()
+            && self
+                .connection
+                .as_ref()
+                .is_none_or(|c| c.close_reason().is_none())
+            && self
+                .active_connected_failure_since
+                .is_some_and(|s| now.duration_since(s) >= min_duration)
     }
 
     /// Autonomous healing: hourly penalty decay (-1)
@@ -261,5 +295,42 @@ mod tests {
         peer.mark_failure_at(t2);
         assert_eq!(peer.missing_count, 3);
         assert_eq!(peer.status, PeerStatus::Suspended);
+    }
+
+    #[test]
+    fn test_active_non_responder_and_reboot_quiet_period_immunity() {
+        let addr: SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let mut peer = PeerInfo::new(addr);
+        let t0 = Instant::now();
+
+        // Initially no failures and not connected
+        assert!(!peer.is_active_non_responder(t0, Duration::from_secs(1800)));
+
+        // Peer is suspended (e.g. from previous failures)
+        peer.missing_count = 3;
+        peer.status = PeerStatus::Suspended;
+
+        // Even though missing_count >= 3, if connection is None, it is NOT an active non-responder
+        assert!(!peer.is_active_non_responder(t0, Duration::from_secs(1800)));
+
+        // Simulate connection established, but quiet period (no RPC failures tested yet)
+        peer.last_connected_at = Some(t0);
+        // We simulate a mock connection state (or active_connected_failure_since)
+        // Note: active_connected_failure_since is None until an actual RPC failure occurs while connected
+        assert_eq!(peer.active_connected_failure_since, None);
+        assert!(!peer.is_active_non_responder(t0, Duration::from_secs(1800)));
+
+        // RPC failure occurs while connected
+        peer.active_connected_failure_since = Some(t0);
+        // Before 30 min has elapsed: false
+        assert!(!peer.is_active_non_responder(t0 + Duration::from_secs(600), Duration::from_secs(1800)));
+
+        // After 30 min (1800s) has elapsed: if connection is None, still false!
+        assert!(!peer.is_active_non_responder(t0 + Duration::from_secs(1801), Duration::from_secs(1800)));
+
+        // Shard work success heals and resets active_connected_failure_since
+        peer.mark_shard_work_success();
+        assert_eq!(peer.active_connected_failure_since, None);
+        assert_eq!(peer.missing_count, 2);
     }
 }

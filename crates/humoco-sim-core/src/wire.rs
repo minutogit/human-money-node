@@ -108,6 +108,38 @@ pub enum MsgType {
     ShardBucketRangeResponse = 0x010D,
     Heartbeat = 0x0201,
     HeartbeatAck = 0x0202,
+    F2fOperatorMessage = 0x0203,
+    F2fOperatorMessageAck = 0x0204,
+    F2fNeighborRoster = 0x0205,
+}
+
+impl MsgType {
+    pub fn from_u16(val: u16) -> Option<Self> {
+        match val {
+            0x0001 => Some(MsgType::StatusQuery),
+            0x0002 => Some(MsgType::StatusResponse),
+            0x0040 => Some(MsgType::LiveStateRequest),
+            0x0041 => Some(MsgType::LiveStateResponse),
+            0x0003 => Some(MsgType::LatencyProbe),
+            0x0004 => Some(MsgType::LatencyProbeAck),
+            0x0101 => Some(MsgType::LockVerifyRequest),
+            0x0102 => Some(MsgType::LockVerifyResponse),
+            0x0105 => Some(MsgType::EquivocationProof),
+            0x0106 => Some(MsgType::EquivocationAck),
+            0x0107 => Some(MsgType::ActiveSyncRequest),
+            0x0109 => Some(MsgType::ActiveSyncDone),
+            0x010A => Some(MsgType::ShardDigestRequest),
+            0x010B => Some(MsgType::ShardDigestResponse),
+            0x010C => Some(MsgType::ShardBucketRangeRequest),
+            0x010D => Some(MsgType::ShardBucketRangeResponse),
+            0x0201 => Some(MsgType::Heartbeat),
+            0x0202 => Some(MsgType::HeartbeatAck),
+            0x0203 => Some(MsgType::F2fOperatorMessage),
+            0x0204 => Some(MsgType::F2fOperatorMessageAck),
+            0x0205 => Some(MsgType::F2fNeighborRoster),
+            _ => None,
+        }
+    }
 }
 
 pub const FLAG_PROVISIONAL: u32 = 0x0000_0001;
@@ -143,5 +175,13 @@ mod tests {
         let parsed = WireHeader::from_bytes(&bytes);
         assert_eq!(hdr, parsed);
         assert!(parsed.is_valid_magic());
+    }
+
+    #[test]
+    fn test_msg_type_from_u16() {
+        assert_eq!(MsgType::from_u16(0x0203), Some(MsgType::F2fOperatorMessage));
+        assert_eq!(MsgType::from_u16(0x0204), Some(MsgType::F2fOperatorMessageAck));
+        assert_eq!(MsgType::from_u16(0x0205), Some(MsgType::F2fNeighborRoster));
+        assert_eq!(MsgType::from_u16(0xFFFF), None);
     }
 }

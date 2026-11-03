@@ -2432,6 +2432,7 @@ pub struct QuicTransport {
 
 /// Backwards-compatible alias for `QuicTransport` (task spec naming: `QuicP2pTransport`).
 pub type QuicP2pTransport = QuicTransport;
+pub type NodeTransport = QuicTransport;
 
 /// Creates a Quinn server endpoint supporting dual-stack IPv6/IPv4 binding when requested.
 fn create_server_endpoint(
@@ -2742,6 +2743,14 @@ impl QuicTransport {
             .record_success(addr, Some(authorized_node_id), Some(connection.clone()))
             .await;
 
+        if self.peer_manager.is_f2f_friend(&authorized_node_id).await {
+            let t_clone = self.clone();
+            let c_clone = connection.clone();
+            tokio::spawn(async move {
+                t_clone.sync_f2f_friend_session(authorized_node_id, c_clone).await;
+            });
+        }
+
         let conn_clone = connection.clone();
         let handler = self.handler.clone();
         let peer_manager = self.peer_manager.clone();
@@ -2854,6 +2863,14 @@ impl QuicTransport {
             .record_success(addr, Some(authorized_node_id), Some(connection.clone()))
             .await;
 
+        if self.peer_manager.is_f2f_friend(&authorized_node_id).await {
+            let t_clone = self.clone();
+            let c_clone = connection.clone();
+            tokio::spawn(async move {
+                t_clone.sync_f2f_friend_session(authorized_node_id, c_clone).await;
+            });
+        }
+
         let conn_clone = connection.clone();
         let handler = self.handler.clone();
         let peer_manager = self.peer_manager.clone();
@@ -2955,7 +2972,108 @@ impl QuicTransport {
         let payload_len = checked_payload_len(payload.len())?;
         let header = WireHeader::new(MsgType::Heartbeat as u16, seq, 0, 0, payload_len);
         let conn = self.connect_peer_unchecked(addr).await?;
-        self.send_unidirectional(&conn, &header, &payload).await
+        let res = self.send_unidirectional(&conn, &header, &payload).await;
+        if res.is_ok() {
+            if let Some(friend_pk) = self.peer_manager.f2f_friend_pubkey_for_addr(&addr).await {
+                let t_clone = self.clone();
+                let c_clone = (*conn).clone();
+                tokio::spawn(async move {
+                    t_clone.sync_f2f_friend_session(friend_pk, c_clone).await;
+                });
+            }
+        }
+        res
+    }
+
+    /// Synchronizes Hop-2 neighbor roster and flushes 1-slot outbox messages to an authenticated F2F friend.
+    pub async fn sync_f2f_friend_session(&self, friend_pk: [u8; 32], conn: quinn::Connection) {
+        let roster = self
+            .peer_manager
+            .build_local_f2f_roster(self.identity.node_pubkey())
+            .await;
+        if let Ok(roster_bytes) = roster.to_bytes() {
+            let header = WireHeader::new(
+                MsgType::F2fNeighborRoster as u16,
+                0,
+                0,
+                0,
+                roster_bytes.len() as u32,
+            );
+            let _ = send_unidirectional_frame(&conn, &header, &roster_bytes).await;
+        }
+
+        let pending = self
+            .peer_manager
+            .f2f_collab()
+            .lock()
+            .inbox()
+            .get_pending_outbox(&friend_pk)
+            .cloned();
+
+        if let Some(msg) = pending {
+            if let Ok(msg_bytes) = msg.to_bytes() {
+                let header = WireHeader::new(
+                    MsgType::F2fOperatorMessage as u16,
+                    0,
+                    0,
+                    0,
+                    msg_bytes.len() as u32,
+                );
+                let _ = send_unidirectional_frame(&conn, &header, &msg_bytes).await;
+            }
+        }
+    }
+
+    /// Queues and sends an F2F operator message to a direct F2F friend.
+    pub async fn send_f2f_operator_message(
+        &self,
+        friend_pubkey: [u8; 32],
+        text: String,
+        trace_pubkeys: Vec<[u8; 32]>,
+        reply_to_msg_id: Option<u64>,
+    ) -> Result<crate::network::f2f_collab::F2fStoredMessage, String> {
+        let msg_id = rand::random::<u64>();
+        let self_pubkey = *self.identity.node_pubkey();
+        let now_ms = self.peer_manager.net_time_ms();
+
+        let payload = crate::network::framing::F2fOperatorMessagePayload {
+            msg_id,
+            sender_pubkey: self_pubkey,
+            timestamp_ms: now_ms,
+            text,
+            trace_pubkeys,
+            reply_to_msg_id,
+        };
+
+        let payload_bytes = payload
+            .to_bytes()
+            .map_err(|e| format!("Invalid F2F operator message: {}", e))?;
+
+        let friend_addr = self.peer_manager.get_f2f_friend_addr(&friend_pubkey).await;
+        let conn_opt = match friend_addr {
+            Some(addr) => self.peer_manager.get_connection(&addr).await,
+            None => None,
+        };
+
+        if let Some(conn) = conn_opt {
+            let header = WireHeader::new(
+                MsgType::F2fOperatorMessage as u16,
+                0,
+                0,
+                0,
+                payload_bytes.len() as u32,
+            );
+            let _ = send_unidirectional_frame(&conn, &header, &payload_bytes).await;
+        }
+
+        let stored = self
+            .peer_manager
+            .f2f_collab()
+            .lock()
+            .inbox_mut()
+            .queue_outbound(friend_pubkey, payload, false);
+
+        Ok(stored)
     }
 
     /// Forwards an authentic multi-hop presence heartbeat to a Dunbar fan-out subset of other F2F friends (Spec 11).
@@ -3404,6 +3522,15 @@ impl QuicTransport {
                                         peer_manager
                                             .record_success(remote_addr, remote_node_id, Some(conn.clone()))
                                             .await;
+                                        if let Some(nid) = remote_node_id {
+                                            if peer_manager.is_f2f_friend(&nid).await {
+                                                let t_clone = transport.clone();
+                                                let c_clone = conn.clone();
+                                                tokio::spawn(async move {
+                                                    t_clone.sync_f2f_friend_session(nid, c_clone).await;
+                                                });
+                                            }
+                                        }
                                         Self::handle_connection(conn, handler, peer_manager.clone(), cancel_token, remote_node_id, stream_semaphore, transport).await;
                                     }
                                     Err(err) => {
@@ -3647,8 +3774,13 @@ impl QuicTransport {
                                             let uni_fut = async {
                                                 // GOSSIP BARRIER:
                                                 // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
+                                                let is_f2f_exclusive = header.msg_type == MsgType::F2fOperatorMessage as u16
+                                                    || header.msg_type == MsgType::F2fOperatorMessageAck as u16
+                                                    || header.msg_type == MsgType::F2fNeighborRoster as u16;
+
                                                 let is_gossip = header.msg_type == MsgType::Heartbeat as u16
-                                                    || header.msg_type == MsgType::EquivocationProof as u16;
+                                                    || header.msg_type == MsgType::EquivocationProof as u16
+                                                    || is_f2f_exclusive;
 
                                                 if is_gossip && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await {
                                                     warn!(
@@ -3658,6 +3790,87 @@ impl QuicTransport {
                                                         "GOSSIP BARRIER: Dropped gossip from non-F2F connection"
                                                     );
                                                     return;
+                                                }
+
+                                                if is_f2f_exclusive {
+                                                    let is_f2f = if let Some(ref nid) = remote_node_id {
+                                                        pm.is_f2f_friend(nid).await
+                                                    } else {
+                                                        pm.is_f2f_addr(&remote_addr).await
+                                                    };
+                                                    if !is_f2f || header.reserved != 0 {
+                                                        warn!("GOSSIP BARRIER: Rejected non-direct or non-F2F operator dialogue frame");
+                                                        return;
+                                                    }
+
+                                                    if header.msg_type == MsgType::F2fOperatorMessage as u16 {
+                                                        let Ok(op_msg) = crate::network::framing::F2fOperatorMessagePayload::from_bytes(&payload) else {
+                                                            warn!("Dropped malformed F2fOperatorMessage");
+                                                            return;
+                                                        };
+                                                        if remote_node_id != Some(op_msg.sender_pubkey) {
+                                                            warn!("Spoofing attempt: F2fOperatorMessage sender_pubkey does not match TLS node identity");
+                                                            return;
+                                                        }
+                                                        let res = pm.f2f_collab().lock().inbox_mut().record_inbound(op_msg.clone(), std::time::Instant::now());
+                                                        if res.is_ok() {
+                                                            let ack_payload = crate::network::framing::F2fOperatorMessageAckPayload {
+                                                                msg_id: op_msg.msg_id,
+                                                                receiver_pubkey: *transport_clone.identity.node_pubkey(),
+                                                                timestamp_ms: pm.net_time_ms(),
+                                                            };
+                                                            if let Ok(ack_bytes) = ack_payload.to_bytes() {
+                                                                let ack_hdr = WireHeader::new(
+                                                                    MsgType::F2fOperatorMessageAck as u16,
+                                                                    0,
+                                                                    0,
+                                                                    0,
+                                                                    ack_bytes.len() as u32,
+                                                                );
+                                                                let _ = send_unidirectional_frame(&conn_clone, &ack_hdr, &ack_bytes).await;
+                                                            }
+                                                            if let Some(dispatcher) = pm.alert_dispatcher() {
+                                                                let text = op_msg.text.clone();
+                                                                let sender_hex = hex::encode(op_msg.sender_pubkey);
+                                                                tokio::spawn(async move {
+                                                                    dispatcher
+                                                                        .trigger_scoped(
+                                                                            crate::alert::AlertKind::KnotenfreundMessageReceived,
+                                                                            Some(&sender_hex),
+                                                                            &format!("F2F operator message from {}: {}", sender_hex, text),
+                                                                        )
+                                                                        .await;
+                                                                });
+                                                            }
+                                                        }
+                                                        return;
+                                                    }
+
+                                                    if header.msg_type == MsgType::F2fOperatorMessageAck as u16 {
+                                                        let Ok(ack) = crate::network::framing::F2fOperatorMessageAckPayload::from_bytes(&payload) else {
+                                                            warn!("Dropped malformed F2fOperatorMessageAck");
+                                                            return;
+                                                        };
+                                                        if remote_node_id != Some(ack.receiver_pubkey) {
+                                                            warn!("Spoofing attempt: F2fOperatorMessageAck receiver_pubkey does not match TLS node identity");
+                                                            return;
+                                                        }
+                                                        pm.f2f_collab().lock().inbox_mut().on_ack_received(ack.receiver_pubkey, ack.msg_id);
+                                                        return;
+                                                    }
+
+                                                    if header.msg_type == MsgType::F2fNeighborRoster as u16 {
+                                                        let Ok(roster) = crate::network::framing::F2fNeighborRosterPayload::from_bytes(&payload) else {
+                                                            warn!("Dropped malformed F2fNeighborRoster");
+                                                            return;
+                                                        };
+                                                        if remote_node_id != Some(roster.sender_pubkey) {
+                                                            warn!("Spoofing attempt: F2fNeighborRoster sender_pubkey does not match TLS node identity");
+                                                            return;
+                                                        }
+                                                        pm.f2f_collab().lock().roster_mut().record_roster(roster);
+                                                        return;
+                                                    }
                                                 }
 
                                                 // HeartbeatAck handling:
@@ -3737,6 +3950,15 @@ impl QuicTransport {
 
                                                         // Check deduplication cache to prevent gossip loops (Spec 11) - ONLY AFTER signature & freshness
                                                         if !pm.check_and_record_heartbeat(&hb.node_id, hb.pow_nonce, hb.timestamp_ms).await {
+                                                            if is_f2f {
+                                                                let friend_pk = match remote_node_id {
+                                                                    Some(pk) => Some(pk),
+                                                                    None => pm.f2f_friend_pubkey_for_addr(&remote_addr).await,
+                                                                };
+                                                                if let Some(fpk) = friend_pk {
+                                                                    pm.record_heartbeat_edge_observation(hb.node_id, fpk, hops as u8).await;
+                                                                }
+                                                            }
                                                             debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped duplicate heartbeat (already seen)");
                                                             return;
                                                         }
@@ -3822,6 +4044,16 @@ impl QuicTransport {
                                                             Some(remote_addr),
                                                             work_score,
                                                         ).await;
+
+                                                        if is_f2f {
+                                                            let friend_pk = match remote_node_id {
+                                                                Some(pk) => Some(pk),
+                                                                None => pm.f2f_friend_pubkey_for_addr(&remote_addr).await,
+                                                            };
+                                                            if let Some(fpk) = friend_pk {
+                                                                pm.record_heartbeat_edge_observation(node_id, fpk, hops as u8).await;
+                                                            }
+                                                        }
 
                                                         pm.record_heartbeat_hourly_observation(
                                                             node_id,

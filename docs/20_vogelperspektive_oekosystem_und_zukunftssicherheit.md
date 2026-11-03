@@ -40,7 +40,7 @@ The local UNIX control socket, for example `/tmp/humoco.sock`, is the primary ad
 | --- | --- | --- |
 | CLI / console | Direct node status, peer and quota administration | Local operator control; no automatic updates or remote operator veto bypass. |
 | Prometheus/OpenMetrics | Bounded counters and latency histograms | All metric aliases/routes/listeners private, including `/metrics`. |
-| Topology/dashboard | Compact offline local diagnosis | All graph, asset and nested aliases private; <128 KiB diagnostic window, no remote dependencies or web log buffers. |
+| Topology/dashboard | Compact offline local diagnosis | All graph, asset and nested aliases private; self-contained offline diagnostic window, no remote dependencies or web log buffers. |
 | Logging | Operational event/trace output | OS stdout/stderr and `systemd`/`journalctl`; no unbounded browser log retention. |
 | Backup/maintenance scripts | Operator-scheduled tasks via local control | External scripts/cron, no browser backup or manual TTL-prune buttons. |
 

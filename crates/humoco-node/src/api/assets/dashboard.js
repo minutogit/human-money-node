@@ -309,10 +309,13 @@ if (adminToken) {
 btn.innerHTML = '🔓 Admin aktiv (Logout)';
 btn.className = 'btn btn-danger';
 adminEls.forEach(el => el.style.display = (el.tagName === 'BUTTON' ? 'inline-flex' : 'block'));
+fetchCollabData();
 } else {
 btn.innerHTML = '🔒 Admin-Modus';
 btn.className = 'btn btn-secondary';
 adminEls.forEach(el => el.style.display = 'none');
+const collabContainer = $('collab-container');
+if (collabContainer) collabContainer.style.display = 'none';
 }
 }
 function applyAdminMode() {
@@ -404,7 +407,7 @@ body: JSON.stringify({ pubkey, label: label || null })
 if (res.ok) {
 if (pInput) pInput.value = '';
 if (lInput) lInput.value = '';
-showToast('P2P-Server erfolgreich verbunden', 'success');
+showToast('Knotenfreund erfolgreich verbunden', 'success');
 refreshDashboard();
 } else {
 const err = await res.json().catch(() => ({}));
@@ -412,13 +415,10 @@ showToast('Fehler: ' + (err.message || res.statusText), 'error');
 }
 } catch (e) { showToast('Fehler: ' + e.message, 'error'); }
 }
-function adminAddFriend() {
-return adminAddMeshPeer();
-}
 function adminRemoveMeshPeer(pubkey) {
 showConfirm(
-'Nachbarknoten trennen',
-`Möchten Sie den Nachbarknoten ${truncateHash(pubkey)} wirklich aus den F2F-Freunden entfernen?`,
+'Knotenfreund trennen',
+`Möchten Sie die Verbindung zum Knotenfreund ${truncateHash(pubkey)} (P2P-Mesh) wirklich trennen?`,
 async () => {
 try {
 const res = await fetchWithTimeout('/dashboard/admin/mesh/peers/' + encodeURIComponent(pubkey), {
@@ -426,7 +426,7 @@ method: 'DELETE',
 headers: { 'Authorization': 'Bearer ' + adminToken }
 }, 6000);
 if (res.ok) {
-showToast(`Nachbarknoten ${truncateHash(pubkey)} entfernt`, 'success');
+showToast(`Knotenfreund ${truncateHash(pubkey)} getrennt`, 'success');
 refreshDashboard();
 } else {
 const err = await res.json().catch(() => ({}));
@@ -435,9 +435,6 @@ showToast('Fehler: ' + (err.message || res.statusText), 'error');
 } catch (e) { showToast('Fehler: ' + e.message, 'error'); }
 }
 );
-}
-function adminRemoveFriend(pubkey) {
-return adminRemoveMeshPeer(pubkey);
 }
 function openAddClientFriendModal() {
 const lInput = $('client-friend-label-input');
@@ -460,7 +457,7 @@ body: JSON.stringify({ label, token: token || null })
 if (res.ok) {
 const data = await res.json();
 closeModal('add-client-modal');
-showToast('Client-Freund freigeschaltet', 'success');
+showToast('Kassen-Zugang freigeschaltet', 'success');
 refreshDashboard();
 showClientQrModal(data.label, data.token, data.wallet_uri);
 } else {
@@ -471,8 +468,8 @@ showToast('Fehler: ' + (err.message || res.statusText), 'error');
 }
 function adminRemoveClientFriend(tokenHash, label) {
 showConfirm(
-'Client-Freund widerrufen',
-`Möchten Sie den Client-Freund "${label || truncateHash(tokenHash)}" wirklich widerrufen?`,
+'Kassen-Zugang widerrufen',
+`Möchten Sie den Kassen-Zugang "${label || truncateHash(tokenHash)}" wirklich widerrufen?`,
 async () => {
 try {
 const res = await fetchWithTimeout('/dashboard/admin/ingress/clients/' + encodeURIComponent(tokenHash), {
@@ -480,7 +477,7 @@ method: 'DELETE',
 headers: { 'Authorization': 'Bearer ' + adminToken }
 }, 6000);
 if (res.ok) {
-showToast(`Client ${label || truncateHash(tokenHash)} widerrufen`, 'success');
+showToast(`Kassen-Zugang ${label || truncateHash(tokenHash)} widerrufen`, 'success');
 refreshDashboard();
 } else {
 const err = await res.json().catch(() => ({}));
@@ -721,7 +718,7 @@ return badge('cyan', 'Gossip gelernt');
 return badge('amber', escapeHtml(s));
 }
 function renderNodeRow(n) {
-const roleBadge = n.is_local ? badge('purple', 'LOCAL') : (n.is_f2f ? badge('blue', 'F2F Friend') : badge('cyan', 'Shard'));
+const roleBadge = n.is_local ? badge('purple', 'LOCAL') : (n.is_f2f ? badge('blue', 'Knotenfreund') : badge('cyan', 'Shard'));
 const statusBadge = getNodeStatusBadge(n);
 const rttText = n.rtt_ms != null ? escapeHtml(n.rtt_ms) + ' ms' : '<span style="color:var(--text-muted);">-</span>';
 const failText = `<span style="${n.missing_count > 0 ? 'color:var(--amber);font-weight:600;' : ''}">${escapeHtml(n.missing_count)} / 3</span>`;
@@ -736,7 +733,7 @@ if (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connec
 actionBtns += ` <button class="btn btn-secondary btn-xs" style="margin-left:0.25rem;border-color:var(--green);color:var(--green);" data-addr="${safeAddr}" onclick="adminResetPeer(this.getAttribute('data-addr'))" title="Ausfall-Zähler zurücksetzen und heilen">🩹 Heilen</button>`;
 }
 if (n.is_f2f) {
-actionBtns += ` <button class="btn btn-danger btn-xs" style="margin-left:0.25rem;" data-pubkey="${safePubkey}" onclick="adminRemoveMeshPeer(this.getAttribute('data-pubkey'))" title="F2F-Freund entfernen">🗑️</button>`;
+actionBtns += ` <button class="btn btn-danger btn-xs" style="margin-left:0.25rem;" data-pubkey="${safePubkey}" onclick="adminRemoveMeshPeer(this.getAttribute('data-pubkey'))" title="Knotenfreund trennen">🗑️</button>`;
 }
 }
 const isProblem = (n.missing_count > 0 || n.connection_status.includes('Suspended') || n.connection_status.includes('Degrading'));
@@ -1096,6 +1093,7 @@ if (res.status === 304) {
 lastSuccessfulFetchTime = new Date();
 if (adminToken) {
 refreshAdminSessionTimestamp();
+fetchCollabData();
 }
 if (consecutiveFailures >= 3) showToast('Verbindung zum Knoten wiederhergestellt', 'success');
 consecutiveFailures = 0;
@@ -1407,7 +1405,7 @@ f2fClientsTbody.innerHTML = html;
 const sub = $('f2f-clients-count-sub');
 if (sub && cv) sub.innerHTML = `${d.f2f_clients.length} Wallets registriert &bull; REST Port <strong>${cv.api_port}</strong>`;
 } else {
-f2fClientsTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine Ingress-Client-Freunde registriert (Locks im Free Tier nutzen BLAKE3 PoW).</td></tr>';
+f2fClientsTbody.innerHTML = '<tr><td colspan="6" class="empty-cell">Keine bevorzugten Kassen- oder Wallet-Zugänge registriert (Locks im Free Tier nutzen BLAKE3 PoW).</td></tr>';
 }
 }
 setText('vouchers-count-sub', `${d.total_active_vouchers_count || 0} Gutscheine aktiv (Top 15 angezeigt)`);
@@ -1746,3 +1744,415 @@ refreshDashboard();
 if (currentActiveTab === 'tab-diagnostics') {
 startPhase2Pollers();
 }
+
+
+// --- Knotenfreunde: Richtungs-Sensorik, Hop-2-Umfeld & Postfach ---
+let currentCollabData = null;
+
+async function fetchCollabData() {
+if (!adminToken) {
+const container = $('collab-container');
+if (container) container.style.display = 'none';
+return;
+}
+try {
+const res = await fetchWithTimeout('/dashboard/admin/mesh/collab', {
+headers: { 'Authorization': 'Bearer ' + adminToken }
+}, 6000);
+if (res.ok) {
+currentCollabData = await res.json();
+renderCollabUI();
+}
+} catch (e) {
+console.warn('Fehler beim Laden der Knotenfreunde-Sensorik:', e);
+}
+}
+
+function renderCollabUI() {
+if (!adminToken || !currentCollabData) {
+const container = $('collab-container');
+if (container) container.style.display = 'none';
+return;
+}
+const container = $('collab-container');
+if (container) container.style.display = 'block';
+
+// 1. Bubble warning callout
+const bubble = $('collab-bubble-warning');
+if (bubble) {
+bubble.style.display = currentCollabData.is_closed_triangle_bubble ? 'flex' : 'none';
+}
+
+// 2. Sectors Table
+const tbody = $('collab-sectors-tbody');
+if (tbody) {
+if (!currentCollabData.sectors || currentCollabData.sectors.length === 0) {
+tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Keine Knotenfreunde konfiguriert.</td></tr>';
+} else {
+let html = '';
+for (const s of currentCollabData.sectors) {
+const safePubkey = escapeHtml(s.friend_pubkey);
+const safeAddr = s.friend_addr ? escapeHtml(s.friend_addr) : '<span style="color:var(--text-muted);">-</span>';
+
+// Status badge
+let statusBadge = s.is_connected ? badge('green', 'Verbunden') : badge('amber', 'Getrennt');
+if (s.active_non_responder_30m) {
+statusBadge += ' <div class="badge badge-red" style="margin-top:0.25rem;">⚠️ RPC-Timeout (≥30m)</div>';
+}
+
+// Direction / Compass
+let hopDist = 'Direkt (Hop 0)';
+if (s.hop_band === 'Hop1') {
+hopDist = 'Nah-Richtung (1 Hop)';
+} else if (s.hop_band === 'Hop2Plus') {
+hopDist = `Fern-Richtung (Ø ${s.avg_min_hops.toFixed(1)} Hops)`;
+}
+
+const badClass = s.n_bad > 0 ? 'color:var(--amber);font-weight:600;' : '';
+const compassText = `<div><strong>${s.n_seen}</strong> gesehen &bull; <strong>${s.n_tested}</strong> geprüft &bull; <span style="${badClass}"><strong>${s.n_bad}</strong> nicht erreichbar</span></div><div class="muted-sm" style="margin-top:0.2rem;">${hopDist}</div>`;
+
+// Hop-2 Info
+let hop2Text = '';
+if (s.hop2_shares_roster === false) {
+hop2Text = '<span class="badge badge-secondary">Ausgeblendet</span>';
+} else {
+const visCount = s.hop2_visible_neighbors ? s.hop2_visible_neighbors.length : 0;
+const hidCount = s.hop2_hidden_count || 0;
+hop2Text = `<div><strong>${visCount}</strong> sichtbar${hidCount > 0 ? ` <span class="muted-sm">(+${hidCount} ausgeblendet)</span>` : ''}</div>`;
+if (visCount > 0) {
+hop2Text += `<button class="btn btn-secondary btn-xs" style="margin-top:0.35rem;" data-pubkey="${safePubkey}" onclick="openHop2Modal(this.getAttribute('data-pubkey'))">🔍 Hop-2 Nachbarn (${visCount})</button>`;
+}
+}
+if (s.is_mega_hub) {
+hop2Text += '<div class="badge badge-amber" style="margin-top:0.25rem;">⚠️ Mega-Hub (>32 Peers)</div>';
+}
+if (s.unlisted_hop1_count > 0) {
+hop2Text += `<div class="badge badge-amber" style="margin-top:0.25rem;">⚠️ Ungemeldete Hop-1-Peers (${s.unlisted_hop1_count})</div>`;
+}
+
+// Actions
+let actionBtns = `<button class="btn btn-secondary btn-xs" data-pubkey="${safePubkey}" onclick="openF2fMessageComposer(this.getAttribute('data-pubkey'))">✉️ Nachricht</button>`;
+if (s.n_bad > 0) {
+const isHop2Plus = s.hop_band === 'Hop2Plus' ? 'true' : 'false';
+actionBtns += ` <button class="btn btn-secondary btn-xs" style="border-color:var(--blue);color:var(--cyan);margin-left:0.25rem;" data-pubkey="${safePubkey}" data-hop2plus="${isHop2Plus}" onclick="openF2fTraceComposer(this.getAttribute('data-pubkey'), this.getAttribute('data-hop2plus') === 'true')">📨 Spur senden</button>`;
+if (s.hop_band === 'Hop2Plus') {
+actionBtns += '<div class="muted-sm" style="font-size:0.75rem;margin-top:0.35rem;color:var(--cyan);">Fern-Richtung: Knotenfreund ist nur Durchleiter – Spur weitergeben statt Verbindung trennen.</div>';
+}
+}
+
+html += `<tr><td><div>${cTrunc(s.friend_pubkey)}</div><div class="muted-sm" style="margin-top:0.15rem;">${safeAddr}</div></td><td>${statusBadge}</td><td>${compassText}</td><td>${hop2Text}</td><td>${actionBtns}</td></tr>`;
+}
+tbody.innerHTML = html;
+}
+}
+
+// 3. Update filter select and render messages
+updateCollabFilterOptions();
+renderCollabMessages();
+}
+
+function updateCollabFilterOptions() {
+const select = $('collab-msg-filter');
+if (!select || !currentCollabData) return;
+const currentVal = select.value || 'ALL';
+const peers = new Set();
+if (currentCollabData.sectors) {
+currentCollabData.sectors.forEach(s => peers.add(s.friend_pubkey));
+}
+if (currentCollabData.messages) {
+currentCollabData.messages.forEach(m => peers.add(m.peer_pubkey));
+}
+
+let opts = '<option value="ALL">Alle Knotenfreunde</option>';
+peers.forEach(pk => {
+opts += `<option value="${escapeHtml(pk)}">${truncateHash(pk)}</option>`;
+});
+select.innerHTML = opts;
+select.value = currentVal;
+}
+
+function renderCollabMessages() {
+if (!currentCollabData) return;
+const badgeEl = $('f2f-msg-count-badge');
+const list = $('collab-messages-list');
+if (!list) return;
+
+const allMsgs = currentCollabData.messages || [];
+if (badgeEl) {
+badgeEl.innerText = `${allMsgs.length} Nachricht${allMsgs.length === 1 ? '' : 'en'}`;
+}
+
+const filter = $('collab-msg-filter')?.value || 'ALL';
+const filtered = filter === 'ALL' ? allMsgs : allMsgs.filter(m => m.peer_pubkey === filter);
+
+if (filtered.length === 0) {
+list.innerHTML = '<div class="empty-cell" style="padding:1.5rem 0;">Keine Nachrichten für diesen Filter vorhanden.</div>';
+return;
+}
+
+let html = '';
+for (const m of filtered) {
+const isOut = m.direction === 'Outbound';
+const dirBadge = isOut ? badge('cyan', 'Gesendet') : badge('blue', 'Eingehend');
+const safePeer = escapeHtml(m.peer_pubkey);
+const peerLabel = isOut ? `an Knotenfreund ${truncateHash(m.peer_pubkey)}` : `von Knotenfreund ${truncateHash(m.peer_pubkey)}`;
+const delivBadge = isOut ? (m.delivered ? badge('green', '✓ Zugestellt') : badge('amber', '⏳ Ausstehend (Reconnect)')) : '';
+const timeStr = formatEpochMillis(m.timestamp_ms);
+
+let traceBlock = '';
+if (m.trace_pubkeys && m.trace_pubkeys.length > 0) {
+let traceContent = `<div style="margin-top:0.4rem;font-weight:600;font-size:0.8rem;color:var(--cyan);">🔍 Angehängte Spur: ${m.trace_pubkeys.length} Knoten</div>`;
+if (m.trace_analysis) {
+const ta = m.trace_analysis;
+if (ta.locally_tested_healthy_count > 0) {
+traceContent += `<div class="callout callout-info" style="margin:0.35rem 0;font-size:0.8rem;">🛡️ <strong>Eigener Gegencheck:</strong> ${ta.locally_tested_healthy_count} von ${ta.total_queried} gemeldeten Knoten sind von deinem Knoten aus normal erreichbar (vermutlich NAT-/Routing-Problem beim Absender).</div>`;
+}
+if (ta.by_knotenfreund && ta.by_knotenfreund.length > 0) {
+traceContent += '<div style="margin-top:0.35rem;">';
+for (const hit of ta.by_knotenfreund) {
+const safeF = escapeHtml(hit.friend_pubkey);
+const safeCsv = escapeHtml(m.trace_pubkeys.join(','));
+const subText = hit.dominant_subnet ? ` &bull; Subnetz ${escapeHtml(hit.dominant_subnet)}` : '';
+traceContent += `<div class="f2f-trace-hit"><span>&bull; <strong>${hit.hit_count} von ${ta.total_queried} Knoten</strong> kommen über Knotenfreund <code class="code">${truncateHash(hit.friend_pubkey)}</code> (min. ${hit.min_hops} Hops${subText})</span><button class="btn btn-secondary btn-xs" data-friend="${safeF}" data-trace="${safeCsv}" onclick="forwardTraceTo(this.getAttribute('data-friend'), this.getAttribute('data-trace'))">📨 Spur weitergeben</button></div>`;
+}
+traceContent += '</div>';
+}
+}
+traceBlock = traceContent;
+}
+
+let replyBtn = '';
+if (!isOut) {
+replyBtn = `<div style="margin-top:0.4rem;"><button class="btn btn-secondary btn-xs" data-peer="${safePeer}" data-msgid="${m.msg_id}" onclick="replyToF2fMessage(this.getAttribute('data-peer'), this.getAttribute('data-msgid'))">↩️ Antworten</button></div>`;
+}
+
+html += `<div class="f2f-msg-card"><div class="f2f-msg-header"><div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">${dirBadge} <strong>${peerLabel}</strong> ${delivBadge}</div><div class="muted-sm">${timeStr}</div></div><div class="f2f-msg-text">${escapeHtml(m.text)}</div>${traceBlock}${replyBtn}</div>`;
+}
+
+list.innerHTML = html;
+}
+
+function updateF2fCharCount() {
+const input = $('f2f-msg-text-input');
+const counter = $('f2f-msg-char-counter');
+if (input && counter) {
+const len = input.value.length;
+counter.innerText = `${len} / 500`;
+counter.style.color = len > 480 ? 'var(--red)' : 'var(--text-muted)';
+}
+}
+
+function openF2fMessageComposer(targetPubkey, replyToId, initialText, traceKeys, isHop2Plus) {
+const targetInput = $('f2f-msg-target-pubkey');
+const replyInput = $('f2f-msg-reply-to-id');
+const dispInput = $('f2f-msg-recipient-display');
+const textInput = $('f2f-msg-text-input');
+const traceInput = $('f2f-msg-trace-input');
+const hint = $('f2f-msg-hint');
+
+if (targetInput) targetInput.value = targetPubkey || '';
+if (replyInput) replyInput.value = replyToId || '';
+if (dispInput) dispInput.value = targetPubkey ? `${truncateHash(targetPubkey)} (${targetPubkey})` : '';
+if (textInput) textInput.value = initialText || '';
+if (traceInput) traceInput.value = traceKeys ? (Array.isArray(traceKeys) ? traceKeys.join('\n') : traceKeys) : '';
+
+if (hint) {
+if (isHop2Plus) {
+hint.innerHTML = '🧭 <strong>Fern-Richtung:</strong> Dieser Knotenfreund ist nur Durchleiter. Spur bitte zur Prüfung weitergeben statt die Verbindung zu trennen.';
+hint.style.display = 'block';
+} else {
+hint.style.display = 'none';
+}
+}
+
+updateF2fCharCount();
+$('f2f-msg-modal')?.classList.add('active');
+}
+
+function openF2fTraceComposer(targetPubkey, isHop2Plus) {
+let sampleKeys = [];
+if (currentCollabData && currentCollabData.sectors) {
+const s = currentCollabData.sectors.find(sec => sec.friend_pubkey === targetPubkey);
+if (s && s.sample_unreachable_pubkeys) {
+sampleKeys = s.sample_unreachable_pubkeys;
+}
+}
+const prefillMsg = 'Hallo, mein Knoten sieht in deiner Netzrichtung einige Knoten, die auf Shard-Anfragen nicht antworten (evtl. Port 9090/NAT blockiert oder offline). Kannst du bitte kurz prüfen, ob diese Knoten bei dir erreichbar sind?';
+openF2fMessageComposer(targetPubkey, null, prefillMsg, sampleKeys, isHop2Plus);
+}
+
+function forwardTraceTo(targetPubkey, traceCsv) {
+const keys = traceCsv ? traceCsv.split(',').map(s => s.trim()).filter(Boolean) : [];
+const prefillMsg = 'Hallo, mir wurde eine Spur von nicht erreichbaren Knoten gemeldet, die über deine Netzrichtung laufen. Bitte prüfen.';
+openF2fMessageComposer(targetPubkey, null, prefillMsg, keys, false);
+}
+
+function replyToF2fMessage(peerPubkey, replyToMsgId) {
+openF2fMessageComposer(peerPubkey, replyToMsgId, '', [], false);
+}
+
+async function submitF2fMessage() {
+const targetPubkey = $('f2f-msg-target-pubkey')?.value.trim();
+const replyToIdStr = $('f2f-msg-reply-to-id')?.value.trim();
+const text = $('f2f-msg-text-input')?.value.trim();
+const rawTrace = $('f2f-msg-trace-input')?.value.trim();
+
+if (!targetPubkey) {
+showToast('Kein Empfänger ausgewählt', 'error');
+return;
+}
+if (!text || text.length === 0) {
+showToast('Bitte einen Nachrichtentext eingeben', 'error');
+return;
+}
+if (text.length > 500) {
+showToast('Nachrichtentext darf maximal 500 Zeichen lang sein', 'error');
+return;
+}
+
+let trace_pubkeys = null;
+if (rawTrace) {
+trace_pubkeys = rawTrace
+.split(/[\n,;]+/)
+.map(s => s.trim())
+.filter(Boolean);
+if (trace_pubkeys.length > 32) {
+showToast('Maximal 32 Spur-Knoten erlaubt', 'error');
+return;
+}
+}
+
+const reply_to_msg_id = replyToIdStr ? parseInt(replyToIdStr, 10) : null;
+
+const btn = $('f2f-msg-send-btn');
+if (btn) btn.disabled = true;
+
+try {
+const res = await fetchWithTimeout('/dashboard/admin/mesh/peers/' + encodeURIComponent(targetPubkey) + '/message', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
+body: JSON.stringify({ text, trace_pubkeys, reply_to_msg_id: isNaN(reply_to_msg_id) ? null : reply_to_msg_id })
+}, 6000);
+
+if (res.ok) {
+closeModal('f2f-msg-modal');
+showToast('Nachricht erfolgreich an Knotenfreund gesendet', 'success');
+fetchCollabData();
+} else {
+const err = await res.json().catch(() => ({}));
+showToast('Fehler: ' + (err.message || res.statusText), 'error');
+}
+} catch (e) {
+showToast('Fehler: ' + e.message, 'error');
+} finally {
+if (btn) btn.disabled = false;
+}
+}
+
+function openHop2Modal(pubkey) {
+if (!currentCollabData || !currentCollabData.sectors) return;
+const s = currentCollabData.sectors.find(sec => sec.friend_pubkey === pubkey);
+if (!s) return;
+
+setText('f2f-hop2-modal-title', `🔍 Knotenfreunde 2. Grades (${truncateHash(pubkey)})`);
+const list = $('f2f-hop2-list');
+if (list) {
+const neighbors = s.hop2_visible_neighbors || [];
+if (neighbors.length === 0) {
+list.innerHTML = '<div class="empty-cell" style="padding:1rem 0;">Keine sichtbaren Hop-2-Nachbarn vorhanden.</div>';
+} else {
+let html = '';
+for (const n of neighbors) {
+const safeN = escapeHtml(n);
+html += `<div style="display:flex;align-items:center;justify-content:space-between;background:var(--surface-alt);padding:0.4rem 0.6rem;border-radius:0.375rem;font-size:0.8125rem;"><span class="code">${safeN}</span><button class="btn btn-secondary btn-xs" data-key="${safeN}" onclick="copyTextToClipboard(this.getAttribute('data-key')).then(() => showToast('NodePubKey kopiert', 'success'))">Kopieren</button></div>`;
+}
+list.innerHTML = html;
+}
+}
+$('f2f-hop2-modal')?.classList.add('active');
+}
+
+function openTraceAnalyzeModal() {
+const input = $('trace-analyze-input');
+const resDiv = $('trace-analyze-results');
+if (input) input.value = '';
+if (resDiv) {
+resDiv.innerHTML = '';
+resDiv.style.display = 'none';
+}
+$('f2f-trace-modal')?.classList.add('active');
+}
+
+async function submitTraceAnalyze() {
+const input = $('trace-analyze-input');
+const raw = input?.value.trim() || '';
+if (!raw) {
+showToast('Bitte mindestens einen NodePubKey eingeben', 'error');
+return;
+}
+const pubkeys = raw
+.split(/[\n,;]+/)
+.map(s => s.trim())
+.filter(Boolean);
+
+if (pubkeys.length === 0) {
+showToast('Keine gültigen Keys gefunden', 'error');
+return;
+}
+if (pubkeys.length > 64) {
+showToast('Maximal 64 NodePubKeys erlaubt', 'error');
+return;
+}
+
+try {
+const res = await fetchWithTimeout('/dashboard/admin/mesh/trace-analyze', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
+body: JSON.stringify({ pubkeys })
+}, 6000);
+
+if (res.ok) {
+const report = await res.json();
+renderTraceAnalyzeResults(report);
+} else {
+const err = await res.json().catch(() => ({}));
+showToast('Fehler: ' + (err.message || res.statusText), 'error');
+}
+} catch (e) {
+showToast('Fehler: ' + e.message, 'error');
+}
+}
+
+function renderTraceAnalyzeResults(r) {
+const resDiv = $('trace-analyze-results');
+if (!resDiv) return;
+
+let html = '<div class="inspect-box" style="margin-top:0.75rem;">';
+html += `<div style="font-weight:600;margin-bottom:0.4rem;">Ergebnis der Spur-Analyse (${r.total_queried} Knoten abgefragt):</div>`;
+html += `<div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.6rem;">`;
+html += `<div>🟢 Lokal gesund/erreichbar: <strong>${r.locally_tested_healthy_count}</strong></div>`;
+html += `<div>🔴 Lokal nicht erreichbar: <strong>${r.locally_unreachable_count}</strong></div>`;
+html += `<div>⚪ Unbekannt: <strong>${r.unknown_count}</strong></div>`;
+html += `</div>`;
+
+if (r.locally_tested_healthy_count > 0) {
+html += `<div class="callout callout-info" style="font-size:0.8rem;margin-bottom:0.6rem;">🛡️ <strong>Eigener Gegencheck:</strong> ${r.locally_tested_healthy_count} Knoten antworten auf deinem Knoten normal. Dies deutet auf ein lokales NAT- oder Firewall-Problem auf Seiten des Melder-Netzes hin.</div>`;
+}
+
+if (r.by_knotenfreund && r.by_knotenfreund.length > 0) {
+html += '<div style="font-weight:600;font-size:0.8rem;margin-bottom:0.35rem;">Richtungs-Treffer nach Knotenfreund:</div>';
+for (const hit of r.by_knotenfreund) {
+const safeF = escapeHtml(hit.friend_pubkey);
+const subText = hit.dominant_subnet ? ` &bull; Subnetz ${escapeHtml(hit.dominant_subnet)}` : '';
+html += `<div class="f2f-trace-hit"><span>&bull; <strong>${hit.hit_count} von ${r.total_queried} Knoten</strong> kommen über Knotenfreund <code class="code">${truncateHash(hit.friend_pubkey)}</code> (min. ${hit.min_hops} Hops${subText})</span></div>`;
+}
+} else {
+html += '<div class="muted-sm">Keine Zuordnung zu bekannten Knotenfreunden möglich.</div>';
+}
+
+html += '</div>';
+resDiv.innerHTML = html;
+resDiv.style.display = 'block';
+}
+
+// Hook into admin and refresh polling

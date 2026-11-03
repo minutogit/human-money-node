@@ -318,6 +318,18 @@ pub fn build_operator_router(state: AppState) -> Router {
             delete(crate::api::dashboard::admin_remove_mesh_peer),
         )
         .route(
+            "/dashboard/admin/mesh/peers/:key/message",
+            post(crate::api::dashboard::admin_send_f2f_message),
+        )
+        .route(
+            "/dashboard/admin/mesh/collab",
+            get(crate::api::dashboard::admin_get_mesh_collab),
+        )
+        .route(
+            "/dashboard/admin/mesh/trace-analyze",
+            post(crate::api::dashboard::admin_trace_analyze),
+        )
+        .route(
             "/dashboard/admin/ingress/clients",
             post(crate::api::dashboard::admin_add_ingress_client),
         )

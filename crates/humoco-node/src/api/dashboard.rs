@@ -16,7 +16,8 @@ use crate::api::qr::generate_qr_svg;
 use crate::api::routes::AppState;
 use crate::api::system_stats::{SparklinesDto, SystemStatsDto};
 pub use crate::ingress::F2fClientDto;
-use crate::network::manager::NetworkNodeDto;
+use crate::network::f2f_collab::{F2fMessageDirection, F2fStoredMessage};
+use crate::network::manager::{KnotenfreundSectorReport, NetworkNodeDto, TraceAnalysisReport};
 use crate::network::peer::PeerConnectionType;
 use crate::storage::recent::{RecentLockStatus, RecentLockSummary, VoucherSummaryDto};
 
@@ -1510,6 +1511,337 @@ pub async fn admin_ping_peer(
         )
             .into_response()
     }
+}
+
+/// Enriched F2F operator dialogue message with optional trace counter-fact analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedF2fMessageDto {
+    pub msg_id: u64,
+    pub peer_pubkey: String,
+    pub direction: F2fMessageDirection,
+    pub timestamp_ms: u64,
+    pub text: String,
+    pub trace_pubkeys: Vec<String>,
+    pub reply_to_msg_id: Option<u64>,
+    pub delivered: bool,
+    pub trace_analysis: Option<TraceAnalysisReport>,
+}
+
+/// Mesh collaboration and topology overview response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminMeshCollabResponse {
+    pub share_neighbor_roster: bool,
+    pub is_closed_triangle_bubble: bool,
+    pub sectors: Vec<KnotenfreundSectorReport>,
+    pub messages: Vec<EnrichedF2fMessageDto>,
+}
+
+/// Request payload to send an F2F operator message.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendF2fMessageRequest {
+    pub text: String,
+    pub trace_pubkeys: Option<Vec<String>>,
+    pub reply_to_msg_id: Option<u64>,
+}
+
+/// Request payload to analyze a list of trace public keys.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TraceAnalyzeRequest {
+    pub pubkeys: Vec<String>,
+}
+
+/// Handler for GET /dashboard/admin/mesh/collab
+pub async fn admin_get_mesh_collab(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let Some(ref pm) = state.peer_manager else {
+        return (
+            StatusCode::OK,
+            Json(AdminMeshCollabResponse {
+                share_neighbor_roster: true,
+                is_closed_triangle_bubble: false,
+                sectors: Vec::new(),
+                messages: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let self_pubkey = *state.identity.node_pubkey();
+    let share_neighbor_roster = pm.share_neighbor_roster();
+    let is_closed_triangle_bubble = pm.is_closed_triangle_bubble(&self_pubkey).await;
+    let sectors = pm.compute_knotenfreund_sectors().await;
+
+    // Collect all stored messages across all Knotenfreunde
+    let raw_messages_map = pm.f2f_collab().lock().inbox().list_all_messages();
+    let mut all_messages: Vec<F2fStoredMessage> = raw_messages_map
+        .into_values()
+        .flatten()
+        .collect();
+
+    // Sort newest first
+    all_messages.sort_by(|a, b| {
+        b.timestamp_ms
+            .cmp(&a.timestamp_ms)
+            .then_with(|| b.msg_id.cmp(&a.msg_id))
+    });
+
+    let mut enriched_messages = Vec::with_capacity(all_messages.len());
+    for msg in all_messages {
+        let trace_analysis = if !msg.trace_pubkeys.is_empty() {
+            Some(pm.analyze_trace_pubkeys(&msg.trace_pubkeys).await)
+        } else {
+            None
+        };
+        enriched_messages.push(EnrichedF2fMessageDto {
+            msg_id: msg.msg_id,
+            peer_pubkey: hex::encode(msg.peer_pubkey),
+            direction: msg.direction,
+            timestamp_ms: msg.timestamp_ms,
+            text: msg.text,
+            trace_pubkeys: msg.trace_pubkeys.iter().map(hex::encode).collect(),
+            reply_to_msg_id: msg.reply_to_msg_id,
+            delivered: msg.delivered,
+            trace_analysis,
+        });
+    }
+
+    (
+        StatusCode::OK,
+        Json(AdminMeshCollabResponse {
+            share_neighbor_roster,
+            is_closed_triangle_bubble,
+            sectors,
+            messages: enriched_messages,
+        }),
+    )
+        .into_response()
+}
+
+/// Handler for POST /dashboard/admin/mesh/peers/:key/message
+pub async fn admin_send_f2f_message(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(key): Path<String>,
+    Json(payload): Json<SendF2fMessageRequest>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let key_bytes = match crate::api::keys::parse_pubkey(&key) {
+        Ok(arr) => arr,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "BadRequest",
+                    "message": format!("Invalid public key: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(ref pm) = state.peer_manager else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "PeerManagerUnavailable",
+                "message": "P2P peer manager is not initialized"
+            })),
+        )
+            .into_response();
+    };
+
+    if !pm.is_f2f_friend(&key_bytes).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "NotAFriend",
+                "message": "Specified peer is not a configured Knotenfreund"
+            })),
+        )
+            .into_response();
+    }
+
+    let trimmed_text = payload.text.trim();
+    if trimmed_text.is_empty() || payload.text.len() > 500 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "BadRequest",
+                "message": "Message text must be between 1 and 500 UTF-8 bytes"
+            })),
+        )
+            .into_response();
+    }
+
+    if payload.text.chars().any(|c| c.is_ascii_control() && c != '\n' && c != '\r' && c != '\t') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "BadRequest",
+                "message": "Message text contains forbidden control characters"
+            })),
+        )
+            .into_response();
+    }
+
+    let mut trace_bytes = Vec::new();
+    if let Some(keys) = payload.trace_pubkeys {
+        if keys.len() > 32 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "BadRequest",
+                    "message": "Too many trace pubkeys (maximum 32 allowed)"
+                })),
+            )
+                .into_response();
+        }
+        for pk_hex in keys {
+            match crate::api::keys::parse_pubkey(&pk_hex) {
+                Ok(arr) => trace_bytes.push(arr),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "BadRequest",
+                            "message": format!("Invalid trace public key '{}': {}", pk_hex, e)
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    let stored = if let Some(ref transport) = state.transport {
+        match transport
+            .send_f2f_operator_message(
+                key_bytes,
+                payload.text.clone(),
+                trace_bytes.clone(),
+                payload.reply_to_msg_id,
+            )
+            .await
+        {
+            Ok(msg) => msg,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "SendFailed",
+                        "message": format!("Failed to send F2F message: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        // Fallback for unit tests without active transport
+        let msg_id = rand::random::<u64>();
+        let self_pubkey = *state.identity.node_pubkey();
+        let now_ms = pm.net_time_ms();
+        let operator_payload = crate::network::framing::F2fOperatorMessagePayload {
+            msg_id,
+            sender_pubkey: self_pubkey,
+            timestamp_ms: now_ms,
+            text: payload.text.clone(),
+            trace_pubkeys: trace_bytes.clone(),
+            reply_to_msg_id: payload.reply_to_msg_id,
+        };
+        pm.f2f_collab()
+            .lock()
+            .inbox_mut()
+            .queue_outbound(key_bytes, operator_payload, false)
+    };
+
+    let hex_key = hex::encode(key_bytes);
+    state.event_log.record(
+        EventKind::System,
+        HealthLevel::Ok,
+        format!("Sent F2F message to Knotenfreund {}", hex_key),
+    );
+
+    let trace_analysis = if !stored.trace_pubkeys.is_empty() {
+        Some(pm.analyze_trace_pubkeys(&stored.trace_pubkeys).await)
+    } else {
+        None
+    };
+
+    let dto = EnrichedF2fMessageDto {
+        msg_id: stored.msg_id,
+        peer_pubkey: hex::encode(stored.peer_pubkey),
+        direction: stored.direction,
+        timestamp_ms: stored.timestamp_ms,
+        text: stored.text,
+        trace_pubkeys: stored.trace_pubkeys.iter().map(hex::encode).collect(),
+        reply_to_msg_id: stored.reply_to_msg_id,
+        delivered: stored.delivered,
+        trace_analysis,
+    };
+
+    (StatusCode::OK, Json(dto)).into_response()
+}
+
+/// Handler for POST /dashboard/admin/mesh/trace-analyze
+pub async fn admin_trace_analyze(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<TraceAnalyzeRequest>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    if payload.pubkeys.len() > 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "BadRequest",
+                "message": "Too many pubkeys for trace analysis (maximum 64 allowed)"
+            })),
+        )
+            .into_response();
+    }
+
+    let mut parsed_keys = Vec::with_capacity(payload.pubkeys.len());
+    for pk_hex in &payload.pubkeys {
+        match crate::api::keys::parse_pubkey(pk_hex) {
+            Ok(arr) => parsed_keys.push(arr),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "BadRequest",
+                        "message": format!("Invalid public key '{}': {}", pk_hex, e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let Some(ref pm) = state.peer_manager else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "PeerManagerUnavailable",
+                "message": "P2P peer manager is not initialized"
+            })),
+        )
+            .into_response();
+    };
+
+    let report = pm.analyze_trace_pubkeys(&parsed_keys).await;
+    (StatusCode::OK, Json(report)).into_response()
 }
 
 /// Computes a fast cryptographic ETag fingerprint for dashboard data.

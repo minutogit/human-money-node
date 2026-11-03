@@ -61,6 +61,8 @@ async fn test_alert_config_debug_masks_token() {
         peer_upgrade_threshold_percent: 50,
         min_peers_for_alert: 3,
         notify_on_sunset_warning: true,
+        notify_on_f2f_messages: true,
+        notify_on_peer_anomalies: true,
     };
     let debug_str = format!("{:?}", config);
     assert!(
@@ -91,6 +93,8 @@ async fn test_webhook_success_when_threshold_reached() {
         peer_upgrade_threshold_percent: 50,
         min_peers_for_alert: 3,
         notify_on_sunset_warning: true,
+        notify_on_f2f_messages: true,
+        notify_on_peer_anomalies: true,
     };
 
     let dispatcher = AlertDispatcher::new(config, temp.path().to_path_buf());
@@ -129,6 +133,8 @@ async fn test_cooldown_suppresses_duplicate_alerts() {
         peer_upgrade_threshold_percent: 50,
         min_peers_for_alert: 3,
         notify_on_sunset_warning: true,
+        notify_on_f2f_messages: true,
+        notify_on_peer_anomalies: true,
     };
 
     let dispatcher = AlertDispatcher::new(config, temp.path().to_path_buf());
@@ -176,6 +182,8 @@ async fn test_no_alert_when_too_few_peers() {
         peer_upgrade_threshold_percent: 50,
         min_peers_for_alert: 3,
         notify_on_sunset_warning: true,
+        notify_on_f2f_messages: true,
+        notify_on_peer_anomalies: true,
     };
 
     let dispatcher = AlertDispatcher::new(config, temp.path().to_path_buf());
@@ -227,6 +235,8 @@ async fn test_cooldown_persistence_across_dispatcher_instances() {
         peer_upgrade_threshold_percent: 50,
         min_peers_for_alert: 1,
         notify_on_sunset_warning: true,
+        notify_on_f2f_messages: true,
+        notify_on_peer_anomalies: true,
     };
 
     let d1 = AlertDispatcher::new(config.clone(), data_dir.clone());

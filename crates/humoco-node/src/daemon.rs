@@ -575,6 +575,12 @@ impl NodeDaemon {
         // Provisional -> Final transition stays strictly coupled to Sync-Readiness.
         peer_manager.set_local_sync_ready(initial_sync_ready);
 
+        let alert_dispatcher = std::sync::Arc::new(crate::alert::AlertDispatcher::new(
+            self.config.alerts.clone(),
+            self.config.storage.data_dir.clone(),
+        ));
+        peer_manager.set_alert_dispatcher(alert_dispatcher.clone());
+
         // Background DNS / DynDNS peer re-resolution task (every 10 minutes)
         let dns_pm = peer_manager.clone();
         let dns_cancel = self.cancel_token.clone();
@@ -952,10 +958,9 @@ impl NodeDaemon {
         cleanup.producer(&ttl_prune_handle);
 
         // 3.5 Operator alerts (Telegram & webhook) with 15-minute hysteresis and interval
-        let alert_config = self.config.alerts.clone();
-        let alert_data_dir = self.config.storage.data_dir.clone();
         let alert_pm = peer_manager.clone();
         let alert_cancel = self.cancel_token.clone();
+        let dispatcher = alert_dispatcher.clone();
         let alert_handle = tokio::spawn(async move {
             // 15-minute startup hysteresis
             tokio::select! {
@@ -965,7 +970,6 @@ impl NodeDaemon {
             if alert_cancel.is_cancelled() {
                 return;
             }
-            let dispatcher = crate::alert::AlertDispatcher::new(alert_config, alert_data_dir);
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // First tick after hysteresis is immediate; subsequent every 15 min
@@ -983,6 +987,38 @@ impl NodeDaemon {
                         // Real version comparison can be added when peer versions are gossiped.
                         let upgraded_peers = total_peers;
                         dispatcher.check_and_alert_outdated(total_peers, upgraded_peers).await;
+
+                        // Check Knotenfreund directional sectors & unresponsiveness (Slice 1)
+                        let sectors = alert_pm.compute_knotenfreund_sectors().await;
+                        for sector in sectors {
+                            let friend_hex = &sector.friend_pubkey;
+                            let short_id = if friend_hex.len() >= 12 { &friend_hex[..12] } else { friend_hex.as_str() };
+                            if sector.active_non_responder_30m {
+                                let msg = format!(
+                                    "Knotenfreund {} is actively unresponsive (>30m RPC failures while QUIC connected).",
+                                    short_id
+                                );
+                                dispatcher.trigger_scoped(
+                                    crate::alert::AlertKind::KnotenfreundUnresponsive,
+                                    Some(friend_hex),
+                                    &msg,
+                                ).await;
+                            }
+                            if sector.severity == crate::network::SectorSeverity::Crit {
+                                let msg = format!(
+                                    "Directional sector behind Knotenfreund {} exhibits critical health anomaly (bad: {}/{}, exclusive bad: {}).",
+                                    short_id,
+                                    sector.n_bad,
+                                    sector.n_tested,
+                                    sector.exclusive_bad_count,
+                                );
+                                dispatcher.trigger_scoped(
+                                    crate::alert::AlertKind::DirectionalSectorAnomaly,
+                                    Some(friend_hex),
+                                    &msg,
+                                ).await;
+                            }
+                        }
                     }
                 }
             }

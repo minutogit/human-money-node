@@ -43,7 +43,7 @@ use humoco_node::{
     storage::{DualTierEngine, RedbStorage},
 };
 use humoco_sim_core::{
-    fraud::{compute_ingress_envelope_digest, compute_ingress_envelope_digest_v2, FraudProofPayload, IngressEnvelopeEvidence},
+    fraud::{compute_ingress_envelope_digest_v2, FraudProofPayload, IngressEnvelopeEvidence},
     wire::{MsgType, WireHeader},
 };
 
@@ -59,9 +59,6 @@ fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
     let mut hash = Sha256::new();
     hash.update(req.transaction_hash);
     hash.update(req.sender_ephemeral_pub);
-    if let Some(receiver) = req.receiver_ephemeral_pub_hash {
-        hash.update(receiver);
-    }
     hash.update(req.deletable_at.as_deref().unwrap().as_bytes());
     req.layer2_voucher_id = hex::encode(hash.finalize());
     let mut proof = humoco_proto::causal::CausalOutputProof {
@@ -70,8 +67,8 @@ fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
         transaction_id: req.transaction_hash,
         state_hash: req.transaction_hash,
         sender_pubkey: req.sender_ephemeral_pub,
-        receiver_pubkey_hash: req.receiver_ephemeral_pub_hash,
-        change_pubkey_hash: req.change_ephemeral_pub_hash,
+        receiver_pubkey_hash: None,
+        change_pubkey_hash: None,
         root_valid_until_ms: req.deletable_at.as_ref().unwrap().parse().unwrap(),
         is_root: true,
         signature: [0; 64],
@@ -101,8 +98,6 @@ fn make_test_hmc_genesis(
         transaction_hash: tx_hash,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -272,16 +267,17 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
 
     let evidences: Vec<IngressEnvelopeEvidence> = records
         .iter()
-        .map(|&(day, seq, cum, prev, ts)| {
+        .map(|&(day, seq, cum, _prev, ts)| {
             let op_hash = *blake3::hash(&seq.to_le_bytes()).as_bytes();
-            let digest = compute_ingress_envelope_digest(
+            let digest = compute_ingress_envelope_digest_v2(
                 &gateway_pubkey,
                 day,
-                seq as u32,
-                cum,
-                prev,
-                0,
+                seq,
                 ts,
+                cum,
+                0,
+                100,
+                false,
                 &op_hash,
             );
             let signature = signing_key.sign(&digest).to_bytes();
@@ -289,16 +285,12 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
                 gateway_pubkey,
                 epoch_day: day,
                 epoch_seq: seq,
-                cumulative_micro_byte_years: cum,
-                prev_day_final_bytes: prev,
-                current_anl_24h: 0,
                 timestamp_ms: ts,
-                declared_write_ema_micro_bj: 0,
+                declared_write_ema_micro_bj: cum,
                 declared_read_ema_credits: 0,
                 footprint_micro_bj: 100,
                 is_read: false,
                 op_hash,
-                lock_hash: op_hash,
                 signature,
             }
         })
@@ -311,13 +303,11 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
                 FraudProofPayload::new_ingress_counter_conflict(ev_a.clone(), ev_b.clone());
             assert!(
                 !proof.verify_ingress_counter_conflict(),
-                "False-positive fraud detected between honest envelopes! A: day={}, seq={}, cum={} vs B: day={}, seq={}, cum={}",
+                "False-positive fraud detected between honest envelopes! A: day={}, seq={} vs B: day={}, seq={}",
                 ev_a.epoch_day,
                 ev_a.epoch_seq,
-                ev_a.cumulative_micro_byte_years,
                 ev_b.epoch_day,
-                ev_b.epoch_seq,
-                ev_b.cumulative_micro_byte_years
+                ev_b.epoch_seq
             );
         }
     }

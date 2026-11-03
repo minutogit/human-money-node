@@ -280,8 +280,6 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         transaction_hash: [1; 32],
         is_genesis: true,
         sender_ephemeral_pub: *identity_client.node_pubkey(),
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: None,
         trap_s: None,
@@ -466,8 +464,6 @@ async fn test_phase4_adversarial_5x_whale_limit_flooding() {
             transaction_hash: [1; 32],
             is_genesis: true,
             sender_ephemeral_pub: *identity_client.node_pubkey(),
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -579,19 +575,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     // 1. Initial Heartbeat anchors write EMA at 10_000_000 (epoch-bound, 30s freshness)
     let t1 = pm_shard.net_time_ms();
     let initial_write_ema = 10_000_000u64;
-    let digest1 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-        identity_client.node_pubkey(),
-        0,
-        0,
-        t1,
-        initial_write_ema,
-        1000,
-        0,
-        false,
-        &[0u8; 32],
-    );
-    let sig1 = identity_client.signing_key().sign(&digest1).to_bytes();
-    let hb_wire = humoco_node::network::framing::HeartbeatWirePayload {
+    let mut hb_wire = humoco_node::network::framing::HeartbeatWirePayload {
         gateway_advertisement: None,
         signing_checkpoint: None,
         node_id: *identity_client.node_pubkey(),
@@ -599,7 +583,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         timestamp_ms: t1,
         declared_write_ema_micro_bj: initial_write_ema,
         declared_read_ema_credits: 1000,
-        signature: sig1,
+        signature: [0u8; 64],
         supported_suites_mask: 0,
         piggyback_observations: Vec::new(),
         pow_nonce: 0,
@@ -607,6 +591,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
+    hb_wire.sign_origin(&identity_client, t1);
     let hb_payload = bincode::serialize(&hb_wire).unwrap();
     let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, hb_payload.len() as u32);
     handler_shard
@@ -642,8 +627,6 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         transaction_hash: [2; 32],
         is_genesis: true,
         sender_ephemeral_pub: *identity_client.node_pubkey(),
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: None,
         trap_s: None,
@@ -805,8 +788,6 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         transaction_hash: [10; 32],
         is_genesis: true,
         sender_ephemeral_pub: *identity_g.node_pubkey(),
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: None,
         trap_s: None,
@@ -919,8 +900,6 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         transaction_hash: [20; 32],
         is_genesis: true,
         sender_ephemeral_pub: *identity_g.node_pubkey(),
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: None,
         trap_s: None,

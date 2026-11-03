@@ -78,10 +78,8 @@ fn compute_format_bits() -> u16 {
     ((data << 10) | rem) ^ 0x5412
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 struct QrVersionSpec {
-    version: usize,
     size: usize,
     alignment_center: usize,
     total_codewords: usize,
@@ -98,7 +96,6 @@ impl QrVersionSpec {
         if len <= 53 {
             // Version 3-L (29x29): 55 data, 15 EC (1 block), total 70
             Self {
-                version: 3,
                 size: 29,
                 alignment_center: 22,
                 total_codewords: 70,
@@ -110,7 +107,6 @@ impl QrVersionSpec {
         } else if len <= 78 {
             // Version 4-L (33x33): 80 data, 20 EC (1 block), total 100
             Self {
-                version: 4,
                 size: 33,
                 alignment_center: 26,
                 total_codewords: 100,
@@ -122,7 +118,6 @@ impl QrVersionSpec {
         } else if len <= 106 {
             // Version 5-L (37x37): 108 data, 26 EC (1 block), total 134
             Self {
-                version: 5,
                 size: 37,
                 alignment_center: 30,
                 total_codewords: 134,
@@ -134,7 +129,6 @@ impl QrVersionSpec {
         } else {
             // Version 6-L (41x41): 136 data (2 blocks of 68), 36 EC (2 blocks of 18), total 172
             Self {
-                version: 6,
                 size: 41,
                 alignment_center: 34,
                 total_codewords: 172,
@@ -496,25 +490,21 @@ mod tests {
     fn test_qr_versions_selection() {
         // V3 (<= 53 B)
         let v3 = QrVersionSpec::for_text_len(40);
-        assert_eq!(v3.version, 3);
         assert_eq!(v3.size, 29);
         assert_eq!(v3.blocks, 1);
 
         // V4 (<= 78 B)
         let v4 = QrVersionSpec::for_text_len(60);
-        assert_eq!(v4.version, 4);
         assert_eq!(v4.size, 33);
         assert_eq!(v4.blocks, 1);
 
         // V5 (<= 106 B)
         let v5 = QrVersionSpec::for_text_len(90);
-        assert_eq!(v5.version, 5);
         assert_eq!(v5.size, 37);
         assert_eq!(v5.blocks, 1);
 
         // V6 (<= 134 B)
         let v6 = QrVersionSpec::for_text_len(120);
-        assert_eq!(v6.version, 6);
         assert_eq!(v6.size, 41);
         assert_eq!(v6.blocks, 2);
     }

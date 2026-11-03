@@ -1,5 +1,4 @@
 //! Passive discovery is authenticated heartbeat data, never a third gossip stream.
-use ed25519_dalek::Signer;
 use humoco_node::{
     api::{build_router, AppState},
     identity::NodeIdentity,
@@ -104,17 +103,6 @@ async fn signed_passive_gateway_publication_arrives_over_quic_and_tampering_is_i
     source_net.spawn_accept_loop();
     receiver_net.spawn_accept_loop();
     let now = source_pm.net_time_ms();
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-        source.node_pubkey(),
-        0,
-        0,
-        now,
-        0,
-        0,
-        0,
-        false,
-        &[0; 32],
-    );
     source_net
         .send_heartbeat_to(
             receiver_net.local_addr().unwrap(),
@@ -123,7 +111,7 @@ async fn signed_passive_gateway_publication_arrives_over_quic_and_tampering_is_i
             1,
             0,
             0,
-            source.signing_key().sign(&digest).to_bytes(),
+            [0u8; 64],
             now,
             vec![],
         )
@@ -155,18 +143,7 @@ async fn signed_passive_gateway_publication_arrives_over_quic_and_tampering_is_i
         signing_checkpoint: None,
         gateway_advertisement: Some(ad),
     };
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-        source.node_pubkey(),
-        0,
-        0,
-        hb.timestamp_ms,
-        0,
-        0,
-        0,
-        false,
-        &[0; 32],
-    );
-    hb.signature = source.signing_key().sign(&digest).to_bytes();
+    hb.sign_origin(&source, hb.timestamp_ms);
     let bytes = bincode::serialize(&hb).unwrap();
     let conn = source_net
         .connect_peer(receiver_net.local_addr().unwrap())

@@ -2588,7 +2588,11 @@ impl DualTierEngine {
             }
 
             let raw_json = serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null);
-            let receiver_pub_hex = entry.receiver_ephemeral_pub_hash.map(hex::encode);
+            let receiver_pub_hex = entry
+                .causal_output
+                .as_ref()
+                .and_then(|c| c.receiver_pubkey_hash)
+                .map(hex::encode);
 
             hops.push(VoucherLockHopDto {
                 lookup_tag: tag,
@@ -3364,8 +3368,6 @@ mod exact_hmc_durability_tests {
             layer2_voucher_id: "exact-durability".into(),
             t_id: [child; 32],
             sender_ephemeral_pub: [7; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -3571,8 +3573,6 @@ mod confirmation_class_precedence_tests {
             layer2_voucher_id: VOUCHER.into(),
             t_id: [11u8; 32],
             sender_ephemeral_pub: key.verifying_key().to_bytes(),
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0u8; 64],
             trap_r: None,
             trap_s: None,
@@ -3602,8 +3602,6 @@ mod confirmation_class_precedence_tests {
             layer2_voucher_id: VOUCHER.into(),
             t_id,
             sender_ephemeral_pub: key.verifying_key().to_bytes(),
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0u8; 64],
             trap_r: None,
             trap_s: None,
@@ -3766,8 +3764,6 @@ mod confirmation_class_precedence_tests {
             layer2_voucher_id: "class-promotion-voucher".into(),
             t_id: [11u8; 32],
             sender_ephemeral_pub: key.verifying_key().to_bytes(),
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0u8; 64],
             trap_r: None,
             trap_s: None,

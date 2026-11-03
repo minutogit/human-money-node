@@ -103,8 +103,6 @@ fn make_hmc_genesis(
         transaction_hash: tx_hash,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -494,8 +492,9 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
             let vk = if att.node_id == gateway_id.node_id_u16() {
                 *gateway_id.verifying_key()
             } else {
+                let pk = att.node_pubkey_bytes().expect("32-byte pubkey in attestation");
                 pm_gw
-                    .get_peer_verifying_key(att.node_id)
+                    .get_peer_verifying_key_by_node_id(&pk)
                     .await
                     .expect("verifying key for FINAL signer")
             };
@@ -614,7 +613,6 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
         humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation(att_a, att_b);
     // Frame the real victim pubkey as perpetrator.
     forged.perpetrator_node_id = victim_pubkey;
-    forged.perpetrator = victim_u16;
     // Sanity: simulator fallback verifies, strict Ed25519 does not.
     assert!(
         forged.verify(),
@@ -793,8 +791,6 @@ async fn test_phase11d_shard_digest_isolation_wire() {
                     layer2_voucher_id: voucher_id.into(),
                     t_id,
                     sender_ephemeral_pub: [0x55; 32],
-                    receiver_ephemeral_pub_hash: None,
-                    change_ephemeral_pub_hash: None,
                     layer2_signature: [0; 64],
                     trap_r: None,
                     trap_s: None,
@@ -844,8 +840,6 @@ async fn test_phase11d_shard_digest_isolation_wire() {
                 layer2_voucher_id: "voucher_same".into(),
                 t_id,
                 sender_ephemeral_pub: [0xA5; 32],
-                receiver_ephemeral_pub_hash: None,
-                change_ephemeral_pub_hash: None,
                 layer2_signature: [0; 64],
                 trap_r: None,
                 trap_s: None,
@@ -875,8 +869,6 @@ async fn test_phase11d_shard_digest_isolation_wire() {
                 layer2_voucher_id: "voucher_other".into(),
                 t_id,
                 sender_ephemeral_pub: [other_seed; 32],
-                receiver_ephemeral_pub_hash: None,
-                change_ephemeral_pub_hash: None,
                 layer2_signature: [0; 64],
                 trap_r: None,
                 trap_s: None,
@@ -1008,8 +1000,6 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
         layer2_voucher_id: "voucher_p11e".into(),
         t_id: [0x55; 32],
         sender_ephemeral_pub: [0x55; 32],
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: None,
         trap_s: None,
@@ -1031,8 +1021,6 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
             layer2_voucher_id: "voucher_p11e".into(),
             t_id,
             sender_ephemeral_pub: [0xAA; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,

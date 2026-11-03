@@ -575,10 +575,6 @@ const HASH_TAB_MAP = {
 '#ingress': 'tab-ingress',
 '#access': 'tab-access',
 '#diagnostics': 'tab-diagnostics',
-// Legacy aliases:
-'#tiers': 'tab-ingress',
-'#vouchers': 'tab-ingress',
-'#history': 'tab-diagnostics',
 };
 function handleHashRouting() {
 const hash = (window.location.hash || '').toLowerCase();

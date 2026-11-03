@@ -274,8 +274,6 @@ mod tests {
                         t_id: tid,
                         layer2_voucher_id: format!("voucher-{}", target_shard),
                         sender_ephemeral_pub: [1; 32],
-                        receiver_ephemeral_pub_hash: None,
-                        change_ephemeral_pub_hash: None,
                         layer2_signature: [0; 64],
                         trap_r: None,
                         trap_s: None,

@@ -16,7 +16,7 @@ pub mod system_stats;
 
 pub use auth::AdminTokenManager;
 pub use dashboard::{
-    dashboard_data, render_dashboard, ConfigViewDto, DashboardData, DashboardDataDto, F2fClientDto,
+    dashboard_data, render_dashboard, ConfigViewDto, DashboardData, F2fClientDto,
     F2fFriendDto, F2fOverviewDto, PersistenceDto, RecentLockDto, RejectionsDto,
     ShardScoreSampleDto, ThermometerStatsDto, TierOverviewDto, TierSharesDto, VipAccountDto,
 };

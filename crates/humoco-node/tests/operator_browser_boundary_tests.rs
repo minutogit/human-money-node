@@ -36,7 +36,6 @@ async fn private_http_rejects_foreign_origins_and_rebinding_hosts_but_allows_loc
         "/dashboard/history/hourly",
         "/dashboard/events",
         "/dashboard/vouchers",
-        "/peers",
         "/api/v1/network/peers",
         "/health",
         "/health/live",

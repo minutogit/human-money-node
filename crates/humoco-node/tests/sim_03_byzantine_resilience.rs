@@ -8,9 +8,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use humoco_node::api::hmc::{L2AuthPayload, L2StatusQuery, L2Verdict};
 use humoco_sim_core::crypto::{sign_lock_attestation, verify_attestation};
-use humoco_sim_core::fraud::{
-    sign_heartbeat, FraudProofPayload, FraudProofPillar, SlotDetector128,
-};
+use humoco_sim_core::fraud::FraudProofPayload;
 use humoco_sim_core::types::{Attestation, SimTime};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
@@ -166,8 +164,6 @@ async fn test_sim_03_byzantine_resilience() {
     let mut proof = FraudProofPayload::new_shard_equivocation(att_a.clone(), att_b.clone());
     // Override perpetrator to actual rogue pubkey so ban targets real F2F session
     proof.perpetrator_node_id = rogue_pubkey;
-    proof.perpetrator = rogue_node_id;
-    proof.pillar = humoco_sim_core::fraud::FraudProofPillar::ShardEquivocation;
     proof.proof_pillar = humoco_sim_core::fraud::FraudProofPillar::ShardEquivocation;
 
     sim.reporter.check(
@@ -342,50 +338,9 @@ async fn test_sim_03_byzantine_resilience() {
 
     sim.reporter.end_phase_ok();
 
-    // --- Phase 3: Heartbeat Spam & SlotDetector128 O(1) Fraud Slashing (Spec 10 Pillar 3) ---
+    // --- Phase 3: Unanchored Fantasy Lock Rejection (400 Bad Request, keine RamIndex-Allokation) ---
     sim.reporter
-        .begin_phase("Phase 3 - Heartbeat Spam & SlotDetector128 O(1) Slashing");
-
-    {
-        let mut detector = SlotDetector128::new();
-        let node_id = 7u16;
-
-        let t0 = SimTime(1_000_000_000);
-        let hb1 = sign_heartbeat(node_id, t0);
-
-        // First heartbeat stored cleanly
-        let proof1 = detector.observe(hb1);
-        sim.reporter.check(
-            proof1.is_none(),
-            "First honest heartbeat must not trigger fraud",
-        );
-
-        // Second heartbeat within 10 minutes (< 50 min threshold) => Slashing proof generated immediately!
-        let t1 = SimTime(1_000_000_000 + 10 * 60 * 1000);
-        let hb2 = sign_heartbeat(node_id, t1);
-        let proof2 = detector.observe(hb2);
-        sim.reporter.check(
-            proof2.is_some(),
-            "Heartbeat spam within 10m (<50m) must trigger FraudProofPayload immediately",
-        );
-
-        if let Some(proof) = proof2 {
-            sim.reporter.check(
-                proof.proof_pillar == FraudProofPillar::HeartbeatSpam,
-                "Proof pillar must be HeartbeatSpam",
-            );
-            sim.reporter.check(
-                proof.verify(),
-                "Generated HeartbeatSpam fraud proof must be cryptographically valid",
-            );
-        }
-    }
-
-    sim.reporter.end_phase_ok();
-
-    // --- Phase 4: Unanchored Fantasy Lock Rejection (400 Bad Request, keine RamIndex-Allokation) ---
-    sim.reporter
-        .begin_phase("Phase 4 - Unanchored Fantasy Lock Rejection");
+        .begin_phase("Phase 3 - Unanchored Fantasy Lock Rejection");
 
     // Snapshot total_locks before fantasy to ensure no allocation
     let (health_status, health_body) = sim

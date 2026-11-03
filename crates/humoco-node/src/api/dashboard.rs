@@ -147,14 +147,7 @@ pub struct AddMeshPeerRequest {
     pub pubkey: String,
     #[serde(default)]
     pub label: Option<String>,
-    #[deprecated(
-        note = "dual_role_ingress is deprecated and ignored; server peering and client ingress are strictly decoupled"
-    )]
-    #[serde(default)]
-    pub dual_role_ingress: Option<bool>,
 }
-
-pub type AddFriendRequest = AddMeshPeerRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddFriendResponse {
@@ -181,12 +174,6 @@ pub struct AddClientFriendResponse {
     pub token: String,
     pub label: String,
     pub wallet_uri: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoveClientFriendResponse {
-    pub status: String,
-    pub removed: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,9 +373,6 @@ pub fn format_epoch_millis(ms: u64) -> String {
         d, month, year, h, mins, s
     )
 }
-
-/// Type alias for DashboardData DTO
-pub type DashboardDataDto = DashboardData;
 
 /// Computes the node's peering string `<pubkey>@<ip>:9090`
 pub fn determine_peering_string(state: &AppState) -> String {
@@ -1170,16 +1154,7 @@ pub async fn admin_add_mesh_peer(
     }
 }
 
-/// Alias handler for POST /dashboard/admin/friends
-pub async fn admin_add_friend(
-    state: State<AppState>,
-    headers: axum::http::HeaderMap,
-    payload: Json<AddFriendRequest>,
-) -> Response {
-    admin_add_mesh_peer(state, headers, payload).await
-}
-
-/// Handler for DELETE /dashboard/admin/mesh/peers/:key (and alias DELETE /dashboard/admin/friends/:key)
+/// Handler for DELETE /dashboard/admin/mesh/peers/:key
 pub async fn admin_remove_mesh_peer(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1232,15 +1207,6 @@ pub async fn admin_remove_mesh_peer(
         )
             .into_response()
     }
-}
-
-/// Alias handler for DELETE /dashboard/admin/friends/:key
-pub async fn admin_remove_friend(
-    state: State<AppState>,
-    headers: axum::http::HeaderMap,
-    key: Path<String>,
-) -> Response {
-    admin_remove_mesh_peer(state, headers, key).await
 }
 
 /// Handler for POST /dashboard/admin/ingress/clients

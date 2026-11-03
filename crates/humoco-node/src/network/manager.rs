@@ -86,17 +86,12 @@ pub struct KnownNodeInfo {
     /// Stored node identity bytes, supplied by the discovery caller as `node_pubkey`.
     /// A BLAKE3 fingerprint is not interchangeable with an Ed25519 verifying key.
     pub(crate) node_pubkey: [u8; 32],
-    /// Alias for `node_pubkey` for backward compatibility (permanent identity).
-    #[allow(dead_code)]
-    pub(crate) node_id: [u8; 32],
     /// Active HRW routing ticket (Argon2d) — sole source for HRW scoring.
     pub(crate) hrw_routing_id: [u8; 32],
     /// Achieved PoW work score for active shard ticket.
     pub(crate) work_score: u64,
     /// Pending new shard ticket during 24h incubation.
     pub(crate) pending_hrw_routing_id: Option<[u8; 32]>,
-    /// Alias for pending_hrw (shorter name, for evaluator compatibility).
-    pub(crate) pending_hrw: Option<[u8; 32]>,
     /// Achieved PoW work score for pending shard ticket during incubation.
     pub(crate) pending_work_score: Option<u64>,
     /// Timestamp of ticket switch (start of incubation).
@@ -136,11 +131,9 @@ impl KnownNodeInfo {
         Self {
             addr,
             node_pubkey,
-            node_id: node_pubkey,
             hrw_routing_id,
             work_score,
             pending_hrw_routing_id: None,
-            pending_hrw: None,
             pending_work_score: None,
             pending_since: None,
             incubated_until: None,
@@ -169,11 +162,9 @@ impl KnownNodeInfo {
         Self {
             addr,
             node_pubkey,
-            node_id: node_pubkey,
             hrw_routing_id,
             work_score: 1,
             pending_hrw_routing_id: None,
-            pending_hrw: None,
             pending_work_score: None,
             pending_since: None,
             incubated_until: None,
@@ -1543,7 +1534,6 @@ impl PeerManager {
                         entry.work_score = pw;
                     }
                     entry.pending_hrw_routing_id = None;
-                    entry.pending_hrw = None;
                     entry.pending_work_score = None;
                     entry.pending_since = None;
                     entry.incubated_until = None;
@@ -1672,7 +1662,6 @@ impl PeerManager {
                         entry.work_score = pw;
                     }
                     entry.pending_hrw_routing_id = None;
-                    entry.pending_hrw = None;
                     entry.pending_work_score = None;
                     entry.pending_since = None;
                     entry.incubated_until = None;
@@ -1706,7 +1695,6 @@ impl PeerManager {
                 let current_max = entry.work_score.max(entry.pending_work_score.unwrap_or(0));
                 if work_score > current_max {
                     entry.pending_hrw_routing_id = Some(hrw_routing_id);
-                    entry.pending_hrw = Some(hrw_routing_id);
                     entry.pending_work_score = Some(work_score);
                     entry.pending_since = Some(now);
                     entry.incubated_until = Some(now + incubation);
@@ -1740,11 +1728,9 @@ impl PeerManager {
                 KnownNodeInfo {
                     addr,
                     node_pubkey,
-                    node_id: node_pubkey,
                     hrw_routing_id,
                     work_score,
                     pending_hrw_routing_id: None,
-                    pending_hrw: None,
                     pending_work_score: None,
                     pending_since: None,
                     incubated_until: None,
@@ -1897,10 +1883,6 @@ impl PeerManager {
             .and_then(|e| e.pending_hrw_routing_id)
     }
 
-    pub async fn pending_hrw(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
-        self.get_pending_hrw_routing_id(node_pubkey).await
-    }
-
     /// Checks if node is still IMMATURE (<24h since first contact).
     pub async fn is_immature(&self, node_pubkey: &[u8; 32]) -> bool {
         let nodes = self.known_network_nodes.read().await;
@@ -1970,7 +1952,6 @@ impl PeerManager {
                         entry.work_score = pw;
                     }
                     entry.pending_hrw_routing_id = None;
-                    entry.pending_hrw = None;
                     entry.pending_work_score = None;
                     entry.pending_since = None;
                     entry.incubated_until = None;
@@ -2225,28 +2206,7 @@ impl PeerManager {
         }
     }
 
-    /// Legacy 16-bit lookup (backward compatibility only).
-    /// Scans the strict 32-byte map for prefix matches and returns a key ONLY
-    /// when the prefix is unambiguous. On collision (multiple pubkeys share the
-    /// prefix) returns `None` instead of silently overwriting — this eliminates
-    /// the old `u16_to_vk` collision-overwrite attack. New code MUST use
-    /// [`Self::get_peer_verifying_key_by_node_id`].
-    pub async fn get_peer_verifying_key(
-        &self,
-        node_id_u16: u16,
-    ) -> Option<ed25519_dalek::VerifyingKey> {
-        let keys = self.verifying_keys.read().await;
-        let mut found: Option<ed25519_dalek::VerifyingKey> = None;
-        for (pubkey, vk) in keys.iter() {
-            if u16::from_be_bytes([pubkey[0], pubkey[1]]) == node_id_u16 {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(*vk);
-            }
-        }
-        found
-    }
+
 
     /// Retrieves an Ed25519 verifying key by the full 32-byte Node ID.
     pub async fn get_peer_verifying_key_by_node_id(

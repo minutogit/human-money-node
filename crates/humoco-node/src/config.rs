@@ -25,10 +25,6 @@ pub const DEFAULT_BYTE_YEARS: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB-years
 pub struct LifecycleConfig {
     #[serde(default)]
     pub supported_suites: Vec<u8>,
-    #[serde(default)]
-    pub warn_deprecated_suite_after: Option<u64>,
-    #[serde(default)]
-    pub reject_deprecated_suite_after: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

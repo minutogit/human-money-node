@@ -250,10 +250,8 @@ pub fn public_router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(1024 * 1024));
 
     Router::new()
-        .route("/lock", post(submit_lock))
         .route("/v1/lock", post(submit_lock))
         .route("/v1/lock/chain", post(submit_hmc_chain_lock))
-        .route("/status", post(query_status))
         .route("/v1/status", post(query_status))
         .merge(sync_router)
         .route("/v1/pow-challenge", get(get_pow_challenge))
@@ -284,7 +282,6 @@ pub fn build_operator_router(state: AppState) -> Router {
         .route("/health", get(get_node_status))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
-        .route("/peers", get(get_peers))
         .route("/api/v1/network/peers", get(get_peers))
         .route("/api/v1/retained-choice/:tag", get(get_retained_choice))
         .route("/dashboard", get(crate::api::dashboard::render_dashboard))
@@ -307,14 +304,6 @@ pub fn build_operator_router(state: AppState) -> Router {
         .route(
             "/dashboard/admin/verify-token",
             post(crate::api::dashboard::admin_verify_token),
-        )
-        .route(
-            "/dashboard/admin/friends",
-            post(crate::api::dashboard::admin_add_friend),
-        )
-        .route(
-            "/dashboard/admin/friends/:key",
-            delete(crate::api::dashboard::admin_remove_friend),
         )
         .route(
             "/dashboard/admin/mesh/peers",
@@ -802,47 +791,42 @@ async fn verify_peer_attestation(
     if att.shard_id != shard_id {
         return false;
     }
-    // Strict 32-byte signer resolution first.
-    let signer_pubkey: Option<[u8; 32]> = att.node_pubkey_bytes();
-    let vk = if let Some(pk) = signer_pubkey {
-        // TLS binding: the attestation signer MUST be the peer we actually
-        // queried over QUIC (prevents signature-transplant across peers).
-        if let Some(tls_pk) = expected_tls_pubkey {
-            if pk != tls_pk {
-                tracing::warn!(
-                    node_id = att.node_id,
-                    "Dropped attestation: signer NodePubKey does not match TLS certificate key of queried peer"
-                );
-                return false;
-            }
+    // Strict 32-byte signer resolution.
+    let pk = match att.node_pubkey_bytes() {
+        Some(pk) => pk,
+        None => {
+            tracing::warn!(
+                node_id = att.node_id,
+                "Dropped attestation: missing or invalid 32-byte NodePubKey"
+            );
+            return false;
         }
-        match peer_mgr.get_peer_verifying_key_by_node_id(&pk).await {
-            Some(k) => k,
-            None => {
-                // Unknown but well-formed pubkey: derive vk directly so new
-                // F2F peers without prior gossip registration still verify.
-                match ed25519_dalek::VerifyingKey::from_bytes(&pk) {
-                    Ok(k) => k,
-                    Err(_) => {
-                        tracing::warn!(
-                            node_id = att.node_id,
-                            "Dropped attestation: invalid 32-byte NodePubKey"
-                        );
-                        return false;
-                    }
+    };
+    // TLS binding: the attestation signer MUST be the peer we actually
+    // queried over QUIC (prevents signature-transplant across peers).
+    if let Some(tls_pk) = expected_tls_pubkey {
+        if pk != tls_pk {
+            tracing::warn!(
+                node_id = att.node_id,
+                "Dropped attestation: signer NodePubKey does not match TLS certificate key of queried peer"
+            );
+            return false;
+        }
+    }
+    let vk = match peer_mgr.get_peer_verifying_key_by_node_id(&pk).await {
+        Some(k) => k,
+        None => {
+            // Unknown but well-formed pubkey: derive vk directly so new
+            // F2F peers without prior gossip registration still verify.
+            match ed25519_dalek::VerifyingKey::from_bytes(&pk) {
+                Ok(k) => k,
+                Err(_) => {
+                    tracing::warn!(
+                        node_id = att.node_id,
+                        "Dropped attestation: invalid 32-byte NodePubKey"
+                    );
+                    return false;
                 }
-            }
-        }
-    } else {
-        // Legacy fallback: 16-bit prefix, fails closed on collisions.
-        match peer_mgr.get_peer_verifying_key(att.node_id).await {
-            Some(k) => k,
-            None => {
-                tracing::warn!(
-                    node_id = att.node_id,
-                    "Dropped attestation: peer verifying key not found (or 16-bit prefix ambiguous)"
-                );
-                return false;
             }
         }
     };
@@ -1035,10 +1019,8 @@ fn validate_remote_collision(
         return None;
     }
 
-    // Bounded decode: bincode with JSON fallback
-    let entry = bincode::deserialize::<crate::api::hmc::L2LockEntry>(payload)
-        .ok()
-        .or_else(|| serde_json::from_slice::<crate::api::hmc::L2LockEntry>(payload).ok())?;
+    // Bounded decode: canonical bincode format
+    let entry = bincode::deserialize::<crate::api::hmc::L2LockEntry>(payload).ok()?;
 
     // Validate voucher consistency
     if entry.layer2_voucher_id != voucher_id {
@@ -2033,11 +2015,9 @@ async fn query_status(
                             {
                                 return None;
                             }
-                            if let Some(entry) = serde_json::from_slice::<
+                            if let Ok(entry) = serde_json::from_slice::<
                                 crate::api::hmc::L2LockEntry,
                             >(&resp_payload)
-                            .ok()
-                            .or_else(|| bincode::deserialize(&resp_payload).ok())
                             {
                                 if entry.layer2_voucher_id == payload.layer2_voucher_id {
                                     return Some(L2Verdict::Verified { lock_entry: entry });
@@ -2251,51 +2231,6 @@ async fn submit_hmc_lock_with_deadline(
         return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
     }
 
-    // Lifecycle sunset & bridge lock checks
-    let suite_id = if req
-        .privacy_guard
-        .as_deref()
-        .is_some_and(|s| s.contains("suite2"))
-    {
-        2
-    } else {
-        1
-    };
-
-    if req.privacy_guard.as_deref() == Some("bridge_missing_pqc") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "InvalidBridgeLock".into(),
-                message: "400 Bad Request: Quantum bridge lock requires pqc_receiver".into(),
-                challenge: None,
-                difficulty: None,
-                expires_at: None,
-            }),
-        )
-            .into_response();
-    }
-
-    if let Some(reject_time) = state.lifecycle.reject_deprecated_suite_after {
-        if (state.net_time_ms() / 1000) >= reject_time && suite_id == 1 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "CryptoSuiteDeprecated".into(),
-                    message: "400 Bad Request: Suite 1 (Ed25519) has reached final sunset".into(),
-                    challenge: None,
-                    difficulty: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response();
-        }
-    }
-
-    let should_warn = state
-        .lifecycle
-        .warn_deprecated_suite_after
-        .is_some_and(|warn_time| (state.net_time_ms() / 1000) >= warn_time && suite_id == 1);
     let now_ms = state.net_time_ms();
 
     const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
@@ -2590,7 +2525,6 @@ async fn submit_hmc_lock_with_deadline(
             entry,
             now_ms,
             ("Idempotent", 0),
-            should_warn,
         )
         .await;
     }
@@ -2692,30 +2626,12 @@ async fn submit_hmc_lock_with_deadline(
             let envelope =
                 wrap_and_sign_verdict_with_quorum(&state.identity, rej_verdict, Some(cert));
             state.metrics.record_e2e_latency(start.elapsed());
-            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
-            if should_warn {
-                resp.headers_mut().insert(
-                    axum::http::HeaderName::from_static("x-deprecation-warning"),
-                    axum::http::HeaderValue::from_static(
-                        "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-                    ),
-                );
-            }
-            return resp;
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
         }
 
         let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, Some(cert));
         state.metrics.record_e2e_latency(start.elapsed());
-        let mut resp = (StatusCode::OK, Json(envelope)).into_response();
-        if should_warn {
-            resp.headers_mut().insert(
-                axum::http::HeaderName::from_static("x-deprecation-warning"),
-                axum::http::HeaderValue::from_static(
-                    "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-                ),
-            );
-        }
-        return resp;
+        return (StatusCode::OK, Json(envelope)).into_response();
     }
 
     // 2. Verify V3 signature: only executed after cheap credential check passes!
@@ -2756,7 +2672,6 @@ async fn submit_hmc_lock_with_deadline(
             entry,
             now_ms,
             (tier_str, byte_years),
-            should_warn,
         )
         .await;
     }
@@ -2946,16 +2861,7 @@ async fn submit_hmc_lock_with_deadline(
                     Some(cert.clone()),
                 );
                 state.metrics.record_e2e_latency(start.elapsed());
-                let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
-                if should_warn {
-                    resp.headers_mut().insert(
-                        axum::http::HeaderName::from_static("x-deprecation-warning"),
-                        axum::http::HeaderValue::from_static(
-                            "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-                        ),
-                    );
-                }
-                return resp;
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(envelope)).into_response();
             }
         }
     }
@@ -2981,16 +2887,7 @@ async fn submit_hmc_lock_with_deadline(
     };
     state.metrics.record_e2e_latency(start.elapsed());
     let envelope = wrap_and_sign_verdict_with_quorum(&state.identity, verdict, quorum_certificate);
-    let mut resp = (status, Json(envelope)).into_response();
-    if should_warn {
-        resp.headers_mut().insert(
-            axum::http::HeaderName::from_static("x-deprecation-warning"),
-            axum::http::HeaderValue::from_static(
-                "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-            ),
-        );
-    }
-    resp
+    (status, Json(envelope)).into_response()
 }
 
 /// Ordered durable-prefix registration for POST /v1/lock/chain.
@@ -3962,8 +3859,6 @@ mod public_retained_evidence_tests {
             layer2_voucher_id: "test-voucher-choice".into(),
             t_id: [8u8; 32],
             sender_ephemeral_pub: [7u8; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -4014,8 +3909,6 @@ mod public_retained_evidence_tests {
             layer2_voucher_id: "test-voucher-choice".into(),
             t_id: [10u8; 32],
             sender_ephemeral_pub: [7u8; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -4228,7 +4121,6 @@ async fn commit_root_registration(
     entry: L2LockEntry,
     now_ms: u64,
     accounting: (&str, u64),
-    should_warn: bool,
 ) -> Response {
     let (verdict, is_new) = state
         .engine
@@ -4248,18 +4140,9 @@ async fn commit_root_registration(
         L2Verdict::Rejected { reason } => write_rejection_status(reason),
         _ => StatusCode::BAD_REQUEST,
     };
-    let mut response = (
+    (
         status,
         Json(wrap_and_sign_verdict(&state.identity, verdict)),
     )
-        .into_response();
-    if should_warn {
-        response.headers_mut().insert(
-            axum::http::HeaderName::from_static("x-deprecation-warning"),
-            axum::http::HeaderValue::from_static(
-                "Suite 1 (Ed25519) deprecated - migrate to suite 2",
-            ),
-        );
-    }
-    response
+        .into_response()
 }

@@ -101,8 +101,6 @@ impl HmcTestWallet {
             transaction_hash: tx_hash,
             is_genesis: true,
             sender_ephemeral_pub: sender_pub,
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: sig.to_bytes(),
             trap_r: Some("none".into()),
             trap_s: Some("none".into()),
@@ -119,8 +117,6 @@ impl HmcTestWallet {
         voucher_id: &str,
         ds_tag: &str,
         timestamp: u128,
-        change_hash: Option<[u8; 32]>,
-        receiver_hash: Option<[u8; 32]>,
     ) -> L2LockRequest {
         let sender_pub = self.pubkey_bytes();
         let mut h = blake3::Hasher::new();
@@ -153,8 +149,6 @@ impl HmcTestWallet {
             transaction_hash: tx_hash,
             is_genesis: false,
             sender_ephemeral_pub: sender_pub,
-            receiver_ephemeral_pub_hash: receiver_hash,
-            change_ephemeral_pub_hash: change_hash,
             layer2_signature: sig.to_bytes(),
             trap_r: Some("none".into()),
             trap_s: Some("none".into()),
@@ -172,8 +166,6 @@ impl HmcTestWallet {
         ds_tag: &str,
         tx_hash: [u8; 32],
         timestamp: u128,
-        change_hash: Option<[u8; 32]>,
-        receiver_hash: Option<[u8; 32]>,
     ) -> L2LockRequest {
         let sender_pub = self.pubkey_bytes();
         let payload_hash = calculate_l2_payload_hash_raw(
@@ -200,8 +192,6 @@ impl HmcTestWallet {
             transaction_hash: tx_hash,
             is_genesis: false,
             sender_ephemeral_pub: sender_pub,
-            receiver_ephemeral_pub_hash: receiver_hash,
-            change_ephemeral_pub_hash: change_hash,
             layer2_signature: sig.to_bytes(),
             trap_r: Some("none".into()),
             trap_s: Some("none".into()),
@@ -607,7 +597,7 @@ async fn test_scenario_1_isolated_village_start_and_mesh_merge() {
     assert!(synced, "Nodes 1 and 2 must symmetrically mesh-merge state");
 
     // 8. Follow-up payment for Voucher 1 submitted to Node 2 (which originally didn't hold it)
-    let succ1 = wallet1.make_successor(voucher_1, "village_succ_tag_01", 200, None, None);
+    let succ1 = wallet1.make_successor(voucher_1, "village_succ_tag_01", 200);
     let (succ1_status, succ1_resp) = node2
         .post_hmc_lock(&succ1)
         .await
@@ -620,7 +610,7 @@ async fn test_scenario_1_isolated_village_start_and_mesh_merge() {
     assert!(matches!(succ1_resp.verdict, L2Verdict::Verified { .. }));
 
     // 9. Follow-up payment for Voucher 2 submitted to Node 1
-    let succ2 = wallet2.make_successor(voucher_2, "village_succ_tag_02", 200, None, None);
+    let succ2 = wallet2.make_successor(voucher_2, "village_succ_tag_02", 200);
     let (succ2_status, succ2_resp) = node1
         .post_hmc_lock(&succ2)
         .await
@@ -675,9 +665,9 @@ async fn test_scenario_2_multi_hop_causality_chain_ingress_newcomer() {
 
     // Build multi-hop chain: Genesis (0) -> Hop 1 -> Hop 2 -> Hop 3
     let genesis = wallet.make_genesis(voucher_id, valid_until, 100);
-    let hop1 = wallet.make_successor(voucher_id, "causality_hop_tag_01", 200, None, None);
-    let hop2 = wallet.make_successor(voucher_id, "causality_hop_tag_02", 300, None, None);
-    let hop3 = wallet.make_successor(voucher_id, "causality_hop_tag_03", 400, None, None);
+    let hop1 = wallet.make_successor(voucher_id, "causality_hop_tag_01", 200);
+    let hop2 = wallet.make_successor(voucher_id, "causality_hop_tag_02", 300);
+    let hop3 = wallet.make_successor(voucher_id, "causality_hop_tag_03", 400);
 
     // Submit Genesis, Hop 1, Hop 2 sequentially to Node 1
     let (s0, _) = node1.post_hmc_lock(&genesis).await.expect("genesis lock");
@@ -790,16 +780,12 @@ async fn test_scenario_3_double_spend_partition_and_canonical_resolution() {
         ds_shared_tag,
         tx_hash_winner,
         200,
-        None,
-        None,
     );
     let req_loser = wallet_b.make_successor_with_custom_tx(
         voucher_id,
         ds_shared_tag,
         tx_hash_loser,
         200,
-        None,
-        None,
     );
 
     // 3. Ingress during partition: Winner to Node 1, Loser to Node 2
@@ -1005,7 +991,7 @@ async fn test_scenario_5_spam_rejection_fantasy_locks() {
     let fantasy_ds_tag = "fantasy_parent_tag_abcdef123456";
 
     // Attempt to submit an unanchored successor lock without prior genesis anchor
-    let fantasy_lock = wallet.make_successor(fantasy_voucher_id, fantasy_ds_tag, 100, None, None);
+    let fantasy_lock = wallet.make_successor(fantasy_voucher_id, fantasy_ds_tag, 100);
 
     let (status, resp) = node
         .post_hmc_lock(&fantasy_lock)

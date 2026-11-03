@@ -126,8 +126,6 @@ impl RequestHandler for DefaultRequestHandler {
 ///   Network-awareness: both signatures must belong to the SAME network universe (Testnet or Mainnet).
 /// - IngressCounterConflict: both envelopes verify under `vk`, and both
 ///   `gateway_pubkey` fields as well as `proof.perpetrator_node_id` MUST equal `vk` (framing with foreign packets fails).
-/// - HeartbeatSpam: simulator heartbeats carry no Ed25519 self-proof, so this
-///   strict path always returns `false` (no ban on hearsay timing claims).
 pub fn verify_equivocation_first_party(
     vk: &ed25519_dalek::VerifyingKey,
     proof: &humoco_sim_core::fraud::FraudProofPayload,
@@ -173,11 +171,6 @@ pub fn verify_equivocation_first_party_network(
                 return false;
             }
             proof.verify()
-        }
-        humoco_sim_core::fraud::FraudProofPillar::HeartbeatSpam => {
-            // No genuine Ed25519 self-proof exists for simulator heartbeats;
-            // hearsay timing alone must never trigger a ban.
-            false
         }
         humoco_sim_core::fraud::FraudProofPillar::ShardEquivocation => {
             let a = match humoco_sim_core::fraud::decode_attestation(&proof.evidence_packet_a) {
@@ -1726,8 +1719,7 @@ impl RequestHandler for NodeRequestHandler {
                         let is_tag_only = lock_id == [0u8; 32];
                         for (lookup_tag, entry) in &hmc.locks {
                             let tag_hash = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-                            let parent_matches = tag_hash == parent_lock
-                                || lookup_tag.as_bytes() == &parent_lock[..];
+                            let parent_matches = tag_hash == parent_lock;
                             if !parent_matches {
                                 continue;
                             }
@@ -2312,31 +2304,11 @@ impl RequestHandler for NodeRequestHandler {
                             announcement_hash,
                             hb.signature,
                         );
-                        let ev_write = if humoco_sim_core::fraud::verify_ingress_envelope_signature(
-                            &candidate_ev,
-                        ) {
-                            candidate_ev
-                        } else {
-                            let legacy_ev = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
-                                hb.node_id,
-                                0,
-                                0,
-                                hb.timestamp_ms,
-                                hb.declared_write_ema_micro_bj,
-                                hb.declared_read_ema_credits,
-                                0,
-                                false,
-                                [0u8; 32],
-                                hb.signature,
-                            );
-                            if humoco_sim_core::fraud::verify_ingress_envelope_signature(&legacy_ev)
-                            {
-                                legacy_ev
-                            } else {
-                                warn!(node = %hex::encode(hb.node_id), "Heartbeat rejected: invalid signature");
-                                return Ok(());
-                            }
-                        };
+                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&candidate_ev) {
+                            warn!(node = %hex::encode(hb.node_id), "Heartbeat rejected: invalid signature");
+                            return Ok(());
+                        }
+                        let ev_write = candidate_ev;
 
                         if let Some(pm) = peer_manager.as_ref() {
                             if let Some(prev) = pm.get_node_write_evidence(&hb.node_id).await {
@@ -3740,10 +3712,7 @@ impl QuicTransport {
                                                     } else {
                                                         pm.is_f2f_addr(&remote_addr).await
                                                     };
-                                                    let res1 = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload);
-                                                    let res2 = bincode::deserialize::<([u8; 32], SocketAddr)>(&payload);
-
-                                                    if let Ok(hb) = res1 {
+                                                    if let Ok(hb) = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload) {
                                                         // 1. TTL drop check
                                                         if hb.ttl == 0 {
                                                             debug!(node = %hex::encode(hb.node_id), "GOSSIP BARRIER: Dropped heartbeat with TTL == 0");
@@ -3902,30 +3871,6 @@ impl QuicTransport {
                                                         if hb.ttl > 1 && (hops as u32) + 1 < crate::network::manager::MAX_GOSSIP_HOPS {
                                                             transport_clone.forward_heartbeat_gossip(&hb, hops, remote_addr).await;
                                                         }
-                                                    } else if let Ok((adv_id, adv_addr)) = res2 {
-                                                        if !pm.is_simulation_mode() {
-                                                            warn!(
-                                                                node = %hex::encode(adv_id),
-                                                                "GOSSIP BARRIER: Dropped unsigned legacy tuple heartbeat in production"
-                                                            );
-                                                            return;
-                                                        }
-                                                        if pm.is_banned(&adv_id).await {
-                                                            warn!(node = %hex::encode(adv_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
-                                                            return;
-                                                        }
-                                                        let is_direct = remote_node_id == Some(adv_id);
-                                                        // Spec 11 / S04-02: No relayed identity (hops > 0 or claimed_pubkey != peer_pubkey)
-                                                        // may EVER be learned, refreshed, or authorized via unsigned legacy tuple!
-                                                        if hops > 0 || !is_direct {
-                                                            warn!(
-                                                                node = %hex::encode(adv_id),
-                                                                hops,
-                                                                "GOSSIP BARRIER: Dropped unsigned legacy tuple heartbeat for non-direct or relayed identity"
-                                                            );
-                                                            return;
-                                                        }
-                                                        pm.learn_node_from_gossip(adv_id, adv_addr, 0, Some(remote_addr)).await;
                                                     }
 
                                                 }

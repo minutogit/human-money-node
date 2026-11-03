@@ -234,8 +234,6 @@ async fn unknown_shard_is_rejected_over_real_quic_despite_global_readiness() {
         transaction_hash: [0x55; 32],
         is_genesis: true,
         sender_ephemeral_pub: *client_id.node_pubkey(),
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),

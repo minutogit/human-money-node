@@ -41,8 +41,6 @@ fn hop(
         transaction_hash: [id; 32],
         is_genesis: prev.is_none(),
         sender_ephemeral_pub: *key.node_pubkey(),
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),

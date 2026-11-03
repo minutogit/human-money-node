@@ -1,7 +1,6 @@
 use humoco_sim_core::crypto::{
     compute_canonical_hash, compute_canonical_hash_with_sig, compute_genesis_root,
 };
-use humoco_sim_core::fraud::SlotDetector1024;
 use humoco_sim_core::types::{extract_shard_id, required_quorum};
 
 #[test]
@@ -62,12 +61,6 @@ fn test_canonical_hash_with_signature() {
         h1, h2,
         "compute_canonical_hash_with_sig nutzt dieselbe Preimage-Berechnung"
     );
-}
-
-#[test]
-fn test_slot_detector_1024_distribution() {
-    assert_eq!(SlotDetector1024::slot_index(1025), 1);
-    assert_eq!(SlotDetector1024::slot_index(2048), 0);
 }
 
 #[test]

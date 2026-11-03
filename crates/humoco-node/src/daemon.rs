@@ -956,7 +956,6 @@ impl NodeDaemon {
         let alert_data_dir = self.config.storage.data_dir.clone();
         let alert_pm = peer_manager.clone();
         let alert_cancel = self.cancel_token.clone();
-        let alert_lifecycle = self.config.lifecycle.clone();
         let alert_handle = tokio::spawn(async move {
             // 15-minute startup hysteresis
             tokio::select! {
@@ -984,23 +983,6 @@ impl NodeDaemon {
                         // Real version comparison can be added when peer versions are gossiped.
                         let upgraded_peers = total_peers;
                         dispatcher.check_and_alert_outdated(total_peers, upgraded_peers).await;
-
-                        // Sunset warning check
-                        if let Some(warn_after) = alert_lifecycle.warn_deprecated_suite_after {
-                            let now_secs = alert_pm.net_time_ms() / 1000;
-                            if now_secs >= warn_after {
-                                let is_rejected = alert_lifecycle
-                                    .reject_deprecated_suite_after
-                                    .is_some_and(|reject| now_secs >= reject);
-                                if !is_rejected {
-                                    let msg = format!(
-                                        "HuMoCo sunset warning: suite 1 deprecation active since {} (now {}), migrate to suite 2",
-                                        warn_after, now_secs
-                                    );
-                                    dispatcher.check_and_alert_sunset(&msg).await;
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -2349,8 +2331,6 @@ mod tests {
             layer2_voucher_id: "test-voucher-reconcile".into(),
             t_id: [1u8; 32],
             sender_ephemeral_pub: author.verifying_key().to_bytes(),
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -2477,8 +2457,6 @@ mod tests {
             layer2_voucher_id: "test-voucher-reconcile-unquorated".into(),
             t_id: [1u8; 32],
             sender_ephemeral_pub: author.verifying_key().to_bytes(),
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,

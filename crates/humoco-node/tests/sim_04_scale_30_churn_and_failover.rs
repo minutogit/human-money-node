@@ -392,8 +392,6 @@ async fn test_sim_04_scale_30_churn_and_failover() {
             layer2_voucher_id: "bench_voucher".into(),
             t_id,
             sender_ephemeral_pub: [1; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,

@@ -97,8 +97,6 @@ fn root(key: &SigningKey, at: u64) -> L2LockRequest {
         transaction_hash: [1; 32],
         is_genesis: true,
         sender_ephemeral_pub: sender,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: None,
         trap_s: None,

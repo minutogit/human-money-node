@@ -14,12 +14,10 @@ pub struct AttestationDto {
     pub lock_id: String,
     pub parent_lock: String,
     pub node_id: u16,
-    /// Full 32-byte Ed25519 NodePubKey of the signer (hex). Empty for legacy payloads.
-    #[serde(default)]
+    /// Full 32-byte Ed25519 NodePubKey of the signer (hex).
     pub node_pubkey: String,
     pub timestamp: u64,
     pub signature: String,
-    #[serde(default)]
     pub shard_id: u16,
 }
 
@@ -38,33 +36,9 @@ impl AttestationDto {
         Some(out)
     }
 
-    /// Decodes the current eight-field struct or the legacy five-field payload.
-    /// Legacy payloads receive an empty `node_pubkey` and `shard_id == 0`.
-    /// Decoding does not verify the signature or establish committee membership;
-    /// callers must apply the relevant identity, signature and membership checks.
+    /// Decodes the eight-field attestation struct.
     pub fn from_wire_bytes(bytes: &[u8]) -> Option<Self> {
-        if let Ok(att) = bincode::deserialize::<Self>(bytes) {
-            return Some(att);
-        }
-        #[derive(serde::Deserialize)]
-        struct LegacyAttestation {
-            lock_id: String,
-            parent_lock: String,
-            node_id: u16,
-            timestamp: u64,
-            signature: String,
-        }
-        bincode::deserialize::<LegacyAttestation>(bytes)
-            .ok()
-            .map(|l| Self {
-                lock_id: l.lock_id,
-                parent_lock: l.parent_lock,
-                node_id: l.node_id,
-                node_pubkey: String::new(),
-                timestamp: l.timestamp,
-                signature: l.signature,
-                shard_id: 0,
-            })
+        bincode::deserialize::<Self>(bytes).ok()
     }
 
     /// Converts this DTO into humoco_sim_core::types::Attestation if hex strings are valid.

@@ -1140,22 +1140,10 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         .await
         .unwrap();
 
-    // Unsigned direct legacy (pubkey, SocketAddr) wire path
-    let unmined_legacy = NodeIdentity::generate();
-    let legacy_payload =
-        bincode::serialize(&((*unmined_legacy.node_pubkey()), addr_d)).unwrap();
-    let mut hdr_legacy =
-        WireHeader::new(MsgType::Heartbeat as u16, 5, 0, 0, legacy_payload.len() as u32);
-    hdr_legacy.reserved = 0;
-    transport_d
-        .send_unidirectional(&conn_d_to_s, &hdr_legacy, &legacy_payload)
-        .await
-        .unwrap();
-
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Simulate 25h maturation and 8 hourly observations for all shortcut candidates
-    for unmined in [&unmined_1, &unmined_2, &unmined_3, &friend_direct, &unmined_legacy] {
+    for unmined in [&unmined_1, &unmined_2, &unmined_3, &friend_direct] {
         pm_server
             .set_first_seen_for_test(
                 unmined.node_pubkey(),
@@ -1221,12 +1209,6 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
             .iter()
             .any(|m| m.node_pubkey == *unmined_3.node_pubkey()),
         "S06-03: [0; 32] shortcut identity must NOT enter shard_committee in production"
-    );
-    assert!(
-        !committee
-            .iter()
-            .any(|m| m.node_pubkey == *unmined_legacy.node_pubkey()),
-        "S06-03: Unsigned legacy wire tuple must NOT enter shard_committee in production"
     );
 
     // Positive Control: Genuinely mined Argon2d ticket over real QUIC

@@ -14,19 +14,6 @@ pub const ARGON2D_M_COST: u32 = 64 * 1024; // 64 MiB
 pub const ARGON2D_T_COST: u32 = 3;
 pub const ARGON2D_P_COST: u32 = 1;
 
-/// Calculates the hybrid node ID as BLAKE3 domain separation hash over Ed25519 and PQC public keys.
-///
-/// HybridNodeId = BLAKE3(len(DOMAIN_HYBRID_NODE_ID) || DOMAIN_HYBRID_NODE_ID || ed25519_pub || pqc_pub)
-pub fn compute_hybrid_node_id(ed25519_pub: &[u8; 32], pqc_pub: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    let domain = humoco_sim_core::crypto::DOMAIN_HYBRID_NODE_ID;
-    let tag_len = domain.len() as u8;
-    hasher.update(&[tag_len]);
-    hasher.update(domain);
-    hasher.update(ed25519_pub);
-    hasher.update(pqc_pub);
-    *hasher.finalize().as_bytes()
-}
 
 /// Computes the raw Argon2d PoW proof hash over NodePubKey || Nonce || T0.
 pub fn compute_pow_proof(
@@ -158,11 +145,6 @@ impl NodeIdentity {
         Self::from_signing_key(signing_key)
     }
 
-    /// Generates with explicit PoW parameters (for production mining).
-    pub fn generate_with_pow(nonce: u64, t0: u64) -> Self {
-        let signing_key = SigningKey::generate(&mut OsRng);
-        Self::from_signing_key_with_pow(signing_key, nonce, t0)
-    }
 
     /// Constructs an Ed25519 node identity from a BIP-39 mnemonic phrase and optional passphrase
     /// using SLIP-0010 Ed25519 master key derivation (matching the human-money-core standard).
@@ -445,7 +427,7 @@ impl NodeIdentity {
     }
 
     /// Loads the private key from a binary file and derives the identity.
-    /// Supports both legacy 32-byte files and new 80-byte format.
+    /// Loads the private key from a binary file and derives the identity (80-byte format).
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self, NodeError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|err| NodeError::IoWithPath {
@@ -453,48 +435,41 @@ impl NodeIdentity {
             source: err,
         })?;
 
-        match bytes.len() {
-            32 => {
-                let mut key_array = [0u8; 32];
-                key_array.copy_from_slice(&bytes);
-                let signing_key = SigningKey::from_bytes(&key_array);
-                Ok(Self::from_signing_key(signing_key))
-            }
-            80 => {
-                let mut key_array = [0u8; 32];
-                key_array.copy_from_slice(&bytes[0..32]);
-                let signing_key = SigningKey::from_bytes(&key_array);
-                let verifying_key = signing_key.verifying_key();
-                let node_id = *verifying_key.as_bytes();
-
-                let mut nonce_bytes = [0u8; 8];
-                nonce_bytes.copy_from_slice(&bytes[32..40]);
-                let nonce = u64::from_le_bytes(nonce_bytes);
-
-                let mut t0_bytes = [0u8; 8];
-                t0_bytes.copy_from_slice(&bytes[40..48]);
-                let t0 = u64::from_le_bytes(t0_bytes);
-
-                let mut hrw = [0u8; 32];
-                hrw.copy_from_slice(&bytes[48..80]);
-
-                // If file contains hrw that doesn't match recomputed value we still trust file
-                // but we keep it as stored to preserve roundtrip determinism.
-                Ok(Self::from_parts(
-                    signing_key,
-                    verifying_key,
-                    node_id,
-                    hrw,
-                    nonce,
-                    t0,
-                ))
-            }
-            other => Err(NodeError::Identity(format!(
-                "Invalid private key file size at {}: expected 32 or 80 bytes, got {}",
+        if bytes.len() != 80 {
+            return Err(NodeError::Identity(format!(
+                "Invalid private key file size at {}: expected 80 bytes, got {}",
                 path.display(),
-                other
-            ))),
+                bytes.len()
+            )));
         }
+
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&bytes[0..32]);
+        let signing_key = SigningKey::from_bytes(&key_array);
+        let verifying_key = signing_key.verifying_key();
+        let node_id = *verifying_key.as_bytes();
+
+        let mut nonce_bytes = [0u8; 8];
+        nonce_bytes.copy_from_slice(&bytes[32..40]);
+        let nonce = u64::from_le_bytes(nonce_bytes);
+
+        let mut t0_bytes = [0u8; 8];
+        t0_bytes.copy_from_slice(&bytes[40..48]);
+        let t0 = u64::from_le_bytes(t0_bytes);
+
+        let mut hrw = [0u8; 32];
+        hrw.copy_from_slice(&bytes[48..80]);
+
+        // If file contains hrw that doesn't match recomputed value we still trust file
+        // but we keep it as stored to preserve roundtrip determinism.
+        Ok(Self::from_parts(
+            signing_key,
+            verifying_key,
+            node_id,
+            hrw,
+            nonce,
+            t0,
+        ))
     }
 }
 

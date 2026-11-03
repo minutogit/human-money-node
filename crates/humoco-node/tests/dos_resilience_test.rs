@@ -115,8 +115,6 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
             transaction_hash: parent_bytes,
             is_genesis: true,
             sender_ephemeral_pub: sender_pub,
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0u8; 64],
             trap_r: Some("none".into()),
             trap_s: Some("none".into()),

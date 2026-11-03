@@ -29,24 +29,18 @@ pub enum NetworkId {
     Testnet,
 }
 
-/// Crypto suite identifier for backward-compatible wire headers
+/// Crypto suite identifier for wire headers
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CryptoSuiteId {
     Ed25519Blake3 = 1,
-    HybridEd25519MlDsa = 2,
-    PureMlDsa = 3,
 }
 
 impl CryptoSuiteId {
-    /// 0x00 is transparently interpreted as suite 1 (Ed25519/BLAKE3) (backward-compatible)
-    pub fn from_u8(v: u8) -> Self {
+    pub fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Self::Ed25519Blake3,
-            1 => Self::Ed25519Blake3,
-            2 => Self::HybridEd25519MlDsa,
-            3 => Self::PureMlDsa,
-            _ => Self::Ed25519Blake3,
+            1 => Some(Self::Ed25519Blake3),
+            _ => None,
         }
     }
     pub fn as_u8(self) -> u8 {

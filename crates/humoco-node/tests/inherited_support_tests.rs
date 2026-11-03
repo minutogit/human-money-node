@@ -384,8 +384,6 @@ fn signed_hmc_cut(
         transaction_hash: [42; 32],
         is_genesis: true,
         sender_ephemeral_pub: *author.node_pubkey(),
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: None,
         trap_s: None,

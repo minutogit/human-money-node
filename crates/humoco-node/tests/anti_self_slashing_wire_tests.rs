@@ -51,8 +51,6 @@ fn make_hmc_spend(
         transaction_hash: tx_hash,
         is_genesis: false,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -84,8 +82,6 @@ fn make_hmc_genesis(
         transaction_hash: tx_hash,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -659,26 +655,28 @@ async fn test_s07_01_wire_high_bit_mutated_proof_rejected_honest_subject_unbanne
         .await
         .expect("connect client to shard");
 
-    // Construct legacy envelopes for honest subject, then high-bit mutate p1's epoch_seq
+    // Construct V2 envelopes for honest subject, then high-bit mutate p1's epoch_seq
     let now = test_now_ms();
-    let p1 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+    let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
         honest_subject.signing_key(),
         1,
         10,
+        now,
         50_000,
         0,
         100,
-        now,
+        false,
         [0x11; 32],
     );
-    let p2 = humoco_sim_core::fraud::sign_ingress_envelope_with_key(
+    let p2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
         honest_subject.signing_key(),
         1,
         11,
+        now + 10,
         40_000,
         0,
         100,
-        now + 10,
+        false,
         [0x22; 32],
     );
 

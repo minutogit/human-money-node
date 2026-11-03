@@ -131,7 +131,6 @@ async fn actual_public_http_never_serves_operator_aliases_or_fake_strong_lookup(
     let client = reqwest::Client::new();
     for route in [
         "/metrics",
-        "/peers",
         "/api/v1/network/peers",
         "/dashboard",
         "/dashboard/data",
@@ -258,8 +257,6 @@ async fn live_state_signature_over_quic_requires_exact_ready_state() {
         layer2_voucher_id: expected.voucher_id.clone(),
         t_id: expected.child_lock,
         sender_ephemeral_pub: [8; 32],
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: None,
         trap_s: None,

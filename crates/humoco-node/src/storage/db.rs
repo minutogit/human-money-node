@@ -786,11 +786,6 @@ impl RedbStorage {
         Ok(results)
     }
 
-    /// Alias for all_banned_nodes: Retrieves all slashed node keys.
-    /// Defensive against corrupted entries: catches errors, logs a warning, and skips defective entries.
-    pub fn all_slashed_nodes(&self) -> Result<Vec<[u8; 32]>, StorageError> {
-        self.all_banned_nodes()
-    }
 }
 
 /// Persisted `(node_pubkey, hrw_routing_id, first_seen_ms)` maturation record.
@@ -2116,8 +2111,6 @@ mod tests {
             layer2_voucher_id: voucher_id.to_string(),
             t_id: [1; 32],
             sender_ephemeral_pub: [2; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -2295,8 +2288,6 @@ mod tests {
             layer2_voucher_id: "test-v1".into(),
             t_id: [1; 32],
             sender_ephemeral_pub: [2; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,

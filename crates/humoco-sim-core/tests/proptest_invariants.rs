@@ -64,12 +64,12 @@ proptest! {
         flags in any::<u32>(),
         payload_len in 0u32..=16_777_216u32, // up to 16 MiB
         crypto_suite in any::<u8>(),
-        min_compat_ver in any::<u8>(),
+        reserved_ver in any::<u8>(),
         reserved in any::<u16>(),
     ) {
         let mut header = WireHeader::new(msg_type, session_seq, epoch_id, flags, payload_len);
         header.crypto_suite = crypto_suite;
-        header.min_compat_ver = min_compat_ver;
+        header.reserved_ver = reserved_ver;
         header.reserved = reserved;
 
         prop_assert!(header.is_valid_magic());
@@ -91,7 +91,7 @@ proptest! {
         prop_assert_eq!(decoded.flags, flags);
         prop_assert_eq!(decoded.payload_len, payload_len);
         prop_assert_eq!(decoded.crypto_suite, crypto_suite);
-        prop_assert_eq!(decoded.min_compat_ver, min_compat_ver);
+        prop_assert_eq!(decoded.reserved_ver, reserved_ver);
         prop_assert_eq!(decoded.reserved, reserved);
 
         // Double round-trip stability

@@ -147,13 +147,6 @@ impl AlertDispatcher {
         self.send_alert(AlertKind::OutdatedVersion, &msg).await;
     }
 
-    /// Sunset warning alert.
-    pub async fn check_and_alert_sunset(&self, message: &str) {
-        if !self.config.notify_on_sunset_warning {
-            return;
-        }
-        self.send_alert(AlertKind::SunsetApproaching, message).await;
-    }
 
     /// Core dispatch: checks 24h cooldown, sends to webhook and/or telegram, updates cooldown on success.
     pub async fn send_alert(&self, kind: AlertKind, message: &str) {

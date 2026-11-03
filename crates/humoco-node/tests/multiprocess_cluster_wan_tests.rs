@@ -89,9 +89,6 @@ fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
     let mut hash = Sha256::new();
     hash.update(req.transaction_hash);
     hash.update(req.sender_ephemeral_pub);
-    if let Some(receiver) = req.receiver_ephemeral_pub_hash {
-        hash.update(receiver);
-    }
     hash.update(req.deletable_at.as_deref().unwrap().as_bytes());
     req.layer2_voucher_id = hex::encode(hash.finalize());
     let mut proof = humoco_proto::causal::CausalOutputProof {
@@ -100,8 +97,8 @@ fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
         transaction_id: req.transaction_hash,
         state_hash: req.transaction_hash,
         sender_pubkey: req.sender_ephemeral_pub,
-        receiver_pubkey_hash: req.receiver_ephemeral_pub_hash,
-        change_pubkey_hash: req.change_ephemeral_pub_hash,
+        receiver_pubkey_hash: None,
+        change_pubkey_hash: None,
         root_valid_until_ms: req.deletable_at.as_ref().unwrap().parse().unwrap(),
         is_root: true,
         signature: [0; 64],
@@ -131,8 +128,6 @@ fn make_test_hmc_genesis(
         transaction_hash: tx_hash,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -166,8 +161,6 @@ fn make_test_hmc_spend(
         transaction_hash: tx_hash,
         is_genesis: false,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),

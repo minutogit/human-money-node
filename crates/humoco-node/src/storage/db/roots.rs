@@ -47,14 +47,14 @@ pub fn root_valid_until(entry: &crate::api::hmc::L2LockEntry) -> Result<u64, Sto
         .deletable_at
         .as_deref()
         .ok_or_else(|| StorageError::DurableCommitFailed("root validity missing".into()))?;
-    let legacy = parse_deletable_at_ms(raw)?;
+    let parsed_ms = parse_deletable_at_ms(raw)?;
     if let Some(proof) = &entry.causal_output {
         if !proof.is_root
             || !proof.verify()
             || proof.transaction_id != entry.t_id
             || proof.sender_pubkey != entry.sender_ephemeral_pub
             || proof.voucher_id != entry.layer2_voucher_id
-            || proof.root_valid_until_ms != legacy
+            || proof.root_valid_until_ms != parsed_ms
         {
             return Err(StorageError::DurableCommitFailed(
                 "invalid root output proof".into(),
@@ -84,7 +84,7 @@ pub fn root_valid_until(entry: &crate::api::hmc::L2LockEntry) -> Result<u64, Sto
         }
         Ok(proof.root_valid_until_ms)
     } else {
-        Ok(legacy)
+        Ok(parsed_ms)
     }
 }
 pub fn put(
@@ -214,8 +214,6 @@ mod tests {
             layer2_voucher_id: proof.voucher_id.clone(),
             t_id: proof.transaction_id,
             sender_ephemeral_pub: proof.sender_pubkey,
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -244,8 +242,6 @@ mod tests {
             layer2_voucher_id: "legacy-root".into(),
             t_id: [7; 32],
             sender_ephemeral_pub: [8; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -321,8 +317,6 @@ mod tests {
             layer2_voucher_id: voucher_id.clone(),
             t_id,
             sender_ephemeral_pub: sender,
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,
@@ -391,8 +385,6 @@ mod tests {
             layer2_voucher_id: "a".repeat(MAX_SYNC_ROW_BYTES + 1),
             t_id: [1; 32],
             sender_ephemeral_pub: [2; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [0; 64],
             trap_r: None,
             trap_s: None,

@@ -157,12 +157,6 @@ pub struct L2LockRequest {
     #[serde(with = "base58_32")]
     pub sender_ephemeral_pub: [u8; 32],
 
-    #[serde(with = "base58_32_opt", default)]
-    pub receiver_ephemeral_pub_hash: Option<[u8; 32]>,
-
-    #[serde(with = "base58_32_opt", default)]
-    pub change_ephemeral_pub_hash: Option<[u8; 32]>,
-
     /// Client request authorization signature, distinct from a shard node attestation.
     #[serde(with = "base58_64")]
     pub layer2_signature: [u8; 64],
@@ -200,8 +194,6 @@ pub struct L2LockEntry {
     pub layer2_voucher_id: String,
     pub t_id: [u8; 32],
     pub sender_ephemeral_pub: [u8; 32],
-    pub receiver_ephemeral_pub_hash: Option<[u8; 32]>,
-    pub change_ephemeral_pub_hash: Option<[u8; 32]>,
     /// Client request authorization signature, distinct from a shard node attestation.
     pub layer2_signature: [u8; 64],
     pub trap_r: Option<String>,
@@ -221,10 +213,6 @@ struct L2LockEntryJsonRef<'a> {
     pub t_id: &'a [u8; 32],
     #[serde(with = "base58_32")]
     pub sender_ephemeral_pub: &'a [u8; 32],
-    #[serde(with = "base58_32_opt", default)]
-    pub receiver_ephemeral_pub_hash: &'a Option<[u8; 32]>,
-    #[serde(with = "base58_32_opt", default)]
-    pub change_ephemeral_pub_hash: &'a Option<[u8; 32]>,
     #[serde(with = "base58_64")]
     pub layer2_signature: &'a [u8; 64],
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,10 +238,6 @@ struct L2LockEntryJsonOwned {
     pub t_id: [u8; 32],
     #[serde(with = "base58_32")]
     pub sender_ephemeral_pub: [u8; 32],
-    #[serde(with = "base58_32_opt", default)]
-    pub receiver_ephemeral_pub_hash: Option<[u8; 32]>,
-    #[serde(with = "base58_32_opt", default)]
-    pub change_ephemeral_pub_hash: Option<[u8; 32]>,
     #[serde(with = "base58_64")]
     pub layer2_signature: [u8; 64],
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,10 +263,6 @@ struct L2LockEntryBinaryRef<'a> {
     pub t_id: &'a [u8; 32],
     #[serde(with = "base58_32")]
     pub sender_ephemeral_pub: &'a [u8; 32],
-    #[serde(with = "base58_32_opt", default)]
-    pub receiver_ephemeral_pub_hash: &'a Option<[u8; 32]>,
-    #[serde(with = "base58_32_opt", default)]
-    pub change_ephemeral_pub_hash: &'a Option<[u8; 32]>,
     #[serde(with = "base58_64")]
     pub layer2_signature: &'a [u8; 64],
     #[serde(default)]
@@ -308,10 +288,6 @@ struct L2LockEntryBinaryOwned {
     pub t_id: [u8; 32],
     #[serde(with = "base58_32")]
     pub sender_ephemeral_pub: [u8; 32],
-    #[serde(with = "base58_32_opt", default)]
-    pub receiver_ephemeral_pub_hash: Option<[u8; 32]>,
-    #[serde(with = "base58_32_opt", default)]
-    pub change_ephemeral_pub_hash: Option<[u8; 32]>,
     #[serde(with = "base58_64")]
     pub layer2_signature: [u8; 64],
     #[serde(default)]
@@ -339,8 +315,6 @@ impl Serialize for L2LockEntry {
                 layer2_voucher_id: &self.layer2_voucher_id,
                 t_id: &self.t_id,
                 sender_ephemeral_pub: &self.sender_ephemeral_pub,
-                receiver_ephemeral_pub_hash: &self.receiver_ephemeral_pub_hash,
-                change_ephemeral_pub_hash: &self.change_ephemeral_pub_hash,
                 layer2_signature: &self.layer2_signature,
                 trap_r: &self.trap_r,
                 trap_s: &self.trap_s,
@@ -356,8 +330,6 @@ impl Serialize for L2LockEntry {
                 layer2_voucher_id: &self.layer2_voucher_id,
                 t_id: &self.t_id,
                 sender_ephemeral_pub: &self.sender_ephemeral_pub,
-                receiver_ephemeral_pub_hash: &self.receiver_ephemeral_pub_hash,
-                change_ephemeral_pub_hash: &self.change_ephemeral_pub_hash,
                 layer2_signature: &self.layer2_signature,
                 trap_r: &self.trap_r,
                 trap_s: &self.trap_s,
@@ -383,8 +355,6 @@ impl<'de> Deserialize<'de> for L2LockEntry {
                 layer2_voucher_id: rep.layer2_voucher_id,
                 t_id: rep.t_id,
                 sender_ephemeral_pub: rep.sender_ephemeral_pub,
-                receiver_ephemeral_pub_hash: rep.receiver_ephemeral_pub_hash,
-                change_ephemeral_pub_hash: rep.change_ephemeral_pub_hash,
                 layer2_signature: rep.layer2_signature,
                 trap_r: rep.trap_r,
                 trap_s: rep.trap_s,
@@ -400,8 +370,6 @@ impl<'de> Deserialize<'de> for L2LockEntry {
                 layer2_voucher_id: rep.layer2_voucher_id,
                 t_id: rep.t_id,
                 sender_ephemeral_pub: rep.sender_ephemeral_pub,
-                receiver_ephemeral_pub_hash: rep.receiver_ephemeral_pub_hash,
-                change_ephemeral_pub_hash: rep.change_ephemeral_pub_hash,
                 layer2_signature: rep.layer2_signature,
                 trap_r: rep.trap_r,
                 trap_s: rep.trap_s,
@@ -421,8 +389,6 @@ impl From<&L2LockRequest> for L2LockEntry {
             layer2_voucher_id: req.layer2_voucher_id.clone(),
             t_id: req.transaction_hash,
             sender_ephemeral_pub: req.sender_ephemeral_pub,
-            receiver_ephemeral_pub_hash: req.receiver_ephemeral_pub_hash,
-            change_ephemeral_pub_hash: req.change_ephemeral_pub_hash,
             layer2_signature: req.layer2_signature,
             trap_r: req.trap_r.clone(),
             trap_s: req.trap_s.clone(),
@@ -743,8 +709,6 @@ mod tests {
             layer2_voucher_id: "voucher1".into(),
             t_id: [1; 32],
             sender_ephemeral_pub: [2; 32],
-            receiver_ephemeral_pub_hash: Some([3; 32]),
-            change_ephemeral_pub_hash: Some([4; 32]),
             layer2_signature: [5; 64],
             trap_r: Some("trap_r_val".into()),
             trap_s: Some("trap_s_val".into()),
@@ -766,8 +730,6 @@ mod tests {
             layer2_voucher_id: "voucher1".into(),
             t_id: [1; 32],
             sender_ephemeral_pub: [2; 32],
-            receiver_ephemeral_pub_hash: None,
-            change_ephemeral_pub_hash: None,
             layer2_signature: [5; 64],
             trap_r: None,
             trap_s: None,

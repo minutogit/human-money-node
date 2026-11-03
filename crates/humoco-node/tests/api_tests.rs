@@ -112,11 +112,19 @@ fn test_now_ms() -> u64 {
 // Transport fixtures sign the separate output descriptor; no L1/SST field is
 // changed. Full L1/state-hash agreement is covered by the Core transfer vector.
 fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
+    authenticate_root_fixture_with_receiver(req, key, None);
+}
+
+fn authenticate_root_fixture_with_receiver(
+    req: &mut L2LockRequest,
+    key: &SigningKey,
+    receiver_pubkey_hash: Option<[u8; 32]>,
+) {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
     hash.update(req.transaction_hash);
     hash.update(req.sender_ephemeral_pub);
-    if let Some(receiver) = req.receiver_ephemeral_pub_hash {
+    if let Some(receiver) = receiver_pubkey_hash {
         hash.update(receiver);
     }
     hash.update(req.deletable_at.as_deref().unwrap().as_bytes());
@@ -127,8 +135,8 @@ fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
         transaction_id: req.transaction_hash,
         state_hash: req.transaction_hash,
         sender_pubkey: req.sender_ephemeral_pub,
-        receiver_pubkey_hash: req.receiver_ephemeral_pub_hash,
-        change_pubkey_hash: req.change_ephemeral_pub_hash,
+        receiver_pubkey_hash,
+        change_pubkey_hash: None,
         root_valid_until_ms: req.deletable_at.as_ref().unwrap().parse().unwrap(),
         is_root: true,
         signature: [0; 64],
@@ -187,8 +195,6 @@ fn make_test_hmc_genesis(
         transaction_hash: tx_hash,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -222,8 +228,6 @@ fn make_test_hmc_spend(
         transaction_hash: tx_hash,
         is_genesis: false,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -813,8 +817,6 @@ async fn test_node_request_handler_lock_verify_and_digest() {
         transaction_hash: [0x55; 32],
         is_genesis: true,
         sender_ephemeral_pub: *sender.node_pubkey(),
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -1119,8 +1121,6 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         transaction_hash: genesis_tx_hash,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: genesis_sig.to_bytes(),
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -1170,8 +1170,6 @@ async fn test_phase1_hmc_shard_id_derived_from_voucher_anchor_not_tid() {
         transaction_hash: different_t_id,
         is_genesis: false,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: sig.to_bytes(),
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -1855,8 +1853,6 @@ async fn test_api_hmc_read_quorum_and_adaptive_logic() {
         transaction_hash: t_id_bytes,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: sig.to_bytes(),
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -2050,8 +2046,6 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         transaction_hash: genesis_t_id,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: genesis_sig.to_bytes(),
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -2118,8 +2112,6 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         transaction_hash: leap_t_id,
         is_genesis: false,
         sender_ephemeral_pub: leap_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: leap_sig.to_bytes(),
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -2208,8 +2200,6 @@ async fn test_api_hmc_fast_forward_leap_locks() {
         transaction_hash: conflict_t_id,
         is_genesis: false,
         sender_ephemeral_pub: conflict_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: conflict_sig.to_bytes(),
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -2350,21 +2340,6 @@ async fn test_api_pex_peers_and_node_status_network() {
     let peers_dto: humoco_node::api::dto::PeersResponse = response_json(res_peers).await;
     assert_eq!(peers_dto.network, "mainnet");
     assert!(peers_dto.active_nodes_count >= 1);
-
-    // 3. Alias /peers must return identical structure
-    let res_alias = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/peers")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res_alias.status(), StatusCode::OK);
-    let alias_dto: humoco_node::api::dto::PeersResponse = response_json(res_alias).await;
-    assert_eq!(alias_dto.network, "mainnet");
 }
 
 // ---------------------------------------------------------------------------
@@ -2415,8 +2390,6 @@ fn make_genesis_hmc_req(
         transaction_hash: tx_hash,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: sig.to_bytes(),
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -2432,8 +2405,6 @@ fn make_follow_hmc_req(
     ds_tag: String,
     sender_key: &ed25519_dalek::SigningKey,
     encrypted_timestamp: u128,
-    change_hash: Option<[u8; 32]>,
-    receiver_hash: Option<[u8; 32]>,
 ) -> humoco_node::api::hmc::L2LockRequest {
     use humoco_node::api::hmc::{calculate_l2_payload_hash_raw, L2AuthPayload, L2LockRequest};
     let sender_pub = sender_key.verifying_key().to_bytes();
@@ -2468,8 +2439,6 @@ fn make_follow_hmc_req(
         transaction_hash: tx_hash,
         is_genesis: false,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: receiver_hash,
-        change_ephemeral_pub_hash: change_hash,
         layer2_signature: sig.to_bytes(),
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -2483,15 +2452,21 @@ fn make_follow_hmc_req(
 fn causal_fixture_key(index: u8) -> SigningKey {
     SigningKey::from_bytes(&[41 + index; 32])
 }
-fn sign_fixture_output(req: &mut L2LockRequest, key: &SigningKey, root_valid_until_ms: u64) {
+fn sign_fixture_output(
+    req: &mut L2LockRequest,
+    key: &SigningKey,
+    root_valid_until_ms: u64,
+    receiver_pubkey_hash: Option<[u8; 32]>,
+    change_pubkey_hash: Option<[u8; 32]>,
+) {
     let mut proof = humoco_proto::causal::CausalOutputProof {
         version: 1,
         voucher_id: req.layer2_voucher_id.clone(),
         transaction_id: req.transaction_hash,
         state_hash: req.transaction_hash,
         sender_pubkey: req.sender_ephemeral_pub,
-        receiver_pubkey_hash: req.receiver_ephemeral_pub_hash,
-        change_pubkey_hash: req.change_ephemeral_pub_hash,
+        receiver_pubkey_hash,
+        change_pubkey_hash,
         root_valid_until_ms,
         is_root: req.is_genesis,
         signature: [0; 64],
@@ -2514,7 +2489,7 @@ fn causal_fixture_spend(previous: &L2LockRequest, key: &SigningKey, id: u8) -> L
         [id; 32],
         key,
     );
-    sign_fixture_output(&mut req, key, proof.root_valid_until_ms);
+    sign_fixture_output(&mut req, key, proof.root_valid_until_ms, None, None);
     req
 }
 fn real_causal_fixture() -> humoco_node::api::hmc::L2ChainLockRequest {
@@ -2523,16 +2498,16 @@ fn real_causal_fixture() -> humoco_node::api::hmc::L2ChainLockRequest {
     let key1 = causal_fixture_key(1);
     let key2 = causal_fixture_key(2);
     let mut root = make_test_hmc_genesis("real-causal-fixture", test_now_ms() + 600_000, &key0);
-    root.receiver_ephemeral_pub_hash =
-        Some(Sha3_256::digest(key1.verifying_key().as_bytes()).into());
-    authenticate_root_fixture(&mut root, &key0);
+    let r1 = Sha3_256::digest(key1.verifying_key().as_bytes()).into();
+    authenticate_root_fixture_with_receiver(&mut root, &key0, Some(r1));
     let mut first = causal_fixture_spend(&root, &key1, 2);
-    first.receiver_ephemeral_pub_hash =
-        Some(Sha3_256::digest(key2.verifying_key().as_bytes()).into());
+    let r2 = Sha3_256::digest(key2.verifying_key().as_bytes()).into();
     sign_fixture_output(
         &mut first,
         &key1,
         root.causal_output.as_ref().unwrap().root_valid_until_ms,
+        Some(r2),
+        None,
     );
     let last = causal_fixture_spend(&first, &key2, 3);
     humoco_node::api::hmc::L2ChainLockRequest {
@@ -2590,7 +2565,7 @@ async fn test_checkout_case_1_happy_single_lock() {
     // Happy single lock: chain with 1 follow hop via /v1/lock/chain
     let follow_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
     let follow_tag = format!("ds_tag_follow_{}", test_now_ms());
-    let follow = make_follow_hmc_req(&voucher_id, follow_tag, &follow_key, 200, None, None);
+    let follow = make_follow_hmc_req(&voucher_id, follow_tag, &follow_key, 200);
     let chain_req = L2ChainLockRequest {
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
@@ -2771,6 +2746,8 @@ async fn test_checkout_case_6_intermediate_conflict_preserves_valid_prefix() {
             .as_ref()
             .unwrap()
             .root_valid_until_ms,
+        None,
+        None,
     );
     let response = app
         .clone()
@@ -2846,9 +2823,15 @@ async fn test_checkout_edge_case_split_dag_change_branch() {
         .as_ref()
         .unwrap()
         .root_valid_until_ms;
-    chain.chain[1].change_ephemeral_pub_hash =
-        Some(Sha3_256::digest(change_key.verifying_key().as_bytes()).into());
-    sign_fixture_output(&mut chain.chain[1], &causal_fixture_key(1), ttl);
+    let change_hash = Sha3_256::digest(change_key.verifying_key().as_bytes()).into();
+    let receiver_hash = chain.chain[1].causal_output.as_ref().and_then(|c| c.receiver_pubkey_hash);
+    sign_fixture_output(
+        &mut chain.chain[1],
+        &causal_fixture_key(1),
+        ttl,
+        receiver_hash,
+        Some(change_hash),
+    );
     let change = causal_fixture_spend(&chain.chain[1], &change_key, 4);
     let receive_tag = chain.chain[2].ds_tag.clone().unwrap();
     assert_ne!(change.ds_tag.as_ref().unwrap(), &receive_tag);
@@ -2936,7 +2919,7 @@ async fn test_checkout_edge_case_empty_and_single_hop_chains() {
     // single follow hop chain (after genesis) -> should also work
     let k2 = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
     let tag = format!("ds_tag_single_follow_{}", test_now_ms());
-    let follow = make_follow_hmc_req(&voucher_id, tag, &k2, 600, None, None);
+    let follow = make_follow_hmc_req(&voucher_id, tag, &k2, 600);
     let single_follow = L2ChainLockRequest {
         auth: L2AuthPayload {
             ephemeral_pubkey: sender_pub,
@@ -3269,143 +3252,6 @@ async fn test_admin_verify_token_rate_limiting() {
     assert!(events
         .iter()
         .any(|e| e.message.contains("Rate-Limit für Admin-Authentifizierung")));
-}
-
-#[tokio::test]
-async fn test_admin_friends_mutation() {
-    let temp = tempdir().expect("tempdir");
-    let db_path = temp.path().join("test_admin_friends.redb");
-    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
-    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
-    let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
-    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
-    let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
-
-    let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
-        "admin_secret_99",
-        false,
-    ));
-    let mut state = AppState::new(
-        engine,
-        storage.clone(),
-        identity.clone(),
-        tier_controller.clone(),
-        pow_engine.clone(),
-    );
-    state.peer_manager = Some(peer_manager.clone());
-    state = state.with_auth(auth);
-
-    let app = build_operator_router(state.clone());
-
-    let test_friend_key = [7u8; 32];
-    let test_friend_hex = hex::encode(test_friend_key);
-
-    // 1. POST without auth -> 401
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/dashboard/admin/friends")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"pubkey": "{}"}}"#,
-                    test_friend_hex
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-
-    // 2. POST with invalid hex -> 400
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/dashboard/admin/friends")
-                .header("Authorization", "Bearer admin_secret_99")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"pubkey": "not_hex"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-
-    // 3. POST with valid auth and valid pubkey -> 200
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/dashboard/admin/friends")
-                .header("Authorization", "Bearer admin_secret_99")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"pubkey": "{}", "label": "Bob"}}"#,
-                    test_friend_hex
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert_eq!(body_json["status"], "ok");
-    assert_eq!(body_json["pubkey"], test_friend_hex);
-
-    // Verify peer_manager has the friend
-    assert!(peer_manager.is_f2f_friend(&test_friend_key).await);
-
-    // 4. DELETE with invalid hex -> 400
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/dashboard/admin/friends/invalid_key")
-                .header("Authorization", "Bearer admin_secret_99")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-
-    // 5. DELETE without auth -> 401
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/dashboard/admin/friends/{}", test_friend_hex))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-
-    // 6. DELETE with valid auth -> 200
-    let res = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/dashboard/admin/friends/{}", test_friend_hex))
-                .header("Authorization", "Bearer admin_secret_99")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // Verify peer_manager removed the friend
-    assert!(!peer_manager.is_f2f_friend(&test_friend_key).await);
 }
 
 #[tokio::test]
@@ -4382,22 +4228,22 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
         assert_eq!(res_bad.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // 2. Add mesh peer (dual_role_ingress is ignored; server peering does NOT register F2F ingress client)
-    let req_dual = Request::builder()
+    // 2. Add mesh peer (server peering does NOT register F2F ingress client)
+    let req_peer = Request::builder()
         .method("POST")
         .uri("/dashboard/admin/mesh/peers")
         .header("Authorization", "Bearer qa_admin_secret")
         .header("Content-Type", "application/json")
         .body(Body::from(format!(
-            r#"{{"pubkey": "{}", "label": "DualPeer", "dual_role_ingress": true}}"#,
+            r#"{{"pubkey": "{}", "label": "TestPeer"}}"#,
             test_peer_hex
         )))
         .unwrap();
-    let res_dual = app.clone().oneshot(req_dual).await.unwrap();
-    assert_eq!(res_dual.status(), StatusCode::OK);
+    let res_peer = app.clone().oneshot(req_peer).await.unwrap();
+    assert_eq!(res_peer.status(), StatusCode::OK);
     assert!(peer_manager.is_f2f_friend(&test_peer).await);
     let clients = tier_controller.list_f2f_clients(1000, 0);
-    assert!(!clients.iter().any(|c| c.label == "DualPeer"));
+    assert!(!clients.iter().any(|c| c.label == "TestPeer"));
 
     // 3. Add client friend and then remove
     let req_add_client = Request::builder()
@@ -5042,8 +4888,6 @@ async fn test_api_retained_own_choice_read_only_endpoint() {
         layer2_voucher_id: root_req.layer2_voucher_id.clone(),
         t_id: [99u8; 32],
         sender_ephemeral_pub: [1u8; 32],
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: None,
         trap_s: None,

@@ -487,7 +487,6 @@ async fn test_a02_01_forged_proof_rejected_without_mutation() {
     let mut forged =
         humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation(att_a, att_b);
     forged.perpetrator_node_id = victim_pub;
-    forged.perpetrator = victim_u16;
 
     let payload = bincode::serialize(&forged).expect("serialize");
     let hdr = WireHeader::new(
@@ -714,7 +713,6 @@ async fn test_a20_01_boot_reconstruction_rejects_forged_evidence() {
     let mut forged =
         humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation(att_a, att_b);
     forged.perpetrator_node_id = victim_pub;
-    forged.perpetrator = victim_u16;
 
     let payload = bincode::serialize(&forged).expect("serialize");
     let evidence_hash = *blake3::hash(&payload).as_bytes();

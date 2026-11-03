@@ -164,58 +164,6 @@ pub struct HeartbeatWirePayload {
     pub gateway_advertisement: Option<crate::network::discovery::GatewayAdvertisement>,
 }
 
-#[derive(serde::Deserialize)]
-struct HeartbeatWithoutGateway {
-    pub node_id: [u8; 32],
-    pub addr: std::net::SocketAddr,
-    pub timestamp_ms: u64,
-    #[serde(default)]
-    pub declared_write_ema_micro_bj: u64,
-    #[serde(default)]
-    pub declared_read_ema_credits: u64,
-    #[serde(default = "default_signature", with = "serde_sig_64")]
-    pub signature: [u8; 64],
-    #[serde(default)]
-    pub supported_suites_mask: u8,
-    #[serde(default, deserialize_with = "deserialize_piggyback_observations")]
-    pub piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
-    #[serde(default)]
-    pub pow_nonce: u64,
-    #[serde(default)]
-    pub hrw_routing_id: [u8; 32],
-    #[serde(default)]
-    pub ticket_epoch_t0: u64,
-    #[serde(default = "default_heartbeat_ttl")]
-    pub ttl: u8,
-    #[serde(default)]
-    pub signing_checkpoint: Option<SigningCheckpoint>,
-}
-
-#[derive(serde::Deserialize)]
-struct HeartbeatWithoutCheckpoint {
-    pub node_id: [u8; 32],
-    pub addr: std::net::SocketAddr,
-    pub timestamp_ms: u64,
-    #[serde(default)]
-    pub declared_write_ema_micro_bj: u64,
-    #[serde(default)]
-    pub declared_read_ema_credits: u64,
-    #[serde(default = "default_signature", with = "serde_sig_64")]
-    pub signature: [u8; 64],
-    #[serde(default)]
-    pub supported_suites_mask: u8,
-    #[serde(default, deserialize_with = "deserialize_piggyback_observations")]
-    pub piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
-    #[serde(default)]
-    pub pow_nonce: u64,
-    #[serde(default)]
-    pub hrw_routing_id: [u8; 32],
-    #[serde(default)]
-    pub ticket_epoch_t0: u64,
-    #[serde(default = "default_heartbeat_ttl")]
-    pub ttl: u8,
-}
-
 pub fn default_heartbeat_ttl() -> u8 {
     16
 }
@@ -236,110 +184,7 @@ where
 
 impl HeartbeatWirePayload {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        if let Ok(hb) = bincode::deserialize::<HeartbeatWirePayload>(bytes) {
-            Ok(hb)
-        } else if let Ok(old) = bincode::deserialize::<HeartbeatWithoutGateway>(bytes) {
-            Ok(Self {
-                node_id: old.node_id,
-                addr: old.addr,
-                timestamp_ms: old.timestamp_ms,
-                declared_write_ema_micro_bj: old.declared_write_ema_micro_bj,
-                declared_read_ema_credits: old.declared_read_ema_credits,
-                signature: old.signature,
-                supported_suites_mask: old.supported_suites_mask,
-                piggyback_observations: old.piggyback_observations,
-                pow_nonce: old.pow_nonce,
-                hrw_routing_id: old.hrw_routing_id,
-                ticket_epoch_t0: old.ticket_epoch_t0,
-                ttl: old.ttl,
-                signing_checkpoint: old.signing_checkpoint,
-                gateway_advertisement: None,
-            })
-        } else if let Ok(old) = bincode::deserialize::<HeartbeatWithoutCheckpoint>(bytes) {
-            Ok(Self {
-                signing_checkpoint: None,
-                gateway_advertisement: None,
-                node_id: old.node_id,
-                addr: old.addr,
-                timestamp_ms: old.timestamp_ms,
-                declared_write_ema_micro_bj: old.declared_write_ema_micro_bj,
-                declared_read_ema_credits: old.declared_read_ema_credits,
-                signature: old.signature,
-                supported_suites_mask: old.supported_suites_mask,
-                piggyback_observations: old.piggyback_observations,
-                pow_nonce: old.pow_nonce,
-                hrw_routing_id: old.hrw_routing_id,
-                ticket_epoch_t0: old.ticket_epoch_t0,
-                ttl: old.ttl,
-            })
-        } else {
-            #[derive(serde::Deserialize)]
-            struct MidHeartbeat {
-                node_id: [u8; 32],
-                addr: std::net::SocketAddr,
-                timestamp_ms: u64,
-                #[serde(default)]
-                declared_write_ema_micro_bj: u64,
-                #[serde(default)]
-                declared_read_ema_credits: u64,
-                #[serde(default = "default_signature", with = "serde_sig_64")]
-                signature: [u8; 64],
-                #[serde(default)]
-                supported_suites_mask: u8,
-                #[serde(default, deserialize_with = "deserialize_piggyback_observations")]
-                piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
-            }
-            if let Ok(m) = bincode::deserialize::<MidHeartbeat>(bytes) {
-                Ok(HeartbeatWirePayload {
-                    signing_checkpoint: None,
-                    gateway_advertisement: None,
-                    node_id: m.node_id,
-                    addr: m.addr,
-                    timestamp_ms: m.timestamp_ms,
-                    declared_write_ema_micro_bj: m.declared_write_ema_micro_bj,
-                    declared_read_ema_credits: m.declared_read_ema_credits,
-                    signature: m.signature,
-                    supported_suites_mask: m.supported_suites_mask,
-                    piggyback_observations: m.piggyback_observations,
-                    pow_nonce: 0,
-                    hrw_routing_id: m.node_id,
-                    ticket_epoch_t0: 0,
-                    ttl: 16,
-                })
-            } else {
-                #[derive(serde::Deserialize)]
-                struct LegacyHeartbeat {
-                    node_id: [u8; 32],
-                    addr: std::net::SocketAddr,
-                    timestamp_ms: u64,
-                    #[serde(default)]
-                    declared_write_ema_micro_bj: u64,
-                    #[serde(default)]
-                    declared_read_ema_credits: u64,
-                    #[serde(default = "default_signature", with = "serde_sig_64")]
-                    signature: [u8; 64],
-                    #[serde(default)]
-                    supported_suites_mask: u8,
-                }
-                let l: LegacyHeartbeat = bincode::deserialize(bytes)?;
-                Ok(HeartbeatWirePayload {
-                    signing_checkpoint: None,
-                    gateway_advertisement: None,
-                    node_id: l.node_id,
-                    addr: l.addr,
-                    timestamp_ms: l.timestamp_ms,
-                    declared_write_ema_micro_bj: l.declared_write_ema_micro_bj,
-                    declared_read_ema_credits: l.declared_read_ema_credits,
-                    signature: l.signature,
-                    supported_suites_mask: l.supported_suites_mask,
-                    piggyback_observations: Vec::new(),
-                    pow_nonce: 0,
-                    hrw_routing_id: l.node_id,
-                    ticket_epoch_t0: 0,
-                    ttl: 16,
-                })
-            }
-        }
+        bincode::deserialize(bytes)
     }
 
     /// Computes the canonical announcement hash binding `(addr, pow_nonce, hrw_routing_id, ticket_epoch_t0)`.
@@ -403,34 +248,9 @@ impl HeartbeatWirePayload {
         vk.verify(&digest, &sig).is_ok()
     }
 
-    /// Verifies the origin signature.
-    /// First checks for canonical address-binding signature; if not matched, falls back to
-    /// legacy `op_hash = [0u8; 32]` for backward compatibility on direct connections.
+    /// Verifies the origin signature with canonical address binding.
     pub fn verify_origin_signature(&self) -> bool {
-        if self.verify_origin_address_binding() {
-            return true;
-        }
-        if self.signature == [0u8; 64] {
-            return false;
-        }
-        let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.node_id) else {
-            return false;
-        };
-        let sig = ed25519_dalek::Signature::from_bytes(&self.signature);
-        let legacy_op_hash = [0u8; 32];
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-            &self.node_id,
-            0,
-            0,
-            self.timestamp_ms,
-            self.declared_write_ema_micro_bj,
-            self.declared_read_ema_credits,
-            0,
-            false,
-            &legacy_op_hash,
-        );
-        use ed25519_dalek::Verifier;
-        vk.verify(&digest, &sig).is_ok()
+        self.verify_origin_address_binding()
     }
 }
 
@@ -957,10 +777,7 @@ pub async fn read_frame_admitted<R: AsyncReadExt + Unpin>(
             )));
         }
 
-        if header.protocol_version != CURRENT_PROTOCOL_VERSION
-            && !(header.min_compat_ver != 0
-                && u16::from(header.min_compat_ver) <= CURRENT_PROTOCOL_VERSION)
-        {
+        if header.protocol_version != CURRENT_PROTOCOL_VERSION {
             return Err(NodeError::Network(format!(
                 "Unsupported protocol version: expected {}, got {}",
                 CURRENT_PROTOCOL_VERSION, header.protocol_version
@@ -1251,7 +1068,7 @@ mod tests {
             "Tampered EMA must fail"
         );
 
-        // Legacy signature with op_hash = [0; 32]
+        // Legacy signature with op_hash = [0; 32] without canonical address binding must fail
         use ed25519_dalek::Signer;
         let legacy_digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
             identity.node_pubkey(),
@@ -1271,8 +1088,8 @@ mod tests {
             "Legacy signature must NOT satisfy address binding"
         );
         assert!(
-            legacy_hb.verify_origin_signature(),
-            "Legacy signature must satisfy backward-compatible origin signature"
+            !legacy_hb.verify_origin_signature(),
+            "Legacy signature without address binding must fail"
         );
     }
 }

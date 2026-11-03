@@ -198,8 +198,6 @@ async fn test_a25_04_unauthenticated_request_returns_unsigned_error() {
         "transaction_hash": bs58::encode([2u8; 32]).into_string(),
         "is_genesis": true,
         "sender_ephemeral_pub": bs58::encode([1u8; 32]).into_string(),
-        "receiver_ephemeral_pub_hash": null,
-        "change_ephemeral_pub_hash": null,
         "layer2_signature": bs58::encode([0u8; 64]).into_string(),
         "created_at_ms": now_ms,
         "deletable_at": (now_ms + 600_000).to_string()
@@ -376,8 +374,6 @@ async fn test_a25_r2_chain_pow_bound_to_parent_rejects_cross_chain_transplant() 
                 "transaction_hash": bs58::encode([4u8; 32]).into_string(),
                 "is_genesis": false,
                 "sender_ephemeral_pub": bs58::encode([3u8; 32]).into_string(),
-                "receiver_ephemeral_pub_hash": null,
-                "change_ephemeral_pub_hash": null,
                 "layer2_signature": bs58::encode([0u8; 64]).into_string(),
                 "created_at_ms": now_ms,
                 "deletable_at": null
@@ -431,8 +427,6 @@ async fn test_a25_r2_chain_pow_bound_to_parent_rejects_cross_chain_transplant() 
                 "transaction_hash": bs58::encode([4u8; 32]).into_string(),
                 "is_genesis": false,
                 "sender_ephemeral_pub": bs58::encode([3u8; 32]).into_string(),
-                "receiver_ephemeral_pub_hash": null,
-                "change_ephemeral_pub_hash": null,
                 "layer2_signature": bs58::encode([0u8; 64]).into_string(),
                 "created_at_ms": now_ms,
                 "deletable_at": null
@@ -525,8 +519,6 @@ async fn test_a25_r3_unauthenticated_empty_or_invalid_requests_rejected_unsigned
                 "transaction_hash": bs58::encode([6u8; 32]).into_string(),
                 "is_genesis": false,
                 "sender_ephemeral_pub": bs58::encode([5u8; 32]).into_string(),
-                "receiver_ephemeral_pub_hash": null,
-                "change_ephemeral_pub_hash": null,
                 "layer2_signature": bs58::encode([0u8; 64]).into_string(),
                 "created_at_ms": 1_000_000,
                 "deletable_at": null

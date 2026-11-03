@@ -53,12 +53,12 @@ proptest! {
         flags in any::<u32>(),
         payload_len in any::<u32>(),
         crypto_suite in any::<u8>(),
-        min_compat_ver in any::<u8>(),
+        reserved_ver in any::<u8>(),
         reserved in any::<u16>(),
     ) {
         let mut hdr = WireHeader::new(msg_type, session_seq, epoch_id, flags, payload_len);
         hdr.crypto_suite = crypto_suite;
-        hdr.min_compat_ver = min_compat_ver;
+        hdr.reserved_ver = reserved_ver;
         hdr.reserved = reserved;
         let bytes = hdr.to_bytes();
         prop_assert_eq!(bytes.len(), WireHeader::SIZE);
@@ -72,7 +72,7 @@ proptest! {
         prop_assert_eq!(decoded.flags, flags);
         prop_assert_eq!(decoded.payload_len, payload_len);
         prop_assert_eq!(decoded.crypto_suite, crypto_suite);
-        prop_assert_eq!(decoded.min_compat_ver, min_compat_ver);
+        prop_assert_eq!(decoded.reserved_ver, reserved_ver);
         prop_assert_eq!(decoded.reserved, reserved);
         prop_assert_eq!(decoded, hdr);
     }

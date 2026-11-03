@@ -70,8 +70,6 @@ fn make_entry(
         layer2_voucher_id: voucher_id.to_string(),
         t_id,
         sender_ephemeral_pub: [0x55; 32],
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0x66; 64],
         trap_r: None,
         trap_s: None,

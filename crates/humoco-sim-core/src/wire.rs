@@ -15,7 +15,7 @@ pub struct WireHeader {
     pub flags: u32,
     pub payload_len: u32,
     pub crypto_suite: u8,
-    pub min_compat_ver: u8,
+    pub reserved_ver: u8,
     pub reserved: u16,
 }
 
@@ -37,8 +37,8 @@ impl WireHeader {
             epoch_id,
             flags,
             payload_len,
-            crypto_suite: 0,
-            min_compat_ver: 0,
+            crypto_suite: 1,
+            reserved_ver: 0,
             reserved: 0,
         }
     }
@@ -49,7 +49,7 @@ impl WireHeader {
     }
 
     #[inline(always)]
-    pub fn crypto_suite(&self) -> crate::types::CryptoSuiteId {
+    pub fn crypto_suite(&self) -> Option<crate::types::CryptoSuiteId> {
         crate::types::CryptoSuiteId::from_u8(self.crypto_suite)
     }
 
@@ -66,7 +66,7 @@ impl WireHeader {
             flags: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
             payload_len: u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
             crypto_suite: bytes[28],
-            min_compat_ver: bytes[29],
+            reserved_ver: bytes[29],
             reserved: u16::from_le_bytes([bytes[30], bytes[31]]),
         }
     }
@@ -81,7 +81,7 @@ impl WireHeader {
         out[20..24].copy_from_slice(&self.flags.to_le_bytes());
         out[24..28].copy_from_slice(&self.payload_len.to_le_bytes());
         out[28] = self.crypto_suite;
-        out[29] = self.min_compat_ver;
+        out[29] = self.reserved_ver;
         out[30..32].copy_from_slice(&self.reserved.to_le_bytes());
         out
     }
@@ -115,7 +115,6 @@ pub const FLAG_FINAL: u32 = 0x0000_0002;
 pub const FLAG_EXPIRED_CLEANUP: u32 = 0x0000_0004;
 pub const FLAG_HEDGED: u32 = 0x0000_0008;
 pub const FLAG_COMPRESSED: u32 = 0x0000_0010;
-pub const FLAG_BRIDGE_LOCK: u32 = 0x0000_0020;
 pub const FLAG_PEER_SUSPENDED: u32 = 0x0000_0040;
 pub const FLAG_POW_OUTDATED: u32 = 0x0000_0080;
 pub const FLAG_QUOTA_EXCEEDED: u32 = 0x0000_0100;

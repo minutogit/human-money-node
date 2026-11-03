@@ -61,8 +61,6 @@ fn make_hmc_genesis(
         transaction_hash: tx_hash,
         is_genesis: true,
         sender_ephemeral_pub: sender_pub,
-        receiver_ephemeral_pub_hash: None,
-        change_ephemeral_pub_hash: None,
         layer2_signature: [0u8; 64],
         trap_r: Some("none".into()),
         trap_s: Some("none".into()),
@@ -567,9 +565,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                         let (req, tag_display, byte_years_est) = if should_inject_collision {
                             let (voucher_id, prev_output) = &spent_history[rng.gen_range(0..spent_history.len())];
-                            let fake_receiver_key = SigningKey::generate(&mut rng);
-                            let fake_receiver_pub = fake_receiver_key.verifying_key().to_bytes();
-                            let fake_receiver_ephemeral_pub_hash = Some(*blake3::hash(&fake_receiver_pub).as_bytes());
 
                             let timestamp = (sim_now_ms as u128).max(prev_output.last_timestamp + 2000);
                             let sender_pub = prev_output.owner_key.verifying_key().to_bytes();
@@ -590,8 +585,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 transaction_hash: tx_hash,
                                 is_genesis: false,
                                 sender_ephemeral_pub: sender_pub,
-                                receiver_ephemeral_pub_hash: fake_receiver_ephemeral_pub_hash,
-                                change_ephemeral_pub_hash: None,
                                 layer2_signature: [0u8; 64],
                                 trap_r: Some("none".into()),
                                 trap_s: Some("none".into()),
@@ -692,11 +685,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 }
 
                                 let receiver_key = SigningKey::generate(&mut rng);
-                                let receiver_pub = receiver_key.verifying_key().to_bytes();
-                                let receiver_ephemeral_pub_hash = Some(*blake3::hash(&receiver_pub).as_bytes());
 
                                 let is_split = rng.gen_bool(0.30);
-                                let (change_key_opt, change_ephemeral_pub_hash) = if is_split {
+                                let (change_key_opt, change_hash_opt) = if is_split {
                                     let change_key = SigningKey::generate(&mut rng);
                                     let change_pub = change_key.verifying_key().to_bytes();
                                     let change_hash = *blake3::hash(&change_pub).as_bytes();
@@ -724,8 +715,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     transaction_hash: tx_hash,
                                     is_genesis: false,
                                     sender_ephemeral_pub: sender_pub,
-                                    receiver_ephemeral_pub_hash,
-                                    change_ephemeral_pub_hash,
                                     layer2_signature: [0u8; 64],
                                     trap_r: Some("none".into()),
                                     trap_s: Some("none".into()),
@@ -757,7 +746,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     last_timestamp: timestamp,
                                 });
 
-                                if let (Some(change_key), Some(change_hash)) = (change_key_opt, change_ephemeral_pub_hash) {
+                                if let (Some(change_key), Some(change_hash)) = (change_key_opt, change_hash_opt) {
                                     let change_tag = bs58::encode(&change_hash).into_string();
                                     voucher.unspent_outputs.push(UnspentOutput {
                                         ds_tag: change_tag,

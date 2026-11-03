@@ -20,17 +20,19 @@ use humoco_node::storage::{DualTierEngine, RedbStorage};
 use humoco_sim_core::types::{Attestation, NetworkId, SimTime};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
-fn sign_attestation(
+/// Signs an attestation for a descendant voucher where the authenticated voucher genesis shard
+/// is decoupled from the arbitrary parent double-spend tag digest prefix.
+fn sign_attestation_with_shard(
     key: &SigningKey,
     parent: &[u8; 32],
     lock_id: &[u8; 32],
     domain: &[u8],
     status: u8,
+    shard_id: u16,
 ) -> Attestation {
     let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(parent, lock_id);
-    let shard = u16::from_be_bytes([parent[0], parent[1]]);
     let digest =
-        humoco_sim_core::crypto::compute_sig_digest(domain, 0, 0, 0, shard, status, &payload);
+        humoco_sim_core::crypto::compute_sig_digest(domain, 0, 0, 0, shard_id, status, &payload);
     let pubkey = key.verifying_key().to_bytes();
     let node_u16 = u16::from_le_bytes([pubkey[0], pubkey[1]]);
     Attestation {
@@ -39,8 +41,20 @@ fn sign_attestation(
         parent_lock: *parent,
         timestamp: SimTime(1_000),
         signature: key.sign(&digest).to_bytes(),
-        shard_id: shard,
+        shard_id,
     }
+}
+
+/// Signs an attestation for a root voucher where the parent lock digest's prefix matches the voucher genesis shard.
+fn sign_attestation(
+    key: &SigningKey,
+    parent: &[u8; 32],
+    lock_id: &[u8; 32],
+    domain: &[u8],
+    status: u8,
+) -> Attestation {
+    let shard = u16::from_be_bytes([parent[0], parent[1]]);
+    sign_attestation_with_shard(key, parent, lock_id, domain, status, shard)
 }
 
 async fn setup_server(
@@ -894,4 +908,734 @@ async fn test_a02_01_testnet_rejects_mainnet_equivocation_proof() {
     client_cancel.cancel();
     client_transport.close();
 }
+
+// ---------------------------------------------------------------------------
+// S04-06: Genuine Conflicting Originals with Shard Differing from Parent Prefix (Bidi QUIC)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s04_06_bidi_different_shard_than_parent_prefix_slashes_offender() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Testnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let offender_key = SigningKey::from_bytes(&[0xA1u8; 32]);
+    let offender_pub = offender_key.verifying_key().to_bytes();
+    // Consumed parent prefix is 0x7777, but signed voucher-genesis shard is 0x1234
+    let mut parent = [0x77u8; 32];
+    parent[0] = 0x77;
+    parent[1] = 0x77;
+    let lock_a = [0x11u8; 32];
+    let lock_b = [0x22u8; 32];
+    let explicit_shard = 0x1234u16;
+
+    // Mixed provisional and final originals
+    let att_a = sign_attestation_with_shard(
+        &offender_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
+        0,
+        explicit_shard,
+    );
+    let att_b = sign_attestation_with_shard(
+        &offender_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
+        1,
+        explicit_shard,
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        offender_pub,
+    );
+
+    assert!(proof.verify(), "Proof must verify under generic verifier");
+    assert!(proof.verify_network(NetworkId::Testnet), "Proof must verify under Testnet");
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        10,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send equivocation proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    // Offender must be banned in RAM and durable redb, and evidence persisted
+    assert!(
+        engine.is_node_banned(&offender_pub).await,
+        "Offender must be banned in engine RAM"
+    );
+    assert!(
+        pm.is_banned(&offender_pub).await,
+        "Offender must be banned in PeerManager"
+    );
+    assert!(
+        storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Offender must be banned in redb"
+    );
+
+    let evidence_hash = *blake3::hash(&payload).as_bytes();
+    assert!(
+        storage
+            .get_evidence(&evidence_hash)
+            .expect("get evidence")
+            .is_some(),
+        "Slashing evidence must be persisted"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+// ---------------------------------------------------------------------------
+// S04-06: Genuine Conflicting Originals with Shard Differing from Parent Prefix (Uni QUIC, Mainnet, Both Final)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s04_06_uni_different_shard_than_parent_prefix_slashes_offender() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let offender_key = SigningKey::from_bytes(&[0xA2u8; 32]);
+    let offender_pub = offender_key.verifying_key().to_bytes();
+    let mut parent = [0x88u8; 32];
+    parent[0] = 0x88;
+    parent[1] = 0x88;
+    let lock_a = [0x33u8; 32];
+    let lock_b = [0x44u8; 32];
+    let explicit_shard = 0x5678u16;
+
+    // Both final originals
+    let att_a = sign_attestation_with_shard(
+        &offender_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+        1,
+        explicit_shard,
+    );
+    let att_b = sign_attestation_with_shard(
+        &offender_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+        1,
+        explicit_shard,
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        offender_pub,
+    );
+
+    assert!(proof.verify_network(NetworkId::Mainnet));
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        11,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    client_transport
+        .send_unidirectional(&conn, &hdr, &payload)
+        .await
+        .expect("send uni proof");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(
+        engine.is_node_banned(&offender_pub).await,
+        "Offender must be banned in engine RAM (uni)"
+    );
+    assert!(
+        pm.is_banned(&offender_pub).await,
+        "Offender must be banned in PeerManager (uni)"
+    );
+    assert!(
+        storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Offender must be banned in redb (uni)"
+    );
+
+    let evidence_hash = *blake3::hash(&payload).as_bytes();
+    assert!(
+        storage
+            .get_evidence(&evidence_hash)
+            .expect("get evidence")
+            .is_some()
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+// ---------------------------------------------------------------------------
+// S04-06: Explicit Shard Zero with Non-Zero Parent Prefix (Both Prov, Mainnet)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s04_06_explicit_shard_zero_with_nonzero_parent_prefix_slashes_offender() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let offender_key = SigningKey::from_bytes(&[0xA3u8; 32]);
+    let offender_pub = offender_key.verifying_key().to_bytes();
+    let mut parent = [0x77u8; 32];
+    parent[0] = 0x77;
+    parent[1] = 0x77;
+    let lock_a = [0x55u8; 32];
+    let lock_b = [0x66u8; 32];
+    // Explicit shard 0x0000, parent prefix 0x7777
+    let explicit_shard = 0x0000u16;
+
+    // Both provisional originals
+    let att_a = sign_attestation_with_shard(
+        &offender_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
+        explicit_shard,
+    );
+    let att_b = sign_attestation_with_shard(
+        &offender_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
+        explicit_shard,
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        offender_pub,
+    );
+
+    assert!(proof.verify_network(NetworkId::Mainnet));
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        12,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    assert!(
+        engine.is_node_banned(&offender_pub).await,
+        "Offender must be banned in RAM for valid explicit shard 0x0000"
+    );
+    assert!(
+        pm.is_banned(&offender_pub).await,
+        "Offender must be banned in PeerManager for valid explicit shard 0x0000"
+    );
+    assert!(
+        storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Offender must be banned in redb for valid explicit shard 0x0000"
+    );
+
+    let evidence_hash = *blake3::hash(&payload).as_bytes();
+    assert!(
+        storage
+            .get_evidence(&evidence_hash)
+            .expect("get evidence")
+            .is_some(),
+        "Slashing evidence must be persisted for valid explicit shard 0x0000"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+// ---------------------------------------------------------------------------
+// S04-06 Negative Tests: Tampered metadata, differing contexts, forged signature
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s04_06_tampered_shard_after_signing_rejected_without_mutation() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let victim_key = SigningKey::from_bytes(&[0xA4u8; 32]);
+    let victim_pub = victim_key.verifying_key().to_bytes();
+    let parent = [0x77u8; 32];
+    let lock_a = [0x55u8; 32];
+    let lock_b = [0x66u8; 32];
+
+    // Signed for shard 0x1234
+    let mut att_a = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
+        0x1234,
+    );
+    let mut att_b = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+        1,
+        0x1234,
+    );
+
+    // Tamper shard_id in att_a and att_b to 0x5678 after signing
+    att_a.shard_id = 0x5678;
+    att_b.shard_id = 0x5678;
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        victim_pub,
+    );
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        13,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send tampered proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    assert!(
+        !engine.is_node_banned(&victim_pub).await,
+        "Victim must not be banned when shard_id is tampered"
+    );
+    assert!(
+        !storage.is_node_banned(&victim_pub).expect("check ban"),
+        "Victim must not be banned in storage when shard_id is tampered"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+#[tokio::test]
+async fn test_s04_06_tampered_nonzero_shard_to_zero_rejected_without_mutation() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let victim_key = SigningKey::from_bytes(&[0xA5u8; 32]);
+    let victim_pub = victim_key.verifying_key().to_bytes();
+    let parent = [0x77u8; 32];
+    let lock_a = [0x55u8; 32];
+    let lock_b = [0x66u8; 32];
+
+    // Signed for shard 0x1234
+    let mut att_a = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
+        0x1234,
+    );
+    let mut att_b = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+        1,
+        0x1234,
+    );
+
+    // Tamper shard_id from signed 0x1234 to 0x0000
+    att_a.shard_id = 0x0000;
+    att_b.shard_id = 0x0000;
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        victim_pub,
+    );
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        14,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    assert!(
+        !engine.is_node_banned(&victim_pub).await,
+        "Tampering non-zero shard to zero must be rejected without ban"
+    );
+    assert!(
+        !storage.is_node_banned(&victim_pub).expect("check ban"),
+        "Tampering non-zero shard to zero must not persist ban"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+#[tokio::test]
+async fn test_s04_06_differing_shards_between_originals_rejected_without_mutation() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let victim_key = SigningKey::from_bytes(&[0xA6u8; 32]);
+    let victim_pub = victim_key.verifying_key().to_bytes();
+    let parent = [0x77u8; 32];
+    let lock_a = [0x55u8; 32];
+    let lock_b = [0x66u8; 32];
+
+    // att_a signed for shard 0x1234, att_b signed for shard 0x5678
+    let att_a = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
+        0x1234,
+    );
+    let att_b = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+        1,
+        0x5678,
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        victim_pub,
+    );
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        15,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    assert!(
+        !engine.is_node_banned(&victim_pub).await,
+        "Differing shard contexts between originals must not ban"
+    );
+    assert!(
+        !storage.is_node_banned(&victim_pub).expect("check ban"),
+        "Differing shard contexts between originals must not persist ban"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+#[tokio::test]
+async fn test_s04_06_forged_signature_with_diff_shard_rejected_without_mutation() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let victim_key = SigningKey::from_bytes(&[0xA7u8; 32]);
+    let victim_pub = victim_key.verifying_key().to_bytes();
+    let parent = [0x77u8; 32];
+    let lock_a = [0x55u8; 32];
+    let lock_b = [0x66u8; 32];
+
+    let mut att_a = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
+        0x1234,
+    );
+    let att_b = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
+        1,
+        0x1234,
+    );
+
+    // Corrupt signature of att_a
+    att_a.signature[0] ^= 0xFF;
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        victim_pub,
+    );
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        16,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    assert!(
+        !engine.is_node_banned(&victim_pub).await,
+        "Forged signature must not ban"
+    );
+    assert!(
+        !storage.is_node_banned(&victim_pub).expect("check ban"),
+        "Forged signature must not persist ban"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+// ---------------------------------------------------------------------------
+// S04-06: Foreign-Network Pair with Non-Prefix Voucher Shard Rejected (Testnet on Mainnet Server)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s04_06_foreign_network_pair_diff_shard_rejected_without_mutation() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let offender_key = SigningKey::from_bytes(&[0xA8u8; 32]);
+    let offender_pub = offender_key.verifying_key().to_bytes();
+    let mut parent = [0x77u8; 32];
+    parent[0] = 0x77;
+    parent[1] = 0x77;
+    let lock_a = [0x55u8; 32];
+    let lock_b = [0x66u8; 32];
+    let explicit_shard = 0x1234u16;
+
+    // Both signed for Testnet, but submitted to a Mainnet server
+    let att_a = sign_attestation_with_shard(
+        &offender_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
+        0,
+        explicit_shard,
+    );
+    let att_b = sign_attestation_with_shard(
+        &offender_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
+        1,
+        explicit_shard,
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        offender_pub,
+    );
+
+    assert!(proof.verify_network(NetworkId::Testnet));
+    assert!(!proof.verify_network(NetworkId::Mainnet));
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let evidence_hash = *blake3::hash(&payload).as_bytes();
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        17,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send foreign proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    // Foreign-network pair must produce NO RAM ban, NO durable ban, and NO stored evidence
+    assert!(
+        !engine.is_node_banned(&offender_pub).await,
+        "Mainnet node must not ban offender in engine RAM for Testnet proof with explicit shard"
+    );
+    assert!(
+        !pm.is_banned(&offender_pub).await,
+        "Mainnet node must not ban offender in PeerManager for Testnet proof with explicit shard"
+    );
+    assert!(
+        !storage.is_node_banned(&offender_pub).expect("check ban"),
+        "Mainnet node must not ban offender in redb for Testnet proof with explicit shard"
+    );
+    assert!(
+        storage.get_evidence(&evidence_hash).expect("get evidence").is_none(),
+        "Mainnet node must not persist evidence for Testnet proof with explicit shard"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+// ---------------------------------------------------------------------------
+// S04-06: Mixed-Network Pair with Non-Prefix Voucher Shard Rejected (One Mainnet, One Testnet)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s04_06_mixed_network_pair_diff_shard_rejected_without_mutation() {
+    let (storage, engine, _worker, pm, server_id, server_transport, server_addr, server_cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client_transport, conn, client_cancel) =
+        setup_client(server_addr, *server_id.node_pubkey(), &pm).await;
+
+    let victim_key = SigningKey::from_bytes(&[0xA9u8; 32]);
+    let victim_pub = victim_key.verifying_key().to_bytes();
+    let mut parent = [0x77u8; 32];
+    parent[0] = 0x77;
+    parent[1] = 0x77;
+    let lock_a = [0x55u8; 32];
+    let lock_b = [0x66u8; 32];
+    let explicit_shard = 0x1234u16;
+
+    // Mixed: att_a is Mainnet, att_b is Testnet
+    let att_a = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_a,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
+        0,
+        explicit_shard,
+    );
+    let att_b = sign_attestation_with_shard(
+        &victim_key,
+        &parent,
+        &lock_b,
+        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
+        1,
+        explicit_shard,
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att_a,
+        att_b,
+        victim_pub,
+    );
+
+    assert!(!proof.verify(), "Mixed-network proof must fail verify");
+    assert!(!proof.verify_network(NetworkId::Mainnet), "Mixed-network proof must fail Mainnet verify");
+    assert!(!proof.verify_network(NetworkId::Testnet), "Mixed-network proof must fail Testnet verify");
+
+    let payload = bincode::serialize(&proof).expect("serialize");
+    let evidence_hash = *blake3::hash(&payload).as_bytes();
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        18,
+        0,
+        0,
+        payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &payload)
+        .await
+        .expect("send mixed proof");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::EquivocationAck as u16);
+
+    assert!(
+        !engine.is_node_banned(&victim_pub).await,
+        "Victim must not be banned in engine RAM for mixed-network proof"
+    );
+    assert!(
+        !pm.is_banned(&victim_pub).await,
+        "Victim must not be banned in PeerManager for mixed-network proof"
+    );
+    assert!(
+        !storage.is_node_banned(&victim_pub).expect("check ban"),
+        "Victim must not be banned in redb for mixed-network proof"
+    );
+    assert!(
+        storage.get_evidence(&evidence_hash).expect("get evidence").is_none(),
+        "Mixed-network proof must not persist evidence"
+    );
+
+    server_cancel.cancel();
+    server_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
 

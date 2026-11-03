@@ -544,7 +544,7 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
         parent_lock,
         timestamp: SimTime(100),
         signature: sig_1,
-        shard_id: 0,
+        shard_id,
     };
     let att_2 = humoco_sim_core::types::Attestation {
         node_id: node_u16,
@@ -552,7 +552,7 @@ async fn test_phase3_equivocation_ban_and_peer_disconnect() {
         parent_lock,
         timestamp: SimTime(200),
         signature: sig_2,
-        shard_id: 0,
+        shard_id,
     };
 
     let proof =

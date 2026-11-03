@@ -58,7 +58,7 @@ socket2 = "0.6"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
+http-body-util = { version = "0.1", features = ["channel"] }
 proptest = "1"
 
 

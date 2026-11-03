@@ -11,7 +11,7 @@
 //! 2. During P2P sync (IngressOrigin::PartitionSync):
 //!    - Physics trumps negotiation: all 20 nodes deterministically converge to Lock A via min(H_canon).
 //!    - Lock B becomes VOID and is displaced from RAM.
-//!    - The double-spending sender is banned network-wide for equivocation.
+//!    - Conflicting owner spends do not constitute node equivocation or cause node bans.
 
 use std::sync::Arc;
 
@@ -298,11 +298,11 @@ async fn test_subquorum_hmc_13_vs_7_minority_with_lower_hash_prevails() {
         );
     }
 
-    // Invariant 2: The equivocating wallet sender is banned on all 20 nodes
+    // Owner signatures are not original node decisions: no P2P identity sanction.
     for (i, engine) in engines.iter().enumerate() {
         assert!(
-            engine.is_node_banned(&wallet_pub).await,
-            "Node {i} MUST have banned the double-spending sender"
+            !engine.is_node_banned(&wallet_pub).await,
+            "Node {i} must not treat wallet signatures as node equivocation"
         );
     }
 }

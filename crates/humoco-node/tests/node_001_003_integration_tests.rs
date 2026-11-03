@@ -727,13 +727,7 @@ async fn test_post_v1_verify_current_unoccupied_and_occupied() {
     }
 }
 
-// ===========================================================================
-// Test 4: POST /v1/checkout 1-RTT PoS Single Roundtrip Proof
-// ===========================================================================
-#[tokio::test]
-async fn test_post_v1_checkout_single_rtt() {
-    let temp = tempdir().unwrap();
-    let cluster = setup_test_cluster(&temp).await;
+async fn checkout_request(cluster: &TestCluster, anchor_gateway: bool) -> L2CheckoutRequest {
     let now = test_now_ms();
 
     // Populate the terminal spend in the cluster
@@ -762,18 +756,20 @@ async fn test_post_v1_checkout_single_rtt() {
             )
             .await;
     }
-    cluster
-        .gateway_engine
-        .ingress_hmc_lock_durable(
-            cluster.genesis_tag.clone(),
-            entry.clone(),
-            IngressOrigin::PartitionSync,
-            Some(now),
-            None,
-            None,
-            Some(cluster.genesis.layer2_voucher_id.clone()),
-        )
-        .await;
+    if anchor_gateway {
+        cluster
+            .gateway_engine
+            .ingress_hmc_lock_durable(
+                cluster.genesis_tag.clone(),
+                entry.clone(),
+                IngressOrigin::PartitionSync,
+                Some(now),
+                None,
+                None,
+                Some(cluster.genesis.layer2_voucher_id.clone()),
+            )
+            .await;
+    }
 
     let live_context = LiveStateContext {
         version: 1,
@@ -795,10 +791,21 @@ async fn test_post_v1_checkout_single_rtt() {
         chain: vec![spend],
     };
 
-    let checkout_req = L2CheckoutRequest {
+    L2CheckoutRequest {
         lock_chain: Some(chain_req),
-        live_context: live_context.clone(),
-    };
+        live_context,
+    }
+}
+
+// ===========================================================================
+// Test 4: POST /v1/checkout 1-RTT PoS Single Roundtrip Proof
+// ===========================================================================
+#[tokio::test]
+async fn test_post_v1_checkout_single_rtt() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_test_cluster(&temp).await;
+    let checkout_req = checkout_request(&cluster, true).await;
+    let live_context = checkout_req.live_context.clone();
 
     let req = Request::builder()
         .method("POST")
@@ -834,6 +841,153 @@ async fn test_post_v1_checkout_single_rtt() {
     verify_live_state_proof(&checkout_resp.proof, &live_context)
         .expect("verify_live_state_proof must succeed for checkout proof");
 
+    cluster.cancel.cancel();
+    cluster.gateway_transport.close();
+    for shard in cluster.shards {
+        shard.transport.close();
+    }
+}
+
+#[tokio::test]
+async fn checkout_deadline_includes_incomplete_json_extraction() {
+    let temp = tempdir().unwrap();
+    let (app, _state, _identity) = setup_standalone_app(&temp);
+    let (mut sender, body) =
+        http_body_util::channel::Channel::<bytes::Bytes, std::convert::Infallible>::new(1);
+    sender
+        .send_data(bytes::Bytes::from_static(b"{"))
+        .await
+        .unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/checkout")
+        .header("content-type", "application/json")
+        .body(Body::new(body))
+        .unwrap();
+
+    let response = tokio::time::timeout(Duration::from_millis(900), app.oneshot(request)).await;
+    drop(sender);
+    assert_eq!(
+        response
+            .expect("Checkout must time out before the body completes")
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+}
+
+#[tokio::test]
+async fn checkout_deadline_bounds_initial_ram_wait() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_test_cluster(&temp).await;
+    let checkout_req = checkout_request(&cluster, true).await;
+    // The gateway RAM guard remains held through the deadline.
+    let gateway_guard = cluster.gateway_engine.hmc_ram.write().await;
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/checkout")
+            .header("content-type", "application/json")
+            .header("x-peer-token", "test_peer_token")
+            .body(Body::from(serde_json::to_vec(&checkout_req).unwrap()))
+            .unwrap()
+    };
+    let initial_result = tokio::time::timeout(
+        Duration::from_millis(900),
+        cluster.app.clone().oneshot(request()),
+    )
+    .await;
+    drop(gateway_guard);
+    assert_eq!(
+        initial_result
+            .expect("Initial RAM wait must respect the request deadline")
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+
+    cluster.cancel.cancel();
+    cluster.gateway_transport.close();
+    for shard in cluster.shards {
+        shard.transport.close();
+    }
+}
+
+#[tokio::test]
+async fn checkout_deadline_shares_json_and_quic_budget() {
+    let temp = tempdir().unwrap();
+    let cluster = setup_test_cluster(&temp).await;
+    let checkout_req = checkout_request(&cluster, false).await;
+    let manager = cluster.gateway_transport.peer_manager();
+    let mut connections = Vec::new();
+    for shard in &cluster.shards {
+        let addr = shard.transport.local_addr().unwrap();
+        let connection = cluster.gateway_transport.connect_peer(addr).await.unwrap();
+        connections.push((connection.clone(), connection.stats().frame_tx.stream));
+    }
+
+    assert!(cluster
+        .gateway_engine
+        .get_hmc_ram_lock(&checkout_req.live_context.lookup_tag)
+        .await
+        .is_none());
+    // JSON extraction consumes part of the same budget before nested chain
+    // registration blocks on real QUIC custodians' RAM guards. The gateway
+    // has no terminal spend, so checkout cannot skip chain registration.
+    let mut remote_guards = Vec::new();
+    for shard in &cluster.shards {
+        remote_guards.push(shard.engine.hmc_ram.write().await);
+    }
+    let bytes = serde_json::to_vec(&checkout_req).unwrap();
+    let (mut sender, body) =
+        http_body_util::channel::Channel::<bytes::Bytes, std::convert::Infallible>::new(1);
+    sender
+        .send_data(bytes::Bytes::copy_from_slice(&bytes[..1]))
+        .await
+        .unwrap();
+    let streaming_request = Request::builder()
+        .method("POST")
+        .uri("/v1/checkout")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "test_peer_token")
+        .body(Body::new(body))
+        .unwrap();
+    let shared_request = async {
+        let response = cluster.app.clone().oneshot(streaming_request);
+        let finish_body = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sender
+                .send_data(bytes::Bytes::copy_from_slice(&bytes[1..]))
+                .await
+                .unwrap();
+            drop(sender);
+        };
+        let (response, ()) = tokio::join!(response, finish_body);
+        response
+    };
+    let shared_result = tokio::time::timeout(Duration::from_millis(900), shared_request).await;
+    drop(remote_guards);
+    assert_eq!(
+        shared_result
+            .expect("JSON extraction and QUIC collection must share one budget")
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+    assert!(
+        connections
+            .iter()
+            .any(|(connection, before)| connection.stats().frame_tx.stream > *before),
+        "Nested chain registration must execute actual QUIC RPCs before its deadline"
+    );
+    for shard in &cluster.shards {
+        let peer = manager
+            .get_peer(&shard.transport.local_addr().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(peer.missing_count, 0, "Deadline cancellation is neutral");
+    }
+    assert!(cluster.gateway_engine.is_signing_healthy());
     cluster.cancel.cancel();
     cluster.gateway_transport.close();
     for shard in cluster.shards {

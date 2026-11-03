@@ -702,10 +702,7 @@ impl PeerManager {
         let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&signer_pubkey) else {
             return None;
         };
-        let shard = u16::from_be_bytes([att.parent_lock[0], att.parent_lock[1]]);
-        if att.shard_id != 0 && att.shard_id != shard {
-            return None;
-        }
+        let shard = att.shard_id;
         let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(
             &att.parent_lock,
             &att.lock_id,

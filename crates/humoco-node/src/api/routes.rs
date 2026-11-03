@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Extension, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -42,6 +42,7 @@ use crate::api::hmc::{
     L2ChainLockRequest, L2CheckoutRequest, L2CheckoutResponse, L2LockEntry, L2LockRequest,
     L2ResponseEnvelope, L2StatusQuery, L2Verdict,
 };
+use crate::api::live::LiveDeadline;
 use crate::identity::NodeIdentity;
 use crate::ingress::{IngressError, PowEngine, TierController};
 use crate::network::{PeerManager, QuicTransport};
@@ -263,7 +264,10 @@ pub fn public_router(state: AppState) -> Router {
                 .layer(axum::middleware::from_fn(live_deadline_middleware)),
         )
         .route("/v1/regional-mesh-view", get(public_regional_mesh_view))
-        .route("/v1/checkout", post(checkout))
+        .route(
+            "/v1/checkout",
+            post(checkout).layer(axum::middleware::from_fn(live_deadline_middleware)),
+        )
         .route("/v1/gateways", get(public_gateways))
         .route("/v1/retained-choice/:tag", get(get_retained_choice))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -406,7 +410,8 @@ async fn submit_lock(
 
     match serde_json::from_slice::<IngressLockPayload>(&body_bytes) {
         Ok(IngressLockPayload::Chain(chain_req)) => {
-            return submit_hmc_chain_lock_inner(state, headers, chain_req, start).await;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(780);
+            return submit_hmc_chain_lock_inner(state, headers, chain_req, start, deadline).await;
         }
         Ok(IngressLockPayload::Single(hmc_req)) => {
             return submit_hmc_lock(state, headers, hmc_req, start).await;
@@ -1828,21 +1833,6 @@ async fn query_status(
 
     let (supplied_shard, supplied_root) = match payload.authenticated_root_shard(now_ms) {
         Ok(Some((shard, root))) => {
-            if state
-                .engine
-                .is_node_banned(&root.sender_ephemeral_pub)
-                .await
-            {
-                let envelope = wrap_and_sign_verdict(
-                    &state.identity,
-                    L2Verdict::Rejected {
-                        reason:
-                            "403 Forbidden: Signer is slashed and banned due to equivocation fraud"
-                                .into(),
-                    },
-                );
-                return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
-            }
             (Some(shard), Some(root))
         }
         Ok(None) => (None, None),
@@ -2214,23 +2204,6 @@ async fn submit_hmc_lock_with_deadline(
     checkout_deadline: tokio::time::Instant,
 ) -> Response {
     state.metrics.record_write();
-    // 0. Check if submitter or ephemeral key is banned/slashed
-    if state.engine.is_node_banned(&req.sender_ephemeral_pub).await
-        || state
-            .engine
-            .is_node_banned(&req.auth.ephemeral_pubkey)
-            .await
-    {
-        let envelope = wrap_and_sign_verdict(
-            &state.identity,
-            L2Verdict::Rejected {
-                reason: "403 Forbidden: Signer is slashed and banned due to equivocation fraud"
-                    .into(),
-            },
-        );
-        return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
-    }
-
     let now_ms = state.net_time_ms();
 
     const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
@@ -2897,7 +2870,8 @@ async fn submit_hmc_chain_lock(
     Json(chain_req): Json<L2ChainLockRequest>,
 ) -> Response {
     let start = std::time::Instant::now();
-    submit_hmc_chain_lock_inner(state, headers, chain_req, start).await
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(780);
+    submit_hmc_chain_lock_inner(state, headers, chain_req, start, deadline).await
 }
 
 async fn submit_hmc_chain_lock_inner(
@@ -2905,8 +2879,8 @@ async fn submit_hmc_chain_lock_inner(
     headers: HeaderMap,
     chain_req: L2ChainLockRequest,
     start: std::time::Instant,
+    checkout_deadline: tokio::time::Instant,
 ) -> Response {
-    let checkout_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(780);
     state.metrics.record_write();
     if chain_req.chain.is_empty() {
         return (
@@ -3080,22 +3054,6 @@ async fn submit_hmc_chain_lock_inner(
             )
                 .into_response();
         }
-    }
-
-    // Banned check for batch auth and each hop
-    if state
-        .engine
-        .is_node_banned(&chain_req.auth.ephemeral_pubkey)
-        .await
-    {
-        let envelope = wrap_and_sign_verdict(
-            &state.identity,
-            L2Verdict::Rejected {
-                reason: "403 Forbidden: Signer is slashed and banned due to equivocation fraud"
-                    .into(),
-            },
-        );
-        return (StatusCode::FORBIDDEN, Json(envelope)).into_response();
     }
 
     // Derive root_valid_until for Byte-Years accounting (same logic as engine)
@@ -4028,11 +3986,9 @@ async fn public_regional_mesh_view(State(state): State<AppState>) -> Response {
 async fn checkout(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Extension(LiveDeadline(checkout_deadline)): Extension<LiveDeadline>,
     Json(req): Json<L2CheckoutRequest>,
 ) -> Response {
-    let checkout_deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_millis(780);
-
     if let Err(e) = humoco_proto::live::live_state_digest(&req.live_context) {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
@@ -4052,8 +4008,14 @@ async fn checkout(
 
         if !is_already_anchored {
             let start = std::time::Instant::now();
-            let chain_resp =
-                submit_hmc_chain_lock_inner(state.clone(), headers, chain_req, start).await;
+            let chain_resp = submit_hmc_chain_lock_inner(
+                state.clone(),
+                headers,
+                chain_req,
+                start,
+                checkout_deadline,
+            )
+            .await;
             let status = chain_resp.status();
             if status == StatusCode::CONFLICT {
                 let body_bytes = axum::body::to_bytes(chain_resp.into_body(), 64 * 1024)
@@ -4070,12 +4032,8 @@ async fn checkout(
         }
     }
 
-    match crate::api::live::collect_live_state_proof(
-        &state,
-        req.live_context,
-        checkout_deadline,
-    )
-    .await
+    match crate::api::live::collect_live_state_proof(&state, req.live_context, checkout_deadline)
+        .await
     {
         Ok(proof) => (
             StatusCode::OK,

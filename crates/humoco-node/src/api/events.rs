@@ -133,22 +133,25 @@ impl EventLog {
         severity: HealthLevel,
         msg: impl Into<String>,
     ) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let item = EventItem {
-            id,
-            timestamp_sec,
-            kind,
-            severity,
-            message: msg.into(),
-        };
-
-        {
+        let message = msg.into();
+        // Cursor IDs and publication share one critical section. A reader must
+        // never observe a higher ID while a lower ID is still unpublished.
+        let item = {
             let mut guard = self.buffer.write();
+            let item = EventItem {
+                id: self.next_id.fetch_add(1, Ordering::SeqCst),
+                timestamp_sec,
+                kind,
+                severity,
+                message,
+            };
             if guard.len() >= self.capacity {
                 guard.pop_front();
             }
             guard.push_back(item.clone());
-        }
+            item
+        };
+        let id = item.id;
 
         let should_persist = severity >= HealthLevel::Warn
             || kind == EventKind::PeerBan
@@ -215,6 +218,68 @@ impl EventLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_message_conversion_preserves_publication_cursor() {
+        struct DelayedMessage {
+            entered: std::sync::mpsc::Sender<()>,
+            resume: std::sync::mpsc::Receiver<()>,
+        }
+
+        impl From<DelayedMessage> for String {
+            fn from(message: DelayedMessage) -> Self {
+                message.entered.send(()).expect("signal conversion");
+                message.resume.recv().expect("resume conversion");
+                "delayed event".into()
+            }
+        }
+
+        let log = Arc::new(EventLog::new(3));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let delayed_log = log.clone();
+        let delayed = std::thread::spawn(move || {
+            delayed_log.record_at(
+                100,
+                EventKind::System,
+                HealthLevel::Ok,
+                DelayedMessage {
+                    entered: entered_tx,
+                    resume: resume_rx,
+                },
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("conversion started");
+        let cursor = log.record_at(101, EventKind::System, HealthLevel::Ok, "published first");
+        let first_poll = log.query(None, None);
+        resume_tx.send(()).expect("resume recorder");
+        let delayed_id = delayed.join().expect("recorder completed");
+
+        assert_eq!(first_poll.len(), 1);
+        assert_eq!(first_poll[0].id, cursor);
+        let following = log.query(Some(cursor), None);
+        assert_eq!(
+            following.len(),
+            1,
+            "A later publication must survive the cursor"
+        );
+        assert_eq!(following[0].id, delayed_id);
+        assert_eq!(following[0].message, "delayed event");
+        assert!(delayed_id > cursor);
+        assert_eq!(log.query(None, Some(1)), following);
+
+        log.record_at(102, EventKind::System, HealthLevel::Ok, "third");
+        log.record_at(103, EventKind::System, HealthLevel::Ok, "fourth");
+        let retained = log.list();
+        assert_eq!(retained.len(), 3);
+        assert_eq!(
+            retained[0].id, delayed_id,
+            "FIFO evicts the first publication"
+        );
+        assert!(retained.windows(2).all(|pair| pair[0].id < pair[1].id));
+    }
 
     #[test]
     fn test_event_log_overflow_eviction() {

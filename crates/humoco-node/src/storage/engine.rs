@@ -1587,7 +1587,7 @@ impl DualTierEngine {
     }
 
     /// Ingress an HMC lock entry on the hot path (< 1µs in RAM) with explicit IngressOrigin, metadata, and queue an async flush operation if newly accepted.
-    /// On double-signing (same sender on colliding tag), evidence is persisted in redb and the offender is banned.
+    /// Conflicting owner spends return collision evidence, never node sanctions.
     #[allow(clippy::too_many_arguments)]
     pub async fn ingress_hmc_lock_with_metadata(
         &self,
@@ -1728,7 +1728,7 @@ impl DualTierEngine {
             }
         };
 
-        let (verdict, is_new, equivocation_to_slash, accepted_entry, accepted_root, ack_rx) = {
+        let (verdict, is_new, accepted_entry, accepted_root, ack_rx) = {
             let mut hmc = self.hmc_ram.write().await;
             let root_upgraded = if super::db::roots::is_root(&lookup_tag, &entry) {
                 hmc.root_anchors
@@ -1736,17 +1736,6 @@ impl DualTierEngine {
                     .is_some_and(|old| old.causal_output.is_none() && entry.causal_output.is_some())
             } else {
                 false
-            };
-            let equivocation = if let Some(existing) = hmc.locks.get(&lookup_tag) {
-                if existing.t_id != entry.t_id
-                    && existing.sender_ephemeral_pub == entry.sender_ephemeral_pub
-                {
-                    Some((existing.clone(), entry.clone()))
-                } else {
-                    None
-                }
-            } else {
-                None
             };
             let (verdict, is_new) = hmc.insert_or_check_with_class(
                 lookup_tag.clone(),
@@ -1796,42 +1785,11 @@ impl DualTierEngine {
             (
                 verdict,
                 is_new,
-                equivocation,
                 accepted_entry,
                 accepted_root,
                 ack_rx,
             )
         };
-
-        if let Some((existing, entry_new)) = equivocation_to_slash {
-            if crate::api::hmc::verify_l2_lock_entry_signature(&existing, &lookup_tag)
-                && crate::api::hmc::verify_l2_lock_entry_signature(&entry_new, &lookup_tag)
-            {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let raw_evidence = serde_json::to_vec(&(&existing, &entry_new)).unwrap_or_default();
-                let evidence_hash = *blake3::hash(&raw_evidence).as_bytes();
-                // Async persistence only (Rule 1): never touch redb synchronously on the hot path.
-                if self
-                    .tx
-                    .try_send(FlushOp::PutEvidence {
-                        hash: evidence_hash,
-                        raw: raw_evidence,
-                    })
-                    .is_err()
-                {
-                    self.stats
-                        .flush_errors_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    warn!("Persistence queue full: equivocation evidence deferred (counted in flush_errors_total)");
-                }
-                self.ban_node(entry_new.sender_ephemeral_pub, now_ms).await;
-            } else {
-                tracing::warn!("Equivocation discarded: one or both signatures failed first-party cryptographic verification");
-            }
-        }
 
         if let Some(ack_rx) = ack_rx {
             match tokio::time::timeout(
@@ -2151,26 +2109,14 @@ impl DualTierEngine {
             }
             // Root proofs may be historical: they spend nothing. Only actual
             // newly admitted spends are subject to the signed wallet-T0 window.
-            if origin == IngressOrigin::ClientApi && !hop.is_genesis {
-                if !(historical_prefix && index < last_index)
-                    && now_ms.is_none_or(|now| {
-                        hop.created_at_ms == 0 || hop.created_at_ms.abs_diff(now) > 30_000
-                    })
-                {
-                    return (L2Verdict::Rejected { reason: format!("Wallet timestamp outside 30s window at chain step {index}; accepted prefix retained") }, changed);
-                }
-                if self.is_node_banned(&hop.sender_ephemeral_pub).await
-                    || self.is_node_banned(&hop.auth.ephemeral_pubkey).await
-                {
-                    return (
-                        L2Verdict::Rejected {
-                            reason: format!(
-                                "Banned signer at chain step {index}; accepted prefix retained"
-                            ),
-                        },
-                        changed,
-                    );
-                }
+            if origin == IngressOrigin::ClientApi
+                && !hop.is_genesis
+                && !(historical_prefix && index < last_index)
+                && now_ms.is_none_or(|now| {
+                    hop.created_at_ms == 0 || hop.created_at_ms.abs_diff(now) > 30_000
+                })
+            {
+                return (L2Verdict::Rejected { reason: format!("Wallet timestamp outside 30s window at chain step {index}; accepted prefix retained") }, changed);
             }
             let single = crate::api::hmc::L2ChainLockRequest {
                 auth: chain_req.auth.clone(),
@@ -2464,19 +2410,12 @@ impl DualTierEngine {
             for vid in db_vouchers {
                 if let std::collections::hash_map::Entry::Vacant(e) = vouchers_map.entry(vid) {
                     if let Ok(locks) = self.db.get_hmc_locks_for_voucher(e.key()) {
-                        let root_valid = locks
-                            .iter()
-                            .find_map(|(_, entry)| {
-                                entry
-                                    .deletable_at
-                                    .as_deref()
-                                    .and_then(|s| s.parse::<u64>().ok())
-                            })
+                        let root = self.db.voucher_root(e.key()).ok().flatten();
+                        let root_valid = root
+                            .as_ref()
+                            .and_then(|root| super::db::roots::root_valid_until(root).ok())
                             .unwrap_or(0);
-                        let genesis = locks
-                            .iter()
-                            .find(|(_, entry)| entry.deletable_at.is_some())
-                            .map(|(tag, _)| tag.clone());
+                        let genesis = root.map(|root| bs58::encode(root.t_id).into_string());
                         e.insert((root_valid, locks.len(), genesis));
                     }
                 }
@@ -2517,86 +2456,71 @@ impl DualTierEngine {
         results
     }
 
-    /// Returns detailed lineage and all lock hops for a voucher, resolving either by layer2_voucher_id or lookup_tag.
+    /// Inspects the retained Root Anchor and current collision locks of a voucher.
+    /// Root metadata is never counted as a spend or inserted into the collision registry.
     pub async fn get_voucher_lineage(&self, voucher_id_or_tag: &str) -> Option<VoucherDetailDto> {
         let trimmed = voucher_id_or_tag.trim();
         if trimmed.is_empty() {
             return None;
         }
 
-        // 0. Resolve voucher_id if a lookup_tag was provided
-        let mut resolved_voucher_id = trimmed.to_string();
-        {
+        // Resolve a RAM-known tag without retaining its guard during disk lookup.
+        let requested_voucher = {
             let hmc = self.hmc_ram.read().await;
-            if let Some(entry) = hmc.locks.get(trimmed) {
-                resolved_voucher_id = entry.layer2_voucher_id.clone();
-            }
-        }
-        if resolved_voucher_id == trimmed {
-            if let Ok(Some(entry)) = self.db.get_hmc_lock(trimmed) {
-                resolved_voucher_id = entry.layer2_voucher_id;
-            }
-        }
-
-        let voucher_id = &resolved_voucher_id;
-        let mut locks_map: HashMap<String, L2LockEntry> = HashMap::new();
-
-        // 1. Query redb
-        if let Ok(db_locks) = self.db.get_hmc_locks_for_voucher(voucher_id) {
-            for (tag, entry) in db_locks {
-                locks_map.insert(tag, entry);
-            }
-        }
-
-        // 2. Query RAM (overwrites with freshest live state)
-        {
+            hmc.locks
+                .get(trimmed)
+                .map(|entry| entry.layer2_voucher_id.clone())
+                .unwrap_or_else(|| trimmed.to_owned())
+        };
+        let db = self.db.clone();
+        let lookup = trimmed.to_owned();
+        let (voucher_id, disk_root, mut locks_map) = tokio::task::spawn_blocking(move || {
+            let resolved = if requested_voucher == lookup {
+                db.get_hmc_lock(&lookup)?
+                    .map(|entry| entry.layer2_voucher_id)
+                    .unwrap_or(requested_voucher)
+            } else {
+                requested_voucher
+            };
+            let root = db.voucher_root(&resolved)?;
+            let locks = db
+                .get_hmc_locks_for_voucher(&resolved)?
+                .into_iter()
+                .collect::<HashMap<_, _>>();
+            Ok::<_, StorageError>((resolved, root, locks))
+        })
+        .await
+        .ok()?
+        .ok()?;
+        // Only the final resolved identity selects the active RAM overlay.
+        // In particular, a disk-only lookup tag must still include newer RAM spends.
+        let ram_root = {
             let hmc = self.hmc_ram.read().await;
-            if let Some(tags) = hmc.vouchers.get(voucher_id) {
+            if let Some(tags) = hmc.vouchers.get(&voucher_id) {
                 for tag in tags {
                     if let Some(entry) = hmc.locks.get(tag) {
                         locks_map.insert(tag.clone(), entry.clone());
                     }
                 }
             }
-        }
+            hmc.root_anchors.get(&voucher_id).cloned()
+        };
+        let root = ram_root.or(disk_root)?;
+        let root_valid_until_ms = super::db::roots::root_valid_until(&root).ok()?;
+        let genesis_tag = Some(bs58::encode(root.t_id).into_string());
+        let created_at_ms = root.created_at_ms;
 
-        if locks_map.is_empty() {
-            return None;
-        }
-
-        let mut hops = Vec::new();
-        let mut genesis_tag = None;
-        let mut root_valid_until_ms = 0;
-        let mut created_at_ms = 0;
-
+        let mut hops = Vec::with_capacity(locks_map.len());
         for (tag, entry) in locks_map {
-            let is_genesis = entry.deletable_at.is_some();
-            if is_genesis {
-                genesis_tag = Some(tag.clone());
-                if let Some(del) = entry
-                    .deletable_at
-                    .as_deref()
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    root_valid_until_ms = del;
-                }
-                created_at_ms = if entry.created_at_ms > 0 {
-                    entry.created_at_ms
-                } else {
-                    entry.encrypted_timestamp as u64
-                };
-            }
-
-            let raw_json = serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null);
+            let raw_json = serde_json::to_value(&entry).ok()?;
             let receiver_pub_hex = entry
                 .causal_output
                 .as_ref()
-                .and_then(|c| c.receiver_pubkey_hash)
+                .and_then(|proof| proof.receiver_pubkey_hash)
                 .map(hex::encode);
-
             hops.push(VoucherLockHopDto {
                 lookup_tag: tag,
-                is_genesis,
+                is_genesis: false,
                 t_id_hex: hex::encode(entry.t_id),
                 sender_pub_hex: hex::encode(entry.sender_ephemeral_pub),
                 receiver_pub_hex,
@@ -2606,36 +2530,17 @@ impl DualTierEngine {
                 raw_json,
             });
         }
-
-        // Sort hops: Genesis lock first, then chronological by encrypted_timestamp
-        hops.sort_by(|a, b| match (a.is_genesis, b.is_genesis) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.encrypted_timestamp.cmp(&b.encrypted_timestamp),
-        });
-
-        if root_valid_until_ms == 0 {
-            if let Some(r) = self.get_hmc_voucher_root_valid(voucher_id).await {
-                root_valid_until_ms = r;
-            }
-        }
-
-        let total_byte_years = (hops.len() as u64) * 144;
-        let formatted = if root_valid_until_ms > 0 {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let rem_sec = root_valid_until_ms.saturating_sub(now_ms) / 1000;
-            format!("{} ms (TTL: {}s)", root_valid_until_ms, rem_sec)
-        } else {
-            "Unknown".to_string()
-        };
-
+        hops.sort_by(|a, b| a.encrypted_timestamp.cmp(&b.encrypted_timestamp));
+        let total_byte_years = u64::try_from(hops.len()).ok()?.checked_mul(144)?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok())?;
+        let rem_sec = root_valid_until_ms.saturating_sub(now_ms) / 1000;
         Some(VoucherDetailDto {
-            voucher_id: voucher_id.to_string(),
+            voucher_id,
             root_valid_until_ms,
-            root_valid_until_formatted: formatted,
+            root_valid_until_formatted: format!("{root_valid_until_ms} ms (TTL: {rem_sec}s)"),
             created_at_ms,
             genesis_tag,
             total_byte_years,

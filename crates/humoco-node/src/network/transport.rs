@@ -189,12 +189,7 @@ pub fn verify_equivocation_first_party_network(
             if a.shard_id != b.shard_id {
                 return false;
             }
-            let shard = u16::from_be_bytes([a.parent_lock[0], a.parent_lock[1]]);
-            // Older originals omitted the shard metadata (zero); only the
-            // canonical parent-derived shard is a protected signing context.
-            if a.shard_id != 0 && a.shard_id != shard {
-                return false;
-            }
+            let shard = a.shard_id;
             let verify_att = |att: &humoco_sim_core::types::Attestation,
                               provisional: &[u8],
                               final_domain: &[u8]|
@@ -1172,19 +1167,6 @@ impl RequestHandler for NodeRequestHandler {
                                 );
                                 return Ok((resp_header, Vec::new()));
                             }
-                            if engine
-                                .is_node_banned(&chain_req.auth.ephemeral_pubkey)
-                                .await
-                            {
-                                let resp_header = WireHeader::new(
-                                    MsgType::LockVerifyResponse as u16,
-                                    header.session_seq.wrapping_add(1),
-                                    header.epoch_id,
-                                    humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
-                                    0,
-                                );
-                                return Ok((resp_header, Vec::new()));
-                            }
                             let (verdict, _is_new) = engine
                                 .ingress_hmc_chain_lock_durable(
                                     chain_req.clone(),
@@ -1314,19 +1296,6 @@ impl RequestHandler for NodeRequestHandler {
                                 }
                             }
                         } else {
-                            if engine.is_node_banned(&req.sender_ephemeral_pub).await
-                                || engine.is_node_banned(&req.auth.ephemeral_pubkey).await
-                            {
-                                let resp_header = WireHeader::new(
-                                    MsgType::LockVerifyResponse as u16,
-                                    header.session_seq.wrapping_add(1),
-                                    header.epoch_id,
-                                    humoco_sim_core::wire::FLAG_PEER_SUSPENDED,
-                                    0,
-                                );
-                                return Ok((resp_header, Vec::new()));
-                            }
-
                             if !crate::api::hmc::verify_l2_lock_signature(&req) {
                                 let resp_header = WireHeader::new(
                                     MsgType::LockVerifyResponse as u16,

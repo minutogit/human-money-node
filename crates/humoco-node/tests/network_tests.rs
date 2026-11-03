@@ -632,3 +632,210 @@ async fn test_s04_05_rejection_precedes_storage_read() {
     );
 }
 
+#[tokio::test]
+async fn test_s04_07_real_quic_rejects_unsupported_crypto_suites_before_handler() {
+    let cancel_token = CancellationToken::new();
+
+    let id_a = NodeIdentity::generate();
+    let id_b = NodeIdentity::generate();
+
+    let node_b_handler = Arc::new(EchoHandler::new());
+    let transport_b = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &id_b,
+        Arc::new(PeerManager::new(vec![])),
+        node_b_handler.clone(),
+        cancel_token.clone(),
+    )
+    .expect("Bind node B");
+
+    let addr_b = transport_b.local_addr().expect("Local addr B");
+    let _accept_handle_b = transport_b.spawn_accept_loop();
+
+    let transport_a = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &id_a,
+        Arc::new(PeerManager::new(vec![addr_b])),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("Bind node A");
+
+    let addr_a = transport_a.local_addr().expect("Local addr A");
+    transport_b
+        .peer_manager()
+        .register_f2f_friend(*id_a.node_id(), Some(addr_a))
+        .await;
+    transport_a
+        .peer_manager()
+        .register_f2f_friend(*id_b.node_id(), Some(addr_b))
+        .await;
+
+    let conn_a_to_b = transport_a
+        .connect_peer(addr_b)
+        .await
+        .expect("Connect A -> B");
+
+    let test_payload = b"Lock Verification Spec 10 Payload".to_vec();
+
+    // 1. Unsupported suites (0, 2, 3, 255) must be rejected before handler invocation
+    for unsupported_suite in [0u8, 2u8, 3u8, 255u8] {
+        let mut req_header = WireHeader::new(
+            MsgType::LockVerifyRequest as u16,
+            100,
+            1,
+            0,
+            test_payload.len() as u32,
+        );
+        req_header.crypto_suite = unsupported_suite;
+
+        let res = transport_a
+            .send_request(&conn_a_to_b, &req_header, &test_payload)
+            .await;
+
+        assert!(
+            res.is_err(),
+            "Request with unsupported crypto suite {unsupported_suite} must be rejected over QUIC"
+        );
+        assert_eq!(
+            node_b_handler.received_requests.load(Ordering::SeqCst),
+            0,
+            "Handler must NEVER be invoked for unsupported crypto suite {unsupported_suite}"
+        );
+    }
+
+    // 2. Canonical suite 1 (Ed25519Blake3) must succeed and invoke handler
+    let mut valid_header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        101,
+        1,
+        0,
+        test_payload.len() as u32,
+    );
+    valid_header.crypto_suite = 1;
+
+    let (resp_header, resp_payload) = transport_a
+        .send_request(&conn_a_to_b, &valid_header, &test_payload)
+        .await
+        .expect("Canonical suite 1 must succeed");
+
+    assert_eq!(resp_header.msg_type, MsgType::LockVerifyResponse as u16);
+    assert_eq!(resp_payload, test_payload);
+    assert_eq!(
+        node_b_handler.received_requests.load(Ordering::SeqCst),
+        1,
+        "Handler must be invoked exactly once for valid suite 1"
+    );
+
+    cancel_token.cancel();
+    transport_a.close();
+    transport_b.close();
+}
+
+#[tokio::test]
+async fn test_s04_07_real_quic_shard_digest_rejects_unsupported_crypto_suites_before_storage() {
+    let cancel = CancellationToken::new();
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(
+        humoco_node::storage::RedbStorage::open(&temp.path().join("s04_07_digest.redb"))
+            .expect("open redb"),
+    );
+    let (engine, _worker) = humoco_node::storage::DualTierEngine::new(storage.clone());
+
+    let server_id = NodeIdentity::generate();
+    let pm_server = Arc::new(PeerManager::new(Vec::new()));
+    let handler = Arc::new(
+        humoco_node::network::NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            server_id.clone(),
+            pm_server.clone(),
+        ),
+    );
+
+    let transport_server = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        pm_server.clone(),
+        handler.clone(),
+        cancel.clone(),
+    )
+    .expect("bind server");
+    let server_addr = transport_server.local_addr().unwrap();
+    transport_server.spawn_accept_loop();
+
+    let client_id = NodeIdentity::generate();
+    let pm_client = Arc::new(PeerManager::new(Vec::new()));
+    let transport_client = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        pm_client.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind client");
+    let client_addr = transport_client.local_addr().unwrap();
+    transport_client.spawn_accept_loop();
+
+    // Authorize client as F2F friend so direct RPC is allowed
+    pm_server
+        .register_f2f_friend(*client_id.node_pubkey(), Some(client_addr))
+        .await;
+    pm_client
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+        .await;
+
+    let conn = transport_client
+        .connect_peer(server_addr)
+        .await
+        .expect("connect to server");
+
+    let payload = 0u16.to_le_bytes().to_vec();
+
+    // 1. ShardDigestRequest with unsupported suites (0, 2, 3, 255) must be rejected
+    // before committed_shard_digest execution or response release
+    for unsupported_suite in [0u8, 2u8, 3u8, 255u8] {
+        let mut hdr = WireHeader::new(
+            MsgType::ShardDigestRequest as u16,
+            10,
+            0,
+            0,
+            payload.len() as u32,
+        );
+        hdr.crypto_suite = unsupported_suite;
+
+        let res = transport_client.send_request(&conn, &hdr, &payload).await;
+        assert!(
+            res.is_err(),
+            "ShardDigestRequest with unsupported crypto suite {unsupported_suite} must be rejected over QUIC"
+        );
+    }
+
+    // 2. Canonical suite 1 (Ed25519Blake3) must succeed and return the 40-byte digest response
+    let mut valid_hdr = WireHeader::new(
+        MsgType::ShardDigestRequest as u16,
+        11,
+        0,
+        0,
+        payload.len() as u32,
+    );
+    valid_hdr.crypto_suite = 1;
+
+    let (resp_hdr, resp_payload) = transport_client
+        .send_request(&conn, &valid_hdr, &payload)
+        .await
+        .expect("ShardDigestRequest with suite 1 must succeed");
+
+    assert_eq!(resp_hdr.msg_type, MsgType::ShardDigestResponse as u16);
+    assert_eq!(
+        resp_payload.len(),
+        40,
+        "ShardDigestResponse must contain 40-byte committed shard digest and timestamp"
+    );
+
+    cancel.cancel();
+    transport_server.close();
+    transport_client.close();
+}
+

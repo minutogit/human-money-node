@@ -476,11 +476,11 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         "CRITICAL: Shard node must NEVER return or sign an attestation for colliding Lock B"
     );
 
-    // 4. Shard node banned the equivocating sender
+    // 4. Conflicting wallet authorizations are not original node equivocation.
     let wallet_sender_pub = sender_key.verifying_key().to_bytes();
     assert!(
-        engine.is_node_banned(&wallet_sender_pub).await,
-        "Shard node must ban the double-spending sender"
+        !engine.is_node_banned(&wallet_sender_pub).await,
+        "Shard node must not apply P2P node sanctions to wallet signatures"
     );
 
     // -----------------------------------------------------------------------

@@ -670,7 +670,7 @@ async fn test_api_hmc_native_flow() {
 }
 
 #[tokio::test]
-async fn test_banned_node_ingress_403_rejection() {
+async fn test_node_ban_does_not_deny_public_wallet_ingress() {
     let temp = tempdir().expect("tempdir");
     let db_path = temp.path().join("test_banned.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
@@ -693,7 +693,7 @@ async fn test_banned_node_ingress_403_rejection() {
     );
     let app = build_router(isolated_ready_state(state));
 
-    // 1. Submit HMC lock from banned ephemeral key
+    // The same key's infrastructure sanction does not restrict public wallet ingress.
     let now = test_now_ms();
     let banned_req = make_test_hmc_genesis(&"01".repeat(32), now + 600_000, &banned_signing_key);
 
@@ -713,8 +713,8 @@ async fn test_banned_node_ingress_403_rejection() {
 
     assert_eq!(
         res.status(),
-        StatusCode::FORBIDDEN,
-        "Banned node must be rejected with 403 Forbidden"
+        StatusCode::CREATED,
+        "A Root Anchor remains admissible through public ingress regardless of node bans"
     );
 }
 

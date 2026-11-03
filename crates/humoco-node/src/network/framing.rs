@@ -784,6 +784,13 @@ pub async fn read_frame_admitted<R: AsyncReadExt + Unpin>(
             )));
         }
 
+        if header.crypto_suite().is_none() {
+            return Err(NodeError::Network(format!(
+                "Unsupported crypto suite: {}",
+                header.crypto_suite
+            )));
+        }
+
         let payload_len = header.payload_len as usize;
         let max_len = max_payload_len_for_msg_type(header.msg_type);
         if payload_len > max_len {
@@ -914,6 +921,60 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Read timeout exceeded"));
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_admitted_rejects_unsupported_crypto_suites_before_body_and_admission() {
+        for unsupported_suite in [0u8, 2u8, 3u8, 255u8] {
+            let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 1, 0, 64);
+            hdr.crypto_suite = unsupported_suite;
+
+            // We use a duplex pipe where the server writes ONLY the 32-byte header,
+            // advertising a 64-byte payload, and keeps the connection open.
+            // If read_frame_admitted attempts to read the advertised body bytes,
+            // it would block waiting for body data until the 5-second timeout expires.
+            // Fast execution strictly proves rejection occurs immediately on the fixed header
+            // without waiting for the body and without hitting EOF.
+            let (mut client, mut server) = tokio::io::duplex(256);
+            server
+                .write_all(&hdr.to_bytes())
+                .await
+                .expect("write header bytes");
+
+            let sync_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let rpc_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+
+            let start = std::time::Instant::now();
+            let res = read_frame_admitted(
+                &mut client,
+                Duration::from_secs(5),
+                Some((sync_sem.clone(), rpc_sem.clone())),
+            )
+            .await;
+
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "Header rejection must return immediately without waiting for body; elapsed: {elapsed:?}"
+            );
+
+            assert!(res.is_err(), "suite {unsupported_suite} must be rejected");
+            let err = res.unwrap_err();
+            assert!(
+                err.to_string().contains("Unsupported crypto suite"),
+                "Error must identify unsupported crypto suite, got: {err}"
+            );
+            assert_eq!(
+                rpc_sem.available_permits(),
+                10,
+                "Service admission permit must not be acquired for unsupported suite {unsupported_suite}"
+            );
+            assert_eq!(
+                sync_sem.available_permits(),
+                10,
+                "Sync permit must not be acquired for unsupported suite {unsupported_suite}"
+            );
+        }
     }
 
     #[test]

@@ -616,6 +616,9 @@ impl FraudProofPayload {
         if a.lock_id == b.lock_id {
             return false;
         }
+        if a.shard_id != b.shard_id {
+            return false;
+        }
 
         let prov_domain = crate::crypto::domain_approve_prov(network_id);
         let final_domain = crate::crypto::domain_approve_final(network_id);
@@ -626,20 +629,15 @@ impl FraudProofPayload {
                     Ok(s) => s,
                     Err(_) => return false,
                 };
-                let shard_candidates = [
-                    att.shard_id,
-                    crate::types::extract_shard_id(&att.parent_lock),
-                ];
+                let shard_id = att.shard_id;
                 let payload_digest =
                     compute_attestation_payload_digest(&att.parent_lock, &att.lock_id);
-                shard_candidates.iter().any(|&shard_id| {
-                    let d_prov =
-                        compute_sig_digest(prov_domain, 0, 0, 0, shard_id, 0, &payload_digest);
-                    let d_final =
-                        compute_sig_digest(final_domain, 0, 0, 0, shard_id, 1, &payload_digest);
-                    vk.verify_strict(&d_prov, &sig).is_ok()
-                        || vk.verify_strict(&d_final, &sig).is_ok()
-                })
+                let d_prov =
+                    compute_sig_digest(prov_domain, 0, 0, 0, shard_id, 0, &payload_digest);
+                let d_final =
+                    compute_sig_digest(final_domain, 0, 0, 0, shard_id, 1, &payload_digest);
+                vk.verify_strict(&d_prov, &sig).is_ok()
+                    || vk.verify_strict(&d_final, &sig).is_ok()
             };
             verify_one(&a) && verify_one(&b)
         } else {

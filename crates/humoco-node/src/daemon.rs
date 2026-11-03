@@ -1,4 +1,4 @@
-use humoco_sim_core::types::{LockRecord, SimTime};
+use humoco_sim_core::types::SimTime;
 use rand::Rng;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -739,7 +739,6 @@ impl NodeDaemon {
                                 needed > 0 && cur_total.saturating_sub(prev_total) >= needed;
                             let empty_initial_bootstrap = init_bootstrap
                                 && max_seen_total <= 1
-                                && thermo_engine.ram.read().await.is_empty()
                                 && thermo_engine.hmc_ram.read().await.locks.is_empty();
                             let invalidated = if remote_dominant_quorum && !empty_initial_bootstrap {
                                 thermo_rm.invalidate_ready_shards()
@@ -2019,8 +2018,6 @@ pub async fn sync_single_shard(
 
 type ReconciledRootFacts =
     std::collections::HashMap<(String, [u8; 32]), (crate::api::hmc::L2LockEntry, u32)>;
-type ReconciledNativeFacts =
-    std::collections::HashMap<([u8; 32], [u8; 32]), ((LockRecord, u64, u8), u32)>;
 type ReconciledHmcFacts = std::collections::HashMap<
     (String, [u8; 32]),
     ((String, crate::api::hmc::L2LockEntry, u8), u32),
@@ -2033,7 +2030,6 @@ type ReconciledStage = (
 
 struct ReconciledCutFacts {
     roots: Vec<crate::api::hmc::L2LockEntry>,
-    native: Vec<(LockRecord, u64)>,
     hmc: Vec<(String, crate::api::hmc::L2LockEntry)>,
 }
 
@@ -2057,40 +2053,8 @@ fn read_reconciled_cut_facts(
         }
         roots.push(root);
     }
-    let native = storage.active_locks_for_shard(shard, now)?;
     let hmc = storage.active_hmc_locks_for_shard(shard, now)?;
-    Ok(ReconciledCutFacts { roots, native, hmc })
-}
-
-fn append_reconciled_native(
-    stage: &crate::storage::db::install::ShardStage,
-    facts: &[(LockRecord, u64)],
-) -> Result<(), crate::storage::StorageError> {
-    use crate::network::framing::SyncPayload;
-    let mut batch: Vec<(LockRecord, u64)> = Vec::new();
-    for fact in facts {
-        batch.push(fact.clone());
-        if bincode::serialized_size(&batch)? > 60 * 1024 {
-            if let Some(overflow) = batch.pop() {
-                if !batch.is_empty() {
-                    stage.append(SyncPayload {
-                        locks: std::mem::take(&mut batch),
-                        hmc_locks: Vec::new(),
-                        support: Vec::new(),
-                    })?;
-                }
-                batch.push(overflow);
-            }
-        }
-    }
-    if !batch.is_empty() {
-        stage.append(SyncPayload {
-            locks: batch,
-            hmc_locks: Vec::new(),
-            support: Vec::new(),
-        })?;
-    }
-    Ok(())
+    Ok(ReconciledCutFacts { roots, hmc })
 }
 
 fn append_reconciled_hmc(
@@ -2105,7 +2069,6 @@ fn append_reconciled_hmc(
             if let Some(overflow) = batch.pop() {
                 if !batch.is_empty() {
                     stage.append(SyncPayload {
-                        locks: Vec::new(),
                         hmc_locks: std::mem::take(&mut batch),
                         support: Vec::new(),
                     })?;
@@ -2116,7 +2079,6 @@ fn append_reconciled_hmc(
     }
     if !batch.is_empty() {
         stage.append(SyncPayload {
-            locks: Vec::new(),
             hmc_locks: batch,
             support: Vec::new(),
         })?;
@@ -2137,12 +2099,10 @@ fn reconcile_distributed_stage(
     use crate::api::hmc::L2LockEntry;
     use std::collections::HashMap;
     let mut root_facts: ReconciledRootFacts = HashMap::new();
-    let mut native_facts: ReconciledNativeFacts = HashMap::new();
     let mut hmc_facts: ReconciledHmcFacts = HashMap::new();
     let ingest = |storage: &crate::storage::RedbStorage,
                   index: usize,
                   root_facts: &mut ReconciledRootFacts,
-                  native_facts: &mut ReconciledNativeFacts,
                   hmc_facts: &mut ReconciledHmcFacts|
      -> Result<(), crate::storage::StorageError> {
         let facts = read_reconciled_cut_facts(storage, shard_id, now)?;
@@ -2160,19 +2120,6 @@ fn reconcile_distributed_stage(
                 .entry((root.layer2_voucher_id.clone(), digest))
                 .or_insert_with(|| (root, 0u32))
                 .1 |= 1u32 << (index.min(31));
-        }
-        for (row, root) in facts.native {
-            let class = storage
-                .native_confirmation_support(&row.parent_lock)?
-                .filter(|s| s.child == row.id)
-                .map_or(row.status.confirmation_class(), |s| {
-                    s.class.max(row.status.confirmation_class())
-                });
-            let entry = native_facts
-                .entry((row.parent_lock, row.id))
-                .or_insert_with(|| ((row.clone(), root, class), 0u32));
-            entry.0 .2 = entry.0 .2.max(class);
-            entry.1 |= 1u32 << (index.min(31));
         }
         for (tag, entry) in facts.hmc {
             let class = storage
@@ -2192,7 +2139,6 @@ fn reconcile_distributed_stage(
             &stage.storage,
             index,
             &mut root_facts,
-            &mut native_facts,
             &mut hmc_facts,
         )?;
     }
@@ -2200,13 +2146,12 @@ fn reconcile_distributed_stage(
         target.as_ref(),
         stages.len(),
         &mut root_facts,
-        &mut native_facts,
         &mut hmc_facts,
     )?;
 
     // A21-R2: Cap reconciliation working memory against malicious/unbounded cuts
     const MAX_RECONCILE_ENTRY_CAP: usize = 50_000;
-    if root_facts.len() + native_facts.len() + hmc_facts.len() > MAX_RECONCILE_ENTRY_CAP {
+    if root_facts.len() + hmc_facts.len() > MAX_RECONCILE_ENTRY_CAP {
         return Err(NodeError::Storage(
             crate::storage::StorageError::DurableCommitFailed(
                 "reconciliation fact memory budget exceeded".into(),
@@ -2234,36 +2179,6 @@ fn reconcile_distributed_stage(
         } else {
             selected_roots.insert(voucher.clone(), (entry.clone(), *digest, count));
         }
-    }
-
-    let mut selected_native: HashMap<[u8; 32], (LockRecord, u64, usize, u8)> = HashMap::new();
-    for ((parent, _), ((row, root, class), witnesses)) in &native_facts {
-        let count = witnesses.count_ones() as usize;
-        if count < needed {
-            continue;
-        }
-        if !row.has_valid_id() {
-            continue;
-        }
-        if let Some((old, _, _, old_class)) = selected_native.get(parent) {
-            let new_hash = humoco_sim_core::crypto::compute_canonical_hash(
-                parent,
-                &row.receiver_pub,
-                &row.nonce,
-            );
-            let old_hash = humoco_sim_core::crypto::compute_canonical_hash(
-                parent,
-                &old.receiver_pub,
-                &old.nonce,
-            );
-            if humoco_sim_core::resolver::compare_native_precedence(
-                *old_class, &old_hash, &old.id, *class, &new_hash, &row.id,
-            ) == humoco_sim_core::resolver::NativeCandidateOrdering::PrecedenceA
-            {
-                continue;
-            }
-        }
-        selected_native.insert(*parent, (row.clone(), *root, count, *class));
     }
 
     let mut selected_hmc: HashMap<String, (String, L2LockEntry, usize, u8)> = HashMap::new();
@@ -2301,14 +2216,13 @@ fn reconcile_distributed_stage(
         );
     }
 
-    if selected_roots.is_empty() && selected_native.is_empty() && selected_hmc.is_empty() {
+    if selected_roots.is_empty() && selected_hmc.is_empty() {
         return Ok(None);
     }
 
-    let min_witnesses = selected_native
+    let min_witnesses = selected_hmc
         .values()
         .map(|(_, _, w, _)| *w)
-        .chain(selected_hmc.values().map(|(_, _, w, _)| *w))
         .chain(selected_roots.values().map(|(_, _, w)| *w))
         .min()
         .unwrap_or(needed);
@@ -2320,12 +2234,6 @@ fn reconcile_distributed_stage(
         .collect();
     roots.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     append_reconciled_hmc(&stage, &roots)?;
-    let mut native: Vec<(LockRecord, u64)> = selected_native
-        .into_values()
-        .map(|(row, root, _, _)| (row, root))
-        .collect();
-    native.sort_unstable_by(|a, b| a.0.parent_lock.cmp(&b.0.parent_lock));
-    append_reconciled_native(&stage, &native)?;
     let mut hmc: Vec<(String, L2LockEntry)> = selected_hmc
         .into_values()
         .map(|(tag, entry, _, _)| (tag, entry))
@@ -2427,56 +2335,89 @@ mod tests {
     fn test_reconcile_prefers_higher_confirmation_class_over_lower_hash() {
         use crate::network::framing::SyncPayload;
         use crate::storage::db::install::ShardStage;
-        use crate::storage::db::support::{native_key, ConfirmationSupport};
+        use crate::storage::db::support::ConfirmationSupport;
         use crate::storage::RedbStorage;
-        use humoco_sim_core::types::{LockRecord, SimTime};
+        use ed25519_dalek::Signer;
 
         let temp = tempdir().unwrap();
         let target = Arc::new(RedbStorage::open(&temp.path().join("target.redb")).unwrap());
-        let shard = 4u16;
         let now = 1_000u64;
 
-        let mut parent = [4u8; 32];
-        parent[..2].copy_from_slice(&shard.to_be_bytes());
-
-        // Find two different receiver_pub / nonces such that one has lower hash than the other
-        let row_low_hash =
-            LockRecord::new(parent, [1u8; 32], vec![1], SimTime(now), SimTime(600_000));
-        let row_high_hash =
-            LockRecord::new(parent, [2u8; 32], vec![2], SimTime(now), SimTime(600_000));
-
-        let hash_1 = humoco_sim_core::crypto::compute_canonical_hash(
-            &parent,
-            &row_low_hash.receiver_pub,
-            &row_low_hash.nonce,
+        let author = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let mut root = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-voucher-reconcile".into(),
+            t_id: [1u8; 32],
+            sender_ephemeral_pub: author.verifying_key().to_bytes(),
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: now,
+            deletable_at: Some("600000".into()),
+            privacy_guard: None,
+        };
+        let root_tag = bs58::encode(root.t_id).into_string();
+        root.layer2_signature = author
+            .sign(&crate::api::hmc::calculate_l2_payload_hash_for_entry(&root, &root_tag))
+            .to_bytes();
+        let shard = humoco_sim_core::types::canonical_voucher_shard(
+            &humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag),
         );
-        let hash_2 = humoco_sim_core::crypto::compute_canonical_hash(
+
+        let spend_tag = "test-spend-tag";
+        let parent = *blake3::hash(spend_tag.as_bytes()).as_bytes();
+
+        let mut spend_1 = root.clone();
+        spend_1.t_id = [2; 32];
+        spend_1.deletable_at = None;
+        spend_1.layer2_signature = author
+            .sign(&crate::api::hmc::calculate_l2_payload_hash_for_entry(&spend_1, spend_tag))
+            .to_bytes();
+
+        let mut spend_2 = root.clone();
+        spend_2.t_id = [3; 32];
+        spend_2.deletable_at = None;
+        spend_2.layer2_signature = author
+            .sign(&crate::api::hmc::calculate_l2_payload_hash_for_entry(&spend_2, spend_tag))
+            .to_bytes();
+
+        let hash_1 = crate::storage::compute_hmc_canonical_hash(
             &parent,
-            &row_high_hash.receiver_pub,
-            &row_high_hash.nonce,
+            &spend_1.sender_ephemeral_pub,
+            &spend_1.t_id,
+        );
+        let hash_2 = crate::storage::compute_hmc_canonical_hash(
+            &parent,
+            &spend_2.sender_ephemeral_pub,
+            &spend_2.t_id,
         );
 
         let (winner_class2, loser_class1) = if hash_1 > hash_2 {
-            // row_low_hash has higher hash -> give it class 2!
-            (row_low_hash, row_high_hash)
+            // spend_1 has higher hash -> give it class 2!
+            (spend_1, spend_2)
         } else {
-            (row_high_hash, row_low_hash)
+            (spend_2, spend_1)
         };
 
         // stage_a has class 2 for winner_class2
         let stage_a = Arc::new(ShardStage::new(shard, now).unwrap());
         let fact_a = ConfirmationSupport {
             parent,
-            child: winner_class2.id,
+            child: winner_class2.t_id,
             class: 2,
             root_valid_until_ms: 600_000,
             verified_context: [77; 32],
         };
         stage_a
             .append(SyncPayload {
-                locks: vec![(winner_class2.clone(), 600_000)],
-                hmc_locks: vec![],
-                support: vec![(0, native_key(&parent), fact_a)],
+                hmc_locks: vec![
+                    (root_tag.clone(), root.clone()),
+                    (spend_tag.to_string(), winner_class2.clone()),
+                ],
+                support: vec![(1, spend_tag.to_string(), fact_a)],
             })
             .unwrap();
 
@@ -2484,16 +2425,18 @@ mod tests {
         let stage_b = Arc::new(ShardStage::new(shard, now).unwrap());
         let fact_b = ConfirmationSupport {
             parent,
-            child: loser_class1.id,
+            child: loser_class1.t_id,
             class: 1,
             root_valid_until_ms: 600_000,
             verified_context: [88; 32],
         };
         stage_b
             .append(SyncPayload {
-                locks: vec![(loser_class1.clone(), 600_000)],
-                hmc_locks: vec![],
-                support: vec![(0, native_key(&parent), fact_b)],
+                hmc_locks: vec![
+                    (root_tag.clone(), root.clone()),
+                    (spend_tag.to_string(), loser_class1.clone()),
+                ],
+                support: vec![(1, spend_tag.to_string(), fact_b)],
             })
             .unwrap();
 
@@ -2505,9 +2448,14 @@ mod tests {
 
         // Verify which row was selected: by DEC-064 & DEC-022, Class 2 MUST beat Class 1 regardless of hash!
         let page = reconciled_stage.page(0).unwrap();
-        assert_eq!(page.payload.locks.len(), 1);
+        let selected = page
+            .payload
+            .hmc_locks
+            .iter()
+            .find(|(tag, _)| tag == spend_tag)
+            .expect("spend present");
         assert_eq!(
-            page.payload.locks[0].0.id, winner_class2.id,
+            selected.1.t_id, winner_class2.t_id,
             "Reconciliation must prefer higher confirmation class over lower canonical hash"
         );
     }
@@ -2517,47 +2465,62 @@ mod tests {
         use crate::network::framing::SyncPayload;
         use crate::storage::db::install::ShardStage;
         use crate::storage::RedbStorage;
-        use humoco_sim_core::types::{LockRecord, SimTime};
+        use ed25519_dalek::Signer;
 
         let temp = tempdir().unwrap();
         let target = Arc::new(RedbStorage::open(&temp.path().join("target.redb")).unwrap());
-        let shard = 4u16;
         let now = 1_000u64;
 
-        // Local node holds a solitary lock that has no remote quorum witnesses
-        let mut parent_local = [4u8; 32];
-        parent_local[..2].copy_from_slice(&shard.to_be_bytes());
-        parent_local[2] = 0xAA;
-        let mut local_row = LockRecord::new(
-            parent_local,
-            [9u8; 32],
-            vec![9],
-            SimTime(now),
-            SimTime(600_000),
-        );
-        local_row.status = humoco_sim_core::types::LockStatus::Provisional {
-            sigs: 3,
-            required: 3,
+        let author = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let mut root = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-voucher-reconcile-unquorated".into(),
+            t_id: [1u8; 32],
+            sender_ephemeral_pub: author.verifying_key().to_bytes(),
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: now,
+            deletable_at: Some("600000".into()),
+            privacy_guard: None,
         };
-        target.put_lock(&local_row, 600_000).unwrap();
+        let root_tag = bs58::encode(root.t_id).into_string();
+        root.layer2_signature = author
+            .sign(&crate::api::hmc::calculate_l2_payload_hash_for_entry(&root, &root_tag))
+            .to_bytes();
+        let shard = humoco_sim_core::types::canonical_voucher_shard(
+            &humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag),
+        );
+
+        // Put root into target storage
+        target.put_hmc_lock(&root_tag, &root).unwrap();
+
+        // Local node holds a solitary lock that has no remote quorum witnesses
+        let local_tag = "local-spend-tag";
+        let mut local_spend = root.clone();
+        local_spend.t_id = [9u8; 32];
+        local_spend.deletable_at = None;
+        target.put_hmc_lock(local_tag, &local_spend).unwrap();
 
         // Remote stages hold a completely different lock with quorum (needed = 2)
-        let mut parent_remote = [4u8; 32];
-        parent_remote[..2].copy_from_slice(&shard.to_be_bytes());
-        parent_remote[2] = 0xBB;
-        let remote_row = LockRecord::new(
-            parent_remote,
-            [8u8; 32],
-            vec![8],
-            SimTime(now),
-            SimTime(600_000),
-        );
+        let remote_tag = "remote-spend-tag";
+        let mut remote_spend = root.clone();
+        remote_spend.t_id = [8u8; 32];
+        remote_spend.deletable_at = None;
+        remote_spend.layer2_signature = author
+            .sign(&crate::api::hmc::calculate_l2_payload_hash_for_entry(&remote_spend, remote_tag))
+            .to_bytes();
 
         let stage_1 = Arc::new(ShardStage::new(shard, now).unwrap());
         stage_1
             .append(SyncPayload {
-                locks: vec![(remote_row.clone(), 600_000)],
-                hmc_locks: vec![],
+                hmc_locks: vec![
+                    (root_tag.clone(), root.clone()),
+                    (remote_tag.to_string(), remote_spend.clone()),
+                ],
                 support: vec![],
             })
             .unwrap();
@@ -2565,8 +2528,10 @@ mod tests {
         let stage_2 = Arc::new(ShardStage::new(shard, now).unwrap());
         stage_2
             .append(SyncPayload {
-                locks: vec![(remote_row.clone(), 600_000)],
-                hmc_locks: vec![],
+                hmc_locks: vec![
+                    (root_tag.clone(), root.clone()),
+                    (remote_tag.to_string(), remote_spend.clone()),
+                ],
                 support: vec![],
             })
             .unwrap();
@@ -2581,16 +2546,16 @@ mod tests {
         // The quorated remote row MUST be present
         assert!(page
             .payload
-            .locks
+            .hmc_locks
             .iter()
-            .any(|(r, _)| r.parent_lock == parent_remote));
+            .any(|(tag, _)| tag == remote_tag));
         // The unquorated local row MUST NOT be injected into the network-reconciled stage
         assert!(
             !page
                 .payload
-                .locks
+                .hmc_locks
                 .iter()
-                .any(|(r, _)| r.parent_lock == parent_local),
+                .any(|(tag, _)| tag == local_tag),
             "Unquorated local lock must not be laundered into the quorated stage"
         );
     }

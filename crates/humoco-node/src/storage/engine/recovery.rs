@@ -249,23 +249,6 @@ impl DualTierEngine {
         // Bounded RAM publication. Only this shard is gated; no index guard is
         // retained over disk work. Existing root metadata remains immutable.
         loop {
-            let mut ram = self.ram.write().await;
-            let keys: Vec<_> = ram
-                .iter()
-                .filter(|r| u16::from_be_bytes([r.parent_lock[0], r.parent_lock[1]]) == stage.shard)
-                .take(256)
-                .map(|r| r.parent_lock)
-                .collect();
-            if keys.is_empty() {
-                break;
-            }
-            for key in keys {
-                ram.remove(&key);
-            }
-            drop(ram);
-            tokio::task::yield_now().await;
-        }
-        loop {
             let mut ram = self.hmc_ram.write().await;
             let keys: Vec<_> = ram
                 .locks
@@ -296,44 +279,30 @@ impl DualTierEngine {
         loop {
             let cut = stage.clone();
             let db = self.db.clone();
-            let (page, classes) = self
+            let (page, classes, hmc) = self
                 .recovery_work
                 .spawn_blocking(move || {
-                    let mut page = cut.page(cursor)?;
-                    let mut native = Vec::new();
-                    for (row, _) in page.payload.locks {
-                        if let Some(row) = db.get_lock(&row.parent_lock)? {
-                            native.push(row);
-                        }
-                    }
-                    page.payload.locks = native;
+                    let page = cut.page(cursor)?;
                     let mut classes = Vec::new();
                     let mut hmc = Vec::new();
-                    for (tag, entry) in page.payload.hmc_locks {
-                        if super::super::db::roots::is_root(&tag, &entry) {
+                    for (tag, entry) in &page.payload.hmc_locks {
+                        if super::super::db::roots::is_root(tag, entry) {
                             if let Some(root) = db.voucher_root(&entry.layer2_voucher_id)? {
-                                hmc.push((tag, root));
+                                hmc.push((tag.clone(), root));
                                 classes.push(0);
                             }
-                        } else if let Some(row) = db.get_hmc_lock(&tag)? {
-                            classes.push(db.confirmation_support(&tag)?.map_or(0, |f| f.class));
-                            hmc.push((tag, row));
+                        } else if let Some(row) = db.get_hmc_lock(tag)? {
+                            classes.push(db.confirmation_support(tag)?.map_or(0, |f| f.class));
+                            hmc.push((tag.clone(), row));
                         }
                     }
-                    page.payload.hmc_locks = hmc;
-                    Ok::<_, StorageError>((page, classes))
+                    Ok::<_, StorageError>((page, classes, hmc))
                 })
                 .await
                 .map_err(|e| error(&format!("publication worker: {e}")))??;
             {
-                let mut ram = self.ram.write().await;
-                for (row, root) in page.payload.locks {
-                    ram.insert_recovered(row, SimTime(root));
-                }
-            }
-            {
                 let mut ram = self.hmc_ram.write().await;
-                for ((tag, entry), class) in page.payload.hmc_locks.into_iter().zip(classes) {
+                for ((tag, entry), class) in hmc.into_iter().zip(classes) {
                     ram.insert_recovered(tag.clone(), entry.clone());
                     ram.set_confirmation_class(&tag, class);
                     if let Some(root) = ram.voucher_roots.get(&entry.layer2_voucher_id).copied() {

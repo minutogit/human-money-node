@@ -556,7 +556,6 @@ mod hmc_chain_opt_json {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum LockWirePayload {
-    Sim(humoco_sim_core::types::LockRecord, u64),
     Hmc {
         #[serde(with = "hmc_req_json")]
         req: crate::api::hmc::L2LockRequest,
@@ -597,7 +596,6 @@ impl LockWirePayload {
 
     pub fn declared_write_ema_micro_bj(&self) -> u64 {
         match self {
-            Self::Sim(..) => 0,
             Self::Hmc {
                 declared_write_ema_micro_bj,
                 ..
@@ -607,7 +605,6 @@ impl LockWirePayload {
 
     pub fn declared_read_ema_credits(&self) -> u64 {
         match self {
-            Self::Sim(..) => 0,
             Self::Hmc {
                 declared_read_ema_credits,
                 ..
@@ -617,21 +614,18 @@ impl LockWirePayload {
 
     pub fn epoch_day(&self) -> u32 {
         match self {
-            Self::Sim(..) => 0,
             Self::Hmc { epoch_day, .. } => *epoch_day,
         }
     }
 
     pub fn epoch_seq(&self) -> u64 {
         match self {
-            Self::Sim(..) => 0,
             Self::Hmc { epoch_seq, .. } => *epoch_seq,
         }
     }
 
     pub fn cumulative_micro_byte_years(&self) -> u64 {
         match self {
-            Self::Sim(..) => 0,
             Self::Hmc {
                 cumulative_micro_byte_years,
                 ..
@@ -641,7 +635,6 @@ impl LockWirePayload {
 
     pub fn prev_day_final_bytes(&self) -> u64 {
         match self {
-            Self::Sim(..) => 0,
             Self::Hmc {
                 prev_day_final_bytes,
                 ..
@@ -651,7 +644,6 @@ impl LockWirePayload {
 
     pub fn current_anl_24h(&self) -> u64 {
         match self {
-            Self::Sim(..) => 0,
             Self::Hmc {
                 current_anl_24h, ..
             } => *current_anl_24h,
@@ -660,14 +652,12 @@ impl LockWirePayload {
 
     pub fn chain(&self) -> Option<&crate::api::hmc::L2ChainLockRequest> {
         match self {
-            Self::Sim(..) => None,
             Self::Hmc { chain, .. } => chain.as_ref(),
         }
     }
 
     pub fn sender_pubkey(&self) -> [u8; 32] {
         match self {
-            Self::Sim(rec, _) => rec.receiver_pub,
             Self::Hmc {
                 sender_pubkey, req, ..
             } => {
@@ -682,7 +672,6 @@ impl LockWirePayload {
 
     pub fn sender_signature(&self) -> [u8; 64] {
         match self {
-            Self::Sim(..) => [0u8; 64],
             Self::Hmc {
                 sender_signature, ..
             } => *sender_signature,
@@ -691,7 +680,6 @@ impl LockWirePayload {
 
     pub fn timestamp_ms(&self) -> u64 {
         match self {
-            Self::Sim(..) => 0,
             Self::Hmc { timestamp_ms, .. } => *timestamp_ms,
         }
     }
@@ -761,39 +749,24 @@ mod hmc_locks_json {
     }
 }
 
-/// Unified active sync payload carrying both regular LockRecords and HMC L2LockEntries.
+/// Active sync payload carrying HMC L2LockEntries and confirmation support.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SyncPayload {
-    pub locks: Vec<(humoco_sim_core::types::LockRecord, u64)>,
     #[serde(with = "hmc_locks_json")]
     pub hmc_locks: Vec<(String, crate::api::hmc::L2LockEntry)>,
     pub support: Vec<(u8, String, crate::storage::db::support::ConfirmationSupport)>,
 }
 
 impl SyncPayload {
-    pub fn new(
-        locks: Vec<(humoco_sim_core::types::LockRecord, u64)>,
-        hmc_locks: Vec<(String, crate::api::hmc::L2LockEntry)>,
-    ) -> Self {
+    pub fn new(hmc_locks: Vec<(String, crate::api::hmc::L2LockEntry)>) -> Self {
         Self {
-            locks,
             hmc_locks,
             support: Vec::new(),
         }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        if let Ok(sp) = bincode::deserialize::<SyncPayload>(bytes) {
-            Ok(sp)
-        } else {
-            let locks: Vec<(humoco_sim_core::types::LockRecord, u64)> =
-                bincode::deserialize(bytes)?;
-            Ok(SyncPayload {
-                locks,
-                hmc_locks: Vec::new(),
-                support: Vec::new(),
-            })
-        }
+        bincode::deserialize(bytes)
     }
 }
 

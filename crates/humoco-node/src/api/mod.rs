@@ -28,7 +28,7 @@ pub use health::{
 pub use history::{HistoryPoint, HistorySampler, HISTORY_CAPACITY};
 
 pub use dto::{
-    AttestationDto, ErrorResponse, HmcSyncRow, LockRecordDto, NodeStatusResponse,
+    AttestationDto, ErrorResponse, HmcSyncRow, NodeStatusResponse,
     PowChallengeResponse, SyncRequest, SyncResponse,
 };
 pub use hmc::{

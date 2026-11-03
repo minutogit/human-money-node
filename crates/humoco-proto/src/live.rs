@@ -3,10 +3,10 @@ use crate::{verify_quorum_proof, AttestationVote, QuorumProof};
 use serde::{Deserialize, Serialize};
 
 /// Domain tag for Layer 2 occupied live-state proof digests.
-pub const LIVE_OCCUPIED_DOMAIN: &[u8] = b"HUMOCO_V1_LIVE_CURRENT_STATE";
+pub(crate) const LIVE_OCCUPIED_DOMAIN: &[u8] = b"HUMOCO_V1_LIVE_CURRENT_STATE";
 
 /// Domain tag for Layer 2 unoccupied live-state proof digests.
-pub const LIVE_UNOCCUPIED_DOMAIN: &[u8] = b"HUMOCO_V1_LIVE_UNOCCUPIED_STATE";
+pub(crate) const LIVE_UNOCCUPIED_DOMAIN: &[u8] = b"HUMOCO_V1_LIVE_UNOCCUPIED_STATE";
 
 /// Occupancy state attested by shard custodians for a queried parent lock slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,12 +53,11 @@ pub struct LiveStateProof {
     /// Distinct current full-key signatures.
     pub votes: Vec<AttestationVote>,
     /// Whether the quorum attests to an occupied lock or an unoccupied slot.
-    #[serde(default)]
     pub occupancy: LiveSlotOccupancy,
 }
 
 /// Validates finite FINAL context structure, never membership authority.
-pub fn validate_live_context(c: &LiveStateContext) -> Result<(), &'static str> {
+pub(crate) fn validate_live_context(c: &LiveStateContext) -> Result<(), &'static str> {
     if c.version != 1
         || c.network > 1
         || c.committee.len() != 20
@@ -465,9 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn test_occupancy_default_and_bincode_roundtrip() {
-        assert_eq!(LiveSlotOccupancy::default(), LiveSlotOccupancy::Occupied);
-
+    fn test_occupancy_mandatory_and_roundtrip() {
         let (occupied, _, signers) = make_contexts();
         let digest = live_state_digest(&occupied).expect("digest");
         let proof = LiveStateProof {
@@ -482,5 +479,10 @@ mod tests {
         let encoded = bincode::serialize(&proof).expect("serialize");
         let decoded: LiveStateProof = bincode::deserialize(&encoded).expect("deserialize");
         assert_eq!(proof, decoded);
+
+        // Backward compatibility shim is gone: truncated payload missing the mandatory
+        // occupancy field must fail deserialization instead of falling back to default.
+        let truncated = &encoded[..encoded.len() - 4];
+        assert!(bincode::deserialize::<LiveStateProof>(truncated).is_err());
     }
 }

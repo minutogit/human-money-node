@@ -7,7 +7,7 @@ use humoco_node::api::hmc::{L2LockEntry, L2Verdict};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
-use humoco_sim_core::types::{LockRecord, SimTime};
+use humoco_sim_core::types::SimTime;
 use humoco_sim_core::wire::{MsgType, WireHeader, FLAG_NOT_READY};
 
 #[tokio::test]
@@ -100,15 +100,26 @@ async fn test_boot_readiness_barrier_wire_flag() {
     // witness even while the global legacy flag and another shard are unready.
     let witness_shard = 0x9001u16;
     let now = SimTime(pm_server.net_time_ms());
-    let mut parent = [0u8; 32];
-    parent[..2].copy_from_slice(&witness_shard.to_be_bytes());
-    let pending = LockRecord::new(parent, [8; 32], vec![1], now, SimTime(now.0 + 60_000));
+    let pending_entry = L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: "witness_voucher".into(),
+        t_id: [8; 32],
+        sender_ephemeral_pub: [1; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: now.0,
+        deletable_at: Some((now.0 + 60_000).to_string()),
+        privacy_guard: None,
+    };
     engine
-        .ram
+        .hmc_ram
         .write()
         .await
-        .try_insert(pending, now, SimTime(now.0 + 60_000))
-        .expect("pending RAM fixture");
+        .insert_lock_for_test("witness_tag".into(), pending_entry);
     readiness.mark_shard_ready(witness_shard);
     assert!(!is_sync_ready.load(Ordering::Acquire));
     let header = WireHeader::new(MsgType::ShardDigestRequest as u16, 90, 0, 0, 2);
@@ -131,7 +142,7 @@ async fn test_boot_readiness_barrier_wire_flag() {
         .await
         .expect("unready shard digest");
     assert_ne!(reply.flags & FLAG_NOT_READY, 0);
-    engine.ram.write().await.remove(&parent);
+    engine.hmc_ram.write().await.remove_lock_for_test("witness_tag");
 
     let now_ms = pm_server.net_time_ms();
     let root_valid_until = now_ms + 600_000;
@@ -243,13 +254,12 @@ async fn test_boot_readiness_barrier_wire_flag() {
     // A gateway can refresh its own envelope but cannot refresh the wallet's
     // signed creation time. The receiving shard must reject before persistence.
     let mut stale = wire.clone();
-    if let humoco_node::network::framing::LockWirePayload::Hmc { req, .. } = &mut stale {
-        req.created_at_ms = now_ms - 31_000;
-        req.layer2_signature = client_id
-            .signing_key()
-            .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req))
-            .to_bytes();
-    }
+    let humoco_node::network::framing::LockWirePayload::Hmc { req, .. } = &mut stale;
+    req.created_at_ms = now_ms - 31_000;
+    req.layer2_signature = client_id
+        .signing_key()
+        .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req))
+        .to_bytes();
     let stale_bytes = bincode::serialize(&stale).unwrap();
     let stale_header = WireHeader::new(
         MsgType::LockVerifyRequest as u16,
@@ -299,22 +309,48 @@ async fn test_paginated_active_sync_streaming_chunks() {
         Arc::new(RedbStorage::open(&temp.path().join("paginated.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
-    // Insert 1250 test locks into storage
+    // Insert 1 root and 1250 test locks into storage
     let now = SimTime(1_000);
     let root_valid = SimTime(1_000_000);
+    let root_entry = L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: "paginated_voucher".into(),
+        t_id: [0x55; 32],
+        sender_ephemeral_pub: [0x55; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: now.0,
+        deletable_at: Some(root_valid.0.to_string()),
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root_entry.t_id).into_string();
+    storage.put_hmc_lock(&root_tag, &root_entry).expect("put root");
+
     for i in 0..1250u32 {
-        let mut parent = [0u8; 32];
-        parent[0] = 0x01; // shard 0x0100
-        parent[2..6].copy_from_slice(&i.to_be_bytes());
-        let rec = LockRecord::new(
-            parent,
-            [0xAA; 32],
-            i.to_le_bytes().to_vec(),
-            now,
-            SimTime(500_000),
-        );
+        let mut t_id = [0u8; 32];
+        t_id[0..4].copy_from_slice(&i.to_be_bytes());
+        let spend_entry = L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "paginated_voucher".into(),
+            t_id,
+            sender_ephemeral_pub: [0xAA; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: now.0,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+        let tag = format!("spend_{:06}", i);
         storage
-            .put_lock(&rec, root_valid.0)
+            .put_hmc_lock(&tag, &spend_entry)
             .expect("committed source row");
     }
 
@@ -390,10 +426,10 @@ async fn test_paginated_active_sync_streaming_chunks() {
         seq += 1;
 
         assert!(
-            page.payload.locks.len() <= limit,
+            page.payload.hmc_locks.len() <= limit,
             "Page size must not exceed limit"
         );
-        all_received.extend(page.payload.locks);
+        all_received.extend(page.payload.hmc_locks);
 
         if !page.has_more {
             break;
@@ -405,8 +441,8 @@ async fn test_paginated_active_sync_streaming_chunks() {
 
     assert_eq!(
         all_received.len(),
-        1250,
-        "Must have received all 1250 locks across pages"
+        1251,
+        "Must have received all 1251 locks across pages"
     );
 }
 
@@ -417,33 +453,7 @@ async fn test_cryptographic_verification_on_partition_sync() {
         Arc::new(RedbStorage::open(&temp.path().join("crypto_sync.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
-    let now = SimTime(10_000);
-    let root_valid = SimTime(600_000);
-
-    // 1. Sim LockRecord with invalid LockId (tampered hash)
-    let parent = [0x99; 32];
-    let mut invalid_rec = LockRecord::new(parent, [0x77; 32], vec![1, 2, 3], now, SimTime(50_000));
-    invalid_rec.id = [0xFF; 32]; // deliberate corrupt ID
-
-    let res = engine
-        .ingress_lock_with_origin(invalid_rec, now, root_valid, IngressOrigin::PartitionSync)
-        .await;
-    assert!(
-        res.is_err(),
-        "Ingress of corrupt LockId under PartitionSync must be rejected"
-    );
-
-    // 2. Sim LockRecord with valid LockId
-    let valid_rec = LockRecord::new(parent, [0x77; 32], vec![1, 2, 3], now, SimTime(50_000));
-    let res2 = engine
-        .ingress_lock_with_origin(valid_rec, now, root_valid, IngressOrigin::PartitionSync)
-        .await;
-    assert!(
-        res2.is_ok(),
-        "Ingress of valid LockId under PartitionSync must succeed"
-    );
-
-    // 3. HMC L2LockEntry with invalid cryptographic signature
+    // HMC L2LockEntry with invalid cryptographic signature
     let invalid_hmc_entry = L2LockEntry {
         causal_output: None,
         layer2_voucher_id: "voucher-test".into(),
@@ -1029,10 +1039,8 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
         .verify_strict(&final_digest, &ed25519_dalek::Signature::from_bytes(&bytes))
         .expect("ready shard signs FINAL domain despite global false");
     assert!(!is_sync_ready.load(Ordering::SeqCst));
-    let mut neighbor_root = match &wire {
-        humoco_node::network::framing::LockWirePayload::Hmc { req, .. } => req.clone(),
-        _ => unreachable!(),
-    };
+    let humoco_node::network::framing::LockWirePayload::Hmc { req, .. } = &wire;
+    let mut neighbor_root = req.clone();
     neighbor_root.is_genesis = true;
     neighbor_root.ds_tag = None;
     neighbor_root.transaction_hash = [0x56; 32];
@@ -1052,12 +1060,11 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
         .await;
     assert!(matches!(verdict, L2Verdict::Verified { .. }));
     let mut neighbouring_wire = wire;
-    if let humoco_node::network::framing::LockWirePayload::Hmc {
+    let humoco_node::network::framing::LockWirePayload::Hmc {
         req,
         sender_signature,
         ..
-    } = &mut neighbouring_wire
-    {
+    } = &mut neighbouring_wire;
         req.transaction_hash = [0x56; 32];
         req.layer2_voucher_id.push_str("_neighbouring_unready_root");
         req.layer2_signature = client_id
@@ -1077,7 +1084,6 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
             &entry.t_id,
         );
         *sender_signature = client_id.signing_key().sign(&digest).to_bytes();
-    }
     let raw = bincode::serialize(&neighbouring_wire).unwrap();
     let next_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 3, 0, 1, raw.len() as u32);
     let (next_response, next_bytes) = client_transport

@@ -11,10 +11,7 @@ use humoco_node::{
     },
     storage::{DualTierEngine, RedbStorage},
 };
-use humoco_sim_core::{
-    types::{LockRecord, SimTime},
-    wire::{MsgType, WireHeader},
-};
+use humoco_sim_core::wire::{MsgType, WireHeader};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -53,19 +50,37 @@ async fn real_quic_checkpoint_detects_restore_but_rejects_framing() {
     let backup = dir.path().join("old.redb");
     let checkpoint = {
         let db = Arc::new(RedbStorage::open(&dir.path().join("source.redb")).unwrap());
-        let record = |parent| {
-            LockRecord::new(
-                [parent; 32],
-                [2; 32],
-                vec![3],
-                SimTime(1_000),
-                SimTime(50_000),
-            )
+        let root = humoco_node::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "voucher-test".into(),
+            t_id: [0x10; 32],
+            sender_ephemeral_pub: [0x22; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0x33; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 0,
+            deletable_at: Some("50000".to_string()),
+            privacy_guard: None,
         };
-        db.commit_original_record_approval(&record(1), 50_000, own.node_pubkey(), b"first", 0)
+        let root_tag = bs58::encode(root.t_id).into_string();
+        db.put_hmc_lock(&root_tag, &root).unwrap();
+
+        let mut entry1 = root.clone();
+        entry1.t_id = [1; 32];
+        entry1.deletable_at = None;
+        let tag1 = "spend-tag-1";
+        db.commit_original_approval(tag1, &entry1, own.node_pubkey(), b"first", 0, 50_000)
             .unwrap();
         db.create_backup(&backup).unwrap();
-        db.commit_original_record_approval(&record(2), 50_000, own.node_pubkey(), b"second", 0)
+
+        let mut entry2 = root.clone();
+        entry2.t_id = [2; 32];
+        entry2.deletable_at = None;
+        let tag2 = "spend-tag-2";
+        db.commit_original_approval(tag2, &entry2, own.node_pubkey(), b"second", 0, 50_000)
             .unwrap();
         let (engine, worker) = DualTierEngine::new(db.clone());
         let handler = NodeRequestHandler::new(engine.clone(), db, own.clone());
@@ -180,9 +195,24 @@ async fn real_quic_checkpoint_detects_restore_but_rejects_framing() {
             "local loss is not a network fraud sanction"
         );
     }
-    let record = LockRecord::new([3; 32], [2; 32], vec![3], SimTime(1_000), SimTime(50_000));
+    let entry3 = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: "voucher-test".into(),
+        t_id: [3; 32],
+        sender_ephemeral_pub: [0x22; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x33; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 0,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let tag3 = "spend-tag-3";
     assert!(storage
-        .commit_original_record_approval(&record, 50_000, own.node_pubkey(), b"unsafe", 0)
+        .commit_original_approval(tag3, &entry3, own.node_pubkey(), b"unsafe", 0, 50_000)
         .is_err());
     let corrupt_backup = dir.path().join("corrupt-backup.redb");
     storage.create_backup(&corrupt_backup).unwrap();

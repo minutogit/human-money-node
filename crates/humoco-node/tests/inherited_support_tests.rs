@@ -2,7 +2,7 @@
 #[path = "common/recovery.rs"]
 mod recovery;
 use humoco_node::{identity::NodeIdentity, storage::RedbStorage};
-use humoco_sim_core::types::{LockRecord, LockStatus, SimTime};
+use humoco_sim_core::types::SimTime;
 use std::sync::Arc;
 async fn sync(peer: &recovery::RecoveryPeer, shard: u16) -> bool {
     humoco_node::daemon::sync_single_shard(
@@ -19,29 +19,18 @@ async fn sync(peer: &recovery::RecoveryPeer, shard: u16) -> bool {
     .unwrap()
 }
 #[tokio::test]
-async fn genuine_native_and_hmc_support_survives_fresh_island_transfer_backup_reopen_and_second_recipient(
-) {
+async fn genuine_hmc_support_survives_fresh_island_transfer_backup_reopen_and_second_recipient() {
     let mut peers = recovery::recovery_peers(20).await;
     let now = peers[0].manager.net_time_ms();
     let (root_tag, root, tag, spend, shard) = signed_hmc_cut(now);
-    let mut parent = [7; 32];
-    parent[..2].copy_from_slice(&shard.to_be_bytes());
-    let native = LockRecord::new(
-        parent,
-        [8; 32],
-        vec![9],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
     for peer in &peers {
         peer.manager.set_ge20_anchor_for_test(now - 86_400_001);
     }
-    // Source availability/mature tickets are prepared premises. Native and HMC
+    // Source availability/mature tickets are prepared premises. HMC
     // class2 facts below are produced only by actual fourteen-source admission.
     for peer in &peers[5..] {
         peer.db.put_hmc_lock(&root_tag, &root).unwrap();
         peer.db.put_hmc_lock(&tag, &spend).unwrap();
-        peer.db.put_lock(&native, now + 600_000).unwrap();
         peer.engine.recover_from_disk(SimTime(now)).await.unwrap();
         peer.readiness.mark_shard_ready(shard);
     }
@@ -49,17 +38,6 @@ async fn genuine_native_and_hmc_support_survives_fresh_island_transfer_backup_re
         assert!(sync(target, shard).await);
         assert_eq!(
             target.db.confirmation_support(&tag).unwrap().unwrap().class,
-            2
-        );
-        assert_eq!(
-            target
-                .db
-                .get_lock(&parent)
-                .unwrap()
-                .unwrap()
-                .0
-                .status
-                .confirmation_class(),
             2
         );
         tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
@@ -76,62 +54,10 @@ async fn genuine_native_and_hmc_support_survives_fresh_island_transfer_backup_re
     }
     let target = &peers[3];
     assert!(target.db.confirmation_support(&tag).unwrap().is_none());
-    let mut weaker = native.clone();
-    for n in 0u64..10_000 {
-        weaker = LockRecord::new(
-            parent,
-            [8; 32],
-            n.to_le_bytes().to_vec(),
-            SimTime(now),
-            SimTime(now + 600_000),
-        );
-        if humoco_sim_core::crypto::compute_canonical_hash(
-            &parent,
-            &weaker.receiver_pub,
-            &weaker.nonce,
-        ) < humoco_sim_core::crypto::compute_canonical_hash(
-            &parent,
-            &native.receiver_pub,
-            &native.nonce,
-        ) {
-            break;
-        }
-    }
-    assert!(
-        humoco_sim_core::crypto::compute_canonical_hash(
-            &parent,
-            &weaker.receiver_pub,
-            &weaker.nonce
-        ) < humoco_sim_core::crypto::compute_canonical_hash(
-            &parent,
-            &native.receiver_pub,
-            &native.nonce
-        )
-    );
-    weaker.status = LockStatus::Provisional {
-        sigs: 3,
-        required: 3,
-    };
-    target.db.put_lock(&weaker, now + 600_000).unwrap();
-    target.engine.recover_from_disk(SimTime(now)).await.unwrap();
     assert!(sync(target, shard).await);
     assert_eq!(
         target.db.confirmation_support(&tag).unwrap().unwrap().class,
         2
-    );
-    assert_eq!(
-        target
-            .engine
-            .get_ram_lock(&parent)
-            .await
-            .unwrap()
-            .status
-            .confirmation_class(),
-        2
-    );
-    assert_eq!(
-        target.engine.get_ram_lock(&parent).await.unwrap().id,
-        native.id
     );
     let backup = target._dir.path().join("inherited.backup.redb");
     target.db.create_backup(&backup).unwrap();
@@ -141,47 +67,15 @@ async fn genuine_native_and_hmc_support_survives_fresh_island_transfer_backup_re
             reopened.confirmation_support(&tag).unwrap().unwrap().class,
             2
         );
-        assert_eq!(
-            reopened
-                .get_lock(&parent)
-                .unwrap()
-                .unwrap()
-                .0
-                .status
-                .confirmation_class(),
-            2
-        );
-        assert_eq!(
-            reopened
-                .native_confirmation_support(&parent)
-                .unwrap()
-                .unwrap()
-                .class,
-            2
-        );
         let token = tokio_util::sync::CancellationToken::new();
         let (engine, worker) =
             humoco_node::storage::DualTierEngine::new_with_token(reopened.clone(), token.clone());
         engine.recover_from_disk(SimTime(now)).await.unwrap();
         assert_eq!(engine.hmc_ram.read().await.get_confirmation_class(&tag), 2);
-        assert_eq!(
-            engine
-                .get_ram_lock(&parent)
-                .await
-                .unwrap()
-                .status
-                .confirmation_class(),
-            2
-        );
         reopened
             .prune_expired_buckets((now + 631_000) / 1000)
             .unwrap();
         assert!(reopened.confirmation_support(&tag).unwrap().is_none());
-        assert!(reopened.get_lock(&parent).unwrap().is_none());
-        assert!(reopened
-            .native_confirmation_support(&parent)
-            .unwrap()
-            .is_none());
         token.cancel();
         worker.await.unwrap();
     }
@@ -206,15 +100,6 @@ async fn genuine_native_and_hmc_support_survives_fresh_island_transfer_backup_re
             .await;
     }
     assert!(!peers[3].readiness.is_shard_ready(shard));
-    assert_eq!(
-        peers[3]
-            .db
-            .native_confirmation_support(&parent)
-            .unwrap()
-            .unwrap()
-            .class,
-        2
-    );
     assert_eq!(
         peers[3]
             .engine
@@ -251,57 +136,6 @@ async fn genuine_native_and_hmc_support_survives_fresh_island_transfer_backup_re
             .unwrap()
             .class,
         2
-    );
-    assert_eq!(
-        peers[4]
-            .engine
-            .get_ram_lock(&parent)
-            .await
-            .unwrap()
-            .status
-            .confirmation_class(),
-        2
-    );
-    recovery::stop_recovery_peers(peers).await;
-}
-
-#[tokio::test]
-async fn raw_native_final_status_cannot_establish_inherited_class_two() {
-    let peers = recovery::recovery_peers(4).await;
-    let now = peers[0].manager.net_time_ms();
-    let mut row = LockRecord::new(
-        [17; 32],
-        [18; 32],
-        vec![19],
-        SimTime(now),
-        SimTime(now + 60_000),
-    );
-    row.status = LockStatus::Final { sigs: 14 };
-    let shard = u16::from_be_bytes([17; 2]);
-    for peer in &peers[..3] {
-        peer.db.put_lock(&row, now + 60_000).unwrap();
-        peer.engine.recover_from_disk(SimTime(now)).await.unwrap();
-        peer.readiness.mark_shard_ready(shard);
-    }
-    assert!(sync(&peers[3], shard).await);
-    assert_eq!(
-        peers[3]
-            .engine
-            .get_ram_lock(&row.parent_lock)
-            .await
-            .unwrap()
-            .status
-            .confirmation_class(),
-        1
-    );
-    assert_eq!(
-        peers[3]
-            .db
-            .native_confirmation_support(&row.parent_lock)
-            .unwrap()
-            .unwrap()
-            .class,
-        1
     );
     recovery::stop_recovery_peers(peers).await;
 }
@@ -371,16 +205,10 @@ async fn real_quic_source_only_promotion_and_expired_support_fail_before_install
 async fn mixed_known_and_unknown_support_on_identical_objective_state_recovers_ready() {
     let peers = recovery::recovery_peers(4).await;
     let now = peers[0].manager.net_time_ms();
-    let row = LockRecord::new(
-        [21; 32],
-        [22; 32],
-        vec![23],
-        SimTime(now),
-        SimTime(now + 60_000),
-    );
-    let shard = u16::from_be_bytes([21; 2]);
+    let (root_tag, root, spend_tag, spend, shard) = signed_hmc_cut(now);
     for peer in &peers[1..] {
-        peer.db.put_lock(&row, now + 60_000).unwrap();
+        peer.db.put_hmc_lock(&root_tag, &root).unwrap();
+        peer.db.put_hmc_lock(&spend_tag, &spend).unwrap();
         peer.engine.recover_from_disk(SimTime(now)).await.unwrap();
         peer.readiness.mark_shard_ready(shard);
     }
@@ -388,7 +216,7 @@ async fn mixed_known_and_unknown_support_on_identical_objective_state_recovers_r
     assert_eq!(
         peers[0]
             .db
-            .native_confirmation_support(&row.parent_lock)
+            .confirmation_support(&spend_tag)
             .unwrap()
             .unwrap()
             .class,
@@ -402,16 +230,15 @@ async fn mixed_known_and_unknown_support_on_identical_objective_state_recovers_r
     assert_eq!(
         peers[1]
             .db
-            .get_lock(&row.parent_lock)
+            .get_hmc_lock(&spend_tag)
             .unwrap()
             .unwrap()
-            .0
-            .id,
-        row.id
+            .t_id,
+        spend.t_id
     );
     assert!(peers[1]
         .db
-        .native_confirmation_support(&row.parent_lock)
+        .confirmation_support(&spend_tag)
         .unwrap()
         .is_some());
     recovery::stop_recovery_peers(peers).await;
@@ -421,24 +248,18 @@ async fn mixed_known_and_unknown_support_on_identical_objective_state_recovers_r
 async fn single_byzantine_source_forged_final_support_is_downgraded_over_real_quic() {
     let peers = recovery::recovery_peers_fault(4, false, 8).await;
     let now = peers[0].manager.net_time_ms();
-    let row = LockRecord::new(
-        [21; 32],
-        [22; 32],
-        vec![23],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
-    let shard = u16::from_be_bytes([21; 2]);
+    let (root_tag, root, spend_tag, spend, shard) = signed_hmc_cut(now);
     // Peers 0..3 hold the identical objective lock with unknown support (class 0),
     // while peer 0 (Byzantine source via support_fault == 8) signs a FrozenShardReply
     // and ActiveSyncResponse claiming inherited class 2 (FINAL).
     for peer in &peers[..3] {
-        peer.db.put_lock(&row, now + 600_000).unwrap();
+        peer.db.put_hmc_lock(&root_tag, &root).unwrap();
+        peer.db.put_hmc_lock(&spend_tag, &spend).unwrap();
         peer.engine.recover_from_disk(SimTime(now)).await.unwrap();
         peer.readiness.mark_shard_ready(shard);
         assert!(peer
             .db
-            .native_confirmation_support(&row.parent_lock)
+            .confirmation_support(&spend_tag)
             .unwrap()
             .is_none());
     }
@@ -447,7 +268,7 @@ async fn single_byzantine_source_forged_final_support_is_downgraded_over_real_qu
     assert_eq!(
         peers[3]
             .db
-            .native_confirmation_support(&row.parent_lock)
+            .confirmation_support(&spend_tag)
             .unwrap()
             .unwrap()
             .class,
@@ -457,11 +278,10 @@ async fn single_byzantine_source_forged_final_support_is_downgraded_over_real_qu
     assert_eq!(
         peers[3]
             .engine
-            .get_ram_lock(&row.parent_lock)
+            .hmc_ram
+            .read()
             .await
-            .unwrap()
-            .status
-            .confirmation_class(),
+            .get_confirmation_class(&spend_tag),
         1
     );
     recovery::stop_recovery_peers(peers).await;

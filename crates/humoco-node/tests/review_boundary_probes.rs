@@ -4,7 +4,6 @@ use humoco_node::{
     storage::{DualTierEngine, HmcRamIndex, IngressOrigin, RedbStorage},
 };
 use humoco_proto::causal::CausalOutputProof;
-use humoco_sim_core::storage::RamIndex;
 use std::{
     future::Future,
     sync::Arc,
@@ -153,14 +152,13 @@ async fn real_quic_root_rejection_preserves_signing_health() {
             &conflict_tag,
         ))
         .to_bytes();
-    if let LockWirePayload::Hmc {
+    let LockWirePayload::Hmc {
         req,
         epoch_seq,
         cumulative_micro_byte_years,
         sender_signature,
         ..
-    } = &mut wire
-    {
+    } = &mut wire;
         req.causal_output = conflict.causal_output.clone();
         req.auth.ephemeral_pubkey = conflict.sender_ephemeral_pub;
         req.transaction_hash = conflict.t_id;
@@ -183,7 +181,6 @@ async fn real_quic_root_rejection_preserves_signing_health() {
             &conflict.t_id,
         );
         *sender_signature = source.identity.signing_key().sign(&digest).to_bytes();
-    }
     let payload = bincode::serialize(&wire).unwrap();
     let header = WireHeader::new(
         MsgType::LockVerifyRequest as u16,
@@ -370,7 +367,6 @@ async fn cancelled_hmc_ingress_must_not_leave_unqueued_ram_state() {
     ram.write().await.insert_recovered(root_tag, root);
     let (tx, mut rx) = mpsc::channel(4);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(RamIndex::new())),
         ram.clone(),
         db.clone(),
         tx,
@@ -456,7 +452,6 @@ async fn successful_retry_after_cancelled_root_and_spend_survives_recovery() {
     let db = Arc::new(RedbStorage::open(&dir.path().join("node.redb")).unwrap());
     let (tx, rx) = mpsc::channel(16);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx,

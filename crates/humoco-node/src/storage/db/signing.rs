@@ -394,28 +394,37 @@ pub(super) fn latch(corrupt: bool) -> Arc<AtomicBool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn lock(parent: u8) -> LockRecord {
-        LockRecord::new(
-            [parent; 32],
-            [2; 32],
-            vec![3],
-            SimTime(1_000),
-            SimTime(50_000),
-        )
+    fn lock(parent: u8) -> (String, crate::api::hmc::L2LockEntry) {
+        let entry = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: format!("voucher-{parent}"),
+            t_id: [2; 32],
+            sender_ephemeral_pub: [7; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: 1_000,
+            deletable_at: Some("50000".into()),
+            privacy_guard: None,
+        };
+        (format!("spend-{parent}"), entry)
     }
     #[test]
     fn intact_restart_retry_expiry_and_backup_keep_monotonic_state() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source.redb");
         let backup = dir.path().join("backup.redb");
-        let first = lock(1);
+        let (tag, first) = lock(1);
         {
             let db = RedbStorage::open(&path).unwrap();
             assert_eq!(db.signing_checkpoint().unwrap().0, 0);
-            db.commit_original_record_approval(&first, 50_000, &[7; 32], b"original", 0)
+            db.commit_original_approval(&tag, &first, &[7; 32], b"original", 0, 50_000)
                 .unwrap();
             assert_eq!(db.signing_checkpoint().unwrap().0, 1);
-            db.commit_original_record_approval(&first, 50_000, &[7; 32], b"retry bytes ignored", 0)
+            db.commit_original_approval(&tag, &first, &[7; 32], b"retry bytes ignored", 0, 50_000)
                 .unwrap();
             assert_eq!(
                 db.signing_checkpoint().unwrap().0,
@@ -448,31 +457,25 @@ mod tests {
     fn deleted_history_is_detected_and_latch_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("truncated.redb");
-        let record = lock(1);
+        let (tag, record) = lock(1);
         {
             let db = RedbStorage::open(&path).unwrap();
-            db.commit_original_record_approval(&record, 50_000, &[7; 32], b"original", 0)
+            db.commit_original_approval(&tag, &record, &[7; 32], b"original", 0, 50_000)
                 .unwrap();
             // Simulate a damaged history independently of the normal writer.
             let txn = db.db.begin_write().unwrap();
             txn.open_table(TABLE_OWN_CHOICES)
                 .unwrap()
-                .remove(
-                    format!(
-                        "{}:{}",
-                        hex::encode([7; 32]),
-                        hex::encode(record.parent_lock)
-                    )
-                    .as_str(),
-                )
+                .remove(format!("{}:{}", hex::encode([7; 32]), tag).as_str())
                 .unwrap();
             txn.commit().unwrap();
         }
         for _ in 0..2 {
             let db = RedbStorage::open(&path).unwrap();
             assert!(!db.is_signing_history_healthy());
+            let (tag2, record2) = lock(2);
             assert!(matches!(
-                db.commit_original_record_approval(&lock(2), 50_000, &[7; 32], b"new", 0),
+                db.commit_original_approval(&tag2, &record2, &[7; 32], b"new", 0, 50_000),
                 Err(StorageError::SigningHistoryCorrupt)
             ));
         }

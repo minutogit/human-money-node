@@ -34,8 +34,6 @@ struct Cut {
     expires: Instant,
     root_after: Option<String>,
     roots_done: bool,
-    native_after: Option<[u8; 32]>,
-    native_done: bool,
     hmc_after: Option<String>,
     next_cursor: u64,
 }
@@ -80,8 +78,6 @@ impl SnapshotCuts {
                     expires: Instant::now() + CUT_LIFETIME,
                     root_after: None,
                     roots_done: false,
-                    native_after: None,
-                    native_done: false,
                     hmc_after: None,
                     next_cursor: key,
                 },
@@ -169,62 +165,6 @@ impl Cut {
             }
             self.roots_done = true;
         }
-        if !self.native_done {
-            let table = self.txn.open_table(TABLE_LOCKS)?;
-            let lower = self
-                .native_after
-                .as_ref()
-                .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-            let rows = table.range::<&[u8; 32]>((lower, std::ops::Bound::Unbounded))?;
-            for row in rows {
-                let (key, bytes) = row?;
-                let shard_matches = self
-                    .shard
-                    .is_none_or(|s| u16::from_be_bytes([key.value()[0], key.value()[1]]) == s);
-                if shard_matches {
-                    if bytes.value().len() > MAX_STORED_PARSE_BYTES {
-                        return Err(invalid("oversize snapshot row"));
-                    }
-                    let (record, root): (LockRecord, u64) = bincode::deserialize(bytes.value())?;
-                    let bucket_matches = self.bucket.is_none_or(|b| {
-                        humoco_sim_core::types::timestamp_to_bucket_id(record.created_at.0) == b
-                    });
-                    if bucket_matches {
-                        if bytes.value().len() > MAX_SYNC_ROW_BYTES {
-                            return Err(invalid("oversize snapshot row"));
-                        }
-                        let key_support = support::native_key(&record.parent_lock);
-                        let metadata = support_metadata(
-                            &self.txn,
-                            support::TABLE_NATIVE_SUPPORT,
-                            0,
-                            &key_support,
-                        )?;
-                        let metadata_bytes = metadata
-                            .as_ref()
-                            .map(bincode::serialized_size)
-                            .transpose()?
-                            .unwrap_or(0) as usize;
-                        if size + bytes.value().len() + metadata_bytes > MAX_PAGE_BYTES
-                            || payload.locks.len() + payload.hmc_locks.len() >= limit
-                        {
-                            return Ok((payload, false));
-                        }
-                        size += bytes.value().len() + metadata_bytes;
-                        if let Some(metadata) = metadata {
-                            payload.support.push(metadata);
-                        }
-                        payload.locks.push((record, root));
-                    }
-                }
-                self.native_after = Some(*key.value());
-                scanned += 1;
-                if scanned >= 1_000 {
-                    return Ok((payload, false));
-                }
-            }
-            self.native_done = true;
-        }
         let table = self.txn.open_table(TABLE_HMC_LOCKS)?;
         let lower = self
             .hmc_after
@@ -269,7 +209,7 @@ impl Cut {
                     .transpose()?
                     .unwrap_or(0) as usize;
                 if size + bytes.value().len() + key.value().len() + metadata_bytes > MAX_PAGE_BYTES
-                    || payload.locks.len() + payload.hmc_locks.len() >= limit
+                    || payload.hmc_locks.len() >= limit
                 {
                     return Ok((payload, false));
                 }
@@ -323,37 +263,54 @@ mod tests {
         let path = dir.path().join("snapshot_shard_first.redb");
         let db = RedbStorage::open(&path).unwrap();
 
-        // Shard 1 key: [0, 1, 0, ...]
-        let mut shard1_parent = [0u8; 32];
-        shard1_parent[0] = 0;
-        shard1_parent[1] = 1;
-        let record1 = LockRecord::new(
-            shard1_parent,
-            [10; 32],
-            vec![1],
-            SimTime(1_000),
-            SimTime(50_000),
-        );
-        db.put_lock(&record1, 50_000).unwrap();
+        let find_tag_for_shard = |target_shard: u16| -> (String, crate::api::hmc::L2LockEntry) {
+            for i in 0u64..100_000 {
+                let tid = *blake3::hash(&i.to_le_bytes()).as_bytes();
+                let tag = bs58::encode(tid).into_string();
+                let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+                if humoco_sim_core::types::canonical_voucher_shard(&parent) == target_shard {
+                    let entry = crate::api::hmc::L2LockEntry {
+                        causal_output: None,
+                        t_id: tid,
+                        layer2_voucher_id: format!("voucher-{}", target_shard),
+                        sender_ephemeral_pub: [1; 32],
+                        receiver_ephemeral_pub_hash: None,
+                        change_ephemeral_pub_hash: None,
+                        layer2_signature: [0; 64],
+                        trap_r: None,
+                        trap_s: None,
+                        encrypted_timestamp: 1,
+                        created_at_ms: 1_000,
+                        deletable_at: Some("50000".into()),
+                        privacy_guard: None,
+                    };
+                    return (tag, entry);
+                }
+            }
+            panic!("no tag found");
+        };
 
-        // Shard 2 key: [0, 2, 0, ...], oversize row (20 KiB > MAX_SYNC_ROW_BYTES, but <= MAX_STORED_PARSE_BYTES)
-        let mut shard2_parent = [0u8; 32];
-        shard2_parent[0] = 0;
-        shard2_parent[1] = 2;
-        let record2 = LockRecord::new(
-            shard2_parent,
-            [20; 32],
-            vec![2; 20 * 1024],
-            SimTime(1_000),
-            SimTime(50_000),
-        );
-        // Write directly to TABLE_LOCKS bypassing put_lock validation (simulating legacy stored row)
+        let (root1_tag, root1) = find_tag_for_shard(1);
+        let (root2_tag, root2) = find_tag_for_shard(2);
+        db.put_hmc_lock(&root1_tag, &root1).unwrap();
+        db.put_hmc_lock(&root2_tag, &root2).unwrap();
+
+        let mut lock1 = root1.clone();
+        lock1.t_id = [11; 32];
+        let lock1_tag = "tag1";
+        db.put_hmc_lock(lock1_tag, &lock1).unwrap();
+
+        let mut lock2 = root2.clone();
+        lock2.t_id = [22; 32];
+        let lock2_tag = "tag2";
         {
             let tx = db.db.begin_write().unwrap();
             {
-                let mut table = tx.open_table(TABLE_LOCKS).unwrap();
-                let bytes = bincode::serialize(&(record2, 50_000u64)).unwrap();
-                table.insert(&shard2_parent, bytes.as_slice()).unwrap();
+                let mut table = tx.open_table(TABLE_HMC_LOCKS).unwrap();
+                let mut oversize_entry = lock2;
+                oversize_entry.trap_r = Some("x".repeat(20 * 1024));
+                let json = serde_json::to_vec(&oversize_entry).unwrap();
+                table.insert(lock2_tag, json.as_slice()).unwrap();
             }
             tx.commit().unwrap();
         }
@@ -367,8 +324,9 @@ mod tests {
         let resp1 = cuts
             .page(&db, req_shard1, owner)
             .expect("snapshot shard 1 succeeds");
-        assert_eq!(resp1.payload.locks.len(), 1);
-        assert_eq!(resp1.payload.locks[0].0.parent_lock, shard1_parent);
+        assert_eq!(resp1.payload.hmc_locks.len(), 2);
+        assert_eq!(resp1.payload.hmc_locks[0].0, root1_tag);
+        assert_eq!(resp1.payload.hmc_locks[1].0, lock1_tag);
 
         // 2. Snapshotting shard 2 fails due to oversize row
         let mut req_shard2 = ActiveSyncRequest::new(0, 100);

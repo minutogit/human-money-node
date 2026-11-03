@@ -45,12 +45,8 @@ use humoco_node::{
     },
 };
 use humoco_proto::causal::CausalOutputProof;
-use humoco_sim_core::{
-    storage::RamIndex,
-    types::{
-        canonical_voucher_shard, genesis_parent_bytes_from_tag, LockRecord, LockStatus, NetworkId,
-        SimTime,
-    },
+use humoco_sim_core::types::{
+    canonical_voucher_shard, genesis_parent_bytes_from_tag, NetworkId, SimTime,
 };
 use redb::StorageBackend;
 use sha2::{Digest, Sha256};
@@ -614,12 +610,10 @@ async fn spend_with_mismatched_sidecar_ttl_rejected_and_matching_stages_cleanly(
     // Stages cleanly via ShardStage::append
     let stage = ShardStage::new(shard, at)?;
     stage.append(SyncPayload {
-        locks: vec![],
         hmc_locks: vec![(root_tag, L2LockEntry::from(&root))],
         support: vec![],
     })?;
     stage.append(SyncPayload {
-        locks: vec![],
         hmc_locks: vec![("spend-match-parent".into(), L2LockEntry::from(&spend_match))],
         support: vec![],
     })?;
@@ -627,7 +621,6 @@ async fn spend_with_mismatched_sidecar_ttl_rejected_and_matching_stages_cleanly(
     // Recovers via recover_from_disk unchanged
     let (tx, _rx) = mpsc::channel(16);
     let recovery_engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx,
@@ -919,7 +912,6 @@ async fn signed_http_status_rejects_uncommitted_spend_until_durable_and_checks_h
     // 1. Ingress spend with paused flush worker (dropped future before durable commit)
     let (tx, _rx) = mpsc::channel(16);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx,
@@ -1080,68 +1072,86 @@ async fn signed_http_status_rejects_uncommitted_spend_until_durable_and_checks_h
 }
 
 // ---------------------------------------------------------------------------
-// Finding F5: Native idempotent replay preserves final status
+// ---------------------------------------------------------------------------
+// Finding F5: HMC idempotent replay preserves status on disk and recovery
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn native_idempotent_replay_preserves_final_status_on_disk_and_recovery(
+async fn hmc_idempotent_replay_preserves_status_on_disk_and_recovery(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let db = Arc::new(RedbStorage::open(&dir.path().join("native.redb"))?);
+    let db = Arc::new(RedbStorage::open(&dir.path().join("hmc.redb"))?);
     let (tx, mut rx) = mpsc::channel(16);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx,
     );
-    let at = SimTime(1000);
-    let root = SimTime(100_000);
-    let mut record = LockRecord::new([10; 32], [11; 32], vec![12], at, root);
-    record.status = LockStatus::Final { sigs: 14 };
-    assert!(engine.ingress_lock(record.clone(), at, root).await.is_ok());
+    let at = now();
+    let key = SigningKey::from_bytes(&[35; 32]);
+    let root_req = root(&key, at);
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    let root_entry = L2LockEntry::from(&root_req);
+
+    // Anchor root
+    db.put_hmc_lock(&root_tag, &root_entry)?;
+    engine.recover_from_disk(SimTime(at)).await?;
+
+    // Create spend
+    let mut spend_req = root_req.clone();
+    spend_req.is_genesis = false;
+    spend_req.ds_tag = Some("ds-replay-tag".into());
+    spend_req.transaction_hash = [36; 32];
+    spend_req.deletable_at = None;
+    spend_req.causal_output = None;
+    sign(&key, &mut spend_req);
+    let spend_tag = "ds-replay-tag".to_string();
+    let spend_entry = L2LockEntry::from(&spend_req);
+
+    let (verdict, is_new) = engine.ingress_hmc_lock(spend_tag.clone(), spend_entry.clone()).await;
+    assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    assert!(is_new);
 
     let mut batch = vec![rx.recv().await.ok_or("missing op")?];
     assert!(!DualTierEngine::flush_batch(&mut batch, &db).failed);
 
-    // Replay with Pending status
-    let mut replay = record.clone();
-    replay.status = LockStatus::Pending;
-    assert!(engine.ingress_lock(replay, at, root).await.is_ok());
+    // Replay the spend
+    let (replay_verdict, replay_is_new) = engine.ingress_hmc_lock(spend_tag.clone(), spend_entry.clone()).await;
+    assert!(matches!(replay_verdict, L2Verdict::Verified { .. }));
+    assert!(!replay_is_new);
 
-    // Assert no new FlushOp::PutLock emitted
+    // Assert no new FlushOp emitted on replay
     assert!(
         rx.try_recv().is_err(),
-        "no FlushOp emitted on Pending replay of Final record"
+        "no FlushOp emitted on replay"
     );
 
-    // RAM retains Final
+    // RAM retains lock
     let ram_rec = engine
-        .get_ram_lock(&record.parent_lock)
+        .get_hmc_ram_lock(&spend_tag)
         .await
         .ok_or("missing RAM row")?;
-    assert_eq!(ram_rec.status, LockStatus::Final { sigs: 14 });
+    assert_eq!(ram_rec.t_id, spend_entry.t_id);
 
-    // Disk retains Final
+    // Disk retains lock
     let disk_rec = db
-        .get_lock(&record.parent_lock)?
+        .get_hmc_lock(&spend_tag)?
         .ok_or("missing disk row")?;
-    assert_eq!(disk_rec.0.status, LockStatus::Final { sigs: 14 });
+    assert_eq!(disk_rec.t_id, spend_entry.t_id);
 
-    // Fresh DualTierEngine retains Final after recover_from_disk
+    // Fresh DualTierEngine retains lock after recover_from_disk
     let (tx2, _rx2) = mpsc::channel(16);
     let recovery_engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx2,
     );
-    recovery_engine.recover_from_disk(at).await?;
+    recovery_engine.recover_from_disk(SimTime(at)).await?;
     let recovered_ram_rec = recovery_engine
-        .get_ram_lock(&record.parent_lock)
+        .get_hmc_ram_lock(&spend_tag)
         .await
         .ok_or("missing recovered RAM row")?;
-    assert_eq!(recovered_ram_rec.status, LockStatus::Final { sigs: 14 });
+    assert_eq!(recovered_ram_rec.t_id, spend_entry.t_id);
 
     Ok(())
 }

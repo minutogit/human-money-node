@@ -9,15 +9,36 @@ use humoco_node::{
     ingress::{PowEngine, TierController},
     network::framing::{StatusObservation, StatusQueryPayload},
 };
-use humoco_sim_core::{
-    types::{LockRecord, SimTime},
-    wire::{MsgType, WireHeader},
-};
+use humoco_sim_core::wire::{MsgType, WireHeader};
 use std::sync::{atomic::Ordering, Arc};
 
-fn payload(reader: &recovery::RecoveryPeer, row: &LockRecord, shard: u16, legacy: bool) -> Vec<u8> {
+fn make_hmc_entry(id: [u8; 32], voucher_id: &str, now: u64) -> L2LockEntry {
+    L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: voucher_id.into(),
+        t_id: id,
+        sender_ephemeral_pub: [4; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [5; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: now,
+        deletable_at: Some((now + 600_000).to_string()),
+        privacy_guard: None,
+    }
+}
+
+fn payload(
+    reader: &recovery::RecoveryPeer,
+    lock_id: [u8; 32],
+    parent_lock: [u8; 32],
+    shard: u16,
+    legacy: bool,
+) -> Vec<u8> {
     if legacy {
-        return bincode::serialize(&(row.id, row.parent_lock, shard)).unwrap();
+        return bincode::serialize(&(lock_id, parent_lock, shard)).unwrap();
     }
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -31,11 +52,11 @@ fn payload(reader: &recovery::RecoveryPeer, row: &LockRecord, shard: u16, legacy
         seq,
         0,
         true,
-        &row.id,
+        &lock_id,
     );
     bincode::serialize(&StatusQueryPayload {
-        lock_id: row.id,
-        parent_lock: row.parent_lock,
+        lock_id,
+        parent_lock,
         shard_id: shard,
         sender_pubkey: *reader.identity.node_pubkey(),
         declared_write_ema_micro_bj: 0,
@@ -80,21 +101,17 @@ async fn status_formats_flags_and_signing_gates_cannot_mint_originals() {
     let peers = recovery::recovery_peers(2).await;
     let (reader, source) = (&peers[0], &peers[1]);
     let now = source.manager.net_time_ms();
-    let row = LockRecord::new(
-        [7; 32],
-        [8; 32],
-        vec![9],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
-    let shard = u16::from_be_bytes([7, 7]);
+    let row = make_hmc_entry([7; 32], "voucher-1", now);
+    let tag = "spend-parent";
+    let parent_lock = *blake3::hash(tag.as_bytes()).as_bytes();
+    let shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
     source
         .engine
-        .ram
+        .hmc_ram
         .write()
         .await
-        .insert_recovered(row.clone(), SimTime(now + 600_000));
-    assert!(source.db.get_lock(&row.parent_lock).unwrap().is_none());
+        .insert_lock_for_test(tag.to_string(), row.clone());
+    assert!(source.db.get_hmc_lock(tag).unwrap().is_none());
     for unhealthy in [true, false] {
         source
             .engine
@@ -109,7 +126,7 @@ async fn status_formats_flags_and_signing_gates_cannot_mint_originals() {
             }
             // Even ready+healthy cannot turn a two-node view into FINAL authority.
             for legacy in [true, false] {
-                let bytes = payload(reader, &row, shard, legacy);
+                let bytes = payload(reader, row.t_id, parent_lock, shard, legacy);
                 for flags in [0, 1, 2, 3, 0xff, u32::MAX] {
                     let reply = observe(reader, source, &bytes, flags).await;
                     let observation: StatusObservation = bincode::deserialize(&reply).unwrap();
@@ -120,10 +137,10 @@ async fn status_formats_flags_and_signing_gates_cannot_mint_originals() {
                             observation.parent_lock,
                             observation.shard_id
                         ),
-                        (1, row.id, row.parent_lock, shard)
+                        (1, row.t_id, parent_lock, shard)
                     );
                 }
-                let wrong_shard = payload(reader, &row, shard + 1, legacy);
+                let wrong_shard = payload(reader, row.t_id, parent_lock, shard + 1, legacy);
                 assert!(observe(reader, source, &wrong_shard, 1).await.is_empty());
             }
         }
@@ -170,18 +187,18 @@ async fn status_formats_flags_and_signing_gates_cannot_mint_originals() {
     .unwrap();
     assert!(!source.engine.is_signing_healthy());
     for legacy in [true, false] {
-        let reply = observe(reader, source, &payload(reader, &row, shard, legacy), 1).await;
+        let reply = observe(reader, source, &payload(reader, row.t_id, parent_lock, shard, legacy), 1).await;
         assert_eq!(
             bincode::deserialize::<StatusObservation>(&reply)
                 .unwrap()
                 .lock_id,
-            row.id
+            row.t_id
         );
     }
-    assert!(source.db.get_lock(&row.parent_lock).unwrap().is_none());
+    assert!(source.db.get_hmc_lock(tag).unwrap().is_none());
     assert!(source
         .db
-        .own_signing_choice(source.identity.node_pubkey(), &hex::encode(row.parent_lock))
+        .own_signing_choice(source.identity.node_pubkey(), tag)
         .unwrap()
         .is_none());
     recovery::stop_recovery_peers(peers).await;
@@ -195,25 +212,18 @@ async fn canonical_replacement_status_preserves_exact_retained_original() {
     let peers = recovery::recovery_peers(2).await;
     let (reader, source) = (&peers[0], &peers[1]);
     let now = source.manager.net_time_ms();
-    let first = LockRecord::new(
-        [7; 32],
-        [8; 32],
-        vec![9],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
-    let other = LockRecord::new(
-        [7; 32],
-        [9; 32],
-        vec![10],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
-    let shard = u16::from_be_bytes([7, 7]);
+    let root = make_hmc_entry([41; 32], "voucher-1", now);
+    let root_tag = bs58::encode(root.t_id).into_string();
+    source.db.put_hmc_lock(&root_tag, &root).unwrap();
+    let first = make_hmc_entry([7; 32], "voucher-1", now);
+    let other = make_hmc_entry([9; 32], "voucher-1", now);
+    let tag = "spend-parent";
+    let parent_lock = *blake3::hash(tag.as_bytes()).as_bytes();
+    let shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
     let att = humoco_node::api::routes::create_attestation_for_network(
         &source.identity,
-        first.id,
-        first.parent_lock,
+        first.t_id,
+        parent_lock,
         shard,
         1,
         now,
@@ -222,33 +232,34 @@ async fn canonical_replacement_status_preserves_exact_retained_original() {
     let exact = bincode::serialize(&att).unwrap();
     source
         .db
-        .commit_original_record_approval(
+        .commit_original_approval(
+            tag,
             &first,
-            now + 600_000,
             source.identity.node_pubkey(),
             &exact,
             1,
+            now + 600_000,
         )
         .unwrap();
     // Prepare the lawful merged canonical state, independently of the immutable own choice.
-    source.db.put_lock(&other, now + 600_000).unwrap();
+    source.db.put_hmc_lock(tag, &other).unwrap();
     source
         .engine
-        .ram
+        .hmc_ram
         .write()
         .await
-        .insert_recovered(other.clone(), SimTime(now + 600_000));
+        .insert_lock_for_test(tag.to_string(), other.clone());
     source
         .engine
         .stats
         .signing_failed
         .store(true, Ordering::Release);
     for legacy in [true, false] {
-        let reply = observe(reader, source, &payload(reader, &other, shard, legacy), 1).await;
+        let reply = observe(reader, source, &payload(reader, other.t_id, parent_lock, shard, legacy), 1).await;
         let observation: StatusObservation = bincode::deserialize(&reply).unwrap();
-        assert_eq!(observation.lock_id, other.id);
+        assert_eq!(observation.lock_id, other.t_id);
         assert!(
-            observe(reader, source, &payload(reader, &first, shard, legacy), 1)
+            observe(reader, source, &payload(reader, first.t_id, parent_lock, shard, legacy), 1)
                 .await
                 .is_empty()
         );
@@ -267,7 +278,7 @@ async fn canonical_replacement_status_preserves_exact_retained_original() {
             Request::builder()
                 .uri(format!(
                     "/v1/retained-choice/{}",
-                    hex::encode(first.parent_lock)
+                    tag
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -278,10 +289,10 @@ async fn canonical_replacement_status_preserves_exact_retained_original() {
     let json: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(json["final_approval"], hex::encode(&exact));
-    assert_eq!(json["child"], hex::encode(first.id));
+    assert_eq!(json["child"], hex::encode(first.t_id));
     let sig: [u8; 64] = hex::decode(&att.signature).unwrap().try_into().unwrap();
     let digest =
-        humoco_proto::live::original_approval_digest(0, shard, 1, &first.parent_lock, &first.id)
+        humoco_proto::live::original_approval_digest(0, shard, 1, &parent_lock, &first.t_id)
             .unwrap();
     source
         .identity
@@ -292,12 +303,12 @@ async fn canonical_replacement_status_preserves_exact_retained_original() {
         .db
         .own_signing_choice(
             source.identity.node_pubkey(),
-            &hex::encode(first.parent_lock),
+            tag,
         )
         .unwrap()
         .unwrap();
     assert_eq!(retained.approvals[1], Some(exact));
-    assert_eq!(retained.child, first.id);
+    assert_eq!(retained.child, first.t_id);
     recovery::stop_recovery_peers(peers).await;
 }
 
@@ -418,7 +429,6 @@ async fn pending_worker_then_late_commit_never_turns_status_into_an_original() {
     let db = Arc::new(RedbStorage::open(&dir.path().join("pending.redb")).unwrap());
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(humoco_sim_core::storage::RamIndex::new())),
         Arc::new(RwLock::new(humoco_node::storage::HmcRamIndex::new())),
         db.clone(),
         tx,
@@ -460,40 +470,44 @@ async fn pending_worker_then_late_commit_never_turns_status_into_an_original() {
     receiver.spawn_accept_loop();
     sender.spawn_accept_loop();
     let now = pm.net_time_ms();
-    let row = LockRecord::new(
-        [7; 32],
-        [8; 32],
-        vec![9],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
-    let shard = u16::from_be_bytes([7, 7]);
+    let root = make_hmc_entry([41; 32], "voucher-1", now);
+    let root_tag = bs58::encode(root.t_id).into_string();
+    db.put_hmc_lock(&root_tag, &root).unwrap();
+    let row = make_hmc_entry([7; 32], "voucher-1", now);
+    let tag = "spend-parent";
+    let parent_lock = *blake3::hash(tag.as_bytes()).as_bytes();
+    let shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_voucher_root_for_test("voucher-1".into(), now + 600_000);
     // Reservation-first production ingress queues the write; withholding the
     // worker is the controlled persistence barrier, not a sleep-based race.
-    engine
-        .ingress_lock_with_origin(
+    let (_verdict, is_new) = engine
+        .ingress_hmc_lock_with_origin(
+            tag.to_string(),
             row.clone(),
-            SimTime(now),
-            SimTime(now + 600_000),
             IngressOrigin::ClientApi,
+            Some(now),
         )
-        .await
-        .unwrap();
+        .await;
+    assert!(is_new);
     readiness.mark_shard_ready(shard);
     let conn = sender
         .connect_peer(receiver.local_addr().unwrap())
         .await
         .unwrap();
-    let bytes = bincode::serialize(&(row.id, row.parent_lock, shard)).unwrap();
+    let bytes = bincode::serialize(&(row.t_id, parent_lock, shard)).unwrap();
     let header = WireHeader::new(MsgType::StatusQuery as u16, 1, 0, 1, bytes.len() as u32);
-    assert!(db.get_lock(&row.parent_lock).unwrap().is_none());
+    assert!(db.get_hmc_lock(tag).unwrap().is_none());
     let (_, pending) = sender.send_request(&conn, &header, &bytes).await.unwrap();
     assert!(AttestationDto::from_wire_bytes(&pending).is_none());
     assert_eq!(
         bincode::deserialize::<StatusObservation>(&pending)
             .unwrap()
             .lock_id,
-        row.id
+        row.t_id
     );
     let worker = DualTierEngine::spawn_flush_worker(
         rx,
@@ -502,7 +516,7 @@ async fn pending_worker_then_late_commit_never_turns_status_into_an_original() {
         cancel.clone(),
     );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while db.get_lock(&row.parent_lock).unwrap().is_none() {
+        while db.get_hmc_lock(tag).unwrap().is_none() {
             tokio::task::yield_now().await;
         }
     })
@@ -511,7 +525,7 @@ async fn pending_worker_then_late_commit_never_turns_status_into_an_original() {
     let (_, committed) = sender.send_request(&conn, &header, &bytes).await.unwrap();
     assert_eq!(pending, committed);
     assert!(db
-        .own_signing_choice(server.node_pubkey(), &hex::encode(row.parent_lock))
+        .own_signing_choice(server.node_pubkey(), tag)
         .unwrap()
         .is_none());
     cancel.cancel();

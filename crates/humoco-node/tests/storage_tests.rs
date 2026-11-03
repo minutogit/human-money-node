@@ -1,15 +1,7 @@
 use humoco_node::storage::{DualTierEngine, RedbStorage};
-use humoco_sim_core::storage::IngressVerdictLow;
-use humoco_sim_core::types::{Hash256, LockRecord, SimTime};
+use humoco_sim_core::types::{Hash256, SimTime};
 use std::sync::Arc;
 use tempfile::tempdir;
-
-fn create_sample_lock(parent_byte: u8, valid_until_ms: u64) -> LockRecord {
-    let parent = [parent_byte; 32];
-    let receiver = [0xEE; 32];
-    let nonce = vec![parent_byte, 0x01, 0x02];
-    LockRecord::new(parent, receiver, nonce, SimTime(0), SimTime(valid_until_ms))
-}
 
 #[test]
 fn test_redb_storage_crud() {
@@ -17,27 +9,27 @@ fn test_redb_storage_crud() {
     let db_path = dir.path().join("test_crud.redb");
     let storage = RedbStorage::open(&db_path).expect("failed to open redb");
 
-    // 1. Lock CRUD
-    let lock1 = create_sample_lock(0x01, 60_000);
-    let root_valid_until_1 = 600_000;
+    // 1. HMC Lock CRUD
+    let (root_tag, root) = make_test_root_entry("v_test", [0x01; 32], 600_000);
     storage
-        .put_lock(&lock1, root_valid_until_1)
-        .expect("put_lock failed");
+        .put_hmc_lock(&root_tag, &root)
+        .expect("put_hmc_lock root failed");
+
+    let (spend_tag, spend) = make_test_spend_entry("v_test", [0x02; 32], 1000);
+    storage
+        .put_hmc_lock(&spend_tag, &spend)
+        .expect("put_hmc_lock spend failed");
 
     let retrieved = storage
-        .get_lock(&lock1.parent_lock)
-        .expect("get_lock failed");
+        .get_hmc_lock(&spend_tag)
+        .expect("get_hmc_lock failed");
     assert!(retrieved.is_some(), "lock should be retrieved");
-    let (rec, rv) = retrieved.unwrap();
-    assert_eq!(rec.id, lock1.id);
-    assert_eq!(rec.parent_lock, lock1.parent_lock);
-    assert_eq!(rec.receiver_pub, lock1.receiver_pub);
-    assert_eq!(rec.nonce, lock1.nonce);
-    assert_eq!(rec.valid_until, lock1.valid_until);
-    assert_eq!(rv, root_valid_until_1);
+    let rec = retrieved.unwrap();
+    assert_eq!(rec.t_id, spend.t_id);
+    assert_eq!(rec.layer2_voucher_id, spend.layer2_voucher_id);
 
     // Non-existent lock
-    let non_existent = storage.get_lock(&[0xFF; 32]).expect("get_lock failed");
+    let non_existent = storage.get_hmc_lock("non_existent").expect("get_hmc_lock failed");
     assert!(non_existent.is_none());
 
     // 2. Quota CRUD & Atomic Charge
@@ -81,201 +73,20 @@ fn test_redb_storage_crud() {
     let ev_retrieved = storage.get_evidence(&ev_hash).unwrap();
     assert_eq!(ev_retrieved.as_deref(), Some(&raw_payload[..]));
 
-    // 4. Batch Put & all_valid_locks
-    let lock2 = create_sample_lock(0x02, 120_000);
-    let lock3 = create_sample_lock(0x03, 180_000);
-    storage
-        .put_locks_batch(vec![(&lock2, 300_000), (&lock3, 400_000)])
-        .unwrap();
-
-    let all_valid = storage.all_valid_locks(50_000).unwrap();
-    assert_eq!(all_valid.len(), 3);
-
-    // Filtered by valid_until at 150s: lock1(60s) and lock2(120s) are expired, lock3(180s) valid
-    let valid_later = storage.all_valid_locks(150_000).unwrap();
-    assert_eq!(valid_later.len(), 1);
-    assert_eq!(valid_later[0].0.id, lock3.id);
+    // 4. all_hmc_locks
+    let all_hmc = storage.all_hmc_locks().unwrap();
+    assert_eq!(all_hmc.len(), 1);
+    assert_eq!(all_hmc[0].0, spend_tag);
 
     // 5. TTL Pruning
-    // lock1: root_valid_until = 600s -> bucket_sec = (600_000 + 30_000)/1000 = 630
-    // lock2: root_valid_until = 300s -> bucket_sec = (300_000 + 30_000)/1000 = 330
-    // prune at now_sec = 350 -> should prune lock2, keep lock1 & lock3
-    let (pruned, _) = storage.prune_expired_buckets(350).unwrap();
-    assert_eq!(pruned.len(), 1);
-    assert_eq!(pruned[0], lock2.parent_lock);
-    assert!(storage.get_lock(&lock2.parent_lock).unwrap().is_none());
-    assert!(storage.get_lock(&lock1.parent_lock).unwrap().is_some());
-    assert!(storage.get_lock(&lock3.parent_lock).unwrap().is_some());
+    // root expires at 600_000 + 30_000 = 630_000 ms = 630s
+    let pruned = storage.prune_expired_buckets(631).unwrap();
+    assert_eq!(pruned, 1);
+    assert!(storage.get_hmc_lock(&spend_tag).unwrap().is_none());
+    assert!(storage.voucher_root("v_test").unwrap().is_none());
 }
 
-#[tokio::test]
-async fn test_dual_tier_engine_hotpath_and_async_flush() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test_engine.redb");
-    let storage = Arc::new(RedbStorage::open(&db_path).expect("failed to open redb"));
 
-    let (engine, worker_handle) = DualTierEngine::new(Arc::clone(&storage));
-
-    let now = SimTime(0);
-    let root_valid = SimTime(600_000);
-    let lock1 = create_sample_lock(0x10, 60_000);
-
-    // 1. Hotpath Ingress (< 1µs RAM insert)
-    let verdict = engine
-        .ingress_lock(lock1.clone(), now, root_valid)
-        .await
-        .expect("ingress should succeed");
-    assert_eq!(verdict, IngressVerdictLow::AcceptedNew);
-
-    // Immediately present in RAM index
-    {
-        let ram = engine.ram.read().await;
-        assert_eq!(ram.len(), 1);
-        assert!(ram.get(&lock1.parent_lock).is_some());
-    }
-
-    // 2. Idempotent Replay
-    let replay_verdict = engine
-        .ingress_lock(lock1.clone(), now, root_valid)
-        .await
-        .expect("replay should succeed");
-    assert_eq!(replay_verdict, IngressVerdictLow::IdempotentReplay);
-
-    // 3. Collision (different lock on same parent) where existing lock1 wins min(H_canon)
-    let h1 = humoco_sim_core::crypto::compute_canonical_hash(
-        &lock1.parent_lock,
-        &lock1.receiver_pub,
-        &lock1.nonce,
-    );
-    let mut nonce_b = 0u8;
-    let colliding_lock = loop {
-        let cand = LockRecord::new(
-            lock1.parent_lock,
-            [0x99; 32],
-            vec![nonce_b],
-            SimTime(0),
-            SimTime(60_000),
-        );
-        let h_cand = humoco_sim_core::crypto::compute_canonical_hash(
-            &cand.parent_lock,
-            &cand.receiver_pub,
-            &cand.nonce,
-        );
-        if h_cand > h1 {
-            break cand;
-        }
-        nonce_b = nonce_b.wrapping_add(1);
-    };
-    let collision_verdict = engine.ingress_lock(colliding_lock, now, root_valid).await;
-    assert_eq!(collision_verdict, Err(IngressVerdictLow::RejectedCollision));
-
-    // 4. Time Window Rejection (valid_until <= now + 30s)
-    let invalid_window_lock = create_sample_lock(0x20, 20_000); // 20s <= 30s
-    let window_verdict = engine
-        .ingress_lock(invalid_window_lock, now, root_valid)
-        .await;
-    assert_eq!(window_verdict, Err(IngressVerdictLow::RejectedWindow));
-
-    // 5. Async Flush verification: Wait for 50ms periodic batch flush
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Check that lock1 is now durable in redb storage
-    let disk_lock = storage.get_lock(&lock1.parent_lock).unwrap();
-    assert!(disk_lock.is_some(), "lock1 must be flushed to disk");
-    let (rec, rv) = disk_lock.unwrap();
-    assert_eq!(rec.id, lock1.id);
-    assert_eq!(rv, root_valid.0);
-
-    // 6. Batch flushing under load (> 100 entries)
-    for i in 100..220u8 {
-        let l = create_sample_lock(i, 80_000);
-        let _ = engine.ingress_lock(l, now, root_valid).await;
-    }
-
-    // Poll for remaining items to be flushed under heavy test-runner load (batch 2 has 20 items, waits for periodic tick)
-    for _ in 0..50 {
-        if storage.get_lock(&[219; 32]).unwrap().is_some() {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
-    }
-
-    for i in 100..220u8 {
-        let parent = [i; 32];
-        assert!(storage.get_lock(&parent).unwrap().is_some());
-    }
-
-    drop(engine);
-    let _ = worker_handle.await;
-}
-
-#[tokio::test]
-async fn test_coldstart_crash_recovery_and_ttl_pruning() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test_recovery.redb");
-
-    let lock_short = create_sample_lock(0x31, 50_000); // valid_until 50s, root 60s
-    let lock_long = create_sample_lock(0x32, 500_000); // valid_until 500s, root 600s
-
-    // Phase 1: Setup engine and write locks
-    {
-        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
-        let (engine, worker_handle) = DualTierEngine::new(Arc::clone(&storage));
-
-        let now = SimTime(0);
-        engine
-            .ingress_lock(lock_short.clone(), now, SimTime(60_000))
-            .await
-            .unwrap();
-        engine
-            .ingress_lock(lock_long.clone(), now, SimTime(600_000))
-            .await
-            .unwrap();
-
-        // Wait for persistence flush
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Drop engine to simulate shutdown / crash
-        drop(engine);
-        let _ = worker_handle.await;
-    }
-
-    // Phase 2: Cold-start recovery at t = 100s
-    // At t = 100s:
-    // lock_short (valid_until 50s, root 60s + 30s grace = 90s) is expired and should be pruned (> 90s).
-    // lock_long (valid_until 500s, root 600s) is fully valid.
-    {
-        let recovery_time = SimTime(100_000); // 100s
-        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
-        let (engine, worker_handle) = DualTierEngine::new(Arc::clone(&storage));
-
-        // RAM is empty before recovery
-        assert_eq!(engine.ram.read().await.len(), 0);
-
-        // Recover from disk
-        let recovered = engine.recover_from_disk(recovery_time).await.unwrap();
-        assert_eq!(recovered, 1, "only 1 unexpired lock should be recovered");
-
-        // Verify RAM state
-        {
-            let ram = engine.ram.read().await;
-            assert_eq!(ram.len(), 1);
-            assert!(ram.get(&lock_short.parent_lock).is_none());
-            assert!(ram.get(&lock_long.parent_lock).is_some());
-        }
-
-        // Test Pruning of disk storage
-        let pruned = engine.prune_expired(recovery_time).await.unwrap();
-        assert_eq!(pruned, 1, "expired lock_short should be pruned on disk");
-
-        // Verify disk storage state
-        assert!(storage.get_lock(&lock_short.parent_lock).unwrap().is_none());
-        assert!(storage.get_lock(&lock_long.parent_lock).unwrap().is_some());
-
-        drop(engine);
-        let _ = worker_handle.await;
-    }
-}
 
 #[tokio::test]
 async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
@@ -379,17 +190,13 @@ async fn test_dual_tier_engine_hmc_ttl_pruning_and_recovery() {
 
 #[test]
 fn test_defensive_deserialization_corrupted_entries() {
-    use humoco_node::storage::db::{TABLE_HMC_LOCKS, TABLE_LOCKS};
+    use humoco_node::storage::db::TABLE_HMC_LOCKS;
     use redb::Database;
 
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test_corrupt.redb");
 
     let storage = RedbStorage::open(&db_path).unwrap();
-
-    // 1. Put one valid LockRecord and one valid HMC lock
-    let lock1 = create_sample_lock(0x42, 100_000);
-    storage.put_lock(&lock1, 600_000).unwrap();
 
     let entry = humoco_node::api::hmc::L2LockEntry {
         causal_output: None,
@@ -419,16 +226,6 @@ fn test_defensive_deserialization_corrupted_entries() {
         let db = Database::open(&db_path).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
-            let mut table_locks = write_txn.open_table(TABLE_LOCKS).unwrap();
-            // Corrupt binary bytes that cannot be deserialized as LockRecord
-            let corrupt_parent = [0xDE; 32];
-            table_locks
-                .insert(
-                    &corrupt_parent,
-                    b"garbage_corrupted_payload_bytes".as_slice(),
-                )
-                .unwrap();
-
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS).unwrap();
             // Corrupt JSON bytes that cannot be deserialized as L2LockEntry
             table_hmc
@@ -453,59 +250,7 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
     // Initial state: empty ringbuffer
     assert!(engine.get_recent_locks(10).is_empty());
 
-    // 1. Ingress first lock
-    let lock1 = create_sample_lock(0x11, 100_000);
-    let v1 = engine
-        .ingress_lock(lock1.clone(), SimTime(1000), SimTime(200_000))
-        .await;
-    assert!(v1.is_ok());
-
-    let recent = engine.get_recent_locks(10);
-    assert_eq!(recent.len(), 1);
-    assert_eq!(recent[0].parent_lock_hex, hex::encode(lock1.parent_lock));
-    assert_eq!(recent[0].child_lock_hex, hex::encode(lock1.id));
-    assert_eq!(
-        recent[0].status,
-        humoco_node::storage::RecentLockStatus::Provisional
-    );
-
-    // 2. Ingress colliding lock (same parent, different child) -> Conflict
-    let lock2 = LockRecord::new(
-        lock1.parent_lock,
-        [0xAA; 32],
-        vec![0x99, 0x88],
-        SimTime(0),
-        SimTime(100_000),
-    );
-    let v2 = engine
-        .ingress_lock(lock2.clone(), SimTime(1050), SimTime(200_000))
-        .await;
-    assert_eq!(v2, Err(IngressVerdictLow::RejectedCollision));
-
-    let recent2 = engine.get_recent_locks(10);
-    assert_eq!(recent2.len(), 2);
-    // Newest is the conflict
-    assert_eq!(
-        recent2[0].status,
-        humoco_node::storage::RecentLockStatus::Conflict
-    );
-    assert_eq!(
-        recent2[1].status,
-        humoco_node::storage::RecentLockStatus::Provisional
-    );
-
-    // 3. inspect_lock on existing parent
-    let insp = engine.inspect_lock(&lock1.parent_lock).await;
-    assert!(insp.is_some());
-    let inspection = insp.unwrap();
-    assert_eq!(inspection.parent_lock_hex, hex::encode(lock1.parent_lock));
-    assert_eq!(inspection.lock_id_hex, hex::encode(lock1.id));
-
-    // 4. inspect_lock on non-existent parent
-    let non_existent = engine.inspect_lock(&[0xFA; 32]).await;
-    assert!(non_existent.is_none());
-
-    // 5. Ingress HMC lock and inspect
+    // 1. Ingress HMC lock and inspect
     let hmc_parent = [0x55u8; 32];
     let hmc_parent_hex = hex::encode(hmc_parent);
     let hmc_entry = humoco_node::api::hmc::L2LockEntry {
@@ -533,11 +278,46 @@ async fn test_recent_locks_ringbuffer_and_inspection() {
         humoco_node::api::hmc::L2Verdict::Verified { .. }
     ));
 
-    let hmc_insp = engine.inspect_lock(&hmc_parent).await;
-    assert!(hmc_insp.is_some());
-    let hmc_inspection = hmc_insp.unwrap();
-    assert_eq!(hmc_inspection.parent_lock_hex, hmc_parent_hex);
-    assert_eq!(hmc_inspection.lock_id_hex, hex::encode(hmc_entry.t_id));
+    let recent = engine.get_recent_locks(10);
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].parent_lock_hex, hmc_parent_hex);
+    assert_eq!(recent[0].child_lock_hex, hex::encode(hmc_entry.t_id));
+    assert_eq!(
+        recent[0].status,
+        humoco_node::storage::RecentLockStatus::Verified
+    );
+
+    // 2. Ingress colliding lock (same parent, different child) -> Conflict
+    let mut colliding_entry = hmc_entry.clone();
+    colliding_entry.t_id = [0x99; 32];
+    let (v2, is_new2) = engine
+        .ingress_hmc_lock(hmc_parent_hex.clone(), colliding_entry.clone())
+        .await;
+    assert!(!is_new2);
+    assert!(matches!(v2, humoco_node::api::hmc::L2Verdict::Conflict { .. }));
+
+    let recent2 = engine.get_recent_locks(10);
+    assert_eq!(recent2.len(), 3);
+    // Newest is the conflict
+    assert_eq!(
+        recent2[0].status,
+        humoco_node::storage::RecentLockStatus::Conflict
+    );
+    assert_eq!(
+        recent2[1].status,
+        humoco_node::storage::RecentLockStatus::Verified
+    );
+
+    // 3. inspect_lock on existing parent
+    let insp = engine.inspect_lock(&hmc_parent).await;
+    assert!(insp.is_some());
+    let inspection = insp.unwrap();
+    assert_eq!(inspection.parent_lock_hex, hmc_parent_hex);
+    assert_eq!(inspection.lock_id_hex, hex::encode(hmc_entry.t_id));
+
+    // 4. inspect_lock on non-existent parent
+    let non_existent = engine.inspect_lock(&[0xFA; 32]).await;
+    assert!(non_existent.is_none());
 }
 
 #[tokio::test]
@@ -840,14 +620,15 @@ fn test_s02_01_backup_to_live_source_path_rejected_and_preserves_durability() {
 
     // 1. Write retained original approval + non-signing state
     let node_key = [0x11u8; 32];
-    let parent1 = [0x22u8; 32];
-    let record1 = LockRecord::new(parent1, [0x33u8; 32], vec![1, 2, 3], SimTime(1000), SimTime(50_000));
+    let (root1_tag, root1) = make_test_root_entry("v_backup_1", [0x21; 32], 600_000);
+    let (spend1_tag, spend1) = make_test_spend_entry("v_backup_1", [0x22; 32], 1000);
+    storage.put_hmc_lock(&root1_tag, &root1).unwrap();
+    storage.put_hmc_lock(&spend1_tag, &spend1).unwrap();
     storage
-        .commit_original_record_approval(&record1, 50_000, &node_key, b"approval_1", 0)
+        .commit_original_approval(&spend1_tag, &spend1, &node_key, b"approval_1", 1, 600_000)
         .unwrap();
     storage.set_quota(&[0x44u8; 32], 5000).unwrap();
     storage.ban_node(&[0x55u8; 32], 2000).unwrap();
-    storage.put_lock(&record1, 50_000).unwrap();
 
     // (a) Exact source path
     let err_exact = storage.create_backup(&db_path);
@@ -878,10 +659,12 @@ fn test_s02_01_backup_to_live_source_path_rejected_and_preserves_durability() {
     }
 
     // 2. Subsequent writes to live DB
-    let parent2 = [0x66u8; 32];
-    let record2 = LockRecord::new(parent2, [0x77u8; 32], vec![4, 5, 6], SimTime(2000), SimTime(50_000));
+    let (root2_tag, root2) = make_test_root_entry("v_backup_2", [0x61; 32], 600_000);
+    let (spend2_tag, spend2) = make_test_spend_entry("v_backup_2", [0x62; 32], 2000);
+    storage.put_hmc_lock(&root2_tag, &root2).unwrap();
+    storage.put_hmc_lock(&spend2_tag, &spend2).unwrap();
     storage
-        .commit_original_record_approval(&record2, 50_000, &node_key, b"approval_2", 0)
+        .commit_original_approval(&spend2_tag, &spend2, &node_key, b"approval_2", 1, 600_000)
         .unwrap();
     storage.ban_node(&[0x88u8; 32], 3000).unwrap();
 
@@ -890,12 +673,12 @@ fn test_s02_01_backup_to_live_source_path_rejected_and_preserves_durability() {
     let reopened = RedbStorage::open(&db_path).unwrap();
 
     // Verify both preexisting and subsequent writes remain intact!
-    assert!(reopened.own_signing_choice(&node_key, &hex::encode(parent1)).unwrap().is_some());
-    assert!(reopened.own_signing_choice(&node_key, &hex::encode(parent2)).unwrap().is_some());
+    assert!(reopened.own_signing_choice(&node_key, &spend1_tag).unwrap().is_some());
+    assert!(reopened.own_signing_choice(&node_key, &spend2_tag).unwrap().is_some());
     assert_eq!(reopened.get_quota(&[0x44u8; 32]).unwrap(), 5000);
     assert!(reopened.is_node_banned(&[0x55u8; 32]).unwrap());
     assert!(reopened.is_node_banned(&[0x88u8; 32]).unwrap());
-    assert!(reopened.get_lock(&parent1).unwrap().is_some());
+    assert!(reopened.get_hmc_lock(&spend1_tag).unwrap().is_some());
 
     // 4. Distinct-destination backup succeeds (and overwriting existing distinct file succeeds)
     let distinct_dest = dir.path().join("distinct_backup.redb");
@@ -942,7 +725,7 @@ fn test_s02_02_prune_expired_buckets_257_spends_retains_root_until_drained() {
     storage.put_hmc_lock(&live_spend_tag, &live_spend).unwrap();
 
     // Pass 1: Prune at sec 81 (prunes up to 256 expired spends, leaving 1 spend)
-    let (_pruned_native, pruned_hmc_pass1) = storage.prune_expired_buckets(81).unwrap();
+    let pruned_hmc_pass1 = storage.prune_expired_buckets(81).unwrap();
     assert_eq!(pruned_hmc_pass1, 256, "Pass 1 must prune exactly 256 expired spends");
 
     // ASSERTIONS AFTER PASS 1:
@@ -962,7 +745,7 @@ fn test_s02_02_prune_expired_buckets_257_spends_retains_root_until_drained() {
     assert!(page.is_ok(), "read_committed_sync_snapshot_bounded must succeed: {:?}", page.err());
 
     // Pass 2: Prune remaining 1 expired spend
-    let (_pruned_native, pruned_hmc_pass2) = storage.prune_expired_buckets(81).unwrap();
+    let pruned_hmc_pass2 = storage.prune_expired_buckets(81).unwrap();
     assert_eq!(pruned_hmc_pass2, 1, "Pass 2 must prune the remaining 1 expired spend");
 
     // After all spends for expired voucher are gone, the root is pruned
@@ -1010,7 +793,7 @@ fn test_s02_02_apply_flush_batch_atomic_prune_retains_root_until_drained() {
     storage.put_hmc_lock(&live_spend_tag, &live_spend).unwrap();
 
     // Pass 1 via apply_flush_batch_atomic
-    storage.apply_flush_batch_atomic(&[], &[], &[], &[], &[], &[81]).unwrap();
+    storage.apply_flush_batch_atomic(&[], &[], &[], &[], &[81]).unwrap();
 
     // After Pass 1: 1 spend remains; root MUST NOT be deleted
     assert!(
@@ -1021,7 +804,7 @@ fn test_s02_02_apply_flush_batch_atomic_prune_retains_root_until_drained() {
     assert!(live_digest.is_ok(), "Live shard digest must succeed after pass 1: {:?}", live_digest.err());
 
     // Pass 2 via apply_flush_batch_atomic
-    storage.apply_flush_batch_atomic(&[], &[], &[], &[], &[], &[81]).unwrap();
+    storage.apply_flush_batch_atomic(&[], &[], &[], &[], &[81]).unwrap();
 
     // After Pass 2: all spends drained, childless root deleted
     assert!(
@@ -1049,8 +832,8 @@ fn test_s02_02_quarantined_provisional_spends_retain_root() {
     let shard = shard_for_tid(exp_root_tid);
 
     // Quarantine the spend into TABLE_PROVISIONAL_HMC_LOCKS
-    let (_q_native, q_hmc) = storage
-        .quarantine_subquorum_locks(shard, &std::collections::HashSet::new(), &std::collections::HashSet::new())
+    let q_hmc = storage
+        .quarantine_subquorum_locks(shard, &std::collections::HashSet::new())
         .unwrap();
     assert_eq!(q_hmc.len(), 1);
     assert!(storage.get_hmc_lock(&spend_tag).unwrap().is_none(), "Spend moved out of active locks");
@@ -1060,7 +843,7 @@ fn test_s02_02_quarantined_provisional_spends_retain_root() {
     assert!(storage.voucher_root(expired_vid).unwrap().is_some());
 
     // Prune at sec 81: the shared worker purges provisional lock AND the root
-    let (_p_native, p_hmc) = storage.prune_expired_buckets(81).unwrap();
+    let p_hmc = storage.prune_expired_buckets(81).unwrap();
     assert_eq!(p_hmc, 1, "Provisional lock must be purged at expiry");
     assert!(storage.get_provisional_hmc_lock(&spend_tag).unwrap().is_none());
     assert!(storage.voucher_root(expired_vid).unwrap().is_none(), "Root must be pruned once provisional lock is purged");
@@ -1100,7 +883,7 @@ fn test_s02_02_multiple_vouchers_ttl_ordering_differs_from_tag_ordering() {
 
     // Prune at sec 81 (both are expired).
     // Pass 1: prunes 256 spends (200 of zebra + 56 of aardvark).
-    let (_, pruned_pass1) = storage.prune_expired_buckets(81).unwrap();
+    let pruned_pass1 = storage.prune_expired_buckets(81).unwrap();
     assert_eq!(pruned_pass1, 256);
 
     // v_aardvark still has 44 spends remaining, so its root MUST be present!
@@ -1112,7 +895,7 @@ fn test_s02_02_multiple_vouchers_ttl_ordering_differs_from_tag_ordering() {
     assert!(storage.read_committed_sync_snapshot(81_000).is_ok());
 
     // Pass 2: prunes remaining 44 spends of aardvark.
-    let (_, pruned_pass2) = storage.prune_expired_buckets(81).unwrap();
+    let pruned_pass2 = storage.prune_expired_buckets(81).unwrap();
     assert_eq!(pruned_pass2, 44);
 
     // Both roots are now childless and completely pruned

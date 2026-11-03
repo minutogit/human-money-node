@@ -1,5 +1,39 @@
 //! A committed snapshot projects collision rows into their canonical root shard.
 use super::*;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedShardRecord {
+    pub id: [u8; 32],
+    pub parent_lock: [u8; 32],
+    pub receiver_pub: [u8; 32],
+    pub nonce: Vec<u8>,
+    pub created_at_ms: u64,
+}
+
+impl CommittedShardRecord {
+    pub fn new(
+        parent_lock: [u8; 32],
+        receiver_pub: [u8; 32],
+        nonce: Vec<u8>,
+        created_at_ms: u64,
+    ) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&parent_lock);
+        hasher.update(&receiver_pub);
+        hasher.update(&nonce);
+        let id = *hasher.finalize().as_bytes();
+        Self {
+            id,
+            parent_lock,
+            receiver_pub,
+            nonce,
+            created_at_ms,
+        }
+    }
+}
+
 impl RedbStorage {
     /// Uses one redb cut, excludes pending RAM, and never treats root proofs as
     /// spends. The original SST parent key remains in the hashed projection.
@@ -7,19 +41,9 @@ impl RedbStorage {
         &self,
         shard: u16,
         now: u64,
-    ) -> Result<Vec<LockRecord>, StorageError> {
+    ) -> Result<Vec<CommittedShardRecord>, StorageError> {
         let txn = self.db.begin_read()?;
         let mut records = Vec::new();
-        for row in txn.open_table(TABLE_LOCKS)?.iter()? {
-            let (_, value) = row?;
-            let (record, _): (LockRecord, u64) = bincode::deserialize(value.value())?;
-            if u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]) == shard
-                && !record.status.is_void()
-                && record.valid_until.0 > now
-            {
-                records.push(record);
-            }
-        }
         let roots = txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
         for row in txn.open_table(TABLE_HMC_LOCKS)?.iter()? {
             let (tag, value) = row?;
@@ -35,12 +59,11 @@ impl RedbStorage {
             );
             let validity = roots::root_valid_until(&root)?;
             if humoco_sim_core::types::canonical_voucher_shard(&parent) == shard && validity > now {
-                records.push(LockRecord::new(
+                records.push(CommittedShardRecord::new(
                     *blake3::hash(tag.value().as_bytes()).as_bytes(),
                     entry.sender_ephemeral_pub,
                     entry.t_id.to_vec(),
-                    SimTime(entry.created_at_ms),
-                    SimTime(validity),
+                    entry.created_at_ms,
                 ));
             }
         }

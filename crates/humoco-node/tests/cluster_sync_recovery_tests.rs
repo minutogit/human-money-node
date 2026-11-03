@@ -1,17 +1,106 @@
 //! Wire-level immutable snapshot and resource-ceiling regressions.
+use ed25519_dalek::{Signer, SigningKey};
 use humoco_node::{
+    api::hmc::{calculate_l2_payload_hash_raw, L2LockEntry, TRAP_NONE_PLACEHOLDER},
     identity::NodeIdentity,
     network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport},
     storage::{DualTierEngine, RedbStorage},
 };
 use humoco_sim_core::{
-    types::{LockRecord, SimTime},
+    types::SimTime,
     wire::{MsgType, WireHeader},
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 static RECOVERY_20_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn make_root_with_shard(
+    target_shard: u16,
+    voucher_id: &str,
+    valid_until_ms: u64,
+    signing_key: &SigningKey,
+) -> (String, L2LockEntry) {
+    let pubkey = signing_key.verifying_key().to_bytes();
+    let mut i = 0u64;
+    loop {
+        let mut t_id = [0u8; 32];
+        t_id[0..8].copy_from_slice(&i.to_le_bytes());
+        let tag = bs58::encode(t_id).into_string();
+        let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+        if humoco_sim_core::types::canonical_voucher_shard(&parent) == target_shard {
+            let mut entry = L2LockEntry {
+                causal_output: None,
+                layer2_voucher_id: voucher_id.into(),
+                t_id,
+                sender_ephemeral_pub: pubkey,
+                receiver_ephemeral_pub_hash: None,
+                change_ephemeral_pub_hash: None,
+                layer2_signature: [0; 64],
+                trap_r: None,
+                trap_s: None,
+                encrypted_timestamp: 0,
+                created_at_ms: 1000,
+                deletable_at: Some(valid_until_ms.to_string()),
+                privacy_guard: None,
+            };
+            let payload_hash = calculate_l2_payload_hash_raw(
+                TRAP_NONE_PLACEHOLDER,
+                &tag,
+                &entry.t_id,
+                &entry.sender_ephemeral_pub,
+                TRAP_NONE_PLACEHOLDER,
+                TRAP_NONE_PLACEHOLDER,
+                0,
+                1000,
+                Some(&valid_until_ms.to_string()),
+                "",
+            );
+            entry.layer2_signature = signing_key.sign(&payload_hash).to_bytes();
+            return (tag, entry);
+        }
+        i += 1;
+    }
+}
+
+fn make_spend(
+    voucher_id: &str,
+    tag: &str,
+    t_id: [u8; 32],
+    created_at_ms: u64,
+    signing_key: &SigningKey,
+) -> L2LockEntry {
+    let pubkey = signing_key.verifying_key().to_bytes();
+    let mut entry = L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: voucher_id.into(),
+        t_id,
+        sender_ephemeral_pub: pubkey,
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let payload_hash = calculate_l2_payload_hash_raw(
+        voucher_id,
+        tag,
+        &t_id,
+        &pubkey,
+        TRAP_NONE_PLACEHOLDER,
+        TRAP_NONE_PLACEHOLDER,
+        0,
+        created_at_ms,
+        None,
+        "",
+    );
+    entry.layer2_signature = signing_key.sign(&payload_hash).to_bytes();
+    entry
+}
 
 #[tokio::test]
 async fn fixed_snapshot_cursor_survives_concurrent_insert_delete_and_rejects_foreign_cursor() {
@@ -76,19 +165,29 @@ async fn fixed_snapshot_cursor_survives_concurrent_insert_delete_and_rejects_for
         .connect_peer(source_net.local_addr().unwrap())
         .await
         .unwrap();
-    let record =
-        |i: u8| LockRecord::new([i; 32], [8; 32], vec![i], SimTime(1_000), SimTime(50_000));
-    for i in 1..=3 {
-        db.put_lock(&record(i), 50_000).unwrap();
+    let key = SigningKey::from_bytes(&[12u8; 32]);
+    let (root_tag, root_entry) = make_root_with_shard(1, "voucher_cursor", 50_000, &key);
+    db.put_hmc_lock(&root_tag, &root_entry).unwrap();
+
+    let spend = |i: u8| {
+        let mut t_id = [0u8; 32];
+        t_id[0] = i;
+        make_spend("voucher_cursor", &format!("spend_{:02}", i), t_id, 1000, &key)
+    };
+    for i in 1..=2 {
+        db.put_hmc_lock(&format!("spend_{:02}", i), &spend(i)).unwrap();
     }
     let first = reader_net
         .request_active_sync_page(&conn, 1, 0, 1)
         .await
         .unwrap();
-    assert_eq!(first.payload.locks[0].0.parent_lock, [1; 32]);
+    assert_eq!(first.payload.hmc_locks[0].0, root_tag);
     let cursor = first.next_cursor.unwrap();
     db.prune_expired_buckets(81).unwrap();
-    db.put_lock(&record(4), 50_000).unwrap();
+    let (fresh_root_tag, fresh_root) = make_root_with_shard(1, "voucher_fresh", 500_000, &key);
+    db.put_hmc_lock(&fresh_root_tag, &fresh_root).unwrap();
+    let spend_3 = make_spend("voucher_fresh", "spend_03", [3; 32], 1000, &key);
+    db.put_hmc_lock("spend_03", &spend_3).unwrap();
     assert!(
         other_net
             .request_active_sync_page(&other, 2, cursor, 1)
@@ -100,19 +199,19 @@ async fn fixed_snapshot_cursor_survives_concurrent_insert_delete_and_rejects_for
         .request_active_sync_page(&conn, 3, cursor, 1)
         .await
         .unwrap();
-    assert_eq!(second.payload.locks[0].0.parent_lock, [2; 32]);
+    assert_eq!(second.payload.hmc_locks[0].0, "spend_01");
     let third = reader_net
         .request_active_sync_page(&conn, 4, second.next_cursor.unwrap(), 1)
         .await
         .unwrap();
-    assert_eq!(third.payload.locks[0].0.parent_lock, [3; 32]);
+    assert_eq!(third.payload.hmc_locks[0].0, "spend_02");
     assert!(!third.has_more);
     let fresh = reader_net
         .request_active_sync_page(&conn, 5, 0, 10)
         .await
         .unwrap();
-    assert_eq!(fresh.payload.locks.len(), 1);
-    assert_eq!(fresh.payload.locks[0].0.parent_lock, [4; 32]);
+    assert_eq!(fresh.payload.hmc_locks.len(), 2);
+    assert_eq!(fresh.payload.hmc_locks[1].0, "spend_03");
     // Send only the oversized header. Rejection must precede payload reads.
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
     send.write_all(&WireHeader::new(MsgType::ActiveSyncRequest as u16, 6, 0, 0, 65_537).to_bytes())
@@ -241,38 +340,23 @@ async fn large_cut_installs_atomically_and_preserves_current_support_after_resta
     let peers = recovery_peers(4).await;
     let shard: u16 = 0x4721;
     let now = peers[0].manager.net_time_ms();
-    let records: Vec<_> = (0..10_050u32)
-        .map(|i| {
-            let mut parent = [0u8; 32];
-            parent[..2].copy_from_slice(&shard.to_be_bytes());
-            parent[2..6].copy_from_slice(&i.to_be_bytes());
-            LockRecord::new(
-                parent,
-                [9; 32],
-                i.to_le_bytes().to_vec(),
-                SimTime(now),
-                SimTime(now + 600_000),
-            )
-        })
-        .collect();
+    let key = SigningKey::from_bytes(&[23u8; 32]);
+    let (root_tag, root_entry) = make_root_with_shard(shard, "voucher_large", now + 600_000, &key);
     for source in &peers[1..] {
-        source
-            .db
-            .put_locks_batch(records.iter().map(|row| (row, now + 600_000)))
-            .unwrap();
+        source.db.put_hmc_lock(&root_tag, &root_entry).unwrap();
+        for i in 0..600u32 {
+            let mut t_id = [0u8; 32];
+            t_id[..4].copy_from_slice(&i.to_be_bytes());
+            let tag = format!("spend_{:06}", i);
+            let spend = make_spend("voucher_large", &tag, t_id, now, &key);
+            source.db.put_hmc_lock(&tag, &spend).unwrap();
+        }
         source.engine.recover_from_disk(SimTime(now)).await.unwrap();
         source.readiness.mark_shard_ready(shard);
     }
-    let mut minority_parent = [255; 32];
-    minority_parent[..2].copy_from_slice(&shard.to_be_bytes());
-    let minority = LockRecord::new(
-        minority_parent,
-        [8; 32],
-        vec![8],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
-    peers[0].db.put_lock(&minority, now + 600_000).unwrap();
+    peers[0].db.put_hmc_lock(&root_tag, &root_entry).unwrap();
+    let minority = make_spend("voucher_large", "minority_tag", [0xEE; 32], now, &key);
+    peers[0].db.put_hmc_lock("minority_tag", &minority).unwrap();
     peers[0]
         .engine
         .recover_from_disk(SimTime(now))
@@ -297,41 +381,31 @@ async fn large_cut_installs_atomically_and_preserves_current_support_after_resta
         "a complete current quorum cut must activate after its commit"
     );
     assert!(target.readiness.is_shard_ready(shard));
-    assert!(target.db.get_lock(&minority_parent).unwrap().is_none());
+    assert!(target.db.get_hmc_lock("minority_tag").unwrap().is_none());
     assert!(target
         .db
-        .get_provisional_lock(&minority_parent)
+        .get_provisional_hmc_lock("minority_tag")
         .unwrap()
         .is_some());
     assert_eq!(
         target.db.committed_shard_digest(shard, now).unwrap().1,
-        10_050
+        600
     );
-    for row in [&records[0], &records[10_049]] {
-        let saved = target.db.get_lock(&row.parent_lock).unwrap().unwrap().0;
-        assert_eq!(saved.id, row.id);
-        assert_eq!(saved.status.confirmation_class(), 1);
+    for tag in ["spend_000000", "spend_000599"] {
+        assert!(target.db.get_hmc_lock(tag).unwrap().is_some());
         assert_eq!(
-            target
-                .engine
-                .get_ram_lock(&row.parent_lock)
-                .await
-                .unwrap()
-                .id,
-            row.id
+            target.db.confirmation_support(tag).unwrap().unwrap().class,
+            1
         );
+        assert!(target.engine.get_hmc_ram_lock(tag).await.is_some());
     }
     let reopen_db = target.db.clone();
     stop_recovery_peers(peers).await;
-    let (recovered, worker) = DualTierEngine::new(reopen_db);
+    let (recovered, worker) = DualTierEngine::new(reopen_db.clone());
     recovered.recover_from_disk(SimTime(now)).await.unwrap();
+    assert!(recovered.get_hmc_ram_lock("spend_000000").await.is_some());
     assert_eq!(
-        recovered
-            .get_ram_lock(&records[0].parent_lock)
-            .await
-            .unwrap()
-            .status
-            .confirmation_class(),
+        reopen_db.confirmation_support("spend_000000").unwrap().unwrap().class,
         1
     );
     drop(recovered);
@@ -357,27 +431,36 @@ async fn authenticated_source_fence_blocks_same_shard_writes_and_rejects_foreign
         .await
         .unwrap();
     let now = source.manager.net_time_ms();
-    let make_row = |shard: u16| {
-        let mut parent = [7; 32];
-        parent[..2].copy_from_slice(&shard.to_be_bytes());
-        LockRecord::new(
-            parent,
-            [8; 32],
-            vec![9],
-            SimTime(now),
-            SimTime(now + 60_000),
+    let key = SigningKey::from_bytes(&[31u8; 32]);
+    let make_row = |target_shard: u16| {
+        make_root_with_shard(
+            target_shard,
+            &format!("voucher_fence_{}", target_shard),
+            now + 60_000,
+            &key,
         )
     };
-    assert!(source
+    let (tag_shard, entry_shard) = make_row(shard);
+    let (tag_other, entry_other) = make_row(shard + 1);
+
+    let (verdict_shard, _) = source
         .engine
-        .ingress_lock(make_row(shard), SimTime(now), SimTime(now + 60_000))
-        .await
-        .is_err());
-    assert!(source
+        .ingress_hmc_lock(tag_shard.clone(), entry_shard.clone())
+        .await;
+    assert!(matches!(
+        verdict_shard,
+        humoco_node::api::hmc::L2Verdict::Rejected { .. }
+    ));
+
+    let (verdict_other, _) = source
         .engine
-        .ingress_lock(make_row(shard + 1), SimTime(now), SimTime(now + 60_000))
-        .await
-        .is_ok());
+        .ingress_hmc_lock(tag_other, entry_other)
+        .await;
+    assert!(matches!(
+        verdict_other,
+        humoco_node::api::hmc::L2Verdict::Verified { .. }
+    ));
+
     let other_conn = outsider
         .network
         .connect_peer(source.network.local_addr().unwrap())
@@ -388,21 +471,29 @@ async fn authenticated_source_fence_blocks_same_shard_writes_and_rejects_foreign
         .release_frozen_shard(&other_conn, shard, 2, lease.token)
         .await
         .is_err());
-    assert!(source
+    let (verdict_shard2, _) = source
         .engine
-        .ingress_lock(make_row(shard), SimTime(now), SimTime(now + 60_000))
-        .await
-        .is_err());
+        .ingress_hmc_lock(tag_shard.clone(), entry_shard.clone())
+        .await;
+    assert!(matches!(
+        verdict_shard2,
+        humoco_node::api::hmc::L2Verdict::Rejected { .. }
+    ));
+
     target
         .network
         .release_frozen_shard(&conn, shard, 3, lease.token)
         .await
         .unwrap();
-    assert!(source
+    let (verdict_shard3, _) = source
         .engine
-        .ingress_lock(make_row(shard), SimTime(now), SimTime(now + 60_000))
-        .await
-        .is_ok());
+        .ingress_hmc_lock(tag_shard, entry_shard)
+        .await;
+    assert!(matches!(
+        verdict_shard3,
+        humoco_node::api::hmc::L2Verdict::Verified { .. }
+    ));
+
     assert!(target
         .network
         .release_frozen_shard(&conn, shard, 4, lease.token)
@@ -416,39 +507,25 @@ async fn corrupt_later_wire_page_keeps_productive_state_and_readiness_unchanged(
     let peers = recovery_peers_mode(4, true).await;
     let shard: u16 = 0x2743;
     let now = peers[0].manager.net_time_ms();
-    let rows: Vec<_> = (0..600u32)
-        .map(|i| {
-            let mut parent = [0; 32];
-            parent[..2].copy_from_slice(&shard.to_be_bytes());
-            parent[2..6].copy_from_slice(&i.to_be_bytes());
-            LockRecord::new(
-                parent,
-                [9; 32],
-                i.to_le_bytes().to_vec(),
-                SimTime(now),
-                SimTime(now + 600_000),
-            )
-        })
-        .collect();
+    let key = SigningKey::from_bytes(&[41u8; 32]);
+    let (root_tag, root_entry) =
+        make_root_with_shard(shard, "voucher_corrupt", now + 600_000, &key);
     for source in &peers[1..] {
-        source
-            .db
-            .put_locks_batch(rows.iter().map(|row| (row, now + 600_000)))
-            .unwrap();
+        source.db.put_hmc_lock(&root_tag, &root_entry).unwrap();
+        for i in 0..600u32 {
+            let mut t_id = [0u8; 32];
+            t_id[..4].copy_from_slice(&i.to_be_bytes());
+            let tag = format!("spend_{:06}", i);
+            let spend = make_spend("voucher_corrupt", &tag, t_id, now, &key);
+            source.db.put_hmc_lock(&tag, &spend).unwrap();
+        }
         source.engine.recover_from_disk(SimTime(now)).await.unwrap();
         source.readiness.mark_shard_ready(shard);
     }
-    let mut parent = [255; 32];
-    parent[..2].copy_from_slice(&shard.to_be_bytes());
-    let old = LockRecord::new(
-        parent,
-        [8; 32],
-        vec![7],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
     let target = &peers[0];
-    target.db.put_lock(&old, now + 600_000).unwrap();
+    target.db.put_hmc_lock(&root_tag, &root_entry).unwrap();
+    let old = make_spend("voucher_corrupt", "old_spend", [8; 32], now, &key);
+    target.db.put_hmc_lock("old_spend", &old).unwrap();
     target.engine.recover_from_disk(SimTime(now)).await.unwrap();
     let before = target.db.committed_shard_digest(shard, now).unwrap();
     let ready = humoco_node::daemon::sync_single_shard(
@@ -470,18 +547,27 @@ async fn corrupt_later_wire_page_keeps_productive_state_and_readiness_unchanged(
         before
     );
     assert_eq!(
-        target.engine.get_ram_lock(&parent).await.unwrap().id,
-        old.id
+        target
+            .engine
+            .get_hmc_ram_lock("old_spend")
+            .await
+            .unwrap()
+            .t_id,
+        old.t_id
     );
-    assert!(target.db.get_provisional_lock(&parent).unwrap().is_none());
+    assert!(target
+        .db
+        .get_provisional_hmc_lock("old_spend")
+        .unwrap()
+        .is_none());
     assert!(target.engine.is_signing_healthy());
     for source in &peers[1..] {
+        let (verdict, _) = source
+            .engine
+            .ingress_hmc_lock("old_spend".into(), old.clone())
+            .await;
         assert!(
-            source
-                .engine
-                .ingress_lock(old.clone(), SimTime(now), SimTime(now + 600_000))
-                .await
-                .is_ok(),
+            matches!(verdict, humoco_node::api::hmc::L2Verdict::Verified { .. }),
             "all source fences released after failed transfer"
         );
     }
@@ -764,14 +850,12 @@ async fn small_mesh_growth_two_nodes_fails_closed_without_automatic_empty_db_fal
     let target = &peers[0];
     let source = &peers[1];
     let now = target.manager.net_time_ms();
-    let row = LockRecord::new(
-        [77; 32],
-        [88; 32],
-        vec![1],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
-    source.db.put_lock(&row, now + 600_000).unwrap();
+    let key = SigningKey::from_bytes(&[51u8; 32]);
+    let (root_tag, root_entry) =
+        make_root_with_shard(shard, "voucher_churn", now + 600_000, &key);
+    source.db.put_hmc_lock(&root_tag, &root_entry).unwrap();
+    let spend = make_spend("voucher_churn", "spend_churn", [88; 32], now, &key);
+    source.db.put_hmc_lock("spend_churn", &spend).unwrap();
     source.engine.recover_from_disk(SimTime(now)).await.unwrap();
     source.readiness.mark_shard_ready(shard);
 
@@ -797,7 +881,7 @@ async fn small_mesh_growth_two_nodes_fails_closed_without_automatic_empty_db_fal
         "shard must remain unready"
     );
     assert!(
-        target.db.get_lock(&row.parent_lock).unwrap().is_none(),
+        target.db.get_hmc_lock("spend_churn").unwrap().is_none(),
         "no partial unconfirmed import"
     );
     stop_recovery_peers(peers).await;
@@ -958,35 +1042,29 @@ async fn distributed_compatible_state_ab8_a6_b6_reconciles_per_fact_and_quaranti
     let peers = recovery_peers(20).await;
     let now = peers[0].manager.net_time_ms();
     let shard = 42u16;
-    let mut p_a = [7; 32];
-    p_a[..2].copy_from_slice(&shard.to_be_bytes());
-    let mut p_b = [8; 32];
-    p_b[..2].copy_from_slice(&shard.to_be_bytes());
-    let mut p_rogue = [9; 32];
-    p_rogue[..2].copy_from_slice(&shard.to_be_bytes());
-    let lock_a = LockRecord::new(p_a, [8; 32], vec![1], SimTime(now), SimTime(now + 600_000));
-    let lock_b = LockRecord::new(p_b, [9; 32], vec![2], SimTime(now), SimTime(now + 600_000));
-    let unconfirmed_local = LockRecord::new(
-        p_rogue,
-        [10; 32],
-        vec![3],
-        SimTime(now),
-        SimTime(now + 600_000),
-    );
+    let key = SigningKey::from_bytes(&[61u8; 32]);
+    let (root_tag, root_entry) =
+        make_root_with_shard(shard, "voucher_reconcile", now + 600_000, &key);
+
+    let lock_a = make_spend("voucher_reconcile", "spend_a", [8; 32], now, &key);
+    let lock_b = make_spend("voucher_reconcile", "spend_b", [9; 32], now, &key);
+    let unconfirmed_local =
+        make_spend("voucher_reconcile", "spend_rogue", [10; 32], now, &key);
 
     // AB: 8 (peers 0..8), A-only: 6 (peers 8..14), B-only: 6 (peers 14..20).
     // Both A and B have 14 committee holders, but no whole-cut digest has >= 14 matches.
     for (i, peer) in peers.iter().enumerate() {
         peer.manager.set_ge20_anchor_for_test(now - 86_400_001);
+        peer.db.put_hmc_lock(&root_tag, &root_entry).unwrap();
         if i < 14 {
-            peer.db.put_lock(&lock_a, now + 600_000).unwrap();
+            peer.db.put_hmc_lock("spend_a", &lock_a).unwrap();
         }
         if !(8..14).contains(&i) {
-            peer.db.put_lock(&lock_b, now + 600_000).unwrap();
+            peer.db.put_hmc_lock("spend_b", &lock_b).unwrap();
         }
         if i == 0 {
             // Unconfirmed Class-0 local singleton lock on target must NOT be promoted
-            peer.db.put_lock(&unconfirmed_local, now + 600_000).unwrap();
+            peer.db.put_hmc_lock("spend_rogue", &unconfirmed_local).unwrap();
         }
         peer.engine.recover_from_disk(SimTime(now)).await.unwrap();
         peer.readiness.mark_shard_ready(shard);
@@ -1013,31 +1091,31 @@ async fn distributed_compatible_state_ab8_a6_b6_reconciles_per_fact_and_quaranti
     assert_eq!(
         target
             .db
-            .get_lock(&p_a)
+            .confirmation_support("spend_a")
             .unwrap()
             .unwrap()
-            .0
-            .status
-            .confirmation_class(),
+            .class,
         2
     );
     assert_eq!(
         target
             .db
-            .get_lock(&p_b)
+            .confirmation_support("spend_b")
             .unwrap()
             .unwrap()
-            .0
-            .status
-            .confirmation_class(),
+            .class,
         2
     );
     assert!(
-        target.db.get_lock(&p_rogue).unwrap().is_none(),
+        target.db.get_hmc_lock("spend_rogue").unwrap().is_none(),
         "unconfirmed local singleton lock must not be promoted into active locks"
     );
     assert!(
-        target.db.get_provisional_lock(&p_rogue).unwrap().is_some(),
+        target
+            .db
+            .get_provisional_hmc_lock("spend_rogue")
+            .unwrap()
+            .is_some(),
         "unconfirmed local singleton lock must be quarantined into provisional storage"
     );
 

@@ -90,7 +90,6 @@ async fn cancelled_request_still_publishes_late_commit() {
     let db = Arc::new(RedbStorage::open(&dir.path().join("test_f2_1.redb")).expect("open redb"));
     let (tx, mut rx) = mpsc::channel(100);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(humoco_sim_core::storage::RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx,
@@ -172,7 +171,6 @@ async fn cancelled_request_late_commit_does_not_authorize_intervening_replacemen
     let db = Arc::new(RedbStorage::open(&dir.path().join("test_f2_2.redb")).expect("open redb"));
     let (tx, mut rx) = mpsc::channel(100);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(humoco_sim_core::storage::RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx,
@@ -268,7 +266,6 @@ async fn failed_commit_never_marks_entry_durable() {
     let db = Arc::new(RedbStorage::open(&dir.path().join("test_f2_3.redb")).expect("open redb"));
     let (tx, mut rx) = mpsc::channel(100);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(humoco_sim_core::storage::RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx,
@@ -368,7 +365,6 @@ async fn status_never_returns_another_vouchers_entry() {
     // Test Case 4a: voucher-A has root anchor only (no spends in vouchers yet)
     let (tx_a, _rx_a) = mpsc::channel(16);
     let engine_a = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(humoco_sim_core::storage::RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx_a,
@@ -411,7 +407,6 @@ async fn status_never_returns_another_vouchers_entry() {
 
     let (tx_b, _rx_b) = mpsc::channel(16);
     let engine_b = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(humoco_sim_core::storage::RamIndex::new())),
         Arc::new(RwLock::new(HmcRamIndex::new())),
         db.clone(),
         tx_b,

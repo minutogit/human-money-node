@@ -142,7 +142,7 @@ impl HistorySampler {
 
                         // Atomic / non-locking reads:
                         // RamIndex.len() uses read lock briefly, but never blocks hot-path.
-                        let active_locks = state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+                        let active_locks = state.engine.hmc_ram.read().await.locks.len();
                         let queue_depth = state.engine.flush_sender_len();
 
                         let load_factor = (state.tier_controller.rolling_24h_average() as f64

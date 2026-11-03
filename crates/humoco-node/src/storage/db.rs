@@ -1,5 +1,5 @@
 pub mod install;
-mod projection;
+pub mod projection;
 pub mod roots;
 mod signing;
 pub use signing::TABLE_SIGNING_STATE;
@@ -7,7 +7,6 @@ pub mod snapshot;
 pub mod support;
 
 use humoco_sim_core::storage::should_prune;
-use humoco_sim_core::types::LockRecord;
 use humoco_sim_core::types::SimTime;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
@@ -114,27 +113,10 @@ pub(crate) fn validate_sync_shape(
     Ok(())
 }
 
-pub(crate) fn validate_native_sync_shape(
-    lock: &LockRecord,
-    root_valid_until: u64,
-) -> Result<(), StorageError> {
-    if bincode::serialized_size(&(lock, root_valid_until))? as usize > MAX_SYNC_ROW_BYTES {
-        return Err(StorageError::DurableCommitFailed(
-            "Native lock entry exceeds synchronization limits".into(),
-        ));
-    }
-    Ok(())
-}
-
-pub const TABLE_LOCKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("locks");
-pub const TABLE_PROVISIONAL_LOCKS: TableDefinition<&[u8; 32], &[u8]> =
-    TableDefinition::new("provisional_locks");
 pub const TABLE_PROVISIONAL_HMC_LOCKS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("provisional_hmc_locks");
 pub const TABLE_PROVISIONAL_HMC_VOUCHER_INDEX: TableDefinition<(&str, &str), ()> =
     TableDefinition::new("prov_hmc_voucher_index");
-pub const TABLE_TTL_INDEX: TableDefinition<(u64, &[u8; 32]), ()> =
-    TableDefinition::new("ttl_index");
 pub const TABLE_SLASHING_EVIDENCE: TableDefinition<&[u8; 32], &[u8]> =
     TableDefinition::new("slashing_evidence");
 pub const TABLE_QUOTA_ACCOUNTS: TableDefinition<&[u8; 32], u64> =
@@ -175,9 +157,6 @@ pub enum OriginalApprovalTarget {
     Hmc {
         tag: String,
         entry: Box<crate::api::hmc::L2LockEntry>,
-    },
-    Record {
-        record: Box<LockRecord>,
     },
 }
 
@@ -258,15 +237,11 @@ impl RedbStorage {
         }
         {
             let _ = write_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
-            let _ = write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
             let _ = write_txn.open_table(TABLE_OWN_CHOICES)?;
             let _ = write_txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
             let _ = write_txn.open_table(TABLE_OWN_CHOICE_TTL)?;
-            let _ = write_txn.open_table(TABLE_LOCKS)?;
-            let _ = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
             let _ = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             let _ = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
-            let _ = write_txn.open_table(TABLE_TTL_INDEX)?;
             let _ = write_txn.open_table(TABLE_SLASHING_EVIDENCE)?;
             let _ = write_txn.open_table(TABLE_QUOTA_ACCOUNTS)?;
             let _ = write_txn.open_table(TABLE_HMC_LOCKS)?;
@@ -275,21 +250,6 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_BANNED_NODES)?;
             let _ = write_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
             let _ = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
-        }
-        // Seamless backwards-compatibility: backfill TABLE_PROVISIONAL_HMC_VOUCHER_INDEX if needed
-        {
-            let prov_locks = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
-            let mut prov_vidx = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
-            if prov_vidx.is_empty()? && !prov_locks.is_empty()? {
-                for item in prov_locks.iter()? {
-                    let (k, v) = item?;
-                    if let Ok(entry) =
-                        serde_json::from_slice::<crate::api::hmc::L2LockEntry>(v.value())
-                    {
-                        prov_vidx.insert((entry.layer2_voucher_id.as_str(), k.value()), ())?;
-                    }
-                }
-            }
         }
         roots::initialize(&write_txn)?;
         let corrupt = signing::initialize(&write_txn)?;
@@ -430,70 +390,6 @@ impl RedbStorage {
                     };
                     results.push(Ok(retained));
                 }
-                OriginalApprovalTarget::Record { record } => {
-                    let tag = hex::encode(record.parent_lock);
-                    let slot = format!("{}:{}", hex::encode(entry.node), tag);
-                    let mut choice = match self.validate_and_prepare_own_choice(
-                        &txn,
-                        slot.as_str(),
-                        record.id,
-                        entry.root_valid_until_ms,
-                        entry.class,
-                        &entry.approval,
-                    ) {
-                        Ok(c) => c,
-                        Err(StorageError::OwnChoiceConflict) => {
-                            results.push(Err(StorageError::OwnChoiceConflict));
-                            continue;
-                        }
-                        Err(StorageError::SigningHistoryCorrupt) => {
-                            self.latch_corruption_in_txn(&txn);
-                            let _ = txn.commit();
-                            return Err(StorageError::SigningHistoryCorrupt);
-                        }
-                        Err(e) => {
-                            results.push(Err(e));
-                            continue;
-                        }
-                    };
-
-                    let mut locks = txn.open_table(TABLE_LOCKS)?;
-                    if let Some(old) = locks.get(&record.parent_lock)? {
-                        let (old, _): (LockRecord, u64) = bincode::deserialize(old.value())?;
-                        if old.id != record.id {
-                            results.push(Err(StorageError::OwnChoiceConflict));
-                            continue;
-                        }
-                    }
-
-                    if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
-                        drop(locks);
-                        self.latch_corruption_in_txn(&txn);
-                        let _ = txn.commit();
-                        return Err(e);
-                    }
-
-                    let bytes = bincode::serialize(&(record.as_ref(), entry.root_valid_until_ms))?;
-                    locks.insert(&record.parent_lock, bytes.as_slice())?;
-                    drop(locks);
-
-                    let expires_sec = grace_expiry_bucket_sec(entry.root_valid_until_ms);
-                    txn.open_table(TABLE_TTL_INDEX)?
-                        .insert(&(expires_sec, &record.parent_lock), ())?;
-                    txn.open_table(TABLE_OWN_CHOICE_TTL)?
-                        .insert(&(expires_sec, slot.as_str()), ())?;
-
-                    let retained = match choice.approvals[usize::from(entry.class)].clone() {
-                        Some(a) => a,
-                        None => {
-                            results.push(Err(StorageError::DurableCommitFailed(
-                                "Missing retained approval".into(),
-                            )));
-                            continue;
-                        }
-                    };
-                    results.push(Ok(retained));
-                }
             }
         }
 
@@ -523,31 +419,6 @@ impl RedbStorage {
             approval: approval.to_vec(),
             class,
             root_valid_until_ms: valid_until_ms,
-        }];
-        let mut results = self.commit_original_approvals_group(&batch)?;
-        results
-            .pop()
-            .unwrap_or(Err(StorageError::DurableCommitFailed("No result".into())))
-    }
-
-    /// Pure collision-record variant of the same private durable decision gate.
-    #[allow(clippy::too_many_arguments)]
-    pub fn commit_original_record_approval(
-        &self,
-        record: &LockRecord,
-        root_valid_until_ms: u64,
-        node: &[u8; 32],
-        approval: &[u8],
-        class: u8,
-    ) -> Result<Vec<u8>, StorageError> {
-        let batch = [OriginalApprovalBatchEntry {
-            target: OriginalApprovalTarget::Record {
-                record: Box::new(record.clone()),
-            },
-            node: *node,
-            approval: approval.to_vec(),
-            class,
-            root_valid_until_ms,
         }];
         let mut results = self.commit_original_approvals_group(&batch)?;
         results
@@ -657,7 +528,7 @@ impl RedbStorage {
     /// Returns database storage statistics: (active_locks, db_size_bytes, page_allocations).
     pub fn get_stats(&self) -> Result<(u64, u64, Option<u64>), StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
+        let table_locks = read_txn.open_table(TABLE_HMC_LOCKS)?;
         let lock_count = table_locks.len()?;
         let db_size_bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         let page_allocations = if let Ok(write_txn) = self.db.begin_write() {
@@ -673,121 +544,12 @@ impl RedbStorage {
         &self.path
     }
 
-    /// Stores a lock record and updates the TTL index.
-    pub fn put_lock(&self, lock: &LockRecord, root_valid_until: u64) -> Result<(), StorageError> {
-        validate_native_sync_shape(lock, root_valid_until)?;
-        let value_bytes = bincode::serialize(&(lock, root_valid_until))?;
-        let bucket_sec = grace_expiry_bucket_sec(root_valid_until);
-
+    /// Prunes expired HMC locks up to now_sec from TABLE_HMC_TTL_INDEX.
+    /// Returns the number of pruned locks.
+    pub fn prune_expired_buckets(&self, now_sec: u64) -> Result<usize, StorageError> {
         let write_txn = self.db.begin_write()?;
-        {
-            let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
-            table_locks.insert(&lock.parent_lock, value_bytes.as_slice())?;
-
-            let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
-            let _ = table_prov_locks.remove(&lock.parent_lock);
-
-            let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
-            table_ttl.insert(&(bucket_sec, &lock.parent_lock), ())?;
-        }
-        write_txn.commit()?;
-        Ok(())
-    }
-
-    /// Stores multiple lock records in a single transaction.
-    pub fn put_locks_batch<'a, I>(&self, locks: I) -> Result<(), StorageError>
-    where
-        I: IntoIterator<Item = (&'a LockRecord, u64)>,
-    {
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
-            let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
-
-            for (lock, root_valid_until) in locks {
-                validate_native_sync_shape(lock, root_valid_until)?;
-                let value_bytes = bincode::serialize(&(lock, root_valid_until))?;
-                let bucket_sec = grace_expiry_bucket_sec(root_valid_until);
-
-                table_locks.insert(&lock.parent_lock, value_bytes.as_slice())?;
-                table_ttl.insert(&(bucket_sec, &lock.parent_lock), ())?;
-            }
-        }
-        write_txn.commit()?;
-        Ok(())
-    }
-
-    /// Retrieves a lock record by its parent_lock hash.
-    pub fn get_lock(
-        &self,
-        parent_lock: &[u8; 32],
-    ) -> Result<Option<(LockRecord, u64)>, StorageError> {
-        let read_txn = self.db.begin_read()?;
-        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
-        if let Some(guard) = table_locks.get(parent_lock)? {
-            let (record, root_valid_until): (LockRecord, u64) =
-                bincode::deserialize(guard.value())?;
-            Ok(Some((record, root_valid_until)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Prunes expired locks up to now_sec from TABLE_TTL_INDEX and deletes corresponding records from TABLE_LOCKS.
-    /// Returns (pruned_parents, pruned_hmc_count).
-    pub fn prune_expired_buckets(
-        &self,
-        now_sec: u64,
-    ) -> Result<(Vec<[u8; 32]>, usize), StorageError> {
-        let write_txn = self.db.begin_write()?;
-        let mut pruned = Vec::new();
         let mut pruned_hmc_count = 0;
         {
-            let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
-            let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
-            let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
-
-            // Range up to now_sec inclusive
-            let max_key = (now_sec, &[0xFFu8; 32]);
-            let expired_entries: Vec<(u64, [u8; 32])> = table_ttl
-                .range(..(max_key.0.saturating_add(1), &[0x00u8; 32]))?
-                .take(256)
-                .map(|item| {
-                    let (k_guard, _) = item?;
-                    let (sec, parent) = k_guard.value();
-                    let mut p = [0u8; 32];
-                    p.copy_from_slice(parent);
-                    Ok::<_, StorageError>((sec, p))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for (sec, parent) in expired_entries {
-                if sec <= now_sec {
-                    if let Some(guard) = table_locks.get(&parent)? {
-                        let (_, root_valid_until): (LockRecord, u64) =
-                            bincode::deserialize(guard.value())?;
-                        if now_sec < grace_expiry_bucket_sec(root_valid_until) {
-                            continue;
-                        }
-                    } else if let Some(guard) = table_prov_locks.get(&parent)? {
-                        let (_, root_valid_until): (LockRecord, u64) =
-                            bincode::deserialize(guard.value())?;
-                        if now_sec < grace_expiry_bucket_sec(root_valid_until) {
-                            continue;
-                        }
-                    }
-                    table_ttl.remove(&(sec, &parent))?;
-                    table_locks.remove(&parent)?;
-                    write_txn
-                        .open_table(support::TABLE_NATIVE_SUPPORT)?
-                        .remove(support::native_key(&parent).as_str())?;
-                    // Quarantined minority copies (TABLE_PROVISIONAL_LOCKS) share
-                    // the same TTL and are purged together here (F09, DEC-035).
-                    table_prov_locks.remove(&parent)?;
-                    pruned.push(parent);
-                }
-            }
-
             // Prune HMC TTL index
             let mut table_hmc_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
@@ -865,7 +627,7 @@ impl RedbStorage {
         self.prune_voucher_roots(&write_txn, now_sec)?;
         Self::prune_own_choices(&write_txn, now_sec)?;
         write_txn.commit()?;
-        Ok((pruned, pruned_hmc_count))
+        Ok(pruned_hmc_count)
     }
 
     /// Stores fraud slashing evidence raw packet by its evidence hash.
@@ -1190,84 +952,6 @@ impl RedbStorage {
         Ok(remaining)
     }
 
-    /// Scans all locks from TABLE_LOCKS and returns all unexpired ones at now_ms.
-    /// Defensive against corrupted entries: catches deserialization errors, logs a warning, and skips defective records.
-    pub fn all_valid_locks(&self, now_ms: u64) -> Result<Vec<(LockRecord, u64)>, StorageError> {
-        let read_txn = self.db.begin_read()?;
-        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
-        let mut results = Vec::new();
-
-        for item in table_locks.iter()? {
-            let (_k_guard, v_guard) = match item {
-                Ok(g) => g,
-                Err(err) => {
-                    warn!("Corrupt entry in TABLE_LOCKS iterator: {}", err);
-                    continue;
-                }
-            };
-            let (record, root_valid_until): (LockRecord, u64) =
-                match bincode::deserialize(v_guard.value()) {
-                    Ok(data) => data,
-                    Err(err) => {
-                        warn!("Failed to deserialize LockRecord from TABLE_LOCKS: {}", err);
-                        continue;
-                    }
-                };
-            if !should_prune(SimTime(now_ms), SimTime(root_valid_until))
-                && record.valid_until.0 > now_ms
-            {
-                results.push((record, root_valid_until));
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// Scans all locks from TABLE_LOCKS for a specific shard_id and returns all unexpired ones at now_ms.
-    /// Defensive against corrupted entries: catches deserialization errors, logs a warning, and skips defective records.
-    pub fn active_locks_for_shard(
-        &self,
-        shard_id: u16,
-        now_ms: u64,
-    ) -> Result<Vec<(LockRecord, u64)>, StorageError> {
-        let read_txn = self.db.begin_read()?;
-        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
-        let mut results = Vec::new();
-
-        for item in table_locks.iter()? {
-            let (_k_guard, v_guard) = match item {
-                Ok(g) => g,
-                Err(err) => {
-                    warn!(
-                        "Corrupt entry in TABLE_LOCKS iterator for shard {}: {}",
-                        shard_id, err
-                    );
-                    continue;
-                }
-            };
-            let (record, root_valid_until): (LockRecord, u64) =
-                match bincode::deserialize(v_guard.value()) {
-                    Ok(data) => data,
-                    Err(err) => {
-                        warn!(
-                            "Failed to deserialize LockRecord for shard {}: {}",
-                            shard_id, err
-                        );
-                        continue;
-                    }
-                };
-            let sid = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
-            if sid == shard_id
-                && !should_prune(SimTime(now_ms), SimTime(root_valid_until))
-                && record.valid_until.0 > now_ms
-            {
-                results.push((record, root_valid_until));
-            }
-        }
-
-        Ok(results)
-    }
-
     /// Scans active unexpired HMC locks whose canonical voucher root belongs to `shard_id`.
     /// Skips scanning or deserializing locks for vouchers belonging to other shards (A21-R2).
     pub fn active_hmc_locks_for_shard(
@@ -1336,11 +1020,10 @@ impl RedbStorage {
     /// Quarantines unconfirmed local minority locks for a shard that are missing from
     /// the dominant quorum state (Spec 08, Pillar 4, DEC-064).
     ///
-    /// Moves native locks from TABLE_LOCKS to TABLE_PROVISIONAL_LOCKS and HMC locks from
-    /// TABLE_HMC_LOCKS to TABLE_PROVISIONAL_HMC_LOCKS, preventing minority state from poisoning
+    /// Moves HMC locks from TABLE_HMC_LOCKS to TABLE_PROVISIONAL_HMC_LOCKS, preventing minority state from poisoning
     /// the active shard digest while preserving recoverable state and own-choice integrity.
     ///
-    /// TTL index entries (TABLE_TTL_INDEX / TABLE_HMC_TTL_INDEX) are intentionally
+    /// TTL index entries (TABLE_HMC_TTL_INDEX) are intentionally
     /// preserved (F09, DEC-035): quarantined records are purged automatically at
     /// voucher expiration by the shared bounded expiry worker together with the
     /// live tables, so zero state bloat (Pillar 6) always holds for quarantine
@@ -1348,50 +1031,11 @@ impl RedbStorage {
     pub fn quarantine_subquorum_locks(
         &self,
         shard_id: u16,
-        keep_native_parents: &std::collections::HashSet<[u8; 32]>,
         keep_hmc_tags: &std::collections::HashSet<String>,
-    ) -> Result<(Vec<[u8; 32]>, Vec<String>), StorageError> {
+    ) -> Result<Vec<String>, StorageError> {
         let write_txn = self.db.begin_write()?;
-        let mut quarantined_native = Vec::new();
         let mut quarantined_hmc = Vec::new();
         {
-            let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
-            let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
-
-            let mut to_remove_native = Vec::new();
-            for item in table_locks.iter()? {
-                let (k_guard, v_guard) = match item {
-                    Ok(g) => g,
-                    Err(err) => {
-                        warn!(
-                            "Corrupt entry in TABLE_LOCKS iterator during quarantine: {}",
-                            err
-                        );
-                        continue;
-                    }
-                };
-                let parent: [u8; 32] = *k_guard.value();
-                let sid = u16::from_be_bytes([parent[0], parent[1]]);
-                if sid == shard_id && !keep_native_parents.contains(&parent) {
-                    let (record, _): (LockRecord, u64) = bincode::deserialize(v_guard.value())?;
-                    if record.status.is_final() {
-                        return Err(StorageError::DurableCommitFailed(
-                            "refusing omission of a confirmed native lock".into(),
-                        ));
-                    }
-                    to_remove_native.push((parent, v_guard.value().to_vec()));
-                }
-            }
-
-            for (parent, val_bytes) in to_remove_native {
-                table_locks.remove(&parent)?;
-                table_prov_locks.insert(&parent, val_bytes.as_slice())?;
-                // TTL index entry (TABLE_TTL_INDEX) is preserved so the shared
-                // expiry worker purges the quarantined record at voucher
-                // expiration (F09, DEC-035, Pillar 6).
-                quarantined_native.push(parent);
-            }
-
             let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
             let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
@@ -1455,23 +1099,7 @@ impl RedbStorage {
             }
         }
         write_txn.commit()?;
-        Ok((quarantined_native, quarantined_hmc))
-    }
-
-    /// Retrieves a provisional (quarantined) native lock record by its parent_lock hash.
-    pub fn get_provisional_lock(
-        &self,
-        parent_lock: &[u8; 32],
-    ) -> Result<Option<(LockRecord, u64)>, StorageError> {
-        let read_txn = self.db.begin_read()?;
-        let table_prov = read_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
-        if let Some(guard) = table_prov.get(parent_lock)? {
-            let (record, root_valid_until): (LockRecord, u64) =
-                bincode::deserialize(guard.value())?;
-            Ok(Some((record, root_valid_until)))
-        } else {
-            Ok(None)
-        }
+        Ok(quarantined_hmc)
     }
 
     /// Retrieves a provisional (quarantined) HMC lock entry by its lookup tag.
@@ -1559,15 +1187,13 @@ impl RedbStorage {
     #[allow(clippy::too_many_arguments)]
     pub fn apply_flush_batch_atomic(
         &self,
-        locks: &[(&LockRecord, u64, &[u8])],
         hmc: &[(&str, &crate::api::hmc::L2LockEntry, &[u8], u64)],
         evidences: &[([u8; 32], Vec<u8>)],
         quotas: &[([u8; 32], u64)],
         bans: &[([u8; 32], u64)],
         prune_now_secs: &[u64],
     ) -> Result<(), StorageError> {
-        if locks.is_empty()
-            && hmc.is_empty()
+        if hmc.is_empty()
             && evidences.is_empty()
             && quotas.is_empty()
             && bans.is_empty()
@@ -1577,20 +1203,6 @@ impl RedbStorage {
         }
         let write_txn = self.db.begin_write()?;
         {
-            if !locks.is_empty() {
-                let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
-                let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
-                for (lock, root_valid_until, bytes) in locks {
-                    if bytes.len() > MAX_SYNC_ROW_BYTES {
-                        return Err(StorageError::DurableCommitFailed(
-                            "Native lock entry exceeds synchronization limits".into(),
-                        ));
-                    }
-                    let bucket_sec = grace_expiry_bucket_sec(*root_valid_until);
-                    table_locks.insert(&lock.parent_lock, *bytes)?;
-                    table_ttl.insert(&(bucket_sec, &lock.parent_lock), ())?;
-                }
-            }
             if !hmc.is_empty() {
                 let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
                 let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
@@ -1789,49 +1401,6 @@ impl RedbStorage {
         write_txn: &redb::WriteTransaction,
         now_sec: u64,
     ) -> Result<(), StorageError> {
-        let mut table_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
-        let mut table_locks = write_txn.open_table(TABLE_LOCKS)?;
-        let mut table_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
-        let expired_entries: Vec<(u64, [u8; 32])> = table_ttl
-            .range(..(now_sec.saturating_add(1), &[0x00u8; 32]))?
-            .take(256)
-            .map(|item| {
-                let (k_guard, _) = item?;
-                let (sec, parent) = k_guard.value();
-                let mut p = [0u8; 32];
-                p.copy_from_slice(parent);
-                Ok::<_, StorageError>((sec, p))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for (sec, parent) in expired_entries {
-            if sec <= now_sec {
-                if let Some(guard) = table_locks.get(&parent)? {
-                    let (_, root_valid_until): (LockRecord, u64) =
-                        bincode::deserialize(guard.value())?;
-                    if now_sec < grace_expiry_bucket_sec(root_valid_until) {
-                        continue;
-                    }
-                } else if let Some(guard) = table_prov_locks.get(&parent)? {
-                    let (_, root_valid_until): (LockRecord, u64) =
-                        bincode::deserialize(guard.value())?;
-                    if now_sec < grace_expiry_bucket_sec(root_valid_until) {
-                        continue;
-                    }
-                }
-                table_ttl.remove(&(sec, &parent))?;
-                table_locks.remove(&parent)?;
-                write_txn
-                    .open_table(support::TABLE_NATIVE_SUPPORT)?
-                    .remove(support::native_key(&parent).as_str())?;
-                // Quarantined minority copies (TABLE_PROVISIONAL_LOCKS) share the
-                // same TTL and are purged together here (F09, DEC-035).
-                table_prov_locks.remove(&parent)?;
-            }
-        }
-        drop(table_ttl);
-        drop(table_locks);
-        drop(table_prov_locks);
-
         let mut table_hmc_ttl = write_txn.open_table(TABLE_HMC_TTL_INDEX)?;
         let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
         let mut table_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
@@ -2054,28 +1623,13 @@ impl RedbStorage {
         self.all_hmc_locks()
     }
 
-    /// Single-transaction committed MVCC snapshot of native and HMC locks for /v1/sync.
+    /// Single-transaction committed MVCC snapshot of HMC locks for /v1/sync.
     /// Fails closed on redb or integrity errors instead of returning an incomplete view.
-    #[allow(clippy::type_complexity)]
     pub fn read_committed_sync_snapshot(
         &self,
         now_ms: u64,
-    ) -> Result<(Vec<(LockRecord, u64)>, Vec<crate::api::dto::HmcSyncRow>), StorageError> {
+    ) -> Result<Vec<crate::api::dto::HmcSyncRow>, StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
-        let mut native_locks = Vec::new();
-
-        for item in table_locks.iter()? {
-            let (_k_guard, v_guard) = item?;
-            let (record, root_valid_until): (LockRecord, u64) =
-                bincode::deserialize(v_guard.value())?;
-            if !should_prune(SimTime(now_ms), SimTime(root_valid_until))
-                && record.valid_until.0 > now_ms
-            {
-                native_locks.push((record, root_valid_until));
-            }
-        }
-
         let table_hmc = read_txn.open_table(TABLE_HMC_LOCKS)?;
         let table_roots = read_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
         let table_support = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
@@ -2106,68 +1660,33 @@ impl RedbStorage {
             hmc_locks.push(row);
         }
 
-        Ok((native_locks, hmc_locks))
+        Ok(hmc_locks)
     }
 
-    /// Single-transaction committed MVCC snapshot of native and HMC locks for /v1/sync,
-    /// bounded strictly before materialization by max_locks_per_kind and max_total_bytes (S01-03).
+    /// Single-transaction committed MVCC snapshot of HMC locks for /v1/sync,
+    /// bounded strictly before materialization by max_locks and max_total_bytes (S01-03).
     /// Known sparse locators are filtered early during iteration so they do not consume limit budget.
-    #[allow(clippy::type_complexity)]
     pub fn read_committed_sync_snapshot_bounded(
         &self,
         now_ms: u64,
         locators: &std::collections::HashSet<String>,
-        max_locks_per_kind: usize,
+        max_locks: usize,
         max_total_bytes: usize,
-    ) -> Result<(Vec<crate::api::dto::LockRecordDto>, Vec<crate::api::dto::HmcSyncRow>), StorageError> {
+    ) -> Result<Vec<crate::api::dto::HmcSyncRow>, StorageError> {
         const MIN_SYNC_ENVELOPE_OVERHEAD: usize = 64;
         let content_cap = max_total_bytes.saturating_sub(MIN_SYNC_ENVELOPE_OVERHEAD);
 
         let read_txn = self.db.begin_read()?;
-        let table_locks = read_txn.open_table(TABLE_LOCKS)?;
         let mut accumulated_bytes: usize = 0;
-        let mut native_locks = Vec::new();
-
-        if max_locks_per_kind > 0 && content_cap > 0 {
-            for item in table_locks.iter()? {
-                if native_locks.len() >= max_locks_per_kind {
-                    break;
-                }
-                let (_k_guard, v_guard) = item?;
-                let (record, root_valid_until): (LockRecord, u64) =
-                    bincode::deserialize(v_guard.value())?;
-                if should_prune(SimTime(now_ms), SimTime(root_valid_until))
-                    || record.valid_until.0 <= now_ms
-                {
-                    continue;
-                }
-                let parent_hex = hex::encode(record.parent_lock);
-                let id_hex = hex::encode(record.id);
-                if locators.contains(&parent_hex) || locators.contains(&id_hex) {
-                    continue;
-                }
-                let dto = crate::api::dto::LockRecordDto::from_record(&record, root_valid_until);
-                let dto_bytes = serde_json::to_vec(&dto)?.len();
-                let row_cost = dto_bytes.saturating_add(1);
-                let Some(next_total) = accumulated_bytes.checked_add(row_cost) else {
-                    break;
-                };
-                if next_total > content_cap {
-                    break;
-                }
-                accumulated_bytes = next_total;
-                native_locks.push(dto);
-            }
-        }
 
         let table_hmc = read_txn.open_table(TABLE_HMC_LOCKS)?;
         let table_roots = read_txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
         let table_support = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
         let mut hmc_locks = Vec::new();
 
-        if max_locks_per_kind > 0 && accumulated_bytes < content_cap {
+        if max_locks > 0 && accumulated_bytes < content_cap {
             for item in table_hmc.iter()? {
-                if hmc_locks.len() >= max_locks_per_kind {
+                if hmc_locks.len() >= max_locks {
                     break;
                 }
                 let (k_guard, v_guard) = item?;
@@ -2212,7 +1731,7 @@ impl RedbStorage {
             }
         }
 
-        Ok((native_locks, hmc_locks))
+        Ok(hmc_locks)
     }
 
     /// Performs a consistent snapshot backup of all tables to destination_path using a read transaction.
@@ -2271,24 +1790,7 @@ impl RedbStorage {
         let write_txn = dest_storage.db.begin_write()?;
         let mut locks_count = 0;
         {
-            // 1. TABLE_LOCKS
-            let src_locks = read_txn.open_table(TABLE_LOCKS)?;
-            let mut dst_locks = write_txn.open_table(TABLE_LOCKS)?;
-            for item in src_locks.iter()? {
-                let (k, v) = item?;
-                dst_locks.insert(k.value(), v.value())?;
-                locks_count += 1;
-            }
-
-            // 1b. TABLE_PROVISIONAL_LOCKS
-            let src_prov_locks = read_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
-            let mut dst_prov_locks = write_txn.open_table(TABLE_PROVISIONAL_LOCKS)?;
-            for item in src_prov_locks.iter()? {
-                let (k, v) = item?;
-                dst_prov_locks.insert(k.value(), v.value())?;
-            }
-
-            // 1c. TABLE_PROVISIONAL_HMC_LOCKS
+            // 1. TABLE_PROVISIONAL_HMC_LOCKS
             let src_prov_hmc = read_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             let mut dst_prov_hmc = write_txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)?;
             for item in src_prov_hmc.iter()? {
@@ -2296,20 +1798,12 @@ impl RedbStorage {
                 dst_prov_hmc.insert(k.value(), v.value())?;
             }
 
-            // 1d. TABLE_PROVISIONAL_HMC_VOUCHER_INDEX
+            // 2. TABLE_PROVISIONAL_HMC_VOUCHER_INDEX
             let src_prov_vidx = read_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
             let mut dst_prov_vidx = write_txn.open_table(TABLE_PROVISIONAL_HMC_VOUCHER_INDEX)?;
             for item in src_prov_vidx.iter()? {
                 let (k, v) = item?;
                 dst_prov_vidx.insert(k.value(), v.value())?;
-            }
-
-            // 2. TABLE_TTL_INDEX
-            let src_ttl = read_txn.open_table(TABLE_TTL_INDEX)?;
-            let mut dst_ttl = write_txn.open_table(TABLE_TTL_INDEX)?;
-            for item in src_ttl.iter()? {
-                let (k, v) = item?;
-                dst_ttl.insert(k.value(), v.value())?;
             }
 
             // 3. TABLE_SLASHING_EVIDENCE
@@ -2369,14 +1863,6 @@ impl RedbStorage {
                 dst_tickets.insert(k.value(), v.value())?;
             }
 
-            {
-                let source = read_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
-                let mut destination = write_txn.open_table(support::TABLE_NATIVE_SUPPORT)?;
-                for row in source.iter()? {
-                    let (key, value) = row?;
-                    destination.insert(key.value(), value.value())?;
-                }
-            }
             let support_src = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
             let mut support_dst = write_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;
             for row in support_src.iter()? {
@@ -2623,7 +2109,6 @@ fn encode_hmc_sync_row(
 mod tests {
     use super::*;
     use crate::api::hmc::L2LockEntry;
-    use humoco_sim_core::types::{LockRecord, SimTime};
 
     fn sample_root(voucher_id: &str, valid_until_ms: u64) -> L2LockEntry {
         L2LockEntry {
@@ -2660,18 +2145,6 @@ mod tests {
         let storage = RedbStorage::open(&db_path).expect("open db");
 
         let root_valid_until_ms = 50_000u64;
-        let parent = [42u8; 32];
-        let record = LockRecord::new(
-            parent,
-            [43u8; 32],
-            b"test_record".to_vec(),
-            SimTime(1_000),
-            SimTime(root_valid_until_ms),
-        );
-        storage
-            .put_lock(&record, root_valid_until_ms)
-            .expect("put_lock");
-
         let voucher_id = "test-voucher-50000";
         let root = sample_root(voucher_id, root_valid_until_ms);
         let root_tag = bs58::encode(root.t_id).into_string();
@@ -2684,11 +2157,8 @@ mod tests {
         storage.put_hmc_lock(spend_tag, &spend).expect("put spend");
 
         // now_sec = 79: must NOT delete
-        let (pruned_native_79, pruned_hmc_79) =
-            storage.prune_expired_buckets(79).expect("prune 79");
-        assert_eq!(pruned_native_79.len(), 0);
-        assert_eq!(pruned_hmc_79, 0);
-        assert!(storage.get_lock(&parent).expect("get_lock").is_some());
+        let pruned_79 = storage.prune_expired_buckets(79).expect("prune 79");
+        assert_eq!(pruned_79, 0);
         assert!(storage
             .get_hmc_lock(spend_tag)
             .expect("get_hmc_lock")
@@ -2699,11 +2169,8 @@ mod tests {
             .is_some());
 
         // now_sec = 80: must NOT delete (grace period +30s expires strictly at >80_000 ms)
-        let (pruned_native_80, pruned_hmc_80) =
-            storage.prune_expired_buckets(80).expect("prune 80");
-        assert_eq!(pruned_native_80.len(), 0);
-        assert_eq!(pruned_hmc_80, 0);
-        assert!(storage.get_lock(&parent).expect("get_lock").is_some());
+        let pruned_80 = storage.prune_expired_buckets(80).expect("prune 80");
+        assert_eq!(pruned_80, 0);
         assert!(storage
             .get_hmc_lock(spend_tag)
             .expect("get_hmc_lock")
@@ -2714,11 +2181,8 @@ mod tests {
             .is_some());
 
         // now_sec = 81: MUST delete
-        let (pruned_native_81, pruned_hmc_81) =
-            storage.prune_expired_buckets(81).expect("prune 81");
-        assert!(pruned_native_81.contains(&parent));
-        assert!(pruned_hmc_81 > 0);
-        assert!(storage.get_lock(&parent).expect("get_lock").is_none());
+        let pruned_81 = storage.prune_expired_buckets(81).expect("prune 81");
+        assert!(pruned_81 > 0);
         assert!(storage
             .get_hmc_lock(spend_tag)
             .expect("get_hmc_lock")
@@ -2796,23 +2260,22 @@ mod tests {
 
         {
             let storage = RedbStorage::open(&db_path).expect("open db");
+            let root = sample_root("compact-voucher", 10_000);
+            let root_tag = bs58::encode(root.t_id).into_string();
+            storage.put_hmc_lock(&root_tag, &root).expect("put root");
+
             for i in 0..100u8 {
-                let parent = [i; 32];
-                let record = LockRecord::new(
-                    parent,
-                    [i + 1; 32],
-                    b"payload_data".to_vec(),
-                    SimTime(1_000),
-                    SimTime(10_000),
-                );
-                storage.put_lock(&record, 10_000).expect("put_lock");
+                let mut spend = sample_root("compact-voucher", 10_000);
+                spend.t_id = [i + 1; 32];
+                spend.deletable_at = None;
+                let tag = format!("spend-{}", i);
+                storage.put_hmc_lock(&tag, &spend).expect("put_hmc_lock");
             }
             let _ = storage.prune_expired_buckets(50).expect("prune");
         }
 
         // Run offline compaction
         let freed = RedbStorage::compact_database(&db_path).expect("compact_database");
-        // Compaction succeeds without error (freed is boolean)
         let _ = freed;
 
         // Re-open compacted database to verify integrity
@@ -2875,14 +2338,10 @@ mod tests {
             other => panic!("expected lifetime mismatch error, got {other:?}"),
         }
 
-        // 3. Oversize native lock is rejected by put_lock
-        let big_record = LockRecord::new(
-            [5; 32],
-            [6; 32],
-            vec![0u8; MAX_SYNC_ROW_BYTES + 1],
-            SimTime(1_000),
-            SimTime(50_000),
-        );
-        assert!(storage.put_lock(&big_record, 50_000).is_err());
+        // 3. Oversize HMC lock is rejected
+        let mut big_spend = spend.clone();
+        big_spend.privacy_guard = Some("x".repeat(MAX_SYNC_ROW_BYTES + 1));
+        let big_tag = "big_spend_tag";
+        assert!(storage.put_hmc_lock(big_tag, &big_spend).is_err());
     }
 }

@@ -19,7 +19,45 @@ use humoco_node::network::{NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{
     DualTierEngine, RedbStorage, StorageError, TABLE_OWN_CHOICES, TABLE_SIGNING_STATE,
 };
-use humoco_sim_core::types::{LockRecord, NetworkId, SimTime};
+use humoco_sim_core::types::NetworkId;
+
+fn anchor_root(db: &RedbStorage, voucher_id: &str, valid_until_ms: u64) {
+    let root = L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: voucher_id.into(),
+        t_id: [42; 32],
+        sender_ephemeral_pub: [1; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 1_000,
+        deletable_at: Some(valid_until_ms.to_string()),
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root.t_id).into_string();
+    db.put_hmc_lock(&root_tag, &root).unwrap();
+}
+
+fn make_spend(voucher_id: &str, child: [u8; 32]) -> L2LockEntry {
+    L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: voucher_id.into(),
+        t_id: child,
+        sender_ephemeral_pub: [2; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 1_000,
+        deletable_at: None,
+        privacy_guard: None,
+    }
+}
 use humoco_sim_core::wire::{MsgType, WireHeader, FLAG_COLLISION_DETECTED, FLAG_NOT_READY};
 
 fn test_now_ms() -> u64 {
@@ -106,34 +144,14 @@ fn test_a23_01_runtime_missing_choice_must_fail_closed_and_latch() {
     let node = *identity.node_pubkey();
 
     let valid_until = 50_000u64;
-    let a = LockRecord::new(
-        [1; 32],
-        [2; 32],
-        vec![3],
-        SimTime(1_000),
-        SimTime(valid_until),
-    );
-    let b = LockRecord::new(
-        [1; 32],
-        [4; 32],
-        vec![3],
-        SimTime(1_000),
-        SimTime(valid_until),
-    );
+    anchor_root(&db, "v_runtime", valid_until);
+    let a = make_spend("v_runtime", [2; 32]);
+    let b = make_spend("v_runtime", [4; 32]);
+    let tag = "spend-slot-1";
 
-    // Genuine attestation approval for A
-    let attestation_a = humoco_node::api::routes::create_attestation_for_network(
-        &identity,
-        *blake3::hash(b"op_a").as_bytes(),
-        a.parent_lock,
-        humoco_sim_core::types::extract_shard_id(&a.parent_lock),
-        0,
-        1_000,
-        NetworkId::Mainnet,
-    );
-    let approval_a = bincode::serialize(&attestation_a).unwrap();
+    let approval_a = b"approval_a";
     let committed_a = db
-        .commit_original_record_approval(&a, valid_until, &node, &approval_a, 0)
+        .commit_original_approval(tag, &a, &node, approval_a, 0, valid_until)
         .unwrap();
     assert_eq!(committed_a, approval_a);
     assert!(db.is_signing_history_healthy());
@@ -143,25 +161,14 @@ fn test_a23_01_runtime_missing_choice_must_fail_closed_and_latch() {
     assert_ne!(fp_before, [0u8; 32]);
 
     // Model loss of the logical choice row without modifying independent metadata
-    let tag = hex::encode(a.parent_lock);
     let slot = format!("{}:{}", hex::encode(node), tag);
     db.inject_remove_own_choice_for_test(&slot).unwrap();
 
     // Canonical collision state lawfully replaces with B
-    db.put_lock(&b, valid_until).unwrap();
+    db.put_hmc_lock(tag, &b).unwrap();
 
-    let attestation_b = humoco_node::api::routes::create_attestation_for_network(
-        &identity,
-        *blake3::hash(b"op_b").as_bytes(),
-        b.parent_lock,
-        humoco_sim_core::types::extract_shard_id(&b.parent_lock),
-        0,
-        1_000,
-        NetworkId::Mainnet,
-    );
-    let approval_b = bincode::serialize(&attestation_b).unwrap();
-
-    let result = db.commit_original_record_approval(&b, valid_until, &node, &approval_b, 0);
+    let approval_b = b"approval_b";
+    let result = db.commit_original_approval(tag, &b, &node, approval_b, 0, valid_until);
     assert!(
         matches!(result, Err(StorageError::SigningHistoryCorrupt)),
         "missing retained history must reject contradictory original approval, got {result:?}"
@@ -172,7 +179,7 @@ fn test_a23_01_runtime_missing_choice_must_fail_closed_and_latch() {
     );
 
     // Assert no committed B approval was written
-    let choice = db.own_signing_choice(&node, &tag).unwrap();
+    let choice = db.own_signing_choice(&node, tag).unwrap();
     assert!(
         choice.is_none(),
         "contradictory choice B must never be written to store"
@@ -197,8 +204,9 @@ fn test_a23_01_runtime_malformed_state_and_row_integrity_latches() {
                 .unwrap();
             tx.commit().unwrap();
         }
-        let a = LockRecord::new([1; 32], [2; 32], vec![3], SimTime(1_000), SimTime(50_000));
-        let res = db.commit_original_record_approval(&a, 50_000, &[7; 32], b"A", 0);
+        anchor_root(&db, "v_malformed_state", 50_000);
+        let a = make_spend("v_malformed_state", [2; 32]);
+        let res = db.commit_original_approval("tag_1", &a, &[7; 32], b"A", 0, 50_000);
         assert!(res.is_err(), "parse failure must return error");
         assert!(
             !db.is_signing_history_healthy(),
@@ -210,14 +218,15 @@ fn test_a23_01_runtime_malformed_state_and_row_integrity_latches() {
     {
         let path = dir.path().join("malformed_row.redb");
         let db = RedbStorage::open(&path).unwrap();
-        let a = LockRecord::new([1; 32], [2; 32], vec![3], SimTime(1_000), SimTime(50_000));
+        anchor_root(&db, "v_malformed_row", 50_000);
+        let a = make_spend("v_malformed_row", [2; 32]);
         let node = [7u8; 32];
-        db.commit_original_record_approval(&a, 50_000, &node, b"valid_first", 0)
+        let tag = "tag_row";
+        db.commit_original_approval(tag, &a, &node, b"valid_first", 0, 50_000)
             .unwrap();
         assert!(db.is_signing_history_healthy());
 
         // Corrupt the choice row in redb
-        let tag = hex::encode(a.parent_lock);
         let slot = format!("{}:{}", hex::encode(node), tag);
         {
             let raw = db.raw_database_for_test();
@@ -229,7 +238,7 @@ fn test_a23_01_runtime_malformed_state_and_row_integrity_latches() {
             tx.commit().unwrap();
         }
 
-        let res = db.commit_original_record_approval(&a, 50_000, &node, b"retry", 0);
+        let res = db.commit_original_approval(tag, &a, &node, b"retry", 0, 50_000);
         assert!(
             matches!(res, Err(StorageError::SigningHistoryCorrupt)),
             "corrupt existing choice row must fail closed, got {res:?}"
@@ -248,21 +257,22 @@ fn test_a23_01_persisted_latch_survives_reopen_and_backup() {
     let path = dir.path().join("persist_latch.redb");
     let backup_path = dir.path().join("persist_latch_backup.redb");
     let node = [9u8; 32];
-    let a = LockRecord::new([10; 32], [11; 32], vec![1], SimTime(1_000), SimTime(50_000));
-    let b = LockRecord::new([10; 32], [12; 32], vec![1], SimTime(1_000), SimTime(50_000));
+    let tag = "tag_persist";
 
     {
         let db = RedbStorage::open(&path).unwrap();
-        db.commit_original_record_approval(&a, 50_000, &node, b"original_a", 0)
+        anchor_root(&db, "v_persist", 50_000);
+        let a = make_spend("v_persist", [11; 32]);
+        let b = make_spend("v_persist", [12; 32]);
+        db.commit_original_approval(tag, &a, &node, b"original_a", 0, 50_000)
             .unwrap();
 
         // Invalidate table cardinality
-        let tag = hex::encode(a.parent_lock);
         let slot = format!("{}:{}", hex::encode(node), tag);
         db.inject_remove_own_choice_for_test(&slot).unwrap();
 
         // Trigger runtime integrity latch
-        let res = db.commit_original_record_approval(&b, 50_000, &node, b"original_b", 0);
+        let res = db.commit_original_approval(tag, &b, &node, b"original_b", 0, 50_000);
         assert!(matches!(res, Err(StorageError::SigningHistoryCorrupt)));
         assert!(!db.is_signing_history_healthy());
 
@@ -639,13 +649,14 @@ fn test_a23_r1_semantic_row_substitution_detected_at_runtime_and_latches_corrupt
     let dir = tempdir().unwrap();
     let path = dir.path().join("row_substitution.redb");
     let node = [42u8; 32];
-    let record_a = LockRecord::new([1; 32], [2; 32], vec![3], SimTime(1_000), SimTime(50_000));
-    let tag = hex::encode(record_a.parent_lock);
+    let tag = "tag_sub";
     let slot = format!("{}:{}", hex::encode(node), tag);
 
     {
         let db = RedbStorage::open(&path).unwrap();
-        db.commit_original_record_approval(&record_a, 50_000, &node, b"approval_a", 0)
+        anchor_root(&db, "v_sub", 50_000);
+        let record_a = make_spend("v_sub", [2; 32]);
+        db.commit_original_approval(tag, &record_a, &node, b"approval_a", 0, 50_000)
             .unwrap();
         assert!(db.is_signing_history_healthy());
 
@@ -670,7 +681,7 @@ fn test_a23_r1_semantic_row_substitution_detected_at_runtime_and_latches_corrupt
         }
 
         // Now attempt an operation on this slot:
-        let res = db.commit_original_record_approval(&record_a, 50_000, &node, b"retry", 0);
+        let res = db.commit_original_approval(tag, &record_a, &node, b"retry", 0, 50_000);
         assert!(
             matches!(res, Err(StorageError::SigningHistoryCorrupt)),
             "semantic row substitution must be detected and return SigningHistoryCorrupt, got {res:?}"
@@ -692,7 +703,9 @@ fn test_a23_r1_semantic_row_substitution_detected_at_runtime_and_latches_corrupt
     let path2 = dir.path().join("commitment_substitution.redb");
     {
         let db = RedbStorage::open(&path2).unwrap();
-        db.commit_original_record_approval(&record_a, 50_000, &node, b"approval_a", 0)
+        anchor_root(&db, "v_sub2", 50_000);
+        let record_a = make_spend("v_sub2", [2; 32]);
+        db.commit_original_approval(tag, &record_a, &node, b"approval_a", 0, 50_000)
             .unwrap();
         assert!(db.is_signing_history_healthy());
 
@@ -707,7 +720,7 @@ fn test_a23_r1_semantic_row_substitution_detected_at_runtime_and_latches_corrupt
             tx.commit().unwrap();
         }
 
-        let res = db.commit_original_record_approval(&record_a, 50_000, &node, b"retry", 0);
+        let res = db.commit_original_approval(tag, &record_a, &node, b"retry", 0, 50_000);
         assert!(
             matches!(res, Err(StorageError::SigningHistoryCorrupt)),
             "tampered commitment must fail closed with SigningHistoryCorrupt"

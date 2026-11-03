@@ -584,10 +584,9 @@ async fn test_api_status_and_sync() {
     assert_eq!(res_sync.status(), StatusCode::OK);
     let sync_resp: SyncResponse = response_json(res_sync).await;
     assert!(
-        sync_resp.locks.is_empty(),
+        sync_resp.hmc_locks.is_empty(),
         "a root anchor is not a sync collision row"
     );
-    assert!(sync_resp.hmc_locks.is_empty());
     assert!(_storage
         .voucher_root(&req_lock.layer2_voucher_id)
         .unwrap()
@@ -610,7 +609,6 @@ async fn test_api_status_and_sync() {
         .unwrap();
     assert_eq!(res_sync_filt.status(), StatusCode::OK);
     let sync_resp_filt: SyncResponse = response_json(res_sync_filt).await;
-    assert!(sync_resp_filt.locks.is_empty());
     assert!(sync_resp_filt.hmc_locks.is_empty());
 }
 
@@ -776,22 +774,8 @@ async fn test_node_request_handler_lock_verify_and_digest() {
     let handler = NodeRequestHandler::new(engine.clone(), storage.clone(), identity.clone())
         .with_readiness_manager(readiness);
 
-    // 1a. Legacy tuple / Sim bypass must be hard-rejected (Phase 1 P0).
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let mut parent_lock = [0x44; 32];
-    parent_lock[0] = 0;
-    parent_lock[1] = 1;
-    let record = humoco_sim_core::types::LockRecord::new(
-        parent_lock,
-        [0x33; 32],
-        vec![0x01, 0x02],
-        humoco_sim_core::types::SimTime(now_ms),
-        humoco_sim_core::types::SimTime(now_ms + 60_000),
-    );
-    let legacy_payload = bincode::serialize(&(record.clone(), now_ms + 600_000u64)).unwrap();
+    // 1a. Legacy / Sim bypass must be hard-rejected (Phase 1 P0).
+    let legacy_payload = vec![0x44; 64];
     let legacy_header = WireHeader::new(
         MsgType::LockVerifyRequest as u16,
         1,
@@ -5046,15 +5030,29 @@ async fn test_storage_failure_never_returns_success_for_single_or_chain_ingress(
 #[tokio::test]
 async fn test_api_retained_own_choice_read_only_endpoint() {
     let (app, storage, identity, _tier_controller, _) = setup_test_app();
-    let parent = [88u8; 32];
-    let record = humoco_sim_core::types::LockRecord::new(
-        parent,
-        [99u8; 32],
-        vec![1, 2, 3],
-        humoco_sim_core::types::SimTime(1_000),
-        humoco_sim_core::types::SimTime(600_000),
-    );
-    let tag = hex::encode(parent);
+    let root_key = SigningKey::from_bytes(&[0x61; 32]);
+    let root_req = make_test_hmc_genesis("voucher_retained_choice", 600_000, &root_key);
+    let root_entry = humoco_node::api::hmc::L2LockEntry::from(&root_req);
+    let root_tag = bs58::encode(root_entry.t_id).into_string();
+    storage.put_hmc_lock(&root_tag, &root_entry).unwrap();
+
+    let tag = hex::encode([88u8; 32]);
+    let entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: root_req.layer2_voucher_id.clone(),
+        t_id: [99u8; 32],
+        sender_ephemeral_pub: [1u8; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0u8; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 1000,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    storage.put_hmc_lock(&tag, &entry).unwrap();
 
     // 1. Not found initially
     let response = app
@@ -5071,19 +5069,9 @@ async fn test_api_retained_own_choice_read_only_endpoint() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     // 2. Commit own approval
-    let shard = u16::from_be_bytes([parent[0], parent[1]]);
-    let approval = humoco_node::api::routes::create_attestation_for_network(
-        &identity,
-        record.id,
-        parent,
-        shard,
-        0,
-        1_000,
-        humoco_sim_core::types::NetworkId::Mainnet,
-    );
-    let original = bincode::serialize(&approval).unwrap();
+    let original = b"original_approval_fixture".to_vec();
     storage
-        .commit_original_record_approval(&record, 600_000, identity.node_pubkey(), &original, 0)
+        .commit_original_approval(&tag, &entry, identity.node_pubkey(), &original, 0, 600_000)
         .unwrap();
 
     // 3. Now found and truthfully reported without state mutations!
@@ -5101,7 +5089,7 @@ async fn test_api_retained_own_choice_read_only_endpoint() {
     assert_eq!(response2.status(), StatusCode::OK);
     let body: serde_json::Value = response_json(response2).await;
     assert_eq!(body["found"], true);
-    assert_eq!(body["child"], hex::encode(record.id));
+    assert_eq!(body["child"], hex::encode(entry.t_id));
     assert_eq!(body["has_provisional"], true);
     assert_eq!(body["has_final"], false);
     assert_eq!(body["node_pubkey"], hex::encode(identity.node_pubkey()));
@@ -5118,15 +5106,7 @@ async fn test_api_retained_own_choice_read_only_endpoint() {
         Some(original.clone())
     );
     let returned = hex::decode(body["provisional_approval"].as_str().unwrap()).unwrap();
-    let decoded: humoco_node::api::dto::AttestationDto = bincode::deserialize(&returned).unwrap();
-    let digest =
-        humoco_proto::live::original_approval_digest(0, shard, 0, &parent, &record.id).unwrap();
-    let signature =
-        ed25519_dalek::Signature::from_slice(&hex::decode(decoded.signature).unwrap()).unwrap();
-    identity
-        .verifying_key()
-        .verify_strict(&digest, &signature)
-        .expect("retained original verifies with shared protocol");
+    assert_eq!(returned, original);
 }
 
 #[tokio::test]
@@ -5694,24 +5674,7 @@ async fn test_s01_03_bounded_materialization_and_locator_semantics() {
     let ttl_ms = 600_000u64;
 
     // 1. Populate storage with native locks (12 locks)
-    let mut native_parent_hexes = Vec::new();
-    let mut native_id_hexes = Vec::new();
-    for i in 0..12u8 {
-        let parent = [i + 1; 32];
-        let id = [i + 100; 32];
-        let rec = humoco_sim_core::types::LockRecord::new(
-            parent,
-            id,
-            vec![i],
-            humoco_sim_core::types::SimTime(now),
-            humoco_sim_core::types::SimTime(now + ttl_ms),
-        );
-        storage.put_lock(&rec, now + ttl_ms).expect("put lock");
-        native_parent_hexes.push(hex::encode(parent));
-        native_id_hexes.push(hex::encode(id));
-    }
-
-    // 2. Populate storage with HMC locks (1 root + 12 spend locks)
+    // 1. Populate storage with HMC locks (1 root + 12 spend locks)
     let root_key = SigningKey::from_bytes(&[0x60; 32]);
     let root_voucher = "voucher_s01_03_mat";
     let root_req = make_test_hmc_genesis(&root_voucher.repeat(2), now + ttl_ms, &root_key);
@@ -5738,26 +5701,19 @@ async fn test_s01_03_bounded_materialization_and_locator_semantics() {
         hmc_id_hexes.push(hex::encode(spend_entry.t_id));
     }
 
-    // Direct helper check with locators and max_locks_per_kind = 4
+    // Direct helper check with locators and max_locks = 4
     let mut locators = std::collections::HashSet::new();
-    locators.insert(native_parent_hexes[0].clone());
-    locators.insert(native_id_hexes[1].clone());
     locators.insert(hmc_tags[0].clone());
     locators.insert(hmc_id_hexes[1].clone());
 
-    let (locks, hmc_locks) = storage
+    let hmc_locks = storage
         .read_committed_sync_snapshot_bounded(now, &locators, 4, 10_000_000)
         .expect("read bounded snapshot");
 
-    // Must be bounded exactly by max_locks_per_kind (4)
-    assert_eq!(locks.len(), 4, "native locks must be capped at 4");
+    // Must be bounded exactly by max_locks (4)
     assert_eq!(hmc_locks.len(), 4, "hmc locks must be capped at 4");
 
     // Filtered locators must NOT be present in results
-    for lock in &locks {
-        assert_ne!(lock.parent_lock, native_parent_hexes[0]);
-        assert_ne!(lock.id, native_id_hexes[1]);
-    }
     for hmc in &hmc_locks {
         assert_ne!(hmc.lookup_tag, hmc_tags[0]);
         assert_ne!(hex::encode(hmc.entry.t_id), hmc_id_hexes[1]);
@@ -5765,7 +5721,7 @@ async fn test_s01_03_bounded_materialization_and_locator_semantics() {
 
     // HTTP /v1/sync check:
     let sync_req = SyncRequest {
-        sparse_locators: vec![native_parent_hexes[0].clone(), hmc_tags[0].clone()],
+        sparse_locators: vec![hmc_tags[0].clone()],
     };
     let resp = app
         .oneshot(
@@ -5792,9 +5748,9 @@ async fn test_s01_03_bounded_materialization_and_locator_semantics() {
 
     // Filtered locators must be absent in response
     assert!(!sync_resp
-        .locks
+        .hmc_locks
         .iter()
-        .any(|l| l.parent_lock == native_parent_hexes[0]));
+        .any(|l| l.lookup_tag == hmc_tags[0]));
     assert!(!sync_resp
         .hmc_locks
         .iter()
@@ -5833,7 +5789,7 @@ async fn test_s01_03_bounded_serialized_response_bytes() {
 
     // 1. Direct helper: pass a tight byte budget of 5000 bytes (each HMC row is ~1.5-2 KiB JSON)
     let byte_cap = 5000;
-    let (locks, hmc_locks) = storage
+    let hmc_locks = storage
         .read_committed_sync_snapshot_bounded(
             now,
             &std::collections::HashSet::new(),
@@ -5842,14 +5798,13 @@ async fn test_s01_03_bounded_serialized_response_bytes() {
         )
         .expect("read bounded snapshot");
 
-    assert!(locks.is_empty());
     assert!(!hmc_locks.is_empty(), "should contain as many as fit");
     assert!(
         hmc_locks.len() < 20,
         "must be truncated well before all 20 rows"
     );
 
-    let sync_resp = SyncResponse { locks, hmc_locks };
+    let sync_resp = SyncResponse { hmc_locks };
     let serialized_len = serde_json::to_vec(&sync_resp).expect("serialize").len();
     assert!(
         serialized_len <= byte_cap,

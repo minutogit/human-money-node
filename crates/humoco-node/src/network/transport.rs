@@ -588,34 +588,13 @@ impl RequestHandler for NodeRequestHandler {
                 };
                 let write_limit = (5.0 * ncb_eff as f64).round() as u64;
 
-                // # Architectural Invariant: P2P Quota-Bypass Closure (Phase 1 P0)
-                //
-                // The QUIC LockVerify path accepts ONLY `LockWirePayload::Hmc`. Simulator
-                // (`LockWirePayload::Sim`) and legacy raw-tuple `(LockRecord, u64)` framings
-                // are test relics that bypass sender authentication, epoch-bound envelope
-                // signatures, and per-sender quota accounting. They are hard-rejected with
-                // FLAG_UNAUTHORIZED so production quota enforcement cannot be circumvented
-                // over the wire.
                 let wire_payload = match bincode::deserialize::<
                     crate::network::framing::LockWirePayload,
                 >(&payload)
                 {
-                    Ok(p) => {
-                        if matches!(p, crate::network::framing::LockWirePayload::Sim(..)) {
-                            warn!("LockVerifyRequest rejected: Sim payload bypass forbidden on P2P wire");
-                            let resp_header = WireHeader::new(
-                                MsgType::LockVerifyResponse as u16,
-                                header.session_seq.wrapping_add(1),
-                                header.epoch_id,
-                                humoco_sim_core::wire::FLAG_UNAUTHORIZED,
-                                0,
-                            );
-                            return Ok((resp_header, Vec::new()));
-                        }
-                        p
-                    }
+                    Ok(p) => p,
                     Err(_) => {
-                        warn!("LockVerifyRequest rejected: invalid payload framing (legacy tuple bypass forbidden)");
+                        warn!("LockVerifyRequest rejected: invalid payload framing");
                         let resp_header = WireHeader::new(
                             MsgType::LockVerifyResponse as u16,
                             header.session_seq.wrapping_add(1),
@@ -636,17 +615,6 @@ impl RequestHandler for NodeRequestHandler {
                 // parent lookups on the hot path. Hex-encoded voucher IDs use the
                 // first 2 bytes (big-endian); all others fall back to BLAKE3.
                 let shard_id = match &wire_payload {
-                    crate::network::framing::LockWirePayload::Sim(..) => {
-                        warn!("LockVerifyRequest rejected: Sim payload unreachable (defense in depth)");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
                     crate::network::framing::LockWirePayload::Hmc { req, chain, .. } => {
                         let voucher_id = chain
                             .as_ref()
@@ -843,17 +811,6 @@ impl RequestHandler for NodeRequestHandler {
                 // The envelope digest commits to sender's timestamp_ms (fresh within 30s drift window)
                 let effective_ts = timestamp_ms;
                 let (op_hash, footprint, total_by) = match &wire_payload {
-                    crate::network::framing::LockWirePayload::Sim(..) => {
-                        warn!("LockVerifyRequest rejected: Sim payload unreachable");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
                     crate::network::framing::LockWirePayload::Hmc {
                         req,
                         root_valid_until,
@@ -1144,7 +1101,6 @@ impl RequestHandler for NodeRequestHandler {
                             false
                         }
                     }
-                    _ => false,
                 };
 
                 if let Some(tc) = &tier_controller {
@@ -1170,17 +1126,6 @@ impl RequestHandler for NodeRequestHandler {
                 // Reservation-First is complete at this point (quota reserved in step 8);
                 // only now may RAM/persistence be touched.
                 match wire_payload {
-                    crate::network::framing::LockWirePayload::Sim(..) => {
-                        warn!("LockVerifyRequest rejected: Sim payload forbidden at mutation gate");
-                        let resp_header = WireHeader::new(
-                            MsgType::LockVerifyResponse as u16,
-                            header.session_seq.wrapping_add(1),
-                            header.epoch_id,
-                            humoco_sim_core::wire::FLAG_UNAUTHORIZED,
-                            0,
-                        );
-                        return Ok((resp_header, Vec::new()));
-                    }
                     crate::network::framing::LockWirePayload::Hmc { req, chain, .. } => {
                         if req.is_genesis
                             && chain.as_ref().is_none_or(|chain| chain.chain.len() == 1)
@@ -1773,22 +1718,9 @@ impl RequestHandler for NodeRequestHandler {
                     let mut is_match = false;
                     let mut tag_entry: Option<crate::api::hmc::L2LockEntry> = None;
                     let mut tag_root: Option<u64> = None;
-                    // Cheap native lookup stays in RAM; pending data is only an observation.
-                    let stored = engine.get_ram_lock(&parent_lock).await;
-                    if let Some(rec) = stored {
-                        let expected_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
-                        if rec.id == lock_id
-                            && rec.parent_lock == parent_lock
-                            && shard_id == expected_shard
-                            && rec.valid_until.0 >= now_ms
-                        {
-                            is_match = true;
-                        }
-                    }
 
                     // Check HMC lock in HMC RAM
-                    if !is_match {
-                        let hmc = engine.hmc_ram.read().await;
+                    let hmc = engine.hmc_ram.read().await;
                         // Tag-only gateway fallback: lock_id zero means "any lock on
                         // this parent tag". Resolve to full entry below.
                         let is_tag_only = lock_id == [0u8; 32];
@@ -1853,7 +1785,6 @@ impl RequestHandler for NodeRequestHandler {
                                 break;
                             }
                         }
-                    }
                     (is_match, tag_entry, tag_root)
                 };
 
@@ -2187,14 +2118,14 @@ impl RequestHandler for NodeRequestHandler {
                         .map_err(|e| NodeError::Network(format!("committed buckets unavailable: {e}")))?;
 
                     // Single O(N) partitioning pass for requested bucket range
-                    let mut partitioned: std::collections::HashMap<u64, Vec<humoco_sim_core::types::LockRecord>> =
-                        std::collections::HashMap::with_capacity(bucket_count.min(locks.len()));
+                    let mut partitioned: std::collections::HashMap<
+                        u64,
+                        Vec<crate::storage::db::projection::CommittedShardRecord>,
+                    > = std::collections::HashMap::with_capacity(bucket_count.min(locks.len()));
                     for lock in locks {
-                        if !lock.status.is_void() {
-                            let b_id = humoco_sim_core::types::timestamp_to_bucket_id(lock.created_at.0);
-                            if b_id >= start_bucket && b_id < end_bucket {
-                                partitioned.entry(b_id).or_default().push(lock);
-                            }
+                        let b_id = humoco_sim_core::types::timestamp_to_bucket_id(lock.created_at_ms);
+                        if b_id >= start_bucket && b_id < end_bucket {
+                            partitioned.entry(b_id).or_default().push(lock);
                         }
                     }
 
@@ -3431,7 +3362,6 @@ impl QuicTransport {
         conn: &quinn::Connection,
         seq: u64,
     ) -> Result<crate::network::framing::SyncPayload, NodeError> {
-        let mut all_locks = Vec::new();
         let mut all_hmc = Vec::new();
         let mut cursor = 0u64;
         let mut current_seq = seq;
@@ -3441,9 +3371,7 @@ impl QuicTransport {
                 .request_active_sync_page(conn, current_seq, cursor, 500)
                 .await?;
             current_seq = current_seq.wrapping_add(1);
-            let count = all_locks.len()
-                + all_hmc.len()
-                + resp.payload.locks.len()
+            let count = all_hmc.len()
                 + resp.payload.hmc_locks.len();
             if count > 10_000 {
                 return Err(NodeError::LocalCapacity(
@@ -3455,7 +3383,6 @@ impl QuicTransport {
             if aggregate_bytes > 512 * 1024 {
                 return Err(NodeError::LocalCapacity("active sync aggregate byte limit"));
             }
-            all_locks.extend(resp.payload.locks);
             all_hmc.extend(resp.payload.hmc_locks);
             if !resp.has_more {
                 break;
@@ -3465,9 +3392,7 @@ impl QuicTransport {
                 _ => break,
             }
         }
-        Ok(crate::network::framing::SyncPayload::new(
-            all_locks, all_hmc,
-        ))
+        Ok(crate::network::framing::SyncPayload::new(all_hmc))
     }
 
     /// Spawns the incoming connection accept loop in the background.

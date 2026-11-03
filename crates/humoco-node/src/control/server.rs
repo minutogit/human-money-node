@@ -243,7 +243,7 @@ impl ControlServer {
             let response = match request {
                 ControlRequest::GetStatus => {
                     let uptime_sec = state.start_time.elapsed().as_secs();
-                    let active_locks = state.engine.ram.read().await.len();
+                    let active_locks = state.engine.hmc_ram.read().await.locks.len();
                     let peers_connected = state.peer_manager.connected_peer_count().await;
                     let hrw_hex = state.identity.hrw_routing_id_hex();
                     let t0 = state.identity.t0();
@@ -386,7 +386,7 @@ impl ControlServer {
                     },
                 },
                 ControlRequest::GetDbStats => {
-                    let ram_locks = state.engine.ram.read().await.len() as u64;
+                    let ram_locks = state.engine.hmc_ram.read().await.locks.len() as u64;
                     match state.storage.get_stats() {
                         Ok((disk_locks, db_size_bytes, page_allocations)) => {
                             ControlResponse::DbStats {

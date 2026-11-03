@@ -12,7 +12,6 @@
 //!    - Physics trumps negotiation: all 20 nodes deterministically converge to Lock A via min(H_canon).
 //!    - Lock B becomes VOID and is displaced from RAM.
 //!    - The double-spending sender is banned network-wide for equivocation.
-//! 3. Also validates simulation core LockRecord split-brain convergence (13 vs 7).
 
 use std::sync::Arc;
 
@@ -22,9 +21,6 @@ use tempfile::tempdir;
 use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockEntry, L2LockRequest};
 use humoco_node::storage::engine::compute_hmc_canonical_hash;
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
-use humoco_sim_core::crypto::compute_canonical_hash;
-use humoco_sim_core::types::{Hash256, LockRecord, LockStatus, SimTime};
-use humoco_sim_core::IngressVerdictLow;
 
 fn test_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -315,167 +311,4 @@ async fn test_subquorum_hmc_13_vs_7_minority_with_lower_hash_prevails() {
     }
 }
 
-#[tokio::test]
-async fn test_subquorum_core_lock_record_13_vs_7_minority_with_lower_hash_prevails() {
-    let temp = tempdir().expect("tempdir");
 
-    // Initialize 20 nodes for core LockRecord domain
-    let mut engines = Vec::with_capacity(20);
-    let mut _workers = Vec::with_capacity(20);
-
-    for i in 0..20 {
-        let db_path = temp.path().join(format!("core_node_{i}.redb"));
-        let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
-        let (engine, worker) = DualTierEngine::new(storage);
-        engines.push(engine);
-        _workers.push(worker);
-    }
-
-    let parent_lock: Hash256 = [0x55u8; 32];
-    let receiver_pub: Hash256 = [0x66u8; 32];
-    let now = SimTime(100_000);
-    let valid_until = SimTime(200_000);
-    let root_valid_until = SimTime(300_000);
-
-    // Pick two nonces such that H_canon(A) < H_canon(B)
-    let mut nonce_1: Hash256 = [0x11u8; 32];
-    let mut nonce_2: Hash256 = [0x22u8; 32];
-
-    let mut h1 = compute_canonical_hash(&parent_lock, &receiver_pub, &nonce_1);
-    let mut h2 = compute_canonical_hash(&parent_lock, &receiver_pub, &nonce_2);
-
-    if h1 > h2 {
-        std::mem::swap(&mut nonce_1, &mut nonce_2);
-        std::mem::swap(&mut h1, &mut h2);
-    }
-    assert!(h1 < h2);
-
-    let id_a = {
-        let mut hasher = blake3::Hasher::new();
-        let tag = b"HUMOCO_V1_LOCK_ID";
-        hasher.update(&[tag.len() as u8]);
-        hasher.update(tag);
-        hasher.update(&parent_lock);
-        hasher.update(&receiver_pub);
-        hasher.update(&nonce_1);
-        hasher.update(&now.0.to_le_bytes());
-        hasher.update(&valid_until.0.to_le_bytes());
-        *hasher.finalize().as_bytes()
-    };
-
-    let id_b = {
-        let mut hasher = blake3::Hasher::new();
-        let tag = b"HUMOCO_V1_LOCK_ID";
-        hasher.update(&[tag.len() as u8]);
-        hasher.update(tag);
-        hasher.update(&parent_lock);
-        hasher.update(&receiver_pub);
-        hasher.update(&nonce_2);
-        hasher.update(&now.0.to_le_bytes());
-        hasher.update(&valid_until.0.to_le_bytes());
-        *hasher.finalize().as_bytes()
-    };
-
-    let mut lock_a = LockRecord::new(
-        parent_lock,
-        receiver_pub,
-        nonce_1.to_vec(),
-        now,
-        valid_until,
-    );
-    lock_a.status = LockStatus::Provisional {
-        sigs: 7,
-        required: 14,
-    };
-
-    let mut lock_b = LockRecord::new(
-        parent_lock,
-        receiver_pub,
-        nonce_2.to_vec(),
-        now,
-        valid_until,
-    );
-    lock_b.status = LockStatus::Provisional {
-        sigs: 13,
-        required: 14,
-    };
-
-    // Partition A (7 nodes) ingests Lock A
-    for i in 0..7 {
-        let res = engines[i]
-            .ingress_lock_with_origin(
-                lock_a.clone(),
-                now,
-                root_valid_until,
-                IngressOrigin::ClientApi,
-            )
-            .await;
-        assert_eq!(res, Ok(IngressVerdictLow::AcceptedNew));
-        assert_eq!(
-            engines[i].get_ram_lock(&parent_lock).await.map(|r| r.id),
-            Some(id_a)
-        );
-    }
-
-    // Partition B (13 nodes) ingests Lock B
-    for i in 7..20 {
-        let res = engines[i]
-            .ingress_lock_with_origin(
-                lock_b.clone(),
-                now,
-                root_valid_until,
-                IngressOrigin::ClientApi,
-            )
-            .await;
-        assert_eq!(res, Ok(IngressVerdictLow::AcceptedNew));
-        assert_eq!(
-            engines[i].get_ram_lock(&parent_lock).await.map(|r| r.id),
-            Some(id_b)
-        );
-    }
-
-    // P2P PartitionSync:
-    // Partition B receives Lock A
-    for i in 7..20 {
-        let res = engines[i]
-            .ingress_lock_with_origin(
-                lock_a.clone(),
-                now,
-                root_valid_until,
-                IngressOrigin::PartitionSync,
-            )
-            .await;
-        assert_eq!(
-            res,
-            Ok(IngressVerdictLow::AcceptedNew),
-            "Node {i} must replace Lock B with winning Lock A"
-        );
-    }
-
-    // Partition A receives Lock B
-    for i in 0..7 {
-        let res = engines[i]
-            .ingress_lock_with_origin(
-                lock_b.clone(),
-                now,
-                root_valid_until,
-                IngressOrigin::PartitionSync,
-            )
-            .await;
-        assert_eq!(
-            res,
-            Err(IngressVerdictLow::RejectedCollision),
-            "Node {i} must reject losing Lock B"
-        );
-    }
-
-    // All 20 nodes deterministically hold Lock A
-    for (i, engine) in engines.iter().enumerate() {
-        let rec = engine
-            .get_ram_lock(&parent_lock)
-            .await
-            .expect("record must exist");
-        assert_eq!(rec.id, id_a, "Node {i} must hold Lock A");
-        assert_ne!(rec.id, id_b, "Node {i} must not hold Lock B");
-    }
-}

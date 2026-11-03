@@ -492,7 +492,6 @@ async fn test_e2e_cluster_lock_and_sync() {
         .hmc_locks
         .iter()
         .any(|r| hex::encode(r.entry.t_id) == tx_id_hex));
-    assert!(sync_resp0.locks.is_empty());
 
     // 3. Verify lock presence after shard-direct collection; exact client replay may repair a missing replica.
     let mut found_node2 = false;
@@ -503,7 +502,6 @@ async fn test_e2e_cluster_lock_and_sync() {
                     .hmc_locks
                     .iter()
                     .any(|r| hex::encode(r.entry.t_id) == tx_id_hex)
-                && sync_resp.locks.is_empty()
             {
                 found_node2 = true;
                 break;
@@ -532,7 +530,6 @@ async fn test_e2e_cluster_lock_and_sync() {
                     .hmc_locks
                     .iter()
                     .any(|r| hex::encode(r.entry.t_id) == tx_id_hex)
-                && sync_resp.locks.is_empty()
             {
                 found_node3 = true;
                 break;
@@ -997,11 +994,10 @@ async fn test_e2e_bootstrap_n2_stays_closed_without_justified_activation() {
     for _ in 0..100 {
         if let Ok((status, sync_resp)) = node_b.post_sync(&sync_req).await {
             if status == StatusCode::OK
-                && (sync_resp.locks.iter().any(|l| l.id == tx_id_hex)
-                    || sync_resp
-                        .hmc_locks
-                        .iter()
-                        .any(|r| hex::encode(r.entry.t_id) == tx_id_hex))
+                && sync_resp
+                    .hmc_locks
+                    .iter()
+                    .any(|r| hex::encode(r.entry.t_id) == tx_id_hex)
             {
                 synced = true;
                 break;
@@ -1111,11 +1107,10 @@ async fn test_e2e_churn_preserves_frozen_quorum_and_restart_gate() {
     for _ in 0..100 {
         if let Ok((status, sync_resp)) = node_2_respawned.post_sync(&sync_req).await {
             if status == StatusCode::OK
-                && (sync_resp.locks.iter().any(|l| l.id == tx_id_2)
-                    || sync_resp
-                        .hmc_locks
-                        .iter()
-                        .any(|r| hex::encode(r.entry.t_id) == tx_id_2))
+                && sync_resp
+                    .hmc_locks
+                    .iter()
+                    .any(|r| hex::encode(r.entry.t_id) == tx_id_2)
             {
                 has_lock_2 = true;
                 break;
@@ -1149,61 +1144,35 @@ async fn test_e2e_sync_garbage_and_invalid_lock_rejection() {
 
     let now_ms = 1_000_000u64;
 
-    // 1. Ingest lock with expired TTL (valid_until < now)
-    let expired_lock = humoco_sim_core::types::LockRecord::new(
-        [0x33u8; 32],
-        [0x44u8; 32],
-        b"nonce_expired".to_vec(),
-        humoco_sim_core::types::SimTime(now_ms - 200_000),
-        humoco_sim_core::types::SimTime(now_ms - 50_000),
-    );
-
-    let res = engine
-        .ingress_lock_with_origin(
-            expired_lock,
-            humoco_sim_core::types::SimTime(now_ms),
-            humoco_sim_core::types::SimTime(now_ms + 100_000),
+    // 1. Ingest HMC lock with expired TTL (now_ms > deletable_at)
+    let expired_hmc_entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: "test_voucher_expired".into(),
+        t_id: [0x33u8; 32],
+        layer2_signature: [0xAAu8; 64],
+        sender_ephemeral_pub: [0x44u8; 32],
+        encrypted_timestamp: now_ms as u128,
+        created_at_ms: now_ms - 200_000,
+        deletable_at: Some((now_ms - 50_000).to_string()),
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        trap_r: None,
+        trap_s: None,
+        privacy_guard: None,
+    };
+    let (res_exp, is_new_exp) = engine
+        .ingress_hmc_lock_with_origin(
+            "expired_tag".to_string(),
+            expired_hmc_entry,
             humoco_node::storage::IngressOrigin::PartitionSync,
+            Some(now_ms),
         )
         .await;
-
+    assert!(!is_new_exp, "Expired HMC lock must not be inserted");
     assert!(matches!(
-        res,
-        Ok(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow) | Err(_)
+        res_exp,
+        humoco_node::api::hmc::L2Verdict::Rejected { .. }
     ));
-    assert_eq!(
-        engine.ram.read().await.len(),
-        0,
-        "Expired lock must not be inserted into RAM"
-    );
-
-    // 2. Ingest lock with root_valid_until < valid_until (invalid causality / origin mandate)
-    let invalid_root_lock = humoco_sim_core::types::LockRecord::new(
-        [0x55u8; 32],
-        [0x66u8; 32],
-        b"nonce_invalid_root".to_vec(),
-        humoco_sim_core::types::SimTime(now_ms),
-        humoco_sim_core::types::SimTime(now_ms + 60_000),
-    );
-
-    let res2 = engine
-        .ingress_lock_with_origin(
-            invalid_root_lock,
-            humoco_sim_core::types::SimTime(now_ms),
-            humoco_sim_core::types::SimTime(now_ms + 10_000), // root expires before successor lock!
-            humoco_node::storage::IngressOrigin::PartitionSync,
-        )
-        .await;
-
-    assert!(matches!(
-        res2,
-        Ok(humoco_sim_core::storage::IngressVerdictLow::RejectedWindow) | Err(_)
-    ));
-    assert_eq!(
-        engine.ram.read().await.len(),
-        0,
-        "Invalid root validity lock must not be inserted"
-    );
 
     // 3. Ingest HMC lock with missing voucher root and invalid deletable_at
     let invalid_hmc_entry = humoco_node::api::hmc::L2LockEntry {

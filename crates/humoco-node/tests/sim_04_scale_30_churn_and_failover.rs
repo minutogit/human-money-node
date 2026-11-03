@@ -17,8 +17,7 @@ use rand::{Rng, SeedableRng};
 use humoco_node::api::hmc::{L2AuthPayload, L2LockEntry, L2StatusQuery, L2Verdict};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::network::{PeerManager, QuicTransport};
-use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
-use humoco_sim_core::storage::RamIndex;
+use humoco_node::storage::{DualTierEngine, HmcRamIndex, IngressOrigin, RedbStorage};
 use humoco_sim_core::types::SimTime;
 
 use simulation::{MeshSimulator, SimWallet};
@@ -381,9 +380,31 @@ async fn test_sim_04_scale_30_churn_and_failover() {
         format!("All 10 passive must remain untouched (UnknownVoucher), got {untouched}/10"),
     );
 
-    // PoS Hot-Path latency <5ms RAM check via RamIndex bench
-    let mut ram_bench = RamIndex::new();
-    let lat = ram_bench.bench_first_seen_latency(500);
+    // PoS Hot-Path latency <5ms RAM check via HmcRamIndex bench
+    let mut ram_bench = HmcRamIndex::new();
+    let start = std::time::Instant::now();
+    for i in 0..500u32 {
+        let tag = format!("bench_tag_{i}");
+        let mut t_id = [0u8; 32];
+        t_id[..4].copy_from_slice(&i.to_le_bytes());
+        let entry = L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "bench_voucher".into(),
+            t_id,
+            sender_ephemeral_pub: [1; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 1000,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+        ram_bench.insert_lock_for_test(tag, entry);
+    }
+    let lat = start.elapsed();
     // 500 ops should be far <5ms *500? But spec says <1us per CAS, we check total <10ms
     sim.reporter.check(
         lat.as_millis() < 20,

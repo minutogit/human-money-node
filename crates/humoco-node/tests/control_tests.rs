@@ -15,7 +15,46 @@ use humoco_node::{
     network::PeerManager,
     storage::{DualTierEngine, RedbStorage},
 };
-use humoco_sim_core::types::{LockRecord, SimTime};
+
+fn make_control_root(voucher_id: &str, t_id: [u8; 32]) -> (String, humoco_node::api::hmc::L2LockEntry) {
+    let tag = bs58::encode(t_id).into_string();
+    let entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        t_id,
+        layer2_voucher_id: voucher_id.to_string(),
+        sender_ephemeral_pub: [0x11; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x22; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 1000,
+        created_at_ms: 1000,
+        deletable_at: Some("600000".to_string()),
+        privacy_guard: None,
+    };
+    (tag, entry)
+}
+
+fn make_control_spend(voucher_id: &str, t_id: [u8; 32]) -> (String, humoco_node::api::hmc::L2LockEntry) {
+    let tag = bs58::encode(t_id).into_string();
+    let entry = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        t_id,
+        layer2_voucher_id: voucher_id.to_string(),
+        sender_ephemeral_pub: [0x33; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x44; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 1000,
+        created_at_ms: 500,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    (tag, entry)
+}
 
 #[tokio::test]
 async fn test_control_socket_status_and_peers() {
@@ -38,16 +77,10 @@ async fn test_control_socket_status_and_peers() {
         .await;
 
     // Add a lock to engine RAM
-    let record = LockRecord::new(
-        [1u8; 32],
-        [2u8; 32],
-        b"nonce1".to_vec(),
-        SimTime(100),
-        SimTime(60_000),
-    );
-    let _ = engine
-        .ingress_lock(record, SimTime(100), SimTime(600_000))
-        .await;
+    let (root_tag, root) = make_control_root("v_ctrl", [1u8; 32]);
+    let (spend_tag, spend) = make_control_spend("v_ctrl", [2u8; 32]);
+    let _ = engine.ingress_hmc_lock(root_tag, root).await;
+    let _ = engine.ingress_hmc_lock(spend_tag, spend).await;
 
     let cancel_token = CancellationToken::new();
     let server = ControlServer::new(
@@ -237,26 +270,15 @@ async fn test_prometheus_metrics_endpoint() {
         .await;
 
     // Add 2 active locks to RAM
-    let lock1 = LockRecord::new(
-        [10u8; 32],
-        [11u8; 32],
-        b"nonce_m1".to_vec(),
-        SimTime(0),
-        SimTime(60_000),
-    );
-    let lock2 = LockRecord::new(
-        [20u8; 32],
-        [21u8; 32],
-        b"nonce_m2".to_vec(),
-        SimTime(0),
-        SimTime(60_000),
-    );
-    let _ = engine
-        .ingress_lock(lock1, SimTime(0), SimTime(600_000))
-        .await;
-    let _ = engine
-        .ingress_lock(lock2, SimTime(0), SimTime(600_000))
-        .await;
+    let (root1_tag, root1) = make_control_root("v_m1", [10u8; 32]);
+    let (spend1_tag, spend1) = make_control_spend("v_m1", [11u8; 32]);
+    let _ = engine.ingress_hmc_lock(root1_tag, root1).await;
+    let _ = engine.ingress_hmc_lock(spend1_tag, spend1).await;
+
+    let (root2_tag, root2) = make_control_root("v_m2", [20u8; 32]);
+    let (spend2_tag, spend2) = make_control_spend("v_m2", [21u8; 32]);
+    let _ = engine.ingress_hmc_lock(root2_tag, root2).await;
+    let _ = engine.ingress_hmc_lock(spend2_tag, spend2).await;
 
     let mut app_state = AppState::new(engine, storage, identity, tier_controller, pow_engine);
     app_state.peer_manager = Some(peer_manager);
@@ -397,31 +419,25 @@ async fn test_control_extensions_batch3() {
 
     // 2. Ingress lock and test get_recent_locks
     let parent = [42u8; 32];
-    let child = [43u8; 32];
-    let record = LockRecord::new(
-        parent,
-        child,
-        b"nonce_b3".to_vec(),
-        SimTime(500),
-        SimTime(100_000),
-    );
-    let lock_id = record.id;
-    let _ = engine
-        .ingress_lock(record, SimTime(500), SimTime(500_000))
-        .await;
+    let parent_hex = hex::encode(parent);
+    let (root_tag, root) = make_control_root("v_inspect", [41u8; 32]);
+    let (_, mut spend) = make_control_spend("v_inspect", [43u8; 32]);
+    spend.sender_ephemeral_pub = [44u8; 32];
+    let lock_id = spend.t_id;
+    let _ = engine.ingress_hmc_lock(root_tag, root).await;
+    let _ = engine.ingress_hmc_lock(parent_hex.clone(), spend).await;
 
     let recent_resp = client.get_recent_locks(10).await.expect("get_recent_locks");
     match recent_resp {
         ControlResponse::RecentLocks { locks } => {
             assert!(!locks.is_empty());
-            assert_eq!(locks[0].parent_lock_hex, hex::encode(parent));
+            assert_eq!(locks[0].parent_lock_hex, parent_hex);
             assert_eq!(locks[0].child_lock_hex, hex::encode(lock_id));
         }
         other => panic!("Expected RecentLocks, got: {:?}", other),
     }
 
     // 3. Test inspect_lock
-    let parent_hex = hex::encode(parent);
     let insp_resp = client
         .inspect_lock(&parent_hex)
         .await
@@ -431,8 +447,8 @@ async fn test_control_extensions_batch3() {
             let insp = inspection.expect("inspection found");
             assert_eq!(insp.parent_lock_hex, parent_hex);
             assert_eq!(insp.lock_id_hex, hex::encode(lock_id));
-            assert_eq!(insp.created_at_ms, 500);
-            assert_eq!(insp.valid_until_ms, 100_000);
+            assert_eq!(insp.valid_until_ms, 600_000);
+            assert_eq!(insp.status, "Verified");
         }
         other => panic!("Expected LockInspection, got: {:?}", other),
     }
@@ -474,13 +490,12 @@ async fn test_control_extensions_batch3() {
 
     // Verify backup file can be read
     let backup_storage = RedbStorage::open(&backup_path).expect("open backup");
-    let (backed_up_rec, root_valid) = backup_storage
-        .get_lock(&parent)
-        .expect("get_lock")
+    let backed_up_rec = backup_storage
+        .get_hmc_lock(&parent_hex)
+        .expect("get_hmc_lock")
         .expect("found");
-    assert_eq!(backed_up_rec.id, lock_id);
-    assert_eq!(backed_up_rec.receiver_pub, child);
-    assert_eq!(root_valid, 500_000);
+    assert_eq!(backed_up_rec.t_id, lock_id);
+    assert_eq!(backed_up_rec.sender_ephemeral_pub, [44u8; 32]);
 
     // Shutdown
     assert!(matches!(
@@ -558,8 +573,10 @@ async fn test_s02_01_control_backup_targeting_live_db_rejected() {
 
     // 4. Prove live daemon DB remains usable and retains subsequent durable writes across reopen
     storage.ban_node(&[0x22; 32], 2000).unwrap();
-    let record = LockRecord::new([0x33; 32], [0x44; 32], vec![1], SimTime(100), SimTime(100_000));
-    storage.put_lock(&record, 100_000).unwrap();
+    let (root3_tag, root3) = make_control_root("v_live_3", [0x31; 32]);
+    let (spend3_tag, spend3) = make_control_spend("v_live_3", [0x33; 32]);
+    storage.put_hmc_lock(&root3_tag, &root3).unwrap();
+    storage.put_hmc_lock(&spend3_tag, &spend3).unwrap();
 
     // Shutdown daemon
     assert!(matches!(
@@ -576,7 +593,7 @@ async fn test_s02_01_control_backup_targeting_live_db_rejected() {
     let reopened = RedbStorage::open(&db_path).expect("reopen redb");
     assert!(reopened.is_node_banned(&[0x11; 32]).unwrap());
     assert!(reopened.is_node_banned(&[0x22; 32]).unwrap());
-    assert!(reopened.get_lock(&[0x33; 32]).unwrap().is_some());
+    assert!(reopened.get_hmc_lock(&spend3_tag).unwrap().is_some());
 }
 
 #[tokio::test]

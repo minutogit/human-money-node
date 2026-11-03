@@ -8,9 +8,6 @@ pub type ShardId = u16;
 /// 32-byte Ed25519 public key identifying a validator/shard node.
 pub type NodePubKey = [u8; 32];
 
-/// 64-byte Ed25519 signature payload.
-pub type SignatureBytes = [u8; 64];
-
 /// Custom serializer and deserializer for 64-byte fixed-size arrays.
 pub mod serde_bytes_64 {
     use serde::{de::Error, Deserializer, Serializer};
@@ -75,7 +72,7 @@ pub struct AttestationVote {
     pub signer_pubkey: NodePubKey,
     /// Ed25519 signature bytes.
     #[serde(with = "serde_bytes_64")]
-    pub signature: SignatureBytes,
+    pub signature: [u8; 64],
 }
 
 /// A cryptographic quorum proof consisting of aggregated votes from shard committee members.
@@ -85,26 +82,6 @@ pub struct QuorumProof {
     pub shard_id: ShardId,
     /// List of attestation votes from committee nodes.
     pub votes: Vec<AttestationVote>,
-}
-
-/// Verdict returned by Layer 2 for a lock operation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum L2Verdict {
-    /// Lock was successfully registered with a valid quorum proof.
-    Confirmed {
-        /// Quorum proof validating the lock confirmation.
-        proof: QuorumProof,
-    },
-    /// Lock was rejected due to a conflict with an existing tag.
-    Conflict {
-        /// Lookup tag of the conflicting existing lock.
-        existing_tag: [u8; 32],
-    },
-    /// Request was rejected with a reason.
-    Rejected {
-        /// Human-readable or machine-parsable rejection reason.
-        reason: String,
-    },
 }
 
 #[cfg(test)]
@@ -143,31 +120,5 @@ mod tests {
         let encoded = bincode::serialize(&proof).expect("serialization failed");
         let decoded: QuorumProof = bincode::deserialize(&encoded).expect("deserialization failed");
         assert_eq!(proof, decoded);
-    }
-
-    #[test]
-    fn test_l2_verdict_roundtrip() {
-        let proof = QuorumProof {
-            shard_id: 5,
-            votes: vec![AttestationVote {
-                signer_pubkey: [9u8; 32],
-                signature: [8u8; 64],
-            }],
-        };
-
-        let confirmed = L2Verdict::Confirmed { proof };
-        let conflict = L2Verdict::Conflict {
-            existing_tag: [0xaa; 32],
-        };
-        let rejected = L2Verdict::Rejected {
-            reason: "rate limited".to_string(),
-        };
-
-        for verdict in [&confirmed, &conflict, &rejected] {
-            let encoded = bincode::serialize(verdict).expect("serialization failed");
-            let decoded: L2Verdict =
-                bincode::deserialize(&encoded).expect("deserialization failed");
-            assert_eq!(*verdict, decoded);
-        }
     }
 }

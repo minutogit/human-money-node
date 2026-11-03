@@ -18,16 +18,31 @@ use humoco_node::storage::{
     DualTierEngine, FlushOp, OriginalApprovalBatchEntry, OriginalApprovalTarget, RedbStorage,
     StorageError,
 };
-use humoco_sim_core::types::{LockRecord, SimTime};
-
-fn make_record(parent: u8, child: u8) -> LockRecord {
-    LockRecord::new(
-        [parent; 32],
-        [child; 32],
-        vec![1, 2, 3],
-        SimTime(1_000),
-        SimTime(50_000),
-    )
+fn anchor_root_in_db(db: &RedbStorage, voucher_id: &str, valid_until_ms: u64) {
+    let req = L2LockRequest {
+        causal_output: None,
+        auth: L2AuthPayload {
+            ephemeral_pubkey: [1u8; 32],
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.to_string(),
+        ds_tag: None,
+        transaction_hash: *blake3::hash(voucher_id.as_bytes()).as_bytes(),
+        is_genesis: true,
+        sender_ephemeral_pub: [1u8; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0u8; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 1_000,
+        deletable_at: Some(valid_until_ms.to_string()),
+        privacy_guard: None,
+    };
+    let tag = bs58::encode(req.transaction_hash).into_string();
+    let entry = L2LockEntry::from(&req);
+    db.put_hmc_lock(&tag, &entry).unwrap();
 }
 
 fn make_test_hmc_entry(
@@ -76,30 +91,34 @@ fn test_a05_02_group_commit_multiple_compatible_approvals() {
     let node = [42u8; 32];
     let key = SigningKey::from_bytes(&[7u8; 32]);
 
-    let r1 = make_record(1, 10);
-    let r2 = make_record(2, 20);
+    let (tag1, entry1) = make_test_hmc_entry("v_batch_1", "tag_1", [1u8; 32], &key);
+    let (tag2, entry2) = make_test_hmc_entry("v_batch_1", "tag_2", [2u8; 32], &key);
     let (tag3, entry3) = make_test_hmc_entry("v_batch_1", "tag_3", [3u8; 32], &key);
     let (tag4, entry4) = make_test_hmc_entry("v_batch_2", "tag_4", [4u8; 32], &key);
 
     {
         let db = RedbStorage::open(&path).expect("open db");
+        anchor_root_in_db(&db, "v_batch_1", 60_000);
+        anchor_root_in_db(&db, "v_batch_2", 60_000);
 
         let batch = [
             OriginalApprovalBatchEntry {
-                target: OriginalApprovalTarget::Record {
-                    record: Box::new(r1.clone()),
+                target: OriginalApprovalTarget::Hmc {
+                    tag: tag1.clone(),
+                    entry: Box::new(entry1.clone()),
                 },
                 node,
-                approval: b"approval_r1".to_vec(),
+                approval: b"approval_h1".to_vec(),
                 class: 0,
                 root_valid_until_ms: 60_000,
             },
             OriginalApprovalBatchEntry {
-                target: OriginalApprovalTarget::Record {
-                    record: Box::new(r2.clone()),
+                target: OriginalApprovalTarget::Hmc {
+                    tag: tag2.clone(),
+                    entry: Box::new(entry2.clone()),
                 },
                 node,
-                approval: b"approval_r2".to_vec(),
+                approval: b"approval_h2".to_vec(),
                 class: 1,
                 root_valid_until_ms: 60_000,
             },
@@ -143,13 +162,13 @@ fn test_a05_02_group_commit_multiple_compatible_approvals() {
     );
 
     let choice1 = reopened
-        .own_signing_choice(&node, &hex::encode(r1.parent_lock))
+        .own_signing_choice(&node, &tag1)
         .expect("get choice")
         .expect("choice 1 present");
-    assert_eq!(choice1.child, r1.id);
+    assert_eq!(choice1.child, entry1.t_id);
     assert_eq!(
         choice1.approvals[0].as_deref(),
-        Some(b"approval_r1".as_slice())
+        Some(b"approval_h1".as_slice())
     );
 
     let choice3 = reopened
@@ -168,49 +187,49 @@ fn test_a05_02_group_commit_conflict_isolation() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("conflict_isolation.redb");
     let node = [42u8; 32];
+    let key = SigningKey::from_bytes(&[7u8; 32]);
 
-    // Pre-commit an existing choice for parent 1 with child 10
-    let existing = make_record(1, 10);
+    let (tag1, entry1) = make_test_hmc_entry("v_iso", "tag_1", [10u8; 32], &key);
+    let (tag1_conflict, entry1_conflict) = make_test_hmc_entry("v_iso", "tag_1", [99u8; 32], &key);
+    let (tag2, entry2) = make_test_hmc_entry("v_iso", "tag_2", [20u8; 32], &key);
+    let (tag3, entry3) = make_test_hmc_entry("v_iso", "tag_3", [30u8; 32], &key);
+
     {
         let db = RedbStorage::open(&path).expect("open db");
-        db.commit_original_record_approval(&existing, 60_000, &node, b"orig", 0)
+        anchor_root_in_db(&db, "v_iso", 60_000);
+        db.commit_original_approval(&tag1, &entry1, &node, b"orig", 0, 60_000)
             .expect("initial commit");
     }
-
-    // Now submit a group containing:
-    // - Entry 0: Record for parent 2 (valid)
-    // - Entry 1: Record for parent 1 with child 99 (diverging child -> OwnChoiceConflict!)
-    // - Entry 2: Record for parent 3 (valid)
-    let r2 = make_record(2, 20);
-    let r1_conflict = make_record(1, 99);
-    let r3 = make_record(3, 30);
 
     let db = RedbStorage::open(&path).expect("reopen db");
     let batch = [
         OriginalApprovalBatchEntry {
-            target: OriginalApprovalTarget::Record {
-                record: Box::new(r2.clone()),
+            target: OriginalApprovalTarget::Hmc {
+                tag: tag2.clone(),
+                entry: Box::new(entry2.clone()),
             },
             node,
-            approval: b"app_r2".to_vec(),
+            approval: b"app_h2".to_vec(),
             class: 0,
             root_valid_until_ms: 60_000,
         },
         OriginalApprovalBatchEntry {
-            target: OriginalApprovalTarget::Record {
-                record: Box::new(r1_conflict.clone()),
+            target: OriginalApprovalTarget::Hmc {
+                tag: tag1_conflict.clone(),
+                entry: Box::new(entry1_conflict.clone()),
             },
             node,
-            approval: b"app_r1_conflict".to_vec(),
+            approval: b"app_h1_conflict".to_vec(),
             class: 0,
             root_valid_until_ms: 60_000,
         },
         OriginalApprovalBatchEntry {
-            target: OriginalApprovalTarget::Record {
-                record: Box::new(r3.clone()),
+            target: OriginalApprovalTarget::Hmc {
+                tag: tag3.clone(),
+                entry: Box::new(entry3.clone()),
             },
             node,
-            approval: b"app_r3".to_vec(),
+            approval: b"app_h3".to_vec(),
             class: 0,
             root_valid_until_ms: 60_000,
         },
@@ -229,15 +248,14 @@ fn test_a05_02_group_commit_conflict_isolation() {
     assert!(results[2].is_ok(), "Sibling entry 2 succeeds");
 
     // Verify siblings were committed durably, conflict was not committed
-    assert!(db.get_lock(&r2.parent_lock).expect("get").is_some());
-    assert!(db.get_lock(&r3.parent_lock).expect("get").is_some());
+    assert!(db.get_hmc_lock(&tag2).expect("get").is_some());
+    assert!(db.get_hmc_lock(&tag3).expect("get").is_some());
     assert_eq!(
-        db.get_lock(&existing.parent_lock)
+        db.get_hmc_lock(&tag1)
             .expect("get")
             .unwrap()
-            .0
-            .id,
-        existing.id,
+            .t_id,
+        entry1.t_id,
         "Conflicting choice did not alter existing record"
     );
 }
@@ -247,13 +265,16 @@ fn test_a05_02_group_commit_idempotent_retry_in_batch() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("idempotent.redb");
     let node = [42u8; 32];
-    let r1 = make_record(1, 10);
+    let key = SigningKey::from_bytes(&[7u8; 32]);
+    let (tag1, entry1) = make_test_hmc_entry("v_idem", "tag_1", [10u8; 32], &key);
 
     let db = RedbStorage::open(&path).expect("open db");
+    anchor_root_in_db(&db, "v_idem", 60_000);
     let batch = [
         OriginalApprovalBatchEntry {
-            target: OriginalApprovalTarget::Record {
-                record: Box::new(r1.clone()),
+            target: OriginalApprovalTarget::Hmc {
+                tag: tag1.clone(),
+                entry: Box::new(entry1.clone()),
             },
             node,
             approval: b"app_exact".to_vec(),
@@ -261,8 +282,9 @@ fn test_a05_02_group_commit_idempotent_retry_in_batch() {
             root_valid_until_ms: 60_000,
         },
         OriginalApprovalBatchEntry {
-            target: OriginalApprovalTarget::Record {
-                record: Box::new(r1.clone()),
+            target: OriginalApprovalTarget::Hmc {
+                tag: tag1.clone(),
+                entry: Box::new(entry1.clone()),
             },
             node,
             approval: b"app_exact".to_vec(),
@@ -291,18 +313,21 @@ fn test_a05_02_flush_worker_group_commit_batching_and_attempts() {
     let db = RedbStorage::open(&path).expect("open db");
     let node = [11u8; 32];
     let health = Arc::new(PersistenceStats::default());
+    let key = SigningKey::from_bytes(&[7u8; 32]);
 
-    let r1 = make_record(1, 10);
-    let r2 = make_record(2, 20);
-    let r3 = make_record(3, 30);
+    anchor_root_in_db(&db, "v_wbatch", 50_000);
+    let (tag1, entry1) = make_test_hmc_entry("v_wbatch", "tag_1", [10u8; 32], &key);
+    let (tag2, entry2) = make_test_hmc_entry("v_wbatch", "tag_2", [20u8; 32], &key);
+    let (tag3, entry3) = make_test_hmc_entry("v_wbatch", "tag_3", [30u8; 32], &key);
 
     let (c1_tx, c1_rx) = tokio::sync::watch::channel(None);
     let (c2_tx, c2_rx) = tokio::sync::watch::channel(None);
     let (c3_tx, c3_rx) = tokio::sync::watch::channel(None);
 
     let mut batch = vec![
-        FlushOp::OriginalRecordApproval {
-            record: Box::new(r1),
+        FlushOp::OriginalHmcApproval {
+            tag: tag1,
+            entry: Box::new(entry1),
             node,
             approval: b"a1".to_vec(),
             class: 0,
@@ -310,8 +335,9 @@ fn test_a05_02_flush_worker_group_commit_batching_and_attempts() {
             complete: c1_tx,
             health: health.clone(),
         },
-        FlushOp::OriginalRecordApproval {
-            record: Box::new(r2),
+        FlushOp::OriginalHmcApproval {
+            tag: tag2,
+            entry: Box::new(entry2),
             node,
             approval: b"a2".to_vec(),
             class: 0,
@@ -319,8 +345,9 @@ fn test_a05_02_flush_worker_group_commit_batching_and_attempts() {
             complete: c2_tx,
             health: health.clone(),
         },
-        FlushOp::OriginalRecordApproval {
-            record: Box::new(r3),
+        FlushOp::OriginalHmcApproval {
+            tag: tag3,
+            entry: Box::new(entry3),
             node,
             approval: b"a3".to_vec(),
             class: 0,
@@ -353,23 +380,25 @@ fn test_a05_02_flush_worker_conflict_isolation_in_batch() {
     let db = RedbStorage::open(&path).expect("open db");
     let node = [11u8; 32];
     let health = Arc::new(PersistenceStats::default());
+    let key = SigningKey::from_bytes(&[7u8; 32]);
 
-    // Pre-seed parent 1 with child 10
-    let existing = make_record(1, 10);
-    db.commit_original_record_approval(&existing, 50_000, &node, b"orig", 0)
+    anchor_root_in_db(&db, "v_wconflict", 50_000);
+    let (tag1, existing) = make_test_hmc_entry("v_wconflict", "tag_1", [10u8; 32], &key);
+    db.commit_original_approval(&tag1, &existing, &node, b"orig", 0, 50_000)
         .expect("preseed");
 
-    let r2 = make_record(2, 20);
-    let r1_conflict = make_record(1, 99); // Conflicts with existing
-    let r3 = make_record(3, 30);
+    let (tag2, entry2) = make_test_hmc_entry("v_wconflict", "tag_2", [20u8; 32], &key);
+    let (tag1_conflict, entry1_conflict) = make_test_hmc_entry("v_wconflict", "tag_1", [99u8; 32], &key);
+    let (tag3, entry3) = make_test_hmc_entry("v_wconflict", "tag_3", [30u8; 32], &key);
 
     let (c2_tx, c2_rx) = tokio::sync::watch::channel(None);
     let (c1_tx, c1_rx) = tokio::sync::watch::channel(None);
     let (c3_tx, c3_rx) = tokio::sync::watch::channel(None);
 
     let mut batch = vec![
-        FlushOp::OriginalRecordApproval {
-            record: Box::new(r2),
+        FlushOp::OriginalHmcApproval {
+            tag: tag2,
+            entry: Box::new(entry2),
             node,
             approval: b"app2".to_vec(),
             class: 0,
@@ -377,8 +406,9 @@ fn test_a05_02_flush_worker_conflict_isolation_in_batch() {
             complete: c2_tx,
             health: health.clone(),
         },
-        FlushOp::OriginalRecordApproval {
-            record: Box::new(r1_conflict),
+        FlushOp::OriginalHmcApproval {
+            tag: tag1_conflict,
+            entry: Box::new(entry1_conflict),
             node,
             approval: b"app1_conflict".to_vec(),
             class: 0,
@@ -386,8 +416,9 @@ fn test_a05_02_flush_worker_conflict_isolation_in_batch() {
             complete: c1_tx,
             health: health.clone(),
         },
-        FlushOp::OriginalRecordApproval {
-            record: Box::new(r3),
+        FlushOp::OriginalHmcApproval {
+            tag: tag3,
+            entry: Box::new(entry3),
             node,
             approval: b"app3".to_vec(),
             class: 0,

@@ -803,7 +803,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             duration.as_secs_f64() * 1000.0,
                                         );
                                     }
-                                    L2Verdict::Verified { .. } | L2Verdict::Ok { .. } => {
+                                    L2Verdict::Verified { .. } => {
                                         batch_writes_count += 1;
                                         batch_writes_byte_years += byte_years_est;
                                         total_byte_years_consumed += byte_years_est;

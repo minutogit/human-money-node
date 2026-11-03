@@ -407,20 +407,29 @@ async fn pre_allocation_rejection_above_64_kib() {
     // 2. ShardStage append rejects pages exceeding limits
     let stage = ShardStage::new(1234, 1_000_000).unwrap();
     let mut oversize_page = humoco_node::network::framing::SyncPayload {
-        locks: Vec::new(),
         hmc_locks: Vec::new(),
         support: Vec::new(),
     };
     // Exceed max 500 records per page
-    for i in 0..501 {
-        let rec = humoco_sim_core::types::LockRecord::new(
-            [i as u8; 32],
-            [1; 32],
-            vec![0],
-            humoco_sim_core::types::SimTime(1_000),
-            humoco_sim_core::types::SimTime(50_000),
-        );
-        oversize_page.locks.push((rec, 50_000));
+    for i in 0..501u32 {
+        let mut t_id = [0u8; 32];
+        t_id[..4].copy_from_slice(&i.to_le_bytes());
+        let rec = humoco_node::api::hmc::L2LockEntry {
+            causal_output: None,
+            t_id,
+            layer2_voucher_id: "v_stage".to_string(),
+            sender_ephemeral_pub: [1; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 1000,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+        oversize_page.hmc_locks.push((format!("tag_{i}"), rec));
     }
     let res = stage.append(oversize_page);
     assert!(

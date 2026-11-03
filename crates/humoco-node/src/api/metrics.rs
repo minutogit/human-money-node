@@ -315,8 +315,7 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> Response {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let (active_byte_years, _) = state.engine.get_active_footprint_byte_years(now_ms).await;
-    let active_locks =
-        state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+    let active_locks = state.engine.hmc_ram.read().await.locks.len();
     let daily_write_quota_byte_years = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let (peers_connected, gateway_concentration_ratio, shard_subnet_dominance_max) =
         if let Some(ref pm) = state.peer_manager {

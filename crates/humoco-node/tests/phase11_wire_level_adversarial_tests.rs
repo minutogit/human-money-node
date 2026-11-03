@@ -32,7 +32,7 @@ use humoco_node::identity::NodeIdentity;
 use humoco_node::ingress::{PowEngine, TierController};
 use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage};
-use humoco_sim_core::types::{required_quorum, LockRecord, SimTime};
+use humoco_sim_core::types::{required_quorum, SimTime};
 use humoco_sim_core::wire::{MsgType, WireHeader};
 
 // ---------------------------------------------------------------------------
@@ -776,6 +776,39 @@ async fn test_phase11d_shard_digest_isolation_wire() {
     const SHARD_SAME: u16 = 0x1234;
     const SHARD_OTHER: u16 = 0x5678;
 
+    fn make_root_with_shard(
+        target_shard: u16,
+        voucher_id: &str,
+        valid_until_ms: u64,
+    ) -> (String, L2LockEntry) {
+        let mut i = 0u64;
+        loop {
+            let mut t_id = [0u8; 32];
+            t_id[0..8].copy_from_slice(&i.to_le_bytes());
+            let tag = bs58::encode(t_id).into_string();
+            let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+            if humoco_sim_core::types::canonical_voucher_shard(&parent) == target_shard {
+                let entry = L2LockEntry {
+                    causal_output: None,
+                    layer2_voucher_id: voucher_id.into(),
+                    t_id,
+                    sender_ephemeral_pub: [0x55; 32],
+                    receiver_ephemeral_pub_hash: None,
+                    change_ephemeral_pub_hash: None,
+                    layer2_signature: [0; 64],
+                    trap_r: None,
+                    trap_s: None,
+                    encrypted_timestamp: 0,
+                    created_at_ms: 1000,
+                    deletable_at: Some(valid_until_ms.to_string()),
+                    privacy_guard: None,
+                };
+                return (tag, entry);
+            }
+            i += 1;
+        }
+    }
+
     async fn spawn_with_locks(
         same_count: usize,
         other_count: usize,
@@ -794,44 +827,67 @@ async fn test_phase11d_shard_digest_isolation_wire() {
             Arc::new(RedbStorage::open(&tmp.path().join("p11d.redb")).expect("open redb"));
         std::mem::forget(tmp);
         let (engine, _worker) = DualTierEngine::new(storage.clone());
+
         // Identical locks for SHARD_SAME on both nodes.
+        let (root_tag_same, root_entry_same) =
+            make_root_with_shard(SHARD_SAME, "voucher_same", now_ms + 50_000_000);
+        storage
+            .put_hmc_lock(&root_tag_same, &root_entry_same)
+            .unwrap();
+
         for i in 0..same_count {
-            let mut parent = [0u8; 32];
-            parent[0..2].copy_from_slice(&SHARD_SAME.to_be_bytes());
-            parent[2..6].copy_from_slice(&(i as u32).to_be_bytes());
-            parent[6] = 0xD1;
-            let rec = LockRecord::new(
-                parent,
-                [0xA5; 32],
-                vec![i as u8],
-                SimTime(now_ms),
-                SimTime(now_ms + 50_000_000),
-            );
-            // This fixture describes committed source state, not an async
-            // pending write. A witness must never depend on worker scheduling.
+            let mut t_id = [0u8; 32];
+            t_id[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            t_id[4] = 0xD1;
+            let spend = L2LockEntry {
+                causal_output: None,
+                layer2_voucher_id: "voucher_same".into(),
+                t_id,
+                sender_ephemeral_pub: [0xA5; 32],
+                receiver_ephemeral_pub_hash: None,
+                change_ephemeral_pub_hash: None,
+                layer2_signature: [0; 64],
+                trap_r: None,
+                trap_s: None,
+                encrypted_timestamp: 0,
+                created_at_ms: now_ms,
+                deletable_at: None,
+                privacy_guard: None,
+            };
             storage
-                .put_lock(&rec, now_ms + 50_000_000)
-                .expect("committed fixture lock");
+                .put_hmc_lock(&format!("spend_same_{i}"), &spend)
+                .unwrap();
         }
+
         // Divergent locks for SHARD_OTHER.
+        let (root_tag_other, root_entry_other) =
+            make_root_with_shard(SHARD_OTHER, "voucher_other", now_ms + 50_000_000);
+        storage
+            .put_hmc_lock(&root_tag_other, &root_entry_other)
+            .unwrap();
+
         for i in 0..other_count {
-            let mut parent = [0u8; 32];
-            parent[0..2].copy_from_slice(&SHARD_OTHER.to_be_bytes());
-            parent[2..6].copy_from_slice(&(i as u32).to_be_bytes());
-            parent[6] = other_seed;
-            parent[7] = other_seed;
-            let rec = LockRecord::new(
-                parent,
-                [other_seed; 32],
-                vec![other_seed, i as u8],
-                SimTime(now_ms),
-                SimTime(now_ms + 50_000_000),
-            );
-            // This fixture describes committed source state, not an async
-            // pending write. A witness must never depend on worker scheduling.
+            let mut t_id = [0u8; 32];
+            t_id[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            t_id[4] = other_seed;
+            let spend = L2LockEntry {
+                causal_output: None,
+                layer2_voucher_id: "voucher_other".into(),
+                t_id,
+                sender_ephemeral_pub: [other_seed; 32],
+                receiver_ephemeral_pub_hash: None,
+                change_ephemeral_pub_hash: None,
+                layer2_signature: [0; 64],
+                trap_r: None,
+                trap_s: None,
+                encrypted_timestamp: 0,
+                created_at_ms: now_ms,
+                deletable_at: None,
+                privacy_guard: None,
+            };
             storage
-                .put_lock(&rec, now_ms + 50_000_000)
-                .expect("committed fixture lock");
+                .put_hmc_lock(&format!("spend_other_{other_seed}_{i}"), &spend)
+                .unwrap();
         }
 
         let identity = NodeIdentity::generate();
@@ -947,19 +1003,47 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let now = SimTime(1_000);
     let root_valid = SimTime(1_000_000);
-    for i in 0..TOTAL as u32 {
-        let mut parent = [0u8; 32];
-        parent[0] = 0x02;
-        parent[2..6].copy_from_slice(&i.to_be_bytes());
-        let rec = LockRecord::new(
-            parent,
-            [0xAA; 32],
-            i.to_le_bytes().to_vec(),
-            now,
-            SimTime(500_000),
-        );
+    let root_entry = L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: "voucher_p11e".into(),
+        t_id: [0x55; 32],
+        sender_ephemeral_pub: [0x55; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: now.0,
+        deletable_at: Some(root_valid.0.to_string()),
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root_entry.t_id).into_string();
+    storage
+        .put_hmc_lock(&root_tag, &root_entry)
+        .expect("put root");
+
+    for i in 0..(TOTAL - 1) as u32 {
+        let mut t_id = [0u8; 32];
+        t_id[0..4].copy_from_slice(&i.to_be_bytes());
+        let spend = L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "voucher_p11e".into(),
+            t_id,
+            sender_ephemeral_pub: [0xAA; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: now.0,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+        let tag = format!("spend_{:06}", i);
         storage
-            .put_lock(&rec, root_valid.0)
+            .put_hmc_lock(&tag, &spend)
             .expect("durable snapshot fixture");
     }
 
@@ -1028,10 +1112,10 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
         seq = seq.wrapping_add(1);
         pages += 1;
         assert!(
-            page.payload.locks.len() <= PAGE,
+            page.payload.hmc_locks.len() <= PAGE,
             "wire page must respect limit"
         );
-        all.extend(page.payload.locks);
+        all.extend(page.payload.hmc_locks);
         if !page.has_more {
             assert!(
                 page.next_cursor.is_none(),
@@ -1053,10 +1137,10 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
         TOTAL,
         "paginated wire sync must deliver every lock"
     );
-    // No duplicates: parent_lock is the unique key.
+    // No duplicates: lookup_tag is the unique key.
     let mut seen = std::collections::HashSet::new();
-    for (rec, _) in &all {
-        assert!(seen.insert(rec.parent_lock), "duplicate lock in wire sync");
+    for (tag, _) in &all {
+        assert!(seen.insert(tag.clone()), "duplicate lock in wire sync");
     }
     assert_eq!(pages, TOTAL / PAGE, "600 locks at limit 100 => 6 pages");
 
@@ -1066,7 +1150,7 @@ async fn test_phase11e_paginated_sync_wire_reliable() {
         .request_active_sync(&conn2, 9000)
         .await
         .expect("full sync");
-    assert_eq!(full.locks.len(), TOTAL);
+    assert_eq!(full.hmc_locks.len(), TOTAL);
 
     cancel.cancel();
     server.close();

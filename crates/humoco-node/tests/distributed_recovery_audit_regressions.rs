@@ -2,7 +2,6 @@
 //! Verifies fixes for Audit Findings F04, F05, F10b (Prompt 21).
 
 use humoco_node::{network::framing::SyncPayload, storage::db::install::ShardStage};
-use humoco_sim_core::types::{LockRecord, SimTime};
 
 #[test]
 fn test_readiness_manager_mark_sync_failed_does_not_clear_ready() {
@@ -40,29 +39,26 @@ fn test_stage_rejects_cumulative_overflow_beyond_capacity() {
     let now = 1_000u64;
     let stage = ShardStage::new(shard, now).unwrap();
 
-    // Try to append 130 pages of 400 records each = 52,000 records.
+    // Try to append 130 pages of 400 support records each = 52,000 records.
     // Max stage entry capacity must be capped (at 50,000 records).
     let mut exceeded = false;
     for page_idx in 0..130 {
-        let mut locks = Vec::new();
+        let mut support = Vec::new();
         for i in 0..400 {
-            let mut parent = [0u8; 32];
-            parent[..2].copy_from_slice(&shard.to_be_bytes());
             let offset = (page_idx * 400 + i) as u64;
-            parent[2..10].copy_from_slice(&offset.to_le_bytes());
-            let row = LockRecord::new(
-                parent,
-                [1u8; 32],
-                vec![2],
-                SimTime(now),
-                SimTime(now + 60_000),
-            );
-            locks.push((row, now + 60_000));
+            let key = format!("tag-{}-{}", shard, offset);
+            let fact = humoco_node::storage::db::support::ConfirmationSupport {
+                parent: [1u8; 32],
+                child: [2u8; 32],
+                class: 1,
+                root_valid_until_ms: now + 60_000,
+                verified_context: [3u8; 32],
+            };
+            support.push((1u8, key, fact));
         }
         let payload = SyncPayload {
-            locks,
             hmc_locks: Vec::new(),
-            support: Vec::new(),
+            support,
         };
         if stage.append(payload).is_err() {
             exceeded = true;

@@ -1,9 +1,7 @@
 mod recovery;
 use humoco_sim_core::quota::ByteYears;
-use humoco_sim_core::storage::{
-    ingress_time_window_valid, should_prune, IngressVerdictLow, RamIndex,
-};
-use humoco_sim_core::types::{LockRecord, SimTime};
+use humoco_sim_core::storage::{ingress_time_window_valid, should_prune};
+use humoco_sim_core::types::SimTime;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -142,6 +140,11 @@ impl HmcRamIndex {
     /// Internal engine state must not be arbitrarily mutated by external production callers.
     pub fn insert_lock_for_test(&mut self, tag: String, entry: L2LockEntry) {
         self.locks.insert(tag, entry);
+    }
+
+    /// Explicit test helper to remove a mock lock entry.
+    pub fn remove_lock_for_test(&mut self, tag: &str) {
+        self.locks.remove(tag);
     }
 
     /// Test helper to insert a voucher root valid_until timestamp in ms.
@@ -779,19 +782,6 @@ pub enum FlushOp {
         complete: tokio::sync::watch::Sender<Option<Result<Vec<u8>, String>>>,
         health: Arc<PersistenceStats>,
     },
-    OriginalRecordApproval {
-        record: Box<LockRecord>,
-        node: [u8; 32],
-        approval: Vec<u8>,
-        class: u8,
-        root: u64,
-        complete: tokio::sync::watch::Sender<Option<Result<Vec<u8>, String>>>,
-        health: Arc<PersistenceStats>,
-    },
-    PutLock {
-        lock: LockRecord,
-        root_valid_until: u64,
-    },
     PutHmcLock {
         lookup_tag: String,
         entry: Box<L2LockEntry>,
@@ -880,7 +870,6 @@ impl Drop for PublicationGuard {
 
 #[derive(Clone)]
 pub struct DualTierEngine {
-    pub ram: Arc<RwLock<RamIndex>>,
     pub hmc_ram: Arc<RwLock<HmcRamIndex>>,
     pub(crate) banned_nodes: Arc<RwLock<HashSet<[u8; 32]>>>,
     pub db: Arc<RedbStorage>,
@@ -910,7 +899,6 @@ impl DualTierEngine {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> (Self, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(10_000);
-        let ram = Arc::new(RwLock::new(RamIndex::new()));
         let hmc_ram = Arc::new(RwLock::new(HmcRamIndex::new()));
 
         let mut banned_set = HashSet::new();
@@ -927,7 +915,6 @@ impl DualTierEngine {
             Self::spawn_flush_worker(rx, Arc::clone(&db), Arc::clone(&stats), cancel_token);
         (
             Self {
-                ram,
                 hmc_ram,
                 banned_nodes,
                 db,
@@ -949,7 +936,6 @@ impl DualTierEngine {
 
     /// Creates an engine instance from existing components (useful for custom worker management).
     pub fn from_parts(
-        ram: Arc<RwLock<RamIndex>>,
         hmc_ram: Arc<RwLock<HmcRamIndex>>,
         db: Arc<RedbStorage>,
         tx: mpsc::Sender<FlushOp>,
@@ -964,7 +950,6 @@ impl DualTierEngine {
         let recent_locks = Arc::new(parking_lot::RwLock::new(RecentLockBuffer::default()));
         let stats = Arc::new(PersistenceStats::default());
         Self {
-            ram,
             hmc_ram,
             banned_nodes,
             db,
@@ -1159,58 +1144,7 @@ impl DualTierEngine {
         Ok(result)
     }
 
-    /// Pure L2 equivalent; same node/parent slot and immutable child rule.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn persist_original_record_approval(
-        &self,
-        record: LockRecord,
-        root_valid_until: SimTime,
-        node: [u8; 32],
-        approval: Vec<u8>,
-        class: u8,
-        now_ms: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        let shard = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
-        let _activity = self.activity.enter(shard).ok_or_else(|| {
-            StorageError::DurableCommitFailed("FLAG_NOT_READY: installing shard".into())
-        })?;
-        if root_valid_until.0 <= now_ms
-            || approval.is_empty()
-            || approval.len() > 16_384
-            || class > 1
-        {
-            return Err(StorageError::DurableCommitFailed(
-                "Invalid or expired approval context".into(),
-            ));
-        }
-        {
-            let ram = self.ram.read().await;
-            if ram
-                .get(&record.parent_lock)
-                .is_none_or(|lock| lock.id != record.id)
-            {
-                return Err(StorageError::OwnChoiceConflict);
-            }
-        }
-        let key = *blake3::hash(&bincode::serialize(&(
-            "original-record",
-            &node,
-            &record.parent_lock,
-            &record.id,
-            class,
-        ))?)
-        .as_bytes();
-        self.wait_original_approval(key, |complete| FlushOp::OriginalRecordApproval {
-            record: Box::new(record),
-            node,
-            approval,
-            class,
-            root: root_valid_until.0,
-            complete,
-            health: self.stats.clone(),
-        })
-        .await
-    }
+
 
     async fn enter_hmc_activity(
         &self,
@@ -1313,162 +1247,7 @@ impl DualTierEngine {
         true
     }
 
-    /// Ingress a lock record on the hot path (< 1µs in RAM) and queue an async flush operation.
-    /// Split-brain healing via min(H_canon) (Spec 02, 08):
-    /// When a colliding lock arrives, min(H_canon) decides.
-    /// If the new lock wins (WinnerB), it replaces the previous one atomically in RAM/disk state.
-    /// If the old lock wins (WinnerA), it remains unchanged and the new lock is discarded (Void).
-    /// Ingress a lock record on the hot path (< 1µs in RAM) with default ClientApi origin.
-    pub async fn ingress_lock(
-        &self,
-        record: LockRecord,
-        now: SimTime,
-        root_valid_until: SimTime,
-    ) -> Result<IngressVerdictLow, IngressVerdictLow> {
-        self.ingress_lock_with_origin(record, now, root_valid_until, IngressOrigin::ClientApi)
-            .await
-    }
 
-    /// Ingress a lock record on the hot path (< 1µs in RAM) with an explicit IngressOrigin and queue an async flush operation.
-    /// Split-brain healing via min(H_canon) (Spec 02, 08):
-    /// - On IngressOrigin::ClientApi, an existing lock is never overwritten by min(H_canon),
-    ///   but immediately returns (Err(IngressVerdictLow::RejectedCollision), None).
-    /// - On IngressOrigin::PartitionSync, min(H_canon) decides deterministically.
-    ///   If the new lock wins (WinnerB), it replaces the previous one atomically in RAM/disk state.
-    ///   If the old lock wins (WinnerA), it remains unchanged and the new lock is discarded (Void).
-    pub async fn ingress_lock_with_origin(
-        &self,
-        mut record: LockRecord,
-        now: SimTime,
-        root_valid_until: SimTime,
-        origin: IngressOrigin,
-    ) -> Result<IngressVerdictLow, IngressVerdictLow> {
-        if !self.is_signing_healthy() {
-            return Err(IngressVerdictLow::RejectedCapacity);
-        }
-
-        let shard = u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]);
-        self.expire_source_leases();
-        let Some(_activity) = self.activity.enter(shard) else {
-            return Err(IngressVerdictLow::RejectedCapacity);
-        };
-
-        if bincode::serialized_size(&(&record, root_valid_until.0))
-            .map_or(true, |len| len as usize > MAX_SYNC_ROW_BYTES)
-        {
-            return Err(IngressVerdictLow::RejectedCapacity);
-        }
-
-        // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
-        let permit = match self.tx.try_reserve() {
-            Ok(p) => p,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                warn!("Persistence flush queue full - rejecting ingress with backpressure");
-                return Err(IngressVerdictLow::RejectedCapacity);
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                error!("Persistence flush worker closed");
-                return Err(IngressVerdictLow::RejectedCapacity);
-            }
-        };
-
-        let parent_lock_hex = hex::encode(record.parent_lock);
-        let child_lock_hex = hex::encode(record.id);
-        let is_final = record.status.is_final();
-
-        if origin == IngressOrigin::PartitionSync {
-            let mut hasher = blake3::Hasher::new();
-            let tag = b"HUMOCO_V1_LOCK_ID";
-            hasher.update(&[tag.len() as u8]);
-            hasher.update(tag);
-            hasher.update(&record.parent_lock);
-            hasher.update(&record.receiver_pub);
-            hasher.update(&record.nonce);
-            hasher.update(&record.created_at.0.to_le_bytes());
-            hasher.update(&record.valid_until.0.to_le_bytes());
-            let expected_id: humoco_sim_core::types::Hash256 = *hasher.finalize().as_bytes();
-            if record.id != expected_id {
-                warn!("PartitionSync lock rejected: invalid LockId hash preimage");
-                return Err(IngressVerdictLow::RejectedWindow);
-            }
-            if record.valid_until.0 <= now.0 || record.valid_until.0 > root_valid_until.0 {
-                warn!("PartitionSync lock rejected: invalid valid_until TTL");
-                return Err(IngressVerdictLow::RejectedWindow);
-            }
-        }
-
-        let (verdict, to_flush) = {
-            let mut ram = self.ram.write().await;
-            match ram.try_insert(record.clone(), now, root_valid_until) {
-                Ok(IngressVerdictLow::IdempotentReplay) => {
-                    (Ok(IngressVerdictLow::IdempotentReplay), None)
-                }
-                Ok(v) => (Ok(v), Some(record)),
-                Err(IngressVerdictLow::RejectedCollision) => {
-                    // Split-brain collision on parent_lock!
-                    if origin == IngressOrigin::ClientApi {
-                        // Live client ingress: protect against self-equivocation; never overwrite an existing lock via min(H_canon)
-                        (Err(IngressVerdictLow::RejectedCollision), None)
-                    } else if let Some(existing) = ram.get_mut(&record.parent_lock) {
-                        let res =
-                            humoco_sim_core::resolver::resolve_split_brain(existing, &mut record);
-                        match res {
-                            humoco_sim_core::resolver::ResolutionResult::WinnerB { .. } => {
-                                ram.replace_lock(record.clone(), root_valid_until);
-                                (Ok(IngressVerdictLow::AcceptedNew), Some(record))
-                            }
-                            humoco_sim_core::resolver::ResolutionResult::WinnerA { .. } => {
-                                (Err(IngressVerdictLow::RejectedCollision), None)
-                            }
-                            humoco_sim_core::resolver::ResolutionResult::Identical => {
-                                (Ok(IngressVerdictLow::IdempotentReplay), None)
-                            }
-                            humoco_sim_core::resolver::ResolutionResult::NoConflict => {
-                                (Err(IngressVerdictLow::RejectedCollision), None)
-                            }
-                        }
-                    } else {
-                        (Err(IngressVerdictLow::RejectedCollision), None)
-                    }
-                }
-                Err(e) => (Err(e), None),
-            }
-        };
-
-        if let Some(rec) = to_flush {
-            permit.send(FlushOp::PutLock {
-                lock: rec,
-                root_valid_until: root_valid_until.0,
-            });
-        }
-
-        // Push lightweight summary to zero-contention recent locks ringbuffer (< 1µs hot-path impact)
-        let recent_status = match &verdict {
-            Ok(IngressVerdictLow::AcceptedNew) => {
-                if is_final {
-                    RecentLockStatus::Verified
-                } else {
-                    RecentLockStatus::Provisional
-                }
-            }
-            Ok(IngressVerdictLow::IdempotentReplay) => RecentLockStatus::Verified,
-            _ => RecentLockStatus::Conflict,
-        };
-        {
-            let mut recent = self.recent_locks.write();
-            recent.push(RecentLockSummary {
-                parent_lock_hex,
-                child_lock_hex,
-                timestamp_ms: now.0,
-                status: recent_status,
-                tier: "P2P-Sync".to_string(),
-                byte_years: 0,
-                voucher_id: None,
-            });
-        }
-
-        verdict
-    }
 
     /// Verify active committee support independently of any caller-supplied class
     /// within an optional checkout deadline (S01-01).
@@ -1742,11 +1521,7 @@ impl DualTierEngine {
         Ok(())
     }
 
-    /// Returns a copy of the LockRecord from RAM index if present.
-    pub async fn get_ram_lock(&self, parent_lock: &[u8; 32]) -> Option<LockRecord> {
-        let ram = self.ram.read().await;
-        ram.get(parent_lock).cloned()
-    }
+
 
     /// Returns a copy of the L2LockEntry from HMC RAM index if present.
     pub async fn get_hmc_ram_lock(&self, lookup_tag: &str) -> Option<L2LockEntry> {
@@ -2476,22 +2251,8 @@ impl DualTierEngine {
         self.recent_locks.write().push(summary);
     }
 
-    /// Inspects a lock by querying the in-memory RAM index.
+    /// Inspects a lock by querying the in-memory HMC RAM index.
     pub async fn inspect_lock(&self, parent_lock: &[u8; 32]) -> Option<LockInspection> {
-        let ram = self.ram.read().await;
-        if let Some(record) = ram.get(parent_lock) {
-            return Some(LockInspection {
-                parent_lock_hex: hex::encode(record.parent_lock),
-                lock_id_hex: hex::encode(record.id),
-                receiver_pub_hex: hex::encode(record.receiver_pub),
-                created_at_ms: record.created_at.0,
-                valid_until_ms: record.valid_until.0,
-                status: format!("{:?}", record.status),
-                signers_count: record.signers.len(),
-            });
-        }
-        drop(ram);
-
         let hmc_ram = self.hmc_ram.read().await;
         let hex_tag = hex::encode(parent_lock);
         if let Some(entry) = hmc_ram.locks.get(&hex_tag) {
@@ -2671,18 +2432,6 @@ impl DualTierEngine {
             for &vu in hmc.valid_until.values() {
                 if vu > now_ms {
                     let ttl_sec = (vu - now_ms) / 1000;
-                    total_byte_years = total_byte_years
-                        .saturating_add(ByteYears::from_ttl_seconds(ttl_sec.max(1)));
-                    count += 1;
-                }
-            }
-        }
-
-        {
-            let ram = self.ram.read().await;
-            for rec in ram.iter() {
-                if rec.valid_until.0 > now_ms {
-                    let ttl_sec = (rec.valid_until.0 - now_ms) / 1000;
                     total_byte_years = total_byte_years
                         .saturating_add(ByteYears::from_ttl_seconds(ttl_sec.max(1)));
                     count += 1;
@@ -2899,17 +2648,6 @@ impl DualTierEngine {
                 return serde_json::to_value(entry).ok();
             }
         }
-        // Check standard RAM
-        if let Ok(bytes) = hex::decode(lookup_tag) {
-            if bytes.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                let ram = self.ram.read().await;
-                if let Some(rec) = ram.get(&arr) {
-                    return serde_json::to_value(rec).ok();
-                }
-            }
-        }
         // Check redb HMC locks
         if let Ok(Some(entry)) = self.db.get_hmc_lock(lookup_tag) {
             return serde_json::to_value(&entry).ok();
@@ -2950,12 +2688,12 @@ impl DualTierEngine {
                     op = rx.recv() => {
                         match op {
                             Some(op) => {
-                                let mut has_durable = matches!(op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. });
+                                let mut has_durable = matches!(op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. });
                                 batch.push(op);
                                 while batch.len() < FLUSH_BATCH_SIZE {
                                     match rx.try_recv() {
                                         Ok(next_op) => {
-                                            if matches!(next_op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. }) {
+                                            if matches!(next_op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. }) {
                                                 has_durable = true;
                                             }
                                             batch.push(next_op);
@@ -3171,9 +2909,6 @@ impl DualTierEngine {
                     .len()
                     .saturating_add(approval.len())
                     .saturating_add(serde_json::to_vec(entry).map_or(MAX_BATCH_BYTES, |b| b.len())),
-                FlushOp::OriginalRecordApproval { approval, .. } => {
-                    256usize.saturating_add(approval.len())
-                }
                 FlushOp::PutEvidence { raw, .. } => raw.len().saturating_add(32),
                 _ => 256,
             };
@@ -3194,32 +2929,22 @@ impl DualTierEngine {
         // first, then atomically persist compatible original approvals in one group commit,
         // preserving worker FIFO and Durable-before-Vote (DEC-029 / A05-02).
         if let Some(index) = batch.iter().position(|op| {
-            matches!(
-                op,
-                FlushOp::OriginalHmcApproval { .. } | FlushOp::OriginalRecordApproval { .. }
-            )
+            matches!(op, FlushOp::OriginalHmcApproval { .. })
         }) {
             let mut tail = batch.split_off(index);
             let before = Self::flush_batch(batch, db);
 
-            // Group all contiguous OriginalHmcApproval / OriginalRecordApproval operations (A05-02)
+            // Group all contiguous OriginalHmcApproval operations (A05-02)
             let group_len = tail
                 .iter()
-                .take_while(|op| {
-                    matches!(
-                        op,
-                        FlushOp::OriginalHmcApproval { .. }
-                            | FlushOp::OriginalRecordApproval { .. }
-                    )
-                })
+                .take_while(|op| matches!(op, FlushOp::OriginalHmcApproval { .. }))
                 .count();
 
             let original_ops: Vec<FlushOp> = tail.drain(0..group_len).collect();
 
             let signing_unavailable = before.failed
                 || original_ops.iter().any(|op| match op {
-                    FlushOp::OriginalHmcApproval { health, .. }
-                    | FlushOp::OriginalRecordApproval { health, .. } => health
+                    FlushOp::OriginalHmcApproval { health, .. } => health
                         .signing_failed
                         .load(std::sync::atomic::Ordering::Acquire),
                     _ => false,
@@ -3229,45 +2954,25 @@ impl DualTierEngine {
             let mut completions = Vec::with_capacity(original_ops.len());
 
             for op in original_ops {
-                match op {
-                    FlushOp::OriginalHmcApproval {
-                        tag,
-                        entry,
+                if let FlushOp::OriginalHmcApproval {
+                    tag,
+                    entry,
+                    node,
+                    approval,
+                    class,
+                    root,
+                    complete,
+                    health,
+                } = op
+                {
+                    batch_entries.push(crate::storage::OriginalApprovalBatchEntry {
+                        target: crate::storage::OriginalApprovalTarget::Hmc { tag, entry },
                         node,
                         approval,
                         class,
-                        root,
-                        complete,
-                        health,
-                    } => {
-                        batch_entries.push(crate::storage::OriginalApprovalBatchEntry {
-                            target: crate::storage::OriginalApprovalTarget::Hmc { tag, entry },
-                            node,
-                            approval,
-                            class,
-                            root_valid_until_ms: root,
-                        });
-                        completions.push((complete, health));
-                    }
-                    FlushOp::OriginalRecordApproval {
-                        record,
-                        node,
-                        approval,
-                        class,
-                        root,
-                        complete,
-                        health,
-                    } => {
-                        batch_entries.push(crate::storage::OriginalApprovalBatchEntry {
-                            target: crate::storage::OriginalApprovalTarget::Record { record },
-                            node,
-                            approval,
-                            class,
-                            root_valid_until_ms: root,
-                        });
-                        completions.push((complete, health));
-                    }
-                    _ => {}
+                        root_valid_until_ms: root,
+                    });
+                    completions.push((complete, health));
                 }
             }
 
@@ -3332,7 +3037,6 @@ impl DualTierEngine {
         type HmcFlushItem = (String, Box<L2LockEntry>, Option<DurableHmcAck>);
 
         // Categorize (drains the input vector exactly once, preserving FIFO within type).
-        let mut locks: Vec<(LockRecord, u64)> = Vec::new();
         let mut hmc: Vec<HmcFlushItem> = Vec::new();
         let mut evidences: Vec<([u8; 32], Vec<u8>)> = Vec::new();
         let mut quotas: Vec<([u8; 32], u64)> = Vec::new();
@@ -3341,18 +3045,13 @@ impl DualTierEngine {
         for op in batch.drain(..) {
             match op {
                 FlushOp::Fence { .. }
-                | FlushOp::OriginalHmcApproval { .. }
-                | FlushOp::OriginalRecordApproval { .. } => {
+                | FlushOp::OriginalHmcApproval { .. } => {
                     return FlushOutcome {
                         ops_committed: 0,
                         attempts: 0,
                         failed: true,
                     };
                 }
-                FlushOp::PutLock {
-                    lock,
-                    root_valid_until,
-                } => locks.push((lock, root_valid_until)),
                 FlushOp::PutHmcLock { lookup_tag, entry } => hmc.push((lookup_tag, entry, None)),
                 FlushOp::PutHmcLockDurable {
                     lookup_tag,
@@ -3374,18 +3073,7 @@ impl DualTierEngine {
             }
         }
 
-        // Pre-serialize locks (permanent per-op errors counted, never retried as a batch).
-        let mut lock_rows: Vec<(LockRecord, u64, Vec<u8>)> = Vec::with_capacity(locks.len());
         let mut permanent_errors = 0u32;
-        for (lock, root) in &locks {
-            match bincode::serialize(&(lock, root)) {
-                Ok(bytes) => lock_rows.push((lock.clone(), *root, bytes)),
-                Err(e) => {
-                    permanent_errors += 1;
-                    error!("Dropping unserializable LockRecord (permanent): {}", e);
-                }
-            }
-        }
 
         // Pre-serialize HMC entries + resolve voucher roots.
         let mut batch_roots: HashMap<String, u64> = HashMap::new();
@@ -3432,10 +3120,6 @@ impl DualTierEngine {
         }
 
         // Borrowed views into the owned rows (built once, reused across retries).
-        let lock_view: Vec<(&LockRecord, u64, &[u8])> = lock_rows
-            .iter()
-            .map(|(l, r, b)| (l, *r, b.as_slice()))
-            .collect();
         let hmc_view: Vec<(&str, &L2LockEntry, &[u8], u64)> = hmc_owned
             .iter()
             .map(|(t, e, b, v)| (t.as_str(), e.as_ref(), b.as_slice(), *v))
@@ -3446,7 +3130,7 @@ impl DualTierEngine {
         loop {
             attempts += 1;
             let res = db.apply_flush_batch_atomic(
-                &lock_view, &hmc_view, &evidences, &quotas, &bans, &prunes,
+                &hmc_view, &evidences, &quotas, &bans, &prunes,
             );
             match res {
                 Ok(()) => {
@@ -3513,8 +3197,7 @@ impl DualTierEngine {
     /// not pre-filtered as expired before their root is known.
     pub async fn recover_from_disk(&self, now: SimTime) -> Result<usize, StorageError> {
         let db = self.db.clone();
-        let locks_res = tokio::task::spawn_blocking(move || {
-            let locks = db.all_valid_locks(now.0)?;
+        let hmc_locks_res = tokio::task::spawn_blocking(move || {
             let mut hmc = Vec::new();
             for root in db.all_voucher_roots()? {
                 if super::db::roots::root_valid_until(&root).is_err() {
@@ -3527,12 +3210,12 @@ impl DualTierEngine {
                 let support = db.confirmation_support(&tag)?;
                 hmc.push((tag, entry, support));
             }
-            Ok::<_, StorageError>((locks, hmc))
+            Ok::<_, StorageError>(hmc)
         })
         .await
         .map_err(|e| StorageError::DurableCommitFailed(format!("recovery worker: {e}")))?;
-        let (locks, hmc_locks) = match locks_res {
-            Ok(pair) => pair,
+        let hmc_locks = match hmc_locks_res {
+            Ok(list) => list,
             Err(e) => {
                 if matches!(e, StorageError::SigningHistoryCorrupt) {
                     self.db.latch_corruption();
@@ -3543,13 +3226,8 @@ impl DualTierEngine {
                 return Err(e);
             }
         };
-        let count = locks.len();
-        let mut ram = self.ram.write().await;
-        for (lock, root_valid_until) in locks {
-            ram.insert_recovered(lock, SimTime(root_valid_until));
-        }
+        let count = hmc_locks.len();
 
-        drop(ram);
         // Stage 1: genesis roots (own deletable_at) first.
         // Stage 2: follow-ups inherit from the anchored roots.
         let mut genesis = Vec::new();
@@ -3629,18 +3307,13 @@ impl DualTierEngine {
             }
         }
 
-        let ram_pruned = {
-            let mut ram = self.ram.write().await;
-            ram.prune_expired_bounded(now, 256)
-        };
-
         let hmc_pruned = {
             let mut hmc_ram = self.hmc_ram.write().await;
             hmc_ram.prune_expired(now)
         };
 
         let db = self.db.clone();
-        let (disk_pruned, disk_hmc_pruned) =
+        let disk_hmc_pruned =
             tokio::task::spawn_blocking(move || db.prune_expired_buckets(now.0 / 1_000))
                 .await
                 .map_err(|error| {
@@ -3648,25 +3321,23 @@ impl DualTierEngine {
                 })??;
         self.last_prune_anchor
             .store(now.0, std::sync::atomic::Ordering::Relaxed);
-        Ok(ram_pruned + hmc_pruned + disk_pruned.len() + disk_hmc_pruned)
+        Ok(hmc_pruned + disk_hmc_pruned)
     }
 
     /// Quarantines unconfirmed local minority locks for a shard that are missing from
     /// the dominant quorum state (Spec 08, Pillar 4, DEC-064).
     ///
-    /// Atomically removes displaced locks from disk and in-memory RamIndex / HmcRamIndex,
+    /// Atomically removes displaced locks from disk and in-memory HmcRamIndex,
     /// placing them into provisional storage so they cannot poison the active shard digest.
     pub async fn quarantine_subquorum_locks(
         &self,
         shard_id: u16,
-        keep_native_parents: &std::collections::HashSet<[u8; 32]>,
         keep_hmc_tags: &std::collections::HashSet<String>,
-    ) -> Result<(Vec<[u8; 32]>, Vec<String>), StorageError> {
+    ) -> Result<Vec<String>, StorageError> {
         let db = self.db.clone();
-        let keep_native = keep_native_parents.clone();
         let keep_hmc = keep_hmc_tags.clone();
-        let (q_native, q_hmc) = tokio::task::spawn_blocking(move || {
-            db.quarantine_subquorum_locks(shard_id, &keep_native, &keep_hmc)
+        let q_hmc = tokio::task::spawn_blocking(move || {
+            db.quarantine_subquorum_locks(shard_id, &keep_hmc)
         })
         .await
         .map_err(|e| StorageError::DurableCommitFailed(format!("quarantine worker: {e}")))??;
@@ -3674,18 +3345,12 @@ impl DualTierEngine {
         // Publish only the exact committed quarantine delta. Pending RAM rows
         // that were absent from this database transaction are not omission proof.
         {
-            let mut ram = self.ram.write().await;
-            for parent in &q_native {
-                ram.remove(parent);
-            }
-        }
-        {
             let mut ram = self.hmc_ram.write().await;
             for tag in &q_hmc {
                 ram.remove_lock(tag);
             }
         }
-        Ok((q_native, q_hmc))
+        Ok(q_hmc)
     }
 }
 
@@ -3812,14 +3477,16 @@ mod exact_hmc_durability_tests {
     fn rejected_original_choice_does_not_increment_committed_operations() {
         let dir = tempfile::tempdir().unwrap();
         let db = RedbStorage::open(&dir.path().join("conflict-stat.redb")).unwrap();
-        let a = LockRecord::new([1; 32], [2; 32], vec![1], SimTime(1_000), SimTime(50_000));
-        let b = LockRecord::new([1; 32], [3; 32], vec![1], SimTime(1_000), SimTime(50_000));
-        db.commit_original_record_approval(&a, 50_000, &[8; 32], b"first", 0)
+        let a = entry(1);
+        let b = entry(2);
+        let tag = "conflict-spend-tag".to_string();
+        db.commit_original_approval(&tag, &a, &[8; 32], b"first", 0, 50_000)
             .unwrap();
         let (complete, result) = tokio::sync::watch::channel(None);
         let health = Arc::new(PersistenceStats::default());
-        let mut batch = vec![FlushOp::OriginalRecordApproval {
-            record: Box::new(b),
+        let mut batch = vec![FlushOp::OriginalHmcApproval {
+            tag,
+            entry: Box::new(b),
             node: [8; 32],
             approval: b"conflicting".to_vec(),
             class: 0,

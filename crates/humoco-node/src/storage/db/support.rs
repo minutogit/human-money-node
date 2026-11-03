@@ -19,8 +19,6 @@ use crate::api::dto::QuorumCertificateDto;
 use humoco_sim_core::types::NetworkId;
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const TABLE_NATIVE_SUPPORT: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("native_confirmation_support");
 pub const TABLE_CONFIRMATION_SUPPORT: TableDefinition<&str, &[u8]> =
     TableDefinition::new("confirmation_support");
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -153,18 +151,6 @@ impl RedbStorage {
         }
         txn.commit()?;
         Ok(fact)
-    }
-    /// Compact admitted native support, separate from legacy row status.
-    pub fn native_confirmation_support(
-        &self,
-        parent: &[u8; 32],
-    ) -> Result<Option<ConfirmationSupport>, StorageError> {
-        let tx = self.db.begin_read()?;
-        let table = tx.open_table(TABLE_NATIVE_SUPPORT)?;
-        table
-            .get(native_key(parent).as_str())?
-            .map(|value| serde_json::from_slice(value.value()).map_err(StorageError::from))
-            .transpose()
     }
     pub fn confirmation_support(
         &self,
@@ -333,14 +319,8 @@ mod tests {
     }
 }
 
-/// Disjoint from base58 HMC collision tags. Native status fields are not provenance.
-pub(crate) fn native_key(parent: &[u8; 32]) -> String {
-    format!("native:{}", hex::encode(parent))
-}
-
 impl RedbStorage {
     /// Bounded streaming commitment over both objective identities and admitted support.
-    /// Unknown provenance commits to class zero, including legacy native FINAL rows.
     pub(crate) fn inherited_support_digest(
         &self,
         shard: u16,
@@ -354,32 +334,6 @@ impl RedbStorage {
         h.update(&[1]);
         h.update(&shard.to_le_bytes());
         let support = tx.open_table(TABLE_CONFIRMATION_SUPPORT)?;
-        for item in tx.open_table(TABLE_LOCKS)?.iter()? {
-            let (_, bytes) = item?;
-            let (row, root): (LockRecord, u64) = bincode::deserialize(bytes.value())?;
-            if u16::from_be_bytes([row.parent_lock[0], row.parent_lock[1]]) != shard
-                || row.valid_until.0 <= now
-                || row.status.is_void()
-            {
-                continue;
-            }
-            let key = native_key(&row.parent_lock);
-            let fact = tx
-                .open_table(TABLE_NATIVE_SUPPORT)?
-                .get(key.as_str())?
-                .map(|v| serde_json::from_slice::<ConfirmationSupport>(v.value()))
-                .transpose()?;
-            hash_fact(
-                &mut h,
-                0,
-                &key,
-                &row.parent_lock,
-                &row.id,
-                &[0; 32],
-                root,
-                admitted_class(fact.as_ref(), &row.parent_lock, &row.id, root)?,
-            )?;
-        }
         for item in tx.open_table(TABLE_HMC_LOCKS)?.iter()? {
             let (key, bytes) = item?;
             let row: crate::api::hmc::L2LockEntry = serde_json::from_slice(bytes.value())?;

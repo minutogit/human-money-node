@@ -9,259 +9,20 @@
 //! Property-Based Testing (`proptest`) for Consensus and Protocol Invariants
 //!
 //! Scope of Work:
-//! 1. Canonical Resolver Commutativity & Invariance (`min(H_canon)`)
-//! 2. Equivocation Proof Symmetry & Collision Resistance
-//! 3. WireHeader Safe Framing & Serialization Round-Trip (`INV-1001`)
-//! 4. Slotted RingBuffer & NetworkThermometer Bounds & Monotonicity
+//! 1. WireHeader Safe Framing & Serialization Round-Trip (`INV-1001`)
+//! 2. Slotted RingBuffer & NetworkThermometer Bounds & Monotonicity
 //!
 //! Run with: `cargo test --test proptest_invariants`
 
-use humoco_sim_core::crypto::{
-    compute_canonical_hash, compute_canonical_hash_with_sig, DOMAIN_CANON_RESOLVER,
-};
 use humoco_sim_core::quota::{
     HourlySlottedRingBuffer, NetworkThermometer, HARD_FLOOR_BASELINE_DAILY,
-    HARD_FLOOR_READ_BASELINE_DAILY, MAX_WHALE_MULTIPLIER, READ_TO_WRITE_RATIO,
+    HARD_FLOOR_READ_BASELINE_DAILY,
 };
-use humoco_sim_core::resolver::{
-    resolve_split_brain, resolve_split_brain_canonical, ResolutionResult,
-};
-use humoco_sim_core::types::{Hash256, LockRecord, LockStatus, NodeId, SimTime};
 use humoco_sim_core::wire::{WireHeader, CURRENT_PROTOCOL_VERSION, WIRE_MAGIC};
 use proptest::prelude::*;
 
-// ---------------------------------------------------------------------------
-// Custom Strategies
-// ---------------------------------------------------------------------------
-
 fn arb_hash256() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
-}
-
-fn arb_sig64() -> impl Strategy<Value = [u8; 64]> {
-    any::<[u8; 64]>()
-}
-
-fn arb_nonce() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(any::<u8>(), 0..64)
-}
-
-fn arb_lock_pair() -> impl Strategy<
-    Value = (
-        [u8; 32],         // parent_lock
-        [u8; 32],         // receiver_a
-        [u8; 32],         // receiver_b
-        Vec<u8>,          // nonce_a
-        Vec<u8>,          // nonce_b
-        Option<[u8; 64]>, // sig_a
-        Option<[u8; 64]>, // sig_b
-        u64,              // created_ms
-        u64,              // ttl_ms
-    ),
-> {
-    (
-        arb_hash256(),
-        arb_hash256(),
-        arb_hash256(),
-        arb_nonce(),
-        arb_nonce(),
-        prop::option::of(arb_sig64()),
-        prop::option::of(arb_sig64()),
-        0u64..1_000_000_000u64,
-        1_000u64..100_000_000u64,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Property 1: Canonical Resolver Commutativity & Invariance (min(H_canon))
-// ---------------------------------------------------------------------------
-
-proptest! {
-    /// Property 1A: Canonical Resolver Commutativity and Winner Consistency
-    /// For any arbitrary random parent_lock, receiver_pub (A & B), nonce (A & B),
-    /// and optional signatures (A & B):
-    /// Resolving (A, B) vs (B, A) must choose the exact same winning payload/lock_id
-    /// and mark the loser as Void.
-    #[test]
-    fn prop_canonical_resolver_commutativity(
-        (parent_lock, receiver_a, receiver_b, nonce_a, nonce_b, sig_a, sig_b, created_ms, ttl_ms) in arb_lock_pair()
-    ) {
-        let created_at = SimTime(created_ms);
-        let valid_until = SimTime(created_ms.saturating_add(ttl_ms).saturating_add(30_000));
-
-        let lock_a_orig = LockRecord::new(
-            parent_lock,
-            receiver_a,
-            nonce_a.clone(),
-            created_at,
-            valid_until,
-        );
-        let lock_b_orig = LockRecord::new(
-            parent_lock,
-            receiver_b,
-            nonce_b.clone(),
-            created_at,
-            valid_until,
-        );
-
-        let mut lock_a_fwd = lock_a_orig.clone();
-        let mut lock_b_fwd = lock_b_orig.clone();
-
-        let mut lock_b_rev = lock_b_orig.clone();
-        let mut lock_a_rev = lock_a_orig.clone();
-
-        let res_fwd = resolve_split_brain_canonical(
-            &mut lock_a_fwd,
-            &mut lock_b_fwd,
-            sig_a.as_ref(),
-            sig_b.as_ref(),
-        );
-
-        let res_rev = resolve_split_brain_canonical(
-            &mut lock_b_rev,
-            &mut lock_a_rev,
-            sig_b.as_ref(),
-            sig_a.as_ref(),
-        );
-
-        if lock_a_orig.id == lock_b_orig.id {
-            // Idempotent duplicate: Identical in both orientations
-            prop_assert_eq!(res_fwd, ResolutionResult::Identical);
-            prop_assert_eq!(res_rev, ResolutionResult::Identical);
-            prop_assert!(!lock_a_fwd.status.is_void());
-            prop_assert!(!lock_b_fwd.status.is_void());
-            prop_assert!(!lock_a_rev.status.is_void());
-            prop_assert!(!lock_b_rev.status.is_void());
-        } else {
-            // Compute expected canonical hashes
-            let h_a = match sig_a.as_ref() {
-                Some(sig) => compute_canonical_hash_with_sig(&parent_lock, &receiver_a, sig),
-                None => compute_canonical_hash(&parent_lock, &receiver_a, &nonce_a),
-            };
-            let h_b = match sig_b.as_ref() {
-                Some(sig) => compute_canonical_hash_with_sig(&parent_lock, &receiver_b, sig),
-                None => compute_canonical_hash(&parent_lock, &receiver_b, &nonce_b),
-            };
-
-            match res_fwd {
-                ResolutionResult::WinnerA { winner_hash, loser_hash } => {
-                    prop_assert_eq!(winner_hash, h_a);
-                    prop_assert_eq!(loser_hash, h_b);
-                    prop_assert!(h_a < h_b);
-
-                    // Winner A untouched, Loser B marked Void
-                    prop_assert!(!lock_a_fwd.status.is_void());
-                    prop_assert!(lock_b_fwd.status.is_void());
-
-                    // In reverse call (B, A), A is second arg so A winning corresponds to WinnerB
-                    prop_assert_eq!(
-                        res_rev,
-                        ResolutionResult::WinnerB {
-                            winner_hash: h_a,
-                            loser_hash: h_b,
-                        }
-                    );
-                    prop_assert!(!lock_a_rev.status.is_void());
-                    prop_assert!(lock_b_rev.status.is_void());
-                }
-                ResolutionResult::WinnerB { winner_hash, loser_hash } => {
-                    prop_assert_eq!(winner_hash, h_b);
-                    prop_assert_eq!(loser_hash, h_a);
-                    prop_assert!(h_b <= h_a);
-
-                    // Winner B untouched, Loser A marked Void
-                    prop_assert!(lock_a_fwd.status.is_void());
-                    prop_assert!(!lock_b_fwd.status.is_void());
-
-                    // In reverse call (B, A), B is first arg so B winning corresponds to WinnerA
-                    prop_assert_eq!(
-                        res_rev,
-                        ResolutionResult::WinnerA {
-                            winner_hash: h_b,
-                            loser_hash: h_a,
-                        }
-                    );
-                    prop_assert!(lock_a_rev.status.is_void());
-                    prop_assert!(!lock_b_rev.status.is_void());
-                }
-                _ => {
-                    prop_assert!(false, "Different locks on same parent must result in WinnerA or WinnerB");
-                }
-            }
-        }
-    }
-
-    /// Property 1B: NoConflict on Distinct Parent Locks
-    /// If parent_a != parent_b, resolving them always results in NoConflict,
-    /// and neither lock is marked Void.
-    #[test]
-    fn prop_canonical_resolver_no_conflict_on_distinct_parents(
-        parent_a in arb_hash256(),
-        parent_b in arb_hash256(),
-        receiver_a in arb_hash256(),
-        receiver_b in arb_hash256(),
-        nonce_a in arb_nonce(),
-        nonce_b in arb_nonce(),
-    ) {
-        prop_assume!(parent_a != parent_b);
-
-        let mut lock_a = LockRecord::new(
-            parent_a,
-            receiver_a,
-            nonce_a,
-            SimTime(100),
-            SimTime(10_000),
-        );
-        let mut lock_b = LockRecord::new(
-            parent_b,
-            receiver_b,
-            nonce_b,
-            SimTime(100),
-            SimTime(10_000),
-        );
-
-        let mut lock_a_rev = lock_a.clone();
-        let mut lock_b_rev = lock_b.clone();
-
-        let res_fwd = resolve_split_brain(&mut lock_a, &mut lock_b);
-        let res_rev = resolve_split_brain(&mut lock_b_rev, &mut lock_a_rev);
-
-        prop_assert_eq!(res_fwd, ResolutionResult::NoConflict);
-        prop_assert_eq!(res_rev, ResolutionResult::NoConflict);
-        prop_assert!(!lock_a.status.is_void());
-        prop_assert!(!lock_b.status.is_void());
-        prop_assert!(!lock_a_rev.status.is_void());
-        prop_assert!(!lock_b_rev.status.is_void());
-    }
-
-    /// Property 1C: Identical Locks Yield Identical Resolution
-    /// If lock_a.id == lock_b.id, resolving them always returns Identical,
-    /// and neither lock is mutated to Void.
-    #[test]
-    fn prop_canonical_resolver_identical_locks(
-        parent in arb_hash256(),
-        receiver in arb_hash256(),
-        nonce in arb_nonce(),
-        created_ms in any::<u64>(),
-        ttl_ms in 1_000u64..100_000_000u64,
-    ) {
-        let created_at = SimTime(created_ms);
-        let valid_until = SimTime(created_ms.saturating_add(ttl_ms));
-
-        let mut lock_a = LockRecord::new(
-            parent,
-            receiver,
-            nonce,
-            created_at,
-            valid_until,
-        );
-        let mut lock_b = lock_a.clone();
-
-        let res = resolve_split_brain(&mut lock_a, &mut lock_b);
-        prop_assert_eq!(res, ResolutionResult::Identical);
-        prop_assert!(!lock_a.status.is_void());
-        prop_assert!(!lock_b.status.is_void());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -354,8 +115,6 @@ proptest! {
         prop_assert_eq!(ring.count(), 0);
         prop_assert_eq!(ring.rolling_24h_sum(), 0);
         prop_assert_eq!(ring.rolling_24h_average(), 0);
-
-        let mut current_last_hour = 0u64;
 
         for (epoch_hour, median) in entries {
             let prev_count = ring.count();

@@ -2,7 +2,7 @@ use humoco_sim_core::crypto::sign_lock_attestation;
 use humoco_sim_core::fraud::{
     sign_heartbeat, FraudProofPayload, FraudProofPillar, SlotDetector128,
 };
-use humoco_sim_core::types::{LockRecord, SimTime};
+use humoco_sim_core::types::SimTime;
 
 /// Säule 1: Equivocation Double-Sign (L3A != L3B, gleicher parent_lock)
 #[test]
@@ -10,27 +10,14 @@ fn test_pillar_1_equivocation_double_sign_bans_immediately() {
     let byzantine: u16 = 5;
     let parent_lock = [0xAA; 32];
 
-    // Zwei konkurrierende Locks für selben parent_lock, unterschiedliche Empfänger/Nonce -> unterschiedliche LockIds
-    let lock_a = LockRecord::new(
-        parent_lock,
-        [0x11; 32],
-        b"nonce_A".to_vec(),
-        SimTime(0),
-        SimTime(50_000),
-    );
-    let lock_b = LockRecord::new(
-        parent_lock,
-        [0x22; 32],
-        b"nonce_B".to_vec(),
-        SimTime(0),
-        SimTime(50_000),
-    );
+    let lock_id_a = [0x11; 32];
+    let lock_id_b = [0x22; 32];
 
-    assert_ne!(lock_a.id, lock_b.id, "L3A und L3B müssen verschieden sein");
+    assert_ne!(lock_id_a, lock_id_b, "L3A und L3B müssen verschieden sein");
 
     // Byzantinischer Knoten signiert beide Attestationen auf denselben parent_lock
-    let att_a = sign_lock_attestation(byzantine, &lock_a.id, &parent_lock, SimTime(100));
-    let att_b = sign_lock_attestation(byzantine, &lock_b.id, &parent_lock, SimTime(200));
+    let att_a = sign_lock_attestation(byzantine, &lock_id_a, &parent_lock, SimTime(100));
+    let att_b = sign_lock_attestation(byzantine, &lock_id_b, &parent_lock, SimTime(200));
 
     // Simulator baut FraudProofPayload (Säule 1)
     let proof = FraudProofPayload::new_shard_equivocation(att_a.clone(), att_b.clone());
@@ -43,8 +30,8 @@ fn test_pillar_1_equivocation_double_sign_bans_immediately() {
     assert!(proof.verify(), "Säule 1 Beweis muss verifizierbar sein");
 
     // Gegenprobe 1: gleiche LockIds dürfen keinen gültigen Equivocation-Beweis ergeben
-    let att_a2 = sign_lock_attestation(byzantine, &lock_a.id, &parent_lock, SimTime(100));
-    let att_b_same = sign_lock_attestation(byzantine, &lock_a.id, &parent_lock, SimTime(300));
+    let att_a2 = sign_lock_attestation(byzantine, &lock_id_a, &parent_lock, SimTime(100));
+    let att_b_same = sign_lock_attestation(byzantine, &lock_id_a, &parent_lock, SimTime(300));
     let bad_proof = FraudProofPayload::new_shard_equivocation(att_a2, att_b_same);
     assert!(
         !bad_proof.verify(),
@@ -54,7 +41,7 @@ fn test_pillar_1_equivocation_double_sign_bans_immediately() {
     // Gegenprobe 2: unterschiedliche parent_locks dürfen NIEMALS als Equivocation gelten (False-Positive-Schutz!)
     let different_parent = [0x99; 32];
     let att_diff_parent =
-        sign_lock_attestation(byzantine, &lock_b.id, &different_parent, SimTime(200));
+        sign_lock_attestation(byzantine, &lock_id_b, &different_parent, SimTime(200));
     let false_positive_proof =
         FraudProofPayload::new_shard_equivocation(att_a, att_diff_parent);
     assert!(

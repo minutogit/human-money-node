@@ -25,7 +25,7 @@ use humoco_node::{
     network::PeerManager,
     storage::{DualTierEngine, RedbStorage},
 };
-use humoco_sim_core::types::{LockRecord, SimTime};
+use humoco_sim_core::types::SimTime;
 use std::sync::{atomic::Ordering, Arc};
 use tower::ServiceExt;
 
@@ -311,8 +311,7 @@ async fn test_f3_sync_preserves_hmc_identity_lifetime_and_class() {
     assert_eq!(response.status(), StatusCode::OK);
     let sync_resp: SyncResponse = response_json(response).await;
 
-    // Native locks must be empty; spend must be in hmc_locks
-    assert!(sync_resp.locks.is_empty(), "native locks must be empty");
+    // Spend must be in hmc_locks
     assert_eq!(sync_resp.hmc_locks.len(), 1);
 
     let row = &sync_resp.hmc_locks[0];
@@ -385,21 +384,7 @@ async fn test_f3_pending_ram_locks_without_commit_not_exported() {
         .unwrap()
         .as_millis() as u64;
 
-    // 1. Insert native lock into RAM only
-    let native_rec = LockRecord::new(
-        [0x55; 32],
-        [0x66; 32],
-        vec![1, 2, 3],
-        SimTime(now_ms),
-        SimTime(now_ms + 600_000),
-    );
-    engine
-        .ram
-        .write()
-        .await
-        .insert_recovered(native_rec, SimTime(now_ms + 600_000));
-
-    // 2. Insert HMC lock into HMC RAM only
+    // 1. Insert HMC lock into HMC RAM only
     let hmc_entry = create_sample_entry("ram-only-voucher", 0x77, now_ms, 600_000);
     engine
         .hmc_ram
@@ -408,10 +393,9 @@ async fn test_f3_pending_ram_locks_without_commit_not_exported() {
         .insert_lock_for_test("ram-only-tag".into(), hmc_entry);
 
     // Verify disk has no records
-    assert!(storage.all_valid_locks(now_ms).unwrap().is_empty());
     assert!(storage.get_hmc_lock("ram-only-tag").unwrap().is_none());
 
-    // 3. /v1/sync must return empty lists
+    // 2. /v1/sync must return empty lists
     let sync_req = SyncRequest {
         sparse_locators: vec![],
     };
@@ -429,10 +413,6 @@ async fn test_f3_pending_ram_locks_without_commit_not_exported() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let sync_resp: SyncResponse = response_json(response).await;
-    assert!(
-        sync_resp.locks.is_empty(),
-        "uncommitted RAM native lock must not be exported"
-    );
     assert!(
         sync_resp.hmc_locks.is_empty(),
         "uncommitted RAM HMC lock must not be exported"

@@ -47,10 +47,10 @@ impl ShardStage {
     }
     /// Validate one bounded page and spill immediately. No whole-cut RAM vectors.
     pub fn append(&self, page: SyncPayload) -> Result<(), StorageError> {
-        let page_entries = page.support.len() + page.locks.len() + page.hmc_locks.len();
+        let page_entries = page.support.len() + page.hmc_locks.len();
         let page_bytes = bincode::serialized_size(&page)?;
         if page.support.len() > PAGE
-            || page.locks.len() + page.hmc_locks.len() > PAGE
+            || page.hmc_locks.len() > PAGE
             || page_bytes > 64 * 1024
         {
             return Err(invalid("staging page ceiling exceeded"));
@@ -67,17 +67,13 @@ impl ShardStage {
             return Err(invalid("staging total ceiling exceeded"));
         }
         let tx = self.storage.db.begin_write()?;
-        for (kind, key, fact) in page.support {
-            if kind > 1 || key.len() > MAX_SYNC_TAG_BYTES || !(1..=2).contains(&fact.class) {
+        for (_kind, key, fact) in page.support {
+            if key.len() > MAX_SYNC_TAG_BYTES || !(1..=2).contains(&fact.class) {
                 return Err(invalid("invalid support metadata"));
             }
             let bytes = serde_json::to_vec(&fact)?;
             if tx
-                .open_table(if kind == 0 {
-                    support::TABLE_NATIVE_SUPPORT
-                } else {
-                    support::TABLE_CONFIRMATION_SUPPORT
-                })?
+                .open_table(support::TABLE_CONFIRMATION_SUPPORT)?
                 .insert(key.as_str(), bytes.as_slice())?
                 .is_some()
             {
@@ -115,14 +111,13 @@ impl ShardStage {
             }) {
                 return Err(invalid("invalid staged output commitment"));
             }
-            let record = LockRecord::new(
+            let record = projection::CommittedShardRecord::new(
                 *blake3::hash(tag.as_bytes()).as_bytes(),
                 entry.sender_ephemeral_pub,
                 entry.t_id.to_vec(),
-                SimTime(entry.created_at_ms),
-                SimTime(validity),
+                entry.created_at_ms,
             );
-            Self::project(&tx, &record, self.now)?;
+            Self::project(&tx, &record, self.now, validity)?;
             let bytes = serde_json::to_vec(&entry)?;
             if tx
                 .open_table(TABLE_HMC_LOCKS)?
@@ -132,45 +127,16 @@ impl ShardStage {
                 return Err(invalid("duplicate staged collision key"));
             }
         }
-        for (mut record, root) in page.locks {
-            let expected = LockRecord::new(
-                record.parent_lock,
-                record.receiver_pub,
-                record.nonce.clone(),
-                record.created_at,
-                record.valid_until,
-            );
-            if record.id != expected.id
-                || record.valid_until.0 > root
-                || record.nonce.len() > MAX_SYNC_ROW_BYTES
-                || u16::from_be_bytes([record.parent_lock[0], record.parent_lock[1]]) != self.shard
-            {
-                return Err(invalid("invalid staged native row"));
-            }
-            // A source's historical status/signers cannot establish support.
-            record.signers.clear();
-            Self::project(&tx, &record, self.now)?;
-            let bytes = bincode::serialize(&(record.clone(), root))?;
-            if bytes.len() > MAX_SYNC_ROW_BYTES {
-                return Err(invalid("invalid staged native row"));
-            }
-            if tx
-                .open_table(TABLE_LOCKS)?
-                .insert(&record.parent_lock, bytes.as_slice())?
-                .is_some()
-            {
-                return Err(invalid("duplicate staged native key"));
-            }
-        }
         tx.commit()?;
         Ok(())
     }
     fn project(
         tx: &redb::WriteTransaction,
-        row: &LockRecord,
+        row: &projection::CommittedShardRecord,
         now: u64,
+        validity: u64,
     ) -> Result<(), StorageError> {
-        if row.valid_until.0 <= now || row.status.is_void() {
+        if validity <= now {
             return Ok(());
         }
         let bytes = bincode::serialize(row)?;
@@ -191,7 +157,7 @@ impl ShardStage {
         hash.update(&self.shard.to_le_bytes());
         for row in tx.open_table(PROJECTION)?.iter()? {
             let (_, value) = row?;
-            let row: LockRecord = bincode::deserialize(value.value())?;
+            let row: projection::CommittedShardRecord = bincode::deserialize(value.value())?;
             hash.update(&row.parent_lock);
             hash.update(&row.receiver_pub);
             hash.update(&row.nonce);
@@ -240,13 +206,6 @@ impl RedbStorage {
             .open_table(support::TABLE_CONFIRMATION_SUPPORT)?
             .len()?
             != 0
-            || stage
-                .storage
-                .db
-                .begin_read()?
-                .open_table(support::TABLE_NATIVE_SUPPORT)?
-                .len()?
-                != 0
         {
             return Err(invalid("inherited support lacks qualified admission"));
         } else {
@@ -293,98 +252,6 @@ impl RedbStorage {
                 return Err(invalid("new canonical sync root lacks author output proof"));
             }
             roots::put(&tx, &root)?;
-        }
-        let mut after = None;
-        loop {
-            let mut page = Vec::new();
-            {
-                let table = tx.open_table(TABLE_LOCKS)?;
-                let lower = after
-                    .as_ref()
-                    .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-                for row in table
-                    .range::<&[u8; 32]>((lower, std::ops::Bound::Unbounded))?
-                    .take(16)
-                {
-                    let (key, value) = row?;
-                    if value.value().len() > MAX_SYNC_ROW_BYTES {
-                        return Err(invalid("oversize local native row"));
-                    }
-                    page.push((*key.value(), value.value().to_vec()));
-                }
-            }
-            if page.is_empty() {
-                break;
-            }
-            for (key, bytes) in page {
-                after = Some(key);
-                if u16::from_be_bytes([key[0], key[1]]) != stage.shard {
-                    continue;
-                }
-                let (old, old_root): (LockRecord, u64) = bincode::deserialize(&bytes)?;
-                let incoming = source
-                    .open_table(TABLE_LOCKS)?
-                    .get(&key)?
-                    .map(|v| bincode::deserialize::<(LockRecord, u64)>(v.value()))
-                    .transpose()?;
-                if incoming.as_ref().is_some_and(|(_, root)| *root != old_root) {
-                    return Err(invalid("native root lifetime changed"));
-                }
-                let old_class = old.status.confirmation_class();
-                let key_support = support::native_key(&key);
-                let incoming_id = incoming.as_ref().map(|(new, _)| new.id);
-                let new_class = source
-                    .open_table(support::TABLE_NATIVE_SUPPORT)?
-                    .get(key_support.as_str())?
-                    .map(|v| serde_json::from_slice::<support::ConfirmationSupport>(v.value()))
-                    .transpose()?
-                    .filter(|f| {
-                        f.parent == key
-                            && incoming_id.as_ref().is_some_and(|id| f.child == *id)
-                            && f.root_valid_until_ms == old_root
-                    })
-                    .map_or(class, |f| {
-                        class.max(if support_is_quorum_verified {
-                            f.class
-                        } else {
-                            0
-                        })
-                    });
-                if old.valid_until.0 > stage.now && !old.status.is_void() {
-                    if incoming.as_ref().is_none_or(|(new, _)| {
-                        new.valid_until.0 <= stage.now || new.status.is_void()
-                    }) && old_class > 0
-                    {
-                        return Err(invalid("quorum cut omits confirmed native choice"));
-                    }
-                    if let Some((new, _)) = &incoming {
-                        if !new.has_valid_id() {
-                            return Err(invalid("incoming native record has invalid lock ID"));
-                        }
-                        if new.id != old.id {
-                            let old_h = humoco_sim_core::crypto::compute_canonical_hash(
-                                &key,
-                                &old.receiver_pub,
-                                &old.nonce,
-                            );
-                            let new_h = humoco_sim_core::crypto::compute_canonical_hash(
-                                &key,
-                                &new.receiver_pub,
-                                &new.nonce,
-                            );
-                            if humoco_sim_core::resolver::compare_native_precedence(
-                                old_class, &old_h, &old.id, new_class, &new_h, &new.id,
-                            ) == humoco_sim_core::resolver::NativeCandidateOrdering::PrecedenceA
-                            {
-                                return Err(invalid("quorum cut loses native class/hash ordering"));
-                            }
-                        }
-                    }
-                }
-                tx.open_table(TABLE_PROVISIONAL_LOCKS)?
-                    .insert(&key, bytes.as_slice())?;
-                tx.open_table(TABLE_LOCKS)?.remove(&key)?;
-            }
         }
         let mut after: Option<String> = None;
         loop {
@@ -501,82 +368,7 @@ impl RedbStorage {
                     .remove((old.layer2_voucher_id.as_str(), tag.as_str()))?;
             }
         }
-        for item in source.open_table(TABLE_LOCKS)?.iter()? {
-            let (key, value) = item?;
-            let (mut row, root): (LockRecord, u64) = bincode::deserialize(value.value())?;
-            if u16::from_be_bytes([key.value()[0], key.value()[1]]) != stage.shard
-                || key.value() != &row.parent_lock
-            {
-                return Err(invalid("staged native lock shard mismatch"));
-            }
-            if !row.has_valid_id() {
-                return Err(invalid("staged native lock has invalid lock ID"));
-            }
-            if row.valid_until.0 <= stage.now || row.status.is_void() {
-                continue;
-            }
-            let support_key = support::native_key(&row.parent_lock);
-            let incoming = source
-                .open_table(support::TABLE_NATIVE_SUPPORT)?
-                .get(support_key.as_str())?
-                .map(|v| serde_json::from_slice::<support::ConfirmationSupport>(v.value()))
-                .transpose()?;
-            let inherited = if support_is_quorum_verified {
-                incoming
-                    .filter(|f| {
-                        f.parent == row.parent_lock
-                            && f.child == row.id
-                            && f.root_valid_until_ms == root
-                    })
-                    .map_or(0, |f| f.class)
-            } else {
-                0
-            };
-            let old_verified = tx
-                .open_table(support::TABLE_NATIVE_SUPPORT)?
-                .get(support_key.as_str())?
-                .map(|v| serde_json::from_slice::<support::ConfirmationSupport>(v.value()))
-                .transpose()?
-                .filter(|f| {
-                    f.parent == row.parent_lock
-                        && f.child == row.id
-                        && f.root_valid_until_ms == root
-                })
-                .map_or(0, |f| f.class);
-            let effective = class.max(inherited).max(old_verified);
-            row.status = if effective == 2 {
-                humoco_sim_core::types::LockStatus::Final { sigs: witnesses }
-            } else {
-                humoco_sim_core::types::LockStatus::Provisional {
-                    sigs: witnesses,
-                    required: witnesses,
-                }
-            };
-            if let Some(old) = tx.open_table(TABLE_PROVISIONAL_LOCKS)?.get(key.value())? {
-                let (old, _): (LockRecord, u64) = bincode::deserialize(old.value())?;
-                if old.id == row.id
-                    && old.status.confirmation_class() > row.status.confirmation_class()
-                {
-                    row.status = old.status;
-                }
-            }
-            let fact = support::ConfirmationSupport {
-                parent: row.parent_lock,
-                child: row.id,
-                class: effective,
-                root_valid_until_ms: root,
-                verified_context: context,
-            };
-            tx.open_table(support::TABLE_NATIVE_SUPPORT)?
-                .insert(support_key.as_str(), serde_json::to_vec(&fact)?.as_slice())?;
-            let bytes = bincode::serialize(&(row, root))?;
-            tx.open_table(TABLE_LOCKS)?
-                .insert(key.value(), bytes.as_slice())?;
-            tx.open_table(TABLE_PROVISIONAL_LOCKS)?
-                .remove(key.value())?;
-            tx.open_table(TABLE_TTL_INDEX)?
-                .insert((super::grace_expiry_bucket_sec(root), key.value()), ())?;
-        }
+
         for item in source.open_table(TABLE_HMC_LOCKS)?.iter()? {
             let (tag, value) = item?;
             let row: L2LockEntry = serde_json::from_slice(value.value())?;
@@ -688,42 +480,8 @@ impl RedbStorage {
     ) -> Result<([u8; 32], u64), StorageError> {
         let sorted = ShardStage::new(shard, now)?;
         let source = self.db.begin_read()?;
-        // Native rows already have canonical parent order. Avoid copying an
-        // otherwise native-only cut into an unnecessary external sort tree.
-        if source.open_table(TABLE_HMC_LOCKS)?.len()? == 0 {
-            let mut hash = blake3::Hasher::new();
-            hash.update(&[0x01]);
-            hash.update(&shard.to_le_bytes());
-            let mut count = 0u64;
-            for item in source.open_table(TABLE_LOCKS)?.iter()? {
-                let (_, value) = item?;
-                let (row, _): (LockRecord, u64) = bincode::deserialize(value.value())?;
-                if u16::from_be_bytes([row.parent_lock[0], row.parent_lock[1]]) == shard
-                    && !row.status.is_void()
-                    && row.valid_until.0 > now
-                {
-                    hash.update(&row.parent_lock);
-                    hash.update(&row.receiver_pub);
-                    hash.update(&row.nonce);
-                    hash.update(&row.id);
-                    count += 1;
-                }
-            }
-            return Ok((*hash.finalize().as_bytes(), count));
-        }
         let tx = sorted.storage.db.begin_write()?;
         let mut count = 0u64;
-        for item in source.open_table(TABLE_LOCKS)?.iter()? {
-            let (_, value) = item?;
-            let (row, _): (LockRecord, u64) = bincode::deserialize(value.value())?;
-            if u16::from_be_bytes([row.parent_lock[0], row.parent_lock[1]]) == shard
-                && !row.status.is_void()
-                && row.valid_until.0 > now
-            {
-                ShardStage::project(&tx, &row, now)?;
-                count += 1;
-            }
-        }
         let roots = source.open_table(roots::TABLE_VOUCHER_ROOTS)?;
         for item in source.open_table(TABLE_HMC_LOCKS)?.iter()? {
             let (tag, value) = item?;
@@ -737,14 +495,13 @@ impl RedbStorage {
             );
             let validity = roots::root_valid_until(&root)?;
             if humoco_sim_core::types::canonical_voucher_shard(&parent) == shard && validity > now {
-                let row = LockRecord::new(
+                let record = projection::CommittedShardRecord::new(
                     *blake3::hash(tag.value().as_bytes()).as_bytes(),
                     row.sender_ephemeral_pub,
                     row.t_id.to_vec(),
-                    SimTime(row.created_at_ms),
-                    SimTime(validity),
+                    row.created_at_ms,
                 );
-                ShardStage::project(&tx, &row, now)?;
+                ShardStage::project(&tx, &record, now, validity)?;
                 count += 1;
             }
         }
@@ -802,20 +559,44 @@ mod review_commit_fault {
         );
         let cancel = tokio_util::sync::CancellationToken::new();
         let (engine, worker) = crate::storage::DualTierEngine::new_with_token(db, cancel.clone());
-        let row = LockRecord::new(
-            [17; 32],
-            [18; 32],
-            vec![19],
-            SimTime(1_000),
-            SimTime(600_000),
+        let author = crate::identity::NodeIdentity::generate();
+        let mut root = L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "fault-root".into(),
+            t_id: [42; 32],
+            sender_ephemeral_pub: *author.node_pubkey(),
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 1_000,
+            deletable_at: Some("600000".into()),
+            privacy_guard: None,
+        };
+        let tag = bs58::encode(root.t_id).into_string();
+        let payload = crate::api::hmc::calculate_l2_payload_hash_raw(
+            crate::api::hmc::TRAP_NONE_PLACEHOLDER,
+            &tag,
+            &root.t_id,
+            &root.sender_ephemeral_pub,
+            crate::api::hmc::TRAP_NONE_PLACEHOLDER,
+            crate::api::hmc::TRAP_NONE_PLACEHOLDER,
+            0,
+            1_000,
+            root.deletable_at.as_deref(),
+            "",
         );
-        let stage = Arc::new(ShardStage::new(u16::from_be_bytes([17, 17]), 1_000).unwrap());
-        let parent = row.parent_lock;
-        let child = row.id;
+        use ed25519_dalek::Signer;
+        root.layer2_signature = author.signing_key().sign(&payload).to_bytes();
+        let shard = humoco_sim_core::types::canonical_voucher_shard(
+            &humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag),
+        );
+        let stage = Arc::new(ShardStage::new(shard, 1_000).unwrap());
         stage
             .append(SyncPayload {
-                locks: vec![(row, 600_000)],
-                hmc_locks: vec![],
+                hmc_locks: vec![(tag.clone(), root.clone())],
                 support: vec![],
             })
             .unwrap();
@@ -844,13 +625,15 @@ mod review_commit_fault {
             &dir.path().join("recovered.redb"),
         )
         .unwrap();
-        assert_eq!(
-            recovered.get_lock(&parent).unwrap().unwrap().0.id,
-            child,
+        assert!(
+            recovered
+                .voucher_root(&root.layer2_voucher_id)
+                .unwrap()
+                .is_some(),
             "the failed sync may leave the new cut recoverable on storage"
         );
         assert!(
-            engine.get_ram_lock(&parent).await.is_none(),
+            !engine.hmc_ram.read().await.locks.contains_key(&tag),
             "old RAM cut is still active"
         );
         cancel.cancel();
@@ -867,6 +650,7 @@ mod tests {
     use super::*;
     use crate::identity::NodeIdentity;
     use ed25519_dalek::Signer;
+
     #[test]
     fn confirmed_omission_rolls_back_root_registration_and_all_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -904,89 +688,170 @@ mod tests {
         let shard = humoco_sim_core::types::canonical_voucher_shard(
             &humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag),
         );
-        let mut parent = [3; 32];
-        parent[..2].copy_from_slice(&shard.to_be_bytes());
-        let mut old = LockRecord::new(parent, [4; 32], vec![5], SimTime(1_000), SimTime(600_000));
-        old.status = humoco_sim_core::types::LockStatus::Final { sigs: 14 };
-        db.put_lock(&old, 600_000).unwrap();
+        db.put_hmc_lock(&tag, &root).unwrap();
+
+        let mut old = root.clone();
+        old.t_id = [43; 32];
+        old.deletable_at = None;
+        let spend_tag = "old-spend-tag";
+        let spend_payload = crate::api::hmc::calculate_l2_payload_hash_raw(
+            crate::api::hmc::TRAP_NONE_PLACEHOLDER,
+            spend_tag,
+            &old.t_id,
+            &old.sender_ephemeral_pub,
+            crate::api::hmc::TRAP_NONE_PLACEHOLDER,
+            crate::api::hmc::TRAP_NONE_PLACEHOLDER,
+            0,
+            1_000,
+            None,
+            "",
+        );
+        old.layer2_signature = author.signing_key().sign(&spend_payload).to_bytes();
+        db.put_hmc_lock(spend_tag, &old).unwrap();
+        let fact = support::ConfirmationSupport {
+            parent: *blake3::hash(spend_tag.as_bytes()).as_bytes(),
+            child: old.t_id,
+            class: 2,
+            root_valid_until_ms: 600_000,
+            verified_context: [1; 32],
+        };
+        {
+            let tx = db.db.begin_write().unwrap();
+            tx.open_table(support::TABLE_CONFIRMATION_SUPPORT)
+                .unwrap()
+                .insert(spend_tag, serde_json::to_vec(&fact).unwrap().as_slice())
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Stage a new root for the same shard, but omitting the old spend
         let stage = ShardStage::new(shard, 1_000).unwrap();
         stage
             .append(SyncPayload {
-                locks: vec![],
-                hmc_locks: vec![(tag, root.clone())],
+                hmc_locks: vec![(tag.clone(), root.clone())],
                 support: vec![],
             })
             .unwrap();
         assert!(db
             .install_shard_cut(&stage, stage.digest().unwrap(), 2, [1; 32], 14, None, None)
             .is_err());
-        assert!(db.voucher_root(&root.layer2_voucher_id).unwrap().is_none());
-        assert_eq!(db.get_lock(&parent).unwrap().unwrap().0.id, old.id);
-        assert!(db.get_provisional_lock(&parent).unwrap().is_none());
+        assert!(db.get_hmc_lock(spend_tag).unwrap().is_some());
+        assert!(db.get_provisional_hmc_lock(spend_tag).unwrap().is_none());
     }
+
     #[test]
-    fn lower_current_quorum_never_downgrades_recovered_final_native_choice() {
+    fn lower_current_quorum_never_downgrades_recovered_final_choice() {
         let dir = tempfile::tempdir().unwrap();
         let db = RedbStorage::open(&dir.path().join("node.redb")).unwrap();
-        let mut old = LockRecord::new([3; 32], [4; 32], vec![5], SimTime(1_000), SimTime(600_000));
-        old.status = humoco_sim_core::types::LockStatus::Final { sigs: 14 };
-        db.put_lock(&old, 600_000).unwrap();
-        let shard = u16::from_be_bytes([3, 3]);
-        let stage = ShardStage::new(shard, 1_000).unwrap();
-        let mut incoming = old.clone();
-        incoming.status = humoco_sim_core::types::LockStatus::Pending;
-        stage
+        let (stage, spend_tag, spend, root_valid_until) = stage_with_class_two_support(1_000);
+        let root = stage
+            .storage
+            .db
+            .begin_read()
+            .unwrap()
+            .open_table(roots::TABLE_VOUCHER_ROOTS)
+            .unwrap()
+            .get(spend.layer2_voucher_id.as_str())
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_vec();
+        let root_entry: L2LockEntry = serde_json::from_slice(&root).unwrap();
+        let root_tag = bs58::encode(root_entry.t_id).into_string();
+        db.put_hmc_lock(&root_tag, &root_entry).unwrap();
+        db.put_hmc_lock(&spend_tag, &spend).unwrap();
+        let fact = support::ConfirmationSupport {
+            parent: *blake3::hash(spend_tag.as_bytes()).as_bytes(),
+            child: spend.t_id,
+            class: 2,
+            root_valid_until_ms: root_valid_until,
+            verified_context: [1; 32],
+        };
+        {
+            let tx = db.db.begin_write().unwrap();
+            tx.open_table(support::TABLE_CONFIRMATION_SUPPORT)
+                .unwrap()
+                .insert(spend_tag.as_str(), serde_json::to_vec(&fact).unwrap().as_slice())
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let incoming_stage = ShardStage::new(stage.shard, 1_000).unwrap();
+        incoming_stage
             .append(SyncPayload {
-                locks: vec![(incoming, 600_000)],
-                hmc_locks: vec![],
+                hmc_locks: vec![
+                    (root_tag.clone(), root_entry.clone()),
+                    (spend_tag.clone(), spend.clone()),
+                ],
                 support: vec![],
             })
             .unwrap();
-        db.install_shard_cut(&stage, stage.digest().unwrap(), 1, [1; 32], 3, None, None)
-            .unwrap();
+
+        // Installing stage with class 1, 3 witnesses must not downgrade from class 2 to class 1
+        db.install_shard_cut(
+            &incoming_stage,
+            incoming_stage.digest().unwrap(),
+            1,
+            [1; 32],
+            3,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
-            db.get_lock(&old.parent_lock)
-                .unwrap()
-                .unwrap()
-                .0
-                .status
-                .confirmation_class(),
+            db.confirmation_support(&spend_tag).unwrap().unwrap().class,
             2
         );
-        // Conservative legacy local exclusion remains protected, but cannot be
-        // laundered into exportable class2 provenance by current island votes.
-        let tx = db.db.begin_read().unwrap();
-        let table = tx.open_table(support::TABLE_NATIVE_SUPPORT).unwrap();
-        let value = table
-            .get(support::native_key(&old.parent_lock).as_str())
-            .unwrap()
-            .unwrap();
-        let fact: support::ConfirmationSupport = serde_json::from_slice(value.value()).unwrap();
-        assert_eq!(fact.class, 1);
     }
-    fn stage_with_class_two_support(now: u64) -> (ShardStage, LockRecord, u64) {
-        let parent = [17; 32];
-        let shard = u16::from_be_bytes([17, 17]);
-        let root = now + 600_000;
-        let row = LockRecord::new(parent, [18; 32], vec![19], SimTime(now), SimTime(root));
-        let key = support::native_key(&parent);
+
+    fn stage_with_class_two_support(now: u64) -> (ShardStage, String, L2LockEntry, u64) {
+        let author = NodeIdentity::generate();
+        let mut root = L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-v1".into(),
+            t_id: [1; 32],
+            sender_ephemeral_pub: *author.node_pubkey(),
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: now,
+            deletable_at: Some((now + 600_000).to_string()),
+            privacy_guard: None,
+        };
+        let root_tag = bs58::encode(root.t_id).into_string();
+        let payload = crate::api::hmc::calculate_l2_payload_hash_for_entry(&root, &root_tag);
+        root.layer2_signature = author.signing_key().sign(&payload).to_bytes();
+        let shard = humoco_sim_core::types::canonical_voucher_shard(
+            &humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag),
+        );
+        let mut spend = root.clone();
+        spend.t_id = [2; 32];
+        spend.deletable_at = None;
+        let spend_tag = "test-spend-tag";
+        let spend_payload =
+            crate::api::hmc::calculate_l2_payload_hash_for_entry(&spend, spend_tag);
+        spend.layer2_signature = author.signing_key().sign(&spend_payload).to_bytes();
+
         let fact = support::ConfirmationSupport {
-            parent,
-            child: row.id,
+            parent: *blake3::hash(spend_tag.as_bytes()).as_bytes(),
+            child: spend.t_id,
             class: 2,
-            root_valid_until_ms: root,
+            root_valid_until_ms: now + 600_000,
             verified_context: [77; 32],
         };
         let stage = ShardStage::new(shard, now).unwrap();
         stage
             .append(SyncPayload {
-                locks: vec![(row.clone(), root)],
-                hmc_locks: vec![],
-                support: vec![(0, key, fact)],
+                hmc_locks: vec![(root_tag, root), (spend_tag.to_string(), spend.clone())],
+                support: vec![(1, spend_tag.to_string(), fact)],
             })
             .unwrap();
-        (stage, row, root)
+        (stage, spend_tag.to_string(), spend, now + 600_000)
     }
+
     fn inherited_cut(
         stage: &ShardStage,
         objective: [u8; 32],
@@ -1046,11 +911,12 @@ mod tests {
         )
         .unwrap()
     }
+
     #[test]
     fn support_digest_without_quorum_cannot_promote_class_two() {
         let dir = tempfile::tempdir().unwrap();
         let db = RedbStorage::open(&dir.path().join("node.redb")).unwrap();
-        let (stage, row, _) = stage_with_class_two_support(1_000);
+        let (stage, spend_tag, _, _) = stage_with_class_two_support(1_000);
         let objective = stage.digest().unwrap();
         let staged_support = stage.support_digest().unwrap();
         let receiver = NodeIdentity::generate();
@@ -1067,27 +933,16 @@ mod tests {
         db.install_shard_cut(&stage, objective, 1, [1; 32], 3, Some(&inherited), None)
             .unwrap();
         assert_eq!(
-            db.native_confirmation_support(&row.parent_lock)
-                .unwrap()
-                .unwrap()
-                .class,
-            1
-        );
-        assert_eq!(
-            db.get_lock(&row.parent_lock)
-                .unwrap()
-                .unwrap()
-                .0
-                .status
-                .confirmation_class(),
+            db.confirmation_support(&spend_tag).unwrap().unwrap().class,
             1
         );
     }
+
     #[test]
     fn support_digest_with_quorum_can_inherit_class_two() {
         let dir = tempfile::tempdir().unwrap();
         let db = RedbStorage::open(&dir.path().join("node.redb")).unwrap();
-        let (stage, row, _) = stage_with_class_two_support(1_000);
+        let (stage, spend_tag, _, _) = stage_with_class_two_support(1_000);
         let objective = stage.digest().unwrap();
         let staged_support = stage.support_digest().unwrap();
         let receiver = NodeIdentity::generate();
@@ -1104,19 +959,7 @@ mod tests {
         db.install_shard_cut(&stage, objective, 1, [1; 32], 3, Some(&inherited), None)
             .unwrap();
         assert_eq!(
-            db.native_confirmation_support(&row.parent_lock)
-                .unwrap()
-                .unwrap()
-                .class,
-            2
-        );
-        assert_eq!(
-            db.get_lock(&row.parent_lock)
-                .unwrap()
-                .unwrap()
-                .0
-                .status
-                .confirmation_class(),
+            db.confirmation_support(&spend_tag).unwrap().unwrap().class,
             2
         );
     }

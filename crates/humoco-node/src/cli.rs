@@ -3217,7 +3217,6 @@ pub async fn execute_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use humoco_sim_core::types::{LockRecord, SimTime};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -3719,14 +3718,27 @@ mod tests {
         // Create db and put a lock
         let db_path = config.storage.data_dir.join("humoco.redb");
         let storage = RedbStorage::open(&db_path).expect("open storage");
-        let record = LockRecord::new(
-            [5u8; 32],
-            [6u8; 32],
-            b"nonce".to_vec(),
-            SimTime(100),
-            SimTime(60_000),
-        );
-        storage.put_lock(&record, 600_000).expect("put lock");
+        let entry = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-voucher-cli".into(),
+            t_id: [5u8; 32],
+            sender_ephemeral_pub: [6u8; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: 100,
+            deletable_at: Some("600000".into()),
+            privacy_guard: None,
+        };
+        let root_tag = bs58::encode(entry.t_id).into_string();
+        storage.put_hmc_lock(&root_tag, &entry).expect("put root");
+        let mut spend = entry.clone();
+        spend.t_id = [7u8; 32];
+        spend.deletable_at = None;
+        storage.put_hmc_lock("tag-5", &spend).expect("put lock");
         drop(storage);
 
         // Test db stats offline
@@ -3756,11 +3768,11 @@ mod tests {
 
         // Verify restored lock
         let restored_storage = RedbStorage::open(&db_path).expect("open restored");
-        let (rec, _) = restored_storage
-            .get_lock(&[5u8; 32])
+        let rec = restored_storage
+            .get_hmc_lock("tag-5")
             .expect("get")
             .expect("found");
-        assert_eq!(rec.receiver_pub, [6u8; 32]);
+        assert_eq!(rec.sender_ephemeral_pub, [6u8; 32]);
     }
 
     #[tokio::test]
@@ -3811,14 +3823,27 @@ mod tests {
         // Create db file and backup offline
         let db_path = config.storage.data_dir.join("humoco.redb");
         let storage = RedbStorage::open(&db_path).expect("open storage");
-        let record = LockRecord::new(
-            [3u8; 32],
-            [4u8; 32],
-            b"nonce".to_vec(),
-            SimTime(100),
-            SimTime(60_000),
-        );
-        storage.put_lock(&record, 600_000).expect("put lock");
+        let entry = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-voucher-cli-2".into(),
+            t_id: [3u8; 32],
+            sender_ephemeral_pub: [4u8; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: 100,
+            deletable_at: Some("600000".into()),
+            privacy_guard: None,
+        };
+        let root_tag = bs58::encode(entry.t_id).into_string();
+        storage.put_hmc_lock(&root_tag, &entry).expect("put root");
+        let mut spend = entry.clone();
+        spend.t_id = [5u8; 32];
+        spend.deletable_at = None;
+        storage.put_hmc_lock("tag-3", &spend).expect("put lock");
         drop(storage);
 
         let backup_out = temp.path().join("backup.redb");
@@ -3829,12 +3854,11 @@ mod tests {
 
         // Verify backup content
         let backup_storage = RedbStorage::open(&backup_out).expect("open backup");
-        let (rec, root_valid) = backup_storage
-            .get_lock(&[3u8; 32])
+        let rec = backup_storage
+            .get_hmc_lock("tag-3")
             .expect("get_lock")
             .expect("found");
-        assert_eq!(rec.receiver_pub, [4u8; 32]);
-        assert_eq!(root_valid, 600_000);
+        assert_eq!(rec.sender_ephemeral_pub, [4u8; 32]);
     }
 
     #[tokio::test]

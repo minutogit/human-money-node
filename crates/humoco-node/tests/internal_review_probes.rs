@@ -132,7 +132,6 @@ async fn replacement_probe(foreign: bool) {
     let stage = Arc::new(ShardStage::new(shard(&incoming_root), 1_000).unwrap());
     stage
         .append(SyncPayload {
-            locks: vec![],
             support: vec![],
             hmc_locks: vec![
                 (

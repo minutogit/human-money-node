@@ -14,7 +14,7 @@ pub mod storage;
 
 pub use api::{
     build_router, collect_peer_attestations, prometheus_metrics, AppState, AttestationDto,
-    ErrorResponse, HmcSyncRow, LockRecordDto, NodeStatusResponse, PeerAttestationQuery,
+    ErrorResponse, HmcSyncRow, NodeStatusResponse, PeerAttestationQuery,
     PowChallengeResponse, SyncRequest, SyncResponse,
 };
 pub use cli::Cli;

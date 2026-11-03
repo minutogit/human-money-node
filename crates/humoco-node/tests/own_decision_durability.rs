@@ -1,46 +1,73 @@
 //! Durable original decisions are private node state, independent of merged locks.
 use humoco_node::storage::engine::PersistenceStats;
 use humoco_node::storage::{DualTierEngine, IngressOrigin, RedbStorage, StorageError};
-use humoco_sim_core::{
-    storage::RamIndex,
-    types::{LockRecord, SimTime},
-};
+use humoco_sim_core::types::SimTime;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-fn record(parent: u8, receiver: u8) -> LockRecord {
-    LockRecord::new(
-        [parent; 32],
-        [receiver; 32],
-        vec![1, 2, 3],
-        SimTime(1_000),
-        SimTime(50_000),
-    )
+fn setup_voucher_root(db: &RedbStorage, voucher: &str) {
+    let root = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: voucher.to_string(),
+        t_id: *blake3::hash(voucher.as_bytes()).as_bytes(),
+        sender_ephemeral_pub: [0x22; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x33; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 0,
+        deletable_at: Some("50000".to_string()),
+        privacy_guard: None,
+    };
+    let tag = bs58::encode(root.t_id).into_string();
+    db.put_hmc_lock(&tag, &root).unwrap();
+}
+
+fn hmc_record(voucher: &str, t_id: u8) -> humoco_node::api::hmc::L2LockEntry {
+    humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: voucher.to_string(),
+        t_id: [t_id; 32],
+        sender_ephemeral_pub: [0x22; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x33; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 0,
+        deletable_at: None,
+        privacy_guard: None,
+    }
 }
 
 #[test]
 fn own_choice_survives_merge_restart_and_same_child_promotion() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("choices.redb");
-    let first = record(1, 2);
-    let other = record(1, 3);
+    let tag = "spend-tag-1";
+    let first = hmc_record("v-1", 2);
+    let other = hmc_record("v-1", 3);
     let node = [7; 32];
     {
         let db = RedbStorage::open(&path).unwrap();
-        db.commit_original_record_approval(&first, 50_000, &node, b"exact provisional", 0)
+        setup_voucher_root(&db, "v-1");
+        db.commit_original_approval(tag, &first, &node, b"exact provisional", 0, 50_000)
             .unwrap();
-        db.commit_original_record_approval(&first, 50_000, &node, b"exact final", 1)
+        db.commit_original_approval(tag, &first, &node, b"exact final", 1, 50_000)
             .unwrap();
         // A lawful objective-state merge does not erase private original choices.
-        db.put_lock(&other, 50_000).unwrap();
+        db.put_hmc_lock(tag, &other).unwrap();
     }
     let db = RedbStorage::open(&path).unwrap();
     let choice = db
-        .own_signing_choice(&node, &hex::encode(first.parent_lock))
+        .own_signing_choice(&node, tag)
         .unwrap()
         .unwrap();
-    assert_eq!(choice.child, first.id);
+    assert_eq!(choice.child, first.t_id);
     assert_eq!(
         choice.approvals,
         [
@@ -49,21 +76,21 @@ fn own_choice_survives_merge_restart_and_same_child_promotion() {
         ]
     );
     assert!(matches!(
-        db.commit_original_record_approval(&other, 50_000, &node, b"conflict", 1),
+        db.commit_original_approval(tag, &other, &node, b"conflict", 1, 50_000),
         Err(StorageError::OwnChoiceConflict)
     ));
     assert_eq!(
-        db.get_lock(&first.parent_lock).unwrap().unwrap().0.id,
-        other.id
+        db.get_hmc_lock(tag).unwrap().unwrap().t_id,
+        other.t_id
     );
     db.prune_expired_buckets(80).unwrap();
     assert!(db
-        .own_signing_choice(&node, &hex::encode(first.parent_lock))
+        .own_signing_choice(&node, tag)
         .unwrap()
         .is_some());
     db.prune_expired_buckets(81).unwrap();
     assert!(db
-        .own_signing_choice(&node, &hex::encode(first.parent_lock))
+        .own_signing_choice(&node, tag)
         .unwrap()
         .is_none());
 }
@@ -72,19 +99,21 @@ fn own_choice_survives_merge_restart_and_same_child_promotion() {
 fn consistent_backup_includes_private_own_choices() {
     let dir = tempfile::tempdir().unwrap();
     let db = RedbStorage::open(&dir.path().join("source.redb")).unwrap();
-    let first = record(1, 2);
-    db.commit_original_record_approval(&first, 50_000, &[7; 32], b"exact", 0)
+    setup_voucher_root(&db, "v-1");
+    let first = hmc_record("v-1", 2);
+    let tag = "spend-tag-1";
+    db.commit_original_approval(tag, &first, &[7; 32], b"exact", 0, 50_000)
         .unwrap();
     let destination = dir.path().join("backup.redb");
     db.create_backup(&destination).unwrap();
     let restored = RedbStorage::open(&destination).unwrap();
     assert_eq!(
         restored
-            .own_signing_choice(&[7; 32], &hex::encode(first.parent_lock))
+            .own_signing_choice(&[7; 32], tag)
             .unwrap()
             .unwrap()
             .child,
-        first.id
+        first.t_id
     );
 }
 
@@ -92,28 +121,46 @@ fn consistent_backup_includes_private_own_choices() {
 async fn timed_out_original_keeps_late_commit_and_retry_protection() {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(RedbStorage::open(&dir.path().join("late.redb")).unwrap());
+    setup_voucher_root(&db, "v-1");
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(RamIndex::new())),
-        Arc::new(RwLock::new(humoco_node::storage::HmcRamIndex::new())),
+        Arc::new(RwLock::new(humoco_node::storage::engine::HmcRamIndex::new())),
         db.clone(),
         tx,
     );
-    let first = record(1, 2);
+    let root = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: "v-1".to_string(),
+        t_id: *blake3::hash(b"v-1").as_bytes(),
+        sender_ephemeral_pub: [0x22; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x33; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 0,
+        deletable_at: Some("50000".to_string()),
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root.t_id).into_string();
+    engine.hmc_ram.write().await.insert_recovered(root_tag, root);
+
+    let first = hmc_record("v-1", 2);
+    let tag = "spend-tag-1".to_string();
     engine
-        .ingress_lock_with_origin(
+        .ingress_hmc_lock_with_origin(
+            tag.clone(),
             first.clone(),
-            SimTime(1_000),
-            SimTime(50_000),
             IngressOrigin::ClientApi,
+            None,
         )
-        .await
-        .unwrap();
+        .await;
     // Worker intentionally not running: no durable result can be announced.
     let result = engine
-        .persist_original_record_approval(
+        .persist_original_approval(
+            tag.clone(),
             first.clone(),
-            SimTime(50_000),
             [7; 32],
             b"exact".to_vec(),
             0,
@@ -122,7 +169,7 @@ async fn timed_out_original_keeps_late_commit_and_retry_protection() {
         .await;
     assert!(result.is_err());
     assert!(db
-        .own_signing_choice(&[7; 32], &hex::encode(first.parent_lock))
+        .own_signing_choice(&[7; 32], &tag)
         .unwrap()
         .is_none());
     let cancel = CancellationToken::new();
@@ -135,7 +182,7 @@ async fn timed_out_original_keeps_late_commit_and_retry_protection() {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if db
-                .own_signing_choice(&[7; 32], &hex::encode(first.parent_lock))
+                .own_signing_choice(&[7; 32], &tag)
                 .unwrap()
                 .is_some()
             {
@@ -148,9 +195,9 @@ async fn timed_out_original_keeps_late_commit_and_retry_protection() {
     .unwrap();
     assert_eq!(
         engine
-            .persist_original_record_approval(
+            .persist_original_approval(
+                tag.clone(),
                 first,
-                SimTime(50_000),
                 [7; 32],
                 b"retry".to_vec(),
                 0,
@@ -259,8 +306,7 @@ async fn identical_pending_root_retries_wait_for_durable_barrier() {
     let db = Arc::new(RedbStorage::open(&dir.path().join("pending.redb")).unwrap());
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let engine = DualTierEngine::from_parts(
-        Arc::new(RwLock::new(RamIndex::new())),
-        Arc::new(RwLock::new(humoco_node::storage::HmcRamIndex::new())),
+        Arc::new(RwLock::new(humoco_node::storage::engine::HmcRamIndex::new())),
         db.clone(),
         tx,
     );
@@ -323,12 +369,16 @@ fn abrupt_process_exit_after_commit_retains_original_choice() {
     const CHILD_PATH: &str = "HUMOCO_TEST_COMMITTED_CHOICE_PATH";
     if let Some(path) = std::env::var_os(CHILD_PATH) {
         let db = RedbStorage::open(std::path::Path::new(&path)).unwrap();
-        db.commit_original_record_approval(
-            &record(1, 2),
-            50_000,
+        setup_voucher_root(&db, "v-1");
+        let first = hmc_record("v-1", 2);
+        let tag = "spend-tag-1";
+        db.commit_original_approval(
+            tag,
+            &first,
             &[7; 32],
             b"released-original",
             0,
+            50_000,
         )
         .unwrap();
         // Immediate exit skips Rust destructors and graceful worker drain.
@@ -348,31 +398,62 @@ fn abrupt_process_exit_after_commit_retains_original_choice() {
     assert_eq!(status.code(), Some(74));
     let db = RedbStorage::open(&path).unwrap();
     let retained = db
-        .own_signing_choice(&[7; 32], &hex::encode([1; 32]))
+        .own_signing_choice(&[7; 32], "spend-tag-1")
         .unwrap()
         .unwrap();
     assert_eq!(
         retained.approvals[0].as_deref(),
         Some(b"released-original".as_slice())
     );
+    let other = hmc_record("v-1", 3);
     assert!(matches!(
-        db.commit_original_record_approval(&record(1, 3), 50_000, &[7; 32], b"contradiction", 0),
+        db.commit_original_approval("spend-tag-1", &other, &[7; 32], b"contradiction", 0, 50_000),
         Err(StorageError::OwnChoiceConflict)
     ));
 }
 
 #[test]
 fn ram_expiry_pass_has_a_hard_examined_entry_limit() {
-    let mut ram = RamIndex::new();
+    let mut ram = humoco_node::storage::engine::HmcRamIndex::new();
+    let root = humoco_node::api::hmc::L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: "test-v".into(),
+        t_id: [0x50; 32],
+        sender_ephemeral_pub: [0x22; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0x33; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 0,
+        deletable_at: Some("50000".to_string()),
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root.t_id).into_string();
+    ram.insert_recovered(root_tag, root);
+
     for value in 0..700u32 {
-        let mut parent = [0; 32];
-        parent[..4].copy_from_slice(&value.to_le_bytes());
-        let lock = LockRecord::new(parent, [2; 32], vec![], SimTime(1_000), SimTime(50_000));
-        ram.insert_recovered(lock, SimTime(50_000));
+        let entry = humoco_node::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-v".into(),
+            t_id: [value as u8; 32],
+            sender_ephemeral_pub: [0x22; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0x33; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 0,
+            created_at_ms: 0,
+            deletable_at: None,
+            privacy_guard: None,
+        };
+        ram.insert_recovered(format!("tag-{}", value), entry);
     }
-    assert_eq!(ram.prune_expired_bounded(SimTime(82_000), 256), 256);
+    assert_eq!(ram.prune_expired(SimTime(82_000)), 256);
     assert_eq!(ram.len(), 444);
-    assert_eq!(ram.prune_expired_bounded(SimTime(82_000), 256), 256);
-    assert_eq!(ram.prune_expired_bounded(SimTime(82_000), 256), 188);
+    assert_eq!(ram.prune_expired(SimTime(82_000)), 256);
+    assert_eq!(ram.prune_expired(SimTime(82_000)), 188);
     assert!(ram.is_empty());
 }

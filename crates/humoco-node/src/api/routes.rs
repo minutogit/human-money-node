@@ -444,8 +444,8 @@ async fn submit_lock(
 ///   from the Top-20 active set. They NEVER hold disk write locks or trigger P2P gossip.
 /// - Sync Limits: Max 10,000 items per sync response with strictly validated net_time_ms.
 /// - Objective Lock State vs. Signature Hoarding (KISS Principle):
-///   Locks returned via `/v1/sync` are serialized strictly as `LockRecordDto`
-///   representing the pure objective collision state (`parent_lock`, `receiver_pub`, `nonce`, `id`).
+///   Locks returned via `/v1/sync` are serialized strictly as `HmcSyncRow`
+///   representing the pure objective collision state (`tag`, `entry`).
 ///   No legacy node attestations or historical 896-byte quorum signature bundles are transferred,
 ///   preventing network bloat and ghost-node dependencies.
 ///
@@ -534,7 +534,7 @@ async fn sync_locks(
     };
 
     let storage = state.storage.clone();
-    let (locks, hmc_locks) = match tokio::task::spawn_blocking(move || {
+    let hmc_locks = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         storage.read_committed_sync_snapshot_bounded(
             now_ms,
@@ -568,7 +568,7 @@ async fn sync_locks(
         }
     };
 
-    (StatusCode::OK, Json(SyncResponse { locks, hmc_locks })).into_response()
+    (StatusCode::OK, Json(SyncResponse { hmc_locks })).into_response()
 }
 
 pub const MAX_SYNC_LOCKS: usize = crate::storage::db::DEFAULT_MAX_SYNC_LOCKS;
@@ -598,8 +598,7 @@ async fn get_node_status(State(state): State<AppState>) -> (StatusCode, Json<Nod
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let (active_byte_years, _) = state.engine.get_active_footprint_byte_years(now_ms).await;
-    let total_locks =
-        state.engine.ram.read().await.len() + state.engine.hmc_ram.read().await.locks.len();
+    let total_locks = state.engine.hmc_ram.read().await.locks.len();
     let daily_write_quota_byte_years = state.tier_controller.calculate_daily_quota(1.0, 1.0);
     let daily_read_quota = state.tier_controller.calculate_daily_read_quota(1.0, 1.0);
     let network = match state.network_id {
@@ -1644,28 +1643,6 @@ pub async fn assemble_quorum_certificate_with_deadline(
                         }
                     }
                 }
-            } else if let Some(record) = state
-                .engine
-                .get_ram_lock(&parent_lock)
-                .await
-                .filter(|r| r.id == lock_id)
-            {
-                let fut = state.engine.persist_original_record_approval(
-                    record.clone(),
-                    record.valid_until,
-                    self_pubkey,
-                    bytes,
-                    target_status,
-                    now_ms,
-                );
-                retained = if let Some(dl) = checkout_deadline {
-                    match tokio::time::timeout_at(dl, fut).await {
-                        Ok(res) => res.ok(),
-                        Err(_) => None,
-                    }
-                } else {
-                    fut.await.ok()
-                };
             }
             if let Some(att) = retained.and_then(|bytes| AttestationDto::from_wire_bytes(&bytes)) {
                 collected_signatures.push(att);
@@ -3980,31 +3957,40 @@ mod public_retained_evidence_tests {
     #[tokio::test]
     async fn retained_choice_returns_exact_approval_bytes_and_validity() {
         let (_temp, state, storage, identity) = test_state();
-        let parent = [7u8; 32];
-        let record = humoco_sim_core::types::LockRecord::new(
-            parent,
-            [8u8; 32],
-            vec![1, 2, 3],
-            humoco_sim_core::types::SimTime(1_000),
-            humoco_sim_core::types::SimTime(600_000),
-        );
-        let tag = hex::encode(parent);
+        let entry = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-voucher-choice".into(),
+            t_id: [8u8; 32],
+            sender_ephemeral_pub: [7u8; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: 1_000,
+            deletable_at: Some("600000".into()),
+            privacy_guard: None,
+        };
+        let tag = "spend-tag-choice".to_string();
         storage
-            .commit_original_record_approval(
-                &record,
-                600_000,
+            .commit_original_approval(
+                &tag,
+                &entry,
                 identity.node_pubkey(),
                 b"sig_prov",
                 0,
+                600_000,
             )
             .expect("commit provisional approval");
         storage
-            .commit_original_record_approval(
-                &record,
-                600_000,
+            .commit_original_approval(
+                &tag,
+                &entry,
                 identity.node_pubkey(),
                 b"sig_final",
                 1,
+                600_000,
             )
             .expect("commit final approval");
 
@@ -4012,7 +3998,7 @@ mod public_retained_evidence_tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_json(response).await;
         assert_eq!(body["found"], true);
-        assert_eq!(body["child"], hex::encode(record.id));
+        assert_eq!(body["child"], hex::encode(entry.t_id));
         assert_eq!(body["valid_until_ms"], 600_000u64);
         assert_eq!(body["provisional_approval"], hex::encode(b"sig_prov"));
         assert_eq!(body["final_approval"], hex::encode(b"sig_final"));
@@ -4023,22 +4009,30 @@ mod public_retained_evidence_tests {
     #[tokio::test]
     async fn retained_choice_reports_missing_class_without_inventing_bytes() {
         let (_temp, state, storage, identity) = test_state();
-        let parent = [9u8; 32];
-        let record = humoco_sim_core::types::LockRecord::new(
-            parent,
-            [10u8; 32],
-            vec![4, 5, 6],
-            humoco_sim_core::types::SimTime(1_000),
-            humoco_sim_core::types::SimTime(600_000),
-        );
-        let tag = hex::encode(parent);
+        let entry = crate::api::hmc::L2LockEntry {
+            causal_output: None,
+            layer2_voucher_id: "test-voucher-choice".into(),
+            t_id: [10u8; 32],
+            sender_ephemeral_pub: [7u8; 32],
+            receiver_ephemeral_pub_hash: None,
+            change_ephemeral_pub_hash: None,
+            layer2_signature: [0; 64],
+            trap_r: None,
+            trap_s: None,
+            encrypted_timestamp: 1,
+            created_at_ms: 1_000,
+            deletable_at: Some("600000".into()),
+            privacy_guard: None,
+        };
+        let tag = "spend-tag-choice-2".to_string();
         storage
-            .commit_original_record_approval(
-                &record,
-                600_000,
+            .commit_original_approval(
+                &tag,
+                &entry,
                 identity.node_pubkey(),
                 b"sig_prov",
                 0,
+                600_000,
             )
             .expect("commit provisional approval");
 
@@ -4146,11 +4140,8 @@ async fn checkout(
     let checkout_deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(780);
 
-    if let Err(e) = humoco_proto::live::validate_live_context(&req.live_context) {
+    if let Err(e) = humoco_proto::live::live_state_digest(&req.live_context) {
         return (StatusCode::BAD_REQUEST, e).into_response();
-    }
-    if req.live_context.child_lock == [0; 32] {
-        return (StatusCode::BAD_REQUEST, "Checkout requires non-zero child_lock").into_response();
     }
 
     let mut conflicting_lock: Option<L2LockEntry> = None;

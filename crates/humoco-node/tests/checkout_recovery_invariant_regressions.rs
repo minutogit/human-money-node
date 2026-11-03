@@ -34,7 +34,7 @@ use humoco_node::{
             install::ShardStage,
             roots,
             support::{ConfirmationSupport, VerifiedInheritedCut},
-            TABLE_HMC_LOCKS, TABLE_LOCKS, TABLE_PROVISIONAL_HMC_LOCKS, TABLE_PROVISIONAL_LOCKS,
+            TABLE_HMC_LOCKS, TABLE_PROVISIONAL_HMC_LOCKS,
         },
         DualTierEngine, IngressOrigin, RedbStorage, StorageError,
     },
@@ -42,7 +42,7 @@ use humoco_node::{
 use humoco_proto::causal::CausalOutputProof;
 use humoco_sim_core::{
     types::{
-        canonical_voucher_shard, genesis_parent_bytes_from_tag, LockRecord, NetworkId, SimTime,
+        canonical_voucher_shard, genesis_parent_bytes_from_tag, NetworkId, SimTime,
     },
     wire::{MsgType, WireHeader},
 };
@@ -212,22 +212,6 @@ fn snapshot_table_str(
     for row in table.iter().unwrap() {
         let (k, v) = row.unwrap();
         rows.push((k.value().to_string(), v.value().to_vec()));
-    }
-    rows
-}
-
-fn snapshot_table_bytes32(
-    db: &RedbStorage,
-    def: redb::TableDefinition<&[u8; 32], &[u8]>,
-) -> Vec<([u8; 32], Vec<u8>)> {
-    let txn = db.raw_database_for_test().begin_read().unwrap();
-    let table = txn.open_table(def).unwrap();
-    let mut rows = Vec::new();
-    for row in table.iter().unwrap() {
-        let (k, v) = row.unwrap();
-        let mut key = [0u8; 32];
-        key.copy_from_slice(k.value());
-        rows.push((key, v.value().to_vec()));
     }
     rows
 }
@@ -793,7 +777,6 @@ async fn real_quic_single_poisoned_sync_source_cannot_install_unbound_canonical_
     let local_stage = Arc::new(ShardStage::new(shard, now).unwrap());
     local_stage
         .append(SyncPayload {
-            locks: vec![],
             hmc_locks: vec![(tag.clone(), legacy_local.clone())],
             support: vec![],
         })
@@ -858,18 +841,7 @@ async fn rejected_shard_install_leaves_root_lock_support_and_provisional_tables_
         .await;
     assert!(matches!(v_hmc, L2Verdict::Verified { .. }));
 
-    // 3. Populate active native lock
-    let parent_lock = [0x42u8; 32];
-    let native_lock = LockRecord::new(
-        parent_lock,
-        [0x44u8; 32],
-        vec![1, 2, 3],
-        SimTime(1_000),
-        SimTime(600_000),
-    );
-    db.put_lock(&native_lock, 600_000).unwrap();
-
-    // 4. Populate support row in TABLE_CONFIRMATION_SUPPORT, provisional native, and provisional HMC
+    // 3. Populate support row in TABLE_CONFIRMATION_SUPPORT and provisional HMC
     let support_fact = ConfirmationSupport {
         child: hmc_spend.t_id,
         parent: *blake3::hash(hmc_tag.as_bytes()).as_bytes(),
@@ -878,15 +850,6 @@ async fn rejected_shard_install_leaves_root_lock_support_and_provisional_tables_
         verified_context: [0x50u8; 32],
     };
     let fact_bytes = serde_json::to_vec(&support_fact).unwrap();
-
-    let prov_native = LockRecord::new(
-        [0x60u8; 32],
-        [0x62u8; 32],
-        vec![4, 5, 6],
-        SimTime(1_000),
-        SimTime(600_000),
-    );
-    let prov_native_bytes = bincode::serialize(&(prov_native, 600_000u64)).unwrap();
 
     let prov_hmc = entry(&author, &valid_root.layer2_voucher_id, 99, None);
     let prov_hmc_bytes = serde_json::to_vec(&prov_hmc).unwrap();
@@ -898,10 +861,6 @@ async fn rejected_shard_install_leaves_root_lock_support_and_provisional_tables_
             .unwrap()
             .insert(hmc_tag, fact_bytes.as_slice())
             .unwrap();
-        txn.open_table(TABLE_PROVISIONAL_LOCKS)
-            .unwrap()
-            .insert(&[0x60u8; 32], prov_native_bytes.as_slice())
-            .unwrap();
         txn.open_table(TABLE_PROVISIONAL_HMC_LOCKS)
             .unwrap()
             .insert("prov_hmc_tag", prov_hmc_bytes.as_slice())
@@ -911,11 +870,9 @@ async fn rejected_shard_install_leaves_root_lock_support_and_provisional_tables_
 
     let shard = canonical_voucher_shard(&genesis_parent_bytes_from_tag(&root_tag));
 
-    // Snapshot raw contents of all 6 tables and committed shard digest BEFORE install
+    // Snapshot raw contents of all 4 tables and committed shard digest BEFORE install
     let roots_before = snapshot_table_str(&db, roots::TABLE_VOUCHER_ROOTS);
-    let locks_before = snapshot_table_bytes32(&db, TABLE_LOCKS);
     let hmc_locks_before = snapshot_table_str(&db, TABLE_HMC_LOCKS);
-    let prov_locks_before = snapshot_table_bytes32(&db, TABLE_PROVISIONAL_LOCKS);
     let prov_hmc_locks_before = snapshot_table_str(&db, TABLE_PROVISIONAL_HMC_LOCKS);
     let support_before = snapshot_table_str(
         &db,
@@ -924,9 +881,7 @@ async fn rejected_shard_install_leaves_root_lock_support_and_provisional_tables_
     let digest_before = db.committed_shard_digest(shard, 1_000).unwrap();
 
     assert!(!roots_before.is_empty());
-    assert!(!locks_before.is_empty());
     assert!(!hmc_locks_before.is_empty());
-    assert!(!prov_locks_before.is_empty());
     assert!(!prov_hmc_locks_before.is_empty());
     assert!(!support_before.is_empty());
 
@@ -998,7 +953,6 @@ async fn rejected_shard_install_leaves_root_lock_support_and_provisional_tables_
     sign(&unbound_attacker, &unbound_tag, &mut unbound_root);
     stage
         .append(SyncPayload {
-            locks: vec![],
             hmc_locks: vec![
                 (valid_stage_tag, valid_stage_entry),
                 (unbound_tag, unbound_root),
@@ -1024,9 +978,7 @@ async fn rejected_shard_install_leaves_root_lock_support_and_provisional_tables_
 
     // Snapshot raw contents AFTER failed install and assert 100% byte-for-byte equality
     let roots_after = snapshot_table_str(&db, roots::TABLE_VOUCHER_ROOTS);
-    let locks_after = snapshot_table_bytes32(&db, TABLE_LOCKS);
     let hmc_locks_after = snapshot_table_str(&db, TABLE_HMC_LOCKS);
-    let prov_locks_after = snapshot_table_bytes32(&db, TABLE_PROVISIONAL_LOCKS);
     let prov_hmc_locks_after = snapshot_table_str(&db, TABLE_PROVISIONAL_HMC_LOCKS);
     let support_after = snapshot_table_str(
         &db,
@@ -1038,14 +990,9 @@ async fn rejected_shard_install_leaves_root_lock_support_and_provisional_tables_
         roots_after, roots_before,
         "TABLE_VOUCHER_ROOTS must be unchanged"
     );
-    assert_eq!(locks_after, locks_before, "TABLE_LOCKS must be unchanged");
     assert_eq!(
         hmc_locks_after, hmc_locks_before,
         "TABLE_HMC_LOCKS must be unchanged"
-    );
-    assert_eq!(
-        prov_locks_after, prov_locks_before,
-        "TABLE_PROVISIONAL_LOCKS must be unchanged"
     );
     assert_eq!(
         prov_hmc_locks_after, prov_hmc_locks_before,

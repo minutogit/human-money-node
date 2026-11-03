@@ -1,4 +1,3 @@
-use humoco_sim_core::types::LockRecord;
 use serde::{Deserialize, Serialize};
 
 /// Signed attestation from a consensus or ingress node.
@@ -148,35 +147,6 @@ pub struct SyncRequest {
 
 /// Detailed DTO for a lock record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LockRecordDto {
-    pub id: String,
-    pub parent_lock: String,
-    pub receiver_pub: String,
-    pub nonce: String,
-    pub created_at: u64,
-    pub valid_until: u64,
-    pub root_valid_until: u64,
-    pub status: String,
-    pub signers: Vec<u16>,
-}
-
-impl LockRecordDto {
-    pub fn from_record(record: &LockRecord, root_valid_until: u64) -> Self {
-        Self {
-            id: hex::encode(record.id),
-            parent_lock: hex::encode(record.parent_lock),
-            receiver_pub: hex::encode(record.receiver_pub),
-            nonce: hex::encode(&record.nonce),
-            created_at: record.created_at.0,
-            valid_until: record.valid_until.0,
-            root_valid_until,
-            status: format!("{:?}", record.status),
-            signers: record.signers.iter().copied().collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HmcSyncRow {
     pub lookup_tag: String,
     pub entry: crate::api::hmc::L2LockEntry,
@@ -188,8 +158,6 @@ pub struct HmcSyncRow {
 /// Response returned from sync endpoint containing list of active locks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncResponse {
-    pub locks: Vec<LockRecordDto>,
-    #[serde(default)]
     pub hmc_locks: Vec<HmcSyncRow>,
 }
 

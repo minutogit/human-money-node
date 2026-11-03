@@ -178,27 +178,24 @@ impl humoco_node::network::RequestHandler for CorruptSnapshot {
             if freeze && header.flags == 0 && (support_fault == 8 || support_fault == 9) {
                 if support_fault == 8 {
                     use ed25519_dalek::Signer;
-                    let (row, root) = db.get_lock(&[21; 32]).unwrap().unwrap();
-                    let key = format!(
-                        "native:{}",
-                        row.parent_lock
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<String>()
-                    );
+                    let (tag, entry) = db.all_hmc_locks().unwrap().pop().unwrap();
+                    let root_entry = db.voucher_root(&entry.layer2_voucher_id).unwrap().unwrap();
+                    let root_valid_until_ms =
+                        humoco_node::storage::db::roots::root_valid_until(&root_entry).unwrap();
+                    let parent = *blake3::hash(tag.as_bytes()).as_bytes();
                     let mut hash = blake3::Hasher::new();
                     let domain = b"HUMOCO_V1_INHERITED_SUPPORT_STATE";
                     hash.update(&[domain.len() as u8]);
                     hash.update(domain);
                     hash.update(&[1]);
                     hash.update(&shard.to_le_bytes());
-                    hash.update(&[0]);
-                    hash.update(&(key.len() as u16).to_le_bytes());
-                    hash.update(key.as_bytes());
-                    hash.update(&row.parent_lock);
-                    hash.update(&row.id);
-                    hash.update(&[0; 32]);
-                    hash.update(&root.to_le_bytes());
+                    hash.update(&[1]);
+                    hash.update(&(tag.len() as u16).to_le_bytes());
+                    hash.update(tag.as_bytes());
+                    hash.update(&parent);
+                    hash.update(&entry.t_id);
+                    hash.update(&root_entry.t_id);
+                    hash.update(&root_valid_until_ms.to_le_bytes());
                     hash.update(&[2]);
                     let mut reply: humoco_node::network::framing::FrozenShardReply =
                         bincode::deserialize(&bytes).unwrap();
@@ -222,25 +219,24 @@ impl humoco_node::network::RequestHandler for CorruptSnapshot {
             if active && support_fault == 8 {
                 let mut page =
                     humoco_node::network::framing::ActiveSyncResponse::from_bytes(&bytes).unwrap();
-                for (row, root) in &page.payload.locks {
-                    let key = format!(
-                        "native:{}",
-                        row.parent_lock
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<String>()
-                    );
-                    page.payload.support.push((
-                        0,
-                        key,
-                        humoco_node::storage::db::support::ConfirmationSupport {
-                            parent: row.parent_lock,
-                            child: row.id,
-                            class: 2,
-                            root_valid_until_ms: *root,
-                            verified_context: [77; 32],
-                        },
-                    ));
+                for (tag, entry) in &page.payload.hmc_locks {
+                    if let Ok(Some(root_entry)) = db.voucher_root(&entry.layer2_voucher_id) {
+                        let root_valid_until_ms =
+                            humoco_node::storage::db::roots::root_valid_until(&root_entry)
+                                .unwrap_or(0);
+                        let parent = *blake3::hash(tag.as_bytes()).as_bytes();
+                            page.payload.support.push((
+                                1,
+                                tag.clone(),
+                                humoco_node::storage::db::support::ConfirmationSupport {
+                                    parent,
+                                    child: entry.t_id,
+                                    class: 2,
+                                    root_valid_until_ms,
+                                    verified_context: [77; 32],
+                                },
+                            ));
+                    }
                 }
                 bytes = page.to_bytes().unwrap();
                 header.payload_len = bytes.len() as u32;
@@ -294,8 +290,8 @@ impl humoco_node::network::RequestHandler for CorruptSnapshot {
                 let mut page =
                     humoco_node::network::framing::ActiveSyncResponse::from_bytes(&bytes)
                         .map_err(|e| humoco_node::error::NodeError::Network(e.to_string()))?;
-                if let Some((row, _)) = page.payload.locks.first_mut() {
-                    row.id[0] ^= 1;
+                if let Some((_, entry)) = page.payload.hmc_locks.first_mut() {
+                    entry.t_id[0] ^= 1;
                 }
                 bytes = page
                     .to_bytes()

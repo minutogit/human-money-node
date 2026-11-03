@@ -5,8 +5,6 @@ use humoco_node::api::hmc::L2LockEntry;
 use humoco_node::network::manager::PeerManager;
 use humoco_node::storage::db::RedbStorage;
 use humoco_node::storage::engine::{DualTierEngine, IngressOrigin};
-use humoco_sim_core::storage::IngressVerdictLow;
-use humoco_sim_core::types::{LockRecord, SimTime};
 
 #[tokio::test]
 async fn test_anti_framing_split_brain_collision_does_not_ban_signers() {
@@ -15,66 +13,63 @@ async fn test_anti_framing_split_brain_collision_does_not_ban_signers() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _handle) = DualTierEngine::new(storage.clone());
 
-    let parent_lock = [0x42u8; 32];
-    let victim_node_id_u16 = 999u16;
-    let victim_pk = {
-        let mut pk = [0u8; 32];
-        pk[0..2].copy_from_slice(&victim_node_id_u16.to_le_bytes());
-        pk
+    let voucher_id = "v_anti_framing".to_string();
+    let root_valid = 2_000_000u64;
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_voucher_root_for_test(voucher_id.clone(), root_valid);
+
+    let innocent_pk = [0x99u8; 32];
+
+    // Spend A
+    let lock_a = L2LockEntry {
+        causal_output: None,
+        layer2_voucher_id: voucher_id.clone(),
+        t_id: [0xaa; 32],
+        sender_ephemeral_pub: [0x11; 32],
+        receiver_ephemeral_pub_hash: None,
+        change_ephemeral_pub_hash: None,
+        layer2_signature: [0u8; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 0,
+        created_at_ms: 100,
+        deletable_at: None,
+        privacy_guard: None,
     };
 
-    // Lock A has victim in signers
-    let mut lock_a = LockRecord::new(
-        parent_lock,
-        [0xaa; 32],
-        vec![1, 2, 3],
-        SimTime(0),
-        SimTime(1_000_000),
-    );
-    lock_a.signers.insert(victim_node_id_u16);
-
-    let res_a = engine
-        .ingress_lock_with_origin(
-            lock_a,
-            SimTime(100),
-            SimTime(2_000_000),
-            IngressOrigin::PartitionSync,
+    let (res_a, is_new_a) = engine
+        .ingress_hmc_lock_with_origin(
+            "tag_conflict".into(),
+            lock_a.clone(),
+            IngressOrigin::ClientApi,
+            Some(100),
         )
         .await;
-    assert_eq!(res_a.unwrap(), IngressVerdictLow::AcceptedNew);
+    assert!(is_new_a);
+    assert!(matches!(res_a, humoco_node::api::hmc::L2Verdict::Verified { .. }));
 
-    // Colliding Lock B also lists victim in signers (attacker framing attempt)
-    let mut lock_b = LockRecord::new(
-        parent_lock,
-        [0xbb; 32],
-        vec![4, 5, 6],
-        SimTime(0),
-        SimTime(1_000_000),
-    );
-    lock_b.signers.insert(victim_node_id_u16);
+    // Colliding Spend B on same tag
+    let mut lock_b = lock_a;
+    lock_b.t_id = [0xbb; 32];
 
-    // Ingress colliding lock — deterministic min(H_canon) decides WinnerA/B, never panic
-    let res_b = engine
-        .ingress_lock_with_origin(
+    let (res_b, is_new_b) = engine
+        .ingress_hmc_lock_with_origin(
+            "tag_conflict".into(),
             lock_b,
-            SimTime(100),
-            SimTime(2_000_000),
-            IngressOrigin::PartitionSync,
+            IngressOrigin::ClientApi,
+            Some(100),
         )
         .await;
-    assert!(
-        matches!(
-            res_b,
-            Ok(IngressVerdictLow::AcceptedNew) | Err(IngressVerdictLow::RejectedCollision)
-        ),
-        "collision must be deterministic WinnerA/B via min(H_canon), got {:?}",
-        res_b
-    );
+    assert!(!is_new_b);
+    assert!(matches!(res_b, humoco_node::api::hmc::L2Verdict::Conflict { .. }));
 
-    // CRITICAL ANTI-FRAMING CHECK: Victim MUST NOT be banned!
+    // CRITICAL ANTI-FRAMING CHECK: Innocent node MUST NOT be banned!
     assert!(
-        !engine.is_node_banned(&victim_pk).await,
-        "Eisen-Regel 8 verletzt: Unschuldiger Knoten wurde durch gefälschtes signers-Feld gebannt!"
+        !engine.is_node_banned(&innocent_pk).await,
+        "Eisen-Regel 8: Kollision darf unbeteiligte Knoten niemals bannen!"
     );
 }
 

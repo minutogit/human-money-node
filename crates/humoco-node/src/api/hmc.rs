@@ -533,11 +533,6 @@ pub enum L2Verdict {
         anchor_lock: Option<L2LockEntry>,
     },
     UnknownVoucher,
-    #[serde(rename = "Ok")]
-    Ok {
-        #[serde(with = "base58_64")]
-        signature: [u8; 64],
-    },
     Rejected {
         reason: String,
     },

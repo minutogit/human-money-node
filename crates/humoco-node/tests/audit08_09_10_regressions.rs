@@ -637,8 +637,8 @@ async fn a08_legacy_unsigned_tuple_relay_must_never_learn_or_authorize_third_par
         signing_checkpoint: None,
         gateway_advertisement: None,
     };
-    legit_hb.sign_origin(&legit_relayed, time);
-    assert!(legit_hb.verify_origin_address_binding());
+    legit_hb.sign_origin(&legit_relayed, time, humoco_sim_core::types::NetworkId::default());
+    assert!(legit_hb.verify_origin_address_binding(humoco_sim_core::types::NetworkId::default()));
 
     let legit_payload = bincode::serialize(&legit_hb).unwrap();
     let mut legit_hdr = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, legit_payload.len() as u32);

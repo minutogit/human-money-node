@@ -149,7 +149,7 @@ async fn real_quic_checkpoint_detects_restore_but_rejects_framing() {
     .into_iter()
     .enumerate()
     {
-        let hb = HeartbeatWirePayload {
+        let mut hb = HeartbeatWirePayload {
             gateway_advertisement: None,
             node_id: *reporter.node_pubkey(),
             addr: client.local_addr().unwrap(),
@@ -165,6 +165,7 @@ async fn real_quic_checkpoint_detects_restore_but_rejects_framing() {
             ttl: 16,
             signing_checkpoint: Some(evidence),
         };
+        hb.sign_origin(&reporter, heartbeat_time + index as u64, humoco_sim_core::types::NetworkId::Mainnet);
         let bytes = bincode::serialize(&hb).unwrap();
         let header = WireHeader::new(
             MsgType::Heartbeat as u16,

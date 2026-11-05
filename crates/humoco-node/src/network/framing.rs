@@ -188,18 +188,33 @@ impl HeartbeatWirePayload {
     }
 
     /// Computes the canonical announcement hash binding `(addr, pow_nonce, hrw_routing_id, ticket_epoch_t0)`.
-    pub fn compute_announcement_hash(&self) -> [u8; 32] {
-        humoco_sim_core::fraud::compute_heartbeat_announcement_hash(
-            &self.addr,
-            self.pow_nonce,
-            &self.hrw_routing_id,
-            self.ticket_epoch_t0,
-        )
+    pub fn compute_announcement_hash(
+        &self,
+        network: humoco_sim_core::types::NetworkId,
+    ) -> [u8; 32] {
+        let mut hash = blake3::Hasher::new();
+        let tag = humoco_sim_core::crypto::domain_heartbeat(network);
+        hash.update(&[tag.len() as u8]);
+        hash.update(tag);
+        hash.update(
+            &humoco_sim_core::fraud::compute_heartbeat_announcement_hash(
+                &self.addr,
+                self.pow_nonce,
+                &self.hrw_routing_id,
+                self.ticket_epoch_t0,
+            ),
+        );
+        *hash.finalize().as_bytes()
     }
 
     /// Signs this heartbeat as the origin node, cryptographically binding its announced
     /// endpoint address, PoW parameters, and EMA declarations into `signature`.
-    pub fn sign_origin(&mut self, identity: &crate::identity::NodeIdentity, now_ms: u64) {
+    pub fn sign_origin(
+        &mut self,
+        identity: &crate::identity::NodeIdentity,
+        now_ms: u64,
+        network: humoco_sim_core::types::NetworkId,
+    ) {
         use ed25519_dalek::Signer;
         self.node_id = *identity.node_pubkey();
         self.timestamp_ms = now_ms;
@@ -207,7 +222,7 @@ impl HeartbeatWirePayload {
         self.hrw_routing_id = *identity.hrw_routing_id();
         self.ticket_epoch_t0 = identity.t0();
 
-        let op_hash = self.compute_announcement_hash();
+        let op_hash = self.compute_announcement_hash(network);
         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
             &self.node_id,
             0,
@@ -224,7 +239,10 @@ impl HeartbeatWirePayload {
 
     /// Verifies that the heartbeat signature is valid and strictly binds `self.addr`
     /// (via `op_hash = announcement_hash`). Required for relayed multi-hop gossip (`hops > 0`).
-    pub fn verify_origin_address_binding(&self) -> bool {
+    pub fn verify_origin_address_binding(
+        &self,
+        network: humoco_sim_core::types::NetworkId,
+    ) -> bool {
         if self.signature == [0u8; 64] {
             return false;
         }
@@ -232,7 +250,7 @@ impl HeartbeatWirePayload {
             return false;
         };
         let sig = ed25519_dalek::Signature::from_bytes(&self.signature);
-        let op_hash = self.compute_announcement_hash();
+        let op_hash = self.compute_announcement_hash(network);
         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
             &self.node_id,
             0,
@@ -249,8 +267,8 @@ impl HeartbeatWirePayload {
     }
 
     /// Verifies the origin signature with canonical address binding.
-    pub fn verify_origin_signature(&self) -> bool {
-        self.verify_origin_address_binding()
+    pub fn verify_origin_signature(&self, network: humoco_sim_core::types::NetworkId) -> bool {
+        self.verify_origin_address_binding(network)
     }
 }
 
@@ -732,6 +750,51 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+/// Reject unsupported header semantics before service admission or body reads.
+fn validate_header_semantics(header: &WireHeader) -> Result<(), NodeError> {
+    use humoco_sim_core::wire::*;
+    let kind = MsgType::from_u16(header.msg_type)
+        .ok_or_else(|| NodeError::Network("Unsupported message type".into()))?;
+    let refusal = FLAG_PEER_SUSPENDED | FLAG_UNAUTHORIZED;
+    let quota = FLAG_QUOTA_EXCEEDED | FLAG_QUOTA_FRAUD | FLAG_PEER_SUSPENDED;
+    let allowed = match kind {
+        MsgType::LockVerifyRequest => FLAG_PROVISIONAL,
+        MsgType::StatusQuery => FLAG_PROVISIONAL | FLAG_AUTHENTICATED_DISCOVERY,
+        MsgType::LockVerifyResponse => {
+            refusal
+                | quota
+                | FLAG_NOT_IN_SHARD
+                | FLAG_SIGNATURE_INVALID
+                | FLAG_NOT_READY
+                | FLAG_COLLISION_DETECTED
+                | FLAG_REPLAY
+        }
+        MsgType::StatusResponse => {
+            refusal | quota | FLAG_SIGNATURE_INVALID | FLAG_NOT_READY | FLAG_AUTHENTICATED_DISCOVERY
+        }
+        MsgType::HeartbeatAck => refusal | FLAG_POW_OUTDATED,
+        MsgType::LiveStateResponse
+        | MsgType::ActiveSyncDone
+        | MsgType::ShardDigestResponse
+        | MsgType::ShardBucketRangeResponse
+        | MsgType::EquivocationAck
+        | MsgType::F2fOperatorMessageAck
+        | MsgType::LatencyProbeAck => refusal | FLAG_NOT_READY,
+        _ => 0,
+    };
+    if header.reserved_ver != 0
+        || header.flags & !allowed != 0
+        || (kind != MsgType::Heartbeat && header.reserved != 0)
+        || (kind == MsgType::Heartbeat
+            && u32::from(header.reserved) >= crate::network::manager::MAX_GOSSIP_HOPS)
+    {
+        return Err(NodeError::Network(
+            "Unsupported header flags or reserved fields".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Reads a 32-byte WireHeader followed by the payload from an async reader with default 5s timeout.
 pub async fn read_frame<R: AsyncReadExt + Unpin>(
     reader: &mut R,
@@ -791,6 +854,7 @@ pub async fn read_frame_admitted<R: AsyncReadExt + Unpin>(
             )));
         }
 
+        validate_header_semantics(&header)?;
         let payload_len = header.payload_len as usize;
         let max_len = max_payload_len_for_msg_type(header.msg_type);
         if payload_len > max_len {
@@ -924,56 +988,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_frame_admitted_rejects_unsupported_crypto_suites_before_body_and_admission() {
-        for unsupported_suite in [0u8, 2u8, 3u8, 255u8] {
-            let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 1, 0, 64);
-            hdr.crypto_suite = unsupported_suite;
-
-            // We use a duplex pipe where the server writes ONLY the 32-byte header,
-            // advertising a 64-byte payload, and keeps the connection open.
-            // If read_frame_admitted attempts to read the advertised body bytes,
-            // it would block waiting for body data until the 5-second timeout expires.
-            // Fast execution strictly proves rejection occurs immediately on the fixed header
-            // without waiting for the body and without hitting EOF.
-            let (mut client, mut server) = tokio::io::duplex(256);
-            server
-                .write_all(&hdr.to_bytes())
+    async fn test_read_frame_admitted_rejects_unsupported_crypto_suites_before_body_and_admission()
+    {
+        for unsupported_suite in [0, 2, 3, 255] {
+            for msg_type in [MsgType::Heartbeat, MsgType::ActiveSyncRequest] {
+                let mut header = WireHeader::new(msg_type as u16, 1, 1, 0, 64);
+                header.crypto_suite = unsupported_suite;
+                let (mut reader, mut writer) = tokio::io::duplex(256);
+                writer.write_all(&header.to_bytes()).await.expect("header");
+                // The header is ready, but the writer remains open without a body.
+                // Zero timeout requires completion on the first poll. Exhausted
+                // pools distinguish suite rejection from premature admission.
+                let sync = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+                let rpc = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+                let result = tokio::time::timeout(
+                    Duration::ZERO,
+                    read_frame_admitted(&mut reader, Duration::from_secs(5), Some((sync, rpc))),
+                )
                 .await
-                .expect("write header bytes");
-
-            let sync_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let rpc_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-
-            let start = std::time::Instant::now();
-            let res = read_frame_admitted(
-                &mut client,
-                Duration::from_secs(5),
-                Some((sync_sem.clone(), rpc_sem.clone())),
-            )
-            .await;
-
-            let elapsed = start.elapsed();
-            assert!(
-                elapsed < Duration::from_millis(500),
-                "Header rejection must return immediately without waiting for body; elapsed: {elapsed:?}"
-            );
-
-            assert!(res.is_err(), "suite {unsupported_suite} must be rejected");
-            let err = res.unwrap_err();
-            assert!(
-                err.to_string().contains("Unsupported crypto suite"),
-                "Error must identify unsupported crypto suite, got: {err}"
-            );
-            assert_eq!(
-                rpc_sem.available_permits(),
-                10,
-                "Service admission permit must not be acquired for unsupported suite {unsupported_suite}"
-            );
-            assert_eq!(
-                sync_sem.available_permits(),
-                10,
-                "Sync permit must not be acquired for unsupported suite {unsupported_suite}"
-            );
+                .expect("unsupported suite must not wait for a body");
+                match result {
+                    Err(NodeError::Network(message)) => assert_eq!(
+                        message,
+                        format!("Unsupported crypto suite: {unsupported_suite}"),
+                    ),
+                    other => panic!("expected suite rejection before admission, got {other:?}"),
+                }
+            }
         }
     }
 
@@ -1094,22 +1135,30 @@ mod tests {
         };
 
         // Unsigned initially
-        assert!(!hb.verify_origin_address_binding());
-        assert!(!hb.verify_origin_signature());
+        assert!(!hb.verify_origin_address_binding(humoco_sim_core::types::NetworkId::default()));
+        assert!(!hb.verify_origin_signature(humoco_sim_core::types::NetworkId::default()));
 
         // Origin-signed
-        hb.sign_origin(&identity, 12345);
+        hb.sign_origin(
+            &identity,
+            12345,
+            humoco_sim_core::types::NetworkId::default(),
+        );
         assert!(
-            hb.verify_origin_address_binding(),
+            hb.verify_origin_address_binding(humoco_sim_core::types::NetworkId::default()),
             "Must verify address binding"
         );
-        assert!(hb.verify_origin_signature(), "Must verify origin signature");
+        assert!(
+            hb.verify_origin_signature(humoco_sim_core::types::NetworkId::default()),
+            "Must verify origin signature"
+        );
 
         // Tamper with address: forged relay attempt
         let mut tampered_addr = hb.clone();
         tampered_addr.addr = "127.0.0.1:31338".parse().unwrap();
         assert!(
-            !tampered_addr.verify_origin_address_binding(),
+            !tampered_addr
+                .verify_origin_address_binding(humoco_sim_core::types::NetworkId::default()),
             "Tampered address must fail address binding"
         );
 
@@ -1117,7 +1166,8 @@ mod tests {
         let mut tampered_ts = hb.clone();
         tampered_ts.timestamp_ms = 99999;
         assert!(
-            !tampered_ts.verify_origin_address_binding(),
+            !tampered_ts
+                .verify_origin_address_binding(humoco_sim_core::types::NetworkId::default()),
             "Tampered timestamp must fail"
         );
 
@@ -1125,7 +1175,8 @@ mod tests {
         let mut tampered_ema = hb.clone();
         tampered_ema.declared_write_ema_micro_bj = 9999;
         assert!(
-            !tampered_ema.verify_origin_address_binding(),
+            !tampered_ema
+                .verify_origin_address_binding(humoco_sim_core::types::NetworkId::default()),
             "Tampered EMA must fail"
         );
 
@@ -1145,11 +1196,11 @@ mod tests {
         let mut legacy_hb = hb.clone();
         legacy_hb.signature = identity.signing_key().sign(&legacy_digest).to_bytes();
         assert!(
-            !legacy_hb.verify_origin_address_binding(),
+            !legacy_hb.verify_origin_address_binding(humoco_sim_core::types::NetworkId::default()),
             "Legacy signature must NOT satisfy address binding"
         );
         assert!(
-            !legacy_hb.verify_origin_signature(),
+            !legacy_hb.verify_origin_signature(humoco_sim_core::types::NetworkId::default()),
             "Legacy signature without address binding must fail"
         );
     }
@@ -1215,7 +1266,11 @@ impl F2fOperatorMessagePayload {
                 "F2F message text exceeds maximum length of 500 bytes".into(),
             )));
         }
-        if self.text.chars().any(|c| c.is_ascii_control() && c != '\n' && c != '\t') {
+        if self
+            .text
+            .chars()
+            .any(|c| c.is_ascii_control() && c != '\n' && c != '\t')
+        {
             return Err(Box::new(bincode::ErrorKind::Custom(
                 "F2F message text contains forbidden ASCII control characters".into(),
             )));
@@ -1232,18 +1287,20 @@ impl F2fOperatorMessagePayload {
         self.validate()?;
         let bytes = bincode::serialize(self)?;
         if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
-            return Err(Box::new(bincode::ErrorKind::Custom(
-                format!("Serialized F2fOperatorMessage exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
-            )));
+            return Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "Serialized F2fOperatorMessage exceeds {} bytes",
+                MAX_F2F_FRAME_PAYLOAD_LEN
+            ))));
         }
         Ok(bytes)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
         if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
-            return Err(Box::new(bincode::ErrorKind::Custom(
-                format!("F2fOperatorMessage payload exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
-            )));
+            return Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "F2fOperatorMessage payload exceeds {} bytes",
+                MAX_F2F_FRAME_PAYLOAD_LEN
+            ))));
         }
         let payload: Self = bincode::deserialize(bytes)?;
         payload.validate()?;
@@ -1263,18 +1320,20 @@ impl F2fOperatorMessageAckPayload {
     pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
         let bytes = bincode::serialize(self)?;
         if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
-            return Err(Box::new(bincode::ErrorKind::Custom(
-                format!("Serialized F2fOperatorMessageAck exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
-            )));
+            return Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "Serialized F2fOperatorMessageAck exceeds {} bytes",
+                MAX_F2F_FRAME_PAYLOAD_LEN
+            ))));
         }
         Ok(bytes)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
         if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
-            return Err(Box::new(bincode::ErrorKind::Custom(
-                format!("F2fOperatorMessageAck payload exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
-            )));
+            return Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "F2fOperatorMessageAck payload exceeds {} bytes",
+                MAX_F2F_FRAME_PAYLOAD_LEN
+            ))));
         }
         let payload: Self = bincode::deserialize(bytes)?;
         Ok(payload)
@@ -1305,18 +1364,20 @@ impl F2fNeighborRosterPayload {
         self.validate()?;
         let bytes = bincode::serialize(self)?;
         if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
-            return Err(Box::new(bincode::ErrorKind::Custom(
-                format!("Serialized F2fNeighborRoster exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
-            )));
+            return Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "Serialized F2fNeighborRoster exceeds {} bytes",
+                MAX_F2F_FRAME_PAYLOAD_LEN
+            ))));
         }
         Ok(bytes)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
         if bytes.len() > MAX_F2F_FRAME_PAYLOAD_LEN {
-            return Err(Box::new(bincode::ErrorKind::Custom(
-                format!("F2fNeighborRoster payload exceeds {} bytes", MAX_F2F_FRAME_PAYLOAD_LEN),
-            )));
+            return Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "F2fNeighborRoster payload exceeds {} bytes",
+                MAX_F2F_FRAME_PAYLOAD_LEN
+            ))));
         }
         let payload: Self = bincode::deserialize(bytes)?;
         payload.validate()?;

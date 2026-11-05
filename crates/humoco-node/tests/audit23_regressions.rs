@@ -291,6 +291,16 @@ fn test_a23_01_persisted_latch_survives_reopen_and_backup() {
 /// an incompatible original signature, close readiness, not ban the client, and return local unavailability.
 #[tokio::test]
 async fn test_a23_01_real_quic_signing_release_refuses_double_signature_under_fault() {
+    signing_release_under_fault(0).await;
+}
+
+#[tokio::test]
+async fn premature_ttl_index_pruning_blocks_live_quic_signature_release() {
+    signing_release_under_fault(1).await;
+    signing_release_under_fault(2).await;
+}
+
+async fn signing_release_under_fault(fault: u8) {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let temp = tempdir().expect("tempdir");
     let storage =
@@ -519,7 +529,34 @@ async fn test_a23_01_real_quic_signing_release_refuses_double_signature_under_fa
         hex::encode(shard_identity.node_pubkey()),
         parent_tag
     );
-    storage.inject_remove_own_choice_for_test(&slot).unwrap();
+    if fault == 0 {
+        storage.inject_remove_own_choice_for_test(&slot).unwrap();
+    } else {
+        let ttl = humoco_node::storage::db::TABLE_OWN_CHOICE_TTL;
+        let txn = storage.raw_database_for_test().begin_write().unwrap();
+        txn.open_table(ttl)
+            .unwrap()
+            .insert((1, slot.as_str()), ())
+            .unwrap();
+        txn.commit().unwrap();
+        if fault == 1 {
+            storage.prune_expired_buckets(1).unwrap();
+        } else {
+            storage
+                .apply_flush_batch_atomic(&[], &[], &[], &[], &[1, 2])
+                .unwrap();
+        }
+        assert!(!storage.is_signing_history_healthy());
+        let retained = storage
+            .own_signing_choice(shard_identity.node_pubkey(), &parent_tag)
+            .unwrap();
+        assert_eq!(retained.unwrap().child, tx_hash_a);
+        let backup = temp.path().join("latched-backup.redb");
+        storage.create_backup(&backup).unwrap();
+        assert!(!RedbStorage::open(&backup)
+            .unwrap()
+            .is_signing_history_healthy());
+    }
 
     // Prepare Lock B for the same parent P
     let tx_hash_b = *blake3::hash(b"lock_b_audit23_tx").as_bytes();

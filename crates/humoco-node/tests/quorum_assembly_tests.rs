@@ -211,6 +211,14 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
             .with_readiness_manager(prepared_readiness()),
         );
 
+        let handler: Arc<dyn RequestHandler> = Arc::new(DelayedHandler {
+            inner: handler,
+            delay: if s < 14 {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(1500)
+            },
+        });
         let transport = QuicTransport::bind_with_options(
             "127.0.0.1:0".parse().expect("addr"),
             &identity,
@@ -383,6 +391,7 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
     );
     state.peer_manager = Some(pm_gw.clone());
     state.transport = Some(gw_transport.clone());
+    state.readiness_manager = prepared_readiness();
     let app = build_router(state);
 
     // -----------------------------------------------------------------------
@@ -399,12 +408,8 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
         ))
         .expect("build request");
 
-    let resp = app.oneshot(req).await.expect("execute request");
+    let resp = app.clone().oneshot(req).await.expect("execute request");
     let status = resp.status();
-    assert!(
-        status == StatusCode::CREATED || status == StatusCode::OK,
-        "Gateway submission must succeed with 200/201, got {status}"
-    );
 
     let body_bytes = resp
         .into_body()
@@ -415,6 +420,11 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
     let envelope: L2ResponseEnvelope =
         serde_json::from_slice(&body_bytes).expect("deserialize envelope");
 
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "mixed replay response: {envelope:?}"
+    );
     assert!(
         matches!(envelope.verdict, L2Verdict::Verified { .. }),
         "Verdict must be Verified, got {:?}",
@@ -423,9 +433,9 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
 
     // -----------------------------------------------------------------------
     // Verify Quorum Certificate:
-    // - All 20 attestations collected (9 replay + 11 new)
+    // - Exactly 14 timely attestations (9 replay + 5 new; 6 exceed the budget)
     // - Status is FINAL (1)
-    // - Committee bitmap has all 20 bits set
+    // - Committee bitmap has exactly 14 distinct signer bits
     // -----------------------------------------------------------------------
     let cert: QuorumCertificateDto = envelope
         .quorum_certificate
@@ -442,32 +452,64 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
         "Certificate status must be FINAL (1) for stable N>=20 cluster"
     );
     assert_eq!(
-        cert.signer_count, 20,
-        "All 20 shard nodes (9 replay + 11 new) must have signed the certificate"
+        cert.signer_count, 14,
+        "canonical quorum must fast-exit even when the removed override is sent"
     );
-    assert_eq!(
-        cert.signatures.len(),
-        20,
-        "Exactly 20 distinct attestations must be collected"
-    );
-
-    // Committee bitmap must have all 20 bits set: (1 << 20) - 1 = 0x000F_FFFF
-    let expected_bitmap = (1u32 << NUM_SHARDS) - 1;
-    assert_eq!(
-        cert.signer_bitmap, expected_bitmap,
-        "Committee bitmap must have all 20 bits set (0x{:05x}), got 0x{:05x}",
-        expected_bitmap, cert.signer_bitmap
-    );
-    assert_eq!(cert.signer_bitmap.count_ones(), 20);
-
-    // Verify all 20 shards now possess Lock X in RAM
-    for s in 0..NUM_SHARDS {
-        let stored = shards[s].engine.get_hmc_ram_lock(&lookup_tag).await;
-        assert!(
-            stored.is_some(),
-            "Shard {s} must have Lock X in RAM after quorum processing"
+    assert_eq!(cert.signatures.len(), 14);
+    assert_eq!(cert.signer_bitmap.count_ones(), 14);
+    // Check every returned signature against the declared certificate domain.
+    for att in &cert.signatures {
+        let pk = att.node_pubkey_bytes().unwrap();
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).unwrap();
+        let core = att.to_core().unwrap();
+        let domain = humoco_sim_core::crypto::domain_approve_final(
+            humoco_sim_core::types::NetworkId::Mainnet,
         );
-        assert_eq!(stored.unwrap().t_id, lock_x_req.transaction_hash);
+        let parent: [u8; 32] = hex::decode(&att.parent_lock).unwrap().try_into().unwrap();
+        let payload =
+            humoco_sim_core::crypto::compute_attestation_payload_digest(&parent, &core.lock_id);
+        let digest = humoco_sim_core::crypto::compute_sig_digest(
+            domain,
+            0,
+            0,
+            0,
+            cert.shard_id,
+            cert.status,
+            &payload,
+        );
+        vk.verify_strict(
+            &digest,
+            &ed25519_dalek::Signature::from_bytes(&core.signature),
+        )
+        .unwrap();
+    }
+    for uri in ["/v1/lock", "/v1/lock/chain"] {
+        let body = if uri.ends_with("chain") {
+            serde_json::to_vec(&humoco_node::api::hmc::L2ChainLockRequest {
+                auth: lock_x_req.auth.clone(),
+                layer2_voucher_id: lock_x_req.layer2_voucher_id.clone(),
+                chain: vec![lock_x_req.clone()],
+            })
+            .unwrap()
+        } else {
+            serde_json::to_vec(&lock_x_req).unwrap()
+        };
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-peer-token", "quorum_test_token")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "stateless replay via {uri}: {}",
+            String::from_utf8_lossy(&body)
+        );
     }
 
     // Cleanup tasks and transports
@@ -710,13 +752,12 @@ async fn test_a24_r1_checkout_enforces_single_end_to_end_deadline_across_persist
     // -----------------------------------------------------------------------
     let partial_deadline = tokio::time::Instant::now() + Duration::from_millis(350);
     let start_partial = std::time::Instant::now();
-    let (cert_partial, _) = assemble_quorum_certificate_with_deadline(
+    let (cert_partial, _, _) = assemble_quorum_certificate_with_deadline(
         &state,
         lock_req.transaction_hash,
         *blake3::hash(lookup_tag.as_bytes()).as_bytes(),
         target_shard_id,
         now,
-        None,
         None,
         Some(partial_deadline),
     )
@@ -790,7 +831,8 @@ async fn test_a24_r1_checkout_enforces_single_end_to_end_deadline_across_persist
 /// S01-01: Bounded checkout completion respecting deadline during support persistence write contention,
 /// with neutral cancellation (no false signing disablement) and safe eventual persistence.
 #[tokio::test]
-async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_without_poisoning_signing_health() {
+async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_without_poisoning_signing_health(
+) {
     const NUM_SHARDS: usize = 20;
 
     let gw_temp = tempdir().expect("gw tempdir");
@@ -888,11 +930,7 @@ async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_witho
     let mut counter = 0u64;
     let (target_shard_id, root_req) = loop {
         counter += 1;
-        let req = make_hmc_genesis(
-            &format!("lock_s01_{counter}"),
-            now + 900_000,
-            &sender_key,
-        );
+        let req = make_hmc_genesis(&format!("lock_s01_{counter}"), now + 900_000, &sender_key);
         let tag = bs58::encode(&req.transaction_hash).into_string();
         let p_bytes = *blake3::hash(tag.as_bytes()).as_bytes();
         let sid = humoco_sim_core::types::extract_shard_id(&p_bytes);
@@ -1069,14 +1107,13 @@ async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_witho
     let checkout_deadline = tokio::time::Instant::now() + Duration::from_millis(300);
     let start = std::time::Instant::now();
 
-    let (cert, _) = assemble_quorum_certificate_with_deadline(
+    let (cert, _, _) = assemble_quorum_certificate_with_deadline(
         &state,
         lock_req.transaction_hash,
         *blake3::hash(lookup_tag.as_bytes()).as_bytes(),
         target_shard_id,
         now,
         Some(wire_payload),
-        Some(14),
         Some(checkout_deadline),
     )
     .await;
@@ -1095,7 +1132,8 @@ async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_witho
         "Certificate status must be degraded to 0 when support was not durably admitted within deadline"
     );
     assert_eq!(
-        cert.signatures.len(), 0,
+        cert.signatures.len(),
+        0,
         "Signatures must be cleared when support persistence fails"
     );
 
@@ -1105,7 +1143,8 @@ async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_witho
         "Timeout waiting for support persistence must NOT trip signing health latch"
     );
     assert_eq!(
-        gw_engine.support_updates_available_for_test(), 31,
+        gw_engine.support_updates_available_for_test(),
+        31,
         "support_updates permit must remain held while background commit is blocked"
     );
 
@@ -1136,7 +1175,8 @@ async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_witho
     );
 
     assert_eq!(
-        gw_engine.support_updates_available_for_test(), 32,
+        gw_engine.support_updates_available_for_test(),
+        32,
         "support_updates permit must be released after completion"
     );
 

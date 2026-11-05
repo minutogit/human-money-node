@@ -76,15 +76,24 @@ async fn observe(
         .connect_peer(source.network.local_addr().unwrap())
         .await
         .unwrap();
-    let (header, reply) = reader
+    let result = reader
         .network
         .send_request(
             &conn,
             &WireHeader::new(MsgType::StatusQuery as u16, 1, 0, flags, bytes.len() as u32),
             bytes,
         )
-        .await
-        .unwrap();
+        .await;
+    if flags & !1 != 0 {
+        assert!(result.is_err(), "unsupported status flags must fail before processing");
+        return Vec::new();
+    }
+    let (header, reply) = result.unwrap();
+    if bytes.len() == 66 {
+        assert_eq!(header.flags, humoco_sim_core::wire::FLAG_UNAUTHORIZED, "old tuple queries must be refused");
+        assert!(reply.is_empty());
+        return reply;
+    }
     assert_eq!(header.msg_type, MsgType::StatusResponse as u16);
     assert_eq!(header.flags, 0);
     assert!(
@@ -127,6 +136,7 @@ async fn status_formats_flags_and_signing_gates_cannot_mint_originals() {
                 let bytes = payload(reader, row.t_id, parent_lock, shard, legacy);
                 for flags in [0, 1, 2, 3, 0xff, u32::MAX] {
                     let reply = observe(reader, source, &bytes, flags).await;
+                    if legacy || flags & !1 != 0 { assert!(reply.is_empty()); continue; }
                     let observation: StatusObservation = bincode::deserialize(&reply).unwrap();
                     assert_eq!(
                         (
@@ -145,7 +155,7 @@ async fn status_formats_flags_and_signing_gates_cannot_mint_originals() {
     }
     let checkpoint =
         humoco_node::network::framing::SigningCheckpoint::signed(&source.identity, 0, 1, [17; 32]);
-    let heartbeat = humoco_node::network::framing::HeartbeatWirePayload {
+    let mut heartbeat = humoco_node::network::framing::HeartbeatWirePayload {
         gateway_advertisement: None,
         node_id: *reader.identity.node_pubkey(),
         addr: reader.network.local_addr().unwrap(),
@@ -161,6 +171,7 @@ async fn status_formats_flags_and_signing_gates_cannot_mint_originals() {
         ttl: 16,
         signing_checkpoint: Some(checkpoint),
     };
+    heartbeat.sign_origin(&reader.identity, heartbeat.timestamp_ms, humoco_sim_core::types::NetworkId::Mainnet);
     let bytes = bincode::serialize(&heartbeat).unwrap();
     let conn = reader
         .network
@@ -186,6 +197,7 @@ async fn status_formats_flags_and_signing_gates_cannot_mint_originals() {
     assert!(!source.engine.is_signing_healthy());
     for legacy in [true, false] {
         let reply = observe(reader, source, &payload(reader, row.t_id, parent_lock, shard, legacy), 1).await;
+        if legacy { assert!(reply.is_empty()); continue; }
         assert_eq!(
             bincode::deserialize::<StatusObservation>(&reply)
                 .unwrap()
@@ -254,6 +266,7 @@ async fn canonical_replacement_status_preserves_exact_retained_original() {
         .store(true, Ordering::Release);
     for legacy in [true, false] {
         let reply = observe(reader, source, &payload(reader, other.t_id, parent_lock, shard, legacy), 1).await;
+        if legacy { assert!(reply.is_empty()); continue; }
         let observation: StatusObservation = bincode::deserialize(&reply).unwrap();
         assert_eq!(observation.lock_id, other.t_id);
         assert!(
@@ -365,7 +378,7 @@ async fn hmc_tag_and_exact_diagnostics_return_no_new_node_signature() {
         .stats
         .signing_failed
         .store(true, Ordering::Release);
-    let exact = bincode::serialize(&(entry.t_id, parent, shard)).unwrap();
+    let exact = payload(reader, entry.t_id, parent, shard, false);
     let reply = observe(reader, source, &exact, 1).await;
     assert_eq!(
         bincode::deserialize::<StatusObservation>(&reply)
@@ -373,7 +386,7 @@ async fn hmc_tag_and_exact_diagnostics_return_no_new_node_signature() {
             .lock_id,
         entry.t_id
     );
-    let tag_only = bincode::serialize(&([0u8; 32], parent, shard)).unwrap();
+    let tag_only = payload(reader, [0u8;32], parent, shard, false);
     let conn = reader
         .network
         .connect_peer(source.network.local_addr().unwrap())
@@ -492,7 +505,15 @@ async fn pending_worker_then_late_commit_never_turns_status_into_an_original() {
         .connect_peer(receiver.local_addr().unwrap())
         .await
         .unwrap();
-    let bytes = bincode::serialize(&(row.t_id, parent_lock, shard)).unwrap();
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        client.node_pubkey(), 0, 0, now, 0, 0, 0, true, &row.t_id,
+    );
+    let bytes = bincode::serialize(&StatusQueryPayload {
+        lock_id: row.t_id, parent_lock, shard_id: shard,
+        sender_pubkey: *client.node_pubkey(), declared_write_ema_micro_bj: 0,
+        current_read_ema_credits: 0, timestamp_ms: now,
+        sender_signature: client.signing_key().sign(&digest).to_bytes(),
+    }).unwrap();
     let header = WireHeader::new(MsgType::StatusQuery as u16, 1, 0, 1, bytes.len() as u32);
     assert!(db.get_hmc_lock(tag).unwrap().is_none());
     let (_, pending) = sender.send_request(&conn, &header, &bytes).await.unwrap();

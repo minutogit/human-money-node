@@ -77,7 +77,8 @@ pub struct AppState {
     /// Bound concurrent blocking /v1/sync snapshot workers to protect memory (S01-03).
     pub sync_reads: Arc<tokio::sync::Semaphore>,
     /// In-memory cache for regional mesh views (5-second TTL).
-    pub mesh_view_cache: Arc<parking_lot::RwLock<Option<(u64, humoco_proto::mesh::RegionalMeshView)>>>,
+    pub mesh_view_cache:
+        Arc<parking_lot::RwLock<Option<(u64, humoco_proto::mesh::RegionalMeshView)>>>,
 }
 
 impl AppState {
@@ -681,7 +682,7 @@ pub fn create_attestation_for_network(
 ) -> AttestationDto {
     let node_id_u16 = identity.node_id_u16();
     // Pillar 3: Cryptographic Identity Trumps Network Topology — bind the full
-    // 32-byte NodePubKey; `node_id` stays only for backward compatibility.
+    // 32-byte NodePubKey; `node_id` is a diagnostic adapter label only.
     let node_pubkey_hex = hex::encode(identity.node_pubkey());
     let domain_tag = if status == 1 {
         humoco_sim_core::crypto::domain_approve_final(network_id)
@@ -989,7 +990,7 @@ enum PeerQueryError {
 
 enum PeerQueryResult {
     LocalCapacity,
-    Success(AttestationDto, Option<[u8; 32]>),
+    Success(AttestationDto, Option<[u8; 32]>, bool),
     QuotaExceeded,
     NotInShard,
     Collision(humoco_sim_core::wire::WireHeader, Vec<u8>, Option<[u8; 32]>),
@@ -1071,7 +1072,7 @@ fn validate_remote_collision(
 pub async fn collect_peer_attestations(
     query: PeerAttestationQuery<'_>,
     collected_signatures: &mut Vec<AttestationDto>,
-) -> Option<crate::api::hmc::L2LockEntry> {
+) -> (Option<crate::api::hmc::L2LockEntry>, bool) {
     let header = humoco_sim_core::wire::WireHeader::new(
         query.msg_type as u16,
         1,
@@ -1089,6 +1090,7 @@ pub async fn collect_peer_attestations(
     let mut in_flight = std::collections::HashMap::new();
     // First genuine HMC conflict evidence (FLAG_COLLISION_DETECTED) for 409.
     let mut collision_entry: Option<crate::api::hmc::L2LockEntry> = None;
+    let mut replay_observed = false;
 
     let is_write = query.msg_type == humoco_sim_core::wire::MsgType::LockVerifyRequest;
     let peer_work = async {
@@ -1173,17 +1175,21 @@ pub async fn collect_peer_attestations(
                         }
                         if resp_header.msg_type == exp_resp && !resp_payload.is_empty() {
                             if let Some(att) = AttestationDto::from_wire_bytes(&resp_payload) {
-                                return Ok((att, tls_pubkey));
+                                return Ok((
+                                    att,
+                                    tls_pubkey,
+                                    (resp_header.flags & humoco_sim_core::wire::FLAG_REPLAY) != 0,
+                                ));
                             }
                         }
                         Err(PeerQueryError::Generic)
                     };
                     match query_peer.await {
-                        Ok((att, tls_pubkey)) => (
+                        Ok((att, tls_pubkey, replay)) => (
                             nid,
                             addr,
                             rank_idx,
-                            PeerQueryResult::Success(att, tls_pubkey),
+                            PeerQueryResult::Success(att, tls_pubkey, replay),
                         ),
                         Err(PeerQueryError::LocalCapacity) => {
                             (nid, addr, rank_idx, PeerQueryResult::LocalCapacity)
@@ -1256,19 +1262,19 @@ pub async fn collect_peer_attestations(
                 .await
             {
                 Ok(Some(res)) => match res {
-                    Ok((_nid, addr, rank_idx, PeerQueryResult::Success(att, tls_pubkey))) => {
+                    Ok((
+                        _nid,
+                        addr,
+                        rank_idx,
+                        PeerQueryResult::Success(att, tls_pubkey, replay),
+                    )) => {
                         in_flight.remove(&rank_idx);
 
-                        // Pillar 3: dedup strictly via 32-byte NodePubKey when
-                        // present; legacy 16-bit prefix only as fallback.
-                        let is_duplicate = match att.node_pubkey_bytes() {
-                            Some(pk) => collected_signatures
+                        let is_duplicate = att.node_pubkey_bytes().is_none_or(|pk| {
+                            collected_signatures
                                 .iter()
-                                .any(|s| s.node_pubkey_bytes().map(|p| p == pk).unwrap_or(false)),
-                            None => collected_signatures
-                                .iter()
-                                .any(|s| s.node_id == att.node_id),
-                        };
+                                .any(|s| s.node_pubkey_bytes() == Some(pk))
+                        });
                         if is_duplicate {
                             spawn_next(
                                 &mut join_set,
@@ -1313,6 +1319,7 @@ pub async fn collect_peer_attestations(
                         // work (verified attestation) decays the Tit-for-Tat
                         // malus — a pure handshake never does.
                         query.peer_mgr.record_shard_work(addr).await;
+                        replay_observed |= replay;
                         collected_signatures.push(att);
 
                         // Early return as soon as required quorum is reached
@@ -1494,7 +1501,7 @@ pub async fn collect_peer_attestations(
             }
         }
     }
-    collision_entry
+    (collision_entry, replay_observed)
 }
 
 /// Assembles a quorum certificate for a lock by collecting signatures from top-20 HRW nodes
@@ -1510,7 +1517,7 @@ pub async fn assemble_quorum_certificate(
     now_ms: u64,
     record_payload: Option<Vec<u8>>,
 ) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
-    assemble_quorum_certificate_with_deadline(
+    let (cert, collision, _) = assemble_quorum_certificate_with_deadline(
         state,
         lock_id,
         parent_lock,
@@ -1518,31 +1525,9 @@ pub async fn assemble_quorum_certificate(
         now_ms,
         record_payload,
         None,
-        None,
     )
-    .await
-}
-
-pub async fn assemble_quorum_certificate_with_override(
-    state: &AppState,
-    lock_id: [u8; 32],
-    parent_lock: [u8; 32],
-    shard_id: u16,
-    now_ms: u64,
-    record_payload: Option<Vec<u8>>,
-    quorum_override: Option<usize>,
-) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
-    assemble_quorum_certificate_with_deadline(
-        state,
-        lock_id,
-        parent_lock,
-        shard_id,
-        now_ms,
-        record_payload,
-        quorum_override,
-        None,
-    )
-    .await
+    .await;
+    (cert, collision)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1553,9 +1538,12 @@ pub async fn assemble_quorum_certificate_with_deadline(
     shard_id: u16,
     now_ms: u64,
     record_payload: Option<Vec<u8>>,
-    quorum_override: Option<usize>,
     checkout_deadline: Option<tokio::time::Instant>,
-) -> (QuorumCertificateDto, Option<crate::api::hmc::L2LockEntry>) {
+) -> (
+    QuorumCertificateDto,
+    Option<crate::api::hmc::L2LockEntry>,
+    bool,
+) {
     use humoco_sim_core::types::CommitteeMember;
     let self_pubkey = *state.identity.node_pubkey();
     let self_hrw = *state.identity.hrw_routing_id();
@@ -1572,10 +1560,7 @@ pub async fn assemble_quorum_certificate_with_deadline(
         )
     };
     let (base_q, final_size) = humoco_sim_core::types::required_quorum(total_active);
-    let required_q = quorum_override
-        .unwrap_or(base_q)
-        .min(total_active)
-        .max(base_q);
+    let required_q = base_q;
     let target_status = u8::from(
         final_size
             && state
@@ -1673,13 +1658,14 @@ pub async fn assemble_quorum_certificate_with_deadline(
         (None, None)
     };
     let mut collision = None;
+    let mut replay_observed = false;
     if collected_signatures.len() < required_q {
         if let (Some(transport), Some(pm), Some(payload)) = (
             &state.transport,
             &state.peer_manager,
             record_payload.as_deref(),
         ) {
-            collision = collect_peer_attestations(
+            (collision, replay_observed) = collect_peer_attestations(
                 PeerAttestationQuery {
                     transport,
                     peer_mgr: pm,
@@ -1711,11 +1697,7 @@ pub async fn assemble_quorum_certificate_with_deadline(
     let cert = QuorumCertificateDto {
         lock_id: hex::encode(lock_id),
         shard_id,
-        status: if collected_signatures.len() >= required_q {
-            target_status
-        } else {
-            0
-        },
+        status: target_status,
         active_nodes_count: total_active,
         signer_count: collected_signatures.len(),
         signatures: collected_signatures,
@@ -1757,13 +1739,14 @@ pub async fn assemble_quorum_certificate_with_deadline(
                                 ..cert
                             },
                             collision,
+                            replay_observed,
                         );
                     }
                 }
             }
         }
     }
-    (cert, collision)
+    (cert, collision, replay_observed)
 }
 
 /// Handler for POST /status and POST /v1/status.
@@ -1844,9 +1827,7 @@ async fn query_status(
     }
 
     let (supplied_shard, supplied_root) = match payload.authenticated_root_shard(now_ms) {
-        Ok(Some((shard, root))) => {
-            (Some(shard), Some(root))
-        }
+        Ok(Some((shard, root))) => (Some(shard), Some(root)),
         Ok(None) => (None, None),
         Err(reason) => {
             let envelope = wrap_and_sign_verdict(
@@ -1991,43 +1972,49 @@ async fn query_status(
                             0,
                             payload_bytes.len() as u32,
                         );
-                        let remote_verdict: Option<L2Verdict> = async {
-                            let conn = transport.connect_peer(addr).await.ok()?;
-                            let fut = transport.send_request(&conn, &header, &payload_bytes);
-                            let (resp_header, resp_payload) =
-                                tokio::time::timeout(std::time::Duration::from_millis(1000), fut)
-                                    .await
-                                    .ok()?
-                                    .ok()?;
-                            if resp_header.msg_type
-                                != humoco_sim_core::wire::MsgType::StatusResponse as u16
-                            {
-                                return None;
-                            }
-                            if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0 {
-                                return Some(L2Verdict::Rejected {
-                                    reason: "Remote durable state pending".into(),
-                                });
-                            }
-                            if resp_payload.is_empty()
-                                || (resp_header.flags & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED)
-                                    != 0
-                                || (resp_header.flags & humoco_sim_core::wire::FLAG_PEER_SUSPENDED)
-                                    != 0
-                            {
-                                return None;
-                            }
-                            if let Ok(entry) = serde_json::from_slice::<
-                                crate::api::hmc::L2LockEntry,
-                            >(&resp_payload)
-                            {
-                                if entry.layer2_voucher_id == payload.layer2_voucher_id {
-                                    return Some(L2Verdict::Verified { lock_entry: entry });
+                        let remote_verdict: Option<L2Verdict> =
+                            async {
+                                let conn = transport.connect_peer(addr).await.ok()?;
+                                let fut = transport.send_request(&conn, &header, &payload_bytes);
+                                let (resp_header, resp_payload) = tokio::time::timeout(
+                                    std::time::Duration::from_millis(1000),
+                                    fut,
+                                )
+                                .await
+                                .ok()?
+                                .ok()?;
+                                if resp_header.msg_type
+                                    != humoco_sim_core::wire::MsgType::StatusResponse as u16
+                                {
+                                    return None;
                                 }
+                                if (resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY) != 0
+                                {
+                                    return Some(L2Verdict::Rejected {
+                                        reason: "Remote durable state pending".into(),
+                                    });
+                                }
+                                if resp_payload.is_empty()
+                                    || (resp_header.flags
+                                        & humoco_sim_core::wire::FLAG_QUOTA_EXCEEDED)
+                                        != 0
+                                    || (resp_header.flags
+                                        & humoco_sim_core::wire::FLAG_PEER_SUSPENDED)
+                                        != 0
+                                {
+                                    return None;
+                                }
+                                if let Ok(entry) = serde_json::from_slice::<
+                                    crate::api::hmc::L2LockEntry,
+                                >(&resp_payload)
+                                {
+                                    if entry.layer2_voucher_id == payload.layer2_voucher_id {
+                                        return Some(L2Verdict::Verified { lock_entry: entry });
+                                    }
+                                }
+                                None
                             }
-                            None
-                        }
-                        .await;
+                            .await;
                         if let Some(remote) = remote_verdict {
                             verdict = remote;
                         }
@@ -2245,10 +2232,6 @@ async fn submit_hmc_lock_with_deadline(
         .get("X-PoW-Nonce")
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
-    let req_q_override = headers
-        .get("X-Required-Quorum")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<usize>().ok());
 
     let parent_for_pow_val = if req.is_genesis {
         None
@@ -2504,14 +2487,8 @@ async fn submit_hmc_lock_with_deadline(
             )
                 .into_response();
         }
-        return commit_root_registration(
-            &state,
-            lookup_tag,
-            entry,
-            now_ms,
-            ("Idempotent", 0),
-        )
-        .await;
+        return commit_root_registration(&state, lookup_tag, entry, now_ms, ("Idempotent", 0))
+            .await;
     }
 
     // 4. Fast-path idempotency check: if identical lock already verified in RAM, return 200 OK immediately
@@ -2576,14 +2553,13 @@ async fn submit_hmc_lock_with_deadline(
         })
         .ok();
         let start_quorum = std::time::Instant::now();
-        let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
+        let (cert, remote_collision, _replay_observed) = assemble_quorum_certificate_with_deadline(
             &state,
             entry.t_id,
             parent_bytes,
             shard_id,
             now_ms,
             wire_payload,
-            req_q_override,
             Some(checkout_deadline),
         )
         .await;
@@ -2651,14 +2627,8 @@ async fn submit_hmc_lock_with_deadline(
     // Genesis is only a durable Root Anchor. No exclusion is inserted, no
     // original spend approval or quorum certificate may be minted for it.
     if req.is_genesis {
-        return commit_root_registration(
-            &state,
-            lookup_tag,
-            entry,
-            now_ms,
-            (tier_str, byte_years),
-        )
-        .await;
+        return commit_root_registration(&state, lookup_tag, entry, now_ms, (tier_str, byte_years))
+            .await;
     }
 
     // 4. Ingress: Local shard storage vs. Stateless Gateway routing
@@ -2737,17 +2707,17 @@ async fn submit_hmc_lock_with_deadline(
                     })
                     .ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
-                    &state,
-                    entry.t_id,
-                    parent_bytes,
-                    shard_id,
-                    now_ms,
-                    wire_payload,
-                    req_q_override,
-                    Some(checkout_deadline),
-                )
-                .await;
+                let (cert, remote_collision, _replay_observed) =
+                    assemble_quorum_certificate_with_deadline(
+                        &state,
+                        entry.t_id,
+                        parent_bytes,
+                        shard_id,
+                        now_ms,
+                        wire_payload,
+                        Some(checkout_deadline),
+                    )
+                    .await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
                 (Some(cert), remote_collision)
             }
@@ -2805,14 +2775,13 @@ async fn submit_hmc_lock_with_deadline(
         })
         .ok();
         let start_quorum = std::time::Instant::now();
-        let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
+        let (cert, remote_collision, replay_observed) = assemble_quorum_certificate_with_deadline(
             &state,
             entry.t_id,
             parent_bytes,
             shard_id,
             now_ms,
             wire_payload,
-            req_q_override,
             Some(checkout_deadline),
         )
         .await;
@@ -2825,7 +2794,7 @@ async fn submit_hmc_lock_with_deadline(
             let verdict = L2Verdict::Verified {
                 lock_entry: entry.clone(),
             };
-            (verdict, true, Some(cert))
+            (verdict, !replay_observed, Some(cert))
         }
     };
 
@@ -3372,17 +3341,17 @@ async fn submit_hmc_chain_lock_inner(
                     })
                     .ok();
                 let start_quorum = std::time::Instant::now();
-                let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
-                    &state,
-                    lock_entry.t_id,
-                    parent_bytes,
-                    shard_id,
-                    now_ms,
-                    wire_payload,
-                    None,
-                    Some(checkout_deadline),
-                )
-                .await;
+                let (cert, remote_collision, _replay_observed) =
+                    assemble_quorum_certificate_with_deadline(
+                        &state,
+                        lock_entry.t_id,
+                        parent_bytes,
+                        shard_id,
+                        now_ms,
+                        wire_payload,
+                        Some(checkout_deadline),
+                    )
+                    .await;
                 state.metrics.record_quorum_latency(start_quorum.elapsed());
                 (Some(cert), remote_collision)
             }
@@ -3441,14 +3410,13 @@ async fn submit_hmc_chain_lock_inner(
         })
         .ok();
         let start_quorum = std::time::Instant::now();
-        let (cert, remote_collision) = assemble_quorum_certificate_with_deadline(
+        let (cert, remote_collision, replay_observed) = assemble_quorum_certificate_with_deadline(
             &state,
             entry.t_id,
             parent_bytes,
             shard_id,
             now_ms,
             wire_payload,
-            None,
             Some(checkout_deadline),
         )
         .await;
@@ -3458,7 +3426,7 @@ async fn submit_hmc_chain_lock_inner(
             (verdict, false, Some(cert))
         } else {
             let verdict = L2Verdict::Verified { lock_entry: entry };
-            (verdict, true, Some(cert))
+            (verdict, !replay_observed, Some(cert))
         }
     };
 
@@ -3751,7 +3719,7 @@ mod local_capacity_collector_tests {
             ),
         ] {
             let mut signatures = Vec::new();
-            let conflict = collect_peer_attestations(
+            let (conflict, _) = collect_peer_attestations(
                 PeerAttestationQuery {
                     transport: &transport,
                     peer_mgr: &manager,
@@ -3968,7 +3936,8 @@ async fn public_regional_mesh_view(State(state): State<AppState>) -> Response {
     {
         let cache = state.mesh_view_cache.read();
         if let Some((cached_at_ms, ref view)) = *cache {
-            if now_ms.saturating_sub(cached_at_ms) < 5_000 && view.valid_until_ms > now_ms + 15_000 {
+            if now_ms.saturating_sub(cached_at_ms) < 5_000 && view.valid_until_ms > now_ms + 15_000
+            {
                 return Json(view.clone()).into_response();
             }
         }

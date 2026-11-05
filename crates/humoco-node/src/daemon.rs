@@ -9,7 +9,6 @@ use tracing::{debug, error, info, warn};
 use crate::config::NodeConfig;
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
-use ed25519_dalek::Signer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundAddrs {
@@ -771,7 +770,6 @@ impl NodeDaemon {
         // 1. F2F Heartbeat-Emitter (hourly with jitter, signed payload)
         let hb_pm = peer_manager.clone();
         let hb_transport = transport.clone();
-        let hb_identity = self.identity.clone();
         let hb_cancel = self.cancel_token.clone();
         let hb_local_addr = if let Some(mut adv) = self.config.network.advertised_addr {
             if adv.port() == 0 {
@@ -830,30 +828,9 @@ impl NodeDaemon {
                             debug!("Heartbeat tick: no F2F friends configured");
                             continue;
                         }
-                        let node_id = *hb_identity.node_pubkey();
                         let declared_write_ema = hb_tc.current_write_ema_micro_bj();
                         let declared_read_ema = hb_tc.current_read_ema_credits();
                         let now_ms = hb_pm.net_time_ms();
-                        // Epoch-bound envelope (Phase 1 P0); heartbeat binds
-                        // origin announcement hash (local_addr, nonce, hrw_routing_id, t0).
-                        let announcement_hash = humoco_sim_core::fraud::compute_heartbeat_announcement_hash(
-                            &hb_local_addr,
-                            hb_identity.nonce(),
-                            hb_identity.hrw_routing_id(),
-                            hb_identity.t0(),
-                        );
-                        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
-                            &node_id,
-                            0,
-                            0,
-                            now_ms,
-                            declared_write_ema,
-                            declared_read_ema,
-                            0,
-                            false,
-                            &announcement_hash,
-                        );
-                        let signature = hb_identity.signing_key().sign(&digest).to_bytes();
                         let piggyback = hb_pm.sample_piggyback_evidences(2).await;
 
                         let mut any_failed = false;
@@ -862,12 +839,10 @@ impl NodeDaemon {
                             seq = seq.wrapping_add(1);
                             match hb_transport.send_heartbeat_to(
                                 peer_addr,
-                                node_id,
                                 hb_local_addr,
                                 seq,
                                 declared_write_ema,
                                 declared_read_ema,
-                                signature,
                                 now_ms,
                                 piggyback.clone(),
                             ).await {

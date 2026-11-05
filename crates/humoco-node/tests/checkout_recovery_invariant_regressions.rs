@@ -1247,8 +1247,8 @@ async fn idempotent_variants_preserve_exact_entry_original_approval_digest_and_r
         .expect("send LockVerifyRequest over real QUIC");
     assert_eq!(resp_hdr.msg_type, MsgType::LockVerifyResponse as u16);
     assert_eq!(
-        resp_hdr.flags, 0,
-        "real QUIC LockVerifyRequest must succeed without error flags"
+        resp_hdr.flags, humoco_sim_core::wire::FLAG_REPLAY,
+        "real QUIC replay must report retained state without error flags"
     );
     assert!(!resp_bytes.is_empty());
     assert_eq!(

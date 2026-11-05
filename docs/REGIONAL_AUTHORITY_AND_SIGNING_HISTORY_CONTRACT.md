@@ -90,16 +90,17 @@ can expose diagnostics while `DualTierEngine::is_signing_healthy` refuses signin
 Irrecoverably truncated/unreadable redb files fail database opening before a node
 can sign; this is not automatically recoverable by copying peer canonical state.
 
-Legacy histories lacking this metadata are measured once on migration. This does
-not retroactively prove their earlier completeness. Missing metadata alongside
-already generation-tagged rows is corruption. A complete replacement of metadata
-and choices by a consistent old directory is the explicitly excluded case below.
+Signing histories require complete current integrity metadata and per-row
+commitments. Missing metadata or commitments alongside retained decisions latches
+corruption; startup never reconstructs missing integrity evidence. A consistent
+complete offline rollback remains the explicitly excluded case below.
 
 The existing heartbeat gains an optional nested `SigningCheckpoint`. It binds:
 length-prefixed `HUMOCO_V1_SIGNING_CHECKPOINT`, network`u8`, full node public key32,
 generation`u64 LE`, fingerprint32, signed with that node's Ed25519 key. It is not
-an approval or a quorum proof. The existing full heartbeat encoding without the
-extension still decodes without discarding its ticket/incubation fields.
+an approval or a quorum proof. Heartbeats use one canonical current encoding;
+optional checkpoint absence is represented within that encoding. Older binary
+layouts are rejected rather than decoded through a compatibility fallback.
 
 A checkpoint is emitted from committed storage by a blocking background read;
 it adds no checkout disk read and no pre-signing network request. The real F2F

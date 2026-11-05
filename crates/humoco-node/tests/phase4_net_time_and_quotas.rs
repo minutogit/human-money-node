@@ -591,7 +591,7 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
-    hb_wire.sign_origin(&identity_client, t1);
+    hb_wire.sign_origin(&identity_client, t1, humoco_sim_core::types::NetworkId::default());
     let hb_payload = bincode::serialize(&hb_wire).unwrap();
     let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, hb_payload.len() as u32);
     handler_shard
@@ -855,7 +855,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     assert_eq!(sampled[0].declared_write_ema_micro_bj, high_write_ema);
 
     // 2. Shard Node A sends Heartbeat with piggyback_observations to Node B
-    let hb_wire = humoco_node::network::framing::HeartbeatWirePayload {
+    let mut hb_wire = humoco_node::network::framing::HeartbeatWirePayload {
         gateway_advertisement: None,
         signing_checkpoint: None,
         node_id: *identity_a.node_pubkey(),
@@ -871,6 +871,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
+    hb_wire.sign_origin(&identity_a, t1 + 5, humoco_sim_core::types::NetworkId::Mainnet);
     let hb_payload = bincode::serialize(&hb_wire).unwrap();
     let hb_hdr = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, hb_payload.len() as u32);
     handler_b
@@ -1214,7 +1215,7 @@ async fn test_s06_02_real_quic_clock_sample_revocation_and_equivocation_ban() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
-    hb_b.sign_origin(&friend_b, now_ms);
+    hb_b.sign_origin(&friend_b, now_ms, humoco_sim_core::types::NetworkId::default());
     let payload_b = bincode::serialize(&hb_b).unwrap();
     let mut hdr_b = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload_b.len() as u32);
     hdr_b.reserved = 0; // hops = 0 (direct)
@@ -1250,7 +1251,7 @@ async fn test_s06_02_real_quic_clock_sample_revocation_and_equivocation_ban() {
     // Friend B sends another heartbeat over QUIC — must NOT be accepted into clock
     let fresh_now = pm_server.net_time_ms();
     hb_b.timestamp_ms = fresh_now;
-    hb_b.sign_origin(&friend_b, fresh_now);
+    hb_b.sign_origin(&friend_b, fresh_now, humoco_sim_core::types::NetworkId::default());
     let payload_b2 = bincode::serialize(&hb_b).unwrap();
     let mut hdr_b2 =
         WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, payload_b2.len() as u32);

@@ -53,9 +53,11 @@ fn write(txn: &redb::WriteTransaction, state: &SigningState) -> Result<(), Stora
     Ok(())
 }
 
-/// Streams startup validation without cloning the history. Legacy rows have no
-/// generation; migrating them cannot retroactively establish preexisting integrity.
-pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<bool, StorageError> {
+/// Streams startup validation without repairing incomplete signing histories.
+pub(super) fn initialize(
+    txn: &redb::WriteTransaction,
+    new_database: bool,
+) -> Result<bool, StorageError> {
     let stored = {
         let table = txn.open_table(TABLE_SIGNING_STATE)?;
         let result = table
@@ -67,7 +69,7 @@ pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<bool, StorageEr
     let mut measured = SigningState::default();
     let choices = txn.open_table(TABLE_OWN_CHOICES)?;
     let ttl = txn.open_table(TABLE_OWN_CHOICE_TTL)?;
-    let mut commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+    let commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
 
     let mut valid_roots = std::collections::HashMap::new();
     let roots_table = txn.open_table(roots::TABLE_VOUCHER_ROOTS)?;
@@ -112,7 +114,7 @@ pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<bool, StorageEr
                 }
             }
             None => {
-                commitments.insert(slot.value(), &fp)?;
+                measured.corrupt = true;
             }
         }
         match serde_json::from_slice::<OwnSigningChoice>(value.value()) {
@@ -128,7 +130,9 @@ pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<bool, StorageEr
                         let raw_entry = if let Some(guard) = hmc_locks.get(rest)? {
                             Some(guard.value().to_vec())
                         } else {
-                            prov_hmc_locks.get(rest)?.map(|guard| guard.value().to_vec())
+                            prov_hmc_locks
+                                .get(rest)?
+                                .map(|guard| guard.value().to_vec())
                         };
                         if let Some(raw_bytes) = raw_entry {
                             if let Ok(hmc_entry) =
@@ -161,7 +165,8 @@ pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<bool, StorageEr
             state
         }
         Ok(None) => {
-            measured.corrupt |= measured.generation != 0;
+            measured.corrupt |=
+                !new_database || measured.count != 0 || commitments.len()? != 0 || ttl.len()? != 0;
             measured
         }
         Err(_) => {
@@ -409,6 +414,120 @@ mod tests {
             privacy_guard: None,
         };
         (format!("spend-{parent}"), entry)
+    }
+    #[test]
+    fn premature_extra_ttl_index_preserves_choice_and_latches_durably() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ttl-corrupt.redb");
+        let (tag, entry) = lock(1);
+        {
+            let db = RedbStorage::open(&path).unwrap();
+            db.commit_original_approval(&tag, &entry, &[7; 32], b"original", 0, 50_000)
+                .unwrap();
+            let txn = db.db.begin_write().unwrap();
+            let slot = {
+                let choices = txn.open_table(TABLE_OWN_CHOICES).unwrap();
+                let slot = choices
+                    .iter()
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .0
+                    .value()
+                    .to_string();
+                slot
+            };
+            txn.open_table(TABLE_OWN_CHOICE_TTL)
+                .unwrap()
+                .insert((1, slot.as_str()), ())
+                .unwrap();
+            txn.commit().unwrap();
+            db.prune_expired_buckets(1).unwrap();
+            // Repeated prune markers must still commit the first corruption latch.
+            db.apply_flush_batch_atomic(&[], &[], &[], &[], &[1, 81])
+                .unwrap();
+            assert!(!db.is_signing_history_healthy());
+            let txn = db.db.begin_read().unwrap();
+            assert_eq!(txn.open_table(TABLE_OWN_CHOICES).unwrap().len().unwrap(), 1);
+        }
+        assert!(!RedbStorage::open(&path)
+            .unwrap()
+            .is_signing_history_healthy());
+    }
+    #[test]
+    fn missing_integrity_metadata_is_never_reconstructed_at_startup() {
+        for remove_state in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("incomplete.redb");
+            let (tag, entry) = lock(1);
+            {
+                let db = RedbStorage::open(&path).unwrap();
+                db.commit_original_approval(&tag, &entry, &[7; 32], b"original", 0, 50_000)
+                    .unwrap();
+                let txn = db.db.begin_write().unwrap();
+                if remove_state {
+                    txn.open_table(TABLE_SIGNING_STATE)
+                        .unwrap()
+                        .remove(0)
+                        .unwrap();
+                } else {
+                    txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)
+                        .unwrap()
+                        .retain(|_, _| false)
+                        .unwrap();
+                }
+                txn.commit().unwrap();
+            }
+            let db = RedbStorage::open(&path).unwrap();
+            assert!(!db.is_signing_history_healthy());
+            if !remove_state {
+                let txn = db.db.begin_read().unwrap();
+                assert_eq!(
+                    txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)
+                        .unwrap()
+                        .len()
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn existing_empty_history_with_missing_state_stays_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-incomplete.redb");
+        {
+            let db = RedbStorage::open(&path).unwrap();
+            let txn = db.db.begin_write().unwrap();
+            txn.open_table(TABLE_SIGNING_STATE)
+                .unwrap()
+                .remove(0)
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        assert!(!RedbStorage::open(&path)
+            .unwrap()
+            .is_signing_history_healthy());
+    }
+
+    #[test]
+    fn rolled_back_prune_marker_is_persisted_on_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retry.redb");
+        {
+            let db = RedbStorage::open(&path).unwrap();
+            // Model a write/commit failure after setting the RAM latch: redb
+            // atomically rolls back this transaction while RAM remains latched.
+            let txn = db.db.begin_write().unwrap();
+            db.latch_corruption_in_txn(&txn);
+            txn.abort().unwrap();
+            db.prune_expired_buckets(1).unwrap();
+        }
+        assert!(!RedbStorage::open(&path)
+            .unwrap()
+            .is_signing_history_healthy());
     }
     #[test]
     fn intact_restart_retry_expiry_and_backup_keep_monotonic_state() {

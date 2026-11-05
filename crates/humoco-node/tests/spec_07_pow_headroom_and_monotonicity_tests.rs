@@ -261,7 +261,7 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
 
     // Node A sends direct Heartbeat (hops = 0) to Node B
     let conn_a_to_b = transport_a.connect_peer_unchecked(addr_b).await.unwrap();
-    let hb = humoco_node::network::framing::HeartbeatWirePayload {
+    let mut hb = humoco_node::network::framing::HeartbeatWirePayload {
         gateway_advertisement: None,
         signing_checkpoint: None,
         node_id: pk_a,
@@ -277,6 +277,7 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
+    hb.sign_origin(&id_a, 1000, humoco_sim_core::types::NetworkId::Mainnet);
     let payload = bincode::serialize(&hb).unwrap();
     let mut header = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
     header.reserved = 0; // hops = 0

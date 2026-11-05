@@ -834,8 +834,104 @@ async fn test_s04_07_real_quic_shard_digest_rejects_unsupported_crypto_suites_be
         "ShardDigestResponse must contain 40-byte committed shard digest and timestamp"
     );
 
+    // Old tuples and malformed current DTOs must receive deterministic refusal.
+    for mut body in [bincode::serialize(&([1u8;32], [2u8;32], 3u16)).unwrap(), vec![0u8; 217]] {
+        for with_tail in [false, true] {
+            if with_tail { body.extend_from_slice(&[0u8;16]); }
+            let header = WireHeader::new(MsgType::StatusQuery as u16, 12, 0, 0, body.len() as u32);
+            let (response, payload) = transport_client.send_request(&conn, &header, &body).await.unwrap();
+            assert_ne!(response.flags & (humoco_sim_core::wire::FLAG_UNAUTHORIZED | humoco_sim_core::wire::FLAG_SIGNATURE_INVALID), 0);
+            assert!(payload.is_empty());
+        }
+    }
+
     cancel.cancel();
     transport_server.close();
     transport_client.close();
 }
 
+#[tokio::test]
+async fn test_s04_07_uni_rejects_unsupported_suite_headers_without_body_or_handler(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cancel = CancellationToken::new();
+    let server_id = NodeIdentity::generate();
+    let client_id = NodeIdentity::generate();
+    let handler = Arc::new(EchoHandler::new());
+    let server = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse()?,
+        &server_id,
+        Arc::new(PeerManager::new(vec![])),
+        handler.clone(),
+        cancel.clone(),
+    )?;
+    let client = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse()?,
+        &client_id,
+        Arc::new(PeerManager::new(vec![])),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )?;
+    server
+        .peer_manager()
+        .register_f2f_friend(*client_id.node_pubkey(), Some(client.local_addr()?))
+        .await;
+    client
+        .peer_manager()
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server.local_addr()?))
+        .await;
+    server.spawn_accept_loop();
+    client.spawn_accept_loop();
+    let conn = client.connect_peer(server.local_addr()?).await?;
+    for suite in [0, 2, 3, 255] {
+        let mut header = WireHeader::new(MsgType::EquivocationProof as u16, 1, 0, 0, 64);
+        header.crypto_suite = suite;
+        let mut send = conn.open_uni().await?;
+        send.write_all(&header.to_bytes()).await?;
+        // Leave the advertised body and FIN unsent. Receiver rejection must
+        // stop this stream without dispatching the gossip handler.
+        let stopped =
+            tokio::time::timeout(std::time::Duration::from_secs(2), send.stopped()).await??;
+        assert!(
+            stopped.is_some(),
+            "suite {suite}: receiver must stop the stream"
+        );
+        assert_eq!(handler.received_unidirectional.load(Ordering::SeqCst), 0);
+    }
+    // Unsupported semantic headers must be rejected without waiting for a body.
+    for variant in 0..4 {
+        let mut header = WireHeader::new(MsgType::LatencyProbe as u16, 1, 0, 0, 64);
+        match variant {
+            0 => header.msg_type = 0xffff,
+            1 => header.reserved_ver = 255,
+            2 => header.flags = 0x8000_0000,
+            _ => header.reserved = 1,
+        }
+        let mut send = conn.open_uni().await?;
+        send.write_all(&header.to_bytes()).await?;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), send.stopped()).await??;
+        assert!(stopped.is_some(), "invalid header {variant} must be rejected before body");
+        assert_eq!(handler.received_unidirectional.load(Ordering::SeqCst), 0);
+    }
+    let payload = b"canonical suite control";
+    let header = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        2,
+        0,
+        0,
+        u32::try_from(payload.len())?,
+    );
+    client.send_unidirectional(&conn, &header, payload).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while handler.received_unidirectional.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(handler.received_unidirectional.load(Ordering::SeqCst), 1);
+    cancel.cancel();
+    server.close();
+    client.close();
+    server.drain_tasks().await;
+    client.drain_tasks().await;
+    Ok(())
+}

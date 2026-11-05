@@ -106,12 +106,10 @@ async fn signed_passive_gateway_publication_arrives_over_quic_and_tampering_is_i
     source_net
         .send_heartbeat_to(
             receiver_net.local_addr().unwrap(),
-            *source.node_pubkey(),
             source_net.local_addr().unwrap(),
             1,
             0,
             0,
-            [0u8; 64],
             now,
             vec![],
         )
@@ -143,7 +141,7 @@ async fn signed_passive_gateway_publication_arrives_over_quic_and_tampering_is_i
         signing_checkpoint: None,
         gateway_advertisement: Some(ad),
     };
-    hb.sign_origin(&source, hb.timestamp_ms);
+    hb.sign_origin(&source, hb.timestamp_ms, humoco_sim_core::types::NetworkId::default());
     let bytes = bincode::serialize(&hb).unwrap();
     let conn = source_net
         .connect_peer(receiver_net.local_addr().unwrap())

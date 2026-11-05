@@ -155,6 +155,8 @@ pub const FLAG_NOT_IN_SHARD: u32 = 0x0000_0400;
 pub const FLAG_UNAUTHORIZED: u32 = 0x0000_0800;
 pub const FLAG_SIGNATURE_INVALID: u32 = 0x0000_1000;
 pub const FLAG_NOT_READY: u32 = 0x0000_2000;
+/// Durable identical request observed by this custodian.
+pub const FLAG_REPLAY: u32 = 0x0000_8000;
 pub const FLAG_COLLISION_DETECTED: u32 = 0x0000_4000;
 
 #[cfg(test)]

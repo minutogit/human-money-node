@@ -26,16 +26,13 @@ unchanged SST formula. The engine validates and durably commits each next step
 sequentially; an invalid suffix cannot roll back a valid durable prefix. Original
 wallet T0 is checked at receiving-shard admission, not refreshed by a gateway.
 
-## Migration limits
+## Current storage format
 
-Legacy genesis self-loops migrate into the separate root table, with bounded
-migration batches. Existing private signing-history evidence remains protected;
-migration does not invent new original genesis votes. A new canonical hex voucher
-root needs the original author's signed output proof and its existing L1 root-ID
-preimage check. A legacy root can receive its author's matching proof without
-changing its immutable deed. Another participant cannot sign missing historical
-sidecars on behalf of an earlier owner. Legacy histories without those proofs
-remain qualified and cannot justify automatic goods release.
+Genesis roots reside exclusively in the separate root table. Startup rejects
+unsupported self-loop genesis spend rows without rewriting them. Original signing
+history must contain complete current integrity metadata. No migration or proof
+backfill establishes missing historical authority. Canonical voucher roots require
+the original author's signed output proof and the existing L1 root-ID preimage check.
 
 The optional proof is consistently encoded in the L2 binary DTO. Deploy matching
 Proto/Core/Node/App versions together; this is not a claim of unversioned binary

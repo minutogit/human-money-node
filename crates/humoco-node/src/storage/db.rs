@@ -100,7 +100,6 @@ pub const MAX_SYNC_ROW_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_SYNC_LOCKS: usize = 10_000;
 pub const DEFAULT_MAX_SYNC_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
-
 pub(crate) fn validate_sync_shape(
     tag: &str,
     entry: &crate::api::hmc::L2LockEntry,
@@ -136,7 +135,6 @@ pub const TABLE_TICKET_OBSERVATIONS: TableDefinition<&[u8; 64], u64> =
 /// Node-local original signing protection. Never included in shard synchronization.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnSigningChoice {
-    #[serde(default)]
     pub generation: u64,
     pub child: [u8; 32],
     pub valid_until_ms: u64,
@@ -216,6 +214,7 @@ impl RedbStorage {
     }
 
     fn initialize_database(db: Database, path: &Path) -> Result<Self, StorageError> {
+        let empty_database = db.begin_read()?.list_tables()?.next().is_none();
         // Initialize tables in a write transaction
         let write_txn = db.begin_write()?;
         {
@@ -223,15 +222,21 @@ impl RedbStorage {
             let existing_version = schema_table.get("schema_version")?.map(|g| g.value());
             match existing_version {
                 Some(v) => {
-                    if v > CURRENT_DB_SCHEMA_VERSION {
+                    if v != CURRENT_DB_SCHEMA_VERSION {
                         return Err(StorageError::UnsupportedSchemaVersion {
                             found: v,
                             supported: CURRENT_DB_SCHEMA_VERSION,
                         });
                     }
                 }
-                None => {
+                None if empty_database => {
                     schema_table.insert("schema_version", CURRENT_DB_SCHEMA_VERSION)?;
+                }
+                None => {
+                    return Err(StorageError::UnsupportedSchemaVersion {
+                        found: 0,
+                        supported: CURRENT_DB_SCHEMA_VERSION,
+                    })
                 }
             }
         }
@@ -252,7 +257,7 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
         }
         roots::initialize(&write_txn)?;
-        let corrupt = signing::initialize(&write_txn)?;
+        let corrupt = signing::initialize(&write_txn, empty_database)?;
         write_txn.commit()?;
 
         Ok(Self {
@@ -612,7 +617,8 @@ impl RedbStorage {
                     if let Ok(entry) =
                         serde_json::from_slice::<crate::api::hmc::L2LockEntry>(guard.value())
                     {
-                        table_prov_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
+                        table_prov_vidx
+                            .remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
                         table_vidx.remove(&(entry.layer2_voucher_id.as_str(), tag.as_str()))?;
                     }
                     prov_quarantined = true;
@@ -625,7 +631,7 @@ impl RedbStorage {
             }
         }
         self.prune_voucher_roots(&write_txn, now_sec)?;
-        Self::prune_own_choices(&write_txn, now_sec)?;
+        self.prune_own_choices(&write_txn, now_sec)?;
         write_txn.commit()?;
         Ok(pruned_hmc_count)
     }
@@ -785,7 +791,6 @@ impl RedbStorage {
         }
         Ok(results)
     }
-
 }
 
 /// Persisted `(node_pubkey, hrw_routing_id, first_seen_ms)` maturation record.
@@ -1268,7 +1273,17 @@ impl RedbStorage {
         Ok(())
     }
 
-    fn prune_own_choices(txn: &redb::WriteTransaction, now_sec: u64) -> Result<(), StorageError> {
+    fn prune_own_choices(
+        &self,
+        txn: &redb::WriteTransaction,
+        now_sec: u64,
+    ) -> Result<(), StorageError> {
+        if !self.is_signing_history_healthy() {
+            // A failed commit may have persisted only the RAM latch. Retry the
+            // durable marker on every subsequent successful pruning transaction.
+            self.latch_corruption_in_txn(txn);
+            return Ok(());
+        }
         let mut ttl = txn.open_table(TABLE_OWN_CHOICE_TTL)?;
         let expired = ttl
             .range(..(now_sec.saturating_add(1), ""))?
@@ -1277,6 +1292,23 @@ impl RedbStorage {
             .collect::<Result<Vec<_>, _>>()?;
         for (sec, slot) in expired {
             if sec <= now_sec {
+                let valid = {
+                    let choices = txn.open_table(TABLE_OWN_CHOICES)?;
+                    let valid = choices
+                        .get(slot.as_str())?
+                        .and_then(|row| {
+                            serde_json::from_slice::<OwnSigningChoice>(row.value()).ok()
+                        })
+                        .is_some_and(|choice| {
+                            grace_expiry_bucket_sec(choice.valid_until_ms) == sec
+                        });
+                    valid
+                };
+                if !valid {
+                    self.latch_corruption_in_txn(txn);
+                    // Preserve the evidence and let the caller commit the durable latch.
+                    return Ok(());
+                }
                 signing::remove_choice(txn, slot.as_str())?;
                 ttl.remove(&(sec, slot.as_str()))?;
             }
@@ -1472,7 +1504,7 @@ impl RedbStorage {
         drop(table_prov_vidx);
         drop(roots_table);
 
-        Self::prune_own_choices(write_txn, now_sec)?;
+        self.prune_own_choices(write_txn, now_sec)?;
         self.prune_voucher_roots(write_txn, now_sec)?;
         Ok(())
     }
@@ -1698,7 +1730,9 @@ impl RedbStorage {
                 let root_guard = table_roots
                     .get(entry.layer2_voucher_id.as_str())?
                     .ok_or_else(|| {
-                        StorageError::DurableCommitFailed("sync HMC lock missing root anchor".into())
+                        StorageError::DurableCommitFailed(
+                            "sync HMC lock missing root anchor".into(),
+                        )
                     })?;
                 let root_anchor: crate::api::hmc::L2LockEntry =
                     serde_json::from_slice(root_guard.value())?;
@@ -2045,11 +2079,11 @@ impl RedbStorage {
         {
             let write_txn = db.begin_write()?;
             {
-                let mut schema_table = write_txn.open_table(TABLE_SCHEMA_METADATA)?;
+                let schema_table = write_txn.open_table(TABLE_SCHEMA_METADATA)?;
                 let existing_version = schema_table.get("schema_version")?.map(|g| g.value());
                 match existing_version {
                     Some(v) => {
-                        if v > CURRENT_DB_SCHEMA_VERSION {
+                        if v != CURRENT_DB_SCHEMA_VERSION {
                             return Err(StorageError::UnsupportedSchemaVersion {
                                 found: v,
                                 supported: CURRENT_DB_SCHEMA_VERSION,
@@ -2057,7 +2091,10 @@ impl RedbStorage {
                         }
                     }
                     None => {
-                        schema_table.insert("schema_version", CURRENT_DB_SCHEMA_VERSION)?;
+                        return Err(StorageError::UnsupportedSchemaVersion {
+                            found: 0,
+                            supported: CURRENT_DB_SCHEMA_VERSION,
+                        })
                     }
                 }
             }

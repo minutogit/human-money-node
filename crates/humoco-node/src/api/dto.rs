@@ -5,10 +5,8 @@ use serde::{Deserialize, Serialize};
 /// # Architectural Invariant: Pillar 3 — Cryptographic Identity Trumps Network Topology
 ///
 /// The permanent signer identity is the full 32-byte Ed25519 `NodePubKey`
-/// (`node_pubkey`, hex). The legacy 16-bit `node_id` prefix (first two bytes)
-/// stays only for backward compatibility and MUST NEVER be used for key
-/// resolution — its 16-bit space collides across nodes and previously allowed
-/// `u16_to_vk` overwrite attacks. Verifiers resolve strictly via `node_pubkey`.
+/// (`node_pubkey`, hex). The 16-bit `node_id` is only a diagnostic label for
+/// the simulation-core adapter. Verifiers resolve strictly via `node_pubkey`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttestationDto {
     pub lock_id: String,

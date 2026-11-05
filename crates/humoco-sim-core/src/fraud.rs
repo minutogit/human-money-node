@@ -36,7 +36,7 @@ fn encode_attestation(att: &Attestation) -> Vec<u8> {
 }
 
 pub fn decode_attestation(bytes: &[u8]) -> Option<Attestation> {
-    if bytes.len() != 138 && bytes.len() != 140 {
+    if bytes.len() != 140 {
         return None;
     }
     let mut lock_id = [0u8; 32];
@@ -47,11 +47,7 @@ pub fn decode_attestation(bytes: &[u8]) -> Option<Attestation> {
     let ts = u64::from_le_bytes(bytes[66..74].try_into().ok()?);
     let mut sig = [0u8; 64];
     sig.copy_from_slice(&bytes[74..138]);
-    let shard_id = if bytes.len() >= 140 {
-        u16::from_le_bytes([bytes[138], bytes[139]])
-    } else {
-        crate::types::extract_shard_id(&parent_lock)
-    };
+    let shard_id = u16::from_le_bytes([bytes[138], bytes[139]]);
     Some(Attestation {
         lock_id,
         parent_lock,

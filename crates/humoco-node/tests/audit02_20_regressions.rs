@@ -543,6 +543,41 @@ async fn test_a02_01_forged_proof_rejected_without_mutation() {
     client_transport.close();
 }
 
+/// A blocked durable fraud commit must not block a single-thread Tokio runtime.
+#[tokio::test(flavor = "current_thread")]
+async fn fraud_commit_worker_keeps_independent_quic_requests_responsive() {
+    let (storage, _, _, pm, server_id, server, addr, cancel) = setup_server(NetworkId::Mainnet).await;
+    let (client, conn, client_cancel) = setup_client(addr, *server_id.node_pubkey(), &pm).await;
+    let key = SigningKey::from_bytes(&[0x61;32]);
+    let parent = [0x60;32];
+    let a = sign_attestation(&key, &parent, &[1;32], humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET, 0);
+    let b = sign_attestation(&key, &parent, &[2;32], humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET, 0);
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(a,b,key.verifying_key().to_bytes());
+    let bytes = bincode::serialize(&proof).unwrap();
+    let header = WireHeader::new(MsgType::EquivocationProof as u16, 1,0,0,bytes.len() as u32);
+    let txn = storage.raw_database_for_test().begin_write().unwrap();
+    let (release, held) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let _ = held.recv_timeout(std::time::Duration::from_secs(2));
+        drop(txn);
+    });
+    let requester = client.clone();
+    let request_conn = conn.clone();
+    let request = tokio::spawn(async move { requester.send_request(&request_conn, &header, &bytes).await });
+    let started = std::time::Instant::now();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!request.is_finished(), "fraud acknowledgment must await durable commit");
+    let probe = WireHeader::new(MsgType::LatencyProbe as u16, 2,0,0,0);
+    client.send_request(&conn, &probe, &[]).await.unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_millis(500), "blocked fraud commit must yield the runtime");
+    release.send(()).unwrap();
+    blocker.join().unwrap();
+    let (ack, _) = request.await.unwrap().unwrap();
+    assert_eq!(ack.msg_type, MsgType::EquivocationAck as u16);
+    assert!(storage.is_node_banned(&key.verifying_key().to_bytes()).unwrap());
+    cancel.cancel(); client_cancel.cancel(); server.close(); client.close();
+}
+
 // ---------------------------------------------------------------------------
 // A20-01: Atomic Persistence with Aborted Worker
 // ---------------------------------------------------------------------------
@@ -1638,4 +1673,125 @@ async fn test_s04_06_mixed_network_pair_diff_shard_rejected_without_mutation() {
     client_transport.close();
 }
 
+#[tokio::test]
+async fn test_s04_06_originals_require_explicit_shard_encoding(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use humoco_sim_core::fraud::{decode_attestation, FraudProofPayload};
 
+    let (storage, engine, worker, pm, server_id, server, addr, cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client, conn, client_cancel) = setup_client(addr, *server_id.node_pubkey(), &pm).await;
+    let identity = NodeIdentity::generate();
+    // Match the parent prefix deliberately: the obsolete decoder otherwise
+    // reconstructs exactly the signed shard and accepts truncated evidence.
+    let original = |lock| {
+        humoco_node::api::routes::create_attestation_for_network(
+            &identity,
+            lock,
+            [0x77; 32],
+            0x7777,
+            0,
+            1_000,
+            NetworkId::Mainnet,
+        )
+        .to_core()
+        .ok_or("invalid original approval DTO")
+    };
+    let mut proof = FraudProofPayload::try_new_shard_equivocation_with_pubkey(
+        original([1; 32])?,
+        original([2; 32])?,
+        *identity.node_pubkey(),
+    )?;
+    assert_eq!(proof.evidence_packet_a.len(), 140);
+    assert!(proof.verify_network(NetworkId::Mainnet));
+    let canonical = proof.evidence_packet_a.clone();
+    assert!(decode_attestation(&proof.evidence_packet_a).is_some());
+    proof.evidence_packet_a.truncate(138);
+    proof.evidence_packet_b.truncate(138);
+    let bytes = bincode::serialize(&proof)?;
+    let hash = *blake3::hash(&bytes).as_bytes();
+    let header = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        100,
+        0,
+        0,
+        u32::try_from(bytes.len())?,
+    );
+    client.send_request(&conn, &header, &bytes).await?;
+    assert!(!engine.is_node_banned(identity.node_pubkey()).await);
+    assert!(!pm.is_banned(identity.node_pubkey()).await);
+    assert!(!storage.is_node_banned(identity.node_pubkey())?);
+    assert!(storage.get_evidence(&hash)?.is_none());
+    for length in [0, 138, 139, 141] {
+        let mut bytes = canonical.clone();
+        bytes.resize(length, 0);
+        assert!(
+            decode_attestation(&bytes).is_none(),
+            "noncanonical length {length}"
+        );
+    }
+    cancel.cancel();
+    client_cancel.cancel();
+    server.close();
+    client.close();
+    worker.abort();
+    server.drain_tasks().await;
+    client.drain_tasks().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s04_06_parent_signer_and_purpose_must_match() -> Result<(), Box<dyn std::error::Error>>
+{
+    use humoco_sim_core::fraud::FraudProofPayload;
+
+    let (storage, engine, worker, pm, server_id, server, addr, cancel) =
+        setup_server(NetworkId::Mainnet).await;
+    let (client, conn, client_cancel) = setup_client(addr, *server_id.node_pubkey(), &pm).await;
+    let key = SigningKey::from_bytes(&[0xb1; 32]);
+    let other = SigningKey::from_bytes(&[0xb2; 32]);
+    let pubkey = key.verifying_key().to_bytes();
+    let domain = humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET;
+    let original = |key, parent, lock, domain| {
+        sign_attestation_with_shard(key, parent, lock, domain, 0, 0x1234)
+    };
+    for case in ["parent", "signer", "purpose"] {
+        let a = original(&key, &[0x77; 32], &[1; 32], domain);
+        let mut b = match case {
+            "parent" => original(&key, &[0x88; 32], &[2; 32], domain),
+            "signer" => original(&other, &[0x77; 32], &[2; 32], domain),
+            _ => original(
+                &key,
+                &[0x77; 32],
+                &[2; 32],
+                humoco_sim_core::crypto::HUMOCO_V1_HEARTBEAT_MAINNET,
+            ),
+        };
+        // Even a colliding short identifier cannot make another full key's
+        // genuine signature evidence against the accused permanent identity.
+        b.node_id = a.node_id;
+        let proof = FraudProofPayload::try_new_shard_equivocation_with_pubkey(a, b, pubkey)?;
+        let bytes = bincode::serialize(&proof)?;
+        let hash = *blake3::hash(&bytes).as_bytes();
+        let header = WireHeader::new(
+            MsgType::EquivocationProof as u16,
+            101,
+            0,
+            0,
+            u32::try_from(bytes.len())?,
+        );
+        client.send_request(&conn, &header, &bytes).await?;
+        assert!(!engine.is_node_banned(&pubkey).await, "{case}");
+        assert!(!pm.is_banned(&pubkey).await, "{case}");
+        assert!(!storage.is_node_banned(&pubkey)?, "{case}");
+        assert!(storage.get_evidence(&hash)?.is_none(), "{case}");
+    }
+    cancel.cancel();
+    client_cancel.cancel();
+    server.close();
+    client.close();
+    worker.abort();
+    server.drain_tasks().await;
+    client.drain_tasks().await;
+    Ok(())
+}

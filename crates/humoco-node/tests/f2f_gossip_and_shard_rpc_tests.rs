@@ -103,7 +103,7 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
-    hb_payload.sign_origin(&identity_c, 0);
+    hb_payload.sign_origin(&identity_c, 0, humoco_sim_core::types::NetworkId::default());
     let heartbeat_payload = bincode::serialize(&hb_payload).expect("serialize heartbeat");
     let mut heartbeat_hdr = WireHeader::new(
         MsgType::Heartbeat as u16,
@@ -113,6 +113,16 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
         heartbeat_payload.len() as u32,
     );
     heartbeat_hdr.reserved = 1;
+
+    // An authentic origin signature from another network must not become local presence.
+    let mut foreign = hb_payload.clone();
+    foreign.sign_origin(&identity_c, 0, humoco_sim_core::types::NetworkId::Testnet);
+    let foreign_payload = bincode::serialize(&foreign).unwrap();
+    let mut foreign_header = heartbeat_hdr;
+    foreign_header.payload_len = foreign_payload.len() as u32;
+    transport_b.send_unidirectional(&conn_b_to_a, &foreign_header, &foreign_payload).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    assert!(!pm_a.is_known_node(identity_c.node_id()).await, "cross-network origin must be rejected before learning and dedup");
 
     transport_b
         .send_unidirectional(&conn_b_to_a, &heartbeat_hdr, &heartbeat_payload)
@@ -420,7 +430,7 @@ async fn test_f2f_multihop_gossip_forwarding_and_incubation() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
-    hb_a.sign_origin(&identity_a, 50_000);
+    hb_a.sign_origin(&identity_a, 50_000, humoco_sim_core::types::NetworkId::default());
     let payload = bincode::serialize(&hb_a).unwrap();
     let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
     hdr.reserved = 0; // hops = 0
@@ -835,7 +845,7 @@ async fn test_s06_01_real_quic_initial_admission_hourly_observations_gate() {
         ticket_epoch_t0: newcomer_c.t0(),
         ttl: 16,
     };
-    hb_c.sign_origin(&newcomer_c, t0_ms);
+    hb_c.sign_origin(&newcomer_c, t0_ms, humoco_sim_core::types::NetworkId::default());
     let payload = bincode::serialize(&hb_c).unwrap();
     let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload.len() as u32);
     hdr.reserved = 1; // hops = 1 (relayed)
@@ -872,7 +882,7 @@ async fn test_s06_01_real_quic_initial_admission_hourly_observations_gate() {
 
     // Relay sends 1 fresh heartbeat for C at t0 + 25h
     hb_c.timestamp_ms = t25_ms;
-    hb_c.sign_origin(&newcomer_c, t25_ms);
+    hb_c.sign_origin(&newcomer_c, t25_ms, humoco_sim_core::types::NetworkId::default());
     let payload2 = bincode::serialize(&hb_c).unwrap();
     let mut hdr2 =
         WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, payload2.len() as u32);
@@ -881,7 +891,14 @@ async fn test_s06_01_real_quic_initial_admission_hourly_observations_gate() {
         .send_unidirectional(&conn_r_to_s, &hdr2, &payload2)
         .await
         .expect("send second heartbeat");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if pm_server.get_known_node_info(newcomer_c.node_pubkey()).await
+                .is_some_and(|node| node.is_presence_fresh()) { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("second authenticated ticket must refresh presence after CPU-worker completion");
+
 
     // Core Assertion S06-01: C has >=24h observed age AND fresh presence,
     // but only 1 hourly observation in the 24h window (the t0 observation fell out!).
@@ -920,13 +937,15 @@ async fn test_s06_01_real_quic_initial_admission_hourly_observations_gate() {
             .await;
     }
 
-    let (committee_admitted, _, _) = pm_server
-        .shard_committee(
-            *server_id.node_pubkey(),
-            *server_id.hrw_routing_id(),
-            42,
-        )
-        .await;
+    let committee_admitted = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (committee, _, _) = pm_server.shard_committee(
+                *server_id.node_pubkey(), *server_id.hrw_routing_id(), 42,
+            ).await;
+            if committee.iter().any(|member| member.node_pubkey == *newcomer_c.node_pubkey()) { break committee; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("authenticated current hourly observation must finish admission");
     assert!(
         committee_admitted
             .iter()
@@ -1047,7 +1066,7 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
-    hb_1.sign_origin(&unmined_1, now_ms);
+    hb_1.sign_origin(&unmined_1, now_ms, humoco_sim_core::types::NetworkId::default());
     let payload_1 = bincode::serialize(&hb_1).unwrap();
     let mut hdr_1 =
         WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload_1.len() as u32);
@@ -1075,7 +1094,7 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
-    hb_2.sign_origin(&unmined_2, now_ms);
+    hb_2.sign_origin(&unmined_2, now_ms, humoco_sim_core::types::NetworkId::default());
     let payload_2 = bincode::serialize(&hb_2).unwrap();
     let mut hdr_2 =
         WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, payload_2.len() as u32);
@@ -1103,7 +1122,7 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
-    hb_3.sign_origin(&unmined_3, now_ms);
+    hb_3.sign_origin(&unmined_3, now_ms, humoco_sim_core::types::NetworkId::default());
     let payload_3 = bincode::serialize(&hb_3).unwrap();
     let mut hdr_3 =
         WireHeader::new(MsgType::Heartbeat as u16, 3, 0, 0, payload_3.len() as u32);
@@ -1130,7 +1149,7 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         ticket_epoch_t0: 0,
         ttl: 16,
     };
-    hb_direct.sign_origin(&friend_direct, now_ms);
+    hb_direct.sign_origin(&friend_direct, now_ms, humoco_sim_core::types::NetworkId::default());
     let payload_d = bincode::serialize(&hb_direct).unwrap();
     let mut hdr_d =
         WireHeader::new(MsgType::Heartbeat as u16, 4, 0, 0, payload_d.len() as u32);
@@ -1232,7 +1251,7 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         ticket_epoch_t0: mined_positive.t0(),
         ttl: 16,
     };
-    hb_pos.sign_origin(&mined_positive, pos_ms);
+    hb_pos.sign_origin(&mined_positive, pos_ms, humoco_sim_core::types::NetworkId::default());
     let payload_pos = bincode::serialize(&hb_pos).unwrap();
     let mut hdr_pos =
         WireHeader::new(MsgType::Heartbeat as u16, 6, 0, 0, payload_pos.len() as u32);
@@ -1241,6 +1260,15 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         .connect_peer(addr_s)
         .await
         .expect("connect relay to server for positive control");
+    let mut foreign = hb_pos.clone();
+    foreign.sign_origin(&mined_positive, pos_ms, humoco_sim_core::types::NetworkId::Testnet);
+    let foreign_payload = bincode::serialize(&foreign).unwrap();
+    let mut foreign_header = hdr_pos;
+    foreign_header.payload_len = foreign_payload.len() as u32;
+    transport_r.send_unidirectional(&conn_pos, &foreign_header, &foreign_payload).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!pm_server.is_known_node(mined_positive.node_pubkey()).await,
+        "a genuinely mined foreign-network origin must not enter the production mesh");
     transport_r
         .send_unidirectional(&conn_pos, &hdr_pos, &payload_pos)
         .await

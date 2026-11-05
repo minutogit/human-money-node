@@ -256,6 +256,7 @@ pub struct NodeRequestHandler {
     pub readiness_manager: Arc<crate::daemon::ShardReadinessManager>,
     pub network_id: humoco_sim_core::types::NetworkId,
     snapshot_cuts: Arc<crate::storage::db::snapshot::SnapshotCuts>,
+    fraud_workers: Arc<Semaphore>,
     gateway_urls: Vec<String>,
 }
 
@@ -275,6 +276,7 @@ impl NodeRequestHandler {
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             readiness_manager: Arc::new(crate::daemon::ShardReadinessManager::new()),
             snapshot_cuts: Arc::new(crate::storage::db::snapshot::SnapshotCuts::default()),
+            fraud_workers: Arc::new(Semaphore::new(4)),
             gateway_urls: Vec::new(),
             network_id: humoco_sim_core::types::NetworkId::default(),
         }
@@ -299,6 +301,7 @@ impl NodeRequestHandler {
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             readiness_manager: Arc::new(crate::daemon::ShardReadinessManager::new()),
             snapshot_cuts: Arc::new(crate::storage::db::snapshot::SnapshotCuts::default()),
+            fraud_workers: Arc::new(Semaphore::new(4)),
             gateway_urls: Vec::new(),
             network_id: humoco_sim_core::types::NetworkId::default(),
         }
@@ -383,7 +386,8 @@ impl NodeRequestHandler {
             return Ok(false);
         };
 
-        let is_first_party_valid = verify_equivocation_first_party_network(Some(self.network_id), &vk, &proof);
+        let is_first_party_valid =
+            verify_equivocation_first_party_network(Some(self.network_id), &vk, &proof);
         if !is_first_party_valid {
             warn!(
                 offender = %hex::encode(offender),
@@ -395,12 +399,16 @@ impl NodeRequestHandler {
 
         // Atomic persistence of evidence + ban in redb (A20-01 / INV-1402)
         let evidence_hash = *blake3::hash(payload).as_bytes();
-        if let Err(e) = self.storage.commit_slashing_evidence_and_ban(
-            &evidence_hash,
-            payload,
-            &offender,
+        if let Err(e) = persist_fraud(
+            self.fraud_workers.clone(),
+            self.storage.clone(),
+            evidence_hash,
+            payload.to_vec(),
+            offender,
             now_ms,
-        ) {
+        )
+        .await
+        {
             warn!(
                 offender = %hex::encode(offender),
                 error = %e,
@@ -411,7 +419,7 @@ impl NodeRequestHandler {
             if let Some(pm) = self.peer_manager.as_ref() {
                 let _ = pm.ban_node(&offender).await;
             }
-            return Err(NodeError::Storage(e));
+            return Err(e);
         }
 
         // Apply in-memory bans and disconnect peers
@@ -1029,12 +1037,15 @@ impl RequestHandler for NodeRequestHandler {
                             let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
                             let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
                             let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                            let _ = storage.commit_slashing_evidence_and_ban(
-                                &evidence_hash,
-                                &evidence_bytes,
-                                &sender_pubkey,
+                            persist_fraud(
+                                this.fraud_workers.clone(),
+                                storage.clone(),
+                                evidence_hash,
+                                evidence_bytes,
+                                sender_pubkey,
                                 now_ms,
-                            );
+                            )
+                            .await?;
                             engine.ban_node_ram(&sender_pubkey).await;
                             pm.ban_node(&sender_pubkey).await;
                             pm.broadcast_fraud_proof(proof);
@@ -1167,7 +1178,7 @@ impl RequestHandler for NodeRequestHandler {
                                 );
                                 return Ok((resp_header, Vec::new()));
                             }
-                            let (verdict, _is_new) = engine
+                            let (verdict, is_new) = engine
                                 .ingress_hmc_chain_lock_durable(
                                     chain_req.clone(),
                                     crate::storage::IngressOrigin::ClientApi,
@@ -1200,7 +1211,11 @@ impl RequestHandler for NodeRequestHandler {
                                         MsgType::LockVerifyResponse as u16,
                                         header.session_seq.wrapping_add(1),
                                         header.epoch_id,
-                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                        if engine.is_signing_healthy() {
+                                            humoco_sim_core::wire::FLAG_UNAUTHORIZED
+                                        } else {
+                                            humoco_sim_core::wire::FLAG_NOT_READY
+                                        },
                                         checked_payload_len(bytes.len())?,
                                     );
                                     return Ok((resp_header, bytes));
@@ -1279,7 +1294,11 @@ impl RequestHandler for NodeRequestHandler {
                                         MsgType::LockVerifyResponse as u16,
                                         header.session_seq.wrapping_add(1),
                                         header.epoch_id,
-                                        0,
+                                        if is_new {
+                                            0
+                                        } else {
+                                            humoco_sim_core::wire::FLAG_REPLAY
+                                        },
                                         payload_len,
                                     );
                                     return Ok((resp_header, resp_bytes));
@@ -1328,7 +1347,7 @@ impl RequestHandler for NodeRequestHandler {
                             let entry = crate::api::hmc::L2LockEntry::from(&req);
                             // INV-1202: validate the ingress time window at the shard with
                             // the current network time (never blindly trust gateway time).
-                            let (verdict, _is_new) = engine
+                            let (verdict, is_new) = engine
                                 .ingress_hmc_lock_durable(
                                     lookup_tag.clone(),
                                     entry.clone(),
@@ -1364,7 +1383,11 @@ impl RequestHandler for NodeRequestHandler {
                                         MsgType::LockVerifyResponse as u16,
                                         header.session_seq.wrapping_add(1),
                                         header.epoch_id,
-                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                        if engine.is_signing_healthy() {
+                                            humoco_sim_core::wire::FLAG_UNAUTHORIZED
+                                        } else {
+                                            humoco_sim_core::wire::FLAG_NOT_READY
+                                        },
                                         checked_payload_len(bytes.len())?,
                                     );
                                     return Ok((resp_header, bytes));
@@ -1430,7 +1453,11 @@ impl RequestHandler for NodeRequestHandler {
                                         MsgType::LockVerifyResponse as u16,
                                         header.session_seq.wrapping_add(1),
                                         header.epoch_id,
-                                        0,
+                                        if is_new {
+                                            0
+                                        } else {
+                                            humoco_sim_core::wire::FLAG_REPLAY
+                                        },
                                         payload_len,
                                     );
                                     return Ok((resp_header, resp_bytes));
@@ -1484,16 +1511,12 @@ impl RequestHandler for NodeRequestHandler {
                         sq.timestamp_ms,
                         sq.sender_signature,
                     )
-                } else if let Ok((l_id, p_lock, s_id)) =
-                    bincode::deserialize::<([u8; 32], [u8; 32], u16)>(&payload)
-                {
-                    (l_id, p_lock, s_id, 0, 0, [0u8; 32], 0, [0u8; 64])
                 } else {
                     let resp_header = WireHeader::new(
                         MsgType::StatusResponse as u16,
                         header.session_seq.wrapping_add(1),
                         header.epoch_id,
-                        0,
+                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
                         0,
                     );
                     return Ok((resp_header, Vec::new()));
@@ -1520,7 +1543,7 @@ impl RequestHandler for NodeRequestHandler {
 
                 // 2. Check authenticated QUIC TLS peer matches claimed sender
                 if let Some(auth_peer) = peer_identity {
-                    if raw_sender_pubkey != [0u8; 32] && raw_sender_pubkey != auth_peer {
+                    if raw_sender_pubkey != auth_peer {
                         warn!(
                             claimed = %hex::encode(raw_sender_pubkey),
                             authenticated = %hex::encode(auth_peer),
@@ -1536,14 +1559,10 @@ impl RequestHandler for NodeRequestHandler {
                         return Ok((resp_header, Vec::new()));
                     }
                 }
-                let sender_pubkey = if let Some(auth_peer) = peer_identity {
-                    auth_peer
-                } else {
-                    raw_sender_pubkey
-                };
+                let sender_pubkey = raw_sender_pubkey;
 
-                // 3. Reject null sender pubkey and signature if signed payload expected
-                if raw_sender_pubkey != [0u8; 32] || sender_signature != [0u8; 64] {
+                // 3. Every current query requires its own authenticated envelope.
+                {
                     if sender_pubkey == [0u8; 32] {
                         warn!("StatusQuery rejected: null sender pubkey");
                         let resp_header = WireHeader::new(
@@ -1601,12 +1620,15 @@ impl RequestHandler for NodeRequestHandler {
                                 let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
                                 let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
                                 let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                let _ = storage.commit_slashing_evidence_and_ban(
-                                    &evidence_hash,
-                                    &evidence_bytes,
-                                    &sender_pubkey,
+                                persist_fraud(
+                                    this.fraud_workers.clone(),
+                                    storage.clone(),
+                                    evidence_hash,
+                                    evidence_bytes,
+                                    sender_pubkey,
                                     now_ms,
-                                );
+                                )
+                                .await?;
                                 engine.ban_node_ram(&sender_pubkey).await;
                                 pm.ban_node(&sender_pubkey).await;
                                 pm.broadcast_fraud_proof(proof);
@@ -1683,69 +1705,69 @@ impl RequestHandler for NodeRequestHandler {
 
                     // Check HMC lock in HMC RAM
                     let hmc = engine.hmc_ram.read().await;
-                        // Tag-only gateway fallback: lock_id zero means "any lock on
-                        // this parent tag". Resolve to full entry below.
-                        let is_tag_only = lock_id == [0u8; 32];
-                        for (lookup_tag, entry) in &hmc.locks {
-                            let tag_hash = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
-                            let parent_matches = tag_hash == parent_lock;
-                            if !parent_matches {
-                                continue;
-                            }
-                            if !is_tag_only && entry.t_id != lock_id {
-                                continue;
-                            }
-                            // Canonical shard check (INV-0302): prefer genesis anchor.
-                            let shard_ok = if let Some(genesis_parent) =
-                                hmc.get_voucher_genesis_parent(&entry.layer2_voucher_id)
-                            {
-                                shard_id
-                                    == humoco_sim_core::types::canonical_voucher_shard(
-                                        &genesis_parent,
-                                    )
-                            } else {
-                                let v_hash =
-                                    *blake3::hash(entry.layer2_voucher_id.as_bytes()).as_bytes();
-                                let v_shard = u16::from_be_bytes([v_hash[0], v_hash[1]]);
-                                let p_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
-                                shard_id == v_shard || shard_id == p_shard
-                            };
-                            let committed_root = hmc
-                                .get_voucher_root_valid(&entry.layer2_voucher_id)
-                                .filter(|&root| root > now_ms && hmc.is_entry_durable(lookup_tag, entry, root));
-
-                            if shard_ok
-                                && is_tag_only
-                                && (committed_root.is_none()
-                                    || !engine.is_signing_healthy()
-                                    || !readiness_manager.is_shard_ready(shard_id))
-                            {
-                                return Ok((
-                                    WireHeader::new(
-                                        MsgType::StatusResponse as u16,
-                                        header.session_seq.wrapping_add(1),
-                                        header.epoch_id,
-                                        humoco_sim_core::wire::FLAG_NOT_READY,
-                                        0,
-                                    ),
-                                    Vec::new(),
-                                ));
-                            }
-                            let valid = entry
-                                .deletable_at
-                                .as_deref()
-                                .and_then(|s| crate::storage::db::roots::parse_deletable_at_ms(s).ok())
-                                .map(|del| del >= now_ms)
-                                .unwrap_or(true);
-                            if shard_ok && valid {
-                                if is_tag_only {
-                                    tag_entry = Some(entry.clone());
-                                    tag_root = committed_root;
-                                }
-                                is_match = true;
-                                break;
-                            }
+                    // Tag-only gateway fallback: lock_id zero means "any lock on
+                    // this parent tag". Resolve to full entry below.
+                    let is_tag_only = lock_id == [0u8; 32];
+                    for (lookup_tag, entry) in &hmc.locks {
+                        let tag_hash = *blake3::hash(lookup_tag.as_bytes()).as_bytes();
+                        let parent_matches = tag_hash == parent_lock;
+                        if !parent_matches {
+                            continue;
                         }
+                        if !is_tag_only && entry.t_id != lock_id {
+                            continue;
+                        }
+                        // Canonical shard check (INV-0302): prefer genesis anchor.
+                        let shard_ok = if let Some(genesis_parent) =
+                            hmc.get_voucher_genesis_parent(&entry.layer2_voucher_id)
+                        {
+                            shard_id
+                                == humoco_sim_core::types::canonical_voucher_shard(&genesis_parent)
+                        } else {
+                            let v_hash =
+                                *blake3::hash(entry.layer2_voucher_id.as_bytes()).as_bytes();
+                            let v_shard = u16::from_be_bytes([v_hash[0], v_hash[1]]);
+                            let p_shard = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+                            shard_id == v_shard || shard_id == p_shard
+                        };
+                        let committed_root = hmc
+                            .get_voucher_root_valid(&entry.layer2_voucher_id)
+                            .filter(|&root| {
+                                root > now_ms && hmc.is_entry_durable(lookup_tag, entry, root)
+                            });
+
+                        if shard_ok
+                            && is_tag_only
+                            && (committed_root.is_none()
+                                || !engine.is_signing_healthy()
+                                || !readiness_manager.is_shard_ready(shard_id))
+                        {
+                            return Ok((
+                                WireHeader::new(
+                                    MsgType::StatusResponse as u16,
+                                    header.session_seq.wrapping_add(1),
+                                    header.epoch_id,
+                                    humoco_sim_core::wire::FLAG_NOT_READY,
+                                    0,
+                                ),
+                                Vec::new(),
+                            ));
+                        }
+                        let valid = entry
+                            .deletable_at
+                            .as_deref()
+                            .and_then(|s| crate::storage::db::roots::parse_deletable_at_ms(s).ok())
+                            .map(|del| del >= now_ms)
+                            .unwrap_or(true);
+                        if shard_ok && valid {
+                            if is_tag_only {
+                                tag_entry = Some(entry.clone());
+                                tag_root = committed_root;
+                            }
+                            is_match = true;
+                            break;
+                        }
+                    }
                     (is_match, tag_entry, tag_root)
                 };
 
@@ -1773,17 +1795,19 @@ impl RequestHandler for NodeRequestHandler {
                             humoco_sim_core::types::NetworkId::Mainnet => 0,
                             humoco_sim_core::types::NetworkId::Testnet => 1,
                         };
-                        let discovery_digest = crate::network::framing::compute_slot_discovery_digest(
-                            network_byte,
-                            shard_id,
-                            header.session_seq,
-                            &parent_lock,
-                            &entry.t_id,
-                            &state_digest,
-                            root_valid_until,
-                            identity.node_pubkey(),
-                        );
-                        let custodian_signature = identity.signing_key().sign(&discovery_digest).to_bytes();
+                        let discovery_digest =
+                            crate::network::framing::compute_slot_discovery_digest(
+                                network_byte,
+                                shard_id,
+                                header.session_seq,
+                                &parent_lock,
+                                &entry.t_id,
+                                &state_digest,
+                                root_valid_until,
+                                identity.node_pubkey(),
+                            );
+                        let custodian_signature =
+                            identity.signing_key().sign(&discovery_digest).to_bytes();
                         let discovery = crate::network::framing::AuthenticatedSlotDiscovery {
                             entry,
                             root_valid_until,
@@ -1792,7 +1816,9 @@ impl RequestHandler for NodeRequestHandler {
                         };
                         let resp_bytes = serde_json::to_vec(&discovery)
                             .map_err(|e| NodeError::Network(e.to_string()))?;
-                        if resp_bytes.len() > crate::network::framing::MAX_AUTHENTICATED_DISCOVERY_BYTES {
+                        if resp_bytes.len()
+                            > crate::network::framing::MAX_AUTHENTICATED_DISCOVERY_BYTES
+                        {
                             return Ok((
                                 WireHeader::new(
                                     MsgType::StatusResponse as u16,
@@ -2074,9 +2100,9 @@ impl RequestHandler for NodeRequestHandler {
                 let db = storage.clone();
 
                 let (resp_bytes, payload_len) = tokio::task::spawn_blocking(move || {
-                    let locks = db
-                        .committed_shard_records(shard_id, now_ms)
-                        .map_err(|e| NodeError::Network(format!("committed buckets unavailable: {e}")))?;
+                    let locks = db.committed_shard_records(shard_id, now_ms).map_err(|e| {
+                        NodeError::Network(format!("committed buckets unavailable: {e}"))
+                    })?;
 
                     // Single O(N) partitioning pass for requested bucket range
                     let mut partitioned: std::collections::HashMap<
@@ -2084,7 +2110,8 @@ impl RequestHandler for NodeRequestHandler {
                         Vec<crate::storage::db::projection::CommittedShardRecord>,
                     > = std::collections::HashMap::with_capacity(bucket_count.min(locks.len()));
                     for lock in locks {
-                        let b_id = humoco_sim_core::types::timestamp_to_bucket_id(lock.created_at_ms);
+                        let b_id =
+                            humoco_sim_core::types::timestamp_to_bucket_id(lock.created_at_ms);
                         if b_id >= start_bucket && b_id < end_bucket {
                             partitioned.entry(b_id).or_default().push(lock);
                         }
@@ -2092,36 +2119,37 @@ impl RequestHandler for NodeRequestHandler {
 
                     let mut buckets = Vec::with_capacity(bucket_count);
                     for b_id in start_bucket..end_bucket {
-                        let (digest, count) = if let Some(mut bucket_locks) = partitioned.remove(&b_id) {
-                            bucket_locks.sort_by(|a, b| {
-                                a.parent_lock
-                                    .cmp(&b.parent_lock)
-                                    .then_with(|| a.id.cmp(&b.id))
-                            });
-                            let mut hasher = blake3::Hasher::new();
-                            let tag = b"HUMOCO_V1_BUCKET_DIGEST";
-                            hasher.update(&[tag.len() as u8]);
-                            hasher.update(tag);
-                            hasher.update(&shard_id.to_le_bytes());
-                            hasher.update(&b_id.to_le_bytes());
-                            hasher.update(&(bucket_locks.len() as u32).to_le_bytes());
-                            for lock in &bucket_locks {
-                                hasher.update(&lock.parent_lock);
-                                hasher.update(&lock.receiver_pub);
-                                hasher.update(&lock.nonce);
-                                hasher.update(&lock.id);
-                            }
-                            (*hasher.finalize().as_bytes(), bucket_locks.len() as u32)
-                        } else {
-                            let mut hasher = blake3::Hasher::new();
-                            let tag = b"HUMOCO_V1_BUCKET_DIGEST";
-                            hasher.update(&[tag.len() as u8]);
-                            hasher.update(tag);
-                            hasher.update(&shard_id.to_le_bytes());
-                            hasher.update(&b_id.to_le_bytes());
-                            hasher.update(&0u32.to_le_bytes());
-                            (*hasher.finalize().as_bytes(), 0u32)
-                        };
+                        let (digest, count) =
+                            if let Some(mut bucket_locks) = partitioned.remove(&b_id) {
+                                bucket_locks.sort_by(|a, b| {
+                                    a.parent_lock
+                                        .cmp(&b.parent_lock)
+                                        .then_with(|| a.id.cmp(&b.id))
+                                });
+                                let mut hasher = blake3::Hasher::new();
+                                let tag = b"HUMOCO_V1_BUCKET_DIGEST";
+                                hasher.update(&[tag.len() as u8]);
+                                hasher.update(tag);
+                                hasher.update(&shard_id.to_le_bytes());
+                                hasher.update(&b_id.to_le_bytes());
+                                hasher.update(&(bucket_locks.len() as u32).to_le_bytes());
+                                for lock in &bucket_locks {
+                                    hasher.update(&lock.parent_lock);
+                                    hasher.update(&lock.receiver_pub);
+                                    hasher.update(&lock.nonce);
+                                    hasher.update(&lock.id);
+                                }
+                                (*hasher.finalize().as_bytes(), bucket_locks.len() as u32)
+                            } else {
+                                let mut hasher = blake3::Hasher::new();
+                                let tag = b"HUMOCO_V1_BUCKET_DIGEST";
+                                hasher.update(&[tag.len() as u8]);
+                                hasher.update(tag);
+                                hasher.update(&shard_id.to_le_bytes());
+                                hasher.update(&b_id.to_le_bytes());
+                                hasher.update(&0u32.to_le_bytes());
+                                (*hasher.finalize().as_bytes(), 0u32)
+                            };
                         let is_sealed = humoco_sim_core::types::is_bucket_sealed(b_id, now_ms);
                         buckets.push(humoco_sim_core::types::ShardBucketDigest {
                             bucket_id: b_id,
@@ -2131,7 +2159,8 @@ impl RequestHandler for NodeRequestHandler {
                         });
                     }
 
-                    let resp = humoco_sim_core::types::ShardBucketRangeResponse { shard_id, buckets };
+                    let resp =
+                        humoco_sim_core::types::ShardBucketRangeResponse { shard_id, buckets };
                     let resp_bytes = bincode::serialize(&resp)
                         .map_err(|e| NodeError::Network(format!("serialization failed: {e}")))?;
                     let payload_len = checked_payload_len(resp_bytes.len())?;
@@ -2148,7 +2177,6 @@ impl RequestHandler for NodeRequestHandler {
                     payload_len,
                 );
                 return Ok((resp_header, resp_bytes));
-
             } else if msg_type == MsgType::ActiveSyncRequest as u16 {
                 let req = crate::network::framing::ActiveSyncRequest::from_bytes(&payload)
                     .map_err(|e| NodeError::Network(format!("invalid sync request: {e}")))?;
@@ -2223,6 +2251,9 @@ impl RequestHandler for NodeRequestHandler {
                     .unwrap_or_else(|| clock.net_time_ms());
                 if let Ok(hb) = crate::network::framing::HeartbeatWirePayload::from_bytes(&payload)
                 {
+                    if !hb.verify_origin_signature(this.network_id) {
+                        return Ok(());
+                    }
                     if let (Some(pm), Some(advertisement)) =
                         (&peer_manager, &hb.gateway_advertisement)
                     {
@@ -2260,7 +2291,7 @@ impl RequestHandler for NodeRequestHandler {
                     }
 
                     if hb.signature != [0u8; 64] {
-                        let announcement_hash = hb.compute_announcement_hash();
+                        let announcement_hash = hb.compute_announcement_hash(this.network_id);
                         let candidate_ev = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
                             hb.node_id,
                             0,
@@ -2273,7 +2304,8 @@ impl RequestHandler for NodeRequestHandler {
                             announcement_hash,
                             hb.signature,
                         );
-                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&candidate_ev) {
+                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&candidate_ev)
+                        {
                             warn!(node = %hex::encode(hb.node_id), "Heartbeat rejected: invalid signature");
                             return Ok(());
                         }
@@ -2289,12 +2321,15 @@ impl RequestHandler for NodeRequestHandler {
                                     let evidence_bytes =
                                         bincode::serialize(&proof).unwrap_or_default();
                                     let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                    let _ = storage.commit_slashing_evidence_and_ban(
-                                        &evidence_hash,
-                                        &evidence_bytes,
-                                        &hb.node_id,
+                                    persist_fraud(
+                                        this.fraud_workers.clone(),
+                                        storage.clone(),
+                                        evidence_hash,
+                                        evidence_bytes,
+                                        hb.node_id,
                                         now_ms,
-                                    );
+                                    )
+                                    .await?;
                                     engine.ban_node_ram(&hb.node_id).await;
                                     pm.ban_node(&hb.node_id).await;
                                     pm.broadcast_fraud_proof_with_sender(proof, sender);
@@ -2324,12 +2359,15 @@ impl RequestHandler for NodeRequestHandler {
                                     let evidence_bytes =
                                         bincode::serialize(&proof).unwrap_or_default();
                                     let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                    let _ = storage.commit_slashing_evidence_and_ban(
-                                        &evidence_hash,
-                                        &evidence_bytes,
-                                        &hb.node_id,
+                                    persist_fraud(
+                                        this.fraud_workers.clone(),
+                                        storage.clone(),
+                                        evidence_hash,
+                                        evidence_bytes,
+                                        hb.node_id,
                                         now_ms,
-                                    );
+                                    )
+                                    .await?;
                                     engine.ban_node_ram(&hb.node_id).await;
                                     pm.ban_node(&hb.node_id).await;
                                     pm.broadcast_fraud_proof_with_sender(proof, sender);
@@ -2355,12 +2393,7 @@ impl RequestHandler for NodeRequestHandler {
                                         let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev.clone());
                                         let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
                                         let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                        let _ = storage.commit_slashing_evidence_and_ban(
-                                            &evidence_hash,
-                                            &evidence_bytes,
-                                            &gw_pub,
-                                            now_ms,
-                                        );
+                                        persist_fraud(this.fraud_workers.clone(), storage.clone(), evidence_hash, evidence_bytes, gw_pub, now_ms).await?;
                                         engine.ban_node_ram(&gw_pub).await;
                                         pm.ban_node(&gw_pub).await;
                                         pm.broadcast_fraud_proof_with_sender(proof, sender);
@@ -2382,12 +2415,7 @@ impl RequestHandler for NodeRequestHandler {
                                         let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev.clone());
                                         let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
                                         let evidence_hash = *blake3::hash(&evidence_bytes).as_bytes();
-                                        let _ = storage.commit_slashing_evidence_and_ban(
-                                            &evidence_hash,
-                                            &evidence_bytes,
-                                            &gw_pub,
-                                            now_ms,
-                                        );
+                                        persist_fraud(this.fraud_workers.clone(), storage.clone(), evidence_hash, evidence_bytes, gw_pub, now_ms).await?;
                                         engine.ban_node_ram(&gw_pub).await;
                                         pm.ban_node(&gw_pub).await;
                                         pm.broadcast_fraud_proof_with_sender(proof, sender);
@@ -2430,9 +2458,49 @@ pub struct QuicTransport {
     is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Backwards-compatible alias for `QuicTransport` (task spec naming: `QuicP2pTransport`).
-pub type QuicP2pTransport = QuicTransport;
-pub type NodeTransport = QuicTransport;
+async fn persist_fraud(
+    pool: Arc<Semaphore>,
+    storage: Arc<crate::storage::RedbStorage>,
+    hash: [u8; 32],
+    bytes: Vec<u8>,
+    offender: [u8; 32],
+    now_ms: u64,
+) -> Result<(), NodeError> {
+    blocking_work_in_pool(pool, move || {
+        storage
+            .commit_slashing_evidence_and_ban(&hash, &bytes, &offender, now_ms)
+            .map_err(NodeError::Storage)
+    })
+    .await
+}
+
+/// CPU ticket verification has a process-wide bound on Argon2 memory use.
+async fn ticket_work<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, NodeError> + Send + 'static,
+) -> Result<T, NodeError> {
+    static CPU: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    blocking_work_in_pool(
+        CPU.get_or_init(|| Arc::new(Semaphore::new(2))).clone(),
+        work,
+    )
+    .await
+}
+
+/// Permits remain owned by running work even when its async caller is cancelled.
+async fn blocking_work_in_pool<T: Send + 'static>(
+    pool: Arc<Semaphore>,
+    work: impl FnOnce() -> Result<T, NodeError> + Send + 'static,
+) -> Result<T, NodeError> {
+    let permit = pool
+        .try_acquire_owned()
+        .map_err(|_| NodeError::LocalCapacity("blocking worker capacity exhausted"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|e| NodeError::Network(format!("blocking worker failed: {e}")))?
+}
 
 /// Creates a Quinn server endpoint supporting dual-stack IPv6/IPv4 binding when requested.
 fn create_server_endpoint(
@@ -2663,7 +2731,9 @@ impl QuicTransport {
         if let Some(conn) = self.peer_manager.get_connection(&addr).await {
             let cached_id = extract_peer_identity_from_connection(&conn).map(|(nid, _)| nid);
             let is_valid = match cached_id {
-                Some(ref nid) => expected_keys.contains(nid) && !self.peer_manager.is_banned(nid).await,
+                Some(ref nid) => {
+                    expected_keys.contains(nid) && !self.peer_manager.is_banned(nid).await
+                }
                 None => false,
             };
             if is_valid {
@@ -2731,7 +2801,9 @@ impl QuicTransport {
         };
 
         if let Some((_, vk)) = remote_identity {
-            self.peer_manager.register_verifying_key(authorized_node_id, vk).await;
+            self.peer_manager
+                .register_verifying_key(authorized_node_id, vk)
+                .await;
         }
 
         // Pin before publishing the connection for reuse by concurrent callers.
@@ -2747,7 +2819,9 @@ impl QuicTransport {
             let t_clone = self.clone();
             let c_clone = connection.clone();
             tokio::spawn(async move {
-                t_clone.sync_f2f_friend_session(authorized_node_id, c_clone).await;
+                t_clone
+                    .sync_f2f_friend_session(authorized_node_id, c_clone)
+                    .await;
             });
         }
 
@@ -2867,7 +2941,9 @@ impl QuicTransport {
             let t_clone = self.clone();
             let c_clone = connection.clone();
             tokio::spawn(async move {
-                t_clone.sync_f2f_friend_session(authorized_node_id, c_clone).await;
+                t_clone
+                    .sync_f2f_friend_session(authorized_node_id, c_clone)
+                    .await;
             });
         }
 
@@ -2890,10 +2966,8 @@ impl QuicTransport {
             .await;
         });
 
-
         Ok(lease)
     }
-
 
     /// Sends a bi-directional request frame and awaits the response frame.
     pub async fn send_request(
@@ -2939,24 +3013,22 @@ impl QuicTransport {
     pub async fn send_heartbeat_to(
         &self,
         addr: SocketAddr,
-        node_id: [u8; 32],
         local_addr: SocketAddr,
         seq: u64,
         declared_write_ema_micro_bj: u64,
         declared_read_ema_credits: u64,
-        signature: [u8; 64],
         timestamp_ms: u64,
         piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     ) -> Result<(), NodeError> {
         let mut hb = crate::network::framing::HeartbeatWirePayload {
             gateway_advertisement: self.handler.gateway_advertisement(),
             signing_checkpoint: self.handler.signing_checkpoint().await?,
-            node_id,
+            node_id: *self.identity.node_pubkey(),
             addr: local_addr,
             timestamp_ms,
             declared_write_ema_micro_bj,
             declared_read_ema_credits,
-            signature,
+            signature: [0; 64],
             supported_suites_mask: 0,
             piggyback_observations,
             pow_nonce: self.identity.nonce(),
@@ -2964,9 +3036,7 @@ impl QuicTransport {
             ticket_epoch_t0: self.identity.t0(),
             ttl: 16,
         };
-        if hb.signature == [0u8; 64] {
-            hb.sign_origin(&self.identity, timestamp_ms);
-        }
+        hb.sign_origin(&self.identity, timestamp_ms, self.network_id);
         let payload = bincode::serialize(&hb)
             .map_err(|e| NodeError::Network(format!("heartbeat serialize: {}", e)))?;
         let payload_len = checked_payload_len(payload.len())?;
@@ -3430,8 +3500,7 @@ impl QuicTransport {
                 .request_active_sync_page(conn, current_seq, cursor, 500)
                 .await?;
             current_seq = current_seq.wrapping_add(1);
-            let count = all_hmc.len()
-                + resp.payload.hmc_locks.len();
+            let count = all_hmc.len() + resp.payload.hmc_locks.len();
             if count > 10_000 {
                 return Err(NodeError::LocalCapacity(
                     "active sync aggregate entry limit",
@@ -3918,7 +3987,7 @@ impl QuicTransport {
 
                                                         // Cryptographic origin signature check
                                                         if hops > 0 {
-                                                            if !hb.verify_origin_address_binding() {
+                                                            if !hb.verify_origin_address_binding(transport.network_id) {
                                                                 warn!(
                                                                     node = %hex::encode(node_id),
                                                                     hops,
@@ -3926,7 +3995,7 @@ impl QuicTransport {
                                                                 );
                                                                 return;
                                                             }
-                                                        } else if hb.signature != [0u8; 64] && !hb.verify_origin_signature() {
+                                                        } else if !hb.verify_origin_signature(transport.network_id) {
                                                             warn!(node = %hex::encode(node_id), "GOSSIP BARRIER: Dropped direct heartbeat with invalid signature");
                                                             return;
                                                         }
@@ -3965,7 +4034,13 @@ impl QuicTransport {
 
                                                         // Verify Argon2d Shard Ticket PoW & HRW routing ID
                                                         let (verified_hrw, work_score) = if hb.pow_nonce != 0 || hb.ticket_epoch_t0 != 0 {
-                                                            let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
+                                                            let nonce = hb.pow_nonce;
+                                                            let t0 = hb.ticket_epoch_t0;
+                                                            let Ok((expected_hrw, w)) = ticket_work(move || {
+                                                                let proof = crate::identity::compute_pow_proof(&node_id, nonce, t0)?;
+                                                                Ok((humoco_sim_core::crypto::compute_whitened_hrw_id(&node_id, nonce, t0, &proof),
+                                                                    humoco_sim_core::crypto::compute_work_from_hash(&proof)))
+                                                            }).await else { return; };
                                                             if expected_hrw != hb.hrw_routing_id {
                                                                 warn!(
                                                                     node = %hex::encode(node_id),
@@ -3973,7 +4048,6 @@ impl QuicTransport {
                                                                 );
                                                                 return;
                                                             }
-                                                            let w = crate::identity::compute_work_score(&node_id, hb.pow_nonce, hb.ticket_epoch_t0);
                                                             if w == 0 {
                                                                 warn!(
                                                                     node = %hex::encode(node_id),
@@ -3983,7 +4057,7 @@ impl QuicTransport {
                                                             }
                                                             (expected_hrw, w)
                                                         } else if pm.is_simulation_mode() {
-                                                            // Fast-path / legacy BLAKE3 in simulation mode
+                                                            // Explicit unmined simulation ticket.
                                                             if hb.hrw_routing_id != [0u8; 32] {
                                                                 let expected_hrw = crate::identity::compute_hrw_routing_id(&node_id, 0, 0);
                                                                 if expected_hrw != hb.hrw_routing_id && node_id != hb.hrw_routing_id {
@@ -4122,5 +4196,40 @@ impl QuicTransport {
     /// Closes the QUIC endpoint and all active connections.
     pub fn close(&self) {
         self.endpoint.close(0u32.into(), b"node shutdown");
+    }
+}
+
+#[cfg(test)]
+mod blocking_worker_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_request_keeps_worker_capacity_until_actual_completion() {
+        let pool = Arc::new(Semaphore::new(1));
+        let worker_pool = pool.clone();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let request = tokio::spawn(async move {
+            blocking_work_in_pool(worker_pool, move || {
+                let _ = started.send(());
+                let _ = blocked.recv_timeout(std::time::Duration::from_secs(2));
+                Ok(())
+            })
+            .await
+        });
+        entered.await.unwrap();
+        request.abort();
+        let _ = request.await;
+        assert!(matches!(
+            blocking_work_in_pool(pool.clone(), || Ok(())).await,
+            Err(NodeError::LocalCapacity(_))
+        ));
+        release.send(()).unwrap();
+        let permit = tokio::time::timeout(std::time::Duration::from_secs(1), pool.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        blocking_work_in_pool(pool, || Ok(())).await.unwrap();
     }
 }

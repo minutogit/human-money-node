@@ -117,42 +117,17 @@ pub fn put(
         .insert((expires_sec, entry.layer2_voucher_id.as_str()), ())?;
     Ok(valid_until)
 }
-/// Atomic bounded-chunk migration of old self-loop genesis records. Private old
-/// own signatures remain protected until their original TTL; no new root vote is
-/// issued, and no L1/SST bytes are rewritten or re-signed.
+/// Reject unsupported self-loop spend records instead of migrating storage.
 pub(super) fn initialize(txn: &redb::WriteTransaction) -> Result<(), StorageError> {
     let _ = txn.open_table(TABLE_VOUCHER_ROOTS)?;
     let _ = txn.open_table(TABLE_VOUCHER_ROOT_TTL)?;
-    let mut after: Option<String> = None;
-    loop {
-        let mut page = Vec::new();
-        {
-            let table = txn.open_table(TABLE_HMC_LOCKS)?;
-            let lower = after
-                .as_deref()
-                .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-            for row in table
-                .range::<&str>((lower, std::ops::Bound::Unbounded))?
-                .take(256)
-            {
-                let (key, value) = row?;
-                let entry: crate::api::hmc::L2LockEntry = serde_json::from_slice(value.value())?;
-                page.push((key.value().to_string(), entry));
-            }
-        }
-        if page.is_empty() {
-            break;
-        }
-        for (tag, entry) in page {
-            after = Some(tag.clone());
-            if is_root(&tag, &entry) {
-                put(txn, &entry)?;
-                txn.open_table(TABLE_HMC_LOCKS)?.remove(tag.as_str())?;
-                txn.open_table(TABLE_HMC_VOUCHER_INDEX)?
-                    .remove((entry.layer2_voucher_id.as_str(), tag.as_str()))?;
-                txn.open_table(super::support::TABLE_CONFIRMATION_SUPPORT)?
-                    .remove(tag.as_str())?;
-            }
+    for row in txn.open_table(TABLE_HMC_LOCKS)?.iter()? {
+        let (tag, bytes) = row?;
+        let entry: crate::api::hmc::L2LockEntry = serde_json::from_slice(bytes.value())?;
+        if is_root(tag.value(), &entry) {
+            return Err(StorageError::DurableCommitFailed(
+                "Unsupported self-loop root in spend storage".into(),
+            ));
         }
     }
     Ok(())
@@ -234,7 +209,7 @@ mod tests {
         );
     }
     #[test]
-    fn legacy_genesis_migrates_to_root_metadata_and_never_occupies_a_spend_slot() {
+    fn unsupported_self_loop_genesis_is_rejected_without_migration() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("root.redb");
         let root = crate::api::hmc::L2LockEntry {
@@ -265,21 +240,7 @@ mod tests {
                 .unwrap();
             txn.commit().unwrap();
         }
-        let db = RedbStorage::open(&path).unwrap();
-        assert!(db.get_hmc_lock(&tag).unwrap().is_none());
-        assert_eq!(
-            db.voucher_root(&root.layer2_voucher_id).unwrap(),
-            Some(root.clone())
-        );
-        assert!(db
-            .get_hmc_locks_for_voucher(&root.layer2_voucher_id)
-            .unwrap()
-            .is_empty());
-        let mut different = root.clone();
-        different.t_id = [9; 32];
-        assert!(db
-            .put_hmc_lock(&bs58::encode(different.t_id).into_string(), &different)
-            .is_err());
+        assert!(RedbStorage::open(&path).is_err());
     }
 
     #[test]

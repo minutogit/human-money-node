@@ -135,6 +135,22 @@ pub enum MsgType {
 | `0x0000_0008` | `FLAG_HEDGED` | Redundant request to backup nodes for latency stabilization |
 | `0x0000_0010` | `FLAG_COMPRESSED` | Payload is LZ4/ZSTD-compressed (only for bulk/cold path) |
 
+`FLAG_REPLAY` (`0x0000_8000`) is valid only on `LockVerifyResponse`.
+It reports that this custodian durably recognized the identical lock. The gateway
+uses it only after verifying the response attestation, signer identity, committee
+membership and signature domain. At a stateless gateway, a successful collection
+containing a verified replay returns HTTP 200, including mixed insert/replay
+collections; otherwise a new successful spend returns HTTP 201. A responsible
+local custodian uses its own durable insert/replay result for this HTTP status. The flag is transport metadata, not part
+of the retained original approval or its signed confirmation class.
+
+The receiver validates the current message-specific flag mask, message type,
+`reserved_ver == 0` and reserved fields before admission or reading the body.
+`Heartbeat.reserved` carries the bounded hop count; other messages require zero.
+Historical constants in the table do not imply support for compression or hedging:
+unsupported bits are rejected. Checkout uses the canonical quorum without an
+HTTP quorum override; certificate status always matches its signature domain.
+
 ### 2.3 The 64-Byte `EpochHeartbeat` Payload (`MsgType::Heartbeat`)
 
 Every active node sends exactly one 64-byte heartbeat payload per hour for presence and horizon synchronization:

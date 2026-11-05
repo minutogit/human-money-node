@@ -89,6 +89,15 @@ Likewise, differing local HRW candidate sets can change authority. Minimal disru
 
 Every accepted heartbeat authenticates the network's canonical domain together with the complete identity, hourly/calendar context, timestamp and defined payload. Hashing uses the canonical length-prefixed domain mechanism. Mainnet/base unanchored islands and testnet have separate domains, including the existing `HUMOCO_V1_HEARTBEAT_MAINNET` and `HUMOCO_V1_HEARTBEAT_TESTNET` labels where the wire version uses them.
 
+The current origin signs the ingress-envelope digest whose operation hash is
+`BLAKE3(len(domain) || domain || announcement_hash)`, using
+`crypto::domain_heartbeat(local_network)`. The announcement binds the endpoint,
+nonce, whitened HRW ticket and ticket T0. Envelope fields bind the full origin
+public key, timestamp and declared load. Both direct and relayed reception verify
+this local network domain before learning presence, recording deduplication or
+processing advertised metadata. Argon2d verification runs once in a bounded CPU
+worker; its proof supplies both HRW whitening and work score.
+
 A valid signature in another domain is invalid locally; forwarding by a friend does not remove the receiving node's obligation to verify. Use full authenticated network context; domain separation does not authenticate an otherwise arbitrary roster or decide which network an unanchored node may safely adopt. Existing domain/manifest authorization boundaries remain explicit in Spec 08.
 
 ## 9. Evidence requirements

@@ -531,7 +531,7 @@ async fn real_quic_wallet_conflict_preserves_node_identity_and_restart() -> Test
         target.ready.mark_shard_ready(shard(&root));
         let connection = connect_friends(&source, &target).await?;
         let (reply, bytes) = send_spend(&source, &connection, &first, 1, false).await?;
-        assert_eq!(reply.flags, 0);
+        assert_eq!(reply.flags, if restart { humoco_sim_core::wire::FLAG_REPLAY } else { 0 });
         assert!(humoco_node::api::dto::AttestationDto::from_wire_bytes(&bytes).is_some());
         let (reply, bytes) = send_spend(&source, &connection, &conflict, 2, false).await?;
         assert_eq!(reply.flags, FLAG_COLLISION_DETECTED);
@@ -572,8 +572,8 @@ async fn real_quic_wallet_conflict_preserves_node_identity_and_restart() -> Test
             for (seq, chain) in [(3, false), (4, true)] {
                 let (reply, _) = send_spend(&source, &connection, &first, seq, chain).await?;
                 assert_eq!(
-                    reply.flags, 0,
-                    "wallet request via another gateway must remain admissible"
+                    reply.flags, humoco_sim_core::wire::FLAG_REPLAY,
+                    "wallet replay via another gateway must remain admissible"
                 );
             }
             target

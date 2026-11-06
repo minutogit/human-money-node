@@ -19,11 +19,22 @@ struct ControlState {
     engine: DualTierEngine,
     peer_manager: Arc<PeerManager>,
     identity: NodeIdentity,
+    shared_identity: Option<Arc<parking_lot::RwLock<NodeIdentity>>>,
     data_dir: PathBuf,
     start_time: std::time::Instant,
     cancel_token: CancellationToken,
     tier_controller: Option<Arc<crate::ingress::TierController>>,
     lifecycle: Option<Arc<super::lifecycle::ShutdownLifecycle>>,
+}
+
+impl ControlState {
+    fn current_identity(&self) -> NodeIdentity {
+        if let Some(shared) = &self.shared_identity {
+            shared.read().clone()
+        } else {
+            self.identity.clone()
+        }
+    }
 }
 
 pub struct ControlServer {
@@ -48,6 +59,7 @@ impl ControlServer {
                 engine,
                 peer_manager,
                 identity,
+                shared_identity: None,
                 data_dir,
                 start_time: std::time::Instant::now(),
                 cancel_token,
@@ -55,6 +67,15 @@ impl ControlServer {
                 lifecycle: None,
             },
         }
+    }
+
+    /// Attaches a shared dynamic identity handle that reflects background-mined tickets.
+    pub fn with_shared_identity(
+        mut self,
+        shared_identity: Arc<parking_lot::RwLock<NodeIdentity>>,
+    ) -> Self {
+        self.state.shared_identity = Some(shared_identity);
+        self
     }
 
     /// Installs the identity of the daemon owning the entire storage lifecycle.
@@ -245,15 +266,16 @@ impl ControlServer {
                     let uptime_sec = state.start_time.elapsed().as_secs();
                     let active_locks = state.engine.hmc_ram.read().await.locks.len();
                     let peers_connected = state.peer_manager.connected_peer_count().await;
-                    let hrw_hex = state.identity.hrw_routing_id_hex();
-                    let t0 = state.identity.t0();
-                    let nonce = state.identity.nonce();
+                    let active_id = state.current_identity();
+                    let hrw_hex = active_id.hrw_routing_id_hex();
+                    let t0 = active_id.t0();
+                    let nonce = active_id.nonce();
                     let incubation_until_ms = if t0 == 0 {
                         None
                     } else {
                         Some(t0.saturating_add(24 * 3600).saturating_mul(1000))
                     };
-                    let own_work = state.identity.work_score();
+                    let own_work = active_id.work_score();
                     let net_median = state.peer_manager.calculate_network_median_work();
                     let headroom_pct = if net_median > 0 {
                         let ratio = (own_work as f64) / (net_median as f64);
@@ -264,8 +286,8 @@ impl ControlServer {
                     let ticket_outdated = state.peer_manager.is_ticket_outdated();
                     ControlResponse::Status {
                         signing_history_corrupt: !state.storage.is_signing_history_healthy(),
-                        node_id: state.identity.node_id_hex(),
-                        public_key: Some(state.identity.public_key_hex()),
+                        node_id: active_id.node_id_hex(),
+                        public_key: Some(active_id.public_key_hex()),
                         hrw_routing_id: Some(hrw_hex.clone()),
                         routing_id: Some(hrw_hex),
                         t0: Some(t0),

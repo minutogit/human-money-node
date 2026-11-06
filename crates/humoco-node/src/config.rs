@@ -17,9 +17,72 @@ fn default_min_peers() -> usize {
     3
 }
 
+fn default_proactive_headroom_pct() -> u32 {
+    20
+}
+
+fn default_urgent_headroom_pct() -> u32 {
+    15
+}
+
+fn default_target_headroom_pct() -> u32 {
+    50
+}
+
+fn default_proactive_sleep_ms() -> u64 {
+    2000
+}
+
+fn default_urgent_sleep_ms() -> u64 {
+    500
+}
+
+fn default_emergency_sleep_ms() -> u64 {
+    50
+}
+
+fn default_check_interval_secs() -> u64 {
+    60
+}
+
 pub const DEFAULT_P2P_LISTEN_ADDR: &str = "0.0.0.0:9090";
 pub const DEFAULT_RPC_LISTEN_ADDR: &str = "127.0.0.1:8080";
 pub const DEFAULT_BYTE_YEARS: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB-years
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MiningConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_proactive_headroom_pct")]
+    pub proactive_headroom_pct: u32,
+    #[serde(default = "default_urgent_headroom_pct")]
+    pub urgent_headroom_pct: u32,
+    #[serde(default = "default_target_headroom_pct")]
+    pub target_headroom_pct: u32,
+    #[serde(default = "default_proactive_sleep_ms")]
+    pub proactive_sleep_ms: u64,
+    #[serde(default = "default_urgent_sleep_ms")]
+    pub urgent_sleep_ms: u64,
+    #[serde(default = "default_emergency_sleep_ms")]
+    pub emergency_sleep_ms: u64,
+    #[serde(default = "default_check_interval_secs")]
+    pub check_interval_secs: u64,
+}
+
+impl Default for MiningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            proactive_headroom_pct: default_proactive_headroom_pct(),
+            urgent_headroom_pct: default_urgent_headroom_pct(),
+            target_headroom_pct: default_target_headroom_pct(),
+            proactive_sleep_ms: default_proactive_sleep_ms(),
+            urgent_sleep_ms: default_urgent_sleep_ms(),
+            emergency_sleep_ms: default_emergency_sleep_ms(),
+            check_interval_secs: default_check_interval_secs(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct LifecycleConfig {
@@ -47,6 +110,8 @@ pub struct NodeConfig {
     pub discovery: DiscoveryConfig,
     #[serde(default)]
     pub ingress: IngressConfig,
+    #[serde(default)]
+    pub mining: MiningConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -611,6 +676,45 @@ mod tests {
         assert_eq!(config.quotas.default_byte_years, DEFAULT_BYTE_YEARS);
         assert!(config.f2f.peers.is_empty());
         assert!(config.discovery.bootstrap_gateways.is_empty());
+        assert!(config.mining.enabled);
+        assert_eq!(config.mining.proactive_headroom_pct, 20);
+        assert_eq!(config.mining.urgent_headroom_pct, 15);
+        assert_eq!(config.mining.target_headroom_pct, 50);
+        assert_eq!(config.mining.proactive_sleep_ms, 2000);
+        assert_eq!(config.mining.urgent_sleep_ms, 500);
+        assert_eq!(config.mining.emergency_sleep_ms, 50);
+        assert_eq!(config.mining.check_interval_secs, 60);
+    }
+
+    #[test]
+    fn test_mining_config_toml_roundtrip_and_defaults() {
+        let toml_empty = "";
+        let parsed_empty: MiningConfig = toml::from_str(toml_empty).expect("Parse empty mining config");
+        assert_eq!(parsed_empty, MiningConfig::default());
+
+        let toml_custom = r#"
+        enabled = false
+        proactive_headroom_pct = 30
+        urgent_headroom_pct = 10
+        target_headroom_pct = 75
+        proactive_sleep_ms = 1000
+        urgent_sleep_ms = 250
+        emergency_sleep_ms = 25
+        check_interval_secs = 120
+        "#;
+        let parsed_custom: MiningConfig = toml::from_str(toml_custom).expect("Parse custom mining config");
+        assert!(!parsed_custom.enabled);
+        assert_eq!(parsed_custom.proactive_headroom_pct, 30);
+        assert_eq!(parsed_custom.urgent_headroom_pct, 10);
+        assert_eq!(parsed_custom.target_headroom_pct, 75);
+        assert_eq!(parsed_custom.proactive_sleep_ms, 1000);
+        assert_eq!(parsed_custom.urgent_sleep_ms, 250);
+        assert_eq!(parsed_custom.emergency_sleep_ms, 25);
+        assert_eq!(parsed_custom.check_interval_secs, 120);
+
+        let serialized = toml::to_string(&parsed_custom).expect("Serialize custom mining config");
+        let parsed_again: MiningConfig = toml::from_str(&serialized).expect("Deserialize custom mining config");
+        assert_eq!(parsed_custom, parsed_again);
     }
 
     #[test]

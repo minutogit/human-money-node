@@ -2446,6 +2446,7 @@ pub struct QuicTransport {
     endpoint: quinn::Endpoint,
     network_id: humoco_sim_core::types::NetworkId,
     identity: NodeIdentity,
+    shared_identity: Option<Arc<parking_lot::RwLock<NodeIdentity>>>,
     peer_manager: Arc<PeerManager>,
     handler: Arc<dyn RequestHandler>,
     cancel_token: CancellationToken,
@@ -2635,6 +2636,7 @@ impl QuicTransport {
             network_id,
             tasks: tasks.clone(),
             identity: identity.clone(),
+            shared_identity: None,
             peer_manager,
             handler,
             cancel_token: cancel_token.clone(),
@@ -2683,6 +2685,24 @@ impl QuicTransport {
     /// Returns a reference to the NodeIdentity.
     pub fn identity(&self) -> &NodeIdentity {
         &self.identity
+    }
+
+    /// Attaches a shared dynamic identity handle that reflects background-mined tickets.
+    pub fn with_shared_identity(
+        mut self,
+        shared_identity: Arc<parking_lot::RwLock<NodeIdentity>>,
+    ) -> Self {
+        self.shared_identity = Some(shared_identity);
+        self
+    }
+
+    /// Returns the active identity snapshot (dynamic if shared handle attached, or fixed).
+    pub fn current_identity(&self) -> NodeIdentity {
+        if let Some(shared) = &self.shared_identity {
+            shared.read().clone()
+        } else {
+            self.identity.clone()
+        }
     }
 
     /// Returns a reference to the PeerManager.
@@ -3020,10 +3040,11 @@ impl QuicTransport {
         timestamp_ms: u64,
         piggyback_observations: Vec<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     ) -> Result<(), NodeError> {
+        let active_id = self.current_identity();
         let mut hb = crate::network::framing::HeartbeatWirePayload {
             gateway_advertisement: self.handler.gateway_advertisement(),
             signing_checkpoint: self.handler.signing_checkpoint().await?,
-            node_id: *self.identity.node_pubkey(),
+            node_id: *active_id.node_pubkey(),
             addr: local_addr,
             timestamp_ms,
             declared_write_ema_micro_bj,
@@ -3031,12 +3052,12 @@ impl QuicTransport {
             signature: [0; 64],
             supported_suites_mask: 0,
             piggyback_observations,
-            pow_nonce: self.identity.nonce(),
-            hrw_routing_id: *self.identity.hrw_routing_id(),
-            ticket_epoch_t0: self.identity.t0(),
+            pow_nonce: active_id.nonce(),
+            hrw_routing_id: *active_id.hrw_routing_id(),
+            ticket_epoch_t0: active_id.t0(),
             ttl: 16,
         };
-        hb.sign_origin(&self.identity, timestamp_ms, self.network_id);
+        hb.sign_origin(&active_id, timestamp_ms, self.network_id);
         let payload = bincode::serialize(&hb)
             .map_err(|e| NodeError::Network(format!("heartbeat serialize: {}", e)))?;
         let payload_len = checked_payload_len(payload.len())?;

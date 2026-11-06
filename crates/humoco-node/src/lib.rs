@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod error;
 pub mod identity;
 pub mod ingress;
+pub mod miner;
 pub mod network;
 pub mod storage;
 
@@ -26,6 +27,7 @@ pub use daemon::{BoundAddrs, NodeDaemon, ShardReadinessManager, ShardStatus};
 pub use error::NodeError;
 pub use identity::NodeIdentity;
 pub use ingress::{IngressError, IngressTier, PowEngine, PowError, TierController};
+pub use miner::{compute_target_work, BackgroundMiner, MiningState};
 pub use network::{
     read_frame, write_frame, BoxFuture, DefaultRequestHandler, NodeRequestHandler, PeerInfo,
     PeerManager, PeerStatus, QuicTransport, RequestHandler,

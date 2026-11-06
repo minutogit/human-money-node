@@ -254,7 +254,7 @@ impl RunCleanup {
 
 pub struct NodeDaemon {
     config: NodeConfig,
-    identity: NodeIdentity,
+    identity: Arc<parking_lot::RwLock<NodeIdentity>>,
     bootstrap_new_region: bool,
     cancel_token: CancellationToken,
     bound_addr_tx: Mutex<Option<tokio::sync::oneshot::Sender<BoundAddrs>>>,
@@ -265,7 +265,7 @@ impl NodeDaemon {
     pub fn new(config: NodeConfig, identity: NodeIdentity) -> Self {
         Self {
             config,
-            identity,
+            identity: Arc::new(parking_lot::RwLock::new(identity)),
             bootstrap_new_region: false,
             cancel_token: CancellationToken::new(),
             bound_addr_tx: Mutex::new(None),
@@ -280,7 +280,7 @@ impl NodeDaemon {
     ) -> Self {
         Self {
             config,
-            identity,
+            identity: Arc::new(parking_lot::RwLock::new(identity)),
             bootstrap_new_region: false,
             cancel_token,
             bound_addr_tx: Mutex::new(None),
@@ -296,7 +296,7 @@ impl NodeDaemon {
     ) -> Self {
         Self {
             config,
-            identity,
+            identity: Arc::new(parking_lot::RwLock::new(identity)),
             bootstrap_new_region: false,
             cancel_token,
             bound_addr_tx: Mutex::new(Some(tx)),
@@ -322,9 +322,28 @@ impl NodeDaemon {
         &self.config
     }
 
-    /// Returns a reference to the node identity.
-    pub fn identity(&self) -> &NodeIdentity {
-        &self.identity
+    /// Returns a snapshot copy of the active node identity.
+    pub fn identity(&self) -> NodeIdentity {
+        self.identity.read().clone()
+    }
+
+    /// Returns the shared, thread-safe handle to the active node identity.
+    pub fn identity_shared(&self) -> Arc<parking_lot::RwLock<NodeIdentity>> {
+        self.identity.clone()
+    }
+
+    /// Updates the active node identity in memory.
+    pub fn set_identity(&self, identity: NodeIdentity) {
+        *self.identity.write() = identity;
+    }
+
+    /// Replaces the internal shared identity reference.
+    pub fn with_shared_identity(
+        mut self,
+        identity: Arc<parking_lot::RwLock<NodeIdentity>>,
+    ) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// Returns a clone of the cancellation token.
@@ -384,9 +403,10 @@ impl NodeDaemon {
         lifecycle: Arc<crate::control::lifecycle::ShutdownLifecycle>,
         cleanup: Arc<RunCleanup>,
     ) -> Result<(), NodeError> {
+        let current_id = self.identity.read().clone();
         info!(
-            node_id = %self.identity.node_id_hex(),
-            public_key = %self.identity.public_key_hex(),
+            node_id = %current_id.node_id_hex(),
+            public_key = %current_id.public_key_hex(),
             p2p_addr = %self.config.network.p2p_listen_addr,
             rpc_addr = %self.config.network.rpc_listen_addr,
             data_dir = %self.config.storage.data_dir.display(),
@@ -463,7 +483,7 @@ impl NodeDaemon {
 
         // Initialize PoW Engine and 3-Tier Access Controller
         let pow_engine =
-            std::sync::Arc::new(crate::ingress::PowEngine::new(*self.identity.node_id(), 8));
+            std::sync::Arc::new(crate::ingress::PowEngine::new(*current_id.node_id(), 8));
         let tier_controller = std::sync::Arc::new(crate::ingress::TierController::new(
             storage.clone(),
             pow_engine.clone(),
@@ -506,8 +526,8 @@ impl NodeDaemon {
         // reset 24h incubation across the cluster, while newly mined tickets still incubate.
         {
             let boot_now_ms = peer_manager.net_time_ms();
-            let local_pk = *self.identity.node_pubkey();
-            let local_hrw = *self.identity.hrw_routing_id();
+            let local_pk = *current_id.node_pubkey();
+            let local_hrw = *current_id.hrw_routing_id();
             let mut local_prior_age = std::time::Duration::ZERO;
             let sim_mode = self.config.network.simulation_mode;
             match storage.all_ticket_observations() {
@@ -538,7 +558,7 @@ impl NodeDaemon {
                     warn!(error = %err, "Failed to load persisted HRW ticket observations from redb");
                 }
             }
-            if sim_mode || self.identity.has_valid_pow_ticket() {
+            if sim_mode || current_id.has_valid_pow_ticket() {
                 peer_manager.seed_local_ticket_age(local_pk, local_hrw, local_prior_age);
                 if let Err(err) =
                     storage.record_ticket_observations_if_absent(&[(local_pk, local_hrw, boot_now_ms)])
@@ -637,7 +657,7 @@ impl NodeDaemon {
             crate::network::NodeRequestHandler::with_peer_manager(
                 engine.clone(),
                 storage.clone(),
-                self.identity.clone(),
+                current_id.clone(),
                 peer_manager.clone(),
             )
             .with_tier_controller(tier_controller.clone())
@@ -648,12 +668,13 @@ impl NodeDaemon {
         );
         let mut transport = crate::network::QuicTransport::bind_with_options_for_network(
             self.config.network.p2p_listen_addr,
-            &self.identity,
+            &current_id,
             peer_manager.clone(),
             handler,
             self.cancel_token.clone(),
             self.config.network.network_id,
-        )?;
+        )?
+        .with_shared_identity(self.identity.clone());
         transport.set_sync_ready_handle(is_sync_ready.clone());
         transport.set_sync_ready(initial_sync_ready);
 
@@ -685,8 +706,8 @@ impl NodeDaemon {
         let thermo_engine = engine.clone();
         let thermo_storage = storage.clone();
         let thermo_self_ticket = (
-            *self.identity.node_pubkey(),
-            *self.identity.hrw_routing_id(),
+            *current_id.node_pubkey(),
+            *current_id.hrw_routing_id(),
         );
         let init_bootstrap = self.bootstrap_new_region;
         let thermo_interval_secs = if is_simulation { 5 } else { 60 };
@@ -766,6 +787,25 @@ impl NodeDaemon {
             }
         });
         cleanup.producer(&thermometer_handle);
+
+        // Duty-Cycled Background Ticket Miner (Spec 07 / Phase 6)
+        if self.config.mining.enabled && self.config.identity.key_path.exists() {
+            let miner = crate::miner::BackgroundMiner::new(
+                self.config.mining.clone(),
+                self.config.identity.key_path.clone(),
+                peer_manager.clone(),
+                self.identity.clone(),
+                Some(storage.clone()),
+                is_simulation,
+                self.cancel_token.clone(),
+            );
+            let miner_handle = miner.spawn();
+            cleanup.producer(&miner_handle);
+            info!(
+                key_path = %self.config.identity.key_path.display(),
+                "Duty-cycled background ticket miner spawned and registered in cleanup"
+            );
+        }
 
         // 1. F2F Heartbeat-Emitter (hourly with jitter, signed payload)
         let hb_pm = peer_manager.clone();
@@ -1006,7 +1046,7 @@ impl NodeDaemon {
         let sync_engine = engine.clone();
         let sync_storage = storage.clone();
         let sync_cancel = self.cancel_token.clone();
-        let sync_identity = self.identity.clone();
+        let sync_identity = current_id.clone();
         let sync_readiness_mgr = readiness_manager.clone();
         let shard_sync_handle = tokio::spawn(async move {
             let Some(mut requests) = sync_readiness_mgr.take_sync_receiver() else {
@@ -1042,7 +1082,7 @@ impl NodeDaemon {
         // 3.1 Throttled background shard warmup for assigned HRW committee shards
         let warmup_pm = peer_manager.clone();
         let warmup_rm = readiness_manager.clone();
-        let warmup_identity = self.identity.clone();
+        let warmup_identity = current_id.clone();
         let warmup_cancel = self.cancel_token.clone();
         let warmup_notify = peer_manager.sync_notifier();
         let warmup_initial_delay_secs = if is_simulation { 2 } else { 5 };
@@ -1202,7 +1242,7 @@ impl NodeDaemon {
             crate::api::HealthLevel::Ok,
             format!(
                 "HuMoCo node daemon started (NodePubKey: {})",
-                self.identity.node_id_bs58()
+                current_id.node_id_bs58()
             ),
         );
 
@@ -1210,7 +1250,7 @@ impl NodeDaemon {
         let app_state = crate::api::AppState {
             engine: engine.clone(),
             storage: storage.clone(),
-            identity: self.identity.clone(),
+            identity: current_id.clone(),
             tier_controller: tier_controller.clone(),
             pow_engine,
             peer_manager: Some(peer_manager.clone()),
@@ -1296,10 +1336,11 @@ impl NodeDaemon {
             storage.clone(),
             engine.clone(),
             peer_manager.clone(),
-            self.identity.clone(),
+            current_id.clone(),
             self.config.storage.data_dir.clone(),
             self.cancel_token.clone(),
         )
+        .with_shared_identity(self.identity.clone())
         .with_tier_controller(tier_controller.clone())
         .with_shutdown_lifecycle(lifecycle);
         let cancel_on_control_failure = self.cancel_token.clone();

@@ -29,6 +29,12 @@ pub const HRW_INCUBATION_DURATION: Duration = Duration::from_secs(HRW_INCUBATION
 /// Accelerated incubation window used exclusively when `network.simulation_mode = true`.
 pub const SIM_HRW_INCUBATION_DURATION: Duration = Duration::from_secs(2);
 
+/// Production minimum work floor for HRW shard tickets (Spec 07 §1.1).
+/// Requires on average 256 Argon2d (64 MiB, t=3) hashes (~12s on PC, ~38s on Raspberry Pi 4).
+pub const W_MIN_FLOOR_PRODUCTION: u64 = 256;
+/// Simulation/test minimum work floor allowing instant bootstrapping (1 hash).
+pub const W_MIN_FLOOR_SIMULATION: u64 = 1;
+
 /// Presence freshness window for phase-transition counting (Spec 08/11 Phase 9 P1, DEC-056).
 /// A gossip-learned node counts toward `N_active` only while its last heartbeat
 /// is fresh. Three consecutive missing hourly heartbeats (3 * max 65m = 3h 15m) exclude
@@ -735,6 +741,15 @@ impl PeerManager {
             SIM_HRW_INCUBATION_DURATION
         } else {
             HRW_INCUBATION_DURATION
+        }
+    }
+
+    /// Returns the minimum work floor for HRW shard tickets (256 in production, 1 in simulation_mode).
+    pub fn effective_min_work_floor(&self) -> u64 {
+        if self.is_simulation_mode() {
+            W_MIN_FLOOR_SIMULATION
+        } else {
+            W_MIN_FLOOR_PRODUCTION
         }
     }
 
@@ -2047,7 +2062,7 @@ impl PeerManager {
     }
 
     /// Calculates the decentralized median PoW work score across all active (mature) known nodes.
-    /// Defaults to W_min_floor (1) if no active nodes are known (Bootstrap N <= 1).
+    /// Defaults to W_min_floor (256 in production, 1 in simulation) if no active nodes are known (Bootstrap N <= 1).
     pub fn calculate_network_median_work(&self) -> u64 {
         let mut works = Vec::new();
         if let Ok(known) = self.known_network_nodes.try_read() {
@@ -2057,23 +2072,26 @@ impl PeerManager {
                 }
             }
         }
+        let floor = self.effective_min_work_floor();
         if works.is_empty() {
-            return 1; // W_min_floor
+            return floor;
         }
         works.sort_unstable();
         let n = works.len();
-        if n % 2 == 1 {
+        let median = if n % 2 == 1 {
             works[n / 2]
         } else {
             (works[n / 2 - 1] + works[n / 2]) / 2
-        }
+        };
+        median.max(floor)
     }
 
     /// Evaluates if a given work score satisfies the network admission threshold (1/8 = 12.5% of median).
     /// Returns (is_acceptable, current_median).
     pub fn is_ticket_acceptable(&self, work: u64) -> (bool, u64) {
         let median = self.calculate_network_median_work();
-        let min_admission = 1u64.max(median >> 3);
+        let floor = self.effective_min_work_floor();
+        let min_admission = floor.max(median >> 3);
         let is_valid = work >= min_admission;
         (is_valid, median)
     }

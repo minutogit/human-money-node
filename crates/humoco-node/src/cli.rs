@@ -94,8 +94,8 @@ pub enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Minimum required work score (default: 1)
-        #[arg(long, default_value = "1")]
+        /// Minimum required work score (default: 256)
+        #[arg(long, default_value_t = crate::network::manager::W_MIN_FLOOR_PRODUCTION)]
         min_work: u64,
 
         /// Explicit T0 timestamp in Unix seconds (default: current Unix timestamp)

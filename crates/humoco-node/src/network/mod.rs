@@ -15,6 +15,7 @@ pub use manager::{
     calculate_fan_out, HopBand, KnotenfreundSectorReport, PeerManager, SectorSeverity,
     TraceAnalysisReport, TraceDirectionHit, DEFAULT_BASE_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
     MAX_GOSSIP_HOPS, PRESENCE_FRESHNESS_SECS, PRESENCE_FRESHNESS_TIMEOUT,
+    W_MIN_FLOOR_PRODUCTION, W_MIN_FLOOR_SIMULATION,
 };
 pub use peer::{PeerConnectionType, PeerInfo, PeerStatus, FAILURE_DEBOUNCE_SECS};
 pub use tls::{

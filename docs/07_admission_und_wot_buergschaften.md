@@ -15,7 +15,7 @@ Argon2d has public inputs here; password-secret timing protection is not the mot
 
 ### 1.1 Work floor, admission threshold and renewal ratchet
 
-The admission design uses an immutable minimum floor and a locally derived network-work threshold:
+The admission design uses an immutable minimum floor (`W_min_floor = 256` in production, `1` in simulation mode) and a locally derived network-work threshold:
 
 `W_min_admission = max(W_min_floor, W_net_median >> 3)`.
 

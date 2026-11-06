@@ -11,12 +11,19 @@ use tokio_util::sync::CancellationToken;
 #[tokio::test]
 async fn test_2_1_bootstrap_median_empty_and_single() {
     let pm = PeerManager::new(vec![]);
-    // Empty network -> W_min_floor (1)
-    assert_eq!(pm.calculate_network_median_work(), 1);
+    // In production mode (empty network) -> W_MIN_FLOOR_PRODUCTION (256)
+    assert_eq!(pm.calculate_network_median_work(), humoco_node::network::manager::W_MIN_FLOOR_PRODUCTION);
 
-    let (is_acc, med) = pm.is_ticket_acceptable(1);
+    let (is_acc, med) = pm.is_ticket_acceptable(humoco_node::network::manager::W_MIN_FLOOR_PRODUCTION);
     assert!(is_acc);
-    assert_eq!(med, 1);
+    assert_eq!(med, humoco_node::network::manager::W_MIN_FLOOR_PRODUCTION);
+
+    // In simulation mode (empty network) -> W_MIN_FLOOR_SIMULATION (1)
+    pm.set_simulation_mode(true);
+    assert_eq!(pm.calculate_network_median_work(), humoco_node::network::manager::W_MIN_FLOOR_SIMULATION);
+    let (is_acc_sim, med_sim) = pm.is_ticket_acceptable(1);
+    assert!(is_acc_sim);
+    assert_eq!(med_sim, 1);
 }
 
 #[tokio::test]
@@ -114,6 +121,7 @@ async fn test_2_4_whale_immunity_3_supercomputers() {
 #[tokio::test]
 async fn test_3_1_and_3_2_monotonicity_downgrade_and_lateral_rejected() {
     let pm = PeerManager::new(vec![]);
+    pm.set_simulation_mode(true);
     let pk = [0xAA; 32];
     let hrw1 = [0x11; 32];
     let hrw2 = [0x22; 32];
@@ -141,6 +149,7 @@ async fn test_3_1_and_3_2_monotonicity_downgrade_and_lateral_rejected() {
 #[tokio::test]
 async fn test_3_3_monotonicity_upgrade_enters_incubation() {
     let pm = PeerManager::new(vec![]);
+    pm.set_simulation_mode(true);
     let pk = [0xBB; 32];
     let hrw1 = [0x11; 32];
     let hrw3 = [0x33; 32];
@@ -171,6 +180,7 @@ async fn test_3_3_monotonicity_upgrade_enters_incubation() {
 #[tokio::test]
 async fn test_3_4_pending_race_intermediate_rejected_and_higher_overwrites() {
     let pm = PeerManager::new(vec![]);
+    pm.set_simulation_mode(true);
     let pk = [0xCC; 32];
     let hrw1 = [0x11; 32];
     let hrw3 = [0x33; 32];

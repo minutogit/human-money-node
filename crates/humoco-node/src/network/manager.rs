@@ -7,7 +7,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::network::peer::{PeerConnectionType, PeerInfo, PeerStatus, FAILURE_THRESHOLD_SUSPENDED};
 use crate::network::quarantine::{
@@ -414,10 +414,15 @@ impl KnownNodeInfo {
         false
     }
 
+    /// Is gossip presence still fresh relative to `now` (heartbeat seen within `PRESENCE_FRESHNESS_TIMEOUT`)?
+    pub fn is_presence_fresh_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_seen) < PRESENCE_FRESHNESS_TIMEOUT
+    }
+
     /// Is gossip presence still fresh (heartbeat seen within `PRESENCE_FRESHNESS_TIMEOUT`)?
     /// Stale ghosts must not inflate `N_active` for the Provisional -> Final transition.
     pub fn is_presence_fresh(&self) -> bool {
-        self.last_seen.elapsed() < PRESENCE_FRESHNESS_TIMEOUT
+        self.is_presence_fresh_at(Instant::now())
     }
 
     /// May node be used for HRW scoring? (ACTIVE, not IMMATURE, and qualified for initial admission)
@@ -867,10 +872,35 @@ impl PeerManager {
         friend_pk: [u8; 32],
         hops: u8,
     ) {
-        let now = Instant::now();
-        let mut nodes = self.known_network_nodes.write().await;
-        if let Some(entry) = nodes.get_mut(&node_id) {
-            entry.record_edge_observation(friend_pk, hops, now);
+        self.record_heartbeat_edge_observation_at(node_id, friend_pk, hops, Instant::now())
+            .await;
+    }
+
+    /// Records a multi-path edge observation with an explicit evaluation timestamp (for simulation and testing).
+    pub async fn record_heartbeat_edge_observation_at(
+        &self,
+        node_id: [u8; 32],
+        friend_pk: [u8; 32],
+        hops: u8,
+        now: Instant,
+    ) {
+        let (was_absent_or_stale, addr_opt) = {
+            let mut nodes = self.known_network_nodes.write().await;
+            if let Some(entry) = nodes.get_mut(&node_id) {
+                let stale = now.saturating_duration_since(entry.last_seen) >= PRESENCE_FRESHNESS_TIMEOUT;
+                if stale {
+                    entry.last_seen = now;
+                }
+                entry.record_edge_observation(friend_pk, hops, now);
+                (stale, Some(entry.addr))
+            } else {
+                (true, None)
+            }
+        };
+
+        if was_absent_or_stale {
+            self.rehabilitate_stale_remote_peer(&node_id, addr_opt.as_ref())
+                .await;
         }
     }
 
@@ -2201,7 +2231,20 @@ impl PeerManager {
         hops: u8,
         ingress_peer: Option<SocketAddr>,
     ) {
-        self.learn_node_from_gossip_with_hrw(node_id, node_id, addr, hops, ingress_peer)
+        self.learn_node_from_gossip_at(node_id, addr, hops, ingress_peer, Instant::now())
+            .await;
+    }
+
+    /// Learns or updates a node discovered through F2F gossip with an explicit timestamp (for simulation and testing).
+    pub async fn learn_node_from_gossip_at(
+        &self,
+        node_id: [u8; 32],
+        addr: SocketAddr,
+        hops: u8,
+        ingress_peer: Option<SocketAddr>,
+        now: Instant,
+    ) {
+        self.learn_node_from_gossip_with_hrw_at(node_id, node_id, addr, hops, ingress_peer, now)
             .await;
     }
 
@@ -2214,13 +2257,35 @@ impl PeerManager {
         hops: u8,
         ingress_peer: Option<SocketAddr>,
     ) {
-        self.learn_node_from_gossip_with_hrw_and_work(
+        self.learn_node_from_gossip_with_hrw_at(
+            node_pubkey,
+            hrw_routing_id,
+            addr,
+            hops,
+            ingress_peer,
+            Instant::now(),
+        )
+        .await;
+    }
+
+    /// Semantically decoupled learning method with explicit HRW routing ticket and explicit timestamp.
+    pub async fn learn_node_from_gossip_with_hrw_at(
+        &self,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        addr: SocketAddr,
+        hops: u8,
+        ingress_peer: Option<SocketAddr>,
+        now: Instant,
+    ) {
+        self.learn_node_from_gossip_with_hrw_and_work_at(
             node_pubkey,
             hrw_routing_id,
             addr,
             hops,
             ingress_peer,
             1,
+            now,
         )
         .await;
     }
@@ -2238,7 +2303,31 @@ impl PeerManager {
         ingress_peer: Option<SocketAddr>,
         work_score: u64,
     ) {
-        self.learn_node_from_gossip_with_hrw_work_and_auth(
+        self.learn_node_from_gossip_with_hrw_and_work_at(
+            node_pubkey,
+            hrw_routing_id,
+            addr,
+            hops,
+            ingress_peer,
+            work_score,
+            Instant::now(),
+        )
+        .await;
+    }
+
+    /// Semantically decoupled learning method with explicit HRW routing ticket, work score, and explicit timestamp.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn learn_node_from_gossip_with_hrw_and_work_at(
+        &self,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        addr: SocketAddr,
+        hops: u8,
+        ingress_peer: Option<SocketAddr>,
+        work_score: u64,
+        now: Instant,
+    ) {
+        self.learn_node_from_gossip_with_hrw_work_and_auth_at(
             node_pubkey,
             hrw_routing_id,
             addr,
@@ -2246,6 +2335,7 @@ impl PeerManager {
             ingress_peer,
             work_score,
             hops == 0,
+            now,
         )
         .await;
     }
@@ -2262,6 +2352,32 @@ impl PeerManager {
         ingress_peer: Option<SocketAddr>,
         work_score: u64,
         origin_authorized: bool,
+    ) {
+        self.learn_node_from_gossip_with_hrw_work_and_auth_at(
+            node_pubkey,
+            hrw_routing_id,
+            addr,
+            hops,
+            ingress_peer,
+            work_score,
+            origin_authorized,
+            Instant::now(),
+        )
+        .await;
+    }
+
+    /// Extended variant that accepts an explicit origin authorization flag and explicit timestamp.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn learn_node_from_gossip_with_hrw_work_and_auth_at(
+        &self,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        addr: SocketAddr,
+        hops: u8,
+        ingress_peer: Option<SocketAddr>,
+        work_score: u64,
+        origin_authorized: bool,
+        now: Instant,
     ) {
         let (is_acceptable, _median) = self.is_ticket_acceptable(work_score);
         if !is_acceptable {
@@ -2288,119 +2404,129 @@ impl PeerManager {
             .copied()
             .unwrap_or(Duration::ZERO);
 
-        let now = Instant::now();
-        let mut nodes = self.known_network_nodes.write().await;
-        if let Some(entry) = nodes.get_mut(&node_pubkey) {
-            entry.incubation_duration = incubation;
-            if entry.addr.port() == 0 && entry.work_score == 0 {
-                // Upgrade evidence-only placeholder to real gossiped ticket
-                entry.hrw_routing_id = hrw_routing_id;
-                entry.work_score = work_score;
-                entry.pre_boot_age = prior_age;
-                entry.first_seen = now;
-                entry.latest_obs_hour = None;
-                entry.obs_24h_mask = 0;
-                entry.initial_admission_qualified = false;
-            }
-            // Promotion if due, before inspecting new value
-            if let (Some(pending), Some(since)) =
-                (entry.pending_hrw_routing_id, entry.pending_since)
-            {
-                if since.elapsed() >= incubation {
-                    entry.hrw_routing_id = pending;
-                    if let Some(pw) = entry.pending_work_score {
-                        entry.work_score = pw;
-                    }
-                    entry.pending_hrw_routing_id = None;
-                    entry.pending_work_score = None;
-                    entry.pending_since = None;
-                    entry.incubated_until = None;
+        let (was_absent_or_stale, trigger_sync) = {
+            let mut nodes = self.known_network_nodes.write().await;
+            if let Some(entry) = nodes.get_mut(&node_pubkey) {
+                let stale = now.saturating_duration_since(entry.last_seen) >= PRESENCE_FRESHNESS_TIMEOUT;
+                entry.incubation_duration = incubation;
+                if entry.addr.port() == 0 && entry.work_score == 0 {
+                    // Upgrade evidence-only placeholder to real gossiped ticket
+                    entry.hrw_routing_id = hrw_routing_id;
+                    entry.work_score = work_score;
+                    entry.pre_boot_age = prior_age;
+                    entry.first_seen = now;
                     entry.latest_obs_hour = None;
                     entry.obs_24h_mask = 0;
                     entry.initial_admission_qualified = false;
                 }
-            }
-            // Protect direct or stronger addresses from unauthorized relay downgrade:
-            // An address overwrite from a relay (hops > 0) is only permitted if origin_authorized is true.
-            if entry.addr != addr {
-                if hops > 0 && !origin_authorized {
-                    warn!(
-                        node = %hex::encode(node_pubkey),
-                        hops,
-                        existing = %entry.addr,
-                        attempted = %addr,
-                        "GOSSIP BARRIER: Rejected unauthorized address overwrite from relay"
-                    );
-                } else {
-                    entry.addr = addr;
-                    if hops <= entry.min_hops || origin_authorized {
-                        entry.min_hops = hops;
+                // Promotion if due, before inspecting new value
+                if let (Some(pending), Some(since)) =
+                    (entry.pending_hrw_routing_id, entry.pending_since)
+                {
+                    if now.saturating_duration_since(since) >= incubation {
+                        entry.hrw_routing_id = pending;
+                        if let Some(pw) = entry.pending_work_score {
+                            entry.work_score = pw;
+                        }
+                        entry.pending_hrw_routing_id = None;
+                        entry.pending_work_score = None;
+                        entry.pending_since = None;
+                        entry.incubated_until = None;
+                        entry.latest_obs_hour = None;
+                        entry.obs_24h_mask = 0;
+                        entry.initial_admission_qualified = false;
                     }
                 }
-            }
-            entry.last_seen = now;
+                // Protect direct or stronger addresses from unauthorized relay downgrade:
+                // An address overwrite from a relay (hops > 0) is only permitted if origin_authorized is true.
+                if entry.addr != addr {
+                    if hops > 0 && !origin_authorized {
+                        warn!(
+                            node = %hex::encode(node_pubkey),
+                            hops,
+                            existing = %entry.addr,
+                            attempted = %addr,
+                            "GOSSIP BARRIER: Rejected unauthorized address overwrite from relay"
+                        );
+                    } else {
+                        entry.addr = addr;
+                        if hops <= entry.min_hops || origin_authorized {
+                            entry.min_hops = hops;
+                        }
+                    }
+                }
+                entry.last_seen = now;
 
-            if entry.hrw_routing_id != hrw_routing_id {
-                // Monotonicity Ratchet: W_new MUST be strictly greater than max(W_active, W_pending)
-                let current_max = entry.work_score.max(entry.pending_work_score.unwrap_or(0));
-                if work_score > current_max {
-                    entry.pending_hrw_routing_id = Some(hrw_routing_id);
-                    entry.pending_work_score = Some(work_score);
-                    entry.pending_since = Some(now);
-                    entry.incubated_until = Some(now + incubation);
+                if entry.hrw_routing_id != hrw_routing_id {
+                    // Monotonicity Ratchet: W_new MUST be strictly greater than max(W_active, W_pending)
+                    let current_max = entry.work_score.max(entry.pending_work_score.unwrap_or(0));
+                    if work_score > current_max {
+                        entry.pending_hrw_routing_id = Some(hrw_routing_id);
+                        entry.pending_work_score = Some(work_score);
+                        entry.pending_since = Some(now);
+                        entry.incubated_until = Some(now + incubation);
+                    }
+                    // If work_score <= current_max: Downgrade or lateral hop -> REJECTED, old active & pending remain!
                 }
-                // If work_score <= current_max: Downgrade or lateral hop -> REJECTED, old active & pending remain!
-            }
-            if hops < entry.min_hops {
-                entry.min_hops = hops;
+                if hops < entry.min_hops {
+                    entry.min_hops = hops;
+                    if let Some(peer) = ingress_peer {
+                        entry.best_ingress_peer = Some(peer);
+                    }
+                }
                 if let Some(peer) = ingress_peer {
-                    entry.best_ingress_peer = Some(peer);
+                    let hash = blake3::hash(peer.to_string().as_bytes());
+                    let hb = hash.as_bytes();
+                    let val = u32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
+                    let bit = 1 << (val % 32);
+                    entry.ingress_diversity_mask |= bit;
                 }
-            }
-            if let Some(peer) = ingress_peer {
-                let hash = blake3::hash(peer.to_string().as_bytes());
-                let hb = hash.as_bytes();
-                let val = u32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
-                let bit = 1 << (val % 32);
-                entry.ingress_diversity_mask |= bit;
-            }
-        } else {
-            let mut mask = 0;
-            if let Some(peer) = ingress_peer {
-                let hash = blake3::hash(peer.to_string().as_bytes());
-                let hb = hash.as_bytes();
-                let val = u32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
-                mask = 1 << (val % 32);
-            }
-            // Newcomer: IMMATURE phase starts unless restored from persisted maturation history
-            nodes.insert(
-                node_pubkey,
-                KnownNodeInfo {
-                    addr,
+                (stale, false)
+            } else {
+                let mut mask = 0;
+                if let Some(peer) = ingress_peer {
+                    let hash = blake3::hash(peer.to_string().as_bytes());
+                    let hb = hash.as_bytes();
+                    let val = u32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
+                    mask = 1 << (val % 32);
+                }
+                // Newcomer: IMMATURE phase starts unless restored from persisted maturation history
+                nodes.insert(
                     node_pubkey,
-                    hrw_routing_id,
-                    work_score,
-                    pending_hrw_routing_id: None,
-                    pending_work_score: None,
-                    pending_since: None,
-                    incubated_until: None,
-                    first_seen: now,
-                    pre_boot_age: prior_age,
-                    incubation_duration: incubation,
-                    last_seen: now,
-                    min_hops: hops,
-                    edge_observations: HashMap::new(),
-                    best_ingress_peer: ingress_peer,
-                    ingress_diversity_mask: mask,
-                    latest_obs_hour: None,
-                    obs_24h_mask: 0,
-                    initial_admission_qualified: prior_age >= incubation,
-                    last_write_evidence: None,
-                    last_read_evidence: None,
-                },
-            );
-            drop(nodes);
+                    KnownNodeInfo {
+                        addr,
+                        node_pubkey,
+                        hrw_routing_id,
+                        work_score,
+                        pending_hrw_routing_id: None,
+                        pending_work_score: None,
+                        pending_since: None,
+                        incubated_until: None,
+                        first_seen: now,
+                        pre_boot_age: prior_age,
+                        incubation_duration: incubation,
+                        last_seen: now,
+                        min_hops: hops,
+                        edge_observations: HashMap::new(),
+                        best_ingress_peer: ingress_peer,
+                        ingress_diversity_mask: mask,
+                        latest_obs_hour: None,
+                        obs_24h_mask: 0,
+                        initial_admission_qualified: prior_age >= incubation,
+                        last_write_evidence: None,
+                        last_read_evidence: None,
+                    },
+                );
+                (true, true)
+            }
+        };
+
+        if trigger_sync {
             self.notify_sync_trigger();
+        }
+
+        if was_absent_or_stale {
+            self.rehabilitate_stale_remote_peer(&node_pubkey, Some(&addr)).await;
         }
     }
 
@@ -3068,6 +3194,59 @@ impl PeerManager {
                 Ok(false)
             }
         }
+    }
+
+    /// Rehabilitates a stale remote peer (h >= 1, conn_type != FriendToFriend) returning after an absence.
+    ///
+    /// Direct F2F friends (h = 0, conn_type == FriendToFriend) are NEVER rehabilitated here:
+    /// they require authentic shard work (`mark_shard_work_success`) or explicit admin action (`reset_peer_suspension`).
+    ///
+    /// Remote gossip/shard peers cannot perform manual admin unquarantine or shard work while offline.
+    /// When they re-enter the network after absence (presence was stale >= PRESENCE_FRESHNESS_TIMEOUT),
+    /// their prior stale conviction (`zombie_since`) is cleared so intermediate neighbors are not falsely quarantined.
+    pub async fn rehabilitate_stale_remote_peer(
+        &self,
+        node_pubkey: &[u8; 32],
+        addr_opt: Option<&SocketAddr>,
+    ) -> bool {
+        if self.is_banned(node_pubkey).await {
+            return false;
+        }
+
+        let is_direct_f2f = {
+            let friends = self.f2f_friends.read().await;
+            friends.contains_key(node_pubkey)
+                || addr_opt.is_some_and(|a| friends.values().any(|entry| entry.as_ref() == Some(a)))
+        };
+        if is_direct_f2f {
+            return false;
+        }
+
+        let mut peers = self.peers.write().await;
+        let mut rehabilitated = false;
+        for peer in peers.values_mut() {
+            let matches_pubkey = peer.node_id == Some(*node_pubkey);
+            let matches_addr = addr_opt.is_some_and(|a| peer.addr == *a);
+            if matches_pubkey || matches_addr {
+                // Not a direct F2F friend; ensure conn_type reflects non-friend if it was defaulted via PeerInfo::new
+                if peer.conn_type == PeerConnectionType::FriendToFriend {
+                    peer.conn_type = PeerConnectionType::ShardDirect;
+                }
+                if peer.zombie_since.is_some() || peer.missing_count > 0 || peer.is_suspended() {
+                    peer.reset_suspension();
+                    if peer.node_id.is_none() {
+                        peer.node_id = Some(*node_pubkey);
+                    }
+                    rehabilitated = true;
+                    info!(
+                        node = %hex::encode(node_pubkey),
+                        addr = %peer.addr,
+                        "Rehabilitated stale remote zombie peer returning after absence"
+                    );
+                }
+            }
+        }
+        rehabilitated
     }
 
     /// Retrieves the current round-trip time (RTT) in milliseconds for an active peer connection.
@@ -5407,5 +5586,110 @@ mod tests {
         // Restored to active target addresses
         let targets = pm.active_f2f_target_addrs().await;
         assert!(targets.contains(&addr_m));
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_remote_zombie_rehabilitation_after_absence() {
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let m = [3u8; 32];
+
+        let addr1: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+        let addr_m: SocketAddr = "127.0.0.1:9003".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(h1), addr1),
+                (Some(h2), addr2),
+                (Some(m), addr_m),
+            ],
+            vec![h1, h2, m],
+        );
+        pm.set_simulation_mode(true);
+
+        // Remote peer Z behind M at distance h = 2
+        let z = [99u8; 32];
+        let z_addr: SocketAddr = "127.0.0.1:9399".parse().unwrap();
+
+        let t0 = Instant::now();
+
+        // 1. Convict remote node Z at t0: missing_count = 3, zombie_since = Some(t0)
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            let mut info_z = KnownNodeInfo::new(z_addr, z, z);
+            info_z.last_seen = t0;
+            info_z.record_edge_observation(m, 2, t0);
+            nodes.insert(z, info_z);
+
+            let mut peers = pm.peers.write().await;
+            let mut p_z = PeerInfo::with_type(z_addr, PeerConnectionType::ShardDirect);
+            p_z.node_id = Some(z);
+            p_z.missing_count = 3;
+            p_z.zombie_since = Some(t0);
+            p_z.status = PeerStatus::Suspended;
+            peers.insert(z_addr, p_z);
+        }
+
+        // 2. Fast-forward time to t0 + 12 hours: Z has been absent and its presence has expired
+        let t12 = t0 + Duration::from_secs(12 * 3600);
+        {
+            let nodes = pm.known_network_nodes.read().await;
+            let info_z = nodes.get(&z).unwrap();
+            assert!(!info_z.is_presence_fresh_at(t12), "Z's presence must be stale after 12h absence");
+        }
+
+        // 3. Z re-enters after absence by sending an authentic gossip heartbeat at t0 + 12h
+        pm.learn_node_from_gossip_with_hrw_and_work_at(
+            z,
+            z,
+            z_addr,
+            2,
+            Some(addr_m),
+            1,
+            t12,
+        ).await;
+        pm.record_heartbeat_edge_observation_at(z, m, 2, t12).await;
+
+        // 4. Verify that Z's zombie conviction in self.peers has been cleared (rehabilitated)
+        {
+            let peers = pm.peers.read().await;
+            let p_z = peers.get(&z_addr).unwrap();
+            assert_eq!(p_z.zombie_since, None, "Z.zombie_since must be None after re-entry");
+            assert_eq!(p_z.missing_count, 0, "Z.missing_count must be reset to 0");
+            assert!(!p_z.is_suspended(), "Z must no longer be suspended");
+        }
+
+        // 5. Evaluate quarantine at t0 + 12h: Feeder M must NOT be falsely quarantined!
+        let events = pm.decay_all_peers_at(t12).await;
+        assert!(events.is_empty(), "M must NOT be quarantined on Z's re-entry! Events: {:?}", events);
+        assert!(!pm.is_f2f_quarantined(&m), "M must remain active");
+
+        let targets = pm.active_f2f_target_addrs().await;
+        assert!(targets.contains(&addr_m), "M must remain in active target addresses");
+
+        // 6. Strict Layer Separation Check: Direct F2F friend (h = 0) is NEVER rehabilitated by gossip
+        {
+            let mut peers = pm.peers.write().await;
+            let p_h1 = peers.get_mut(&addr1).unwrap();
+            p_h1.missing_count = 3;
+            p_h1.zombie_since = Some(t0);
+            p_h1.status = PeerStatus::Suspended;
+        }
+        pm.learn_node_from_gossip_with_hrw_and_work_at(
+            h1,
+            h1,
+            addr1,
+            0,
+            None,
+            1,
+            t12,
+        ).await;
+        {
+            let peers = pm.peers.read().await;
+            let p_h1 = peers.get(&addr1).unwrap();
+            assert_eq!(p_h1.zombie_since, Some(t0), "Direct F2F friend MUST NOT be rehabilitated by gossip");
+            assert!(p_h1.is_suspended());
+        }
     }
 }

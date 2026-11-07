@@ -650,8 +650,11 @@ async fn valid_root_registration_retry_upgrade_and_preexisting_corrupt_root_reco
     assert!(!db.is_signing_history_healthy());
     assert!(!engine_corrupt.is_signing_healthy());
 
-    // 8. Pruning must NOT silently delete the corrupt root
-    engine_corrupt.prune_expired(SimTime(700_000)).await.unwrap();
+    // 8. Pruning must NOT silently delete the corrupt root (fails closed with SigningHistoryCorrupt)
+    assert!(matches!(
+        engine_corrupt.prune_expired(SimTime(700_000)).await,
+        Err(StorageError::SigningHistoryCorrupt)
+    ));
     assert!(
         db.voucher_root("corrupt_voucher").unwrap().is_some(),
         "corrupted root must NOT be deleted by TTL pruning (fail-closed latch)"

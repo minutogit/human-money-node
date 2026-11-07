@@ -15,8 +15,8 @@ pub use framing::{read_frame, write_frame, HeartbeatWirePayload, MAX_FRAME_PAYLO
 pub use manager::{
     calculate_fan_out, HopBand, KnotenfreundSectorReport, PeerManager, SectorSeverity,
     TraceAnalysisReport, TraceDirectionHit, DEFAULT_BASE_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
-    MAX_GOSSIP_HOPS, PRESENCE_FRESHNESS_SECS, PRESENCE_FRESHNESS_TIMEOUT,
-    W_MIN_FLOOR_PRODUCTION, W_MIN_FLOOR_SIMULATION,
+    MAX_GOSSIP_HOPS, PRESENCE_FRESHNESS_SECS, PRESENCE_FRESHNESS_TIMEOUT, W_MIN_FLOOR_PRODUCTION,
+    W_MIN_FLOOR_SIMULATION,
 };
 pub use peer::{PeerConnectionType, PeerInfo, PeerStatus, FAILURE_DEBOUNCE_SECS};
 pub use quarantine::{
@@ -30,6 +30,6 @@ pub use tls::{
     get_alpn_for_network, init_crypto_provider, P2pCertVerifier, ALPN_HUMOCO_L2,
 };
 pub use transport::{
-    send_unidirectional_frame, BoxFuture, DefaultRequestHandler, NodeRequestHandler, QuicTransport,
-    RequestHandler,
+    send_unidirectional_frame, send_unidirectional_frame_bounded, BoxFuture, DefaultRequestHandler,
+    NodeRequestHandler, QuicTransport, RequestHandler,
 };

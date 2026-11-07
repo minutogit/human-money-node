@@ -30,6 +30,7 @@ pub struct ConfirmationSupport {
     pub verified_context: [u8; 32],
 }
 /// Only cryptographic verification can construct an admissible support update.
+#[derive(Clone)]
 pub struct VerifiedSupport {
     tag: String,
     fact: ConfirmationSupport,

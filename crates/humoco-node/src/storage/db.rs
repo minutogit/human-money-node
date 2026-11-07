@@ -10,6 +10,7 @@ use humoco_sim_core::storage::should_prune;
 use humoco_sim_core::types::SimTime;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{info, warn};
@@ -335,8 +336,8 @@ impl RedbStorage {
                             continue;
                         }
                         Err(StorageError::SigningHistoryCorrupt) => {
-                            self.latch_corruption_in_txn(&txn);
-                            let _ = txn.commit();
+                            drop(txn);
+                            self.latch_corruption();
                             return Err(StorageError::SigningHistoryCorrupt);
                         }
                         Err(e) => {
@@ -363,8 +364,10 @@ impl RedbStorage {
 
                     if let Err(e) = signing::put_choice(&txn, slot.as_str(), &mut choice) {
                         drop(locks);
-                        self.latch_corruption_in_txn(&txn);
-                        let _ = txn.commit();
+                        drop(txn);
+                        if matches!(e, StorageError::SigningHistoryCorrupt) {
+                            self.latch_corruption();
+                        }
                         return Err(e);
                     }
 
@@ -630,8 +633,20 @@ impl RedbStorage {
                 pruned_hmc_count += 1;
             }
         }
-        self.prune_voucher_roots(&write_txn, now_sec)?;
-        self.prune_own_choices(&write_txn, now_sec)?;
+        if let Err(e) = self.prune_voucher_roots(&write_txn, now_sec) {
+            drop(write_txn);
+            if matches!(e, StorageError::SigningHistoryCorrupt) {
+                self.latch_corruption();
+            }
+            return Err(e);
+        }
+        if let Err(e) = self.prune_own_choices(&write_txn, now_sec) {
+            drop(write_txn);
+            if matches!(e, StorageError::SigningHistoryCorrupt) {
+                self.latch_corruption();
+            }
+            return Err(e);
+        }
         write_txn.commit()?;
         Ok(pruned_hmc_count)
     }
@@ -1004,12 +1019,7 @@ impl RedbStorage {
                 }
             };
             if let Some(&root_v) = shard_roots.get(&entry.layer2_voucher_id) {
-                let owned_ttl = entry
-                    .deletable_at
-                    .as_deref()
-                    .and_then(|s| s.parse::<u64>().ok());
-                let effective_ttl = owned_ttl.unwrap_or(root_v);
-                if !should_prune(SimTime(now_ms), SimTime(effective_ttl)) {
+                if !should_prune(SimTime(now_ms), SimTime(root_v)) {
                     results.push((k_guard.value().to_string(), entry));
                 }
             }
@@ -1202,7 +1212,7 @@ impl RedbStorage {
             return Ok(());
         }
         let write_txn = self.db.begin_write()?;
-        {
+        let populate_res = (|| -> Result<(), StorageError> {
             if !hmc.is_empty() {
                 let mut table_hmc = write_txn.open_table(TABLE_HMC_LOCKS)?;
                 let mut table_vidx = write_txn.open_table(TABLE_HMC_VOUCHER_INDEX)?;
@@ -1268,8 +1278,23 @@ impl RedbStorage {
             for now_sec in prune_now_secs {
                 self.prune_expired_in_txn(&write_txn, *now_sec)?;
             }
+            Ok(())
+        })();
+
+        if let Err(e) = populate_res {
+            drop(write_txn);
+            if matches!(e, StorageError::SigningHistoryCorrupt) {
+                self.latch_corruption();
+            }
+            return Err(e);
         }
-        write_txn.commit()?;
+
+        if let Err(e) = write_txn.commit().map_err(StorageError::from) {
+            if matches!(e, StorageError::SigningHistoryCorrupt) {
+                self.latch_corruption();
+            }
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -1279,10 +1304,7 @@ impl RedbStorage {
         now_sec: u64,
     ) -> Result<(), StorageError> {
         if !self.is_signing_history_healthy() {
-            // A failed commit may have persisted only the RAM latch. Retry the
-            // durable marker on every subsequent successful pruning transaction.
-            self.latch_corruption_in_txn(txn);
-            return Ok(());
+            return Err(StorageError::SigningHistoryCorrupt);
         }
         let mut ttl = txn.open_table(TABLE_OWN_CHOICE_TTL)?;
         let expired = ttl
@@ -1305,11 +1327,15 @@ impl RedbStorage {
                     valid
                 };
                 if !valid {
-                    self.latch_corruption_in_txn(txn);
-                    // Preserve the evidence and let the caller commit the durable latch.
-                    return Ok(());
+                    self.signing_corrupt.store(true, Ordering::Release);
+                    return Err(StorageError::SigningHistoryCorrupt);
                 }
-                signing::remove_choice(txn, slot.as_str())?;
+                if let Err(e) = signing::remove_choice(txn, slot.as_str()) {
+                    if matches!(e, StorageError::SigningHistoryCorrupt) {
+                        self.signing_corrupt.store(true, Ordering::Release);
+                    }
+                    return Err(e);
+                }
                 ttl.remove(&(sec, slot.as_str()))?;
             }
         }
@@ -1596,7 +1622,7 @@ impl RedbStorage {
         }
         drop(table_hmc);
         drop(read_txn);
-        // Stage 1: collect genesis roots.
+        // Stage 1: collect committed genesis roots.
         let mut roots: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for root in self.all_voucher_roots()? {
             roots.insert(
@@ -1604,37 +1630,11 @@ impl RedbStorage {
                 roots::root_valid_until(&root)?,
             );
         }
-        for (_, entry) in &raw {
-            if let Some(v) = entry
-                .deletable_at
-                .as_deref()
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                roots.entry(entry.layer2_voucher_id.clone()).or_insert(v);
-            }
-        }
-        // Stage 2: evaluate expiry with inherited TTL; never use TTL 0.
+        // Stage 2: evaluate expiry exclusively from committed Root Anchors.
         let mut results = Vec::new();
         for (tag, entry) in raw {
-            let owned_ttl = entry
-                .deletable_at
-                .as_deref()
-                .and_then(|s| s.parse::<u64>().ok());
-            let inherited = roots.get(&entry.layer2_voucher_id).copied();
-            match (owned_ttl, inherited) {
-                (Some(v), _) => {
-                    if !should_prune(SimTime(now_ms), SimTime(v)) {
-                        results.push((tag, entry));
-                    }
-                }
-                (None, Some(root_v)) => {
-                    if !should_prune(SimTime(now_ms), SimTime(root_v)) {
-                        results.push((tag, entry));
-                    }
-                }
-                (None, None) => {
-                    // Orphan follow-up with unknown root: expiry unprovable —
-                    // retain instead of dropping with TTL 0.
+            if let Some(root_v) = roots.get(&entry.layer2_voucher_id).copied() {
+                if !should_prune(SimTime(now_ms), SimTime(root_v)) {
                     results.push((tag, entry));
                 }
             }

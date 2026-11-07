@@ -255,27 +255,32 @@ pub(super) fn remove_choice(txn: &redb::WriteTransaction, slot: &str) -> Result<
     if commitments.len()? != state.count {
         return Err(StorageError::SigningHistoryCorrupt);
     }
-    let old = choices.remove(slot)?.map(|v| v.value().to_vec());
-    if let Some(old) = old {
-        let expected_fp = fingerprint(slot, &old);
-        let stored_fp = commitments.remove(slot)?.map(|guard| *guard.value());
-        match stored_fp {
-            Some(stored) if stored == expected_fp => {}
-            _ => return Err(StorageError::SigningHistoryCorrupt),
-        }
-        state.generation = state
-            .generation
-            .checked_add(1)
-            .ok_or(StorageError::SigningHistoryCorrupt)?;
-        state.count = state
-            .count
-            .checked_sub(1)
-            .ok_or(StorageError::SigningHistoryCorrupt)?;
-        xor(&mut state.fingerprint, expected_fp);
-        write(txn, &state)?;
-    } else {
-        commitments.remove(slot)?;
+    let old = choices
+        .get(slot)?
+        .map(|v| v.value().to_vec())
+        .ok_or(StorageError::SigningHistoryCorrupt)?;
+    let expected_fp = fingerprint(slot, &old);
+    let stored_fp = commitments
+        .get(slot)?
+        .map(|guard| *guard.value())
+        .ok_or(StorageError::SigningHistoryCorrupt)?;
+    if stored_fp != expected_fp {
+        return Err(StorageError::SigningHistoryCorrupt);
     }
+
+    choices.remove(slot)?;
+    commitments.remove(slot)?;
+
+    state.generation = state
+        .generation
+        .checked_add(1)
+        .ok_or(StorageError::SigningHistoryCorrupt)?;
+    state.count = state
+        .count
+        .checked_sub(1)
+        .ok_or(StorageError::SigningHistoryCorrupt)?;
+    xor(&mut state.fingerprint, expected_fp);
+    write(txn, &state)?;
     Ok(())
 }
 
@@ -357,7 +362,7 @@ impl RedbStorage {
 
     /// Caller first verifies an actual self-signature and network context. A peer
     /// hint by itself is never evidence. The latch also blocks already queued votes.
-    pub(crate) fn observe_verified_own_checkpoint(
+    pub fn observe_verified_own_checkpoint(
         &self,
         generation: u64,
         fingerprint: [u8; 32],
@@ -443,10 +448,15 @@ mod tests {
                 .insert((1, slot.as_str()), ())
                 .unwrap();
             txn.commit().unwrap();
-            db.prune_expired_buckets(1).unwrap();
-            // Repeated prune markers must still commit the first corruption latch.
-            db.apply_flush_batch_atomic(&[], &[], &[], &[], &[1, 81])
-                .unwrap();
+            assert!(matches!(
+                db.prune_expired_buckets(1),
+                Err(StorageError::SigningHistoryCorrupt)
+            ));
+            // Repeated prune markers must still commit the first corruption latch and return Err.
+            assert!(matches!(
+                db.apply_flush_batch_atomic(&[], &[], &[], &[], &[1, 81]),
+                Err(StorageError::SigningHistoryCorrupt)
+            ));
             assert!(!db.is_signing_history_healthy());
             let txn = db.db.begin_read().unwrap();
             assert_eq!(txn.open_table(TABLE_OWN_CHOICES).unwrap().len().unwrap(), 1);
@@ -523,7 +533,7 @@ mod tests {
             let txn = db.db.begin_write().unwrap();
             db.latch_corruption_in_txn(&txn);
             txn.abort().unwrap();
-            db.prune_expired_buckets(1).unwrap();
+            let _ = db.prune_expired_buckets(1);
         }
         assert!(!RedbStorage::open(&path)
             .unwrap()

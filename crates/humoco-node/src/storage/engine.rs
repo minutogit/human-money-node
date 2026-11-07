@@ -988,6 +988,17 @@ impl DualTierEngine {
         self.support_updates.available_permits()
     }
 
+    /// Closes and awaits all tracked background recovery and persistence tasks.
+    pub async fn drain_recovery_work(&self) {
+        self.recovery_work.close();
+        self.recovery_work.wait().await;
+    }
+
+    /// Returns true if all tracked background recovery and persistence tasks are idle.
+    pub fn is_recovery_work_idle(&self) -> bool {
+        self.recovery_work.is_empty()
+    }
+
     async fn wait_original_approval(
         &self,
         key: [u8; 32],
@@ -1071,6 +1082,9 @@ impl DualTierEngine {
         class: u8,
         now_ms: u64,
     ) -> Result<Vec<u8>, StorageError> {
+        if !self.is_signing_healthy() {
+            return Err(StorageError::SigningHistoryCorrupt);
+        }
         if approval.is_empty() || approval.len() > 16_384 || class > 1 {
             return Err(StorageError::DurableCommitFailed(
                 "Invalid approval size or class".into(),
@@ -1095,7 +1109,6 @@ impl DualTierEngine {
                 .voucher_roots
                 .get(&accepted.layer2_voucher_id)
                 .copied()
-                .or_else(|| ram.valid_until.get(&tag).copied())
                 .ok_or_else(|| StorageError::DurableCommitFailed("Unknown root lifetime".into()))?;
             (accepted, root)
         };
@@ -1127,19 +1140,25 @@ impl DualTierEngine {
             .await?;
         {
             let mut hmc = self.hmc_ram.write().await;
+            if !self.is_signing_healthy() {
+                return Err(StorageError::SigningHistoryCorrupt);
+            }
             if hmc.locks.get(&committed_tag) != Some(&committed_entry)
                 || hmc
                     .voucher_roots
                     .get(&committed_entry.layer2_voucher_id)
                     .copied()
-                    .or_else(|| hmc.valid_until.get(&committed_tag).copied())
                     != Some(root)
             {
                 return Err(StorageError::OwnChoiceConflict);
             }
             hmc.mark_exact_durable(&committed_tag, &committed_entry, root);
-            // Durability protects this node's original choice. It supplies one
-            // vote, not verified committee support (DEC-022 / DEC-064).
+            if !self.is_signing_healthy() {
+                return Err(StorageError::SigningHistoryCorrupt);
+            }
+        }
+        if !self.is_signing_healthy() {
+            return Err(StorageError::SigningHistoryCorrupt);
         }
         Ok(result)
     }
@@ -1340,6 +1359,12 @@ impl DualTierEngine {
             }
         }
 
+        if self.recovery_work.is_closed() {
+            return Err(StorageError::DurableCommitFailed(
+                "persistence is shutting down".into(),
+            ));
+        }
+
         let permit = self
             .support_updates
             .clone()
@@ -1352,7 +1377,7 @@ impl DualTierEngine {
         let background_tag = tag.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        tokio::spawn(async move {
+        let _tracked = self.recovery_work.spawn(async move {
             let _permit = permit;
             let _activity = _activity;
             let mut publication = PublicationGuard {
@@ -1360,10 +1385,30 @@ impl DualTierEngine {
                 uncertain: true,
             };
 
-            let res = tokio::task::spawn_blocking(move || {
-                db.commit_confirmation_support(verified)
+            let mut res = tokio::task::spawn_blocking({
+                let db = db.clone();
+                let verified = verified.clone();
+                move || db.commit_confirmation_support(verified)
             })
             .await;
+
+            // If the lock was queued in the flush worker and not yet durably committed to TABLE_HMC_LOCKS,
+            // yield briefly to allow the flush worker to commit the lock to disk, then retry.
+            for _ in 0..10 {
+                if let Ok(Err(StorageError::DurableCommitFailed(ref msg))) = res {
+                    if msg.contains("support lock missing") {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        let db = db.clone();
+                        let verified = verified.clone();
+                        res = tokio::task::spawn_blocking(move || {
+                            db.commit_confirmation_support(verified)
+                        })
+                        .await;
+                        continue;
+                    }
+                }
+                break;
+            }
 
             let fact = match res {
                 Err(join_err) => {
@@ -2202,11 +2247,8 @@ impl DualTierEngine {
         let hmc_ram = self.hmc_ram.read().await;
         let hex_tag = hex::encode(parent_lock);
         if let Some(entry) = hmc_ram.locks.get(&hex_tag) {
-            let valid_until_ms = entry
-                .deletable_at
-                .as_deref()
-                .and_then(|s| s.parse::<u64>().ok())
-                .or_else(|| hmc_ram.get_voucher_root_valid(&entry.layer2_voucher_id))
+            let valid_until_ms = hmc_ram
+                .get_voucher_root_valid(&entry.layer2_voucher_id)
                 .unwrap_or(0);
             return Some(LockInspection {
                 parent_lock_hex: hex_tag,
@@ -3059,6 +3101,17 @@ impl DualTierEngine {
                     };
                 }
                 Err(e) => {
+                    if matches!(e, StorageError::SigningHistoryCorrupt) {
+                        db.latch_corruption();
+                        for (completion, _) in completions.drain(..) {
+                            completion.failed(StorageError::SigningHistoryCorrupt);
+                        }
+                        return FlushOutcome {
+                            ops_committed,
+                            attempts,
+                            failed: true,
+                        };
+                    }
                     if attempts >= MAX_FLUSH_RETRIES {
                         error!(
                             "Flush batch commit failed after {} attempts: {} ({} ops uncommitted)",
@@ -3148,35 +3201,24 @@ impl DualTierEngine {
                 followups.push((tag, entry, support));
             }
         }
-        // Precompute roots (including expired ones) so follow-ups inherit the
-        // same TTL their genesis carries; expiry is then evaluated uniformly.
+        // Precompute roots exclusively from committed genesis root anchors.
         let mut root_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        for (_, e, _) in genesis.iter().chain(followups.iter()) {
+        for (_, e, _) in genesis.iter() {
             if let Ok(v) = super::db::roots::root_valid_until(e) {
                 root_map.entry(e.layer2_voucher_id.clone()).or_insert(v);
             }
         }
         let mut hmc_ram = self.hmc_ram.write().await;
         for (tag, entry, support) in genesis.into_iter().chain(followups) {
-            // Expiry filter at recovery time `now`: entries with known
-            // (owned or inherited) TTL that already exceed grace are skipped.
-            // Orphans with unknown root are retained (expiry unprovable,
-            // never TTL-0-dropped); `insert_recovered` defers them until the
-            // root arrives.
-            let owned = if super::db::roots::is_root(&tag, &entry) {
-                super::db::roots::root_valid_until(&entry).ok()
-            } else {
-                None
+            let Some(&root_v) = root_map.get(&entry.layer2_voucher_id) else {
+                continue;
             };
-            let effective = owned.or_else(|| root_map.get(&entry.layer2_voucher_id).copied());
-            if let Some(v) = effective {
-                if should_prune(now, SimTime(v)) {
-                    continue;
-                }
+            if should_prune(now, SimTime(root_v)) {
+                continue;
             }
             hmc_ram.insert_recovered(tag.clone(), entry.clone());
             if let Some(fact) = support.filter(|fact| {
-                fact.child == entry.t_id && effective == Some(fact.root_valid_until_ms)
+                fact.child == entry.t_id && fact.root_valid_until_ms == root_v
             }) {
                 hmc_ram.set_confirmation_class(&tag, fact.class);
             }
@@ -3222,12 +3264,23 @@ impl DualTierEngine {
         };
 
         let db = self.db.clone();
-        let disk_hmc_pruned =
+        let disk_hmc_pruned_res =
             tokio::task::spawn_blocking(move || db.prune_expired_buckets(now.0 / 1_000))
                 .await
                 .map_err(|error| {
                     StorageError::DurableCommitFailed(format!("Prune worker failed: {error}"))
-                })??;
+                })?;
+        let disk_hmc_pruned = match disk_hmc_pruned_res {
+            Ok(count) => count,
+            Err(e) => {
+                if matches!(e, StorageError::SigningHistoryCorrupt) {
+                    self.stats
+                        .signing_failed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                return Err(e);
+            }
+        };
         self.last_prune_anchor
             .store(now.0, std::sync::atomic::Ordering::Relaxed);
         Ok(hmc_pruned + disk_hmc_pruned)

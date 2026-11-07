@@ -10,22 +10,26 @@ use http_body_util::BodyExt;
 use humoco_node::{
     api::{
         build_router,
+        dto::QuorumCertificateDto,
         hmc::{
             calculate_l2_payload_hash, L2AuthPayload, L2ChainLockRequest, L2LockEntry,
             L2LockRequest, L2Verdict,
         },
-        routes::build_operator_router,
+        routes::{build_operator_router, create_attestation_for_network},
         AppState,
     },
     daemon::ShardReadinessManager,
     identity::NodeIdentity,
     ingress::{PowEngine, TierController},
     network::{framing::LockWirePayload, NodeRequestHandler, PeerManager, QuicTransport},
-    storage::{DualTierEngine, IngressOrigin, RedbStorage},
+    storage::{
+        db::install::ShardStage, db::TABLE_HMC_LOCKS, DualTierEngine, IngressOrigin, RedbStorage,
+        StorageError, TABLE_OWN_CHOICES, TABLE_OWN_CHOICE_COMMITMENTS,
+    },
 };
 use humoco_proto::causal::CausalOutputProof;
 use humoco_sim_core::{
-    types::SimTime,
+    types::{canonical_voucher_shard, genesis_parent_bytes_from_tag, NetworkId, SimTime},
     wire::{MsgType, WireHeader, FLAG_COLLISION_DETECTED, FLAG_PEER_SUSPENDED},
 };
 use sha2::{Digest, Sha256};
@@ -33,6 +37,9 @@ use sha3::Sha3_256;
 use std::{error::Error, path::Path, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+
+#[path = "common/recovery.rs"]
+mod recovery;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -593,5 +600,690 @@ async fn real_quic_wallet_conflict_preserves_node_identity_and_restart() -> Test
         source.stop().await?;
         target.stop().await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_05_prune_commitment_corruption_fails_closed_without_partial_delete() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("s02_05_a.redb");
+    let key = SigningKey::from_bytes(&[81; 32]);
+    let root_req = root(&key, 1, 10_000)?;
+    let spend_req = spend(&root_req, 2, &key)?;
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+
+    let node = [7u8; 32];
+    let slot = format!("{}:{}", hex::encode(node), spend_tag);
+
+    {
+        let db = RedbStorage::open(&path)?;
+        db.put_hmc_lock(&root_tag, &(&root_req).into())?;
+        db.commit_original_approval(&spend_tag, &(&spend_req).into(), &node, b"appr", 0, 50_000)?;
+        assert!(db.is_signing_history_healthy());
+
+        // Corrupt TABLE_OWN_CHOICE_COMMITMENTS for `slot` without changing table cardinality
+        let txn = db.raw_database_for_test().begin_write()?;
+        {
+            let mut commitments = txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+            commitments.insert(slot.as_str(), &[0xee; 32])?;
+        }
+        txn.commit()?;
+
+        // Trigger prune_expired_buckets at now_sec = 81 (valid_until_ms = 50_000 -> expires_sec = 81)
+        let prune_res = db.prune_expired_buckets(81);
+        assert!(
+            matches!(prune_res, Err(StorageError::SigningHistoryCorrupt)),
+            "prune_expired_buckets must return SigningHistoryCorrupt, got: {prune_res:?}"
+        );
+        assert!(
+            !db.is_signing_history_healthy(),
+            "in-memory signing latch must be corrupt immediately"
+        );
+
+        // Verify corrupted row is NOT partially deleted (evidence preserved!)
+        let read_txn = db.raw_database_for_test().begin_read()?;
+        let choices = read_txn.open_table(TABLE_OWN_CHOICES)?;
+        assert!(
+            choices.get(slot.as_str())?.is_some(),
+            "TABLE_OWN_CHOICES row must NOT be partially deleted upon corruption"
+        );
+        let commitments = read_txn.open_table(TABLE_OWN_CHOICE_COMMITMENTS)?;
+        assert!(
+            commitments.get(slot.as_str())?.is_some(),
+            "TABLE_OWN_CHOICE_COMMITMENTS row must NOT be partially deleted upon corruption"
+        );
+    }
+
+    // Latch must persist across RedbStorage::open reopen
+    let reopened = RedbStorage::open(&path)?;
+    assert!(
+        !reopened.is_signing_history_healthy(),
+        "corruption latch must survive database reopen"
+    );
+
+    // Committing another slot must be rejected fail-closed
+    let another_res = reopened.commit_original_approval(
+        "another-spend",
+        &(&spend_req).into(),
+        &node,
+        b"appr2",
+        0,
+        50_000,
+    );
+    assert!(
+        matches!(another_res, Err(StorageError::SigningHistoryCorrupt)),
+        "committing another slot on corrupt DB must be rejected fail-closed"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_05_atomic_flush_batch_aborts_on_corruption_and_latches_durably() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("s02_05_b.redb");
+    let key = SigningKey::from_bytes(&[82; 32]);
+    let root_req = root(&key, 1, 10_000)?;
+    let spend_req1 = spend(&root_req, 2, &key)?;
+    let spend_req2 = spend(&spend_req1, 3, &key)?;
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    let spend_tag1 = spend_req1.ds_tag.clone().ok_or("missing spend tag 1")?;
+    let spend_tag2 = spend_req2.ds_tag.clone().ok_or("missing spend tag 2")?;
+
+    let node = [8u8; 32];
+    let slot1 = format!("{}:{}", hex::encode(node), spend_tag1);
+
+    let db = Arc::new(RedbStorage::open(&path)?);
+    db.put_hmc_lock(&root_tag, &(&root_req).into())?;
+    db.commit_original_approval(&spend_tag1, &(&spend_req1).into(), &node, b"appr1", 0, 50_000)?;
+    assert!(db.is_signing_history_healthy());
+
+    // Inject an inconsistent/premature TTL index entry: bucket sec = 1 while choice has valid_until_ms = 50_000 (bucket 81)
+    let txn = db.raw_database_for_test().begin_write()?;
+    {
+        let mut ttl = txn.open_table(humoco_node::storage::db::TABLE_OWN_CHOICE_TTL)?;
+        ttl.insert(&(1, slot1.as_str()), ())?;
+    }
+    txn.commit()?;
+
+    // Attempt to flush a batch containing a new spend lock (spend2) AND prune_now_secs = [1]
+    let entry2: L2LockEntry = (&spend_req2).into();
+    let entry2_bytes = serde_json::to_vec(&entry2)?;
+    let hmc_view = [(&spend_tag2[..], &entry2, &entry2_bytes[..], 600_000u64 + 10_000u64)];
+    let res = db.apply_flush_batch_atomic(&hmc_view, &[], &[], &[], &[1]);
+
+    // On unpatched code, prune_own_choices returned Ok(()) on !valid, committing the batch!
+    // On patched code, it must return Err(SigningHistoryCorrupt).
+    assert!(
+        matches!(res, Err(StorageError::SigningHistoryCorrupt)),
+        "apply_flush_batch_atomic must return SigningHistoryCorrupt, got: {res:?}"
+    );
+
+    // Verify batch write was aborted: new lock spend_tag2 must NOT exist in redb!
+    assert!(
+        db.get_hmc_lock(&spend_tag2)?.is_none(),
+        "aborted flush batch must NOT commit spend_tag2 to redb"
+    );
+
+    // Verify corruption latch is persisted across reopen
+    drop(db);
+
+    let reopened = RedbStorage::open(&path)?;
+    assert!(
+        !reopened.is_signing_history_healthy(),
+        "signing corruption latch must persist across reopen"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_06_persist_approval_race_latches_corruption_and_rejects_publication() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("s02_06_race.redb");
+    let key = SigningKey::from_bytes(&[83; 32]);
+    let root_req = root(&key, 1, 10_000)?;
+    let spend_req = spend(&root_req, 2, &key)?;
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+
+    let db = Arc::new(RedbStorage::open(&path)?);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let hmc_ram = Arc::new(tokio::sync::RwLock::new(humoco_node::storage::HmcRamIndex::new()));
+    let engine = DualTierEngine::from_parts(hmc_ram, db.clone(), tx);
+
+    // Anchor root and insert spend lock in engine RAM
+    let spend_entry: L2LockEntry = (&spend_req).into();
+    engine.hmc_ram.write().await.insert_voucher_root_for_test(spend_entry.layer2_voucher_id.clone(), 600_000 + 10_000);
+    engine.hmc_ram.write().await.insert_lock_for_test(spend_tag.clone(), spend_entry.clone());
+
+    let node = [9u8; 32];
+    let approval = b"original_approval_s02_06".to_vec();
+
+    // Spawn persist_original_approval in a separate task
+    let engine_clone = engine.clone();
+    let spend_tag_clone = spend_tag.clone();
+    let spend_entry_clone = spend_entry.clone();
+    let handle = tokio::task::spawn(async move {
+        engine_clone
+            .persist_original_approval(
+                spend_tag_clone,
+                spend_entry_clone,
+                node,
+                approval,
+                0,
+                10_000,
+            )
+            .await
+    });
+
+    // Controlled persistence channel: receive the FlushOp from persist_original_approval
+    let op = rx.recv().await.ok_or("must receive FlushOp")?;
+    let complete = match op {
+        humoco_node::storage::FlushOp::OriginalHmcApproval { complete, .. } => complete,
+        other => return Err(format!("expected OriginalHmcApproval, got: {other:?}").into()),
+    };
+
+    // Acquire write_guard on hmc_ram while persist_original_approval is waiting in wait_original_approval
+    let write_guard = engine.hmc_ram.write().await;
+
+    // Complete the durable ACK while holding write_guard
+    complete.send(Some(Ok(b"committed_bytes".to_vec())))?;
+
+    // Yield so persist_original_approval wakes up from wait_original_approval and
+    // is deterministically suspended at `let mut hmc = self.hmc_ram.write().await;`
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    // While write_guard is still held, latch signing corruption!
+    engine.db.latch_corruption();
+    assert!(!engine.is_signing_healthy());
+
+    // Drop write_guard so persist_original_approval resumes and enters hmc_ram.write()
+    drop(write_guard);
+
+    // Await handle: MUST return Err(SigningHistoryCorrupt)!
+    let res = handle.await?;
+    assert!(
+        matches!(res, Err(StorageError::SigningHistoryCorrupt)),
+        "persist_original_approval must return Err(SigningHistoryCorrupt) if latched during wait, got: {res:?}"
+    );
+
+    // Verify it was NOT marked durable
+    let ram = engine.hmc_ram.read().await;
+    let root_val = ram.get_voucher_root_valid(&spend_entry.layer2_voucher_id).unwrap_or(0);
+    assert!(
+        !ram.is_entry_durable(&spend_tag, &spend_entry, root_val),
+        "entry must NOT be marked durable when signing corruption occurred"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_06_real_quic_rollback_checkpoint_suppresses_attestation() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source_path = dir.path().join("s02_06_source.redb");
+    let target_path = dir.path().join("s02_06_target.redb");
+    let source_id = NodeIdentity::generate();
+    let target_id = NodeIdentity::generate();
+    let wallet_node = NodeIdentity::generate();
+    let now = now_ms()?;
+    let root_req = root(wallet_node.signing_key(), 30, now)?;
+    let spend_req = spend(&root_req, 31, wallet_node.signing_key())?;
+
+    let source = WireNode::start(&source_path, source_id).await?;
+    let target = WireNode::start(&target_path, target_id).await?;
+    target
+        .manager
+        .register_f2f_friend(*wallet_node.node_pubkey(), None)
+        .await;
+    anchor(&target.engine, &root_req).await?;
+    target.ready.mark_shard_ready(shard(&root_req));
+
+    // Latch corruption on target via a verified rollback checkpoint contradiction
+    let corrupted = target
+        .db
+        .observe_verified_own_checkpoint(999, [0xcc; 32])?;
+    assert!(corrupted, "observe_verified_own_checkpoint must detect contradiction");
+    assert!(!target.engine.is_signing_healthy());
+
+    let connection = connect_friends(&source, &target).await?;
+    let (_reply, bytes) = send_spend(&source, &connection, &spend_req, 1, false).await?;
+
+    // Verify NO attestation is released over the real QUIC connection
+    let attestation = humoco_node::api::dto::AttestationDto::from_wire_bytes(&bytes);
+    assert!(
+        attestation.is_none(),
+        "No attestation must be released over QUIC when signing history is latched corrupt"
+    );
+
+    drop(connection);
+    source.stop().await?;
+    target.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_07_spend_lock_inherits_root_ttl_ignoring_short_spend_hint() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let db = RedbStorage::open(&dir.path().join("s02_07_a.redb"))?;
+
+    let root_entry = L2LockEntry {
+        causal_output: None,
+        t_id: [0x41; 32],
+        layer2_voucher_id: "voucher-s02-07-a".to_string(),
+        sender_ephemeral_pub: [0x11; 32],
+        layer2_signature: [0x22; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 1000,
+        created_at_ms: 1000,
+        deletable_at: Some("105000".to_string()), // Root-TTL = 105_000
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root_entry.t_id).into_string();
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag);
+    let shard = humoco_sim_core::types::canonical_voucher_shard(&parent);
+    db.put_hmc_lock(&root_tag, &root_entry)?;
+
+    let spend_entry = L2LockEntry {
+        causal_output: None,
+        t_id: [0x42; 32],
+        layer2_voucher_id: "voucher-s02-07-a".to_string(),
+        sender_ephemeral_pub: [0x33; 32],
+        layer2_signature: [0x44; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 2000,
+        created_at_ms: 2000,
+        deletable_at: Some("1".to_string()), // Spend hint = 1 (shorter than root)
+        privacy_guard: None,
+    };
+    let spend_tag = "spend-s02-07-short-hint".to_string();
+    db.put_hmc_lock(&spend_tag, &spend_entry)?;
+
+    // At now_ms = 50_000 (valid under Root-TTL 105_000, expired under spend hint 1):
+    let active_shard_locks = db.active_hmc_locks_for_shard(shard, 50_000)?;
+    assert!(
+        active_shard_locks.iter().any(|(tag, _)| tag == &spend_tag),
+        "active_hmc_locks_for_shard must include spend lock at now=50000 deriving TTL from root"
+    );
+
+    let all_valid = db.all_valid_hmc_locks(50_000)?;
+    assert!(
+        all_valid.iter().any(|(tag, _)| tag == &spend_tag),
+        "all_valid_hmc_locks must include spend lock at now=50000 deriving TTL from root"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_07_spend_lock_cannot_extend_expired_root_and_orphan_does_not_synthesize_root() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let db = Arc::new(RedbStorage::open(&dir.path().join("s02_07_b.redb"))?);
+
+    let root_entry = L2LockEntry {
+        causal_output: None,
+        t_id: [0x51; 32],
+        layer2_voucher_id: "voucher-s02-07-b".to_string(),
+        sender_ephemeral_pub: [0x11; 32],
+        layer2_signature: [0x22; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 100,
+        created_at_ms: 100,
+        deletable_at: Some("1000".to_string()), // Root-TTL = 1000 (expires at 1000 + 30_000 = 31_000)
+        privacy_guard: None,
+    };
+    let root_tag = bs58::encode(root_entry.t_id).into_string();
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag);
+    let shard = humoco_sim_core::types::canonical_voucher_shard(&parent);
+    db.put_hmc_lock(&root_tag, &root_entry)?;
+
+    let spend_entry = L2LockEntry {
+        causal_output: None,
+        t_id: [0x52; 32],
+        layer2_voucher_id: "voucher-s02-07-b".to_string(),
+        sender_ephemeral_pub: [0x33; 32],
+        layer2_signature: [0x44; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 200,
+        created_at_ms: 200,
+        deletable_at: Some("999999".to_string()), // Spend hint cannot extend root
+        privacy_guard: None,
+    };
+    let spend_tag = "spend-s02-07-extended-hint".to_string();
+    db.put_hmc_lock(&spend_tag, &spend_entry)?;
+
+    // Orphan spend with no committed root
+    let orphan_entry = L2LockEntry {
+        causal_output: None,
+        t_id: [0x53; 32],
+        layer2_voucher_id: "orphan-voucher-unanchored".to_string(),
+        sender_ephemeral_pub: [0x55; 32],
+        layer2_signature: [0x66; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 300,
+        created_at_ms: 300,
+        deletable_at: Some("999999".to_string()),
+        privacy_guard: None,
+    };
+    let orphan_tag = "orphan-spend-tag".to_string();
+    let txn = db.raw_database_for_test().begin_write()?;
+    {
+        let mut locks = txn.open_table(TABLE_HMC_LOCKS)?;
+        locks.insert(orphan_tag.as_str(), serde_json::to_vec(&orphan_entry)?.as_slice())?;
+    }
+    txn.commit()?;
+
+    // At now_ms = 50_000 (past root TTL 1000 + 30s grace = 31000):
+    let active_shard_locks = db.active_hmc_locks_for_shard(shard, 50_000)?;
+    assert!(
+        !active_shard_locks.iter().any(|(tag, _)| tag == &spend_tag),
+        "spend hint must not extend expired root lifetime in active_hmc_locks_for_shard"
+    );
+    assert!(
+        !active_shard_locks.iter().any(|(tag, _)| tag == &orphan_tag),
+        "orphan spend must not appear in active_hmc_locks_for_shard"
+    );
+
+    let all_valid = db.all_valid_hmc_locks(50_000)?;
+    assert!(
+        !all_valid.iter().any(|(tag, _)| tag == &spend_tag),
+        "spend hint must not extend expired root lifetime in all_valid_hmc_locks"
+    );
+    assert!(
+        !all_valid.iter().any(|(tag, _)| tag == &orphan_tag),
+        "orphan spend must not synthesize root in all_valid_hmc_locks"
+    );
+
+    // Also verify recover_from_disk does not synthesize a root or retain expired/orphan spend
+    let cancel = CancellationToken::new();
+    let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
+    engine.recover_from_disk(SimTime(50_000)).await?;
+    let ram = engine.hmc_ram.read().await;
+    assert!(
+        !ram.locks().contains_key(&spend_tag),
+        "recover_from_disk must not retain expired spend"
+    );
+    assert!(
+        !ram.locks().contains_key(&orphan_tag),
+        "recover_from_disk must not retain orphan spend without root"
+    );
+    assert!(
+        !ram.voucher_roots().contains_key("orphan-voucher-unanchored"),
+        "recover_from_disk must not synthesize a root from orphan spend hint"
+    );
+    cancel.cancel();
+    worker.await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_07_real_quic_shard_reconciliation_sees_inherited_ttl_spend() -> TestResult {
+    let peers = recovery::recovery_peers(2).await;
+    let (reader, source) = (&peers[0], &peers[1]);
+
+    let key = SigningKey::from_bytes(&[85; 32]);
+    let sender = key.verifying_key().to_bytes();
+    let transaction = [0x61; 32];
+    let expiry = "105000".to_string();
+    let receiver: [u8; 32] = Sha3_256::digest(sender).into();
+    let mut hash = Sha256::new();
+    hash.update(transaction);
+    hash.update(sender);
+    hash.update(receiver);
+    hash.update(expiry.as_bytes());
+    let voucher = hex::encode(hash.finalize());
+
+    let mut proof = CausalOutputProof {
+        version: 1,
+        voucher_id: voucher.clone(),
+        transaction_id: transaction,
+        state_hash: transaction,
+        sender_pubkey: sender,
+        receiver_pubkey_hash: Some(receiver),
+        change_pubkey_hash: None,
+        root_valid_until_ms: 105_000,
+        is_root: true,
+        signature: [0; 64],
+    };
+    proof.signature = key
+        .sign(&proof.digest().map_err(std::io::Error::other)?)
+        .to_bytes();
+
+    let mut root_req = L2LockRequest {
+        causal_output: Some(proof),
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher.clone(),
+        ds_tag: None,
+        transaction_hash: transaction,
+        is_genesis: true,
+        sender_ephemeral_pub: sender,
+        layer2_signature: [0; 64],
+        trap_r: None,
+        trap_s: None,
+        encrypted_timestamp: 1000,
+        created_at_ms: 1000,
+        deletable_at: Some(expiry),
+        privacy_guard: None,
+    };
+    root_req.layer2_signature = key.sign(&calculate_l2_payload_hash(&root_req)).to_bytes();
+
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&root_tag);
+    let shard = humoco_sim_core::types::canonical_voucher_shard(&parent);
+    source.db.put_hmc_lock(&root_tag, &(&root_req).into())?;
+
+    let mut spend_req = spend(&root_req, 0x62, &key)?;
+    spend_req.deletable_at = Some("1".to_string()); // Spend hint = 1
+    spend_req.layer2_signature = key.sign(&calculate_l2_payload_hash(&spend_req)).to_bytes();
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+    source.db.put_hmc_lock(&spend_tag, &(&spend_req).into())?;
+
+    // In unpatched code, source's active_hmc_locks_for_shard at 50_000 dropped the spend lock!
+    let source_active = source.db.active_hmc_locks_for_shard(shard, 50_000)?;
+    assert!(
+        source_active.iter().any(|(t, _)| t == &spend_tag),
+        "Source active_hmc_locks_for_shard must include spend lock deriving TTL from root"
+    );
+
+    // Connect reader to source over real QUIC
+    let conn = reader
+        .network
+        .connect_peer(source.network.local_addr()?)
+        .await?;
+
+    // Request active sync page for shard over real QUIC
+    let page = reader
+        .network
+        .request_active_sync_page_for_shard(&conn, 1, 0, 100, shard)
+        .await?;
+
+    // Verify page payload contains spend_tag
+    assert!(
+        page.payload.hmc_locks.iter().any(|(t, _)| t == &spend_tag),
+        "Active sync page over real QUIC must include spend lock with inherited Root-TTL"
+    );
+
+    // Verify reader stages and installs the reconciled cut cleanly
+    let stage = Arc::new(ShardStage::new(shard, 50_000)?);
+    stage.append(page.payload)?;
+    let digest = stage.digest()?;
+    reader
+        .engine
+        .install_shard_snapshot(stage, digest, 1, [0x77; 32], 3, None, None)
+        .await?;
+
+    // Reader storage now holds the reconciled spend lock
+    let installed = reader.db.get_hmc_lock(&spend_tag)?;
+    assert!(installed.is_some(), "Installed snapshot must contain spend lock");
+    assert_eq!(installed.unwrap().t_id, spend_req.transaction_hash);
+
+    // Reader active shard query at now=50_000 also sees the lock
+    let reader_active = reader.db.active_hmc_locks_for_shard(shard, 50_000)?;
+    assert!(
+        reader_active.iter().any(|(t, _)| t == &spend_tag),
+        "Reader active_hmc_locks_for_shard must see reconciled lock at now=50000"
+    );
+
+    drop(conn);
+    recovery::stop_recovery_peers(peers).await;
+    Ok(())
+}
+
+// ============================================================================
+// S02-08: Support persistence continuation participates in shutdown drain and
+// preserves caller deadline independence
+// ============================================================================
+
+#[tokio::test]
+async fn test_s02_08_persist_support_deadline_expiry_participates_in_drain() -> TestResult {
+    let now = now_ms()?;
+    let key = SigningKey::from_bytes(&[42; 32]);
+    let root_req = root(&key, 0x51, now)?;
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+
+    let temp = tempfile::tempdir()?;
+    let db = Arc::new(RedbStorage::open(&temp.path().join("s02_08_drain.redb"))?);
+    let cancel = CancellationToken::new();
+    let (engine, _worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
+
+    // Ingress root lock
+    let (v_root, _) = engine
+        .ingress_hmc_lock_durable(
+            root_tag.clone(),
+            L2LockEntry::from(&root_req),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(v_root, L2Verdict::Verified { .. }));
+
+    // Ingress spend lock
+    let spend_req = spend(&root_req, 0x52, &key)?;
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+    let (v_spend, _) = engine
+        .ingress_hmc_lock_durable(
+            spend_tag.clone(),
+            L2LockEntry::from(&spend_req),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(v_spend, L2Verdict::Verified { .. }));
+
+    // Prepare valid provisional support certificate (status = 0, class = 1)
+    let parent = *blake3::hash(spend_tag.as_bytes()).as_bytes();
+    let genesis_parent = genesis_parent_bytes_from_tag(&root_tag);
+    let shard = canonical_voucher_shard(&genesis_parent);
+    let identity = NodeIdentity::generate();
+    let att = create_attestation_for_network(
+        &identity,
+        spend_req.transaction_hash,
+        parent,
+        shard,
+        0,
+        now,
+        NetworkId::Mainnet,
+    );
+    let cert = QuorumCertificateDto {
+        lock_id: hex::encode(spend_req.transaction_hash),
+        shard_id: shard,
+        status: 0,
+        active_nodes_count: 1,
+        signer_count: 1,
+        signatures: vec![att],
+        signer_bitmap: 1,
+    };
+
+    // Hold a blocking redb write transaction to freeze support persistence commit
+    let blocking_txn = db.raw_database_for_test().begin_write()?;
+
+    // Call persist_confirmation_support_with_deadline with a tight deadline (15ms)
+    let res = engine
+        .persist_confirmation_support_with_deadline(
+            spend_tag.clone(),
+            cert,
+            &identity,
+            now,
+            NetworkId::Mainnet,
+            None,
+            Some(tokio::time::Instant::now() + Duration::from_millis(15)),
+        )
+        .await;
+
+    assert!(
+        matches!(res, Err(StorageError::DurableCommitFailed(ref msg)) if msg.contains("deadline exceeded")),
+        "Caller deadline must return Err immediately upon expiration: {:?}",
+        res
+    );
+
+    // Continuation task is now in-flight, tracked under engine.recovery_work
+    assert!(
+        !engine.is_recovery_work_idle(),
+        "Continuation must be tracked in recovery_work while commit is pending"
+    );
+
+    // Draining engine persistence tasks must NOT complete while the redb writer is blocked!
+    let mut drain_fut = Box::pin(engine.drain_recovery_work());
+    let drained_prematurely = tokio::time::timeout(Duration::from_millis(100), &mut drain_fut)
+        .await
+        .is_ok();
+    assert!(
+        !drained_prematurely,
+        "Engine persistence drain must NOT complete while detached support commit is blocked on disk"
+    );
+
+    // Verify neither durable support nor RAM confirmation class is published yet
+    assert!(
+        db.confirmation_support(&spend_tag)?.is_none(),
+        "Confirmation support must not be durably committed before unblocking"
+    );
+    assert_eq!(
+        engine.hmc_ram.read().await.get_confirmation_class(&spend_tag),
+        0,
+        "RAM confirmation class must remain 0 before unblocking"
+    );
+
+    // Release blocking transaction
+    drop(blocking_txn);
+
+    // Drain must now complete cleanly within a short timeout
+    tokio::time::timeout(Duration::from_secs(3), drain_fut)
+        .await
+        .map_err(|_| "Drain timed out after releasing blocking transaction")?;
+
+    // Now durable support and RAM confirmation class must both be published!
+    let durable_support = db.confirmation_support(&spend_tag)?;
+    assert!(
+        durable_support.is_some(),
+        "Confirmation support must be durably committed after unblocking"
+    );
+    assert_eq!(durable_support.as_ref().map(|s| s.class), Some(1));
+    assert_eq!(
+        engine.hmc_ram.read().await.get_confirmation_class(&spend_tag),
+        1,
+        "RAM confirmation class must be updated to 1 after completion"
+    );
+    assert!(engine.is_recovery_work_idle());
+
+    cancel.cancel();
+    let _ = _worker.await;
     Ok(())
 }

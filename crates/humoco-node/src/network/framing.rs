@@ -865,11 +865,11 @@ pub async fn read_frame_admitted<R: AsyncReadExt + Unpin>(
         }
 
         let permit = if let Some((sync, rpc)) = pools {
-            let pool = if header.msg_type == MsgType::ActiveSyncRequest as u16 {
-                sync
-            } else {
-                rpc
-            };
+            let is_sync = header.msg_type == MsgType::ActiveSyncRequest as u16
+                || header.msg_type == MsgType::ShardDigestRequest as u16
+                || header.msg_type == MsgType::ShardBucketRangeRequest as u16
+                || header.msg_type == MsgType::LiveStateRequest as u16;
+            let pool = if is_sync { sync } else { rpc };
             Some(
                 pool.try_acquire_owned()
                     .map_err(|_| NodeError::LocalCapacity("wire service admission exhausted"))?,

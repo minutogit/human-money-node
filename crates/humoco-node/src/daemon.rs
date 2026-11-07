@@ -258,6 +258,7 @@ pub struct NodeDaemon {
     bootstrap_new_region: bool,
     cancel_token: CancellationToken,
     bound_addr_tx: Mutex<Option<tokio::sync::oneshot::Sender<BoundAddrs>>>,
+    engine_tx: Mutex<Option<tokio::sync::oneshot::Sender<crate::storage::DualTierEngine>>>,
 }
 
 impl NodeDaemon {
@@ -269,6 +270,7 @@ impl NodeDaemon {
             bootstrap_new_region: false,
             cancel_token: CancellationToken::new(),
             bound_addr_tx: Mutex::new(None),
+            engine_tx: Mutex::new(None),
         }
     }
 
@@ -284,6 +286,7 @@ impl NodeDaemon {
             bootstrap_new_region: false,
             cancel_token,
             bound_addr_tx: Mutex::new(None),
+            engine_tx: Mutex::new(None),
         }
     }
 
@@ -300,7 +303,19 @@ impl NodeDaemon {
             bootstrap_new_region: false,
             cancel_token,
             bound_addr_tx: Mutex::new(Some(tx)),
+            engine_tx: Mutex::new(None),
         }
+    }
+
+    /// Sets an engine notification channel to receive the active DualTierEngine upon startup.
+    pub fn with_engine_sender(
+        self,
+        tx: tokio::sync::oneshot::Sender<crate::storage::DualTierEngine>,
+    ) -> Self {
+        if let Ok(mut lock) = self.engine_tx.try_lock() {
+            *lock = Some(tx);
+        }
+        self
     }
 
     /// Explicit operator authorization to establish a new, empty regional registry.
@@ -475,6 +490,11 @@ impl NodeDaemon {
         );
         *cleanup.flush.lock() = Some((flush_cancel_token.clone(), flush_handle.abort_handle()));
         *cleanup.recovery_work.lock() = Some(engine.recovery_work.clone());
+        if let Ok(mut lock) = self.engine_tx.try_lock() {
+            if let Some(tx) = lock.take() {
+                let _ = tx.send(engine.clone());
+            }
+        }
         // Cold-boot recovery: Load all records into RAM index without premature pruning.
         // Unverified host SystemTime must not be trusted before P2P median synchronization (Spec 07 / INV-1203).
         engine

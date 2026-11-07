@@ -476,6 +476,21 @@ impl HeartbeatDedupCache {
         true
     }
 
+    /// Checks if an ID is present in the dedup set.
+    pub fn contains(&self, id: &[u8; 32]) -> bool {
+        self.set.contains(id)
+    }
+
+    /// Removes an ID from the dedup set and eviction queue.
+    pub fn remove(&mut self, id: &[u8; 32]) -> bool {
+        if self.set.remove(id) {
+            self.queue.retain(|x| x != id);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn check_and_insert_slotted(
         &mut self,
         id: [u8; 32],
@@ -1503,6 +1518,19 @@ impl PeerManager {
         } else {
             true
         }
+    }
+
+    /// Checks if a fraud proof dedup hash has been recorded in the seen-set.
+    pub async fn has_fraud_proof(&self, hash: &[u8; 32]) -> bool {
+        let guard = self.seen_fraud_proofs.read().await;
+        guard.contains(hash)
+    }
+
+    /// Removes a previously recorded fraud proof hash from the dedup seen-set,
+    /// allowing subsequent retries to attempt forwarding when capacity recovers.
+    pub async fn remove_fraud_proof(&self, hash: &[u8; 32]) -> bool {
+        let mut guard = self.seen_fraud_proofs.write().await;
+        guard.remove(hash)
     }
 
     pub fn broadcast_fraud_proof(&self, proof: humoco_sim_core::fraud::FraudProofPayload) {

@@ -540,11 +540,15 @@ async fn signing_release_under_fault(fault: u8) {
             .unwrap();
         txn.commit().unwrap();
         if fault == 1 {
-            storage.prune_expired_buckets(1).unwrap();
+            assert!(matches!(
+                storage.prune_expired_buckets(1),
+                Err(humoco_node::storage::StorageError::SigningHistoryCorrupt)
+            ));
         } else {
-            storage
-                .apply_flush_batch_atomic(&[], &[], &[], &[], &[1, 2])
-                .unwrap();
+            assert!(matches!(
+                storage.apply_flush_batch_atomic(&[], &[], &[], &[], &[1, 2]),
+                Err(humoco_node::storage::StorageError::SigningHistoryCorrupt)
+            ));
         }
         assert!(!storage.is_signing_history_healthy());
         let retained = storage

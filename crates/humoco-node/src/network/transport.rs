@@ -8,8 +8,16 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-/// Maximum number of concurrent QUIC stream handler tasks (DoS/OOM protection).
+/// Maximum number of concurrent QUIC bi-stream handler tasks (DoS/OOM protection).
 pub const STREAM_CONCURRENCY_LIMIT: usize = 1024;
+/// Maximum number of concurrent QUIC uni-stream handler tasks (DoS/OOM protection).
+pub const UNI_STREAM_CONCURRENCY_LIMIT: usize = 1024;
+/// Maximum number of concurrent outbound forwarder tasks for Heartbeat gossip.
+pub const OUTBOUND_FORWARDER_LIMIT: usize = 256;
+/// Maximum number of concurrent outbound forwarder tasks for Fraud/Equivocation gossip (Spec 10 priority).
+pub const OUTBOUND_FRAUD_FORWARDER_LIMIT: usize = 256;
+/// Default timeout for outbound unidirectional frame transmission (3 seconds).
+pub const DEFAULT_UNI_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Maximum number of concurrent QUIC handshake / connection handler tasks (DoS/OOM protection).
 pub const CONNECTION_CONCURRENCY_LIMIT: usize = 256;
 /// Spec 11 Freshness window for gossip heartbeats (+/- 60 seconds)
@@ -2234,7 +2242,16 @@ impl RequestHandler for NodeRequestHandler {
             if header.msg_type == MsgType::HeartbeatAck as u16 {
                 if (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0 {
                     if let Some(pm) = peer_manager.as_ref() {
-                        pm.set_ticket_outdated(true);
+                        let is_f2f = match sender {
+                            Some(ref nid) => pm.is_f2f_friend(nid).await,
+                            None => false,
+                        };
+                        if is_f2f {
+                            pm.set_ticket_outdated(true);
+                            warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from authenticated direct F2F friend: shard ticket is outdated");
+                        } else {
+                            warn!("Rejected HeartbeatAck with FLAG_POW_OUTDATED from unauthenticated or non-F2F peer");
+                        }
                     }
                 }
                 return Ok(());
@@ -2453,11 +2470,14 @@ pub struct QuicTransport {
     cancel_token: CancellationToken,
     tasks: tokio_util::task::TaskTracker,
     stream_semaphore: Arc<Semaphore>,
+    uni_stream_semaphore: Arc<Semaphore>,
     sync_streams: Arc<Semaphore>,
     shard_streams: Arc<Semaphore>,
     connection_semaphore: Arc<Semaphore>,
     shard_pool: crate::network::pool::ShardConnectionPool,
     is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
+    outbound_forwarder_semaphore: Arc<Semaphore>,
+    fraud_forwarder_semaphore: Arc<Semaphore>,
 }
 
 async fn persist_fraud(
@@ -2642,11 +2662,14 @@ impl QuicTransport {
             handler,
             cancel_token: cancel_token.clone(),
             stream_semaphore: Arc::new(Semaphore::new(STREAM_CONCURRENCY_LIMIT)),
+            uni_stream_semaphore: Arc::new(Semaphore::new(UNI_STREAM_CONCURRENCY_LIMIT)),
             sync_streams: Arc::new(Semaphore::new(32)),
             shard_streams: Arc::new(Semaphore::new(256)),
             connection_semaphore: Arc::new(Semaphore::new(CONNECTION_CONCURRENCY_LIMIT)),
             shard_pool: crate::network::pool::ShardConnectionPool::new(),
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            outbound_forwarder_semaphore: Arc::new(Semaphore::new(OUTBOUND_FORWARDER_LIMIT)),
+            fraud_forwarder_semaphore: Arc::new(Semaphore::new(OUTBOUND_FRAUD_FORWARDER_LIMIT)),
         };
 
         let transport_for_broadcast = transport.clone();
@@ -2714,6 +2737,16 @@ impl QuicTransport {
     /// Returns a reference to the CancellationToken.
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
+    }
+
+    /// Returns the outbound heartbeat gossip forwarder semaphore.
+    pub fn outbound_forwarder_semaphore(&self) -> &Arc<Semaphore> {
+        &self.outbound_forwarder_semaphore
+    }
+
+    /// Returns the dedicated outbound fraud proof forwarder semaphore (Spec 10).
+    pub fn fraud_forwarder_semaphore(&self) -> &Arc<Semaphore> {
+        &self.fraud_forwarder_semaphore
     }
 
     /// Occupies the actual local admission budget without creating 256 sockets.
@@ -2839,7 +2872,7 @@ impl QuicTransport {
         if self.peer_manager.is_f2f_friend(&authorized_node_id).await {
             let t_clone = self.clone();
             let c_clone = connection.clone();
-            tokio::spawn(async move {
+            self.tasks.spawn(async move {
                 t_clone
                     .sync_f2f_friend_session(authorized_node_id, c_clone)
                     .await;
@@ -2961,7 +2994,7 @@ impl QuicTransport {
         if self.peer_manager.is_f2f_friend(&authorized_node_id).await {
             let t_clone = self.clone();
             let c_clone = connection.clone();
-            tokio::spawn(async move {
+            self.tasks.spawn(async move {
                 t_clone
                     .sync_f2f_friend_session(authorized_node_id, c_clone)
                     .await;
@@ -3005,27 +3038,66 @@ impl QuicTransport {
         Ok((resp_hdr, resp_payload))
     }
 
-    /// Sends a unidirectional frame over a dedicated unidirectional stream.
+    /// Sends a unidirectional frame over a dedicated unidirectional stream with transport cancellation and timeout.
     pub async fn send_unidirectional(
         &self,
         conn: &quinn::Connection,
         header: &WireHeader,
         payload: &[u8],
     ) -> Result<(), NodeError> {
-        send_unidirectional_frame(conn, header, payload).await
+        send_unidirectional_frame_bounded(
+            conn,
+            header,
+            payload,
+            DEFAULT_UNI_STREAM_TIMEOUT,
+            Some(&self.cancel_token),
+        )
+        .await
     }
 }
 
-/// Freestanding helper to send a unidirectional frame over a dedicated QUIC stream.
+/// Sends a unidirectional frame over a dedicated QUIC stream with a bounded timeout and optional cancellation.
+pub async fn send_unidirectional_frame_bounded(
+    conn: &quinn::Connection,
+    header: &WireHeader,
+    payload: &[u8],
+    timeout_dur: std::time::Duration,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<(), NodeError> {
+    let send_op = async {
+        let mut send = conn.open_uni().await.map_err(NodeError::QuinnConnection)?;
+        write_frame(&mut send, header, payload).await?;
+        send.finish().map_err(NodeError::QuinnClosedStream)?;
+        Ok(())
+    };
+
+    let with_timeout = async {
+        match tokio::time::timeout(timeout_dur, send_op).await {
+            Ok(res) => res,
+            Err(_) => Err(NodeError::Network(
+                "outbound unidirectional frame timeout".to_string(),
+            )),
+        }
+    };
+
+    if let Some(token) = cancel_token {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(NodeError::Network("operation cancelled".to_string())),
+            res = with_timeout => res,
+        }
+    } else {
+        with_timeout.await
+    }
+}
+
+/// Freestanding helper to send a unidirectional frame over a dedicated QUIC stream with a bounded timeout.
 pub async fn send_unidirectional_frame(
     conn: &quinn::Connection,
     header: &WireHeader,
     payload: &[u8],
 ) -> Result<(), NodeError> {
-    let mut send = conn.open_uni().await.map_err(NodeError::QuinnConnection)?;
-    write_frame(&mut send, header, payload).await?;
-    send.finish().map_err(NodeError::QuinnClosedStream)?;
-    Ok(())
+    send_unidirectional_frame_bounded(conn, header, payload, DEFAULT_UNI_STREAM_TIMEOUT, None).await
 }
 
 impl QuicTransport {
@@ -3069,7 +3141,7 @@ impl QuicTransport {
             if let Some(friend_pk) = self.peer_manager.f2f_friend_pubkey_for_addr(&addr).await {
                 let t_clone = self.clone();
                 let c_clone = (*conn).clone();
-                tokio::spawn(async move {
+                self.tasks.spawn(async move {
                     t_clone.sync_f2f_friend_session(friend_pk, c_clone).await;
                 });
             }
@@ -3091,7 +3163,9 @@ impl QuicTransport {
                 0,
                 roster_bytes.len() as u32,
             );
-            let _ = send_unidirectional_frame(&conn, &header, &roster_bytes).await;
+            let _ = self
+                .send_unidirectional(&conn, &header, &roster_bytes)
+                .await;
         }
 
         let pending = self
@@ -3111,7 +3185,7 @@ impl QuicTransport {
                     0,
                     msg_bytes.len() as u32,
                 );
-                let _ = send_unidirectional_frame(&conn, &header, &msg_bytes).await;
+                let _ = self.send_unidirectional(&conn, &header, &msg_bytes).await;
             }
         }
     }
@@ -3155,7 +3229,9 @@ impl QuicTransport {
                 0,
                 payload_bytes.len() as u32,
             );
-            let _ = send_unidirectional_frame(&conn, &header, &payload_bytes).await;
+            let _ = self
+                .send_unidirectional(&conn, &header, &payload_bytes)
+                .await;
         }
 
         let stored = self
@@ -3228,10 +3304,22 @@ impl QuicTransport {
         header.reserved = next_hops;
 
         for target in candidates {
+            let permit = match self
+                .outbound_forwarder_semaphore
+                .clone()
+                .try_acquire_owned()
+            {
+                Ok(p) => p,
+                Err(_) => {
+                    debug!("Outbound forwarder capacity exhausted, dropping forwarded heartbeat");
+                    continue;
+                }
+            };
             let transport = self.clone();
             let hdr = header;
             let pld = payload.clone();
             self.tasks.spawn(async move {
+                let _permit = permit;
                 let _ = transport
                     .send_unidirectional_to_peer(target, &hdr, &pld)
                     .await;
@@ -3259,8 +3347,11 @@ impl QuicTransport {
             .await;
     }
 
-    /// Phase 10: deduplicated fraud-proof forwarding with echo protection.
+    /// Phase 10: deduplicated fraud-proof forwarding with echo protection and Spec 10 priority.
+    /// - Dedicated bounded capacity (`fraud_forwarder_semaphore`) prevents starvation under heartbeat load.
     /// - LRU seen-set suppresses re-broadcast storms (gossip loops).
+    /// - If 0 permits could be admitted due to capacity exhaustion, the proof is removed from the
+    ///   dedup set to allow retry upon capacity recovery.
     /// - `exclude` (the immediate sender we received the proof from) is
     ///   never sent the proof back.
     pub async fn broadcast_equivocation_proof_to_f2f_except(
@@ -3277,12 +3368,16 @@ impl QuicTransport {
             Ok(p) => p,
             Err(e) => {
                 warn!("Failed to serialize FraudProofPayload for broadcast: {}", e);
+                self.peer_manager.remove_fraud_proof(&hash).await;
                 return;
             }
         };
         let payload_len = match checked_payload_len(payload.len()) {
             Ok(l) => l,
-            Err(_) => return,
+            Err(_) => {
+                self.peer_manager.remove_fraud_proof(&hash).await;
+                return;
+            }
         };
         let header = WireHeader::new(MsgType::EquivocationProof as u16, 1, 0, 0, payload_len);
         let mut targets = self.peer_manager.all_f2f_target_addrs().await;
@@ -3291,10 +3386,9 @@ impl QuicTransport {
         if let Some(sender_id) = exclude {
             let sender_addrs = self.peer_manager.addrs_for_node_id(&sender_id).await;
             targets.retain(|a| !sender_addrs.contains(a));
-            if targets.is_empty() {
-                return;
-            }
         }
+
+        let mut eligible_targets = Vec::with_capacity(targets.len());
         for addr in targets {
             // Second line of echo defense: skip any target currently mapped
             // to the excluded sender identity (covers addr changes/races).
@@ -3305,13 +3399,42 @@ impl QuicTransport {
                     }
                 }
             }
+            eligible_targets.push(addr);
+        }
+
+        if eligible_targets.is_empty() {
+            return;
+        }
+
+        let mut admitted = 0usize;
+        for addr in eligible_targets {
+            let permit = match self
+                .fraud_forwarder_semaphore
+                .clone()
+                .try_acquire_owned()
+            {
+                Ok(p) => p,
+                Err(_) => {
+                    debug!("Fraud forwarder capacity exhausted, dropping forwarded fraud proof for target {}", addr);
+                    continue;
+                }
+            };
+            admitted += 1;
             let transport = self.clone();
             let payload = payload.clone();
             self.tasks.spawn(async move {
+                let _permit = permit;
                 let _ = transport
                     .send_unidirectional_to_peer(addr, &header, &payload)
                     .await;
             });
+        }
+
+        if admitted == 0 {
+            // All eligible targets were dropped because fraud forwarding capacity was exhausted.
+            // Roll back the dedup record so retries after capacity recovers are not suppressed.
+            self.peer_manager.remove_fraud_proof(&hash).await;
+            warn!("Fraud forwarder capacity exhausted for all eligible targets; removed from dedup cache to allow retry");
         }
     }
 
@@ -3839,7 +3962,7 @@ impl QuicTransport {
                                 };
                                 let h = handler.clone();
                                 let pm = peer_manager.clone();
-                                let sem = stream_semaphore.clone();
+                                let sem = transport.uni_stream_semaphore.clone();
                                 let conn_clone = conn.clone();
                                 let transport_clone = transport.clone();
                                 let cancel_token = transport.cancel_token.clone();
@@ -3850,7 +3973,7 @@ impl QuicTransport {
                                         Err(_) => {
                                             warn!(
                                                 remote = %remote_addr,
-                                                "Stream concurrency limit {} reached, dropping incoming uni-stream (DoS protection)", STREAM_CONCURRENCY_LIMIT
+                                                "Uni-stream concurrency limit {} reached, dropping incoming uni-stream (DoS protection)", UNI_STREAM_CONCURRENCY_LIMIT
                                             );
                                             return;
                                         }
@@ -3918,7 +4041,7 @@ impl QuicTransport {
                                                                     0,
                                                                     ack_bytes.len() as u32,
                                                                 );
-                                                                let _ = send_unidirectional_frame(&conn_clone, &ack_hdr, &ack_bytes).await;
+                                                                let _ = transport_clone.send_unidirectional(&conn_clone, &ack_hdr, &ack_bytes).await;
                                                             }
                                                             if let Some(dispatcher) = pm.alert_dispatcher() {
                                                                 let text = op_msg.text.clone();
@@ -3965,11 +4088,20 @@ impl QuicTransport {
                                                 }
 
                                                 // HeartbeatAck handling:
-                                                if header.msg_type == MsgType::HeartbeatAck as u16
-                                                    && (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0
-                                                {
-                                                    pm.set_ticket_outdated(true);
-                                                    warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from F2F peer: shard ticket is outdated");
+                                                if header.msg_type == MsgType::HeartbeatAck as u16 {
+                                                    if (header.flags & humoco_sim_core::wire::FLAG_POW_OUTDATED) != 0 {
+                                                        let is_f2f = match remote_node_id {
+                                                            Some(ref nid) => pm.is_f2f_friend(nid).await,
+                                                            None => false,
+                                                        };
+                                                        if is_f2f {
+                                                            pm.set_ticket_outdated(true);
+                                                            warn!("Received HeartbeatAck with FLAG_POW_OUTDATED from authenticated direct F2F friend: shard ticket is outdated");
+                                                        } else {
+                                                            warn!("Rejected HeartbeatAck with FLAG_POW_OUTDATED from unauthenticated or non-F2F peer");
+                                                        }
+                                                    }
+                                                    return;
                                                 }
 
                                                 // If an authentic Heartbeat is received from an F2F friend, update known_network_nodes and clock:
@@ -4145,7 +4277,7 @@ impl QuicTransport {
                                                                     humoco_sim_core::wire::FLAG_POW_OUTDATED,
                                                                     0,
                                                                 );
-                                                                let _ = send_unidirectional_frame(&conn_clone, &ack_hdr, &[]).await;
+                                                                let _ = transport_clone.send_unidirectional(&conn_clone, &ack_hdr, &[]).await;
                                                             } else {
                                                                 warn!(
                                                                     node = %hex::encode(node_id),

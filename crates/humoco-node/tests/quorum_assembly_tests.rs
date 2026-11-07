@@ -1126,15 +1126,15 @@ async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_witho
         "Checkout must respect the deadline and not stall on blocked write txn! Elapsed: {elapsed:?}"
     );
 
-    // Returns degraded status 0 and empty signatures
-    assert_eq!(
-        cert.status, 0,
-        "Certificate status must be degraded to 0 when support was not durably admitted within deadline"
+    // S01-09: Valid 14-signature quorum must NOT be cleared or degraded to 0 when local support persistence times out
+    assert!(
+        cert.is_quorum_reached(),
+        "Quorum certificate must remain valid even when local confirmation support was not durably admitted within deadline"
     );
     assert_eq!(
         cert.signatures.len(),
-        0,
-        "Signatures must be cleared when support persistence fails"
+        14,
+        "Valid 14 remote signatures must be preserved"
     );
 
     // 3. Neutral cancellation & no false signing disablement

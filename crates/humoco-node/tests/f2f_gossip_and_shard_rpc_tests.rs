@@ -784,6 +784,7 @@ async fn test_s06_01_real_quic_initial_admission_hourly_observations_gate() {
         Vec::new(),
         vec![*relay_id.node_pubkey()],
     ));
+    pm_server.set_min_work_floor_for_test(1);
     assert!(pm_server.effective_incubation_duration().as_secs() >= 86400);
 
     let pm_relay = Arc::new(PeerManager::with_f2f(
@@ -979,6 +980,7 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
         Vec::new(),
         vec![*relay_id.node_pubkey(), *friend_direct.node_pubkey()],
     ));
+    pm_server.set_min_work_floor_for_test(1);
     assert!(pm_server.effective_incubation_duration().as_secs() >= 86400); // simulation_mode == false
 
     let pm_relay = Arc::new(PeerManager::with_f2f(

@@ -1095,9 +1095,9 @@ async fn test_s06_02_clock_sample_revocation_on_friend_removal_and_ban() {
 
     // Register 10 fresh honest trusted friends with +4_000 ms offset
     let fresh_friends: Vec<_> = (0..10).map(|_| NodeIdentity::generate()).collect();
-    let fresh_now = pm.clock().physical_now_ms();
     for f in &fresh_friends {
         pm.register_f2f_friend(*f.node_pubkey(), None).await;
+        let fresh_now = pm.clock().physical_now_ms();
         let ok = pm
             .clock()
             .record_peer_heartbeat(*f.node_pubkey(), true, fresh_now + 4_000);

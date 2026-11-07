@@ -3,6 +3,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -3183,7 +3184,7 @@ impl QuicTransport {
             return;
         }
 
-        let all_targets = self.peer_manager.all_f2f_target_addrs().await;
+        let all_targets = self.peer_manager.active_f2f_target_addrs().await;
         let mut candidates: Vec<SocketAddr> = all_targets
             .into_iter()
             .filter(|a| *a != sender_addr)
@@ -4038,6 +4039,28 @@ impl QuicTransport {
                                                             }
                                                         }
 
+                                                        // Algo 3v2 + ShadowEdgeWindow: If received from a quarantined F2F friend,
+                                                        // record exclusively into the shadow edge window and drop immediately
+                                                        // without updating the dedup cache, clock, or forwarding.
+                                                        if is_f2f {
+                                                            let friend_pk = match remote_node_id {
+                                                                Some(pk) => Some(pk),
+                                                                None => pm.f2f_friend_pubkey_for_addr(&remote_addr).await,
+                                                            };
+                                                            if let Some(fpk) = friend_pk {
+                                                                if pm.is_f2f_quarantined(&fpk) {
+                                                                    pm.record_shadow_heartbeat(fpk, hb.node_id, hops as u8, Instant::now()).await;
+                                                                    debug!(
+                                                                        friend = %hex::encode(fpk),
+                                                                        origin = %hex::encode(hb.node_id),
+                                                                        hops,
+                                                                        "GOSSIP BARRIER: Recorded heartbeat in ShadowEdgeWindow of quarantined F2F friend"
+                                                                    );
+                                                                    return;
+                                                                }
+                                                            }
+                                                        }
+
                                                         // Check deduplication cache to prevent gossip loops (Spec 11) - ONLY AFTER signature & freshness
                                                         if !pm.check_and_record_heartbeat(&hb.node_id, hb.pow_nonce, hb.timestamp_ms).await {
                                                             if is_f2f {
@@ -4061,7 +4084,9 @@ impl QuicTransport {
                                                                 let proof = crate::identity::compute_pow_proof(&node_id, nonce, t0)?;
                                                                 Ok((humoco_sim_core::crypto::compute_whitened_hrw_id(&node_id, nonce, t0, &proof),
                                                                     humoco_sim_core::crypto::compute_work_from_hash(&proof)))
-                                                            }).await else { return; };
+                                                            }).await else {
+                                                                return;
+                                                            };
                                                             if expected_hrw != hb.hrw_routing_id {
                                                                 warn!(
                                                                     node = %hex::encode(node_id),

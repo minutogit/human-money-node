@@ -547,8 +547,10 @@ mod tests {
         pm.set_ticket_outdated(true);
         assert!(pm.is_ticket_outdated());
 
-        let mut config = MiningConfig::default();
-        config.target_headroom_pct = 50;
+        let config = MiningConfig {
+            target_headroom_pct: 50,
+            ..Default::default()
+        };
 
         let cancel = CancellationToken::new();
         let miner = BackgroundMiner::new(

@@ -238,6 +238,7 @@ async fn test_m5_three_independent_daemon_processes_quorum_persistence_and_compa
         config.network.rpc_listen_addr = format!("127.0.0.1:{}", ports[i].0).parse().unwrap();
         config.network.simulation_mode = true;
         config.network.fast_ticker_interval_secs = Some(1);
+        config.mining.enabled = false;
         config.storage.data_dir = temp_dirs[i].path().join("data");
         config.identity.key_path = key_paths[i].clone();
         config.network.control_socket = Some(temp_dirs[i].path().join("humoco.sock"));

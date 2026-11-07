@@ -470,6 +470,7 @@ async fn unready_shard_returns_flag_not_ready_and_is_rejected_as_recovery_witnes
 #[tokio::test]
 async fn test_s06_01_initial_admission_requires_24h_age_and_eight_hourly_observations() {
     let manager = Arc::new(PeerManager::new(Vec::new()));
+    manager.set_min_work_floor_for_test(1);
     assert!(manager.effective_incubation_duration().as_secs() >= 86400);
 
     // Mined Argon2d ticket so S06-03 does not mask S06-01

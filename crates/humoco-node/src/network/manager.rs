@@ -9,7 +9,19 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::warn;
 
-use crate::network::peer::{PeerConnectionType, PeerInfo, PeerStatus};
+use crate::network::peer::{PeerConnectionType, PeerInfo, PeerStatus, FAILURE_THRESHOLD_SUSPENDED};
+use crate::network::quarantine::{
+    decide_algo3v2, CandidateEdge, QuarantineDecision, QuarantineEvent, QuarantinePolicy,
+    QuarantinedEdgeState,
+};
+
+/// Thread-safe state tracking for F2F edge quarantine and ShadowEdgeWindow.
+#[derive(Debug, Clone)]
+pub struct QuarantineState {
+    pub quarantined_f2f_edges: HashMap<[u8; 32], QuarantinedEdgeState>,
+    pub last_quarantine_step_at: Option<Instant>,
+    pub quarantine_policy: QuarantinePolicy,
+}
 
 pub const DEFAULT_BASE_BACKOFF_MS: u64 = 500;
 pub const DEFAULT_MAX_BACKOFF_MS: u64 = 30_000;
@@ -580,6 +592,7 @@ pub struct PeerManager {
     ticket_outdated: Arc<std::sync::atomic::AtomicBool>,
     local_sync_ready: Arc<std::sync::atomic::AtomicBool>,
     simulation_mode: Arc<std::sync::atomic::AtomicBool>,
+    override_min_work_floor: Arc<std::sync::atomic::AtomicU64>,
     merge_hysteresis_until_ms: Arc<AtomicU64>,
     fraud_proof_tx:
         Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<FraudProofForwardMsg>>>>,
@@ -601,6 +614,7 @@ pub struct PeerManager {
     f2f_collab: Arc<parking_lot::Mutex<crate::network::f2f_collab::F2fCollabManager>>,
     sector_anomaly_since: Arc<parking_lot::Mutex<HashMap<[u8; 32], Instant>>>,
     alert_dispatcher: Arc<parking_lot::RwLock<Option<Arc<crate::alert::AlertDispatcher>>>>,
+    quarantine_state: Arc<parking_lot::RwLock<QuarantineState>>,
 }
 
 impl std::fmt::Debug for PeerManager {
@@ -699,6 +713,7 @@ impl PeerManager {
             ticket_outdated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             local_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             simulation_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            override_min_work_floor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             merge_hysteresis_until_ms: Arc::new(AtomicU64::new(0)),
             fraud_proof_tx: Arc::new(tokio::sync::RwLock::new(None)),
             recent_observed_evidences: Arc::new(tokio::sync::RwLock::new(
@@ -717,6 +732,11 @@ impl PeerManager {
             )),
             sector_anomaly_since: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             alert_dispatcher: Arc::new(parking_lot::RwLock::new(None)),
+            quarantine_state: Arc::new(parking_lot::RwLock::new(QuarantineState {
+                quarantined_f2f_edges: HashMap::new(),
+                last_quarantine_step_at: None,
+                quarantine_policy: QuarantinePolicy::default(),
+            })),
         }
     }
 
@@ -746,11 +766,23 @@ impl PeerManager {
 
     /// Returns the minimum work floor for HRW shard tickets (256 in production, 1 in simulation_mode).
     pub fn effective_min_work_floor(&self) -> u64 {
+        let overridden = self
+            .override_min_work_floor
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if overridden > 0 {
+            return overridden;
+        }
         if self.is_simulation_mode() {
             W_MIN_FLOOR_SIMULATION
         } else {
             W_MIN_FLOOR_PRODUCTION
         }
+    }
+
+    /// Sets an explicit work floor override for unit/integration tests without altering incubation duration.
+    pub fn set_min_work_floor_for_test(&self, floor: u64) {
+        self.override_min_work_floor
+            .store(floor, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn configure_f2f_collab(
@@ -795,13 +827,22 @@ impl PeerManager {
     }
 
     pub async fn f2f_friend_pubkey_for_addr(&self, addr: &SocketAddr) -> Option<[u8; 32]> {
-        let friends = self.f2f_friends.read().await;
-        for (&pk, opt_addr) in friends.iter() {
-            if opt_addr.as_ref() == Some(addr) {
-                return Some(pk);
+        {
+            let friends = self.f2f_friends.read().await;
+            for (&pk, opt_addr) in friends.iter() {
+                if opt_addr.as_ref() == Some(addr) {
+                    return Some(pk);
+                }
             }
         }
-        None
+        let peers = self.peers.read().await;
+        peers.get(addr).and_then(|p| {
+            if p.conn_type == PeerConnectionType::FriendToFriend {
+                p.node_id
+            } else {
+                None
+            }
+        })
     }
 
     /// Records a multi-path edge observation from an authenticated direct F2F friend (0 Argon2d cost).
@@ -2993,13 +3034,7 @@ impl PeerManager {
         {
             let mut peers = self.peers.write().await;
             if let Some(peer) = peers.get_mut(&addr) {
-                peer.missing_count = 0;
-                peer.last_failure = None;
-                if peer.connection.is_some() {
-                    peer.status = PeerStatus::Connected;
-                } else {
-                    peer.status = PeerStatus::Degrading;
-                }
+                peer.reset_suspension();
                 Ok(true)
             } else {
                 Ok(false)
@@ -3610,10 +3645,18 @@ impl PeerManager {
 
     /// Autonomous healing: decrements penalty counter of all registered peers by 1.
     pub async fn decay_all_peers(&self) {
-        let mut peers = self.peers.write().await;
-        for peer in peers.values_mut() {
-            peer.decay_malus();
+        let _ = self.decay_all_peers_at(Instant::now()).await;
+    }
+
+    /// Autonomous healing with explicit evaluation timestamp (for simulation and testing).
+    pub async fn decay_all_peers_at(&self, now: Instant) -> Vec<QuarantineEvent> {
+        {
+            let mut peers = self.peers.write().await;
+            for peer in peers.values_mut() {
+                peer.decay_malus();
+            }
         }
+        self.evaluate_f2f_quarantine(now).await
     }
 
     /// Returns all F2F friend addresses for the periodic heartbeat emitter.
@@ -3636,6 +3679,328 @@ impl PeerManager {
             }
         }
         addrs
+    }
+
+    /// Checks whether a direct F2F friend public key is currently quarantined.
+    pub fn is_f2f_quarantined(&self, friend_pk: &[u8; 32]) -> bool {
+        self.quarantine_state
+            .read()
+            .quarantined_f2f_edges
+            .contains_key(friend_pk)
+    }
+
+    /// Checks whether a given peer socket address belongs to a currently quarantined F2F friend.
+    pub async fn is_f2f_addr_quarantined(&self, addr: &SocketAddr) -> bool {
+        if let Some(fpk) = self.f2f_friend_pubkey_for_addr(addr).await {
+            self.is_f2f_quarantined(&fpk)
+        } else {
+            false
+        }
+    }
+
+    /// Returns the currently active (non-quarantined) F2F target addresses for multi-hop gossip forwarding.
+    pub async fn active_f2f_target_addrs(&self) -> Vec<SocketAddr> {
+        let all = self.all_f2f_target_addrs().await;
+        let mut active = Vec::with_capacity(all.len());
+        for addr in all {
+            if !self.is_f2f_addr_quarantined(&addr).await {
+                active.push(addr);
+            }
+        }
+        active
+    }
+
+    /// Returns a copy of the current quarantine policy.
+    pub fn quarantine_policy(&self) -> QuarantinePolicy {
+        self.quarantine_state.read().quarantine_policy.clone()
+    }
+
+    /// Sets a new quarantine policy (e.g. fast timings for simulation/tests).
+    pub fn set_quarantine_policy(&self, policy: QuarantinePolicy) {
+        self.quarantine_state.write().quarantine_policy = policy;
+    }
+
+    /// Returns a snapshot of all currently quarantined F2F edges and their shadow states.
+    pub fn quarantined_f2f_edges(&self) -> HashMap<[u8; 32], QuarantinedEdgeState> {
+        self.quarantine_state.read().quarantined_f2f_edges.clone()
+    }
+
+    /// Records an authentic heartbeat received over a quarantined F2F friend edge in its ShadowEdgeWindow.
+    ///
+    /// If the origin node has a local `zombie_since.is_some()`, this heartbeat is considered a zombie heartbeat,
+    /// resetting the edge's clean window timer. Otherwise, it increments the count of clean heartbeats.
+    pub async fn record_shadow_heartbeat(
+        &self,
+        friend_pk: [u8; 32],
+        origin_node_id: [u8; 32],
+        _hops: u8,
+        now: Instant,
+    ) {
+        let known_addr = {
+            let known = self.known_network_nodes.read().await;
+            known.get(&origin_node_id).map(|info| info.addr)
+        };
+        let friend_addr = {
+            let friends = self.f2f_friends.read().await;
+            friends.get(&origin_node_id).copied().flatten()
+        };
+        let is_zombie = {
+            let peers = self.peers.read().await;
+            let by_known = known_addr
+                .and_then(|a| peers.get(&a))
+                .is_some_and(|p| p.zombie_since.is_some());
+            let by_friend = friend_addr
+                .and_then(|a| peers.get(&a))
+                .is_some_and(|p| p.zombie_since.is_some());
+            let by_id = peers
+                .values()
+                .any(|p| p.node_id == Some(origin_node_id) && p.zombie_since.is_some());
+            by_known || by_friend || by_id
+        };
+        let mut state = self.quarantine_state.write();
+        if let Some(edge) = state.quarantined_f2f_edges.get_mut(&friend_pk) {
+            edge.record_shadow_heartbeat(is_zombie, now);
+        }
+    }
+
+    /// Synchronous variant of `record_shadow_heartbeat` with explicit zombie flag (for unit tests / simulation).
+    pub fn record_shadow_heartbeat_sync(
+        &self,
+        friend_pk: [u8; 32],
+        is_zombie: bool,
+        now: Instant,
+    ) {
+        let mut state = self.quarantine_state.write();
+        if let Some(edge) = state.quarantined_f2f_edges.get_mut(&friend_pk) {
+            edge.record_shadow_heartbeat(is_zombie, now);
+        }
+    }
+
+    /// Evaluates the Hop-invariant KISS F2F Quarantine (Algo 3v2) and ShadowEdgeWindow.
+    ///
+    /// 1. Self-healing check: Any quarantined edge with `now - last_zombie_shadow_seen >= shadow_clean_window`
+    ///    heals autonomously and is restored to active status.
+    /// 2. Cadence check: If `now - last_quarantine_step_at < min_step_interval`, no new quarantine/preemption
+    ///    action is performed in this step.
+    /// 3. Candidate evaluation: For all currently active F2F friends, evaluates mature zombies (h = 0 for direct
+    ///    friends with missing_count >= 3; h >= 1 for known nodes with missing_count >= 3 whose zombie age >= T(h)),
+    ///    calculates exclusive and healthy community sizes, and applies `decide_algo3v2`.
+    pub async fn evaluate_f2f_quarantine(&self, now: Instant) -> Vec<QuarantineEvent> {
+        let mut events = Vec::new();
+
+        // 1. Autonomous self-healing check on currently quarantined edges
+        let (healed, policy, min_step_ok) = {
+            let mut state = self.quarantine_state.write();
+            let policy = state.quarantine_policy.clone();
+            let mut healed = Vec::new();
+            for (&friend_pk, edge_state) in state.quarantined_f2f_edges.iter() {
+                if edge_state.is_healed(now, &policy) {
+                    healed.push(friend_pk);
+                }
+            }
+            for pk in &healed {
+                state.quarantined_f2f_edges.remove(pk);
+            }
+
+            let min_step_ok = match state.last_quarantine_step_at {
+                Some(last) => now.saturating_duration_since(last) >= policy.min_step_interval,
+                None => true,
+            };
+
+            (healed, policy, min_step_ok)
+        };
+
+        for pk in &healed {
+            events.push(QuarantineEvent::Healed { friend_pk: *pk });
+        }
+
+        // 2. Calm cadence check (Rule 3)
+        if !min_step_ok {
+            return events;
+        }
+
+        // 3. Active F2F friends collection (sequential snapshot)
+        let f2f_friends_map = {
+            let friends = self.f2f_friends.read().await;
+            friends.clone()
+        };
+        let quarantined_edges = {
+            let state = self.quarantine_state.read();
+            state.quarantined_f2f_edges.clone()
+        };
+
+        let active_friends: HashSet<[u8; 32]> = f2f_friends_map
+            .keys()
+            .copied()
+            .filter(|pk| !quarantined_edges.contains_key(pk))
+            .collect();
+
+        let active_friends_count = active_friends.len();
+        if active_friends_count == 0 {
+            return events;
+        }
+
+        // 4. Gather health status and edge observations (sequential snapshots to prevent lock inversion)
+        let known_nodes = {
+            let kn = self.known_network_nodes.read().await;
+            kn.clone()
+        };
+        let peers = {
+            let p = self.peers.read().await;
+            p.clone()
+        };
+
+        let mut healthy_counts: HashMap<[u8; 32], usize> = HashMap::new();
+        let mut exclusive_healthy_counts: HashMap<[u8; 32], usize> = HashMap::new();
+        let mut exclusive_strictly_healthy_counts: HashMap<[u8; 32], usize> = HashMap::new();
+        let mut min_mature_hops: HashMap<[u8; 32], u8> = HashMap::new();
+
+        for (&k_pk, k_info) in known_nodes.iter() {
+            let k_peer = peers
+                .values()
+                .find(|p| p.node_id == Some(k_pk))
+                .or_else(|| peers.get(&k_info.addr));
+
+            let missing_count = k_peer.map(|p| p.missing_count).unwrap_or(0);
+            let zombie_since = k_peer.and_then(|p| p.zombie_since);
+            let is_strictly_healthy = missing_count == 0 && zombie_since.is_none();
+            let is_healthy = missing_count < FAILURE_THRESHOLD_SUSPENDED && zombie_since.is_none();
+            let is_zombie = zombie_since.is_some();
+
+            let active_obs: Vec<([u8; 32], u8)> = k_info
+                .edge_observations
+                .iter()
+                .filter(|(f_pk, (_, ts))| {
+                    active_friends.contains(*f_pk)
+                        && now.saturating_duration_since(*ts) <= EDGE_OBSERVATION_TTL
+                })
+                .map(|(&f_pk, &(hops, _))| (f_pk, hops))
+                .collect();
+
+            if active_obs.is_empty() {
+                continue;
+            }
+
+            for &(f_pk, _) in &active_obs {
+                if is_healthy {
+                    *healthy_counts.entry(f_pk).or_insert(0) += 1;
+                }
+            }
+
+            if active_obs.len() == 1 {
+                let (f_pk, _) = active_obs[0];
+                if is_healthy {
+                    *exclusive_healthy_counts.entry(f_pk).or_insert(0) += 1;
+                }
+                if is_strictly_healthy {
+                    *exclusive_strictly_healthy_counts.entry(f_pk).or_insert(0) += 1;
+                }
+            }
+
+            if is_zombie {
+                let z_age = zombie_since
+                    .map(|ts| now.saturating_duration_since(ts))
+                    .unwrap_or(Duration::ZERO);
+
+                for &(f_pk, hops) in &active_obs {
+                    let wait_dur = policy.hop_wait_duration(hops);
+                    if z_age >= wait_dur {
+                        let entry = min_mature_hops.entry(f_pk).or_insert(hops);
+                        if hops < *entry {
+                            *entry = hops;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Direct F2F friend defects (h = 0)
+        for &f_pk in &active_friends {
+            if healed.contains(&f_pk) {
+                continue;
+            }
+            let f_peer = peers.values().find(|p| p.node_id == Some(f_pk)).or_else(|| {
+                f2f_friends_map
+                    .get(&f_pk)
+                    .copied()
+                    .flatten()
+                    .and_then(|a| peers.get(&a))
+            });
+
+            if f_peer.is_some_and(|p| p.zombie_since.is_some()) {
+                // T(0) = 0 -> immediately mature candidate with h = 0
+                min_mature_hops.insert(f_pk, 0);
+            }
+        }
+
+        // 5. Build CandidateEdge list
+        let mut mature_candidates = Vec::new();
+        for &f_pk in &active_friends {
+            if healed.contains(&f_pk) {
+                continue;
+            }
+            if let Some(&h) = min_mature_hops.get(&f_pk) {
+                mature_candidates.push(CandidateEdge {
+                    friend_pk: f_pk,
+                    h,
+                    n_exclusive_strictly_healthy: exclusive_strictly_healthy_counts
+                        .get(&f_pk)
+                        .copied()
+                        .unwrap_or(0),
+                    n_exclusive_healthy: exclusive_healthy_counts
+                        .get(&f_pk)
+                        .copied()
+                        .unwrap_or(0),
+                    n_healthy: healthy_counts.get(&f_pk).copied().unwrap_or(0),
+                });
+            }
+        }
+
+        // 6. Execute Algo 3v2 decision
+        if let Some(decision) = decide_algo3v2(
+            &mature_candidates,
+            active_friends_count,
+            &quarantined_edges,
+            &policy,
+        ) {
+            match decision {
+                QuarantineDecision::Quarantine {
+                    friend_pk,
+                    trigger_hops,
+                } => {
+                    let mut state = self.quarantine_state.write();
+                    state.quarantined_f2f_edges.insert(
+                        friend_pk,
+                        QuarantinedEdgeState::new(now, trigger_hops),
+                    );
+                    state.last_quarantine_step_at = Some(now);
+                    events.push(QuarantineEvent::Quarantined {
+                        friend_pk,
+                        trigger_hops,
+                    });
+                }
+                QuarantineDecision::Preempt {
+                    release_friend_pk,
+                    target_friend_pk,
+                    trigger_hops,
+                } => {
+                    let mut state = self.quarantine_state.write();
+                    state.quarantined_f2f_edges.remove(&release_friend_pk);
+                    state.quarantined_f2f_edges.insert(
+                        target_friend_pk,
+                        QuarantinedEdgeState::new(now, trigger_hops),
+                    );
+                    state.last_quarantine_step_at = Some(now);
+                    events.push(QuarantineEvent::Preempted {
+                        released_friend_pk: release_friend_pk,
+                        quarantined_friend_pk: target_friend_pk,
+                        trigger_hops,
+                    });
+                }
+            }
+        }
+
+        events
     }
 
     /// Returns shard sync candidates for digest pull (non-suspended peers).
@@ -4332,5 +4697,687 @@ mod tests {
         assert_eq!(hit.hit_count, 2);
         assert_eq!(hit.min_hops, 1);
         assert_eq!(hit.exclusive_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_scenario_1_direct_defect_and_self_healing() {
+        let f1 = [1u8; 32];
+        let f2 = [2u8; 32];
+        let f3 = [3u8; 32];
+        let addr1: SocketAddr = "127.0.0.1:9101".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:9102".parse().unwrap();
+        let addr3: SocketAddr = "127.0.0.1:9103".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(f1), addr1),
+                (Some(f2), addr2),
+                (Some(f3), addr3),
+            ],
+            vec![f1, f2, f3],
+        );
+
+        let t0 = Instant::now();
+        pm.set_quarantine_policy(QuarantinePolicy {
+            hop_wait_per_hop: Duration::from_secs(10),
+            shadow_clean_window: Duration::from_secs(10),
+            min_step_interval: Duration::from_secs(5),
+            min_remaining_active_friends: 2,
+            max_exclusive_strictly_healthy: 2,
+        });
+
+        // 1. Direct F2F friend f1 reaches missing_count == 3
+        {
+            let mut peers = pm.peers.write().await;
+            let p1 = peers.get_mut(&addr1).unwrap();
+            p1.missing_count = 3;
+            p1.zombie_since = Some(t0);
+            p1.status = PeerStatus::Suspended;
+        }
+
+        // 2. Evaluate quarantine at t0 -> immediately quarantines f1 (h = 0)
+        let events = pm.evaluate_f2f_quarantine(t0).await;
+        assert_eq!(
+            events,
+            vec![QuarantineEvent::Quarantined {
+                friend_pk: f1,
+                trigger_hops: 0,
+            }]
+        );
+        assert!(pm.is_f2f_quarantined(&f1));
+        assert!(!pm.is_f2f_quarantined(&f2));
+        assert!(!pm.is_f2f_quarantined(&f3));
+
+        // Active forwarding targets exclude f1
+        let active_targets = pm.active_f2f_target_addrs().await;
+        assert!(!active_targets.contains(&addr1));
+        assert!(active_targets.contains(&addr2));
+        assert!(active_targets.contains(&addr3));
+
+        // 3. Shadow edge window: f1 recovers (peer decays/resets) and sends clean heartbeats at +3s and +6s
+        {
+            let mut peers = pm.peers.write().await;
+            let p1 = peers.get_mut(&addr1).unwrap();
+            p1.reset_suspension();
+        }
+        pm.record_shadow_heartbeat_sync(f1, false, t0 + Duration::from_secs(3));
+        pm.record_shadow_heartbeat_sync(f1, false, t0 + Duration::from_secs(6));
+
+        // At +8s (only 8s since quarantine), not yet healed
+        let mid_events = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(8)).await;
+        assert!(mid_events.is_empty());
+        assert!(pm.is_f2f_quarantined(&f1));
+
+        // 4. At +11s (>= 10s of clean window since t0), heals automatically!
+        let heal_events = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(11)).await;
+        assert_eq!(heal_events, vec![QuarantineEvent::Healed { friend_pk: f1 }]);
+        assert!(!pm.is_f2f_quarantined(&f1));
+
+        // Once healed, f1 is included back into active forward targets
+        let restored_targets = pm.active_f2f_target_addrs().await;
+        assert!(restored_targets.contains(&addr1));
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_scenario_2_double_neighbor_trap_s3() {
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let m1 = [3u8; 32];
+        let m2 = [4u8; 32];
+        let addr_h1: SocketAddr = "127.0.0.1:9201".parse().unwrap();
+        let addr_h2: SocketAddr = "127.0.0.1:9202".parse().unwrap();
+        let addr_m1: SocketAddr = "127.0.0.1:9203".parse().unwrap();
+        let addr_m2: SocketAddr = "127.0.0.1:9204".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(h1), addr_h1),
+                (Some(h2), addr_h2),
+                (Some(m1), addr_m1),
+                (Some(m2), addr_m2),
+            ],
+            vec![h1, h2, m1, m2],
+        );
+
+        let t0 = Instant::now();
+        pm.set_quarantine_policy(QuarantinePolicy {
+            hop_wait_per_hop: Duration::from_secs(10),
+            shadow_clean_window: Duration::from_secs(100),
+            min_step_interval: Duration::from_secs(5),
+            min_remaining_active_friends: 2,
+            max_exclusive_strictly_healthy: 2,
+        });
+
+        // Malicious feeder m1 observes zombie Z1 at hop 1
+        // Malicious feeder m2 observes zombie Z2 at hop 1
+        let z1 = [11u8; 32];
+        let z2 = [12u8; 32];
+        let z1_addr: SocketAddr = "127.0.0.1:9211".parse().unwrap();
+        let z2_addr: SocketAddr = "127.0.0.1:9212".parse().unwrap();
+
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            let mut info1 = KnownNodeInfo::new(z1_addr, z1, z1);
+            info1.record_edge_observation(m1, 1, t0);
+            nodes.insert(z1, info1);
+
+            let mut info2 = KnownNodeInfo::new(z2_addr, z2, z2);
+            info2.record_edge_observation(m2, 1, t0);
+            nodes.insert(z2, info2);
+
+            let mut peers = pm.peers.write().await;
+            let mut p_z1 = PeerInfo::new(z1_addr);
+            p_z1.node_id = Some(z1);
+            p_z1.missing_count = 3;
+            p_z1.zombie_since = Some(t0);
+            peers.insert(z1_addr, p_z1);
+
+            let mut p_z2 = PeerInfo::new(z2_addr);
+            p_z2.node_id = Some(z2);
+            p_z2.missing_count = 3;
+            p_z2.zombie_since = Some(t0);
+            peers.insert(z2_addr, p_z2);
+        }
+
+        // Before maturation (t0 + 5s < 10s wait): no quarantine
+        let ev0 = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(5)).await;
+        assert!(ev0.is_empty());
+
+        // Step 1: At t0 + 10s (mature at h = 1), active = 4 -> quarantines first feeder
+        let ev1 = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(10)).await;
+        assert_eq!(ev1.len(), 1);
+        let first_quarantined = match &ev1[0] {
+            QuarantineEvent::Quarantined { friend_pk, trigger_hops } => {
+                assert_eq!(*trigger_hops, 1);
+                *friend_pk
+            }
+            _ => panic!("Expected Quarantined event"),
+        };
+        assert!(first_quarantined == m1 || first_quarantined == m2);
+
+        // Before min_step_interval (t0 + 12s < 10s + 5s): calm cadence throttles step 2
+        let ev_throttled = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(12)).await;
+        assert!(ev_throttled.is_empty());
+
+        // Step 2: At t0 + 16s (past min_step_interval), active = 3 -> quarantines second feeder
+        let ev2 = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(16)).await;
+        assert_eq!(ev2.len(), 1);
+        let second_quarantined = match &ev2[0] {
+            QuarantineEvent::Quarantined { friend_pk, trigger_hops } => {
+                assert_eq!(*trigger_hops, 1);
+                *friend_pk
+            }
+            _ => panic!("Expected Quarantined event"),
+        };
+        assert!(second_quarantined == m1 || second_quarantined == m2);
+        assert_ne!(first_quarantined, second_quarantined);
+
+        // Both feeders are now quarantined!
+        assert!(pm.is_f2f_quarantined(&m1));
+        assert!(pm.is_f2f_quarantined(&m2));
+
+        // Active friends count is now 2 (the honest friends h1, h2).
+        // At t0 + 25s: active == 2 == min_remaining_active_friends -> honest friends are NEVER cut!
+        let ev3 = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(25)).await;
+        assert!(ev3.is_empty());
+        assert!(!pm.is_f2f_quarantined(&h1));
+        assert!(!pm.is_f2f_quarantined(&h2));
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_scenario_3_hop_inflation_resistance() {
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let a1 = [3u8; 32];
+        let a2 = [4u8; 32];
+        let addr_h1: SocketAddr = "127.0.0.1:9301".parse().unwrap();
+        let addr_h2: SocketAddr = "127.0.0.1:9302".parse().unwrap();
+        let addr_a1: SocketAddr = "127.0.0.1:9303".parse().unwrap();
+        let addr_a2: SocketAddr = "127.0.0.1:9304".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(h1), addr_h1),
+                (Some(h2), addr_h2),
+                (Some(a1), addr_a1),
+                (Some(a2), addr_a2),
+            ],
+            vec![h1, h2, a1, a2],
+        );
+
+        let t0 = Instant::now();
+        pm.set_quarantine_policy(QuarantinePolicy {
+            hop_wait_per_hop: Duration::from_secs(10), // T(5) = 50s, T(12) = 120s
+            shadow_clean_window: Duration::from_secs(1000),
+            min_step_interval: Duration::from_secs(5),
+            min_remaining_active_friends: 2,
+            max_exclusive_strictly_healthy: 2,
+        });
+
+        // a1 feeds zombie z1 spoofed at hop 5
+        // a2 feeds zombie z2 spoofed at hop 12
+        let z1 = [21u8; 32];
+        let z2 = [22u8; 32];
+        let z1_addr: SocketAddr = "127.0.0.1:9321".parse().unwrap();
+        let z2_addr: SocketAddr = "127.0.0.1:9322".parse().unwrap();
+
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            let mut info1 = KnownNodeInfo::new(z1_addr, z1, z1);
+            info1.record_edge_observation(a1, 5, t0);
+            nodes.insert(z1, info1);
+
+            let mut info2 = KnownNodeInfo::new(z2_addr, z2, z2);
+            info2.record_edge_observation(a2, 12, t0);
+            nodes.insert(z2, info2);
+
+            let mut peers = pm.peers.write().await;
+            let mut p_z1 = PeerInfo::new(z1_addr);
+            p_z1.node_id = Some(z1);
+            p_z1.missing_count = 3;
+            p_z1.zombie_since = Some(t0);
+            peers.insert(z1_addr, p_z1);
+
+            let mut p_z2 = PeerInfo::new(z2_addr);
+            p_z2.node_id = Some(z2);
+            p_z2.missing_count = 3;
+            p_z2.zombie_since = Some(t0);
+            peers.insert(z2_addr, p_z2);
+        }
+
+        // At +30s: neither is mature (30s < 50s and 30s < 120s)
+        assert!(pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(30)).await.is_empty());
+
+        // At +55s: z1 (hop 5) is mature (55s >= 50s), z2 (hop 12) is not (55s < 120s)
+        let ev1 = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(55)).await;
+        assert_eq!(
+            ev1,
+            vec![QuarantineEvent::Quarantined {
+                friend_pk: a1,
+                trigger_hops: 5,
+            }]
+        );
+        assert!(pm.is_f2f_quarantined(&a1));
+        assert!(!pm.is_f2f_quarantined(&a2));
+
+        // At +125s: z2 (hop 12) is now mature (125s >= 120s)
+        let ev2 = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(125)).await;
+        assert_eq!(
+            ev2,
+            vec![QuarantineEvent::Quarantined {
+                friend_pk: a2,
+                trigger_hops: 12,
+            }]
+        );
+        assert!(pm.is_f2f_quarantined(&a2));
+
+        // 100% quarantined despite extreme hop inflation!
+        assert!(!pm.is_f2f_quarantined(&h1));
+        assert!(!pm.is_f2f_quarantined(&h2));
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_scenario_4_bridge_protection() {
+        let f_bridge = [1u8; 32];
+        let f2 = [2u8; 32];
+        let f3 = [3u8; 32];
+        let addr_b: SocketAddr = "127.0.0.1:9401".parse().unwrap();
+        let addr_2: SocketAddr = "127.0.0.1:9402".parse().unwrap();
+        let addr_3: SocketAddr = "127.0.0.1:9403".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(f_bridge), addr_b),
+                (Some(f2), addr_2),
+                (Some(f3), addr_3),
+            ],
+            vec![f_bridge, f2, f3],
+        );
+
+        let t0 = Instant::now();
+        pm.set_quarantine_policy(QuarantinePolicy {
+            hop_wait_per_hop: Duration::from_secs(10),
+            shadow_clean_window: Duration::from_secs(100),
+            min_step_interval: Duration::from_secs(5),
+            min_remaining_active_friends: 2,
+            max_exclusive_strictly_healthy: 2, // Bridge protection threshold
+        });
+
+        // Over f_bridge, there is a mature zombie at hop 1
+        let z = [9u8; 32];
+        let z_addr: SocketAddr = "127.0.0.1:9409".parse().unwrap();
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            let mut info_z = KnownNodeInfo::new(z_addr, z, z);
+            info_z.record_edge_observation(f_bridge, 1, t0);
+            nodes.insert(z, info_z);
+
+            // And 3 strictly healthy nodes exclusively reachable via f_bridge
+            for i in 1..=3 {
+                let k_pk = [10 + i; 32];
+                let k_addr: SocketAddr = format!("127.0.0.1:941{i}").parse().unwrap();
+                let mut info_k = KnownNodeInfo::new(k_addr, k_pk, k_pk);
+                info_k.record_edge_observation(f_bridge, 1, t0);
+                nodes.insert(k_pk, info_k);
+            }
+
+            let mut peers = pm.peers.write().await;
+            let mut p_z = PeerInfo::new(z_addr);
+            p_z.node_id = Some(z);
+            p_z.missing_count = 3;
+            p_z.zombie_since = Some(t0);
+            peers.insert(z_addr, p_z);
+            // Notice: the 3 strictly healthy nodes have no failure entries in peers (missing_count == 0)
+        }
+
+        // At +15s (past maturation of hop 1):
+        // f_bridge has n_exclusive_strictly_healthy = 3 (> max 2).
+        // Bridge protection kicks in: f_bridge is NEVER quarantined!
+        let ev = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(15)).await;
+        assert!(ev.is_empty());
+        assert!(!pm.is_f2f_quarantined(&f_bridge));
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_scenario_5_preemption_at_limit() {
+        let f1 = [1u8; 32];
+        let f2 = [2u8; 32];
+        let f_far = [3u8; 32];
+        let addr1: SocketAddr = "127.0.0.1:9501".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:9502".parse().unwrap();
+        let addr_far: SocketAddr = "127.0.0.1:9503".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(f1), addr1),
+                (Some(f2), addr2),
+                (Some(f_far), addr_far),
+            ],
+            vec![f1, f2, f_far],
+        );
+
+        let t0 = Instant::now();
+        pm.set_quarantine_policy(QuarantinePolicy {
+            hop_wait_per_hop: Duration::from_secs(10),
+            shadow_clean_window: Duration::from_secs(100),
+            min_step_interval: Duration::from_secs(5),
+            min_remaining_active_friends: 2, // Limit is 2
+            max_exclusive_strictly_healthy: 2,
+        });
+
+        // Suppose f_far is currently quarantined with trigger_hops = 3
+        {
+            let mut state = pm.quarantine_state.write();
+            state.quarantined_f2f_edges.insert(
+                f_far,
+                QuarantinedEdgeState::new(t0, 3),
+            );
+            state.last_quarantine_step_at = Some(t0);
+        }
+        assert!(pm.is_f2f_quarantined(&f_far));
+        // Active friends count is currently 2 (f1 and f2)
+
+        // Now f1 has a mature zombie at hop 1
+        let z = [88u8; 32];
+        let z_addr: SocketAddr = "127.0.0.1:9588".parse().unwrap();
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            let mut info_z = KnownNodeInfo::new(z_addr, z, z);
+            info_z.record_edge_observation(f1, 1, t0);
+            nodes.insert(z, info_z);
+
+            let mut peers = pm.peers.write().await;
+            let mut p_z = PeerInfo::new(z_addr);
+            p_z.node_id = Some(z);
+            p_z.missing_count = 3;
+            p_z.zombie_since = Some(t0);
+            peers.insert(z_addr, p_z);
+        }
+
+        // At +15s (past min_step_interval and mature):
+        // active == 2, so cannot quarantine without dropping to 1.
+        // But f_far has trigger_hops = 3 > 1!
+        // Preemption executes: releases f_far, quarantines f1!
+        let ev = pm.evaluate_f2f_quarantine(t0 + Duration::from_secs(15)).await;
+        assert_eq!(
+            ev,
+            vec![QuarantineEvent::Preempted {
+                released_friend_pk: f_far,
+                quarantined_friend_pk: f1,
+                trigger_hops: 1,
+            }]
+        );
+
+        assert!(!pm.is_f2f_quarantined(&f_far));
+        assert!(pm.is_f2f_quarantined(&f1));
+        assert!(!pm.is_f2f_quarantined(&f2));
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_scenario_6_ingress_dedup_poisoning_protection() {
+        let f_quarantined = [1u8; 32];
+        let f_honest = [2u8; 32];
+        let addr_q: SocketAddr = "127.0.0.1:9601".parse().unwrap();
+        let addr_h: SocketAddr = "127.0.0.1:9602".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(f_quarantined), addr_q),
+                (Some(f_honest), addr_h),
+            ],
+            vec![f_quarantined, f_honest],
+        );
+
+        let t0 = Instant::now();
+        // Mark f_quarantined as quarantined
+        {
+            let mut state = pm.quarantine_state.write();
+            state.quarantined_f2f_edges.insert(
+                f_quarantined,
+                QuarantinedEdgeState::new(t0, 1),
+            );
+        }
+        assert!(pm.is_f2f_quarantined(&f_quarantined));
+
+        let attacker_hb_origin = [99u8; 32];
+
+        // When a heartbeat arrives over f_quarantined, transport routes it to record_shadow_heartbeat
+        // instead of check_and_record_heartbeat!
+        // Here we verify the invariant:
+        pm.record_shadow_heartbeat(f_quarantined, attacker_hb_origin, 1, t0).await;
+
+        // 1. Quarantined edge shadow window received the heartbeat
+        let edges = pm.quarantined_f2f_edges();
+        let q_state = edges.get(&f_quarantined).unwrap();
+        assert_eq!(q_state.shadow_last_seen, Some(t0));
+
+        // 2. The active deduplication cache was NOT touched by the quarantined edge!
+        // When honest friend f_honest delivers the authentic heartbeat for attacker_hb_origin,
+        // it is NOT considered duplicate and passes successfully!
+        let is_fresh = pm.check_and_record_heartbeat(&attacker_hb_origin, 12345, 1000).await;
+        assert!(is_fresh, "Honest delivery must NOT be blocked by quarantined peer attempt");
+
+        // 3. Forward targets strictly exclude f_quarantined
+        let forward_targets = pm.active_f2f_target_addrs().await;
+        assert!(!forward_targets.contains(&addr_q));
+        assert!(forward_targets.contains(&addr_h));
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_scenario_7_shadow_heartbeat_zombie_detection() {
+        let f_quarantined = [10u8; 32];
+        let addr_q: SocketAddr = "127.0.0.1:9701".parse().unwrap();
+        let z_direct_f2f = [20u8; 32];
+        let addr_z_f2f: SocketAddr = "127.0.0.1:9702".parse().unwrap();
+        let z_network = [30u8; 32];
+        let addr_z_net: SocketAddr = "127.0.0.1:9703".parse().unwrap();
+        let clean_node = [40u8; 32];
+        let addr_clean: SocketAddr = "127.0.0.1:9704".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(f_quarantined), addr_q),
+                (Some(z_direct_f2f), addr_z_f2f),
+            ],
+            vec![f_quarantined, z_direct_f2f],
+        );
+
+        let t0 = Instant::now();
+        {
+            let mut state = pm.quarantine_state.write();
+            state.quarantined_f2f_edges.insert(
+                f_quarantined,
+                QuarantinedEdgeState::new(t0, 1),
+            );
+        }
+
+        // Direct F2F zombie: peer at addr_z_f2f has zombie_since set (node_id not set on peer struct directly)
+        {
+            let mut peers = pm.peers.write().await;
+            let mut p_f2f = PeerInfo::new(addr_z_f2f);
+            p_f2f.missing_count = 3;
+            p_f2f.zombie_since = Some(t0);
+            peers.insert(addr_z_f2f, p_f2f);
+
+            // Network zombie: known_network_nodes maps z_network -> addr_z_net
+            let mut p_net = PeerInfo::new(addr_z_net);
+            p_net.missing_count = 3;
+            p_net.zombie_since = Some(t0);
+            peers.insert(addr_z_net, p_net);
+
+            // Clean node
+            let mut p_clean = PeerInfo::new(addr_clean);
+            p_clean.missing_count = 0;
+            peers.insert(addr_clean, p_clean);
+        }
+        {
+            let mut known = pm.known_network_nodes.write().await;
+            known.insert(z_network, KnownNodeInfo::new(addr_z_net, z_network, z_network));
+            known.insert(clean_node, KnownNodeInfo::new(addr_clean, clean_node, clean_node));
+        }
+
+        // 1. Clean heartbeat arrives at +2s
+        let t1 = t0 + Duration::from_secs(2);
+        pm.record_shadow_heartbeat(f_quarantined, clean_node, 1, t1).await;
+        {
+            let q_state = pm.quarantined_f2f_edges().get(&f_quarantined).cloned().unwrap();
+            assert_eq!(q_state.clean_heartbeats_seen, 1);
+            assert_eq!(q_state.last_zombie_shadow_seen, t0); // unchanged
+        }
+
+        // 2. Direct F2F zombie heartbeat arrives at +4s (resolved via f2f_friends -> addr -> peers)
+        let t2 = t0 + Duration::from_secs(4);
+        pm.record_shadow_heartbeat(f_quarantined, z_direct_f2f, 1, t2).await;
+        {
+            let q_state = pm.quarantined_f2f_edges().get(&f_quarantined).cloned().unwrap();
+            assert_eq!(q_state.clean_heartbeats_seen, 1);
+            assert_eq!(q_state.last_zombie_shadow_seen, t2); // updated to t2!
+        }
+
+        // 3. Known network zombie heartbeat arrives at +7s (resolved via known_network_nodes -> addr -> peers)
+        let t3 = t0 + Duration::from_secs(7);
+        pm.record_shadow_heartbeat(f_quarantined, z_network, 1, t3).await;
+        {
+            let q_state = pm.quarantined_f2f_edges().get(&f_quarantined).cloned().unwrap();
+            assert_eq!(q_state.clean_heartbeats_seen, 1);
+            assert_eq!(q_state.last_zombie_shadow_seen, t3); // updated to t3!
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_scenario_8_hourly_decay_preserves_conviction_and_prevents_oscillation() {
+        // Setup a node with 2 honest friends (h1, h2) + 1 malicious feeder M
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let m = [3u8; 32];
+        let addr_h1: SocketAddr = "127.0.0.1:9301".parse().unwrap();
+        let addr_h2: SocketAddr = "127.0.0.1:9302".parse().unwrap();
+        let addr_m: SocketAddr = "127.0.0.1:9303".parse().unwrap();
+
+        let pm = PeerManager::with_f2f(
+            vec![
+                (Some(h1), addr_h1),
+                (Some(h2), addr_h2),
+                (Some(m), addr_m),
+            ],
+            vec![h1, h2, m],
+        );
+
+        // QuarantinePolicy defaults:
+        // hop_wait_per_hop = 3h -> T(2) = 6h maturation delay
+        // shadow_clean_window = 3h
+        // min_step_interval = 1h
+        // min_remaining_active_friends = 2
+        let policy = pm.quarantine_policy();
+        assert_eq!(policy.hop_wait_duration(2), Duration::from_secs(6 * 3600));
+        assert_eq!(policy.shadow_clean_window, Duration::from_secs(3 * 3600));
+
+        // Behind M sits zombie Z at distance h = 2
+        let z = [99u8; 32];
+        let z_addr: SocketAddr = "127.0.0.1:9399".parse().unwrap();
+
+        let t0 = Instant::now();
+
+        // At t0: Z reaches 3 failures and is convicted as a zombie (zombie_since = Some(t0))
+        {
+            let mut nodes = pm.known_network_nodes.write().await;
+            let mut info_z = KnownNodeInfo::new(z_addr, z, z);
+            info_z.record_edge_observation(m, 2, t0);
+            nodes.insert(z, info_z);
+
+            let mut peers = pm.peers.write().await;
+            let mut p_z = PeerInfo::new(z_addr);
+            p_z.node_id = Some(z);
+            p_z.missing_count = 3;
+            p_z.zombie_since = Some(t0);
+            p_z.status = PeerStatus::Suspended;
+            peers.insert(z_addr, p_z);
+        }
+
+        // Simulate realistically each hour t = 1h, 2h, 3h, 4h, 5h, 6h:
+        // Hourly decay_all_peers_at(t0 + h) decrements missing_count (dropping to 0 by hour 3),
+        // but zombie_since remains active because Z never performed authentic shard work!
+        for h in 1..=5 {
+            let t = t0 + Duration::from_secs(h * 3600);
+            let events = pm.decay_all_peers_at(t).await;
+            assert!(events.is_empty(), "Hour {}: should not quarantine before 6h maturation", h);
+            assert!(!pm.is_f2f_quarantined(&m));
+        }
+
+        // At hour 5, verify that Z.missing_count is 0 but Z.zombie_since is still Some(t0)
+        {
+            let peers = pm.peers.read().await;
+            let p_z = peers.get(&z_addr).unwrap();
+            assert_eq!(p_z.missing_count, 0);
+            assert_eq!(p_z.zombie_since, Some(t0));
+        }
+
+        // At t = 6h: Maturation delay T(2) = 6h is reached -> M is reliably quarantined!
+        let t6 = t0 + Duration::from_secs(6 * 3600);
+        let events6 = pm.decay_all_peers_at(t6).await;
+        assert_eq!(
+            events6,
+            vec![QuarantineEvent::Quarantined {
+                friend_pk: m,
+                trigger_hops: 2,
+            }]
+        );
+        assert!(pm.is_f2f_quarantined(&m));
+
+        // Simulate further hours t = 7h .. 14h (8 additional hours with hourly decay_all_peers_at
+        // + hourly record_shadow_heartbeat of Z via M):
+        // M must stay continuously quarantined with ZERO oscillation or spurious healing alarms!
+        for h in 7..=14 {
+            let t = t0 + Duration::from_secs(h * 3600);
+            pm.record_shadow_heartbeat(m, z, 2, t).await;
+            let events = pm.decay_all_peers_at(t).await;
+            assert!(
+                events.is_empty(),
+                "Hour {}: M must not trigger events or spurious healing while Z remains a zombie",
+                h
+            );
+            assert!(
+                pm.is_f2f_quarantined(&m),
+                "Hour {}: M must remain continuously quarantined",
+                h
+            );
+        }
+
+        // Counter-test: Honest peer Z proves authentic shard work via mark_shard_work_success()
+        {
+            let mut peers = pm.peers.write().await;
+            let p_z = peers.get_mut(&z_addr).unwrap();
+            p_z.mark_shard_work_success();
+            assert_eq!(p_z.zombie_since, None);
+        }
+
+        // Now simulate 3 clean shadow hours without zombie defects:
+        // Hour 15 (1h clean): not yet healed (1h < 3h clean window)
+        let t15 = t0 + Duration::from_secs(15 * 3600);
+        pm.record_shadow_heartbeat(m, z, 2, t15).await;
+        let events15 = pm.decay_all_peers_at(t15).await;
+        assert!(events15.is_empty());
+        assert!(pm.is_f2f_quarantined(&m));
+
+        // Hour 16 (2h clean): not yet healed (2h < 3h clean window)
+        let t16 = t0 + Duration::from_secs(16 * 3600);
+        pm.record_shadow_heartbeat(m, z, 2, t16).await;
+        let events16 = pm.decay_all_peers_at(t16).await;
+        assert!(events16.is_empty());
+        assert!(pm.is_f2f_quarantined(&m));
+
+        // Hour 17 (3h clean): reached shadow_clean_window (3h >= 3h) -> heals back to Active!
+        let t17 = t0 + Duration::from_secs(17 * 3600);
+        pm.record_shadow_heartbeat(m, z, 2, t17).await;
+        let events17 = pm.decay_all_peers_at(t17).await;
+        assert_eq!(
+            events17,
+            vec![QuarantineEvent::Healed { friend_pk: m }]
+        );
+        assert!(!pm.is_f2f_quarantined(&m));
+
+        // Restored to active target addresses
+        let targets = pm.active_f2f_target_addrs().await;
+        assert!(targets.contains(&addr_m));
     }
 }

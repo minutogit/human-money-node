@@ -621,7 +621,10 @@ impl NodeDaemon {
         });
         cleanup.producer(&dns_re_resolve_handle);
 
-        // Background hourly malus decay ticker (Spec 19: Autonome Peer-Heilung)
+        let is_simulation = self.config.network.simulation_mode
+            || self.config.network.fast_ticker_interval_secs.is_some();
+
+        // Background hourly malus decay ticker (Spec 19: Autonomous Peer Healing)
         let decay_pm = peer_manager.clone();
         let decay_token = self.cancel_token.clone();
         let malus_decay_handle = tokio::spawn(async move {
@@ -638,6 +641,26 @@ impl NodeDaemon {
             }
         });
         cleanup.producer(&malus_decay_handle);
+
+        // Background F2F quarantine evaluation ticker (Algo 3v2 + ShadowEdgeWindow)
+        let q_pm = peer_manager.clone();
+        let q_token = self.cancel_token.clone();
+        let q_interval_secs = if is_simulation { 2 } else { 30 };
+        let quarantine_handle = tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(q_interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = q_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        let _events = q_pm.evaluate_f2f_quarantine(std::time::Instant::now()).await;
+                    }
+                }
+            }
+        });
+        cleanup.producer(&quarantine_handle);
 
         info!("Initializing QUIC P2P transport...");
 

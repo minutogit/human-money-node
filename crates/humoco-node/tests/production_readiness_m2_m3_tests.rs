@@ -446,6 +446,7 @@ async fn test_persisted_ticket_observations_survive_restart_while_new_tickets_in
     // Simulate daemon restart: reopen RedbStorage and seed a fresh PeerManager (production 24h mode)
     let storage = RedbStorage::open(&db_path).expect("reopen redb");
     let pm = PeerManager::new(vec![]);
+    pm.set_min_work_floor_for_test(1);
     for (pk, hrw, seen_ms) in storage
         .all_ticket_observations()
         .expect("load observations")

@@ -178,7 +178,7 @@ async fn test_phase4_spec_09_slotted_median_and_dynamic_quotas() {
     let temp = tempdir().unwrap();
     let db_path = temp.path().join("spec09_test.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
-    let pow = Arc::new(PowEngine::new([0x33; 32], 8));
+    let pow = Arc::new(PowEngine::new(8));
     let controller = TierController::new(storage.clone(), pow);
 
     // 1. Initial State: Hard Floor Baseline
@@ -217,7 +217,7 @@ async fn test_phase4_spec_09_slotted_median_and_dynamic_quotas() {
     let huge_ttl_seconds = 100 * 31_536_000; // 100 years = 19_200 byte-years
     let huge_by = ByteYears::from_ttl_seconds(huge_ttl_seconds);
     let exceed_res =
-        controller.evaluate_f2f_quota(peer_token, huge_by * 1000, controller.current_epoch_day()); // 19_200_000 > 12_000_000
+        controller.evaluate_f2f_quota(peer_token, huge_by * 1000, controller.now_ms()); // 19_200_000 > 12_000_000
     assert!(matches!(
         exceed_res,
         Err(IngressError::QuotaExceeded { .. })
@@ -235,7 +235,7 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
     let db_path = temp.path().join("wire_quota.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let (engine, _drain) = DualTierEngine::new(storage.clone());
-    let pow = Arc::new(PowEngine::new([0x44; 32], 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow));
 
     // NCB_eff hard floor is 960_000, 5.0 * 960_000 = 4_800_000
@@ -408,7 +408,7 @@ async fn test_phase4_adversarial_5x_whale_limit_flooding() {
     let db_path = temp.path().join("adversarial_whale.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let (engine, _drain) = DualTierEngine::new(storage.clone());
-    let pow = Arc::new(humoco_node::ingress::pow::PowEngine::new([0x55; 32], 8));
+    let pow = Arc::new(humoco_node::ingress::pow::PowEngine::new(8));
     let tier_controller = Arc::new(humoco_node::ingress::tier::TierController::new(
         storage.clone(),
         pow,

@@ -65,7 +65,7 @@ fn setup_app() -> axum::Router {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open"));
     let (engine, _fh) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine, storage, identity, tier, pow);
     isolated_ready(&state);
@@ -79,7 +79,7 @@ fn setup_app_with_tier() -> (axum::Router, Arc<TierController>, Arc<PowEngine>) 
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let (engine, _fh) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine, storage, identity.clone(), tier.clone(), pow.clone());
     isolated_ready(&state);
@@ -476,7 +476,7 @@ async fn test_chaos_ingress_quota_exhaustion_under_flood() {
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let (engine, _fh) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 0)); // difficulty 0 for speed
+    let pow = Arc::new(PowEngine::new(0)); // difficulty 0 for speed
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     // Register VIP with tiny quota 500 BY
     let tag = [0x77u8; 32];
@@ -552,7 +552,7 @@ async fn test_chaos_ingress_quota_exhaustion_concurrent_barrier_flood() {
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let (engine, _fh) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 0));
+    let pow = Arc::new(PowEngine::new(0));
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let tag = [0x88u8; 32];
     let token = "barrier_vip";

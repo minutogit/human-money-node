@@ -696,9 +696,10 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
     let (total_write_used, total_read_used) = {
         let thermo_arc = state.tier_controller.thermometer();
         let thermo = thermo_arc.read().unwrap_or_else(|e| e.into_inner());
+        let now_sec = now_ms / 1000;
         (
-            thermo.total_daily_write_usage(),
-            thermo.total_daily_read_usage(),
+            thermo.total_write_usage_at(now_sec),
+            thermo.total_read_usage_at(now_sec),
         )
     };
     let today_write_used = state.tier_controller.rolling_24h_average();
@@ -862,8 +863,7 @@ pub async fn collect_dashboard_data(state: &AppState) -> DashboardData {
         total_quota_used_pct,
     };
 
-    let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
-    let f2f_clients = state.tier_controller.list_f2f_clients(now_ms, epoch_day);
+    let f2f_clients = state.tier_controller.list_f2f_clients(now_ms);
 
     let api_port = state.config.network.rpc_listen_addr.port();
     let p2p_port = state.config.network.p2p_listen_addr.port();

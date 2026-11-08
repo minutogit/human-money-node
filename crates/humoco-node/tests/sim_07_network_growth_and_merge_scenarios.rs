@@ -238,7 +238,7 @@ async fn spawn_test_node(
         )
         .await;
 
-    let pow = Arc::new(humoco_node::ingress::PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(humoco_node::ingress::PowEngine::new(8));
     let tier = Arc::new(humoco_node::ingress::TierController::new(
         storage.clone(),
         pow.clone(),

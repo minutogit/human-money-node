@@ -44,7 +44,7 @@ fn setup_test_app_pair() -> (
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let state = AppState::new(
@@ -90,7 +90,7 @@ fn setup_test_operator_app() -> (
     let storage = Arc::new(RedbStorage::open(&temp.path().join("operator.redb")).expect("redb"));
     let (engine, _flush) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(
         engine,
@@ -676,7 +676,7 @@ async fn test_node_ban_does_not_deny_public_wallet_ingress() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("friend_token");
 
@@ -1264,7 +1264,7 @@ async fn test_phase1_gateway_hrw_rank_filtering_in_quorum_certificate() {
     let db_path = temp.path().join("test_qc_rank.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("gateway_test_token");
 
@@ -3098,7 +3098,7 @@ async fn test_admin_verify_token_endpoint() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
@@ -3191,7 +3191,7 @@ async fn test_admin_verify_token_rate_limiting() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
@@ -3260,7 +3260,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
 
@@ -3387,7 +3387,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
         .contains(gen_token));
 
     // Verify Bob and Charlie in list_f2f_clients
-    let clients = tier_controller.list_f2f_clients(1000, 0);
+    let clients = tier_controller.list_f2f_clients(1000);
     assert!(clients.iter().any(|c| c.label == "Bob Wallet"));
     assert!(clients.iter().any(|c| c.label == "Charlie PoS"));
 
@@ -3441,7 +3441,7 @@ async fn test_admin_mesh_and_ingress_client_routes() {
     assert_eq!(del_json["removed"], bob_hash);
 
     // Verify Bob is removed
-    let clients_after = tier_controller.list_f2f_clients(1000, 0);
+    let clients_after = tier_controller.list_f2f_clients(1000);
     assert!(!clients_after.iter().any(|c| c.label == "Bob Wallet"));
     assert!(clients_after.iter().any(|c| c.label == "Charlie PoS"));
 }
@@ -3453,7 +3453,7 @@ async fn test_admin_quota_mutation() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let auth = Arc::new(humoco_node::api::auth::AdminTokenManager::with_token(
@@ -4159,7 +4159,7 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
 
@@ -4241,7 +4241,7 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
     let res_peer = app.clone().oneshot(req_peer).await.unwrap();
     assert_eq!(res_peer.status(), StatusCode::OK);
     assert!(peer_manager.is_f2f_friend(&test_peer).await);
-    let clients = tier_controller.list_f2f_clients(1000, 0);
+    let clients = tier_controller.list_f2f_clients(1000);
     assert!(!clients.iter().any(|c| c.label == "TestPeer"));
 
     // 3. Add client friend and then remove
@@ -4261,7 +4261,7 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
             .unwrap();
     assert_eq!(client_json["label"], "Kasse-A");
 
-    let client_list = tier_controller.list_f2f_clients(1000, 0);
+    let client_list = tier_controller.list_f2f_clients(1000);
     let kasse_client = client_list.iter().find(|c| c.label == "Kasse-A").unwrap();
     let token_hash = kasse_client.token_hash.clone();
 
@@ -4275,7 +4275,7 @@ async fn test_qa_admin_endpoints_unauthorized_and_mutations() {
     let res_del = app.oneshot(req_del).await.unwrap();
     assert_eq!(res_del.status(), StatusCode::OK);
     assert!(!tier_controller
-        .list_f2f_clients(1000, 0)
+        .list_f2f_clients(1000)
         .iter()
         .any(|c| c.label == "Kasse-A"));
 }
@@ -4365,7 +4365,7 @@ async fn test_admin_peer_reset_and_ping_endpoints() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     let peer_manager = Arc::new(humoco_node::network::PeerManager::with_f2f(vec![], vec![]));
 
@@ -4748,7 +4748,7 @@ async fn test_empty_immature_committee_never_confirms_zero_of_zero() {
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
     let pm = Arc::new(humoco_node::network::PeerManager::new(Vec::new()));
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     tiers.register_f2f_peer("authorized_immature_test_client");
     let owner = SigningKey::from_bytes(&[92; 32]);
@@ -4824,7 +4824,7 @@ async fn test_storage_failure_never_returns_success_for_single_or_chain_ingress(
     let storage = Arc::new(RedbStorage::open(&temp.path().join("failed-signing.redb")).unwrap());
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     tiers.register_f2f_peer("storage_fault_test");
     let state = isolated_ready_state(AppState::new(engine.clone(), storage, identity, tiers, pow));
@@ -4958,7 +4958,7 @@ async fn retained_choice_capacity_refuses_before_disk_and_recovers_after_release
     let storage = Arc::new(RedbStorage::open(&dir.path().join("retrieval.redb")).unwrap());
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine, storage, identity, tiers, pow);
     let held = state
@@ -5023,7 +5023,7 @@ async fn test_a05_01_non_blocking_voucher_root_reads() {
     let storage = Arc::new(RedbStorage::open(&dir.path().join("roots_nb.redb")).unwrap());
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine.clone(), storage.clone(), identity, tiers, pow);
 

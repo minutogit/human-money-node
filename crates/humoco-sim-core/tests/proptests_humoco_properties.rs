@@ -310,45 +310,63 @@ proptest! {
         node_id in any::<u16>(),
     ) {
         let mut thermo = NetworkThermometer::new();
-        let day = 42u64;
+        let now_sec = 42_000u64;
         let mut total_accepted = 0u64;
         for fp in footprints.clone() {
-            let ok = thermo.try_accept_lock(day, node_id, fp, quota);
+            let ok = thermo.try_accept_lock(now_sec, node_id, fp, quota);
             if ok {
                 total_accepted = total_accepted.saturating_add(fp);
                 prop_assert!(total_accepted <= quota, "accepted total {} must be <= quota {}", total_accepted, quota);
                 prop_assert_eq!(thermo.get_node_usage(node_id), total_accepted);
             } else {
                 prop_assert_eq!(thermo.get_node_usage(node_id), total_accepted);
-                let huge_ok = thermo.try_accept_lock(day, node_id, quota, quota);
+                let huge_ok = thermo.try_accept_lock(now_sec, node_id, quota, quota);
                 let expected_huge = total_accepted.saturating_add(quota) <= quota;
                 prop_assert_eq!(huge_ok, expected_huge, "huge footprint must respect remaining quota");
                 break;
             }
         }
         let usage_before = thermo.get_node_usage(node_id);
-        let _ = thermo.try_accept_lock(day, node_id, 1, quota);
+        let _ = thermo.try_accept_lock(now_sec, node_id, 1, quota);
         prop_assert!(thermo.get_node_usage(node_id) >= usage_before);
     }
 
     #[test]
-    fn prop_try_accept_lock_resets_next_day(
+    fn prop_try_accept_lock_rolling_ema_decay_and_monotonicity(
         quota in 1_000u64..5_000_000,
-        fp in 1u64..5_000,
+        fp in 100u64..5_000,
         node_id in any::<u16>(),
     ) {
         let mut thermo = NetworkThermometer::new();
         prop_assume!(fp <= quota);
-        let day1 = 10u64;
-        let day2 = 11u64;
-        prop_assert!(thermo.try_accept_lock(day1, node_id, fp, quota));
+        let t1 = 10_000u64;
+        prop_assert!(thermo.try_accept_lock(t1, node_id, fp, quota));
         prop_assert_eq!(thermo.get_node_usage(node_id), fp);
-        prop_assert!(thermo.try_accept_lock(day2, node_id, fp, quota));
-        prop_assert_eq!(thermo.get_node_usage(node_id), fp);
-        if fp * 2 <= quota {
-            prop_assert!(thermo.try_accept_lock(day2, node_id, fp, quota));
-            prop_assert_eq!(thermo.get_node_usage(node_id), fp * 2);
+
+        // 24h later: usage decays by 50%
+        let t2 = t1 + 86_400;
+        let decayed_usage = thermo.get_node_usage_at(node_id, t2);
+        let expected_half = humoco_sim_core::quota::decay_integer_ema(fp, 86_400);
+        prop_assert_eq!(decayed_usage, expected_half);
+        prop_assert!(decayed_usage <= (fp / 2) + 1);
+
+        // Consuming at t2 adds on top of decayed usage
+        if decayed_usage.saturating_add(fp) <= quota {
+            prop_assert!(thermo.try_accept_lock(t2, node_id, fp, quota));
+            prop_assert_eq!(thermo.get_node_usage(node_id), decayed_usage + fp);
         }
+
+        // Out-of-order packet with past timestamp (t1 < t2) must never reset or inflate decay
+        let past_t = t1;
+        let usage_before = thermo.get_node_usage_at(node_id, t2);
+        let _ = thermo.try_accept_lock(past_t, node_id, 1, quota);
+        prop_assert!(thermo.get_node_usage_at(node_id, t2) >= usage_before);
+
+        // 64 half-lives later: decays completely to 0
+        let t_ext = t2 + 64 * 86_400;
+        prop_assert_eq!(thermo.get_node_usage_at(node_id, t_ext), 0);
+        prop_assert!(thermo.try_accept_lock(t_ext, node_id, quota, quota));
+        prop_assert_eq!(thermo.get_node_usage(node_id), quota);
     }
 
     #[test]

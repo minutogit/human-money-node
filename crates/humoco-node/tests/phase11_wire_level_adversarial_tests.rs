@@ -225,7 +225,7 @@ async fn test_phase11a_quorum_gating_wire_returns_503_never_200_201() {
     .expect("bind gateway");
     transport.spawn_accept_loop();
 
-    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("phase11_friend_token");
 
@@ -404,7 +404,7 @@ async fn test_phase11b_final_attestation_status_wire_n_ge_20() {
             .expect("preconnect shard");
     }
 
-    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("phase11b_token");
     let mut state = AppState::new(
@@ -1505,7 +1505,7 @@ async fn quorum_wire_cluster(gateway_rank: usize) -> (Vec<QuorumWireNode>, L2Loc
         .expect("bind");
         transport.set_sync_ready(true);
         transport.spawn_accept_loop();
-        let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+        let pow = Arc::new(PowEngine::new(8));
         let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
         tier.register_f2f_peer("committee_wire_token");
         nodes.push(QuorumWireNode {

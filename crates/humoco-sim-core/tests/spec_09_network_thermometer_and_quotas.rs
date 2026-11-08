@@ -17,12 +17,13 @@ use humoco_sim_core::quota::{
 
 /// [INV-0902] [INV-0904]
 /// Test 1: Verifiziert, dass ein Kaltstart-Knoten (N < 4 oder leeres Netz)
-/// exakt 1.000 Fünf-Jahres-Locks (je 960 Byte-Jahre) innerhalb eines Tages einspeisen kann.
+/// exakt 1.000 Fünf-Jahres-Locks (je 960 Byte-Jahre) innerhalb eines Tages einspeisen kann,
+/// und dass das Budget kontinuierlich mit einer 24h-Halbwertszeit (EMA) regeneriert.
 #[test]
 fn test_spec_09_hard_floor_baseline_1000_locks_guarantee() {
     let mut thermometer = NetworkThermometer::new();
     let node_id = 42;
-    let epoch_day = 0;
+    let now_sec = 0;
 
     // Hard-Floor Baseline ist aktiv (keine History vorhanden)
     let ncb_eff = thermometer.effective_ncb();
@@ -38,7 +39,7 @@ fn test_spec_09_hard_floor_baseline_1000_locks_guarantee() {
 
     // 1.000 Locks einspeisen -> alle müssen erfolgreich akzeptiert werden
     for i in 0..1000 {
-        let accepted = thermometer.try_accept_lock(epoch_day, node_id, lock_5y_footprint, quota);
+        let accepted = thermometer.try_accept_lock(now_sec, node_id, lock_5y_footprint, quota);
         assert!(
             accepted,
             "Lock {} von 1.000 muss innerhalb des Tageskontingents akzeptiert werden",
@@ -48,23 +49,30 @@ fn test_spec_09_hard_floor_baseline_1000_locks_guarantee() {
 
     assert_eq!(thermometer.get_node_usage(node_id), 960_000);
 
-    // Der 1.001 Lock am selben Tag übersteigt das Budget und wird lautlos abgewiesen (Silent Dropping)
+    // Der 1.001 Lock zum selben Zeitpunkt übersteigt das Budget und wird lautlos abgewiesen (Silent Dropping)
     let lock_1001_accepted =
-        thermometer.try_accept_lock(epoch_day, node_id, lock_5y_footprint, quota);
+        thermometer.try_accept_lock(now_sec, node_id, lock_5y_footprint, quota);
     assert!(
         !lock_1001_accepted,
         "Lock 1.001 muss durch Silent Dropping abgewiesen werden"
     );
 
-    // Am nächsten Tag (neue 24h-Epoche) wird das Budget zurückgesetzt
-    let next_day = epoch_day + 1;
-    let next_day_lock_accepted =
-        thermometer.try_accept_lock(next_day, node_id, lock_5y_footprint, quota);
+    // 24 Stunden später (t = 86.400s) sind 50% des Verbrauchs abgeklungen (480.000 Byte-Jahre frei)
+    let t_24h = now_sec + 86_400;
+    assert_eq!(thermometer.get_node_usage_at(node_id, t_24h), 480_000);
+
+    // Ein neuer 5-Jahres-Lock passt problemlos in das regenerierte Budget
+    let next_lock_accepted =
+        thermometer.try_accept_lock(t_24h, node_id, lock_5y_footprint, quota);
     assert!(
-        next_day_lock_accepted,
-        "Am nächsten Tag muss das Budget wieder voll zur Verfügung stehen"
+        next_lock_accepted,
+        "Nach 24h Halbwertszeit muss das Budget zu 50% regeneriert sein"
     );
-    assert_eq!(thermometer.get_node_usage(node_id), 960);
+    assert_eq!(thermometer.get_node_usage(node_id), 480_000 + 960);
+
+    // Nach 64 Halbwertszeiten ist das gesamte Kontingent vollständig zu 0 abgeklungen
+    let t_fully_decayed = t_24h + 64 * 86_400;
+    assert_eq!(thermometer.get_node_usage_at(node_id, t_fully_decayed), 0);
 }
 
 /// [INV-0901]
@@ -111,7 +119,7 @@ fn test_quartile_distribution_and_spread_damper() {
 fn test_spec_09_read_hard_floor_baseline_50000_reads_guarantee() {
     let mut thermometer = NetworkThermometer::new();
     let node_id = 42;
-    let epoch_day = 0;
+    let now_sec = 0;
 
     let ncb_eff = thermometer.effective_ncb();
     assert_eq!(ncb_eff, HARD_FLOOR_BASELINE_DAILY);
@@ -125,7 +133,7 @@ fn test_spec_09_read_hard_floor_baseline_50000_reads_guarantee() {
     // Teste 50.000 Reads (unter Verwendung von Chunks zur Performance-Optimierung im Test)
     for i in 0..50 {
         let accepted = thermometer.try_accept_read(
-            epoch_day,
+            now_sec,
             node_id,
             one_read_credit * 1000,
             daily_read_quota,
@@ -140,20 +148,27 @@ fn test_spec_09_read_hard_floor_baseline_50000_reads_guarantee() {
     assert_eq!(thermometer.get_node_read_usage(node_id), 50_000);
 
     let read_over_budget_accepted =
-        thermometer.try_accept_read(epoch_day, node_id, one_read_credit, daily_read_quota);
+        thermometer.try_accept_read(now_sec, node_id, one_read_credit, daily_read_quota);
     assert!(
         !read_over_budget_accepted,
         "Read 50.001 muss durch Silent Dropping abgewiesen werden"
     );
 
-    let next_day = epoch_day + 1;
+    // 24 Stunden später (t = 86.400s) sind 50% des Read-Verbrauchs abgeklungen (25.000 frei)
+    let t_24h = now_sec + 86_400;
+    assert_eq!(thermometer.get_node_read_usage_at(node_id, t_24h), 25_000);
+
     let next_day_read_accepted =
-        thermometer.try_accept_read(next_day, node_id, one_read_credit, daily_read_quota);
+        thermometer.try_accept_read(t_24h, node_id, one_read_credit, daily_read_quota);
     assert!(
         next_day_read_accepted,
-        "Am nächsten Tag muss das Budget wieder voll zur Verfügung stehen"
+        "Nach 24h muss das Read-Budget zu 50% regeneriert sein"
     );
-    assert_eq!(thermometer.get_node_read_usage(node_id), 1);
+    assert_eq!(thermometer.get_node_read_usage(node_id), 25_001);
+
+    // Nach 64 Halbwertszeiten ist der Read-Verbrauch vollständig auf 0 abgeklungen
+    let t_fully_decayed = t_24h + 64 * 86_400;
+    assert_eq!(thermometer.get_node_read_usage_at(node_id, t_fully_decayed), 0);
 }
 
 /// [INV-0911]
@@ -228,7 +243,7 @@ fn test_spec_09_calculate_sync_read_credits() {
 fn test_spec_09_read_quota_evaluation_on_join() {
     let mut thermometer = NetworkThermometer::new();
     let node_id = 42;
-    let epoch_day = 0;
+    let now_sec = 0;
 
     // Beim Kaltstart ist der effektive NCB_Read_Eff = Hard-Floor-Read-Baseline
     assert_eq!(
@@ -253,7 +268,7 @@ fn test_spec_09_read_quota_evaluation_on_join() {
     // Knoten verbraucht 30.000 Reads
     let one_read = 1;
     let accepted1 = thermometer.try_accept_read(
-        epoch_day,
+        now_sec,
         node_id,
         one_read * 30_000,
         daily_read_quota_after_seed,
@@ -263,7 +278,7 @@ fn test_spec_09_read_quota_evaluation_on_join() {
 
     // Knoten verbraucht weitere 70.000 Reads, Gesamt 100.000 -> Akzeptiert
     let accepted2 = thermometer.try_accept_read(
-        epoch_day,
+        now_sec,
         node_id,
         one_read * 70_000,
         daily_read_quota_after_seed,
@@ -273,7 +288,7 @@ fn test_spec_09_read_quota_evaluation_on_join() {
 
     // Knoten versucht, weitere 1 Read zu verbrauchen -> Silent Dropping
     let accepted3 =
-        thermometer.try_accept_read(epoch_day, node_id, one_read, daily_read_quota_after_seed);
+        thermometer.try_accept_read(now_sec, node_id, one_read, daily_read_quota_after_seed);
     assert!(!accepted3);
     assert_eq!(thermometer.get_node_read_usage(node_id), 100_000);
 }
@@ -367,8 +382,9 @@ fn test_spec_09_organic_network_growth_and_silent_dropping() {
         let lock_1y = ByteYears::from_ttl_years(1.0); // 192 Byte-Jahre
 
         // Node schreibt 100 Locks
+        let now_sec = day * 86_400;
         for _ in 0..100 {
-            let ok = thermometer.try_accept_lock(day, node_id, lock_1y, quota);
+            let ok = thermometer.try_accept_lock(now_sec, node_id, lock_1y, quota);
             assert!(ok);
         }
     }

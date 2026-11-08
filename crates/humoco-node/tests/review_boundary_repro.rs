@@ -135,7 +135,7 @@ async fn submit(app: axum::Router, req: &L2LockRequest) -> StatusCode {
 
 fn app(db: Arc<RedbStorage>, engine: DualTierEngine) -> axum::Router {
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier = Arc::new(TierController::new(db.clone(), pow.clone()));
     tier.register_f2f_peer("f2f_0123456789abcdef0123456789abcdef");
     let state = AppState::new(engine, db, identity, tier, pow);

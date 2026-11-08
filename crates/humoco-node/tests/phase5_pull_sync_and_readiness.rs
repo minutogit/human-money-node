@@ -511,7 +511,7 @@ async fn test_boot_readiness_barrier_http_api_503() {
     .expect("bind");
     server_transport.set_sync_ready_handle(is_sync_ready.clone());
 
-    let pow_engine = Arc::new(PowEngine::new(*server_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let mut state = AppState::new(engine, storage, server_id, tier_controller, pow_engine);
@@ -623,7 +623,7 @@ async fn test_per_shard_readiness_demand_sync_503() {
     server_transport.set_sync_ready_handle(is_sync_ready.clone());
     server_transport.set_sync_ready(true);
 
-    let pow_engine = Arc::new(PowEngine::new(*server_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("test_f2f_token");
 

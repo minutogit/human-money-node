@@ -38,7 +38,7 @@ async fn main() {
     let token="f2f_0123456789abcdef0123456789abcdef";
     for index in [0usize,1] {
         let peer=&peers[index];
-        let pow=Arc::new(PowEngine::new(*peer.identity.node_id(),8)); pow.set_clock(peer.manager.clock().clone());
+        let pow=Arc::new(PowEngine::new(8)); pow.set_clock(peer.manager.clock().clone());
         let tier=Arc::new(TierController::new(peer.db.clone(),pow.clone())); tier.register_f2f_peer(token);
         let mut state=humoco_node::api::AppState::new(peer.engine.clone(),peer.db.clone(),peer.identity.clone(),tier,pow);
         state.peer_manager=Some(peer.manager.clone()); state.transport=Some(peer.network.clone()); state.readiness_manager=peer.readiness.clone();

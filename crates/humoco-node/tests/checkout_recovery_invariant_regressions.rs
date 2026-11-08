@@ -171,7 +171,7 @@ fn setup_test_app() -> TestAppFixture {
     let cancel = CancellationToken::new();
     let (engine, worker) = DualTierEngine::new_with_token(storage.clone(), cancel.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let state = AppState::new(
@@ -1203,7 +1203,7 @@ async fn idempotent_variants_preserve_exact_entry_original_approval_digest_and_r
 
     let ttl_s = root_expiry.saturating_sub(now_ms + 1) / 1000;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
-    let sender_pow = Arc::new(PowEngine::new(*sender_node.node_id(), 8));
+    let sender_pow = Arc::new(PowEngine::new(8));
     let sender_tier = TierController::new(db.clone(), sender_pow);
     let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
         sender_tier.record_declared_usage(now_ms + 1, footprint);

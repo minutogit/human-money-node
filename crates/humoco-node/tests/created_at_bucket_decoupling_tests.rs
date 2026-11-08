@@ -59,7 +59,7 @@ fn setup_test_app() -> (
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let state = AppState::new(

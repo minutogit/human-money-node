@@ -183,7 +183,7 @@ async fn test_s01_11_http_and_quic_bad_suffix_genesis_retains_valid_prefix() {
         let cancel = CancellationToken::new();
         let (engine, _worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
         let id = NodeIdentity::generate();
-        let pow = Arc::new(PowEngine::new(*id.node_id(), 8));
+        let pow = Arc::new(PowEngine::new(8));
         let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
         tiers.register_f2f_peer("f2f_s01_11");
         let state = AppState::new(engine.clone(), db.clone(), id.clone(), tiers, pow);
@@ -401,7 +401,7 @@ async fn test_s01_10_vip_chain_retry_storage_not_recharged() {
     let cancel = CancellationToken::new();
     let (engine, _worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
     let id = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*id.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
 
     // Provision VIP account
@@ -628,7 +628,7 @@ async fn test_s01_09_parallel_quorum_assembly_when_gateway_worker_blocked() {
             .expect("preconnect shard");
     }
 
-    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("s01_09_peer");
 
@@ -921,7 +921,7 @@ async fn test_s01_14_insufficient_chain_pow_emits_429_and_required_difficulty_he
     let (engine, _worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
     let id = NodeIdentity::generate();
     // Default difficulty = 16
-    let pow = Arc::new(PowEngine::new(*id.node_id(), 16));
+    let pow = Arc::new(PowEngine::new(16));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
 
     let state = AppState::new(engine.clone(), db.clone(), id.clone(), tiers, pow.clone());
@@ -1139,7 +1139,7 @@ async fn test_s01_13_prompt_quorum_failure_and_preserved_durable_commit_when_per
             .expect("preconnect shard");
     }
 
-    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("s01_13_peer");
 
@@ -1461,7 +1461,7 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
             .expect("preconnect shard");
     }
 
-    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
 
     let mut state = AppState::new(

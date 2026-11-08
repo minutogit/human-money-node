@@ -753,7 +753,7 @@ async fn test_s07_02_wire_quic_v2_ingress_accounting_refusal_vs_under_reporting_
     let storage = Arc::new(RedbStorage::open(&temp.path().join("s07_02.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
 
-    let pow = Arc::new(humoco_node::ingress::PowEngine::new([0x42; 32], 8));
+    let pow = Arc::new(humoco_node::ingress::PowEngine::new(8));
     let tier_controller = Arc::new(humoco_node::ingress::TierController::new(
         storage.clone(),
         pow,
@@ -992,11 +992,10 @@ async fn test_s07_02_wire_quic_v2_ingress_accounting_refusal_vs_under_reporting_
     // Part 2: Neutral Quota Refusal (Exceeded Daily Budget, No Fraud Claim)
     // -----------------------------------------------------------------------
     let quota_pub = *quota_client.node_pubkey();
-    let epoch_day = tier_controller.current_epoch_day_at(now);
     // Exhaust quota_client's daily write allowance in tier_controller
     let daily_limit = tier_controller.calculate_daily_quota(humoco_sim_core::MAX_WHALE_MULTIPLIER, 1.0);
     tier_controller
-        .evaluate_node_write_quota(&quota_pub, daily_limit, epoch_day)
+        .evaluate_node_write_quota(&quota_pub, daily_limit, test_now_ms() + 5_000)
         .expect("initial quota reservation");
 
     // Quota client sends honest envelope with legitimate sequence progression (no under-reporting)

@@ -149,7 +149,7 @@ fn setup_standalone_app(temp: &tempfile::TempDir) -> (axum::Router, AppState, No
     let storage = Arc::new(RedbStorage::open(&temp.path().join("standalone.redb")).unwrap());
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 1));
+    let pow = Arc::new(PowEngine::new(1));
     let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
     tc.register_f2f_peer("test_peer_token");
 
@@ -171,7 +171,7 @@ struct TestShard {
 }
 
 fn build_shard_app(shard: &TestShard, shard_id: u16) -> axum::Router {
-    let pow = Arc::new(PowEngine::new(*shard.id.node_id(), 1));
+    let pow = Arc::new(PowEngine::new(1));
     let tc = Arc::new(TierController::new(shard.storage.clone(), pow.clone()));
     tc.register_f2f_peer("test_peer_token");
     let mut state = AppState::new(
@@ -369,7 +369,7 @@ async fn setup_test_cluster_with_root(
         .await;
     gateway_transport.spawn_accept_loop();
 
-    let pow = Arc::new(PowEngine::new(*gateway.node_id(), 1));
+    let pow = Arc::new(PowEngine::new(1));
     let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
     tc.register_f2f_peer("test_peer_token");
     let mut state = AppState::new(gateway_engine.clone(), storage, gateway, tc, pow);

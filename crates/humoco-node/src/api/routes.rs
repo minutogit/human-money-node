@@ -466,7 +466,6 @@ async fn sync_locks(
 ) -> Response {
     state.metrics.record_read();
     let now_ms = state.net_time_ms();
-    let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
 
     // Rate-limiting / quota protection for heavy sync queries (A09 & Rule 9)
     let client_node_id: u16 =
@@ -493,7 +492,6 @@ async fn sync_locks(
     if let Err(ingress_err) = state.tier_controller.evaluate_read_quota_with_time(
         client_node_id,
         sync_read_credits,
-        epoch_day,
         1.0,
         Some(now_ms),
     ) {
@@ -1973,7 +1971,6 @@ async fn query_status(
     }
     state.metrics.record_read();
     let now_ms = state.net_time_ms();
-    let epoch_day = state.tier_controller.current_epoch_day_at(now_ms);
     let client_node_id: u16 =
         if let Some(auth) = headers.get("Authorization").and_then(|h| h.to_str().ok()) {
             let tag = state
@@ -1993,7 +1990,6 @@ async fn query_status(
     if let Err(ingress_err) = state.tier_controller.evaluate_read_quota_with_time(
         client_node_id,
         read_credits,
-        epoch_day,
         1.0,
         Some(now_ms),
     ) {
@@ -3984,7 +3980,7 @@ mod public_retained_evidence_tests {
             Arc::new(RedbStorage::open(&temp.path().join("unit.redb")).expect("open redb"));
         let (engine, _worker) = DualTierEngine::new(storage.clone());
         let identity = NodeIdentity::generate();
-        let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+        let pow = Arc::new(PowEngine::new(8));
         let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
         let state = AppState::new(engine, storage.clone(), identity.clone(), tiers, pow);
         (temp, state, storage, identity)

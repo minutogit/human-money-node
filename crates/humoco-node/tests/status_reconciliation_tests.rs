@@ -142,7 +142,7 @@ async fn test_status_query_unspent_and_spent_reconciliation() {
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
     let pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 1));
+    let pow = Arc::new(PowEngine::new(1));
     let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
     tc.register_f2f_peer("status_test_token");
 
@@ -557,7 +557,7 @@ async fn setup_live_proof_cluster_with_custom_handlers(
         .record_hmc_voucher_genesis_parent(&genesis.layer2_voucher_id, anchor)
         .await;
     gateway_transport.spawn_accept_loop();
-    let pow = Arc::new(PowEngine::new(*gateway.node_id(), 1));
+    let pow = Arc::new(PowEngine::new(1));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let mut state = AppState::new(gateway_engine, storage, gateway, tiers, pow);
     state.peer_manager = Some(gateway_pm);

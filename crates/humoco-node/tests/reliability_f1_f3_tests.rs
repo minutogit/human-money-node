@@ -61,7 +61,7 @@ fn setup_local_test_app() -> (
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine.clone(), storage.clone(), identity, tiers, pow);
     let router = build_router(state);
@@ -151,7 +151,7 @@ async fn test_f1_pending_remote_never_becomes_verified() {
     assert!(source.db.get_hmc_lock(tag).unwrap().is_none());
 
     // Gateway setup on reader
-    let pow = Arc::new(PowEngine::new(*reader.identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(reader.db.clone(), pow.clone()));
     let mut state = AppState::new(
         reader.engine.clone(),

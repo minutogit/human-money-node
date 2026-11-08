@@ -13,7 +13,7 @@ async fn private_http_rejects_foreign_origins_and_rebinding_hosts_but_allows_loc
     let storage = Arc::new(RedbStorage::open(&temp.path().join("operator.redb")).unwrap());
     let (engine, _worker) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine, storage, identity, tiers, pow);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -180,7 +180,7 @@ async fn signed_regional_view_is_private_and_matches_real_committee_selection() 
     let (expected, _, _) = manager
         .shard_committee(*identity.node_pubkey(), *identity.hrw_routing_id(), 42)
         .await;
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let mut state = AppState::new(engine, storage, identity.clone(), tiers, pow);
     state.peer_manager = Some(manager.clone());

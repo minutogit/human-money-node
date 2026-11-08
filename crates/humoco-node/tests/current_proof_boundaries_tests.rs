@@ -104,7 +104,7 @@ async fn actual_public_http_never_serves_operator_aliases_or_fake_strong_lookup(
     let storage = Arc::new(RedbStorage::open(&temp.path().join("http.redb")).unwrap());
     let (engine, _flush) = DualTierEngine::new(storage.clone());
     let id = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*id.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let state = AppState::new(engine, storage, id, tier, pow);
     let public = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -120,7 +120,7 @@ async fn actual_public_http_never_serves_operator_aliases_or_fake_strong_lookup(
     let storage = Arc::new(RedbStorage::open(&temp.path().join("private.redb")).unwrap());
     let (engine, _flush) = DualTierEngine::new(storage.clone());
     let id = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*id.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let private_state = AppState::new(engine, storage, id, tier, pow);
     let priv_job = tokio::spawn(async move {

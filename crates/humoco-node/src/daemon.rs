@@ -503,7 +503,7 @@ impl NodeDaemon {
 
         // Initialize PoW Engine and 3-Tier Access Controller
         let pow_engine =
-            std::sync::Arc::new(crate::ingress::PowEngine::new(*current_id.node_id(), 8));
+            std::sync::Arc::new(crate::ingress::PowEngine::new(8));
         let tier_controller = std::sync::Arc::new(crate::ingress::TierController::new(
             storage.clone(),
             pow_engine.clone(),

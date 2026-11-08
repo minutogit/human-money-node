@@ -129,7 +129,7 @@ async fn post_lock_http(
             let start_nonce: u64 = rand::random::<u32>() as u64;
             let mut nonce = start_nonce;
             for n in start_nonce..(start_nonce + 200_000) {
-                let hash = humoco_node::ingress::pow::compute_solution_hash(&challenge_bytes, n);
+                let hash = humoco_node::ingress::pow::hash_work(&parent_bytes, slot, n);
                 if humoco_node::ingress::pow::check_difficulty(&hash, 8) {
                     nonce = n;
                     break;

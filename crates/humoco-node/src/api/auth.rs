@@ -16,6 +16,9 @@ pub const AUTH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 /// Maximum number of tracked IP addresses to prevent unbounded RAM usage.
 pub const MAX_TRACKED_AUTH_IPS: usize = 1024;
 
+/// Maximum length in bytes for tracked IP addresses to prevent memory exhaustion.
+pub const MAX_AUTH_IP_LEN: usize = 128;
+
 #[derive(Debug, Default)]
 struct AuthFailureTracker {
     map: HashMap<String, Vec<Instant>>,
@@ -40,8 +43,22 @@ impl AdminTokenManager {
     pub fn load_or_create(data_dir: &Path, auth_disabled: bool) -> Result<Self, std::io::Error> {
         let token_path = data_dir.join("admin.token");
         let token = if token_path.exists() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+            }
+
             let content = std::fs::read_to_string(&token_path)?;
-            content.trim().to_string()
+            let token_str = content.trim().to_string();
+            if token_str.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "admin.token file is empty",
+                ));
+            }
+            token_str
         } else {
             let mut rand_bytes = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut rand_bytes);
@@ -91,7 +108,7 @@ impl AdminTokenManager {
     /// Creates an in-memory `AdminTokenManager` with an explicit token (useful for testing).
     pub fn with_token(token: impl Into<String>, auth_disabled: bool) -> Self {
         Self {
-            token: token.into(),
+            token: token.into().trim().to_string(),
             token_path: None,
             auth_disabled,
             failed_attempts: Arc::new(Mutex::new(AuthFailureTracker::default())),
@@ -100,7 +117,7 @@ impl AdminTokenManager {
 
     /// Verifies whether the provided HTTP Authorization header contains a valid admin token.
     ///
-    /// Accepts both `Bearer <token>` and raw `<token>` format.
+    /// Accepts case-insensitive `Bearer <token>` and raw `<token>` format.
     /// If `auth_disabled` is true, all requests are authorized immediately.
     pub fn verify_token(&self, auth_header: Option<&str>) -> bool {
         if self.auth_disabled {
@@ -112,28 +129,28 @@ impl AdminTokenManager {
         };
 
         let trimmed_header = header.trim();
-        let provided = if let Some(stripped) = trimmed_header.strip_prefix("Bearer ") {
-            stripped.trim()
-        } else if let Some(stripped) = trimmed_header.strip_prefix("bearer ") {
-            stripped.trim()
+        if trimmed_header.eq_ignore_ascii_case("bearer") {
+            return false;
+        }
+
+        let provided = if trimmed_header.len() >= 7
+            && trimmed_header.as_bytes()[..7].eq_ignore_ascii_case(b"bearer ")
+        {
+            trimmed_header[7..].trim()
         } else {
             trimmed_header
         };
 
-        if provided.is_empty() {
+        if provided.is_empty() || self.token.is_empty() {
             return false;
         }
 
-        // Constant-time comparison for security
-        let token_bytes = self.token.as_bytes();
-        let provided_bytes = provided.as_bytes();
-
-        if token_bytes.len() != provided_bytes.len() {
-            return false;
-        }
+        // Fixed-digest constant-time comparison to prevent length and timing leakage
+        let expected_hash = blake3::hash(self.token.as_bytes());
+        let provided_hash = blake3::hash(provided.as_bytes());
 
         let mut diff = 0u8;
-        for (a, b) in token_bytes.iter().zip(provided_bytes.iter()) {
+        for (a, b) in expected_hash.as_bytes().iter().zip(provided_hash.as_bytes().iter()) {
             diff |= a ^ b;
         }
 
@@ -167,17 +184,45 @@ impl AdminTokenManager {
             return true;
         }
         let mut tracker = self.failed_attempts.lock();
+
+        if ip.len() > MAX_AUTH_IP_LEN || ip.trim().is_empty() {
+            tracker
+                .overflow_failures
+                .retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+            return tracker.overflow_failures.len() < MAX_AUTH_FAILURES_PER_WINDOW;
+        }
+
+        let mut remove_empty = false;
         if let Some(timestamps) = tracker.map.get_mut(ip) {
             timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
-            if timestamps.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
-                return false;
-            }
-        } else if tracker.map.len() >= MAX_TRACKED_AUTH_IPS {
-            tracker.overflow_failures.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
-            if tracker.overflow_failures.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
-                return false;
+            if timestamps.is_empty() {
+                remove_empty = true;
+            } else {
+                return timestamps.len() < MAX_AUTH_FAILURES_PER_WINDOW;
             }
         }
+
+        if remove_empty {
+            tracker.map.remove(ip);
+            return true;
+        }
+
+        if tracker.map.len() >= MAX_TRACKED_AUTH_IPS {
+            tracker.map.retain(|_, timestamps| {
+                timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+                !timestamps.is_empty()
+            });
+
+            if tracker.map.len() >= MAX_TRACKED_AUTH_IPS {
+                tracker
+                    .overflow_failures
+                    .retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+                if tracker.overflow_failures.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
+                    return false;
+                }
+            }
+        }
+
         true
     }
 
@@ -193,6 +238,21 @@ impl AdminTokenManager {
         }
         let mut tracker = self.failed_attempts.lock();
 
+        if ip.len() > MAX_AUTH_IP_LEN || ip.trim().is_empty() {
+            tracker
+                .overflow_failures
+                .retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+            if tracker.overflow_failures.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
+                let excess = tracker
+                    .overflow_failures
+                    .len()
+                    .saturating_sub(MAX_AUTH_FAILURES_PER_WINDOW - 1);
+                tracker.overflow_failures.drain(0..excess);
+            }
+            tracker.overflow_failures.push(now);
+            return;
+        }
+
         // 1. Purge expired entries across the map if near capacity
         if tracker.map.len() >= MAX_TRACKED_AUTH_IPS {
             tracker.map.retain(|_, timestamps| {
@@ -206,15 +266,22 @@ impl AdminTokenManager {
             let timestamps = tracker.map.entry(ip.to_string()).or_default();
             timestamps.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
             if timestamps.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
-                let excess = timestamps.len().saturating_sub(MAX_AUTH_FAILURES_PER_WINDOW - 1);
+                let excess = timestamps
+                    .len()
+                    .saturating_sub(MAX_AUTH_FAILURES_PER_WINDOW - 1);
                 timestamps.drain(0..excess);
             }
             timestamps.push(now);
         } else {
             // Saturated: track in bounded overflow failures to prevent unbounded map growth while enforcing rate limit
-            tracker.overflow_failures.retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
+            tracker
+                .overflow_failures
+                .retain(|&t| now.saturating_duration_since(t) < AUTH_RATE_LIMIT_WINDOW);
             if tracker.overflow_failures.len() >= MAX_AUTH_FAILURES_PER_WINDOW {
-                let excess = tracker.overflow_failures.len().saturating_sub(MAX_AUTH_FAILURES_PER_WINDOW - 1);
+                let excess = tracker
+                    .overflow_failures
+                    .len()
+                    .saturating_sub(MAX_AUTH_FAILURES_PER_WINDOW - 1);
                 tracker.overflow_failures.drain(0..excess);
             }
             tracker.overflow_failures.push(now);
@@ -227,7 +294,9 @@ impl AdminTokenManager {
             return;
         }
         let mut tracker = self.failed_attempts.lock();
-        tracker.map.remove(ip);
+        if ip.len() <= MAX_AUTH_IP_LEN && !ip.trim().is_empty() {
+            tracker.map.remove(ip);
+        }
         tracker.overflow_failures.clear();
     }
 
@@ -244,6 +313,11 @@ impl AdminTokenManager {
             .get(ip)
             .map(|v| v.len())
             .unwrap_or(0)
+    }
+
+    /// Returns the number of overflow failure timestamps (for test assertion).
+    pub fn overflow_failure_count_for_test(&self) -> usize {
+        self.failed_attempts.lock().overflow_failures.len()
     }
 }
 
@@ -322,5 +396,130 @@ mod tests {
         let disabled_mgr = AdminTokenManager::with_token("hmc_adm_secret123", true);
         assert!(disabled_mgr.verify_token(None));
         assert!(disabled_mgr.verify_token(Some("random_stuff")));
+    }
+
+    #[test]
+    fn test_evict_expired_map_entries_on_capacity() {
+        let mgr = AdminTokenManager::with_token("secret", false);
+        let t0 = Instant::now();
+
+        // 1,024 IPs recorded at t0
+        for i in 0..1024 {
+            let ip = format!("10.0.{}.{}", i / 256, i % 256);
+            mgr.record_failure_at(&ip, t0);
+        }
+        assert_eq!(mgr.tracked_ip_count_for_test(), 1024);
+
+        // 5 overflow failures at t0 + 50s
+        let t_overflow = t0 + Duration::from_secs(50);
+        for _ in 0..5 {
+            mgr.record_failure_at("198.51.100.1", t_overflow);
+        }
+        assert_eq!(mgr.overflow_failure_count_for_test(), 5);
+
+        // Untracked IP is blocked during window saturation (t0 + 55s)
+        assert!(!mgr.check_rate_limit_at("192.0.2.77", t0 + Duration::from_secs(55)));
+
+        // At t0 + 61s: 1,024 map entries expired (> 60s window), so check_rate_limit_at
+        // evicts expired entries and returns true!
+        assert!(mgr.check_rate_limit_at("192.0.2.77", t0 + Duration::from_secs(61)));
+        assert_eq!(mgr.tracked_ip_count_for_test(), 0);
+    }
+
+    #[test]
+    fn test_oversized_ip_not_tracked_in_map_and_rate_limited_via_overflow() {
+        let mgr = AdminTokenManager::with_token("secret", false);
+        let oversized_ip = "x".repeat(MAX_AUTH_IP_LEN + 1);
+
+        assert!(mgr.check_rate_limit(&oversized_ip));
+
+        // 4 failures -> still allowed, 0 map entries allocated
+        for _ in 0..4 {
+            mgr.record_failure(&oversized_ip);
+            assert!(mgr.check_rate_limit(&oversized_ip));
+        }
+        assert_eq!(mgr.tracked_ip_count_for_test(), 0);
+        assert_eq!(mgr.overflow_failure_count_for_test(), 4);
+
+        // 5th failure -> blocked via overflow
+        mgr.record_failure(&oversized_ip);
+        assert!(!mgr.check_rate_limit(&oversized_ip));
+        assert_eq!(mgr.tracked_ip_count_for_test(), 0);
+        assert_eq!(mgr.overflow_failure_count_for_test(), 5);
+
+        // Blank/whitespace IP also does not allocate map entries
+        let blank_ip = "    ";
+        assert_eq!(mgr.failure_count_for_ip_for_test(blank_ip), 0);
+        mgr.record_failure(blank_ip);
+        assert_eq!(mgr.tracked_ip_count_for_test(), 0);
+    }
+
+    #[test]
+    fn test_load_or_create_rejects_empty_and_whitespace_token() {
+        let dir = tempdir().expect("tempdir");
+        let token_path = dir.path().join("admin.token");
+
+        // Empty file
+        std::fs::write(&token_path, b"").expect("write empty token");
+        let err = AdminTokenManager::load_or_create(dir.path(), false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "admin.token file is empty");
+
+        // Whitespace-only file
+        std::fs::write(&token_path, b"  \n\t  \r\n ").expect("write whitespace token");
+        let err = AdminTokenManager::load_or_create(dir.path(), false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "admin.token file is empty");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_existing_token_enforces_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let token_path = dir.path().join("admin.token");
+        std::fs::write(&token_path, "hmc_adm_validtoken123\n").expect("write token");
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set 0644");
+
+        let mgr = AdminTokenManager::load_or_create(dir.path(), false).expect("load token");
+        assert_eq!(mgr.token(), "hmc_adm_validtoken123");
+
+        let meta = std::fs::metadata(&token_path).expect("metadata");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn test_verify_token_case_insensitivity_and_constant_time() {
+        let mgr = AdminTokenManager::with_token("hmc_adm_secret123", false);
+
+        // Case variations of Bearer
+        assert!(mgr.verify_token(Some("BEARER hmc_adm_secret123")));
+        assert!(mgr.verify_token(Some("BeArEr   hmc_adm_secret123  ")));
+        assert!(mgr.verify_token(Some("bearer hmc_adm_secret123")));
+        assert!(mgr.verify_token(Some("Bearer hmc_adm_secret123")));
+        assert!(mgr.verify_token(Some("hmc_adm_secret123")));
+        assert!(mgr.verify_token(Some("  hmc_adm_secret123  ")));
+
+        // Empty / incomplete Bearer headers
+        assert!(!mgr.verify_token(Some("BEARER")));
+        assert!(!mgr.verify_token(Some("bearer")));
+        assert!(!mgr.verify_token(Some("Bearer ")));
+        assert!(!mgr.verify_token(Some("BeArEr   ")));
+        assert!(!mgr.verify_token(Some("")));
+        assert!(!mgr.verify_token(Some("   ")));
+        assert!(!mgr.verify_token(None));
+
+        // Wrong token
+        assert!(!mgr.verify_token(Some("BEARER wrong_token")));
+        assert!(!mgr.verify_token(Some("wrong_token")));
+
+        // Empty token manager never authorizes non-disabled tokens
+        let empty_mgr = AdminTokenManager::with_token("", false);
+        assert!(!empty_mgr.verify_token(Some("")));
+        assert!(!empty_mgr.verify_token(Some("BEARER ")));
+        assert!(!empty_mgr.verify_token(Some("hmc_adm_secret123")));
     }
 }

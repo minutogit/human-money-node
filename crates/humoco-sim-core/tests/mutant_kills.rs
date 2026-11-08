@@ -38,11 +38,11 @@ fn test_mutant_m1o5_byteyears_zero_ttl_is_one() {
 fn test_mutant_m1o7_quota_exact_boundary_le() {
     let mut thermo = NetworkThermometer::new();
     let node: u16 = 1;
-    let epoch_day = 0;
+    let now_sec = 1000;
     let quota = 100u64;
 
     // Exactly consume quota in one go -> must be accepted (<=)
-    let accepted = thermo.try_accept_lock(epoch_day, node, 100, quota);
+    let accepted = thermo.try_accept_lock(now_sec, node, 100, quota);
     assert!(
         accepted,
         "exact quota boundary (100/100) must be accepted with <="
@@ -50,16 +50,16 @@ fn test_mutant_m1o7_quota_exact_boundary_le() {
     assert_eq!(thermo.get_node_usage(node), 100);
 
     // One more byte-year must be rejected
-    let rejected = thermo.try_accept_lock(epoch_day, node, 1, quota);
+    let rejected = thermo.try_accept_lock(now_sec, node, 1, quota);
     assert!(!rejected, "over quota by 1 must be rejected");
 
     // Read quota exact boundary as well
     let mut thermo2 = NetworkThermometer::new();
     let read_quota = 50u64;
-    let ok = thermo2.try_accept_read(epoch_day, node, 50, read_quota);
+    let ok = thermo2.try_accept_read(now_sec, node, 50, read_quota);
     assert!(ok, "exact read quota boundary must be accepted");
     assert_eq!(thermo2.get_node_read_usage(node), 50);
-    let over = thermo2.try_accept_read(epoch_day, node, 1, read_quota);
+    let over = thermo2.try_accept_read(now_sec, node, 1, read_quota);
     assert!(!over);
 }
 
@@ -68,16 +68,16 @@ fn test_mutant_m1o7_quota_split_exact_boundary() {
     // Split across multiple calls that sum exactly to quota
     let mut thermo = NetworkThermometer::new();
     let node: u16 = 42;
-    let epoch_day = 5;
+    let now_sec = 5000;
     let quota = 10u64;
 
-    assert!(thermo.try_accept_lock(epoch_day, node, 4, quota));
-    assert!(thermo.try_accept_lock(epoch_day, node, 3, quota));
+    assert!(thermo.try_accept_lock(now_sec, node, 4, quota));
+    assert!(thermo.try_accept_lock(now_sec, node, 3, quota));
     // Now usage = 7, remaining 3 -> exact fit must succeed
-    assert!(thermo.try_accept_lock(epoch_day, node, 3, quota));
+    assert!(thermo.try_accept_lock(now_sec, node, 3, quota));
     assert_eq!(thermo.get_node_usage(node), 10);
     // Next must fail
-    assert!(!thermo.try_accept_lock(epoch_day, node, 1, quota));
+    assert!(!thermo.try_accept_lock(now_sec, node, 1, quota));
 }
 
 // ---------------------------------------------------------------------------

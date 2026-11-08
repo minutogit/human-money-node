@@ -1113,9 +1113,8 @@ impl RequestHandler for NodeRequestHandler {
 
                 if let Some(tc) = &tier_controller {
                     if !is_exact_retry {
-                        let epoch_day = tc.current_epoch_day_at(now_ms);
                         if let Err(e) =
-                            tc.evaluate_node_write_quota(&sender_pubkey, total_by, epoch_day)
+                            tc.evaluate_node_write_quota(&sender_pubkey, total_by, now_ms)
                         {
                             warn!(error = ?e, sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: node write quota exceeded");
                             let resp_header = WireHeader::new(
@@ -1687,8 +1686,7 @@ impl RequestHandler for NodeRequestHandler {
                 // 5. Recipient-side read quota check
                 if let Some(tc) = &tier_controller {
                     if sender_pubkey != [0u8; 32] {
-                        let epoch_day = tc.current_epoch_day_at(now_ms);
-                        if let Err(e) = tc.evaluate_node_read_quota(&sender_pubkey, 1, epoch_day) {
+                        if let Err(e) = tc.evaluate_node_read_quota(&sender_pubkey, 1, now_ms) {
                             warn!(error = ?e, sender = %hex::encode(sender_pubkey), "StatusQuery rejected: node read quota exceeded");
                             let resp_header = WireHeader::new(
                                 MsgType::StatusResponse as u16,

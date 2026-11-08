@@ -275,7 +275,7 @@ async fn canonical_replacement_status_preserves_exact_retained_original() {
                 .is_empty()
         );
     }
-    let pow = Arc::new(PowEngine::new(*source.identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(source.db.clone(), pow.clone()));
     let state = AppState::new(
         source.engine.clone(),
@@ -679,7 +679,7 @@ async fn gateway_full_entry_lookup_works_and_rejects_legacy_original_as_entry() 
         .await
         .unwrap();
     source.readiness.mark_shard_ready(canonical_shard);
-    let pow = Arc::new(PowEngine::new(*reader.identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(reader.db.clone(), pow.clone()));
     let mut state = AppState::new(
         reader.engine.clone(),
@@ -1028,7 +1028,7 @@ async fn cold_and_root_only_gateways_route_canonical_shard_to_single_custodian()
         custodians.push((cust_transport, cust_worker));
     }
 
-    let pow = Arc::new(PowEngine::new(*gw_identity.node_id(), 0));
+    let pow = Arc::new(PowEngine::new(0));
     let tiers = Arc::new(TierController::new(gw_db.clone(), pow.clone()));
     let mut state = AppState::new(
         gw_engine.clone(),

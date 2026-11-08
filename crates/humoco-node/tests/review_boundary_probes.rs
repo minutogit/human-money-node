@@ -473,7 +473,7 @@ async fn successful_retry_after_cancelled_root_and_spend_survives_recovery() {
     let worker =
         DualTierEngine::spawn_flush_worker(rx, db.clone(), engine.stats.clone(), cancel.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
     tiers.register_f2f_client("retry", None);
     let state = AppState::new(engine.clone(), db.clone(), identity, tiers, pow);

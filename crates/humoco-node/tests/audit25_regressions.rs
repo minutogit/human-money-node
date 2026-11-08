@@ -28,7 +28,7 @@ use humoco_node::storage::{DualTierEngine, RedbStorage};
 #[tokio::test]
 async fn test_a25_01_canonical_direct_work_and_parent_binding() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    let pow = PowEngine::new([0x42; 32], 0);
+    let pow = PowEngine::new(0);
 
     let concrete_parent = [0x77u8; 32];
     let zero_parent = [0u8; 32];
@@ -67,7 +67,7 @@ async fn test_a25_01_canonical_direct_work_and_parent_binding() {
 #[tokio::test]
 async fn test_a25_02_identical_valid_work_retry_succeeds_without_replay_error() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    let pow = PowEngine::new([0x42; 32], 0);
+    let pow = PowEngine::new(0);
 
     let parent = [0x33u8; 32];
     let (challenge, _, _) = pow.generate_challenge_for_parent(&parent);
@@ -134,7 +134,7 @@ async fn test_a25_03_separate_client_credentials_from_peer_topology() {
     let temp = tempdir().expect("tempdir");
     let storage = Arc::new(RedbStorage::open(&temp.path().join("a25_03.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
-    let pow = Arc::new(PowEngine::new([0x42; 32], 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let identity = NodeIdentity::generate();
     let state = AppState::new(engine, storage, identity, tier_controller, pow);
@@ -172,7 +172,7 @@ async fn test_a25_04_unauthenticated_request_returns_unsigned_error() {
     let temp = tempdir().expect("tempdir");
     let storage = Arc::new(RedbStorage::open(&temp.path().join("a25_04.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
-    let pow = Arc::new(PowEngine::new([0x42; 32], 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let identity = NodeIdentity::generate();
 
@@ -235,7 +235,7 @@ async fn test_a25_05_public_admission_honors_daily_quota_exhaustion() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let temp = tempdir().expect("tempdir");
     let storage = Arc::new(RedbStorage::open(&temp.path().join("a25_05.redb")).expect("open redb"));
-    let pow = Arc::new(PowEngine::new([0x42; 32], 0));
+    let pow = Arc::new(PowEngine::new(0));
     let controller = TierController::new(storage, pow);
 
     let parent = [0x55u8; 32];
@@ -262,7 +262,7 @@ async fn test_a25_05_public_admission_honors_daily_quota_exhaustion() {
 #[tokio::test]
 async fn test_a25_r1_canonical_hash_work_accepted_and_legacy_solution_hash_rejected() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    let pow = PowEngine::new([0x42; 32], 8);
+    let pow = PowEngine::new(8);
 
     let parent = [9u8; 32];
     let slot = 2u64;
@@ -297,12 +297,22 @@ async fn test_a25_r1_canonical_hash_work_accepted_and_legacy_solution_hash_rejec
     );
 
     // 3. Solve a nonce using legacy compute_solution_hash
+    fn legacy_compute_solution_hash(challenge: &[u8; 32], nonce: u64) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        let tag = b"HUMOCO_POW_SOLUTION";
+        hasher.update(&(tag.len() as u8).to_le_bytes());
+        hasher.update(tag);
+        hasher.update(challenge);
+        hasher.update(&nonce.to_le_bytes());
+        *hasher.finalize().as_bytes()
+    }
+
     let challenge_bytes = hex::decode(&challenge).unwrap();
     let mut chal_arr = [0u8; 32];
     chal_arr.copy_from_slice(&challenge_bytes);
     let mut legacy_nonce = 0u64;
     for n in 0..10_000 {
-        let legacy_hash = humoco_node::ingress::pow::compute_solution_hash(&chal_arr, n);
+        let legacy_hash = legacy_compute_solution_hash(&chal_arr, n);
         if humoco_node::ingress::pow::count_leading_zero_bits(&legacy_hash) >= difficulty {
             legacy_nonce = n;
             break;
@@ -335,7 +345,7 @@ async fn test_a25_r2_chain_pow_bound_to_parent_rejects_cross_chain_transplant() 
     let temp = tempdir().expect("tempdir");
     let storage = Arc::new(RedbStorage::open(&temp.path().join("a25_r2.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
-    let pow = Arc::new(PowEngine::new([0x42; 32], 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let identity = NodeIdentity::generate();
     let state = AppState::new(engine, storage, identity, tier_controller, pow.clone());
@@ -465,7 +475,7 @@ async fn test_a25_r3_unauthenticated_empty_or_invalid_requests_rejected_unsigned
     let temp = tempdir().expect("tempdir");
     let storage = Arc::new(RedbStorage::open(&temp.path().join("a25_r3.redb")).expect("open redb"));
     let (engine, _worker) = DualTierEngine::new(storage.clone());
-    let pow = Arc::new(PowEngine::new([0x42; 32], 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow.clone()));
     let identity = NodeIdentity::generate();
     let state = AppState::new(engine, storage, identity, tier_controller, pow);

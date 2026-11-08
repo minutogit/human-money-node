@@ -503,14 +503,80 @@ pub fn evaluate_quota_exceeded_claim(
     }
 }
 
+/// Continuous rolling quota tracker using the 24-hour half-life integer EMA (`decay_integer_ema`).
+/// Eliminates discrete UTC midnight rollover cliffs (`epoch_day` resets) and backward-timestamp races.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RollingQuotaCounter {
+    decayed_usage: u64,
+    last_update_sec: Option<u64>,
+}
+
+impl RollingQuotaCounter {
+    /// Creates a new, empty rolling quota counter.
+    pub const fn new() -> Self {
+        Self {
+            decayed_usage: 0,
+            last_update_sec: None,
+        }
+    }
+
+    /// Computes the effective decayed usage at timestamp `now_sec`.
+    ///
+    /// Monotonicity guarantees:
+    /// - Returns 0 if no usage has ever been recorded (`last_update_sec.is_none()`).
+    /// - If `now_sec < last_sec` (e.g. out-of-order packet arrival or clock jitter),
+    ///   `delta_secs = 0` so decay never resets or inflates backwards.
+    pub fn usage_at(&self, now_sec: u64) -> u64 {
+        match self.last_update_sec {
+            None => 0,
+            Some(last_sec) => {
+                let delta_secs = now_sec.saturating_sub(last_sec);
+                decay_integer_ema(self.decayed_usage, delta_secs)
+            }
+        }
+    }
+
+    /// Returns the raw cached usage at the last recorded timestamp (without projecting forward).
+    pub const fn raw_cached_usage(&self) -> u64 {
+        self.decayed_usage
+    }
+
+    /// Returns the timestamp in seconds of the last recorded update, or None if empty.
+    pub const fn last_update_sec(&self) -> Option<u64> {
+        self.last_update_sec
+    }
+
+    /// Attempts to consume `amount` against `limit` at timestamp `now_sec`.
+    ///
+    /// Returns:
+    /// - `Ok(new_usage)`: Consumption accepted. State is updated: `decayed_usage = new_usage`
+    ///   and `last_update_sec` is monotonically advanced to `max(last, now_sec)`.
+    /// - `Err(available)`: Quota exceeded or overflow. `self` is completely unmodified.
+    ///   The error payload contains the remaining available budget at `now_sec` (`limit.saturating_sub(current)`).
+    pub fn try_consume(&mut self, now_sec: u64, amount: u64, limit: u64) -> Result<u64, u64> {
+        let current = self.usage_at(now_sec);
+        match current.checked_add(amount) {
+            Some(new_usage) if new_usage <= limit => {
+                self.decayed_usage = new_usage;
+                self.last_update_sec =
+                    Some(self.last_update_sec.map_or(now_sec, |last| last.max(now_sec)));
+                Ok(new_usage)
+            }
+            _ => Err(limit.saturating_sub(current)),
+        }
+    }
+}
+
+/// Maximum number of tracked nodes in RAM before stale zero-usage nodes are purged.
+pub const MAX_TRACKED_NODES: usize = 16_384;
+
 /// Full decentralized network thermometer with quota enforcement
 #[derive(Clone, Debug)]
 pub struct NetworkThermometer {
     ring_buffer: SlottedMedianRingBuffer,
     read_ring_buffer: SlottedMedianRingBuffer,
-    current_epoch_day: u64,
-    node_daily_usage: HashMap<NodeId, u64>,
-    node_daily_read_usage: HashMap<NodeId, u64>,
+    node_write_usage: HashMap<NodeId, RollingQuotaCounter>,
+    node_read_usage: HashMap<NodeId, RollingQuotaCounter>,
     write_ema_micro_bj: u64,
     last_write_ema_sec: Option<u64>,
     read_ema_credits: u64,
@@ -522,9 +588,8 @@ impl NetworkThermometer {
         Self {
             ring_buffer: SlottedMedianRingBuffer::new(),
             read_ring_buffer: SlottedMedianRingBuffer::new(),
-            current_epoch_day: 0,
-            node_daily_usage: HashMap::new(),
-            node_daily_read_usage: HashMap::new(),
+            node_write_usage: HashMap::new(),
+            node_read_usage: HashMap::new(),
             write_ema_micro_bj: 0,
             last_write_ema_sec: None,
             read_ema_credits: 0,
@@ -591,95 +656,136 @@ impl NetworkThermometer {
         ((ncb_read_eff as f64) * k * damper).round() as u64
     }
 
-    /// Checks and registers a lock ingress for the node.
-    /// Returns `true` if the lock is within the daily budget.
+    /// Checks and consumes a lock ingress for the node using rolling 24h half-life EMA decay.
+    /// Returns `Ok(new_usage)` if accepted, or `Err(available_budget)` if rejected.
+    pub fn try_consume_lock(
+        &mut self,
+        now_sec: u64,
+        node_id: NodeId,
+        footprint_byte_years: u64,
+        quota_byte_years: u64,
+    ) -> Result<u64, u64> {
+        if !self.node_write_usage.contains_key(&node_id)
+            && self.node_write_usage.len() >= MAX_TRACKED_NODES
+        {
+            self.node_write_usage
+                .retain(|_, counter| counter.usage_at(now_sec) > 0);
+        }
+        let counter = self.node_write_usage.entry(node_id).or_default();
+        counter.try_consume(now_sec, footprint_byte_years, quota_byte_years)
+    }
+
+    /// Checks and registers a lock ingress for the node using rolling 24h half-life EMA decay.
+    /// Returns `true` if the lock is within the budget.
     /// Returns `false` if the budget is exceeded (silent dropping).
     pub fn try_accept_lock(
         &mut self,
-        epoch_day: u64,
+        now_sec: u64,
         node_id: NodeId,
         footprint_byte_years: u64,
         quota_byte_years: u64,
     ) -> bool {
-        // Epoch change: on a new day, clear the daily usage register
-        if epoch_day > self.current_epoch_day {
-            self.current_epoch_day = epoch_day;
-            self.node_daily_usage.clear();
-            self.node_daily_read_usage.clear();
-        }
-
-        let current_usage = self.node_daily_usage.entry(node_id).or_insert(0);
-        if let Some(new_usage) = current_usage.checked_add(footprint_byte_years) {
-            if new_usage <= quota_byte_years {
-                *current_usage = new_usage;
-                true
-            } else {
-                // Quota exceeded -> silent dropping
-                false
-            }
-        } else {
-            false
-        }
+        self.try_consume_lock(now_sec, node_id, footprint_byte_years, quota_byte_years)
+            .is_ok()
     }
 
-    /// Checks and registers a read ingress for the node.
-    /// Returns `true` if the read is within the daily budget.
+    /// Checks and consumes a read ingress for the node using rolling 24h half-life EMA decay.
+    /// Returns `Ok(new_usage)` if accepted, or `Err(available_budget)` if rejected.
+    pub fn try_consume_read(
+        &mut self,
+        now_sec: u64,
+        node_id: NodeId,
+        credits: u64,
+        quota: u64,
+    ) -> Result<u64, u64> {
+        if !self.node_read_usage.contains_key(&node_id)
+            && self.node_read_usage.len() >= MAX_TRACKED_NODES
+        {
+            self.node_read_usage
+                .retain(|_, counter| counter.usage_at(now_sec) > 0);
+        }
+        let counter = self.node_read_usage.entry(node_id).or_default();
+        counter.try_consume(now_sec, credits, quota)
+    }
+
+    /// Checks and registers a read ingress for the node using rolling 24h half-life EMA decay.
+    /// Returns `true` if the read is within the budget.
     /// Returns `false` if the budget is exceeded (silent dropping).
     pub fn try_accept_read(
         &mut self,
-        epoch_day: u64,
+        now_sec: u64,
         node_id: NodeId,
         credits: u64,
         quota: u64,
     ) -> bool {
-        // Epoch change: on a new day, clear the daily usage register
-        if epoch_day > self.current_epoch_day {
-            self.current_epoch_day = epoch_day;
-            self.node_daily_usage.clear();
-            self.node_daily_read_usage.clear();
-        }
-
-        let current_usage = self.node_daily_read_usage.entry(node_id).or_insert(0);
-        if let Some(new_usage) = current_usage.checked_add(credits) {
-            if new_usage <= quota {
-                *current_usage = new_usage;
-                true
-            } else {
-                // Quota exceeded -> silent dropping
-                false
-            }
-        } else {
-            false
-        }
+        self.try_consume_read(now_sec, node_id, credits, quota)
+            .is_ok()
     }
 
-    /// Returns the current daily usage of a node
-    pub fn get_node_usage(&self, node_id: NodeId) -> u64 {
-        self.node_daily_usage.get(&node_id).copied().unwrap_or(0)
-    }
-
-    /// Returns the total daily write usage across all nodes in the network
-    pub fn total_daily_write_usage(&self) -> u64 {
-        self.node_daily_usage
-            .values()
-            .copied()
-            .fold(0u64, u64::saturating_add)
-    }
-
-    /// Returns the current daily read usage of a node
-    pub fn get_node_read_usage(&self, node_id: NodeId) -> u64 {
-        self.node_daily_read_usage
+    /// Returns the current write usage of a node decayed to `now_sec`
+    pub fn get_node_usage_at(&self, node_id: NodeId, now_sec: u64) -> u64 {
+        self.node_write_usage
             .get(&node_id)
-            .copied()
-            .unwrap_or(0)
+            .map_or(0, |c| c.usage_at(now_sec))
     }
 
-    /// Returns the total daily read usage across all nodes in the network
-    pub fn total_daily_read_usage(&self) -> u64 {
-        self.node_daily_read_usage
+    /// Returns the raw cached write usage of a node (at last recorded update)
+    pub fn get_node_usage(&self, node_id: NodeId) -> u64 {
+        self.node_write_usage
+            .get(&node_id)
+            .map_or(0, |c| c.raw_cached_usage())
+    }
+
+    /// Returns the total write usage across all nodes decayed to `now_sec`
+    pub fn total_write_usage_at(&self, now_sec: u64) -> u64 {
+        self.node_write_usage
             .values()
-            .copied()
-            .fold(0u64, u64::saturating_add)
+            .fold(0u64, |acc, c| acc.saturating_add(c.usage_at(now_sec)))
+    }
+
+    /// Returns the total raw cached write usage across all nodes in the network
+    pub fn total_daily_write_usage(&self) -> u64 {
+        self.node_write_usage
+            .values()
+            .fold(0u64, |acc, c| acc.saturating_add(c.raw_cached_usage()))
+    }
+
+    /// Returns the current read usage of a node decayed to `now_sec`
+    pub fn get_node_read_usage_at(&self, node_id: NodeId, now_sec: u64) -> u64 {
+        self.node_read_usage
+            .get(&node_id)
+            .map_or(0, |c| c.usage_at(now_sec))
+    }
+
+    /// Returns the raw cached read usage of a node (at last recorded update)
+    pub fn get_node_read_usage(&self, node_id: NodeId) -> u64 {
+        self.node_read_usage
+            .get(&node_id)
+            .map_or(0, |c| c.raw_cached_usage())
+    }
+
+    /// Returns the total read usage across all nodes decayed to `now_sec`
+    pub fn total_read_usage_at(&self, now_sec: u64) -> u64 {
+        self.node_read_usage
+            .values()
+            .fold(0u64, |acc, c| acc.saturating_add(c.usage_at(now_sec)))
+    }
+
+    /// Returns the total raw cached read usage across all nodes in the network
+    pub fn total_daily_read_usage(&self) -> u64 {
+        self.node_read_usage
+            .values()
+            .fold(0u64, |acc, c| acc.saturating_add(c.raw_cached_usage()))
+    }
+
+    /// Returns a reference to a node's rolling write quota counter, if present.
+    pub fn get_node_write_counter(&self, node_id: NodeId) -> Option<&RollingQuotaCounter> {
+        self.node_write_usage.get(&node_id)
+    }
+
+    /// Returns a reference to a node's rolling read quota counter, if present.
+    pub fn get_node_read_counter(&self, node_id: NodeId) -> Option<&RollingQuotaCounter> {
+        self.node_read_usage.get(&node_id)
     }
 
     /// Initializes the read thermometer of a new node with the current peer read median
@@ -1288,32 +1394,47 @@ mod tests {
         assert_eq!(NetworkThermometer::calculate_sync_read_credits(20), 3);
         assert_eq!(NetworkThermometer::calculate_sync_read_credits(21), 4);
 
-        // try_accept_lock & try_accept_read tracking and rollover
+        // try_accept_lock & try_accept_read tracking and continuous 24h rolling EMA decay
         let node = 42u16;
         let quota = 1000u64;
+        let t0 = 1000u64;
         assert_eq!(therm.get_node_usage(node), 0);
         assert_eq!(therm.get_node_read_usage(node), 0);
 
         // Ingress within quota
-        assert!(therm.try_accept_lock(1, node, 600, quota));
+        assert!(therm.try_accept_lock(t0, node, 600, quota));
         assert_eq!(therm.get_node_usage(node), 600);
 
         // Exceeding quota
-        assert!(!therm.try_accept_lock(1, node, 500, quota));
+        assert!(!therm.try_accept_lock(t0, node, 500, quota));
         assert_eq!(therm.get_node_usage(node), 600);
 
         // Read ingress within quota
-        assert!(therm.try_accept_read(1, node, 400, quota));
+        assert!(therm.try_accept_read(t0, node, 400, quota));
         assert_eq!(therm.get_node_read_usage(node), 400);
 
         // Read ingress exceeding quota
-        assert!(!therm.try_accept_read(1, node, 700, quota));
+        assert!(!therm.try_accept_read(t0, node, 700, quota));
         assert_eq!(therm.get_node_read_usage(node), 400);
 
-        // Epoch day rollover (day 2) resets usages
-        assert!(therm.try_accept_lock(2, node, 300, quota));
-        assert_eq!(therm.get_node_usage(node), 300);
-        assert_eq!(therm.get_node_read_usage(node), 0);
+        // Continuous 24h half-life EMA decay recovery (24h later: 50% recovered)
+        let t_24h = t0 + 86_400;
+        assert_eq!(therm.get_node_usage_at(node, t_24h), 300);
+        assert_eq!(therm.get_node_read_usage_at(node, t_24h), 200);
+
+        // Ingress at t_24h: 300 + 300 = 600 <= 1000 succeeds!
+        assert!(therm.try_accept_lock(t_24h, node, 300, quota));
+        assert_eq!(therm.get_node_usage(node), 600);
+
+        // Read ingress at t_24h: 200 + 300 = 500 <= 1000 succeeds!
+        assert!(therm.try_accept_read(t_24h, node, 300, quota));
+        assert_eq!(therm.get_node_read_usage(node), 500);
+
+        // Total usages across nodes
+        assert_eq!(therm.total_daily_write_usage(), 600);
+        assert_eq!(therm.total_daily_read_usage(), 500);
+        assert_eq!(therm.total_write_usage_at(t_24h), 600);
+        assert_eq!(therm.total_read_usage_at(t_24h), 500);
 
         // record_daily_median & record_daily_read_median
         therm.record_daily_median(3_000_000);
@@ -1331,5 +1452,107 @@ mod tests {
 
         let default_therm = NetworkThermometer::default();
         assert_eq!(default_therm.effective_ncb(), HARD_FLOOR_BASELINE_DAILY);
+    }
+
+    #[test]
+    fn test_rolling_quota_counter_basic_and_decay() {
+        let mut counter = RollingQuotaCounter::new();
+        assert_eq!(counter.raw_cached_usage(), 0);
+        assert_eq!(counter.last_update_sec(), None);
+        assert_eq!(counter.usage_at(0), 0);
+        assert_eq!(counter.usage_at(1000), 0);
+
+        let limit = 100_000u64;
+
+        // 1. Initial consumption at t = 1000
+        let res1 = counter.try_consume(1000, 40_000, limit);
+        assert_eq!(res1, Ok(40_000));
+        assert_eq!(counter.raw_cached_usage(), 40_000);
+        assert_eq!(counter.last_update_sec(), Some(1000));
+        assert_eq!(counter.usage_at(1000), 40_000);
+
+        // 2. Second consumption at same timestamp t = 1000
+        let res2 = counter.try_consume(1000, 50_000, limit);
+        assert_eq!(res2, Ok(90_000));
+        assert_eq!(counter.usage_at(1000), 90_000);
+
+        // 3. Exceeding consumption returns Err with remaining budget (100_000 - 90_000 = 10_000)
+        let res3 = counter.try_consume(1000, 20_000, limit);
+        assert_eq!(res3, Err(10_000));
+        // Counter unmodified
+        assert_eq!(counter.raw_cached_usage(), 90_000);
+        assert_eq!(counter.usage_at(1000), 90_000);
+
+        // 4. Time advances by 24h (86_400s) -> decays 50% from 90_000 to 45_000
+        let t_24h = 1000 + 86_400;
+        assert_eq!(counter.usage_at(t_24h), 45_000);
+        // Raw cached usage is still 90_000 until next consumed
+        assert_eq!(counter.raw_cached_usage(), 90_000);
+
+        // 5. Consume at t_24h: current 45_000 + 30_000 = 75_000 <= 100_000
+        let res4 = counter.try_consume(t_24h, 30_000, limit);
+        assert_eq!(res4, Ok(75_000));
+        assert_eq!(counter.raw_cached_usage(), 75_000);
+        assert_eq!(counter.last_update_sec(), Some(t_24h));
+
+        // 6. 64 half-lives later -> decays completely to 0
+        let t_ext = t_24h + 64 * 86_400;
+        assert_eq!(counter.usage_at(t_ext), 0);
+        let res5 = counter.try_consume(t_ext, 100_000, limit);
+        assert_eq!(res5, Ok(100_000));
+    }
+
+    #[test]
+    fn test_rolling_quota_counter_backward_timestamp_monotonicity() {
+        let mut counter = RollingQuotaCounter::new();
+        let limit = 100_000u64;
+
+        // Packet at t = 5000
+        assert_eq!(counter.try_consume(5000, 30_000, limit), Ok(30_000));
+        assert_eq!(counter.last_update_sec(), Some(5000));
+
+        // Delayed out-of-order packet arriving with timestamp in the past (t = 2000)
+        // Must yield delta_secs = 0, so usage does NOT decay or reset backwards!
+        assert_eq!(counter.usage_at(2000), 30_000);
+        let res = counter.try_consume(2000, 20_000, limit);
+        assert_eq!(res, Ok(50_000));
+        // Monotonic anchor stays at 5000
+        assert_eq!(counter.last_update_sec(), Some(5000));
+        assert_eq!(counter.raw_cached_usage(), 50_000);
+    }
+
+    #[test]
+    fn test_rolling_quota_counter_boundary_conditions() {
+        let mut counter = RollingQuotaCounter::new();
+
+        // Exact boundary (amount == limit)
+        assert_eq!(counter.try_consume(100, 500, 500), Ok(500));
+        // Over-limit with 0 remaining
+        assert_eq!(counter.try_consume(100, 1, 500), Err(0));
+
+        // Overflow safety with huge amount near u64::MAX
+        assert_eq!(counter.try_consume(100, u64::MAX, 500), Err(0));
+    }
+
+    #[test]
+    fn test_network_thermometer_table_cleanup_on_limit() {
+        let mut therm = NetworkThermometer::new();
+        let limit = 10_000u64;
+
+        // Insert MAX_TRACKED_NODES entries at t = 100
+        for i in 0..MAX_TRACKED_NODES {
+            let node = i as u16;
+            assert!(therm.try_accept_lock(100, node, 100, limit));
+        }
+        assert_eq!(therm.node_write_usage.len(), MAX_TRACKED_NODES);
+
+        // Advance time by 64 half-lives so all existing entries decay to 0
+        let t_decayed = 100 + 64 * 86_400;
+        let new_node = 20_000u16;
+        assert!(therm.try_accept_lock(t_decayed, new_node, 500, limit));
+
+        // The map must have purged the zero-usage entries, leaving only the newly inserted node!
+        assert_eq!(therm.node_write_usage.len(), 1);
+        assert_eq!(therm.get_node_usage(new_node), 500);
     }
 }

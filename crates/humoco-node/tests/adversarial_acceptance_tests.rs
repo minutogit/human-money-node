@@ -76,7 +76,7 @@ async fn pow_positive_exact_retry_and_adversarial_tamper_rejection() {
     let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
     let id = NodeIdentity::generate();
     // PowEngine with low difficulty (4 bits) for quick test solving
-    let pow = Arc::new(PowEngine::new(*id.node_id(), 4));
+    let pow = Arc::new(PowEngine::new(4));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
     let state = AppState::new(engine.clone(), db.clone(), id.clone(), tiers, pow.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -177,9 +177,6 @@ async fn pow_positive_exact_retry_and_adversarial_tamper_rejection() {
                 && humoco_node::ingress::pow::count_leading_zero_bits(
                     &humoco_node::ingress::pow::hash_work(&[0u8; 32], slot.saturating_sub(1), n),
                 ) < difficulty
-                && humoco_node::ingress::pow::count_leading_zero_bits(
-                    &humoco_node::ingress::pow::compute_solution_hash(&challenge_bytes, n),
-                ) < difficulty
         })
         .unwrap_or(99999999999);
     let bad_nonce_res = client
@@ -212,7 +209,7 @@ async fn token_origin_isolation_and_redirect_rejection() {
     let cancel = CancellationToken::new();
     let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
     let id = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*id.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
 
     let secret_friend_token = "f2f_0123456789abcdef0123456789abcdef";

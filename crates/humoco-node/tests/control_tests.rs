@@ -256,7 +256,7 @@ async fn test_prometheus_metrics_endpoint() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let addr: SocketAddr = "127.0.0.1:9090".parse().unwrap();

@@ -15,6 +15,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
@@ -35,7 +36,11 @@ use humoco_node::{
     control::parse_account_tag,
     daemon::ShardReadinessManager,
     identity::NodeIdentity,
-    ingress::{tier::is_valid_client_token, IngressError, IngressTier, PowEngine, TierController},
+    ingress::{
+        pow::{self, count_leading_zero_bits, hash_work, PowError},
+        tier::is_valid_client_token,
+        IngressError, IngressTier, PowEngine, TierController,
+    },
     network::{
         framing::LockWirePayload, DefaultRequestHandler, NodeRequestHandler, PeerManager,
         QuicTransport,
@@ -44,7 +49,7 @@ use humoco_node::{
 };
 use humoco_sim_core::{
     fraud::{compute_ingress_envelope_digest_v2, FraudProofPayload, IngressEnvelopeEvidence},
-    wire::{MsgType, WireHeader},
+    wire::{MsgType, WireHeader, FLAG_QUOTA_EXCEEDED},
 };
 
 fn test_now_ms() -> u64 {
@@ -126,7 +131,7 @@ fn setup_test_app_pair() -> (
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 0)); // difficulty 0 for instant tests
+    let pow_engine = Arc::new(PowEngine::new(0)); // difficulty 0 for instant tests
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let state = AppState::new(
@@ -161,7 +166,7 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
     let temp = tempdir().unwrap();
     let db_path = temp.path().join("test_s05_01.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
-    let pow = Arc::new(PowEngine::new([0x11; 32], 0));
+    let pow = Arc::new(PowEngine::new(0));
     let controller = Arc::new(TierController::new(storage, pow));
 
     // Base day: day 100
@@ -329,6 +334,12 @@ async fn test_s05_01_real_quic_honest_rollover_no_slashing() {
     let gateway_pubkey = *gateway_id.node_pubkey();
 
     let server_peer_mgr = Arc::new(PeerManager::new(vec![]));
+    server_peer_mgr.set_simulation_mode(true);
+    server_peer_mgr.seed_local_ticket_age(
+        *server_id.node_pubkey(),
+        *server_id.hrw_routing_id(),
+        std::time::Duration::from_secs(86_400),
+    );
     let readiness = Arc::new(ShardReadinessManager::new());
     for shard in 0..=u16::MAX {
         readiness.mark_shard_ready(shard);
@@ -382,7 +393,7 @@ async fn test_s05_01_real_quic_honest_rollover_no_slashing() {
     // Gateway setup with TierController
     let gw_db_path = temp.path().join("gw.redb");
     let gw_storage = Arc::new(RedbStorage::open(&gw_db_path).unwrap());
-    let gw_pow = Arc::new(PowEngine::new(*gateway_id.node_id(), 0));
+    let gw_pow = Arc::new(PowEngine::new(0));
     let gw_tier = Arc::new(TierController::new(gw_storage, gw_pow));
 
     let day_ms = 86_400_000u64;
@@ -476,7 +487,7 @@ async fn test_s05_02_idempotent_vip_registration_and_topup_preservation() {
     // 1. Initial persisted balance = 100
     storage.set_quota(&account_tag, 100).unwrap();
 
-    let pow = Arc::new(PowEngine::new([0x01; 32], 0));
+    let pow = Arc::new(PowEngine::new(0));
     let controller = TierController::new(storage.clone(), pow);
 
     // Initial cache should have 100
@@ -577,7 +588,7 @@ async fn test_s05_02_cold_hydration_race_preserves_mutations() {
     let temp = tempdir().unwrap();
     let db_path = temp.path().join("cold_race.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
-    let pow = Arc::new(PowEngine::new([0x02; 32], 0));
+    let pow = Arc::new(PowEngine::new(0));
     let controller = Arc::new(TierController::new(storage.clone(), pow));
 
     // Initially cold: set quota on disk AFTER controller creation so it's not in in-memory cache
@@ -673,7 +684,7 @@ async fn test_s05_02_operator_http_topup_after_unpersisted_debit() {
     );
 
     // Wait for persistence worker to commit to disk
-    for _ in 0..20 {
+    for _ in 0..50 {
         tokio::task::yield_now().await;
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         if storage.get_quota(&account_tag).unwrap_or(0) == 180 {
@@ -704,14 +715,13 @@ async fn test_s05_03_vip_daily_allowance_enforcement_without_credit_burn() {
     storage.set_quota(&account_tag, 50_000).unwrap();
 
     let now_ms = test_now_ms();
-    let epoch_day = tier_controller.current_epoch_day_at(now_ms);
     // Daily quota with 5x Whale Brake:
     let daily_limit = tier_controller.calculate_daily_quota(5.0, 1.0);
     assert!(daily_limit > 0);
 
     // Exhaust daily quota directly
     tier_controller
-        .evaluate_vip_quota(&account_tag, daily_limit, epoch_day, 5.0)
+        .evaluate_vip_quota(&account_tag, daily_limit, now_ms, 5.0)
         .expect("first VIP quota must be admitted up to daily limit");
 
     let balance_before = tier_controller
@@ -784,7 +794,7 @@ async fn test_s05_03_vip_daily_allowance_enforcement_without_credit_burn() {
     );
 
     // 4. Verify retry remains idempotent
-    let _retry_res = tier_controller
+    let retry_res = tier_controller
         .evaluate_and_charge_with_time_and_retry(
             Some(token),
             None,
@@ -796,6 +806,11 @@ async fn test_s05_03_vip_daily_allowance_enforcement_without_credit_burn() {
             true, // is_retry = true
         )
         .await;
+    assert_eq!(
+        retry_res.as_ref().ok(),
+        Some(&IngressTier::Tier1Vip),
+        "Idempotent retry must succeed even when VIP daily cap is reached"
+    );
     // When retry is evaluated, does not burn balance
     assert_eq!(
         tier_controller.get_cached_vip_quota(&account_tag),
@@ -833,7 +848,7 @@ async fn test_s05_03_vip_persistence_channel_full_leaves_state_untouched() {
     let temp = tempdir().unwrap();
     let db_path = temp.path().join("persist_full.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
-    let pow_engine = Arc::new(PowEngine::new([0x33; 32], 0));
+    let pow_engine = Arc::new(PowEngine::new(0));
 
     // Create TierController with persist capacity = 1
     let controller = Arc::new(TierController::new_with_persist_capacity(
@@ -882,7 +897,7 @@ async fn test_s05_03_vip_persistence_channel_full_leaves_state_untouched() {
     );
 
     // Verify daily usage is completely unchanged (0)
-    let (_usage_day, usage_bytes) = controller.vip_daily_usage_for_test(&account_tag);
+    let usage_bytes = controller.vip_rolling_usage_at_for_test(&account_tag, now_ms);
     assert_eq!(
         usage_bytes, 0,
         "Daily usage must NOT be recorded when persistence channel is full!"
@@ -933,7 +948,6 @@ async fn test_s05_03_concurrent_vip_allowance_contention() {
     storage.set_quota(&account_tag, 50_000).unwrap();
 
     let now_ms = test_now_ms();
-    let epoch_day = tiers.current_epoch_day_at(now_ms);
 
     // 1 year TTL = 192 Byte-Years
     let req_by = 192u64;
@@ -943,7 +957,7 @@ async fn test_s05_03_concurrent_vip_allowance_contention() {
     assert!(daily_limit > 3 * req_by);
     let pre_consume = daily_limit - 3 * req_by;
     tiers
-        .evaluate_vip_quota(&account_tag, pre_consume, epoch_day, 5.0)
+        .evaluate_vip_quota(&account_tag, pre_consume, now_ms, 5.0)
         .expect("pre-consume quota");
 
     let bal_before = tiers.get_cached_vip_quota(&account_tag).unwrap();
@@ -1041,11 +1055,11 @@ async fn test_s05_04_full_32byte_client_accounting_and_tier_isolation() {
 
     // 1. Exhaust ONLY Friend 1's daily quota
     tier_controller
-        .evaluate_f2f_quota(token_1, daily_limit, epoch_day)
+        .evaluate_f2f_quota(token_1, daily_limit, now_ms)
         .expect("friend 1 quota must be admitted up to limit");
 
     // Friend 1 should now be rejected
-    let f1_second = tier_controller.evaluate_f2f_quota(token_1, 1, epoch_day);
+    let f1_second = tier_controller.evaluate_f2f_quota(token_1, 1, now_ms);
     assert!(
         matches!(f1_second, Err(IngressError::QuotaExceeded { .. })),
         "Friend 1 must be rejected after exhausting daily quota"
@@ -1108,18 +1122,17 @@ async fn test_s05_04_full_32byte_client_accounting_and_tier_isolation() {
     colliding_32[2] = 0x99;
 
     tier_controller
-        .evaluate_node_write_quota(&colliding_32, 100, epoch_day)
+        .evaluate_node_write_quota(&colliding_32, 100, now_ms)
         .expect("P2P node write must succeed");
 
     tier_controller.register_vip_token("vip_colliding_tag", colliding_32);
     tier_controller.set_cached_vip_quota(colliding_32, 10_000);
     tier_controller
-        .evaluate_vip_quota(&colliding_32, 100, epoch_day, 5.0)
+        .evaluate_vip_quota(&colliding_32, 100, now_ms, 5.0)
         .expect("VIP write must succeed");
 
     // 5. Assert list_f2f_clients reports each friend's own independent usage accurately
-    let now_ms = epoch_day * 86_400_000 + 2_000;
-    let client_dtos = tier_controller.list_f2f_clients(now_ms, epoch_day);
+    let client_dtos = tier_controller.list_f2f_clients(now_ms);
     assert_eq!(client_dtos.len(), 2);
 
     let f1_dto = client_dtos.iter().find(|c| c.label == "Friend-1").unwrap();
@@ -1145,17 +1158,18 @@ async fn test_s05_04_full_32byte_client_accounting_and_tier_isolation() {
         f2_dto.writes_today
     );
 
-    // 6. Next-day reset verification
+    // 6. Next-day rolling decay verification
     let next_day = epoch_day + 1;
-    let next_day_dtos = tier_controller.list_f2f_clients(next_day * 86_400_000, next_day);
+    let next_day_dtos = tier_controller.list_f2f_clients(next_day * 86_400_000);
     let next_f1 = next_day_dtos.iter().find(|c| c.label == "Friend-1").unwrap();
-    assert_eq!(
-        next_f1.writes_today, 0,
-        "Usage must reset to 0 on next epoch day"
+    assert!(
+        next_f1.writes_today < daily_limit,
+        "Usage must decay over time: got {}",
+        next_f1.writes_today
     );
     assert!(
         !next_f1.whale_brake_active,
-        "Whale brake must reset on next epoch day"
+        "Whale brake must reset on next day due to rolling decay"
     );
 }
 
@@ -1301,7 +1315,7 @@ async fn test_s05_05_real_tcp_operator_http_unspoofable_source_ip() {
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let (engine, _flush) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*identity.node_id(), 0));
+    let pow = Arc::new(PowEngine::new(0));
     let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
 
     let auth = Arc::new(AdminTokenManager::with_token("correct_secret_token", false));
@@ -1414,3 +1428,740 @@ async fn test_s05_05_public_vs_operator_router_boundary() {
         "Public router must NOT expose operator admin verify endpoint!"
     );
 }
+
+// ===========================================================================
+// S05-06: Public Tier-3 shared rolling pool & constant memory (zero bypass)
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s05_06_public_tier3_shared_rolling_budget_and_constant_memory() {
+    let (router, _operator, _storage, _identity, tier_controller, _pow, _state) =
+        setup_test_app_pair();
+
+    let daily_limit = tier_controller.calculate_daily_quota(1.0, 1.0);
+    assert_eq!(daily_limit, 960_000);
+
+    let now_ms = test_now_ms();
+    let parent_1 = [0x11u8; 32];
+    let parent_2 = [0x22u8; 32];
+    let parent_3 = [0x33u8; 32];
+
+    // 1. First anonymous write for parent_1 consumes 960,000 BY (full daily quota)
+    // 5,000 years * 192 = 960,000 BY
+    let ttl_full = 5_000 * 31_536_000;
+    let res_1 = tier_controller
+        .evaluate_and_charge_with_time(
+            None,
+            None,
+            None,
+            None,
+            ttl_full,
+            Some(&parent_1),
+            Some(now_ms),
+        )
+        .await;
+    assert_eq!(
+        res_1.as_ref().ok(),
+        Some(&IngressTier::Tier3Public),
+        "Initial anonymous Tier-3 write up to daily quota must succeed"
+    );
+
+    // 2. Second anonymous write with DISTINCT parent_lock (parent_2) MUST BE REJECTED
+    // Fixes S05-06: Shared O(1) RollingQuotaCounter prevents distinct parent_lock quota bypass!
+    let ttl_extra = 31_536_000; // 1 year = 192 BY
+    let res_2 = tier_controller
+        .evaluate_and_charge_with_time(
+            None,
+            None,
+            None,
+            None,
+            ttl_extra,
+            Some(&parent_2),
+            Some(now_ms),
+        )
+        .await;
+    assert!(
+        matches!(res_2, Err(IngressError::QuotaExceeded { available, required }) if available == 0 && required == 192),
+        "S05-06: Distinct parent_2 MUST NOT bypass public Tier-3 quota; shared rolling counter required: got {:?}",
+        res_2
+    );
+
+    // 3. Third anonymous write with parent_3 also rejected
+    let res_3 = tier_controller
+        .evaluate_and_charge_with_time(
+            None,
+            None,
+            None,
+            None,
+            ttl_extra,
+            Some(&parent_3),
+            Some(now_ms),
+        )
+        .await;
+    assert!(
+        matches!(res_3, Err(IngressError::QuotaExceeded { .. })),
+        "Parent 3 must also be rejected by shared pool"
+    );
+
+    // 4. HTTP layer verification: POST /v1/lock with another distinct parent returns HTTP 429
+    let client_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let req_http = make_test_hmc_genesis(
+        [0x99u8; 32],
+        now_ms + 86_400_000,
+        &client_key,
+    );
+    let http_res = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req_http).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        http_res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "HTTP POST /v1/lock must return 429 Too Many Requests when Tier-3 shared rolling pool is full"
+    );
+}
+
+// ===========================================================================
+// S05-07: Consensus time propagation for PoW and TierController
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s05_07_consensus_time_propagation_for_pow_and_tiers() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s05_07.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+
+    // Attached NetworkClock shifted +3,600,000 ms ahead (+1 hour)
+    let clock = Arc::new(humoco_node::network::NetworkClock::new());
+    clock.fast_reseed_on_merge(3_600_000);
+
+    let pow = Arc::new(PowEngine::new(8).with_clock(clock.clone()));
+    let controller = Arc::new(TierController::new(storage, pow.clone()));
+
+    let parent = [0x77u8; 32];
+
+    // 1. When now_ms is None, pow.now_ms() / controller.effective_now_ms(None) queries NetworkClock (+3,600,000 ms)
+    let net_time_sec = clock.net_time_ms() / 1000;
+    let net_slot = pow.current_epoch_slot(net_time_sec);
+    let net_challenge = pow::compute_stateless_challenge(&parent, net_slot);
+    let net_challenge_hex = hex::encode(net_challenge);
+
+    // Unshifted OS-clock slot
+    let os_time_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let os_slot = os_time_sec / 600;
+    let os_challenge = pow::compute_stateless_challenge(&parent, os_slot);
+    let os_challenge_hex = hex::encode(os_challenge);
+
+    let net_nonce = (0..50_000)
+        .find(|&n| count_leading_zero_bits(&hash_work(&parent, net_slot, n)) >= 8)
+        .expect("solve net PoW");
+
+    // NetworkClock challenge must be accepted when now_ms is None
+    let accept_net = controller
+        .evaluate_and_charge_with_time(
+            None,
+            None,
+            Some(&net_challenge_hex),
+            Some(net_nonce),
+            60,
+            Some(&parent),
+            None,
+        )
+        .await;
+    assert_eq!(
+        accept_net.as_ref().ok(),
+        Some(&IngressTier::Tier3Public),
+        "Challenge derived from NetworkClock must be accepted when now_ms is None"
+    );
+
+    // OS-clock challenge must be rejected by consensus time
+    if os_slot != net_slot {
+        let reject_os = controller
+            .evaluate_and_charge_with_time(
+                None,
+                None,
+                Some(&os_challenge_hex),
+                Some(0),
+                60,
+                Some(&parent),
+                None,
+            )
+            .await;
+        assert!(
+            matches!(reject_os, Err(IngressError::InvalidPoW(PowError::InvalidFormat))),
+            "OS-clock challenge must be rejected by NetworkClock consensus time"
+        );
+    }
+
+    // 2. Explicit now_ms (+7,200,000 ms, +2 hours) overrides NetworkClock
+    let explicit_now_ms = clock.net_time_ms() + 3_600_000;
+    let explicit_now_sec = explicit_now_ms / 1000;
+    let explicit_slot = pow.current_epoch_slot(explicit_now_sec);
+    let explicit_challenge = pow::compute_stateless_challenge(&parent, explicit_slot);
+    let explicit_challenge_hex = hex::encode(explicit_challenge);
+
+    let explicit_nonce = (0..50_000)
+        .find(|&n| count_leading_zero_bits(&hash_work(&parent, explicit_slot, n)) >= 8)
+        .expect("solve explicit PoW");
+
+    let accept_explicit = controller
+        .evaluate_and_charge_with_time(
+            None,
+            None,
+            Some(&explicit_challenge_hex),
+            Some(explicit_nonce),
+            60,
+            Some(&parent),
+            Some(explicit_now_ms),
+        )
+        .await;
+    assert_eq!(
+        accept_explicit.as_ref().ok(),
+        Some(&IngressTier::Tier3Public),
+        "Challenge aligned to explicit now_ms must be accepted"
+    );
+
+    // NetworkClock challenge must be rejected when evaluated against explicit_now_ms
+    let reject_net_on_explicit = controller
+        .evaluate_and_charge_with_time(
+            None,
+            None,
+            Some(&net_challenge_hex),
+            Some(net_nonce),
+            60,
+            Some(&parent),
+            Some(explicit_now_ms),
+        )
+        .await;
+    assert!(
+        matches!(reject_net_on_explicit, Err(IngressError::InvalidPoW(PowError::InvalidFormat))),
+        "Older NetworkClock challenge must be rejected when caller provides explicit now_ms"
+    );
+}
+
+// ===========================================================================
+// S05-08: PoW zero TTL, overflow, difficulty bounds and no legacy fallback
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s05_08_pow_zero_ttl_overflow_difficulty_bounds_and_no_legacy_fallback() {
+    let pow = PowEngine::new(252).with_ttl(0);
+
+    // 1. Clamped TTL >= 1 prevents division by zero and saturates cleanly on u64::MAX
+    assert_eq!(pow.current_epoch_slot(0), 0);
+    assert_eq!(pow.current_epoch_slot(u64::MAX), u64::MAX);
+
+    let (chal, diff, exp) = pow.generate_challenge_for_parent_at(&[0u8; 32], u64::MAX);
+    assert_eq!(diff, 252);
+    assert_eq!(exp, u64::MAX);
+    assert_eq!(chal.len(), 64);
+
+    // 2. Difficulty bounds and safe non-finite float handling:
+    // 252 + 8 = 260 -> capped at 256
+    assert_eq!(pow.required_difficulty_for_load(0.95), 256);
+    assert_eq!(pow.required_difficulty_for_load(1.0), 256);
+    // 252 + 4 = 256
+    assert_eq!(pow.required_difficulty_for_load(0.6), 256);
+    // <= 0.5 -> baseline 252
+    assert_eq!(pow.required_difficulty_for_load(0.5), 252);
+    assert_eq!(pow.required_difficulty_for_load(0.1), 252);
+    // NaN and infinities return baseline 252 safely
+    assert_eq!(pow.required_difficulty_for_load(f64::NAN), 252);
+    assert_eq!(pow.required_difficulty_for_load(f64::INFINITY), 252);
+    assert_eq!(pow.required_difficulty_for_load(f64::NEG_INFINITY), 252);
+
+    // 3. solve_blake3_hashcash returns None for non-zero-parent or unknown challenges
+    let custom_parent = [0x55u8; 32];
+    let custom_chal = pow::compute_stateless_challenge(&custom_parent, 42);
+    let custom_chal_hex = hex::encode(custom_chal);
+    assert_eq!(
+        pow::solve_blake3_hashcash(&custom_chal_hex, 4, 100),
+        None,
+        "Unknown/non-zero-parent challenge must return None without legacy compute_solution_hash fallback loop"
+    );
+}
+
+// ===========================================================================
+// S05-09: Rolling EMA quota recovery, exact retry, VIP latch & QUIC node quota
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s05_09_rolling_ema_quota_exact_limit_retry_vip_latch_and_quic_node_quota() {
+    let (router, _operator, storage, _identity, tier_controller, _pow, _state) =
+        setup_test_app_pair();
+
+    let account_tag = [0x88u8; 32];
+    let token = "vip_rolling_test_token";
+    tier_controller.register_vip_token(token, account_tag);
+    tier_controller.set_cached_vip_quota(account_tag, 20_000_000);
+    storage.set_quota(&account_tag, 20_000_000).unwrap();
+
+    let f2f_token = "f2f_0123456789abcdef0123456789abcdef";
+    tier_controller.register_f2f_peer(f2f_token);
+
+    let vip_limit = tier_controller.calculate_daily_quota(5.0, 1.0);
+    assert_eq!(vip_limit, 4_800_000);
+
+    // -----------------------------------------------------------------------
+    // (a) Smooth physical recovery via 24h-half-life EMA
+    // -----------------------------------------------------------------------
+    let t0_ms = 1_000_000_000_000u64;
+    // Consume 100% of VIP daily quota at t0
+    tier_controller
+        .evaluate_vip_quota(&account_tag, vip_limit, t0_ms, 5.0)
+        .expect("VIP quota first consume up to limit");
+
+    // Attempting 1 more unit at t0 is rejected
+    let vip_rej = tier_controller.evaluate_vip_quota(&account_tag, 1, t0_ms, 5.0);
+    assert!(matches!(vip_rej, Err(IngressError::QuotaExceeded { .. })));
+
+    // UTC midnight boundary test: 86_399_999 ms -> 86_400_001 ms (2 ms difference)
+    let t_midnight_1 = 86_399_999u64;
+    let t_midnight_2 = 86_400_001u64;
+    let mid_tag = [0x79u8; 32];
+    tier_controller.register_vip_token("mid_token", mid_tag);
+    tier_controller.set_cached_vip_quota(mid_tag, 20_000_000);
+    storage.set_quota(&mid_tag, 20_000_000).unwrap();
+    tier_controller
+        .evaluate_vip_quota(&mid_tag, vip_limit, t_midnight_1, 5.0)
+        .expect("consume at 23:59:59");
+    // At 00:00:00 (2 ms later), continuous EMA does NOT reset to 0!
+    let burst_res = tier_controller.evaluate_vip_quota(&mid_tag, vip_limit, t_midnight_2, 5.0);
+    assert!(
+        matches!(burst_res, Err(IngressError::QuotaExceeded { .. })),
+        "S05-09: Quota must NOT burst-reset across UTC midnight cliff: got {:?}",
+        burst_res
+    );
+
+    // 50% recovery after 24h (+86_400_000 ms)
+    let t_24h_ms = t0_ms + 86_400_000;
+    let usage_after_24h = tier_controller.vip_rolling_usage_at_for_test(&account_tag, t_24h_ms);
+    assert!(
+        usage_after_24h <= vip_limit / 2 + 10,
+        "Usage after 24h must decay to ~50%: got {}",
+        usage_after_24h
+    );
+    // Exactly 50% (2,400,000 BY) can now be spent
+    let half_spend = tier_controller.evaluate_vip_quota(&account_tag, 2_400_000, t_24h_ms, 5.0);
+    assert!(half_spend.is_ok(), "50% recovered quota must be spendable after 24h");
+
+    // Out-of-order older timestamp never rolls back usage
+    let t_older_ms = t0_ms - 1_000_000;
+    let older_usage = tier_controller.vip_rolling_usage_at_for_test(&account_tag, t_older_ms);
+    assert!(older_usage >= 2_400_000, "Older timestamp must not roll back or erase recorded usage");
+
+    // -----------------------------------------------------------------------
+    // (b) Exact idempotent retry returns 200 OK even at 100% quota
+    // -----------------------------------------------------------------------
+    // Commit a lock via POST /v1/lock using client_key
+    let http_now_ms = test_now_ms();
+    let client_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let req_genesis = make_test_hmc_genesis(
+        [0x44u8; 32],
+        http_now_ms + 86_400_000,
+        &client_key,
+    );
+
+    // First POST /v1/lock succeeds (difficulty 0)
+    let res_post_1 = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req_genesis).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_post_1.status(), StatusCode::CREATED);
+
+    // Exhaust remaining Public quota to 100%
+    tier_controller.exhaust_public_quota_for_test(http_now_ms);
+
+    // A brand new lock is now rejected with 429
+    let req_other = make_test_hmc_genesis(
+        [0x99u8; 32],
+        http_now_ms + 86_400_000,
+        &client_key,
+    );
+    let res_other = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req_other).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_other.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Exact idempotent retry of committed lock returns 200 OK even at 100% quota!
+    let res_retry = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req_genesis).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_retry.status(),
+        StatusCode::OK,
+        "Idempotent retry of committed lock must succeed with 200 OK at 100% quota"
+    );
+
+    // Direct unit check on evaluate_and_charge_with_time_and_retry with is_retry = true
+    let vip_retry_res = tier_controller
+        .evaluate_and_charge_with_time_and_retry(
+            Some(token),
+            None,
+            None,
+            None,
+            31_536_000,
+            None,
+            Some(t0_ms),
+            true,
+        )
+        .await;
+    assert_eq!(vip_retry_res.as_ref().ok(), Some(&IngressTier::Tier1Vip));
+
+    let f2f_retry_res = tier_controller
+        .evaluate_and_charge_with_time_and_retry(
+            None,
+            Some(f2f_token),
+            None,
+            None,
+            31_536_000,
+            None,
+            Some(t0_ms),
+            true,
+        )
+        .await;
+    assert_eq!(f2f_retry_res.as_ref().ok(), Some(&IngressTier::Tier2F2F));
+
+    // -----------------------------------------------------------------------
+    // (c) VIP persistence fail-closed latch
+    // -----------------------------------------------------------------------
+    tier_controller
+        .quota_worker_failure_handle()
+        .store(true, Ordering::Release);
+
+    let topup_err = tier_controller.topup_vip_quota(account_tag, 100);
+    assert!(
+        matches!(topup_err, Err(IngressError::QuotaPersistenceUnavailable)),
+        "topup_vip_quota must fail closed when vip_persist_failed is latched"
+    );
+
+    let charge_err = tier_controller.try_charge_vip_in_memory(&account_tag, 10);
+    assert!(
+        matches!(charge_err, Err(IngressError::QuotaPersistenceUnavailable)),
+        "try_charge_vip_in_memory must fail closed when vip_persist_failed is latched"
+    );
+
+    let debit_err = tier_controller
+        .evaluate_and_charge_with_time(
+            Some(token),
+            None,
+            None,
+            None,
+            60,
+            None,
+            Some(t0_ms),
+        )
+        .await;
+    assert!(
+        matches!(debit_err, Err(IngressError::QuotaPersistenceUnavailable)),
+        "evaluate_and_charge VIP debit must fail closed when vip_persist_failed is latched"
+    );
+
+    // -----------------------------------------------------------------------
+    // (d) Real QUIC node quota: write & read rate enforcement over QUIC
+    // -----------------------------------------------------------------------
+    let quic_temp = tempdir().unwrap();
+    let q_storage = Arc::new(RedbStorage::open(&quic_temp.path().join("q_server.redb")).unwrap());
+    let (q_engine, _q_worker) = DualTierEngine::new(q_storage.clone());
+    let server_id = NodeIdentity::generate();
+    let gateway_id = NodeIdentity::generate();
+    let gateway_pubkey = *gateway_id.node_pubkey();
+
+    let server_peer_mgr = Arc::new(PeerManager::new(vec![]));
+    server_peer_mgr.set_simulation_mode(true);
+    server_peer_mgr.seed_local_ticket_age(
+        *server_id.node_pubkey(),
+        *server_id.hrw_routing_id(),
+        std::time::Duration::from_secs(86_400),
+    );
+    let readiness = Arc::new(ShardReadinessManager::new());
+    for shard in 0..=u16::MAX {
+        readiness.mark_shard_ready(shard);
+    }
+
+    let q_pow = Arc::new(PowEngine::new(0));
+    let server_tc = Arc::new(TierController::new(q_storage.clone(), q_pow));
+
+    let handler = NodeRequestHandler::with_peer_manager(
+        q_engine.clone(),
+        q_storage.clone(),
+        server_id.clone(),
+        server_peer_mgr.clone(),
+    )
+    .with_readiness_manager(readiness)
+    .with_tier_controller(server_tc.clone());
+
+    let cancel_token = CancellationToken::new();
+
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        server_peer_mgr.clone(),
+        Arc::new(handler),
+        cancel_token.clone(),
+    )
+    .expect("bind server QUIC");
+    let server_addr = server_transport.local_addr().unwrap();
+    let _server_accept = server_transport.spawn_accept_loop();
+
+    let gw_peer_mgr = Arc::new(PeerManager::new(vec![server_addr]));
+    let gateway_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &gateway_id,
+        gw_peer_mgr.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("bind gateway QUIC");
+    let _gw_accept = gateway_transport.spawn_accept_loop();
+
+    server_peer_mgr
+        .register_f2f_friend(gateway_pubkey, Some(gateway_transport.local_addr().unwrap()))
+        .await;
+    gw_peer_mgr
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+        .await;
+
+    let conn = gateway_transport
+        .connect_peer(server_addr)
+        .await
+        .expect("connect QUIC peer");
+
+    let quic_now_ms = test_now_ms();
+
+    // Exhaust gateway node write quota (pre-seed with +5s margin against 1-second wall clock decay)
+    let daily_node_limit = server_tc.calculate_daily_quota(5.0, 1.0);
+    server_tc
+        .evaluate_node_write_quota(&gateway_pubkey, daily_node_limit, quic_now_ms + 5_000)
+        .expect("initial node write consume");
+
+    // LockVerifyRequest over QUIC with a 5-year voucher (960 Byte-Years) receives FLAG_QUOTA_EXCEEDED
+    let ttl_s = 5 * 31_536_000u64;
+    let root_valid_until = quic_now_ms + ttl_s * 1000;
+    let lock_req = make_test_hmc_genesis([0x66u8; 32], root_valid_until, gateway_id.signing_key());
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+    let digest = compute_ingress_envelope_digest_v2(
+        &gateway_pubkey,
+        0,
+        1,
+        quic_now_ms,
+        0,
+        0,
+        footprint,
+        false,
+        &lock_req.transaction_hash,
+    );
+    let sender_sig = gateway_id.signing_key().sign(&digest).to_bytes();
+
+    let wire_payload = bincode::serialize(&LockWirePayload::Hmc {
+        req: lock_req,
+        chain: None,
+        root_valid_until,
+        epoch_day: 0,
+        epoch_seq: 1,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: gateway_pubkey,
+        sender_signature: sender_sig,
+        timestamp_ms: quic_now_ms,
+    })
+    .unwrap();
+    let header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        1,
+        0,
+        0,
+        wire_payload.len() as u32,
+    );
+
+    let (resp_hdr, _) = gateway_transport
+        .send_request(&conn, &header, &wire_payload)
+        .await
+        .expect("send QUIC request");
+
+    assert_eq!(
+        resp_hdr.flags & FLAG_QUOTA_EXCEEDED,
+        FLAG_QUOTA_EXCEEDED,
+        "LockVerifyRequest over QUIC must return FLAG_QUOTA_EXCEEDED when node write quota is exhausted"
+    );
+
+    // Exhaust gateway node read quota (pre-seed with +5s margin against 1-second wall clock decay)
+    let daily_node_read_limit = server_tc.calculate_daily_read_quota(5.0, 1.0);
+    server_tc
+        .evaluate_node_read_quota(&gateway_pubkey, daily_node_read_limit, quic_now_ms + 5_000)
+        .expect("initial node read consume");
+
+    // StatusQuery over QUIC receives FLAG_QUOTA_EXCEEDED
+    let query_lock_id = [0x77u8; 32];
+    let query_digest = compute_ingress_envelope_digest_v2(
+        &gateway_pubkey,
+        0,
+        0,
+        quic_now_ms,
+        0,
+        0,
+        0,
+        true,
+        &query_lock_id,
+    );
+    let query_sig = gateway_id.signing_key().sign(&query_digest).to_bytes();
+
+    let status_payload = bincode::serialize(&humoco_node::network::framing::StatusQueryPayload {
+        lock_id: query_lock_id,
+        parent_lock: [0x88u8; 32],
+        shard_id: 1,
+        sender_pubkey: gateway_pubkey,
+        declared_write_ema_micro_bj: 0,
+        current_read_ema_credits: 0,
+        timestamp_ms: quic_now_ms,
+        sender_signature: query_sig,
+    })
+    .unwrap();
+    let status_hdr = WireHeader::new(
+        MsgType::StatusQuery as u16,
+        2,
+        0,
+        0,
+        status_payload.len() as u32,
+    );
+
+    let (status_resp_hdr, _) = gateway_transport
+        .send_request(&conn, &status_hdr, &status_payload)
+        .await
+        .expect("send QUIC status query");
+
+    assert_eq!(
+        status_resp_hdr.flags & FLAG_QUOTA_EXCEEDED,
+        FLAG_QUOTA_EXCEEDED,
+        "StatusQuery over QUIC must return FLAG_QUOTA_EXCEEDED when node read quota is exhausted"
+    );
+}
+
+// ===========================================================================
+// S05-10: Auth expired map eviction, key bounds, empty file & Bearer casing
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s05_10_auth_expired_map_eviction_key_bounds_empty_file_and_bearer_case() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s05_10.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let controller = TierController::new(storage, pow);
+
+    // 1. Bearer casing and trimming in resolve_account_tag
+    let vip_tag = [0x99u8; 32];
+    controller.register_vip_token("my_vip_token", vip_tag);
+
+    assert_eq!(
+        controller.resolve_account_tag("BEARER my_vip_token").as_ref().ok(),
+        Some(&vip_tag),
+        "BEARER uppercase prefix must resolve account tag"
+    );
+    assert_eq!(
+        controller.resolve_account_tag("bearer my_vip_token").as_ref().ok(),
+        Some(&vip_tag),
+        "bearer lowercase prefix must resolve account tag"
+    );
+    assert_eq!(
+        controller.resolve_account_tag("  Bearer   my_vip_token   ").as_ref().ok(),
+        Some(&vip_tag),
+        "Bearer with extra surrounding and interior whitespace must resolve account tag"
+    );
+    assert_eq!(
+        controller.resolve_account_tag("my_vip_token").as_ref().ok(),
+        Some(&vip_tag),
+        "Raw token without Bearer prefix must resolve account tag"
+    );
+    assert!(
+        controller.resolve_account_tag("BEARER").is_err(),
+        "Bare BEARER string must be rejected"
+    );
+    assert!(
+        controller.resolve_account_tag("Bearer ").is_err(),
+        "Bare Bearer prefix without token must be rejected"
+    );
+
+    // 2. AdminTokenManager Bearer casing and trimming
+    let admin_mgr = AdminTokenManager::with_token("admin_secret_42", false);
+    assert!(admin_mgr.verify_token(Some("BEARER admin_secret_42")));
+    assert!(admin_mgr.verify_token(Some("bearer admin_secret_42")));
+    assert!(admin_mgr.verify_token(Some("  Bearer   admin_secret_42  ")));
+    assert!(admin_mgr.verify_token(Some("admin_secret_42")));
+    assert!(!admin_mgr.verify_token(Some("BEARER")));
+    assert!(!admin_mgr.verify_token(Some("bearer")));
+    assert!(!admin_mgr.verify_token(Some("Bearer ")));
+    assert!(!admin_mgr.verify_token(Some("wrong_token")));
+    assert!(!admin_mgr.verify_token(None));
+
+    // 3. Expired map eviction at 1,024 IPs
+    let t0 = Instant::now();
+    let expired_time = t0 - Duration::from_secs(120); // > 60s window
+    for i in 0..1024 {
+        let ip = format!("10.{}.{}.{}", (i >> 16) & 0xff, (i >> 8) & 0xff, i & 0xff);
+        admin_mgr.record_failure_at(&ip, expired_time);
+    }
+    // Now at current time t0, checking rate limit for a new IP triggers eviction of all expired IPs!
+    assert!(
+        admin_mgr.check_rate_limit_at("192.168.1.100", t0),
+        "Rate limit check must succeed and evict expired entries"
+    );
+
+    // 4. Oversized IP handling
+    let oversized_ip = "192.168.1.".to_string() + &"9".repeat(200);
+    assert!(admin_mgr.check_rate_limit(&oversized_ip));
+    admin_mgr.record_failure(&oversized_ip);
+
+    // 5. Empty admin.token file rejection
+    let empty_dir = tempdir().unwrap();
+    std::fs::write(empty_dir.path().join("admin.token"), b"  \n\r\n  ").unwrap();
+    let load_res = AdminTokenManager::load_or_create(empty_dir.path(), false);
+    assert!(
+        load_res.is_err(),
+        "Empty admin.token file must be rejected with InvalidData error"
+    );
+    assert_eq!(
+        load_res.unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+

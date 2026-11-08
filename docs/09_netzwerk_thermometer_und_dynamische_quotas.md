@@ -81,18 +81,19 @@ Once $N \ge 4$ active nodes are present in the mesh:
 
 ---
 
-## 3. Physical Inertia (24h Daily Cycle & Time-Based Integer EMA)
+## 3. Physical Inertia (Continuous Rolling 24h-Half-Life EMA & Slotted Ring Buffer)
 
-Real economic traffic fluctuates over the day:
-1. **24-hour daily epoch (`epoch_day`):** Quotas are allocated as **daily budgets**.
+Real economic traffic fluctuates continuously over time without discrete calendar boundaries:
+1. **Continuous 24h-Half-Life Rolling Quotas (`RollingQuotaCounter`):** Quota enforcement does NOT rely on discrete UTC midnight resets (`epoch_day` rollover), which would create artificial burst cliffs, race conditions, and double-budget windows at 23:59:59 -> 00:00:00. Instead, every peer/tier quota is tracked continuously via `RollingQuotaCounter` using the physical-time 24h half-life integer EMA (`decay_integer_ema`). Budget regenerates smoothly (50% recovery per 24 hours, decaying to 0 after 64 half-lives).
 2. **Time-based integer EMA for burst damping (`decay_integer_ema`):** To avoid millisecond spikes and sudden cut-offs, the gateway computes the Exponential Moving Average with a continuous 24-hour exponential half-life ($T_{1/2} = 86.400\,\text{s}$) in $\mu\text{BJ}$ ($10^6$ fixed-point):
    $$\text{decayed\_ema} = \text{decay\_integer\_ema}(\text{old\_ema}, \Delta t_{\text{sec}})$$
    $$\text{new\_ema} = \text{decayed\_ema} + \text{footprint}$$
    - **Continuous Half-Life:** Every 24 hours ($86.400\,\text{s}$), the EMA value decays by exactly 50% ($2^{-\Delta t / 86.400}$).
    - **Pure Integer Arithmetic:** Implemented via a 64-step dyadic lookup table (`DYADIC_HALF_LIFE_TABLE`, step width $1.350\,\text{s}$) with linear interpolation (error $< 0{,}002\%$) and 128-bit fixed-point arithmetic (`u128`).
-   - **Boundary Conditions:** At $\Delta t = 0$, no decay occurs ($\text{decayed\_ema} = \text{old\_ema}$). After 64 half-lives ($\Delta t \ge 64 \times 86.400\,\text{s}$), the value decays completely to 0.
+   - **Boundary Conditions:** At $\Delta t = 0$, no decay occurs ($\text{decayed\_ema} = \text{old\_ema}$). After 64 half-lives ($\Delta t \ge 64 \times 86.400\,\text{s}$), the value decays completely to 0. Delayed out-of-order packets ($\Delta t < 0$) are clamped with `saturating_sub` to $\Delta t = 0$, preventing backwards decay inflation or resets.
    - **Equivalent Daily Rate:** The 24h half-life EMA accumulator converts to an equivalent daily rate via $\text{Rate}_{\text{daily}} = \lfloor \text{EMA} \cdot \ln(2) \rfloor \approx \lfloor \frac{\text{EMA} \times 693.147}{1.000.000} \rfloor$.
-3. **Organic inertia ($\tau$):** Smoothed via the 28-day low-pass filter.
+3. **Calendar `epoch_day` Scope:** Deterministic calendar days ($\lfloor t_{\text{unix}} / 86400 \rfloor$) remain strictly reserved for Spec 10 signed ingress envelope sequencing and the 28-day median ring-buffer slot rotation, with zero connection to consensus tenures or committee terms.
+4. **Organic inertia ($\tau$):** Smoothed via the 28-day low-pass filter.
 
 ---
 
@@ -172,7 +173,7 @@ Since $\Delta t = 0$ for read requests, the read thermometer measures **read ope
 1. **[INV-0901] Byte-Years accounting unit:** Ingress and storage capacity for write locks is measured exclusively in the Storage-Time Product $\text{Byte} \times \Delta t_{\text{TTL}}$ (standard: Byte-Years).
 2. **[INV-0902] Hard floor baseline ($960.000\,\text{BJ/day}$):** Effective write baseline $\text{NCB}_{\text{eff}}$ must never fall below the fixed minimum of $960.000\,\text{Byte-Years/day}$ ($40.000\,\text{BJ/h}$).
 3. **[INV-0903] 28-day median smoothing:** Apply the 28-day slotted buffer to reduce sensitivity to short spikes; smoothing does not prove the reports honest.
-4. **[INV-0904] 24h daily budget:** Quotas are computed per 24-hour epoch (`epoch_day`) for accounting; physical-time burst damping and capacity checks still apply. Calendar epoch_day does not define committee tenure.
+4. **[INV-0904] Continuous rolling 24h EMA quota budget:** Peer and tier quotas are enforced continuously via 24h-half-life integer EMA decay (`RollingQuotaCounter` via `decay_integer_ema`), eliminating midnight burst cliffs and double-spending spikes across rollover boundaries. Calendar `epoch_day` rotates 28-day ring slots and sequences Spec 10 envelopes, but never defines committee tenure or consensus authority.
 5. **[INV-0905] Whale cap:** Multiplier $K$ is invariantly capped at $5{,}0$ ($K \le 5{,}0$).
 6. **[INV-0906] Local enforcement:** Bounded admission refusals/drops follow the interface contract, without global blame, presence penalties or bans.
 7. **[INV-0907] Seed initialization for new nodes:** New nodes fill all 28 slots of their ring buffer on joining with the current peer median to prevent cold-start deadlocks in large networks.

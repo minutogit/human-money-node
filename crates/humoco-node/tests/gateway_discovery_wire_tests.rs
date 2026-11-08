@@ -162,7 +162,7 @@ async fn signed_passive_gateway_publication_arrives_over_quic_and_tampering_is_i
         pm.advertised_gateway_urls().await,
         vec!["https://checkout.example"]
     );
-    let pow = Arc::new(PowEngine::new(*receiver.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(receiver_db.clone(), pow.clone()));
     let mut state = AppState::new(engine, receiver_db, receiver, tiers, pow);
     state.peer_manager = Some(pm);

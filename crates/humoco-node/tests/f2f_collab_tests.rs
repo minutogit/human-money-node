@@ -27,7 +27,7 @@ fn setup_test_state(identity: NodeIdentity, peer_manager: Arc<PeerManager>) -> A
     let db_path = temp.path().join("test_collab.redb");
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush) = DualTierEngine::new(storage.clone());
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
 
     let auth = Arc::new(AdminTokenManager::with_token("test_admin_token", false));

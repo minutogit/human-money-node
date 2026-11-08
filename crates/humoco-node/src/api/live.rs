@@ -402,10 +402,9 @@ pub async fn collect_live_state_proof(
     };
     let client_bucket = u16::from_le_bytes([context.parent_lock[0], context.parent_lock[1]]);
     let now_ms = state.net_time_ms();
-    let day = state.tier_controller.current_epoch_day_at(now_ms);
     if state
         .tier_controller
-        .evaluate_read_quota_with_time(client_bucket, 60, day, 1.0, Some(now_ms))
+        .evaluate_read_quota_with_time(client_bucket, 60, 1.0, Some(now_ms))
         .is_err()
     {
         return Err((StatusCode::TOO_MANY_REQUESTS, "Read quota exceeded"));

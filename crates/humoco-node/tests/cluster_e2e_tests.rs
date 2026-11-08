@@ -337,7 +337,7 @@ impl ClusterHarness {
             transport.set_sync_ready(true);
             let p2p_addr = transport.local_addr()?;
             transport.spawn_accept_loop();
-            let pow = Arc::new(PowEngine::new(*identity.node_id(), 8));
+            let pow = Arc::new(PowEngine::new(8));
             let tier = Arc::new(TierController::new(storage.clone(), pow.clone()));
             tier.register_f2f_peer(E2E_F2F_TOKEN);
             let mut state = AppState::new(engine, storage, identity.clone(), tier, pow);

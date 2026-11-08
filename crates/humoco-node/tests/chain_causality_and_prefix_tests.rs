@@ -153,7 +153,7 @@ async fn http_bad_suffix_retains_exact_durable_prefix_after_restart() {
         let cancel = CancellationToken::new();
         let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
         let id = NodeIdentity::generate();
-        let pow = Arc::new(PowEngine::new(*id.node_id(), 8));
+        let pow = Arc::new(PowEngine::new(8));
         let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
         tiers.register_f2f_peer("prefix-test");
         let state = AppState::new(engine.clone(), db.clone(), id.clone(), tiers, pow);
@@ -460,7 +460,7 @@ async fn http_future_terminal_is_rejected_and_valid_prefix_retained() {
     let cancel = CancellationToken::new();
     let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
     let id = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*id.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
     tiers.register_f2f_peer("future-test");
     let state = AppState::new(engine.clone(), db.clone(), id.clone(), tiers, pow);
@@ -520,7 +520,7 @@ async fn http_historical_predecessor_fresh_terminal_and_rfc3339_root_ttl() {
     let cancel = CancellationToken::new();
     let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
     let author = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*author.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
     tiers.register_f2f_peer("historical-http-token");
     let state = AppState::new(engine.clone(), db.clone(), author.clone(), tiers, pow);
@@ -667,7 +667,7 @@ async fn http_independent_receiver_and_change_branches_do_not_collide() {
     let author = NodeIdentity::generate();
     let receiver = NodeIdentity::generate();
     let change = NodeIdentity::generate();
-    let pow = Arc::new(PowEngine::new(*author.node_id(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
     tiers.register_f2f_peer("split-http-token");
     let state = AppState::new(engine.clone(), db.clone(), author.clone(), tiers, pow);

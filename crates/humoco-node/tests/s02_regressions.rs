@@ -150,7 +150,7 @@ async fn anchor(engine: &DualTierEngine, root: &L2LockRequest) -> TestResult {
 }
 
 fn app_state(engine: DualTierEngine, db: Arc<RedbStorage>, identity: NodeIdentity) -> AppState {
-    let pow = Arc::new(PowEngine::new(*identity.node_pubkey(), 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));
     tiers.register_f2f_peer("s02-client");
     AppState::new(engine, db, identity, tiers, pow)

@@ -117,7 +117,7 @@ async fn setup_quic_shard_and_client() -> (
         Arc::new(RedbStorage::open(&temp.path().join("audit19.redb")).expect("open redb"));
     let (engine_raw, _worker) = DualTierEngine::new(storage.clone());
     let engine = Arc::new(engine_raw);
-    let pow = Arc::new(PowEngine::new([0x42; 32], 8));
+    let pow = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow));
 
     let shard_identity = NodeIdentity::generate();
@@ -950,7 +950,7 @@ async fn test_w4_p2p_quota_isolation_by_full_nodepubkey() {
     let temp = tempdir().expect("tempdir");
     let storage =
         Arc::new(RedbStorage::open(&temp.path().join("w4_quota.redb")).expect("open redb"));
-    let pow = Arc::new(PowEngine::new([0x42; 32], 8));
+    let pow = Arc::new(PowEngine::new(8));
     let controller = TierController::new(storage, pow);
 
     // Two distinct valid 32-byte public keys sharing the first 2 bytes [0xAA, 0xBB]
@@ -965,18 +965,18 @@ async fn test_w4_p2p_quota_isolation_by_full_nodepubkey() {
     assert_ne!(key_a, key_b);
     assert_eq!(key_a[0..2], key_b[0..2]);
 
-    let epoch_day = controller.current_epoch_day();
+    let now_ms = controller.now_ms();
     let daily_quota = controller.calculate_daily_quota(5.0, 1.0);
 
     // Node A consumes its full daily quota
-    let res_a = controller.evaluate_node_write_quota(&key_a, daily_quota, epoch_day);
+    let res_a = controller.evaluate_node_write_quota(&key_a, daily_quota, now_ms);
     assert!(
         res_a.is_ok(),
         "Node A first write within budget must succeed"
     );
 
     // Node A is now at quota limit
-    let res_a_exceeded = controller.evaluate_node_write_quota(&key_a, 10, epoch_day);
+    let res_a_exceeded = controller.evaluate_node_write_quota(&key_a, 10, now_ms);
     assert!(
         res_a_exceeded.is_err(),
         "Node A additional write must exceed quota"
@@ -985,7 +985,7 @@ async fn test_w4_p2p_quota_isolation_by_full_nodepubkey() {
     // Node B with same 16-bit prefix attempts a write within its own quota
     // On unfixed code: shared 16-bit key causes Node B to be blocked by Node A's usage!
     // On fixed code: P2P quota is isolated by full 32-byte NodePubKey, so Node B succeeds!
-    let res_b = controller.evaluate_node_write_quota(&key_b, 100, epoch_day);
+    let res_b = controller.evaluate_node_write_quota(&key_b, 100, now_ms);
     assert!(
         res_b.is_ok(),
         "W4 RED check: Node B must NOT be blocked by Node A's quota despite sharing 16-bit prefix: got {:?}",
@@ -1014,7 +1014,7 @@ async fn test_a19_r1_quic_reordered_and_concurrent_reads_never_ban() {
     ) = setup_quic_shard_and_client().await;
 
     let now = test_now_ms();
-    let auth_root_valid_until = now + 100_000_000;
+    let auth_root_valid_until = now + 5 * 31_536_000_000;
     let sender_key = SigningKey::from_bytes(&[12u8; 32]);
     let genesis_req = make_test_genesis("v_a19_r1", auth_root_valid_until, &sender_key);
     let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
@@ -1171,7 +1171,7 @@ async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
     ) = setup_quic_shard_and_client().await;
 
     let now = test_now_ms();
-    let auth_root_valid_until = now + 100_000_000;
+    let auth_root_valid_until = now + 5 * 31_536_000_000;
     let sender_key = SigningKey::from_bytes(&[15u8; 32]);
     let genesis_req = make_test_genesis("v_a19_r2", auth_root_valid_until, &sender_key);
     let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
@@ -1192,7 +1192,7 @@ async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
     let _ = tier_controller.evaluate_node_write_quota(
         client_id.node_pubkey(),
         initial_usage,
-        epoch_day,
+        now,
     );
 
     let fp = ByteYears::micro_from_ttl_seconds(ttl_s);
@@ -1342,7 +1342,7 @@ async fn test_a19_r3_quic_write_budget_exhaustion_before_mutation() {
     ) = setup_quic_shard_and_client().await;
 
     let now = test_now_ms();
-    let auth_root_valid_until = now + 100_000_000;
+    let auth_root_valid_until = now + 5 * 31_536_000_000;
     let sender_key = SigningKey::from_bytes(&[19u8; 32]);
     let genesis_req = make_test_genesis("v_a19_r3", auth_root_valid_until, &sender_key);
     let genesis_tag = bs58::encode(&genesis_req.transaction_hash).into_string();
@@ -1358,7 +1358,7 @@ async fn test_a19_r3_quic_write_budget_exhaustion_before_mutation() {
 
     // Completely exhaust sender's observed write budget
     let _ =
-        tier_controller.evaluate_node_write_quota(client_id.node_pubkey(), daily_limit, epoch_day);
+        tier_controller.evaluate_node_write_quota(client_id.node_pubkey(), daily_limit, now + 5_000);
 
     let ttl_s = auth_root_valid_until.saturating_sub(now) / 1000;
     let fp = ByteYears::micro_from_ttl_seconds(ttl_s);

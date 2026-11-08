@@ -30,7 +30,7 @@ async fn test_dos_correlated_failure_suppression_prevents_death_spiral() {
     let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
     let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
     let identity = NodeIdentity::generate();
-    let pow_engine = Arc::new(PowEngine::new(*identity.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("friend_secret_token");
 

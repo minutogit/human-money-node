@@ -378,7 +378,7 @@ async fn test_gateway_assembles_quorum_from_mixed_200_and_201_responses() {
             .expect("preconnect shard");
     }
 
-    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("quorum_test_token");
 
@@ -732,7 +732,7 @@ async fn test_a24_r1_checkout_enforces_single_end_to_end_deadline_across_persist
             .expect("preconnect shard");
     }
 
-    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
     tier_controller.register_f2f_peer("quorum_deadline_token");
 
@@ -1041,7 +1041,7 @@ async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_witho
             .expect("preconnect shard");
     }
 
-    let pow_engine = Arc::new(PowEngine::new(*gateway_id.node_id(), 8));
+    let pow_engine = Arc::new(PowEngine::new(8));
     let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
 
     let mut state = AppState::new(

@@ -526,12 +526,11 @@ async fn test_6_2_mesh_merge_dynamic_clamp_adaptation() {
 
 #[tokio::test]
 async fn test_6_3_pow_engine_clock_alignment() {
-    let secret = [0x55u8; 32];
     let clock = Arc::new(humoco_node::network::NetworkClock::new());
     // Move clock into future by 10 minutes (600_000 ms)
     clock.fast_reseed_on_merge(600_000);
 
-    let pow_engine = humoco_node::ingress::pow::PowEngine::new(secret, 8).with_clock(clock.clone());
+    let pow_engine = humoco_node::ingress::pow::PowEngine::new(8).with_clock(clock.clone());
 
     // Epoch slot must be derived from clock.net_time_ms() rather than naive host SystemTime
     let expected_slot = (clock.net_time_ms() / 1000) / 600;

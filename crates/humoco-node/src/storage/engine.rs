@@ -988,6 +988,12 @@ impl DualTierEngine {
         self.support_updates.available_permits()
     }
 
+    /// Test-only hook to inspect count of pending approvals.
+    #[doc(hidden)]
+    pub fn pending_approvals_count_for_test(&self) -> usize {
+        self.pending_approvals.lock().len()
+    }
+
     /// Closes and awaits all tracked background recovery and persistence tasks.
     pub async fn drain_recovery_work(&self) {
         self.recovery_work.close();
@@ -1113,7 +1119,12 @@ impl DualTierEngine {
             (accepted, root)
         };
         let entry = accepted;
-        if root <= now_ms {
+        let initial_now = self
+            .calibrated_now_ms()
+            .await
+            .map(|calibrated| calibrated.max(now_ms))
+            .unwrap_or(now_ms);
+        if root <= initial_now {
             return Err(StorageError::DurableCommitFailed("Expired root".into()));
         }
         let key = *blake3::hash(&bincode::serialize(&(
@@ -1160,6 +1171,17 @@ impl DualTierEngine {
         if !self.is_signing_healthy() {
             return Err(StorageError::SigningHistoryCorrupt);
         }
+        let release_now = self
+            .calibrated_now_ms()
+            .await
+            .map(|calibrated| calibrated.max(now_ms))
+            .unwrap_or(now_ms);
+        if root <= release_now {
+            return Err(StorageError::DurableCommitFailed("Expired root".into()));
+        }
+        if !self.is_signing_healthy() {
+            return Err(StorageError::SigningHistoryCorrupt);
+        }
         Ok(result)
     }
 
@@ -1194,6 +1216,20 @@ impl DualTierEngine {
         pm.set_engine(self);
         let mut guard = self.peer_manager.write().await;
         *guard = Some(pm);
+    }
+
+    /// Test helper to access peer_manager rwlock for clock-wait interception.
+    #[doc(hidden)]
+    pub fn peer_manager_rwlock_for_test(
+        &self,
+    ) -> &Arc<RwLock<Option<Arc<crate::network::PeerManager>>>> {
+        &self.peer_manager
+    }
+
+    /// Returns the calibrated P2P network-adjusted time in ms, if a PeerManager is attached.
+    pub async fn calibrated_now_ms(&self) -> Option<u64> {
+        let guard = self.peer_manager.read().await;
+        guard.as_ref().map(|pm| pm.net_time_ms())
     }
 
     /// Checks if a node is banned due to fraud/slashing.
@@ -2554,6 +2590,9 @@ impl DualTierEngine {
 
         let mut hops = Vec::with_capacity(locks_map.len());
         for (tag, entry) in locks_map {
+            if super::db::roots::is_root(&tag, &entry) {
+                continue;
+            }
             let raw_json = serde_json::to_value(&entry).ok()?;
             let receiver_pub_hex = entry
                 .causal_output
@@ -2573,12 +2612,21 @@ impl DualTierEngine {
             });
         }
         hops.sort_by(|a, b| a.encrypted_timestamp.cmp(&b.encrypted_timestamp));
-        let total_byte_years = u64::try_from(hops.len()).ok()?.checked_mul(144)?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| u64::try_from(duration.as_millis()).ok())?;
+        let now_ms = self.calibrated_now_ms().await.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        });
         let rem_sec = root_valid_until_ms.saturating_sub(now_ms) / 1000;
+        let per_lock_byte_years = if root_valid_until_ms > now_ms {
+            ByteYears::from_ttl_seconds(rem_sec.max(1))
+        } else {
+            0
+        };
+        let total_byte_years = u64::try_from(hops.len())
+            .ok()?
+            .checked_mul(per_lock_byte_years)?;
         Some(VoucherDetailDto {
             voucher_id,
             root_valid_until_ms,
@@ -3509,6 +3557,115 @@ mod exact_hmc_durability_tests {
             .is_entry_durable(&tag, &a, 50_000));
         cancel.cancel();
         worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_s02_12_persist_approval_refuses_release_when_corruption_latches_during_clock_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(RedbStorage::open(&dir.path().join("s02_12_clock_wait.redb")).unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let hmc_ram = Arc::new(tokio::sync::RwLock::new(HmcRamIndex::new()));
+        let engine = DualTierEngine::from_parts(hmc_ram.clone(), db.clone(), tx);
+        let manager = Arc::new(crate::network::PeerManager::new(vec![]));
+        manager.set_simulation_mode(true);
+        engine.set_peer_manager(manager.clone()).await;
+
+        let now_ms = manager.net_time_ms();
+        let root_expiry = now_ms + 100_000;
+        let mut root = entry(1);
+        root.deletable_at = Some(root_expiry.to_string());
+        let root_tag = bs58::encode(root.t_id).into_string();
+        engine
+            .hmc_ram
+            .write()
+            .await
+            .insert_recovered(root_tag, root);
+
+        let mut spend_entry = entry(2);
+        spend_entry.deletable_at = None;
+        let spend_tag = "s02_12_spend".to_string();
+        engine
+            .hmc_ram
+            .write()
+            .await
+            .insert_recovered(spend_tag.clone(), spend_entry.clone());
+
+        let node = [9u8; 32];
+        let approval = b"original_approval_s02_12".to_vec();
+
+        let engine_clone = engine.clone();
+        let spend_tag_clone = spend_tag.clone();
+        let spend_entry_clone = spend_entry.clone();
+        let approval_clone = approval.clone();
+        let handle = tokio::task::spawn(async move {
+            engine_clone
+                .persist_original_approval(
+                    spend_tag_clone,
+                    spend_entry_clone,
+                    node,
+                    approval_clone,
+                    0,
+                    now_ms,
+                )
+                .await
+        });
+
+        // 1. Wait until persist_original_approval has enqueued the op (initial_now check has passed)
+        let op = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("rx.recv() timeout")
+            .expect("must receive FlushOp");
+
+        // 2. Acquire peer_manager write guard to intercept calibrated_now_ms() wait
+        let pm_guard = engine.peer_manager.write().await;
+
+        // 3. Complete the durable commit
+        let mut batch = vec![op];
+        let outcome = DualTierEngine::flush_batch(&mut batch, &db);
+        assert!(!outcome.failed && outcome.ops_committed > 0);
+
+        // 4. Wait for the exact RAM durability marker
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !engine
+                .hmc_ram
+                .read()
+                .await
+                .is_entry_durable(&spend_tag, &spend_entry, root_expiry)
+            {
+                assert!(
+                    !handle.is_finished(),
+                    "handle must not finish prematurely before durability marker"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durability wait timed out");
+
+        // 5. Latch corruption on db while calibrated_now_ms() is blocked on pm_guard
+        db.latch_corruption();
+        assert!(!engine.is_signing_healthy());
+        assert!(!db.is_signing_history_healthy());
+
+        // 6. Release the clock guard
+        drop(pm_guard);
+
+        // 7. Await the handle: MUST return SigningHistoryCorrupt
+        let res = handle.await.expect("task join");
+        assert!(
+            matches!(res, Err(StorageError::SigningHistoryCorrupt)),
+            "persist_original_approval must fail with SigningHistoryCorrupt when corruption latches during clock wait: {res:?}"
+        );
+
+        // 8. Committed lock and own choice must remain retained in redb
+        assert!(
+            db.get_hmc_lock(&spend_tag).unwrap().is_some(),
+            "committed lock must be preserved in redb"
+        );
+        assert!(
+            db.own_signing_choice(&node, &spend_tag).unwrap().is_some(),
+            "committed own choice must be preserved in redb"
+        );
     }
 }
 

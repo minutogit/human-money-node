@@ -1811,5 +1811,343 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
     }
 }
 
+// ============================================================================
+// S01-15: Local-only quorum collection respects absolute checkout deadline
+// ============================================================================
+
+#[tokio::test]
+async fn test_s01_15_local_only_quorum_collection_respects_deadline_without_aborting_durable_work() {
+    let tmp = tempdir().expect("tempdir");
+    let storage = Arc::new(RedbStorage::open(&tmp.path().join("local_quorum_s01_15.redb")).expect("open redb"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(8));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let state = AppState::new(engine.clone(), storage.clone(), identity.clone(), tiers, pow);
+
+    let now_ms = test_now_ms();
+    let shard_id = 42;
+    state.readiness_manager.mark_shard_ready(shard_id);
+    let snapshot = humoco_node::api::routes::FrozenCommitteeSnapshot::compute(&state, shard_id, now_ms).await;
+    assert!(snapshot.self_is_in_committee);
+    assert!(snapshot.remote.is_empty());
+
+    let lock_id = [0x11; 32];
+    let parent_lock = [0x22; 32];
+    let att = humoco_node::api::routes::create_attestation_for_network(
+        &identity,
+        lock_id,
+        parent_lock,
+        shard_id,
+        snapshot.target_status,
+        now_ms,
+        state.network_id,
+    );
+
+    let (task_done_tx, task_done_rx) = tokio::sync::oneshot::channel();
+    let slow_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let _ = task_done_tx.send(true);
+        Some(att)
+    });
+
+    let checkout_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(30));
+    let t0 = std::time::Instant::now();
+    let (cert, collision, replay) = humoco_node::api::routes::assemble_quorum_certificate_with_deadline_and_local(
+        &state,
+        &snapshot,
+        lock_id,
+        parent_lock,
+        shard_id,
+        now_ms,
+        None,
+        checkout_deadline,
+        Some(slow_task),
+    )
+    .await;
+    let elapsed = t0.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "Local-only quorum collection must complete promptly upon deadline (30ms), elapsed: {elapsed:?}"
+    );
+    assert_eq!(
+        cert.signer_count, 0,
+        "Late vote exceeding checkout deadline must not be counted in quorum signatures"
+    );
+    assert!(!cert.is_quorum_reached());
+    assert!(collision.is_none());
+    assert!(!replay);
+
+    // Assert submitted durable work in the background task runs to completion without being aborted
+    let background_completed = tokio::time::timeout(Duration::from_millis(500), task_done_rx)
+        .await
+        .expect("background task must not hang")
+        .expect("background task must complete without being dropped/cancelled");
+    assert!(background_completed);
+}
+
+// ============================================================================
+// S01-16: Single-genesis chain voucher mismatch rejected on HTTP and QUIC
+// ============================================================================
+
+#[tokio::test]
+async fn test_s01_16_http_single_genesis_chain_voucher_mismatch_rejected() {
+    let tmp = tempdir().expect("tempdir");
+    let storage = Arc::new(RedbStorage::open(&tmp.path().join("http_s01_16.redb")).expect("open redb"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow = Arc::new(PowEngine::new(8));
+    let tiers = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    tiers.register_f2f_peer("s01_16_peer");
+    let state = AppState::new(engine.clone(), storage.clone(), identity.clone(), tiers, pow);
+
+    let sender_key = NodeIdentity::generate();
+    let now = test_now_ms();
+    let inner_voucher = "s01_16_inner_voucher_A";
+    let outer_voucher = "s01_16_outer_voucher_B";
+
+    let genesis_hop = build_hop(&sender_key, inner_voucher, 1, None, now);
+    let tag = bs58::encode(&genesis_hop.transaction_hash).into_string();
+    let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(&tag);
+    state
+        .readiness_manager
+        .mark_shard_ready(humoco_sim_core::types::canonical_voucher_shard(&parent));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let chain_req = L2ChainLockRequest {
+        auth: genesis_hop.auth.clone(),
+        layer2_voucher_id: outer_voucher.into(),
+        chain: vec![genesis_hop.clone()],
+    };
+
+    // 1. POST /v1/lock/chain with mismatched wrapper/hop voucher IDs
+    let res_chain = client
+        .post(format!("http://{addr}/v1/lock/chain"))
+        .header("X-Peer-Token", "s01_16_peer")
+        .json(&chain_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res_chain.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "POST /v1/lock/chain with mismatched voucher identity must return 400 Bad Request"
+    );
+    assert!(
+        storage.voucher_root(inner_voucher).unwrap().is_none(),
+        "Inner voucher root must NOT be registered when chain wrapper mismatches"
+    );
+    assert!(
+        storage.voucher_root(outer_voucher).unwrap().is_none(),
+        "Outer voucher root must NOT be registered"
+    );
+
+    // 2. POST /v1/lock (chain payload) with mismatched wrapper/hop voucher IDs
+    let res_lock = client
+        .post(format!("http://{addr}/v1/lock"))
+        .header("X-Peer-Token", "s01_16_peer")
+        .json(&chain_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res_lock.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "POST /v1/lock with mismatched voucher identity must return 400 Bad Request"
+    );
+    assert!(
+        storage.voucher_root(inner_voucher).unwrap().is_none(),
+        "Inner voucher root must NOT be registered"
+    );
+    assert!(
+        storage.voucher_root(outer_voucher).unwrap().is_none(),
+        "Outer voucher root must NOT be registered"
+    );
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_s01_16_quic_single_genesis_chain_voucher_mismatch_rejected_and_control_succeeds() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("quic_s01_16.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let cancel = CancellationToken::new();
+    let (engine, _worker) = DualTierEngine::new_with_token(storage.clone(), cancel.clone());
+    let server_id = NodeIdentity::generate();
+    let client_id = NodeIdentity::generate();
+    let server_pm = Arc::new(PeerManager::with_f2f(vec![], vec![*client_id.node_pubkey()]));
+    let client_pm = Arc::new(PeerManager::with_f2f(vec![], vec![*server_id.node_pubkey()]));
+
+    let ready = prepared_readiness();
+    let handler = Arc::new(
+        NodeRequestHandler::new(engine.clone(), storage.clone(), server_id.clone())
+            .with_readiness_manager(ready),
+    );
+    let server_net = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        server_pm.clone(),
+        handler,
+        cancel.clone(),
+    )
+    .unwrap();
+    let client_net = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        client_pm.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+
+    server_pm
+        .register_f2f_friend(*client_id.node_pubkey(), Some(client_net.local_addr().unwrap()))
+        .await;
+    client_pm
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server_net.local_addr().unwrap()))
+        .await;
+    server_net.spawn_accept_loop();
+    client_net.spawn_accept_loop();
+
+    let conn = client_net
+        .connect_peer(server_net.local_addr().unwrap())
+        .await
+        .unwrap();
+
+    let sender_key = NodeIdentity::generate();
+    let now = test_now_ms();
+    let inner_voucher = "s01_16_quic_inner_A";
+    let outer_voucher = "s01_16_quic_outer_B";
+
+    let genesis_hop = build_hop(&sender_key, inner_voucher, 1, None, now);
+    let mismatched_chain_req = L2ChainLockRequest {
+        auth: genesis_hop.auth.clone(),
+        layer2_voucher_id: outer_voucher.into(),
+        chain: vec![genesis_hop.clone()],
+    };
+
+    // 1. Send mismatched single-genesis chain via QUIC
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        client_id.node_pubkey(),
+        0,
+        0,
+        now,
+        0,
+        0,
+        footprint,
+        false,
+        &genesis_hop.transaction_hash,
+    );
+    let wire_mismatched = LockWirePayload::Hmc {
+        req: genesis_hop.clone(),
+        chain: Some(mismatched_chain_req),
+        root_valid_until: now + 600_000,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *client_id.node_pubkey(),
+        sender_signature: client_id.signing_key().sign(&digest).to_bytes(),
+        timestamp_ms: now,
+    };
+    let bytes = bincode::serialize(&wire_mismatched).unwrap();
+    let header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        1,
+        0,
+        0,
+        bytes.len() as u32,
+    );
+    let (reply, _) = client_net
+        .send_request(&conn, &header, &bytes)
+        .await
+        .unwrap();
+    assert_ne!(
+        reply.flags & FLAG_UNAUTHORIZED,
+        0,
+        "QUIC single-genesis chain with mismatched voucher identity must return FLAG_UNAUTHORIZED"
+    );
+    assert!(
+        storage.voucher_root(inner_voucher).unwrap().is_none(),
+        "Inner voucher root must NOT be registered upon mismatched chain"
+    );
+    assert!(
+        storage.voucher_root(outer_voucher).unwrap().is_none(),
+        "Outer voucher root must NOT be registered"
+    );
+
+    // 2. Control: matching single-genesis chain must succeed and register root
+    let control_voucher = "s01_16_quic_control_C";
+    let control_hop = build_hop(&sender_key, control_voucher, 2, None, now);
+    let control_chain_req = L2ChainLockRequest {
+        auth: control_hop.auth.clone(),
+        layer2_voucher_id: control_voucher.into(),
+        chain: vec![control_hop.clone()],
+    };
+    let digest_ctrl = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        client_id.node_pubkey(),
+        0,
+        0,
+        now,
+        0,
+        0,
+        footprint,
+        false,
+        &control_hop.transaction_hash,
+    );
+    let wire_control = LockWirePayload::Hmc {
+        req: control_hop.clone(),
+        chain: Some(control_chain_req),
+        root_valid_until: now + 600_000,
+        epoch_day: 0,
+        epoch_seq: 0,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: *client_id.node_pubkey(),
+        sender_signature: client_id.signing_key().sign(&digest_ctrl).to_bytes(),
+        timestamp_ms: now,
+    };
+    let bytes_ctrl = bincode::serialize(&wire_control).unwrap();
+    let header_ctrl = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        2,
+        0,
+        0,
+        bytes_ctrl.len() as u32,
+    );
+    let (reply_ctrl, _) = client_net
+        .send_request(&conn, &header_ctrl, &bytes_ctrl)
+        .await
+        .unwrap();
+    assert_eq!(
+        reply_ctrl.flags & FLAG_UNAUTHORIZED,
+        0,
+        "QUIC matching single-genesis chain control must succeed"
+    );
+    assert!(
+        storage.voucher_root(control_voucher).unwrap().is_some(),
+        "Control voucher root must be registered"
+    );
+
+    cancel.cancel();
+    server_net.close();
+    client_net.close();
+}
+
+
 
 

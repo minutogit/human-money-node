@@ -51,11 +51,11 @@ fn now_ms() -> TestResult<u64> {
     )?)
 }
 
-fn root(key: &SigningKey, seed: u8, now: u64) -> TestResult<L2LockRequest> {
+fn root_with_ttl(key: &SigningKey, seed: u8, now: u64, ttl_ms: u64) -> TestResult<L2LockRequest> {
     let sender = key.verifying_key().to_bytes();
     let transaction = [seed; 32];
     let expiry = now
-        .checked_add(600_000)
+        .checked_add(ttl_ms)
         .ok_or("expiry overflow")?
         .to_string();
     let receiver: [u8; 32] = Sha3_256::digest(sender).into();
@@ -101,6 +101,10 @@ fn root(key: &SigningKey, seed: u8, now: u64) -> TestResult<L2LockRequest> {
     };
     req.layer2_signature = key.sign(&calculate_l2_payload_hash(&req)).to_bytes();
     Ok(req)
+}
+
+fn root(key: &SigningKey, seed: u8, now: u64) -> TestResult<L2LockRequest> {
+    root_with_ttl(key, seed, now, 600_000)
 }
 
 fn spend(root: &L2LockRequest, seed: u8, key: &SigningKey) -> TestResult<L2LockRequest> {
@@ -1285,5 +1289,634 @@ async fn test_s02_08_persist_support_deadline_expiry_participates_in_drain() -> 
 
     cancel.cancel();
     let _ = _worker.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_09_persist_approval_refuses_publication_at_and_after_root_expiry() -> TestResult {
+    for advance_beyond in [0u64, 1u64] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(format!("s02_09_expiry_{advance_beyond}.redb"));
+        let key = SigningKey::from_bytes(&[85; 32]);
+        let manager = Arc::new(PeerManager::new(vec![]));
+        manager.set_simulation_mode(true);
+        let base_now = manager.clock().net_time_ms();
+        let root_ttl = 5_000u64;
+        let root_expiry = base_now + root_ttl;
+        let root_req = root_with_ttl(&key, 1, base_now, root_ttl)?;
+        let spend_req = spend(&root_req, 2, &key)?;
+        let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+
+        let db = Arc::new(RedbStorage::open(&path)?);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let hmc_ram = Arc::new(tokio::sync::RwLock::new(humoco_node::storage::HmcRamIndex::new()));
+        let engine = DualTierEngine::from_parts(hmc_ram, db.clone(), tx);
+        engine.set_peer_manager(manager.clone()).await;
+
+        let spend_entry: L2LockEntry = (&spend_req).into();
+        engine
+            .hmc_ram
+            .write()
+            .await
+            .insert_voucher_root_for_test(spend_entry.layer2_voucher_id.clone(), root_expiry);
+        engine
+            .hmc_ram
+            .write()
+            .await
+            .insert_lock_for_test(spend_tag.clone(), spend_entry.clone());
+
+        let node = [9u8; 32];
+        let approval = b"original_approval_s02_09".to_vec();
+
+        let engine_clone = engine.clone();
+        let spend_tag_clone = spend_tag.clone();
+        let spend_entry_clone = spend_entry.clone();
+        let approval_clone = approval.clone();
+        let handle = tokio::task::spawn(async move {
+            engine_clone
+                .persist_original_approval(
+                    spend_tag_clone,
+                    spend_entry_clone,
+                    node,
+                    approval_clone,
+                    0,
+                    base_now,
+                )
+                .await
+        });
+
+        let op = rx.recv().await.ok_or("must receive FlushOp")?;
+
+        let current_clock = manager.clock().net_time_ms();
+        let target_time = root_expiry + advance_beyond;
+        if target_time > current_clock {
+            manager.clock().advance_time_for_test(target_time - current_clock);
+        }
+        assert!(manager.clock().net_time_ms() >= target_time);
+
+        let mut batch = vec![op];
+        let outcome = DualTierEngine::flush_batch(&mut batch, &db);
+        assert!(!outcome.failed && outcome.ops_committed > 0);
+
+        let res = handle.await?;
+        assert!(
+            matches!(res, Err(StorageError::DurableCommitFailed(ref msg)) if msg.contains("Expired root")),
+            "persist_original_approval must refuse publication at/after root expiry: {res:?}"
+        );
+
+        assert!(engine.is_signing_healthy());
+        assert!(db.is_signing_history_healthy());
+
+        assert!(
+            db.get_hmc_lock(&spend_tag)?.is_some(),
+            "committed lock must be preserved in redb"
+        );
+        assert!(
+            db.own_signing_choice(&node, &spend_tag)?.is_some(),
+            "committed own choice must be preserved in redb"
+        );
+        let ram = engine.hmc_ram.read().await;
+        assert!(
+            ram.is_entry_durable(&spend_tag, &spend_entry, root_expiry),
+            "entry must be marked durable in RAM"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_09_real_quic_rejects_expired_root_without_attestation_bytes() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source_path = dir.path().join("s02_09_quic_source.redb");
+    let target_path = dir.path().join("s02_09_quic_target.redb");
+    let source_id = NodeIdentity::generate();
+    let target_id = NodeIdentity::generate();
+    let wallet_node = NodeIdentity::generate();
+
+    let source = WireNode::start(&source_path, source_id).await?;
+    let target = WireNode::start(&target_path, target_id).await?;
+
+    let now = target.manager.clock().net_time_ms();
+    let root_ttl = 40_000u64;
+    let root_expiry = now + root_ttl;
+    let root_req = root_with_ttl(wallet_node.signing_key(), 40, now, root_ttl)?;
+    let spend_req = spend(&root_req, 41, wallet_node.signing_key())?;
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+
+    target
+        .manager
+        .register_f2f_friend(*wallet_node.node_pubkey(), None)
+        .await;
+    anchor(&target.engine, &root_req).await?;
+    target.ready.mark_shard_ready(shard(&root_req));
+
+    let blocking_txn = target.db.raw_database_for_test().begin_write()?;
+    let connection = connect_friends(&source, &target).await?;
+
+    let send_fut = async {
+        send_spend(&source, &connection, &spend_req, 1, false).await
+    };
+    let step_fut = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        target.manager.clock().advance_time_for_test(root_ttl + 5_000);
+        assert!(target.manager.clock().net_time_ms() > root_expiry);
+        drop(blocking_txn);
+    };
+
+    let (send_res, ()) = tokio::join!(send_fut, step_fut);
+    let (header, reply_bytes) = send_res?;
+
+    assert_eq!(
+        header.flags & humoco_sim_core::wire::FLAG_NOT_READY,
+        humoco_sim_core::wire::FLAG_NOT_READY
+    );
+    let att = humoco_node::api::dto::AttestationDto::from_wire_bytes(&reply_bytes);
+    assert!(
+        att.is_none(),
+        "attestation must NOT be released over QUIC when root is expired"
+    );
+
+    assert!(
+        target.db.get_hmc_lock(&spend_tag)?.is_some(),
+        "lock must remain committed in redb"
+    );
+    assert!(target.engine.is_signing_healthy());
+
+    drop(connection);
+    source.stop().await?;
+    target.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_09_unexpired_root_wallet_freshness_delay_still_publishes() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("s02_09_freshness_control.redb");
+    let key = SigningKey::from_bytes(&[86; 32]);
+    let manager = Arc::new(PeerManager::new(vec![]));
+    manager.set_simulation_mode(true);
+    let base_now = manager.clock().net_time_ms();
+    let root_ttl = 600_000u64;
+    let root_expiry = base_now + root_ttl;
+    let root_req = root_with_ttl(&key, 1, base_now, root_ttl)?;
+    let spend_req = spend(&root_req, 2, &key)?;
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+
+    let db = Arc::new(RedbStorage::open(&path)?);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let hmc_ram = Arc::new(tokio::sync::RwLock::new(humoco_node::storage::HmcRamIndex::new()));
+    let engine = DualTierEngine::from_parts(hmc_ram, db.clone(), tx);
+    engine.set_peer_manager(manager.clone()).await;
+
+    let spend_entry: L2LockEntry = (&spend_req).into();
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_voucher_root_for_test(spend_entry.layer2_voucher_id.clone(), root_expiry);
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_lock_for_test(spend_tag.clone(), spend_entry.clone());
+
+    let node = [9u8; 32];
+    let approval = b"original_approval_freshness_control".to_vec();
+
+    let engine_clone = engine.clone();
+    let spend_tag_clone = spend_tag.clone();
+    let spend_entry_clone = spend_entry.clone();
+    let approval_clone = approval.clone();
+    let handle = tokio::task::spawn(async move {
+        engine_clone
+            .persist_original_approval(
+                spend_tag_clone,
+                spend_entry_clone,
+                node,
+                approval_clone,
+                0,
+                base_now,
+            )
+            .await
+    });
+
+    let op = rx.recv().await.ok_or("must receive FlushOp")?;
+
+    // Advance calibrated time by 35s, crossing wallet entry freshness window (30s)
+    manager.clock().advance_time_for_test(35_000);
+    assert!(manager.clock().net_time_ms() < root_expiry);
+
+    let mut batch = vec![op];
+    let outcome = DualTierEngine::flush_batch(&mut batch, &db);
+    assert!(!outcome.failed && outcome.ops_committed > 0);
+
+    let res = handle.await?;
+    assert_eq!(
+        res.as_ref().map_err(|e| format!("{e:?}")),
+        Ok(&approval),
+        "unexpired root must publish approval even if wallet freshness window elapsed during commit"
+    );
+    assert!(engine.is_signing_healthy());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_10_voucher_detail_canonical_byte_years_accounting() -> TestResult {
+    use humoco_sim_core::quota::ByteYears;
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("s02_10_byte_years.redb");
+    let key = SigningKey::from_bytes(&[87; 32]);
+    let identity = NodeIdentity::generate();
+    let db = Arc::new(RedbStorage::open(&path)?);
+    let cancel = CancellationToken::new();
+    let (engine, _worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
+    let manager = Arc::new(PeerManager::new(vec![]));
+    manager.set_simulation_mode(true);
+    engine.set_peer_manager(manager.clone()).await;
+
+    let state = app_state(engine.clone(), db.clone(), identity);
+    let operator_app = build_operator_router(state);
+
+    // 1. Root Anchor exclusion test (0 spend locks)
+    let now = engine.calibrated_now_ms().await.ok_or("clock missing")?;
+    let root_1y = root_with_ttl(&key, 1, now, 31_536_000 * 1000)?;
+    anchor(&engine, &root_1y).await?;
+
+    let lineage_0 = engine
+        .get_voucher_lineage(&root_1y.layer2_voucher_id)
+        .await
+        .ok_or("voucher lineage missing")?;
+    assert!(
+        lineage_0.locks.is_empty(),
+        "Root Anchor must be excluded from hops list: {:?}",
+        lineage_0.locks
+    );
+    assert_eq!(
+        lineage_0.total_byte_years, 0,
+        "Voucher with only Root Anchor must have 0 total Byte-Years"
+    );
+
+    let (status, json_0) = get_json(
+        &operator_app,
+        &format!("/dashboard/voucher/{}", root_1y.layer2_voucher_id),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_0["total_byte_years"], 0);
+    assert_eq!(json_0["locks"].as_array().map(|a| a.len()), Some(0));
+
+    // 2. Short remaining lifetime (60 seconds) with 1 spend lock
+    let root_60s = root_with_ttl(&key, 2, now, 60 * 1000)?;
+    let spend_60s = spend(&root_60s, 3, &key)?;
+    anchor(&engine, &root_60s).await?;
+    let (v_spend_60s, _) = engine
+        .ingress_hmc_lock_durable(
+            spend_60s.ds_tag.clone().ok_or("tag missing")?,
+            (&spend_60s).into(),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(v_spend_60s, L2Verdict::Verified { .. }));
+
+    let lineage_60s = engine
+        .get_voucher_lineage(&root_60s.layer2_voucher_id)
+        .await
+        .ok_or("voucher lineage 60s missing")?;
+    assert_eq!(lineage_60s.locks.len(), 1);
+    assert_eq!(
+        lineage_60s.total_byte_years,
+        ByteYears::from_ttl_seconds(60),
+        "60s lifetime must evaluate to canonical Byte-Year (1)"
+    );
+
+    let (status, json_60s) = get_json(
+        &operator_app,
+        &format!("/dashboard/voucher/{}", root_60s.layer2_voucher_id),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_60s["total_byte_years"], 1);
+
+    // 3. One-year lifetime (31,536,000 seconds) with 1 spend lock, then 2 spend locks
+    let spend_1y_1 = spend(&root_1y, 4, &key)?;
+    let (v_1y_1, _) = engine
+        .ingress_hmc_lock_durable(
+            spend_1y_1.ds_tag.clone().ok_or("tag missing")?,
+            (&spend_1y_1).into(),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(v_1y_1, L2Verdict::Verified { .. }));
+
+    let lineage_1y_1 = engine
+        .get_voucher_lineage(&root_1y.layer2_voucher_id)
+        .await
+        .ok_or("voucher lineage 1y missing")?;
+    assert_eq!(lineage_1y_1.locks.len(), 1);
+    assert_eq!(
+        lineage_1y_1.total_byte_years,
+        ByteYears::from_ttl_seconds(31_536_000),
+        "1 lock for 1 year must be canonical Byte-Years"
+    );
+
+    let (status, json_1y) = get_json(
+        &operator_app,
+        &format!("/dashboard/voucher/{}", root_1y.layer2_voucher_id),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_1y["total_byte_years"],
+        ByteYears::from_ttl_seconds(31_536_000)
+    );
+
+    let spend_1y_2 = spend(&spend_1y_1, 5, &key)?;
+    let (v_1y_2, _) = engine
+        .ingress_hmc_lock_durable(
+            spend_1y_2.ds_tag.clone().ok_or("tag missing")?,
+            (&spend_1y_2).into(),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(v_1y_2, L2Verdict::Verified { .. }));
+
+    let lineage_1y_2 = engine
+        .get_voucher_lineage(&root_1y.layer2_voucher_id)
+        .await
+        .ok_or("voucher lineage 1y (2 locks) missing")?;
+    assert_eq!(lineage_1y_2.locks.len(), 2);
+    assert_eq!(
+        lineage_1y_2.total_byte_years,
+        2 * ByteYears::from_ttl_seconds(31_536_000),
+        "2 locks for 1 year must be 2 * canonical Byte-Years"
+    );
+
+    // 4. Ten-year lifetime (10 * 31,536,000 seconds) with 1 spend lock
+    let root_10y = root_with_ttl(&key, 6, now, 10 * 31_536_000 * 1000)?;
+    let spend_10y = spend(&root_10y, 7, &key)?;
+    anchor(&engine, &root_10y).await?;
+    let (v_10y, _) = engine
+        .ingress_hmc_lock_durable(
+            spend_10y.ds_tag.clone().ok_or("tag missing")?,
+            (&spend_10y).into(),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(v_10y, L2Verdict::Verified { .. }));
+
+    let lineage_10y = engine
+        .get_voucher_lineage(&root_10y.layer2_voucher_id)
+        .await
+        .ok_or("voucher lineage 10y missing")?;
+    assert_eq!(lineage_10y.locks.len(), 1);
+    assert_eq!(
+        lineage_10y.total_byte_years,
+        ByteYears::from_ttl_seconds(10 * 31_536_000),
+        "1 lock for 10 years must be canonical Byte-Years"
+    );
+
+    let (status, json_10y) = get_json(
+        &operator_app,
+        &format!("/dashboard/voucher/{}", root_10y.layer2_voucher_id),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_10y["total_byte_years"],
+        ByteYears::from_ttl_seconds(10 * 31_536_000)
+    );
+
+    cancel.cancel();
+    let _ = _worker.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_11_real_quic_missing_state_key_zero_suppresses_signatures_without_peer_ban() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source_path = dir.path().join("s02_11_quic_source.redb");
+    let target_path = dir.path().join("s02_11_quic_target.redb");
+    let source_id = NodeIdentity::generate();
+    let target_id = NodeIdentity::generate();
+    let wallet_node = NodeIdentity::generate();
+
+    let source = WireNode::start(&source_path, source_id).await?;
+    let target = WireNode::start(&target_path, target_id).await?;
+
+    let now = target.manager.clock().net_time_ms();
+    let root_ttl = 60_000u64;
+    let root_req = root_with_ttl(wallet_node.signing_key(), 11, now, root_ttl)?;
+    let spend_req = spend(&root_req, 12, wallet_node.signing_key())?;
+
+    target
+        .manager
+        .register_f2f_friend(*wallet_node.node_pubkey(), None)
+        .await;
+    anchor(&target.engine, &root_req).await?;
+    target.ready.mark_shard_ready(shard(&root_req));
+
+    // Remove state key 0 in target database during open session
+    {
+        let txn = target.db.raw_database_for_test().begin_write()?;
+        txn.open_table(humoco_node::storage::TABLE_SIGNING_STATE)?.remove(0)?;
+        txn.commit()?;
+    }
+
+    // Trigger signing_checkpoint via storage/transport heartbeat hook
+    let ckpt = target.db.signing_checkpoint();
+    assert!(matches!(ckpt, Err(StorageError::SigningHistoryCorrupt)));
+    assert!(!target.db.is_signing_history_healthy());
+    assert!(!target.engine.is_signing_healthy());
+
+    let connection = connect_friends(&source, &target).await?;
+
+    // 1. Spend request over QUIC must be refused with FLAG_NOT_READY and empty payload
+    let (header, reply_bytes) = send_spend(&source, &connection, &spend_req, 1, false).await?;
+    assert_eq!(
+        header.flags & humoco_sim_core::wire::FLAG_NOT_READY,
+        humoco_sim_core::wire::FLAG_NOT_READY,
+        "Spend request over QUIC must be refused with FLAG_NOT_READY when signing history is corrupt"
+    );
+    assert!(
+        humoco_node::api::dto::AttestationDto::from_wire_bytes(&reply_bytes).is_none(),
+        "Attestation must not be released"
+    );
+
+    // 2. LiveStateRequest over QUIC must be refused with FLAG_NOT_READY
+    let shard_id = shard(&root_req);
+    let live_ctx = humoco_proto::live::LiveStateContext {
+        version: 1,
+        network: 0,
+        shard_id,
+        lookup_tag: spend_req.ds_tag.clone().unwrap_or_default(),
+        voucher_id: spend_req.layer2_voucher_id.clone(),
+        parent_lock: [0; 32],
+        child_lock: spend_req.transaction_hash,
+        root_valid_until: now + root_ttl,
+        state_digest: [1; 32],
+        recipient_nonce: [2; 32],
+        committee: vec![*target.identity.node_pubkey()],
+    };
+    let live_bytes = serde_json::to_vec(&live_ctx)?;
+    let live_header = WireHeader::new(
+        MsgType::LiveStateRequest as u16,
+        2,
+        0,
+        0,
+        live_bytes.len() as u32,
+    );
+    let (live_resp, live_resp_bytes) = source.network.send_request(&connection, &live_header, &live_bytes).await?;
+    assert_eq!(
+        live_resp.flags & humoco_sim_core::wire::FLAG_NOT_READY,
+        humoco_sim_core::wire::FLAG_NOT_READY,
+        "LiveStateRequest must be refused with FLAG_NOT_READY when signing history is corrupt"
+    );
+    assert!(live_resp_bytes.is_empty());
+
+    // 3. Assert NO peer ban or suspension on the honest caller
+    assert!(
+        !target.manager.is_banned(source.identity.node_pubkey()).await,
+        "Caller must not be banned"
+    );
+    assert!(
+        !target.manager.is_peer_suspended_by_id(source.identity.node_pubkey()).await,
+        "Caller must not be suspended"
+    );
+
+    drop(connection);
+    source.stop().await?;
+    target.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_12_real_quic_corruption_latched_during_clock_wait_suppresses_approval_release() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source_path = dir.path().join("s02_12_quic_source.redb");
+    let target_path = dir.path().join("s02_12_quic_target.redb");
+    let source_id = NodeIdentity::generate();
+    let target_id = NodeIdentity::generate();
+    let wallet_node = NodeIdentity::generate();
+
+    let source = WireNode::start(&source_path, source_id).await?;
+    let target = WireNode::start(&target_path, target_id).await?;
+
+    let now = target.manager.clock().net_time_ms();
+    let root_ttl = 60_000u64;
+    let root_expiry = now + root_ttl;
+    let root_req = root_with_ttl(wallet_node.signing_key(), 21, now, root_ttl)?;
+    let spend_req = spend(&root_req, 22, wallet_node.signing_key())?;
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+    let spend_entry: L2LockEntry = (&spend_req).into();
+
+    target
+        .manager
+        .register_f2f_friend(*wallet_node.node_pubkey(), None)
+        .await;
+    anchor(&target.engine, &root_req).await?;
+    target.ready.mark_shard_ready(shard(&root_req));
+
+    let connection = connect_friends(&source, &target).await?;
+
+    let source_ref = &source;
+    let conn_ref = &connection;
+    let spend_req_ref = &spend_req;
+    let send_fut = async move {
+        send_spend(source_ref, conn_ref, spend_req_ref, 1, false).await
+    };
+
+    let target_engine = target.engine.clone();
+    let target_db = target.db.clone();
+    let spend_tag_clone = spend_tag.clone();
+    let spend_entry_clone = spend_entry.clone();
+
+    let step_fut = async move {
+        // Wait until persist_original_approval has passed line 1116 and enqueued the op
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while target_engine.pending_approvals_count_for_test() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pending approval wait timed out");
+
+        // Now acquire pm_guard: this intercepts line 1168 (calibrated_now_ms() wait)
+        let pm_guard = target_engine.peer_manager_rwlock_for_test().write().await;
+
+        // Wait deterministically until the entry is committed and marked durable in RAM
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !target_engine
+                .hmc_ram
+                .read()
+                .await
+                .is_entry_durable(&spend_tag_clone, &spend_entry_clone, root_expiry)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durability marker wait timed out");
+
+        // Latch corruption on target while persist_original_approval is awaiting pm_guard in calibrated_now_ms()
+        target_db.latch_corruption();
+        assert!(!target_engine.is_signing_healthy());
+
+        // Release the clock guard
+        drop(pm_guard);
+    };
+
+    let (send_res, ()) = tokio::join!(send_fut, step_fut);
+    let (header, reply_bytes) = send_res?;
+
+    assert_eq!(
+        header.flags & humoco_sim_core::wire::FLAG_NOT_READY,
+        humoco_sim_core::wire::FLAG_NOT_READY,
+        "Approval release must be refused with FLAG_NOT_READY when corruption latched during clock wait"
+    );
+    assert!(
+        humoco_node::api::dto::AttestationDto::from_wire_bytes(&reply_bytes).is_none(),
+        "Attestation must not be released"
+    );
+
+    // Retained choices and committed locks must remain preserved in database
+    assert!(
+        target.db.get_hmc_lock(&spend_tag)?.is_some(),
+        "committed lock must be preserved in redb"
+    );
+    assert!(
+        target.db.own_signing_choice(target.identity.node_pubkey(), &spend_tag)?.is_some(),
+        "committed own choice must be preserved in redb"
+    );
+
+    // Assert NO peer ban or suspension on the honest caller
+    assert!(
+        !target.manager.is_banned(source.identity.node_pubkey()).await,
+        "Caller must not be banned"
+    );
+    assert!(
+        !target.manager.is_peer_suspended_by_id(source.identity.node_pubkey()).await,
+        "Caller must not be suspended"
+    );
+
+    drop(connection);
+    source.stop().await?;
+    target.stop().await?;
     Ok(())
 }

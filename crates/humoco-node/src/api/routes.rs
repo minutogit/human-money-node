@@ -600,10 +600,7 @@ async fn get_pow_challenge(
 /// Handler for GET /health and GET /v1/status
 async fn get_node_status(State(state): State<AppState>) -> (StatusCode, Json<NodeStatusResponse>) {
     state.metrics.record_read();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now_ms = state.net_time_ms();
     let (active_byte_years, _) = state.engine.get_active_footprint_byte_years(now_ms).await;
     let total_locks = state.engine.hmc_ram.read().await.locks.len();
     let daily_write_quota_byte_years = state.tier_controller.calculate_daily_quota(1.0, 1.0);
@@ -1849,7 +1846,15 @@ pub async fn assemble_quorum_certificate_with_deadline_and_local(
             .await;
         } else if let Some(handle) = local_task {
             if snapshot.self_is_in_committee {
-                if let Ok(Some(att)) = handle.await {
+                let local_att = if let Some(deadline) = checkout_deadline {
+                    match tokio::time::timeout_at(deadline, handle).await {
+                        Ok(res) => res.ok().flatten(),
+                        Err(_) => None,
+                    }
+                } else {
+                    handle.await.ok().flatten()
+                };
+                if let Some(att) = local_att {
                     if att.node_pubkey_bytes() == Some(self_pubkey)
                         && !collected_signatures
                             .iter()
@@ -3162,6 +3167,19 @@ async fn submit_hmc_chain_lock_inner(
     }
 
     if chain_req.chain.len() == 1 && chain_req.chain[0].is_genesis {
+        if chain_req.chain[0].layer2_voucher_id != chain_req.layer2_voucher_id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "InvalidRequest".into(),
+                    message: "Voucher identity mismatch between chain wrapper and genesis hop".into(),
+                    challenge: None,
+                    difficulty: None,
+                    expires_at: None,
+                }),
+            )
+                .into_response();
+        }
         return submit_hmc_lock_with_deadline(
             state,
             headers,

@@ -344,10 +344,19 @@ impl RedbStorage {
     pub fn signing_checkpoint(&self) -> Result<(u64, [u8; 32]), StorageError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(TABLE_SIGNING_STATE)?;
-        let value = table.get(0)?.ok_or(StorageError::SigningHistoryCorrupt)?;
+        let value = match table.get(0)? {
+            Some(v) => v,
+            None => {
+                drop(table);
+                drop(txn);
+                self.latch_corruption();
+                return Err(StorageError::SigningHistoryCorrupt);
+            }
+        };
         let state: SigningState = match serde_json::from_slice(value.value()) {
             Ok(s) => s,
             Err(_) => {
+                drop(table);
                 drop(txn);
                 self.latch_corruption();
                 return Err(StorageError::SigningHistoryCorrupt);
@@ -606,5 +615,59 @@ mod tests {
                 Err(StorageError::SigningHistoryCorrupt)
             ));
         }
+    }
+
+    #[test]
+    fn test_missing_state_key_zero_in_open_session_latches_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s02_11_missing_key0.redb");
+        let (tag, record) = lock(1);
+        let db = RedbStorage::open(&path).unwrap();
+        assert!(db.is_signing_history_healthy());
+        db.commit_original_approval(&tag, &record, &[7; 32], b"original", 0, 50_000)
+            .unwrap();
+        assert!(db.is_signing_history_healthy());
+        assert_eq!(db.signing_checkpoint().unwrap().0, 1);
+
+        // Remove signing-state key 0 during an open session
+        {
+            let txn = db.db.begin_write().unwrap();
+            txn.open_table(TABLE_SIGNING_STATE).unwrap().remove(0).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Before calling signing_checkpoint(), RAM health is still true
+        assert!(db.is_signing_history_healthy());
+
+        // Calling signing_checkpoint() must return SigningHistoryCorrupt
+        let res = db.signing_checkpoint();
+        assert!(
+            matches!(res, Err(StorageError::SigningHistoryCorrupt)),
+            "must return SigningHistoryCorrupt, got: {res:?}"
+        );
+
+        // Must latch corruption immediately in-memory
+        assert!(
+            !db.is_signing_history_healthy(),
+            "immediate unhealthy state required"
+        );
+
+        // Retained choices must still be preserved in the database
+        assert!(
+            db.own_signing_choice(&[7; 32], &tag).unwrap().is_some(),
+            "retained choices must be preserved"
+        );
+
+        // Durable corruption persistence after reopen
+        drop(db);
+        let reopened = RedbStorage::open(&path).unwrap();
+        assert!(
+            !reopened.is_signing_history_healthy(),
+            "corruption must persist durably after reopen"
+        );
+        assert!(
+            reopened.own_signing_choice(&[7; 32], &tag).unwrap().is_some(),
+            "retained choices must be preserved after reopen"
+        );
     }
 }

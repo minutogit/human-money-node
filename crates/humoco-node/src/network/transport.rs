@@ -18,6 +18,8 @@ pub const OUTBOUND_FORWARDER_LIMIT: usize = 256;
 pub const OUTBOUND_FRAUD_FORWARDER_LIMIT: usize = 256;
 /// Default timeout for outbound unidirectional frame transmission (3 seconds).
 pub const DEFAULT_UNI_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Default timeout for outbound bi-directional request/response transactions (5 seconds).
+pub const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Maximum number of concurrent QUIC handshake / connection handler tasks (DoS/OOM protection).
 pub const CONNECTION_CONCURRENCY_LIMIT: usize = 256;
 /// Spec 11 Freshness window for gossip heartbeats (+/- 60 seconds)
@@ -38,7 +40,9 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
-use crate::network::framing::{checked_payload_len, read_frame, write_frame};
+use crate::network::framing::{
+    checked_payload_len, read_frame, read_frame_with_timeout, write_frame,
+};
 use crate::network::manager::PeerManager;
 use crate::network::tls::extract_peer_identity_from_connection;
 
@@ -774,6 +778,37 @@ impl RequestHandler for NodeRequestHandler {
                     }
                 }
 
+                // Cheap validation: single-genesis chain wrapper and hop voucher identities must match
+                if let crate::network::framing::LockWirePayload::Hmc {
+                    req,
+                    chain: Some(chain_req),
+                    ..
+                } = &wire_payload
+                {
+                    if chain_req.chain.len() == 1
+                        && chain_req.chain[0].is_genesis
+                        && (chain_req.chain[0].layer2_voucher_id != chain_req.layer2_voucher_id
+                            || req.layer2_voucher_id != chain_req.layer2_voucher_id)
+                    {
+                        warn!(
+                            wrapper_voucher = %chain_req.layer2_voucher_id,
+                            hop_voucher = %chain_req.chain[0].layer2_voucher_id,
+                            req_voucher = %req.layer2_voucher_id,
+                            "LockVerifyRequest rejected: voucher identity mismatch between chain wrapper and genesis hop"
+                        );
+                        return Ok((
+                            WireHeader::new(
+                                MsgType::LockVerifyResponse as u16,
+                                header.session_seq.wrapping_add(1),
+                                header.epoch_id,
+                                humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                0,
+                            ),
+                            Vec::new(),
+                        ));
+                    }
+                }
+
                 // 4. Check authenticated QUIC identity matches sender_pubkey
                 if let Some(auth_peer) = peer_identity {
                     if sender_pubkey != auth_peer {
@@ -1134,8 +1169,17 @@ impl RequestHandler for NodeRequestHandler {
                 // only now may RAM/persistence be touched.
                 match wire_payload {
                     crate::network::framing::LockWirePayload::Hmc { req, chain, .. } => {
-                        if req.is_genesis
-                            && chain.as_ref().is_none_or(|chain| chain.chain.len() == 1)
+                        let is_single_genesis = req.is_genesis
+                            && match &chain {
+                                None => true,
+                                Some(c) => {
+                                    c.chain.len() == 1
+                                        && c.chain[0].is_genesis
+                                        && c.layer2_voucher_id == req.layer2_voucher_id
+                                        && c.chain[0].layer2_voucher_id == c.layer2_voucher_id
+                                }
+                            };
+                        if is_single_genesis
                         {
                             if !crate::api::hmc::verify_l2_lock_signature(&req) {
                                 return Ok((
@@ -2476,6 +2520,7 @@ pub struct QuicTransport {
     is_sync_ready: Arc<std::sync::atomic::AtomicBool>,
     outbound_forwarder_semaphore: Arc<Semaphore>,
     fraud_forwarder_semaphore: Arc<Semaphore>,
+    handler_timeout: Arc<std::sync::atomic::AtomicU64>,
 }
 
 async fn persist_fraud(
@@ -2668,6 +2713,9 @@ impl QuicTransport {
             is_sync_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             outbound_forwarder_semaphore: Arc::new(Semaphore::new(OUTBOUND_FORWARDER_LIMIT)),
             fraud_forwarder_semaphore: Arc::new(Semaphore::new(OUTBOUND_FRAUD_FORWARDER_LIMIT)),
+            handler_timeout: Arc::new(std::sync::atomic::AtomicU64::new(
+                DEFAULT_HANDLER_TIMEOUT.as_millis() as u64,
+            )),
         };
 
         let transport_for_broadcast = transport.clone();
@@ -2745,6 +2793,19 @@ impl QuicTransport {
     /// Returns the dedicated outbound fraud proof forwarder semaphore (Spec 10).
     pub fn fraud_forwarder_semaphore(&self) -> &Arc<Semaphore> {
         &self.fraud_forwarder_semaphore
+    }
+
+    /// Test-only hook to set the handler timeout for deterministic deadline verification.
+    #[doc(hidden)]
+    pub fn set_handler_timeout_for_test(&self, timeout: std::time::Duration) {
+        self.handler_timeout
+            .store(timeout.as_millis().max(1) as u64, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Test-only hook to inspect available bi-stream concurrency permits.
+    #[doc(hidden)]
+    pub fn stream_semaphore_available_for_test(&self) -> usize {
+        self.stream_semaphore.available_permits()
     }
 
     /// Occupies the actual local admission budget without creating 256 sockets.
@@ -3022,18 +3083,34 @@ impl QuicTransport {
     }
 
     /// Sends a bi-directional request frame and awaits the response frame.
+    /// Bounds the entire operation (stream acquisition, frame transmission, finish, and response read)
+    /// under an absolute deadline and transport cancellation token.
     pub async fn send_request(
         &self,
         conn: &quinn::Connection,
         header: &WireHeader,
         payload: &[u8],
     ) -> Result<(WireHeader, Vec<u8>), NodeError> {
-        let (mut send, mut recv) = conn.open_bi().await.map_err(NodeError::QuinnConnection)?;
-        write_frame(&mut send, header, payload).await?;
-        send.finish().map_err(NodeError::QuinnClosedStream)?;
+        self.send_request_timeout(conn, header, payload, DEFAULT_REQUEST_TIMEOUT)
+            .await
+    }
 
-        let (resp_hdr, resp_payload) = read_frame(&mut recv).await?;
-        Ok((resp_hdr, resp_payload))
+    /// Sends a bi-directional request frame and awaits the response frame with a custom timeout.
+    pub async fn send_request_timeout(
+        &self,
+        conn: &quinn::Connection,
+        header: &WireHeader,
+        payload: &[u8],
+        timeout_dur: std::time::Duration,
+    ) -> Result<(WireHeader, Vec<u8>), NodeError> {
+        send_request_bounded(
+            conn,
+            header,
+            payload,
+            timeout_dur,
+            Some(&self.cancel_token),
+        )
+        .await
     }
 
     /// Sends a unidirectional frame over a dedicated unidirectional stream with transport cancellation and timeout.
@@ -3052,6 +3129,54 @@ impl QuicTransport {
         )
         .await
     }
+}
+
+/// Sends a bi-directional request frame and awaits the response frame over a dedicated QUIC stream
+/// with an absolute deadline and optional cancellation covering stream opening, frame transmission,
+/// stream finish, and response frame reception.
+pub async fn send_request_bounded(
+    conn: &quinn::Connection,
+    header: &WireHeader,
+    payload: &[u8],
+    timeout_dur: std::time::Duration,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<(WireHeader, Vec<u8>), NodeError> {
+    let req_op = async {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(NodeError::QuinnConnection)?;
+        write_frame(&mut send, header, payload).await?;
+        send.finish().map_err(NodeError::QuinnClosedStream)?;
+
+        let (resp_hdr, resp_payload) = read_frame_with_timeout(&mut recv, timeout_dur).await?;
+        Ok((resp_hdr, resp_payload))
+    };
+
+    let with_timeout = async {
+        match tokio::time::timeout(timeout_dur, req_op).await {
+            Ok(res) => res,
+            Err(_) => Err(NodeError::Network(
+                "outbound request timeout".to_string(),
+            )),
+        }
+    };
+
+    if let Some(token) = cancel_token {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(NodeError::Network("operation cancelled".to_string())),
+            res = with_timeout => res,
+        }
+    } else {
+        with_timeout.await
+    }
+}
+
+/// Freestanding helper to send a bi-directional request frame and await the response over a dedicated QUIC stream with a bounded timeout.
+pub async fn send_request_frame(
+    conn: &quinn::Connection,
+    header: &WireHeader,
+    payload: &[u8],
+) -> Result<(WireHeader, Vec<u8>), NodeError> {
+    send_request_bounded(conn, header, payload, DEFAULT_REQUEST_TIMEOUT, None).await
 }
 
 /// Sends a unidirectional frame over a dedicated QUIC stream with a bounded timeout and optional cancellation.
@@ -3326,14 +3451,48 @@ impl QuicTransport {
     }
 
     /// Sends a unidirectional frame to a target peer without prior authorization check (used for F2F gossip & fraud proofs).
+    /// Bounds connection establishment and transmission together under a single deadline and transport cancellation token,
+    /// ensuring stalled dials do not delay cancellation-based draining and deadlines are not restarted.
     pub async fn send_unidirectional_to_peer(
         &self,
         addr: SocketAddr,
         header: &WireHeader,
         payload: &[u8],
     ) -> Result<(), NodeError> {
-        let conn = self.connect_peer_unchecked(addr).await?;
-        self.send_unidirectional(&conn, header, payload).await
+        self.send_unidirectional_to_peer_timeout(addr, header, payload, DEFAULT_UNI_STREAM_TIMEOUT)
+            .await
+    }
+
+    /// Sends a unidirectional frame to a target peer with a custom timeout covering both connection establishment and transmission.
+    pub async fn send_unidirectional_to_peer_timeout(
+        &self,
+        addr: SocketAddr,
+        header: &WireHeader,
+        payload: &[u8],
+        timeout_dur: std::time::Duration,
+    ) -> Result<(), NodeError> {
+        let send_op = async {
+            let conn = self.connect_peer_unchecked(addr).await?;
+            let mut send = conn.open_uni().await.map_err(NodeError::QuinnConnection)?;
+            write_frame(&mut send, header, payload).await?;
+            send.finish().map_err(NodeError::QuinnClosedStream)?;
+            Ok(())
+        };
+
+        let with_timeout = async {
+            match tokio::time::timeout(timeout_dur, send_op).await {
+                Ok(res) => res,
+                Err(_) => Err(NodeError::Network(
+                    "outbound unidirectional frame timeout".to_string(),
+                )),
+            }
+        };
+
+        tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => Err(NodeError::Network("operation cancelled".to_string())),
+            res = with_timeout => res,
+        }
     }
 
     /// Broadcasts an equivocation or under-reporting fraud proof to all F2F friends via unidirectional QUIC streams.
@@ -3799,6 +3958,7 @@ impl QuicTransport {
                                 let sync_pool = transport.sync_streams.clone();
                                 let shard_pool = transport.shard_streams.clone();
                                 let cancel_token = transport.cancel_token.clone();
+                                let handler_timeout_ref = transport.handler_timeout.clone();
                                 transport.tasks.spawn(async move {
                                     let _lease = lease;
                                     let _permit = match sem.try_acquire_owned() {
@@ -3822,88 +3982,91 @@ impl QuicTransport {
                                     };
                                     match read_res {
                                         Ok(((header, payload), _service_permit)) => {
-                                            // GOSSIP BARRIER:
-                                            // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
-                                            let is_gossip = header.msg_type == MsgType::Heartbeat as u16
-                                                || header.msg_type == MsgType::EquivocationProof as u16;
-
-                                            if is_gossip
-                                                && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await
-                                            {
-                                                warn!(
-                                                    remote = %remote_addr,
-                                                    node_id = ?remote_node_id.map(hex::encode),
-                                                    msg_type = header.msg_type,
-                                                    "GOSSIP BARRIER: Rejected gossip on bidirectional stream from non-F2F connection"
-                                                );
-                                                let resp_payload = b"unauthorized gossip: F2F only";
-                                                let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
-                                                let resp_header = WireHeader::new(
-                                                    MsgType::StatusResponse as u16,
-                                                    header.session_seq.wrapping_add(1),
-                                                    header.epoch_id,
-                                                    humoco_sim_core::wire::FLAG_UNAUTHORIZED,
-                                                    payload_len,
-                                                );
-                                                if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
-                                                    debug!(error = %e, "Failed to write unauthorized response frame");
-                                                }
-                                                let _ = send.finish();
-                                                return;
-                                            }
-
-                                            // Shard-Direct RPC Authorization:
-                                            // LockVerifyRequest, ActiveSyncRequest, and ShardDigestRequest are only allowed if peer is F2F friend or known via gossip
-                                            let is_restricted_rpc = header.msg_type == MsgType::LockVerifyRequest as u16
-                                                || header.msg_type == MsgType::StatusQuery as u16
-                                                || header.msg_type == MsgType::ActiveSyncRequest as u16
-                                                || header.msg_type == MsgType::ShardDigestRequest as u16
-                                                || header.msg_type == MsgType::ShardBucketRangeRequest as u16
-                                                || header.msg_type == MsgType::LiveStateRequest as u16;
-
-                                            if is_restricted_rpc
-                                                && !pm.can_authorize_direct_rpc(&remote_addr, remote_node_id.as_ref()).await
-                                            {
-                                                warn!(
-                                                    remote = %remote_addr,
-                                                    node_id = ?remote_node_id.map(hex::encode),
-                                                    msg_type = header.msg_type,
-                                                    "Rejected direct RPC from unauthorized peer (neither F2F nor known via gossip)"
-                                                );
-                                                // Phase 8 (Spec 15/19 Tit-for-Tat): locally suspended
-                                                // or permanently banned peers are refused with
-                                                // FLAG_PEER_SUSPENDED so the gateway applies
-                                                // no checkout committee replacement is allowed; unknown peers get a plain
-                                                // unauthorized response without any malus effect.
-                                                let suspended_or_banned = if let Some(nid) = remote_node_id {
-                                                    pm.is_banned(&nid).await
-                                                        || pm.is_peer_suspended_by_id(&nid).await
-                                                        || pm.is_peer_suspended_by_addr(&remote_addr).await
-                                                } else {
-                                                    pm.is_peer_suspended_by_addr(&remote_addr).await
-                                                };
-                                                let resp_payload = b"unauthorized";
-                                                let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
-                                                let resp_flags = if suspended_or_banned {
-                                                    humoco_sim_core::wire::FLAG_PEER_SUSPENDED
-                                                } else {
-                                                    humoco_sim_core::wire::FLAG_UNAUTHORIZED
-                                                };
-                                                let resp_header = WireHeader::new(
-                                                    MsgType::StatusResponse as u16,
-                                                    header.session_seq.wrapping_add(1),
-                                                    header.epoch_id,
-                                                    resp_flags,
-                                                    payload_len,
-                                                );
-                                                if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
-                                                    debug!(error = %e, "Failed to write unauthorized response frame");
-                                                }
-                                                let _ = send.finish();
-                                                return;
-                                            }
-
+                                            let handler_timeout = std::time::Duration::from_millis(
+                                                handler_timeout_ref.load(std::sync::atomic::Ordering::Acquire),
+                                            );
                                             let handler_fut = async {
+                                                // GOSSIP BARRIER:
+                                                // Mesh Gossip (Heartbeat and EquivocationProof) is STRICTLY accepted from direct F2F friends only!
+                                                let is_gossip = header.msg_type == MsgType::Heartbeat as u16
+                                                    || header.msg_type == MsgType::EquivocationProof as u16;
+
+                                                if is_gossip
+                                                    && !pm.can_accept_gossip(&remote_addr, remote_node_id.as_ref()).await
+                                                {
+                                                    warn!(
+                                                        remote = %remote_addr,
+                                                        node_id = ?remote_node_id.map(hex::encode),
+                                                        msg_type = header.msg_type,
+                                                        "GOSSIP BARRIER: Rejected gossip on bidirectional stream from non-F2F connection"
+                                                    );
+                                                    let resp_payload = b"unauthorized gossip: F2F only";
+                                                    let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
+                                                    let resp_header = WireHeader::new(
+                                                        MsgType::StatusResponse as u16,
+                                                        header.session_seq.wrapping_add(1),
+                                                        header.epoch_id,
+                                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED,
+                                                        payload_len,
+                                                    );
+                                                    if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
+                                                        debug!(error = %e, "Failed to write unauthorized response frame");
+                                                    }
+                                                    let _ = send.finish();
+                                                    return;
+                                                }
+
+                                                // Shard-Direct RPC Authorization:
+                                                // LockVerifyRequest, ActiveSyncRequest, and ShardDigestRequest are only allowed if peer is F2F friend or known via gossip
+                                                let is_restricted_rpc = header.msg_type == MsgType::LockVerifyRequest as u16
+                                                    || header.msg_type == MsgType::StatusQuery as u16
+                                                    || header.msg_type == MsgType::ActiveSyncRequest as u16
+                                                    || header.msg_type == MsgType::ShardDigestRequest as u16
+                                                    || header.msg_type == MsgType::ShardBucketRangeRequest as u16
+                                                    || header.msg_type == MsgType::LiveStateRequest as u16;
+
+                                                if is_restricted_rpc
+                                                    && !pm.can_authorize_direct_rpc(&remote_addr, remote_node_id.as_ref()).await
+                                                {
+                                                    warn!(
+                                                        remote = %remote_addr,
+                                                        node_id = ?remote_node_id.map(hex::encode),
+                                                        msg_type = header.msg_type,
+                                                        "Rejected direct RPC from unauthorized peer (neither F2F nor known via gossip)"
+                                                    );
+                                                    // Phase 8 (Spec 15/19 Tit-for-Tat): locally suspended
+                                                    // or permanently banned peers are refused with
+                                                    // FLAG_PEER_SUSPENDED so the gateway applies
+                                                    // no checkout committee replacement is allowed; unknown peers get a plain
+                                                    // unauthorized response without any malus effect.
+                                                    let suspended_or_banned = if let Some(nid) = remote_node_id {
+                                                        pm.is_banned(&nid).await
+                                                            || pm.is_peer_suspended_by_id(&nid).await
+                                                            || pm.is_peer_suspended_by_addr(&remote_addr).await
+                                                    } else {
+                                                        pm.is_peer_suspended_by_addr(&remote_addr).await
+                                                    };
+                                                    let resp_payload = b"unauthorized";
+                                                    let payload_len = checked_payload_len(resp_payload.len()).unwrap_or(0);
+                                                    let resp_flags = if suspended_or_banned {
+                                                        humoco_sim_core::wire::FLAG_PEER_SUSPENDED
+                                                    } else {
+                                                        humoco_sim_core::wire::FLAG_UNAUTHORIZED
+                                                    };
+                                                    let resp_header = WireHeader::new(
+                                                        MsgType::StatusResponse as u16,
+                                                        header.session_seq.wrapping_add(1),
+                                                        header.epoch_id,
+                                                        resp_flags,
+                                                        payload_len,
+                                                    );
+                                                    if let Err(e) = write_frame(&mut send, &resp_header, resp_payload).await {
+                                                        debug!(error = %e, "Failed to write unauthorized response frame");
+                                                    }
+                                                    let _ = send.finish();
+                                                    return;
+                                                }
+
                                                 match h.handle_authenticated(header, payload, remote_node_id).await {
                                                     Ok((resp_header, resp_payload)) => {
                                                         if let Err(e) = write_frame(&mut send, &resp_header, &resp_payload).await {
@@ -3928,9 +4091,9 @@ impl QuicTransport {
                                                         }
                                                     }
                                                 }
-                                                res = tokio::time::timeout(DEFAULT_HANDLER_TIMEOUT, &mut handler_fut) => {
+                                                res = tokio::time::timeout(handler_timeout, &mut handler_fut) => {
                                                     if res.is_err() {
-                                                        warn!(remote = %remote_addr, "Bi-stream request handler timed out after 10s");
+                                                        warn!(remote = %remote_addr, "Bi-stream request handler timed out after {:?}", handler_timeout);
                                                     }
                                                 }
                                             }
@@ -4342,9 +4505,14 @@ impl QuicTransport {
                                                         }
                                                     }
                                                 }
-                                                res = tokio::time::timeout(DEFAULT_HANDLER_TIMEOUT, &mut uni_fut) => {
+                                                res = tokio::time::timeout(
+                                                    std::time::Duration::from_millis(
+                                                        transport_clone.handler_timeout.load(std::sync::atomic::Ordering::Acquire),
+                                                    ),
+                                                    &mut uni_fut,
+                                                ) => {
                                                     if res.is_err() {
-                                                        warn!(remote = %remote_addr, "Uni-stream handler timed out after 10s");
+                                                        warn!(remote = %remote_addr, "Uni-stream handler timed out");
                                                     }
                                                 }
                                             }

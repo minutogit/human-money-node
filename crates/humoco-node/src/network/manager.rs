@@ -2764,6 +2764,12 @@ impl PeerManager {
         }
     }
 
+    /// For tests: removes a node from known_network_nodes without closing active QUIC connections.
+    pub async fn unlearn_node_for_test(&self, node_pubkey: &[u8; 32]) {
+        let mut nodes = self.known_network_nodes.write().await;
+        nodes.remove(node_pubkey);
+    }
+
     /// Checks if a node_id is known (either as an F2F friend or learned via F2F gossip).
     /// F2F check is strictly based on the permanent NodePubKey / NodeId, not the HRW ticket.
     pub async fn is_known_node(&self, node_id: &[u8; 32]) -> bool {

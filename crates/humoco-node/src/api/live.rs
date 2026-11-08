@@ -193,7 +193,8 @@ async fn query_member_live_vote(
         return None;
     }
     let sender_pubkey = *query.state_identity.node_pubkey();
-    let env_digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let env_digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        query.network_id,
         &sender_pubkey,
         0,
         0,

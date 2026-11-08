@@ -407,6 +407,16 @@ pub enum QuotaCommands {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
+
+    /// Provision a new random VIP bearer credential for an account tag
+    ProvisionCredential {
+        /// Account identifier or 32-byte hex tag
+        account: String,
+
+        /// Path to configuration file (default: ~/.humoco/humoco.toml)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
 }
 
 impl Cli {
@@ -2031,6 +2041,43 @@ pub async fn execute_quota(command: QuotaCommands) -> Result<(), NodeError> {
             );
             Ok(())
         }
+        QuotaCommands::ProvisionCredential { account, config } => {
+            use rand::RngCore;
+            let cfg_path = config.unwrap_or_else(NodeConfig::default_config_path);
+            if !cfg_path.exists() {
+                return Err(NodeError::Cli(format!(
+                    "Configuration file not found at '{}'.",
+                    cfg_path.display()
+                )));
+            }
+            let cfg = NodeConfig::load_from_file(&cfg_path)?;
+            let socket_path = cfg.control_socket_path();
+            let client = ControlClient::new(socket_path);
+
+            // Try live control client first
+            if let Ok(bearer_token) = client.provision_vip_credential(&account).await {
+                println!(
+                    "VIP credential provisioned for '{}' (live):\n{}",
+                    account, bearer_token
+                );
+                return Ok(());
+            }
+
+            // Offline fallback: Generate, persist to RedbStorage directly
+            let db_path = cfg.storage.data_dir.join("humoco.redb");
+            let storage = RedbStorage::open(&db_path)?;
+            let tag_bytes = parse_account_tag(&account);
+            let mut random_bytes = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut random_bytes);
+            let bearer_token = format!("vip_{}", hex::encode(random_bytes));
+            let token_hash = crate::ingress::tier::compute_vip_token_hash(&bearer_token);
+            storage.put_vip_credential(&token_hash, &tag_bytes)?;
+            println!(
+                "VIP credential provisioned for '{}' (offline):\n{}",
+                account, bearer_token
+            );
+            Ok(())
+        }
     }
 }
 
@@ -2171,7 +2218,11 @@ pub async fn execute_revoke(
         now_ms,
     );
 
-    if !crate::network::transport::verify_equivocation_first_party(identity.verifying_key(), &proof)
+    if !crate::network::transport::verify_equivocation_first_party_network(
+        config.network.network_id,
+        identity.verifying_key(),
+        &proof,
+    )
     {
         return Err(NodeError::Crypto(
             "Self-revocation proof failed local first-party verification".into(),

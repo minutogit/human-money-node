@@ -29,6 +29,15 @@ pub enum NetworkId {
     Testnet,
 }
 
+impl NetworkId {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Mainnet => 1,
+            Self::Testnet => 2,
+        }
+    }
+}
+
 /// Crypto suite identifier for wire headers
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

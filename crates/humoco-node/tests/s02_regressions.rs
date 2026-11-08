@@ -361,7 +361,12 @@ struct WireNode {
 }
 
 impl WireNode {
-    async fn start(path: &Path, identity: NodeIdentity) -> TestResult<Self> {
+    async fn start_with_limits(
+        path: &Path,
+        identity: NodeIdentity,
+        public_limit: usize,
+        internal_limit: usize,
+    ) -> TestResult<Self> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let db = loop {
             match RedbStorage::open(path) {
@@ -373,7 +378,12 @@ impl WireNode {
             }
         };
         let cancel = CancellationToken::new();
-        let (engine, worker) = DualTierEngine::new_with_token(db.clone(), cancel.clone());
+        let (engine, worker) = DualTierEngine::new_with_limits(
+            db.clone(),
+            cancel.clone(),
+            public_limit,
+            internal_limit,
+        );
         let manager = Arc::new(PeerManager::new(vec![]));
         manager.set_simulation_mode(true);
         engine.set_peer_manager(manager.clone()).await;
@@ -420,6 +430,16 @@ impl WireNode {
             cancel,
             worker,
         })
+    }
+
+    async fn start(path: &Path, identity: NodeIdentity) -> TestResult<Self> {
+        Self::start_with_limits(
+            path,
+            identity,
+            humoco_node::storage::engine::DEFAULT_PUBLIC_PERSISTENCE_LIMIT,
+            humoco_node::storage::engine::DEFAULT_INTERNAL_PERSISTENCE_LIMIT,
+        )
+        .await
     }
 
     async fn stop(self) -> TestResult {
@@ -471,7 +491,8 @@ async fn send_spend(
         expiry.saturating_sub(now) / 1000,
     );
     let sender = *source.identity.node_pubkey();
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        NetworkId::Mainnet,
         &sender,
         0,
         seq,
@@ -777,6 +798,7 @@ async fn test_s02_06_persist_approval_race_latches_corruption_and_rejects_public
                 approval,
                 0,
                 10_000,
+                humoco_node::storage::PersistenceServiceClass::Public,
             )
             .await
     });
@@ -1341,6 +1363,7 @@ async fn test_s02_09_persist_approval_refuses_publication_at_and_after_root_expi
                     approval_clone,
                     0,
                     base_now,
+                    humoco_node::storage::PersistenceServiceClass::Public,
                 )
                 .await
         });
@@ -1496,6 +1519,7 @@ async fn test_s02_09_unexpired_root_wallet_freshness_delay_still_publishes() -> 
                 approval_clone,
                 0,
                 base_now,
+                humoco_node::storage::PersistenceServiceClass::Public,
             )
             .await
     });
@@ -1914,6 +1938,526 @@ async fn test_s02_12_real_quic_corruption_latched_during_clock_wait_suppresses_a
         !target.manager.is_peer_suspended_by_id(source.identity.node_pubkey()).await,
         "Caller must not be suspended"
     );
+
+    drop(connection);
+    source.stop().await?;
+    target.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s02_13_controlled_worker_service_class_reservation() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let db = Arc::new(RedbStorage::open(&dir.path().join("s02_13_controlled.redb"))?);
+    let cancel = CancellationToken::new();
+    let public_limit = 5;
+    let internal_limit = 2;
+    let (engine, worker) = DualTierEngine::new_with_limits(
+        db.clone(),
+        cancel.clone(),
+        public_limit,
+        internal_limit,
+    );
+
+    assert_eq!(engine.public_persistence_permits_available_for_test(), 5);
+    assert_eq!(engine.internal_persistence_permits_available_for_test(), 2);
+
+    let key = SigningKey::from_bytes(&[101; 32]);
+    let now = now_ms()?;
+    let root_req = root_with_ttl(&key, 1, now, 100_000)?;
+    anchor(&engine, &root_req).await?;
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    let root_entry: L2LockEntry = (&root_req).into();
+
+    // 1. Pause persistence consumption
+    engine.set_worker_paused_for_test(true);
+
+    // 2. Fill all 5 public slots using valid root retries
+    let mut public_tasks = Vec::new();
+    for _ in 0..5 {
+        let eng = engine.clone();
+        let tag = root_tag.clone();
+        let entry = root_entry.clone();
+        public_tasks.push(tokio::spawn(async move {
+            eng.ingress_hmc_lock_durable(
+                tag,
+                entry,
+                IngressOrigin::ClientApi,
+                Some(now),
+                None,
+                None,
+                None,
+            )
+            .await
+        }));
+    }
+
+    // Wait until all 5 public permits are consumed
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while engine.public_persistence_permits_available_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.public_persistence_permits_available_for_test(), 0);
+
+    // Internal reservations (2) MUST remain available!
+    assert_eq!(
+        engine.internal_persistence_permits_available_for_test(),
+        2,
+        "Internal admission permits must not be consumed by public ingress"
+    );
+
+    // 3. Assert a 6th public durable lock is refused with backpressure
+    let (v_pub_6, changed) = engine
+        .ingress_hmc_lock_durable(
+            root_tag.clone(),
+            root_entry.clone(),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(!changed);
+    assert!(
+        matches!(v_pub_6, L2Verdict::Rejected { ref reason } if reason.contains("backpressure")),
+        "6th public durable lock must be rejected with backpressure, got: {v_pub_6:?}"
+    );
+
+    // Assert a public persist_original_approval is ALSO refused
+    let spend_req = spend(&root_req, 1, &key)?;
+    let spend_tag = spend_req.ds_tag.clone().unwrap();
+    let spend_entry: L2LockEntry = (&spend_req).into();
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(spend_tag.clone(), spend_entry.clone());
+
+    let node_id = [1u8; 32];
+    let pub_app_res = engine
+        .persist_original_approval(
+            spend_tag.clone(),
+            spend_entry.clone(),
+            node_id,
+            b"pub_app".to_vec(),
+            0,
+            now,
+            humoco_node::storage::PersistenceServiceClass::Public,
+        )
+        .await;
+    assert!(
+        pub_app_res.is_err(),
+        "public persist_original_approval must fail when public admission is exhausted, got: {pub_app_res:?}"
+    );
+
+    // 4. Prove internal durable lock AND internal persist_original_approval both succeed in reserving capacity
+    let mut internal_tasks = Vec::new();
+    let eng = engine.clone();
+    let tag = root_tag.clone();
+    let entry = root_entry.clone();
+    internal_tasks.push(tokio::spawn(async move {
+        eng.ingress_hmc_lock_durable_internal(
+            tag,
+            entry,
+            IngressOrigin::ClientApi,
+            Some(now),
+        )
+        .await
+    }));
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while engine.internal_persistence_permits_available_for_test() > 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.internal_persistence_permits_available_for_test(), 1);
+
+    // Second internal slot via internal persist_original_approval on anchored spend lock
+    let eng_app = engine.clone();
+    let tag_app = spend_tag.clone();
+    let entry_app = spend_entry.clone();
+    let app_task = tokio::spawn(async move {
+        eng_app
+            .persist_original_approval(
+                tag_app,
+                entry_app,
+                node_id,
+                b"internal_app".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Internal,
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while engine.internal_persistence_permits_available_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.internal_persistence_permits_available_for_test(), 0);
+
+    // Exceeding the finite internal_limit (2) MUST be refused (bounded internal capacity)
+    let (v_int_3, _) = engine
+        .ingress_hmc_lock_durable_internal(
+            root_tag.clone(),
+            root_entry.clone(),
+            IngressOrigin::ClientApi,
+            Some(now),
+        )
+        .await;
+    assert!(
+        matches!(v_int_3, L2Verdict::Rejected { ref reason } if reason.contains("backpressure")),
+        "3rd internal durable lock must be rejected with backpressure, got: {v_int_3:?}"
+    );
+
+    let int_app_3 = engine
+        .persist_original_approval(
+            spend_tag.clone(),
+            spend_entry.clone(),
+            [99u8; 32],
+            b"internal_app_3".to_vec(),
+            0,
+            now,
+            humoco_node::storage::PersistenceServiceClass::Internal,
+        )
+        .await;
+    assert!(
+        int_app_3.is_err(),
+        "3rd internal approval must be rejected when internal admission is exhausted, got: {int_app_3:?}"
+    );
+
+    // (a) Normal batch flush completion: resume worker and verify all tasks succeed and permits restore
+    engine.set_worker_paused_for_test(false);
+
+    for (idx, task) in public_tasks.into_iter().enumerate() {
+        let (verdict, _) = task.await?;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }), "task {idx} failed with: {verdict:?}");
+    }
+    for task in internal_tasks {
+        let (verdict, _) = task.await?;
+        assert!(matches!(verdict, L2Verdict::Verified { .. }));
+    }
+    let app_bytes = app_task.await??;
+    assert_eq!(app_bytes, b"internal_app".to_vec());
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while engine.public_persistence_permits_available_for_test() < 5
+            || engine.internal_persistence_permits_available_for_test() < 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.public_persistence_permits_available_for_test(), 5);
+    assert_eq!(engine.internal_persistence_permits_available_for_test(), 2);
+
+    // (b) Early conflict rejection does not leak reservations
+    engine.set_worker_paused_for_test(true);
+    let mut conflict_spend = spend(&root_req, 99, &key)?;
+    conflict_spend.created_at_ms = now;
+    conflict_spend.layer2_signature = [0u8; 64];
+    let (v_bad, _) = engine
+        .ingress_hmc_lock_durable(
+            spend_tag.clone(),
+            (&conflict_spend).into(),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(v_bad, L2Verdict::Conflict { .. }));
+    assert_eq!(engine.public_persistence_permits_available_for_test(), 5);
+    assert_eq!(engine.internal_persistence_permits_available_for_test(), 2);
+
+    // (c) Waiter timeout: approval queued when worker paused and waiter times out
+    let timeout_spend = spend(&root_req, 77, &key)?;
+    let timeout_tag = timeout_spend.ds_tag.clone().unwrap();
+    let timeout_entry: L2LockEntry = (&timeout_spend).into();
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(timeout_tag.clone(), timeout_entry.clone());
+
+    let timeout_res = tokio::time::timeout(
+        Duration::from_millis(50),
+        engine.persist_original_approval(
+            timeout_tag.clone(),
+            timeout_entry.clone(),
+            [2u8; 32],
+            b"timeout_app".to_vec(),
+            0,
+            now,
+            humoco_node::storage::PersistenceServiceClass::Public,
+        ),
+    )
+    .await;
+    assert!(timeout_res.is_err(), "waiter timeout expected");
+    assert_eq!(engine.public_persistence_permits_available_for_test(), 4);
+    engine.set_worker_paused_for_test(false);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while engine.public_persistence_permits_available_for_test() < 5 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.public_persistence_permits_available_for_test(), 5);
+
+    // (d) Persistence worker failure (rx drop): permits released cleanly without leak
+    let (tx_dead, rx_dead) = tokio::sync::mpsc::channel(10);
+    let dead_engine = DualTierEngine::from_parts_with_limits(
+        engine.hmc_ram.clone(),
+        db.clone(),
+        tx_dead,
+        2,
+        2,
+    );
+    assert_eq!(dead_engine.public_persistence_permits_available_for_test(), 2);
+    drop(rx_dead);
+    let (v_dead, _) = dead_engine
+        .ingress_hmc_lock_durable(
+            root_tag.clone(),
+            root_entry.clone(),
+            IngressOrigin::ClientApi,
+            Some(now),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(v_dead, L2Verdict::Rejected { ref reason } if reason.contains("signing unavailable") || reason.contains("worker unavailable")),
+        "v_dead was: {v_dead:?}"
+    );
+    assert_eq!(dead_engine.public_persistence_permits_available_for_test(), 2);
+
+    cancel.cancel();
+    worker.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_13_real_quic_concurrent_http_root_retry_separation() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source_path = dir.path().join("s02_13_quic_source.redb");
+    let target_path = dir.path().join("s02_13_quic_target.redb");
+    let source_id = NodeIdentity::generate();
+    let target_id = NodeIdentity::generate();
+    let wallet_node = NodeIdentity::generate();
+
+    let public_limit = 4;
+    let internal_limit = 2;
+
+    let source = WireNode::start(&source_path, source_id).await?;
+    let target = WireNode::start_with_limits(
+        &target_path,
+        target_id,
+        public_limit,
+        internal_limit,
+    )
+    .await?;
+
+    let now = target.manager.clock().net_time_ms();
+    let root_ttl = 60_000u64;
+    let root_req = root_with_ttl(wallet_node.signing_key(), 41, now, root_ttl)?;
+    let shard_id = shard(&root_req);
+
+    // Authorize peer and friend
+    target
+        .manager
+        .register_f2f_friend(*wallet_node.node_pubkey(), None)
+        .await;
+    anchor(&target.engine, &root_req).await?;
+    target.ready.mark_shard_ready(shard_id);
+
+    // Build HTTP Axum router for target node
+    let pow = Arc::new(PowEngine::new(0));
+    let tiers = Arc::new(TierController::new(target.db.clone(), pow.clone()));
+    tiers.register_vip_token("test_client", [1u8; 32]);
+    let app_state = AppState::new(
+        target.engine.clone(),
+        target.db.clone(),
+        target.identity.clone(),
+        tiers,
+        pow,
+    );
+    app_state.readiness_manager.mark_shard_ready(shard_id);
+    let app = build_router(app_state);
+
+    // Connect real QUIC peer
+    let connection = connect_friends(&source, &target).await?;
+
+    // 1. Pause target's persistence worker
+    target.engine.set_worker_paused_for_test(true);
+
+    // 2. Saturate all 4 public persistence reservations via concurrent HTTP POST /v1/lock root retries
+    let root_json = serde_json::to_vec(&root_req)?;
+    let mut http_futs = Vec::new();
+    for _ in 0..4 {
+        let app_clone = app.clone();
+        let body = root_json.clone();
+        http_futs.push(tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("Authorization", "Bearer test_client")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            app_clone.oneshot(req).await
+        }));
+    }
+
+    // Wait until all 4 public permits are consumed
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while target.engine.public_persistence_permits_available_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.public_persistence_permits_available_for_test(), 0);
+
+    // Verify an additional HTTP root retry is rejected due to persistence backpressure
+    let req_5th = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("Authorization", "Bearer test_client")
+        .header("Content-Type", "application/json")
+        .body(Body::from(root_json.clone()))
+        .unwrap();
+    let resp_5th = app.clone().oneshot(req_5th).await?;
+    let status_5th = resp_5th.status();
+    let body_bytes = resp_5th.into_body().collect().await?.to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        status_5th == StatusCode::SERVICE_UNAVAILABLE
+            || status_5th == StatusCode::BAD_REQUEST
+            || body_str.contains("backpressure"),
+        "5th HTTP root retry must be rejected with backpressure, got: {status_5th} {body_str}"
+    );
+
+    // 3. Send valid internal QUIC LockVerifyRequest from authorized peer while public persistence is full!
+    let spend_req = spend(&root_req, 42, wallet_node.signing_key())?;
+    let now = source.manager.net_time_ms();
+    let expiry = spend_req
+        .causal_output
+        .as_ref()
+        .ok_or("missing output proof")?
+        .root_valid_until_ms;
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(
+        expiry.saturating_sub(now) / 1000,
+    );
+    let sender = *source.identity.node_pubkey();
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        NetworkId::Mainnet,
+        &sender,
+        0,
+        10,
+        now,
+        0,
+        0,
+        footprint,
+        false,
+        &spend_req.transaction_hash,
+    );
+    let wire = LockWirePayload::Hmc {
+        req: spend_req.clone(),
+        chain: None,
+        root_valid_until: expiry,
+        epoch_day: 0,
+        epoch_seq: 10,
+        cumulative_micro_byte_years: footprint.saturating_mul(10),
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: sender,
+        sender_signature: source.identity.signing_key().sign(&digest).to_bytes(),
+        timestamp_ms: now,
+    };
+    let bytes = bincode::serialize(&wire)?;
+    let header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        10,
+        0,
+        0,
+        u32::try_from(bytes.len())?,
+    );
+    let source_network = source.network.clone();
+    let conn_wire = connection.clone();
+    let quic_send_task = tokio::spawn(async move {
+        source_network.send_request(&conn_wire, &header, &bytes).await
+    });
+
+    // 4. Deterministically wait until the QUIC spend request reached DualTierEngine and reserved its internal permit
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while target.engine.internal_persistence_permits_available_for_test() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("QUIC spend request must reserve internal persistence permit within 500ms");
+
+    // Assert that while persistence worker remains paused, NO attestation response is released yet (DEC-029)
+    let early_check = tokio::time::timeout(Duration::from_millis(40), async {
+        while !quic_send_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        early_check.is_err(),
+        "QUIC request must not release attestation while persistence worker is paused (Durable-before-Vote)"
+    );
+
+    // Internal capacity was reserved (1 of 2 consumed)
+    assert_eq!(target.engine.internal_persistence_permits_available_for_test(), 1);
+
+    // 5. Resume persistence worker: internal request completes durably in redb AND returns valid signed attestation
+    target.engine.set_worker_paused_for_test(false);
+
+    let (quic_resp_header, quic_resp_bytes) = quic_send_task.await??;
+    assert_eq!(
+        quic_resp_header.flags & humoco_sim_core::wire::FLAG_NOT_READY,
+        0,
+        "Response must not have FLAG_NOT_READY after resume"
+    );
+    let att = humoco_node::api::dto::AttestationDto::from_wire_bytes(&quic_resp_bytes)
+        .expect("must return valid signed attestation");
+    assert_eq!(att.lock_id, hex::encode(spend_req.transaction_hash));
+
+    // Assert the spend lock is committed durably in target's redb
+    let spend_tag = spend_req.ds_tag.as_ref().unwrap();
+    assert!(
+        target.db.get_hmc_lock(spend_tag)?.is_some(),
+        "Spend lock must be committed durably in redb"
+    );
+
+    // Assert all 4 public tasks completed
+    for fut in http_futs {
+        let resp = fut.await??;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // All public & internal permits restored!
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while target.engine.public_persistence_permits_available_for_test() < 4
+            || target.engine.internal_persistence_permits_available_for_test() < 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.public_persistence_permits_available_for_test(), 4);
+    assert_eq!(target.engine.internal_persistence_permits_available_for_test(), 2);
 
     drop(connection);
     source.stop().await?;

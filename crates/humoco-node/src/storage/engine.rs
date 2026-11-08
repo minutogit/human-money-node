@@ -767,6 +767,16 @@ impl DurableHmcAck {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceServiceClass {
+    Public,
+    Internal,
+}
+
+pub const DEFAULT_PUBLIC_PERSISTENCE_LIMIT: usize = 8_000;
+pub const DEFAULT_INTERNAL_PERSISTENCE_LIMIT: usize = 2_000;
+pub const SYSTEM_PERSISTENCE_HEADROOM: usize = 512;
+
 #[derive(Debug)]
 pub enum FlushOp {
     Fence {
@@ -781,15 +791,18 @@ pub enum FlushOp {
         root: u64,
         complete: tokio::sync::watch::Sender<Option<Result<Vec<u8>, String>>>,
         health: Arc<PersistenceStats>,
+        _reservation: Option<tokio::sync::OwnedSemaphorePermit>,
     },
     PutHmcLock {
         lookup_tag: String,
         entry: Box<L2LockEntry>,
+        _reservation: Option<tokio::sync::OwnedSemaphorePermit>,
     },
     PutHmcLockDurable {
         lookup_tag: String,
         entry: Box<L2LockEntry>,
         ack: DurableHmcAck,
+        _reservation: Option<tokio::sync::OwnedSemaphorePermit>,
     },
     Prune {
         now_sec: u64,
@@ -818,7 +831,7 @@ pub enum FlushOp {
 ///   graceful-shutdown drain deterministic (no untracked `tokio::spawn` jobs).
 pub const FLUSH_BATCH_SIZE: usize = 100;
 /// Finite wait for a commit; expiry never rolls a late commit back.
-pub const DURABLE_ACK_TIMEOUT_MS: u64 = if cfg!(test) { 3_000 } else { 750 };
+pub const DURABLE_ACK_TIMEOUT_MS: u64 = 750;
 const MAX_PENDING_APPROVALS: usize = 256;
 const MAX_APPROVAL_WAITERS: usize = 32;
 const MAX_BATCH_BYTES: usize = 1_048_576;
@@ -885,6 +898,10 @@ pub struct DualTierEngine {
     pub(crate) recovery_work: tokio_util::task::TaskTracker,
     source_leases: Arc<parking_lot::Mutex<HashMap<u16, recovery::SourceLease>>>,
     lease_cooldowns: Arc<parking_lot::Mutex<HashMap<u16, std::time::Instant>>>,
+    pub(crate) public_admission: Arc<tokio::sync::Semaphore>,
+    pub(crate) internal_admission: Arc<tokio::sync::Semaphore>,
+    pub(crate) worker_paused: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) worker_pause_notify: Arc<tokio::sync::Notify>,
 }
 
 impl DualTierEngine {
@@ -893,12 +910,17 @@ impl DualTierEngine {
         Self::new_with_token(db, tokio_util::sync::CancellationToken::new())
     }
 
-    /// Creates a new DualTierEngine with a cancellation token for graceful shutdown of the flush worker.
-    pub fn new_with_token(
+    /// Creates a new DualTierEngine with explicit service-class limits and channel sizing (INV-1307).
+    pub fn new_with_limits(
         db: Arc<RedbStorage>,
         cancel_token: tokio_util::sync::CancellationToken,
+        public_limit: usize,
+        internal_limit: usize,
     ) -> (Self, tokio::task::JoinHandle<()>) {
-        let (tx, rx) = mpsc::channel(10_000);
+        let channel_cap = public_limit
+            .saturating_add(internal_limit)
+            .saturating_add(SYSTEM_PERSISTENCE_HEADROOM);
+        let (tx, rx) = mpsc::channel(channel_cap);
         let hmc_ram = Arc::new(RwLock::new(HmcRamIndex::new()));
 
         let mut banned_set = HashSet::new();
@@ -910,9 +932,19 @@ impl DualTierEngine {
         let banned_nodes = Arc::new(RwLock::new(banned_set));
         let recent_locks = Arc::new(parking_lot::RwLock::new(RecentLockBuffer::default()));
         let stats = Arc::new(PersistenceStats::default());
+        let public_admission = Arc::new(tokio::sync::Semaphore::new(public_limit));
+        let internal_admission = Arc::new(tokio::sync::Semaphore::new(internal_limit));
+        let worker_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_pause_notify = Arc::new(tokio::sync::Notify::new());
 
-        let handle =
-            Self::spawn_flush_worker(rx, Arc::clone(&db), Arc::clone(&stats), cancel_token);
+        let handle = Self::spawn_flush_worker(
+            rx,
+            Arc::clone(&db),
+            Arc::clone(&stats),
+            cancel_token,
+            Arc::clone(&worker_paused),
+            Arc::clone(&worker_pause_notify),
+        );
         (
             Self {
                 hmc_ram,
@@ -929,8 +961,25 @@ impl DualTierEngine {
                 recovery_work: tokio_util::task::TaskTracker::new(),
                 source_leases: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 lease_cooldowns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                public_admission,
+                internal_admission,
+                worker_paused,
+                worker_pause_notify,
             },
             handle,
+        )
+    }
+
+    /// Creates a new DualTierEngine with default limits and a cancellation token for graceful shutdown.
+    pub fn new_with_token(
+        db: Arc<RedbStorage>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
+        Self::new_with_limits(
+            db,
+            cancel_token,
+            DEFAULT_PUBLIC_PERSISTENCE_LIMIT,
+            DEFAULT_INTERNAL_PERSISTENCE_LIMIT,
         )
     }
 
@@ -939,6 +988,18 @@ impl DualTierEngine {
         hmc_ram: Arc<RwLock<HmcRamIndex>>,
         db: Arc<RedbStorage>,
         tx: mpsc::Sender<FlushOp>,
+    ) -> Self {
+        let cap = tx.max_capacity();
+        Self::from_parts_with_limits(hmc_ram, db, tx, cap, cap)
+    }
+
+    /// Creates an engine instance from existing components with explicit service-class limits.
+    pub fn from_parts_with_limits(
+        hmc_ram: Arc<RwLock<HmcRamIndex>>,
+        db: Arc<RedbStorage>,
+        tx: mpsc::Sender<FlushOp>,
+        public_limit: usize,
+        internal_limit: usize,
     ) -> Self {
         let mut banned_set = HashSet::new();
         if let Ok(banned_list) = db.all_banned_nodes() {
@@ -964,6 +1025,10 @@ impl DualTierEngine {
             recovery_work: tokio_util::task::TaskTracker::new(),
             source_leases: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             lease_cooldowns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            public_admission: Arc::new(tokio::sync::Semaphore::new(public_limit)),
+            internal_admission: Arc::new(tokio::sync::Semaphore::new(internal_limit)),
+            worker_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker_pause_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -994,6 +1059,44 @@ impl DualTierEngine {
         self.pending_approvals.lock().len()
     }
 
+    /// Test-only hook to inspect available public persistence permits (Spec 14 / INV-1307).
+    #[doc(hidden)]
+    pub fn public_persistence_permits_available_for_test(&self) -> usize {
+        self.public_admission.available_permits()
+    }
+
+    /// Test-only hook to inspect available internal persistence permits (Spec 14 / INV-1307).
+    #[doc(hidden)]
+    pub fn internal_persistence_permits_available_for_test(&self) -> usize {
+        self.internal_admission.available_permits()
+    }
+
+    /// Test-only gate to deterministically pause/resume the background persistence flush loop.
+    #[doc(hidden)]
+    pub fn set_worker_paused_for_test(&self, paused: bool) {
+        self.worker_paused
+            .store(paused, std::sync::atomic::Ordering::Release);
+        self.worker_pause_notify.notify_waiters();
+        self.worker_pause_notify.notify_one();
+    }
+
+    /// Test helper to spawn a flush worker bound to this engine instance.
+    #[doc(hidden)]
+    pub fn spawn_worker_for_engine(
+        &self,
+        rx: mpsc::Receiver<FlushOp>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        Self::spawn_flush_worker(
+            rx,
+            Arc::clone(&self.db),
+            Arc::clone(&self.stats),
+            cancel_token,
+            Arc::clone(&self.worker_paused),
+            Arc::clone(&self.worker_pause_notify),
+        )
+    }
+
     /// Closes and awaits all tracked background recovery and persistence tasks.
     pub async fn drain_recovery_work(&self) {
         self.recovery_work.close();
@@ -1008,7 +1111,11 @@ impl DualTierEngine {
     async fn wait_original_approval(
         &self,
         key: [u8; 32],
-        make_op: impl FnOnce(tokio::sync::watch::Sender<Option<Result<Vec<u8>, String>>>) -> FlushOp,
+        service_class: PersistenceServiceClass,
+        make_op: impl FnOnce(
+            tokio::sync::watch::Sender<Option<Result<Vec<u8>, String>>>,
+            Option<tokio::sync::OwnedSemaphorePermit>,
+        ) -> FlushOp,
     ) -> Result<Vec<u8>, StorageError> {
         if !self.is_signing_healthy() {
             return Err(StorageError::DurableCommitFailed(
@@ -1031,11 +1138,18 @@ impl DualTierEngine {
                         "Approval capacity exhausted".into(),
                     ));
                 }
+                let admission_pool = match service_class {
+                    PersistenceServiceClass::Public => &self.public_admission,
+                    PersistenceServiceClass::Internal => &self.internal_admission,
+                };
+                let admission_permit = admission_pool.clone().try_acquire_owned().map_err(|_| {
+                    StorageError::DurableCommitFailed("Persistence queue unavailable".into())
+                })?;
                 let permit = self.tx.try_reserve().map_err(|_| {
                     StorageError::DurableCommitFailed("Persistence queue unavailable".into())
                 })?;
                 let (complete, receiver) = tokio::sync::watch::channel(None);
-                permit.send(make_op(complete));
+                permit.send(make_op(complete, Some(admission_permit)));
                 let waiters = Arc::new(tokio::sync::Semaphore::new(MAX_APPROVAL_WAITERS));
                 let waiter = waiters.clone().try_acquire_owned().map_err(|_| {
                     StorageError::DurableCommitFailed("Approval waiter unavailable".into())
@@ -1087,6 +1201,7 @@ impl DualTierEngine {
         approval: Vec<u8>,
         class: u8,
         now_ms: u64,
+        service_class: PersistenceServiceClass,
     ) -> Result<Vec<u8>, StorageError> {
         if !self.is_signing_healthy() {
             return Err(StorageError::SigningHistoryCorrupt);
@@ -1138,7 +1253,7 @@ impl DualTierEngine {
         let committed_tag = tag.clone();
         let committed_entry = entry.clone();
         let result = self
-            .wait_original_approval(key, |complete| FlushOp::OriginalHmcApproval {
+            .wait_original_approval(key, service_class, |complete, reservation| FlushOp::OriginalHmcApproval {
                 tag,
                 entry: Box::new(entry),
                 node,
@@ -1147,6 +1262,7 @@ impl DualTierEngine {
                 root,
                 complete,
                 health: self.stats.clone(),
+                _reservation: reservation,
             })
             .await?;
         {
@@ -1281,7 +1397,15 @@ impl DualTierEngine {
             warn!("EquivocationProof rejected: perpetrator_node_id is not a valid Ed25519 key");
             return false;
         };
-        if !crate::network::transport::verify_equivocation_first_party(&vk, proof) {
+        if !crate::network::transport::verify_equivocation_first_party_network(
+            humoco_sim_core::types::NetworkId::Mainnet,
+            &vk,
+            proof,
+        ) && !crate::network::transport::verify_equivocation_first_party_network(
+            humoco_sim_core::types::NetworkId::Testnet,
+            &vk,
+            proof,
+        ) {
             warn!("EquivocationProof rejected: first-party verification failed");
             return false;
         }
@@ -1639,6 +1763,7 @@ impl DualTierEngine {
             None,
             false,
             confirmation_class,
+            PersistenceServiceClass::Public,
         )
         .await
     }
@@ -1681,12 +1806,22 @@ impl DualTierEngine {
         voucher_id: Option<String>,
     ) -> (L2Verdict, bool) {
         self.ingress_hmc_lock_internal(
-            lookup_tag, entry, origin, now_ms, tier, byte_years, voucher_id, false, 0,
+            lookup_tag,
+            entry,
+            origin,
+            now_ms,
+            tier,
+            byte_years,
+            voucher_id,
+            false,
+            0,
+            PersistenceServiceClass::Public,
         )
         .await
     }
 
-    /// Ingress an HMC lock entry on the hot path with strict "Durable-before-Vote" (DEC-029 restoration).
+    /// Ingress an HMC lock entry on the hot path with strict "Durable-before-Vote" (DEC-029 restoration)
+    /// under Public service-class admission.
     /// Awaits durable redb commit before returning success (< 20ms local durable SLA).
     #[allow(clippy::too_many_arguments)]
     pub async fn ingress_hmc_lock_durable(
@@ -1700,7 +1835,39 @@ impl DualTierEngine {
         voucher_id: Option<String>,
     ) -> (L2Verdict, bool) {
         self.ingress_hmc_lock_internal(
-            lookup_tag, entry, origin, now_ms, tier, byte_years, voucher_id, true, 0,
+            lookup_tag,
+            entry,
+            origin,
+            now_ms,
+            tier,
+            byte_years,
+            voucher_id,
+            true,
+            0,
+            PersistenceServiceClass::Public,
+        )
+        .await
+    }
+
+    /// Internal QUIC lock ingress with strict "Durable-before-Vote" and Internal service-class admission (Spec 14 / INV-1307).
+    pub async fn ingress_hmc_lock_durable_internal(
+        &self,
+        lookup_tag: String,
+        entry: L2LockEntry,
+        origin: IngressOrigin,
+        now_ms: Option<u64>,
+    ) -> (L2Verdict, bool) {
+        self.ingress_hmc_lock_internal(
+            lookup_tag,
+            entry,
+            origin,
+            now_ms,
+            None,
+            None,
+            None,
+            true,
+            0,
+            PersistenceServiceClass::Internal,
         )
         .await
     }
@@ -1717,6 +1884,7 @@ impl DualTierEngine {
         voucher_id: Option<String>,
         durable: bool,
         confirmation_class: u8,
+        service_class: PersistenceServiceClass,
     ) -> (L2Verdict, bool) {
         if !self.is_signing_healthy() {
             return (
@@ -1786,6 +1954,34 @@ impl DualTierEngine {
             );
         }
 
+        // Service-Class Admission (Spec 14 lines 145-147 & INV-1307):
+        // Acquire bounded permit BEFORE tx reservation and BEFORE modifying RAM
+        let admission_pool = match service_class {
+            PersistenceServiceClass::Public => &self.public_admission,
+            PersistenceServiceClass::Internal => &self.internal_admission,
+        };
+        let admission_permit = match admission_pool.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                warn!("Persistence admission limit reached for {service_class:?} - rejecting HMC ingress with backpressure");
+                return (
+                    L2Verdict::Rejected {
+                        reason: "Persistence queue congested (backpressure)".into(),
+                    },
+                    false,
+                );
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                error!("Persistence admission pool closed");
+                return (
+                    L2Verdict::Rejected {
+                        reason: "Persistence worker unavailable".into(),
+                    },
+                    false,
+                );
+            }
+        };
+
         // Reservation-First: check if flush capacity is available before modifying RAM (Backpressure protection B-01)
         let permit = match self.tx.try_reserve() {
             Ok(p) => p,
@@ -1851,12 +2047,14 @@ impl DualTierEngine {
                             accepted_entry.clone(),
                             accepted_root.unwrap_or(0),
                         ),
+                        _reservation: Some(admission_permit),
                     });
                     Some(ack_rx)
                 } else {
                     permit.send(FlushOp::PutHmcLock {
                         lookup_tag: lookup_tag.clone(),
                         entry: Box::new(accepted_entry.clone()),
+                        _reservation: Some(admission_permit),
                     });
                     None
                 }
@@ -2092,8 +2290,16 @@ impl DualTierEngine {
         tier: Option<&str>,
         byte_years: Option<u64>,
     ) -> (L2Verdict, bool) {
-        self.ingress_hmc_chain_lock_internal(chain_req, origin, now_ms, tier, byte_years, false)
-            .await
+        self.ingress_hmc_chain_lock_internal(
+            chain_req,
+            origin,
+            now_ms,
+            tier,
+            byte_years,
+            false,
+            PersistenceServiceClass::Public,
+        )
+        .await
     }
 
     /// Ordered prefix-preserving registration with Durable-before-Vote (DEC-029).
@@ -2105,8 +2311,16 @@ impl DualTierEngine {
         tier: Option<&str>,
         byte_years: Option<u64>,
     ) -> (L2Verdict, bool) {
-        self.ingress_hmc_chain_lock_internal(chain_req, origin, now_ms, tier, byte_years, true)
-            .await
+        self.ingress_hmc_chain_lock_internal(
+            chain_req,
+            origin,
+            now_ms,
+            tier,
+            byte_years,
+            true,
+            PersistenceServiceClass::Public,
+        )
+        .await
     }
 
     /// Ordered prefix-preserving registration with Durable-before-Vote (DEC-029).
@@ -2115,21 +2329,25 @@ impl DualTierEngine {
         chain_req: crate::api::hmc::L2ChainLockRequest,
         origin: IngressOrigin,
         now_ms: Option<u64>,
+        service_class: PersistenceServiceClass,
     ) -> (L2Verdict, bool) {
         let default_tier = match origin {
             IngressOrigin::ClientApi => "Free",
             IngressOrigin::PartitionSync => "P2P-Sync",
         };
-        self.ingress_hmc_chain_lock_durable_with_tier(
+        self.ingress_hmc_chain_lock_internal(
             chain_req,
             origin,
             now_ms,
             Some(default_tier),
             Some(0),
+            true,
+            service_class,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn ingress_hmc_chain_lock_internal(
         &self,
         chain_req: crate::api::hmc::L2ChainLockRequest,
@@ -2138,6 +2356,7 @@ impl DualTierEngine {
         tier: Option<&str>,
         byte_years: Option<u64>,
         durable: bool,
+        service_class: PersistenceServiceClass,
     ) -> (L2Verdict, bool) {
         if !self.is_signing_healthy() {
             return (
@@ -2230,6 +2449,7 @@ impl DualTierEngine {
                     Some(chain_req.layer2_voucher_id.clone()),
                     durable,
                     0,
+                    service_class,
                 ),
             )
             .await;
@@ -2669,6 +2889,8 @@ impl DualTierEngine {
         db: Arc<RedbStorage>,
         stats: Arc<PersistenceStats>,
         cancel_token: tokio_util::sync::CancellationToken,
+        worker_paused: Arc<std::sync::atomic::AtomicBool>,
+        worker_pause_notify: Arc<tokio::sync::Notify>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut batch: Vec<FlushOp> = Vec::with_capacity(FLUSH_BATCH_SIZE);
@@ -2677,12 +2899,29 @@ impl DualTierEngine {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
+                while worker_paused.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+                        _ = worker_pause_notify.notified() => {}
+                    }
+                }
+                if cancel_token.is_cancelled() {
+                    Self::drain_on_shutdown(&mut rx, &mut batch, &db, &stats).await;
+                    info!("Flush worker cleanly drained and terminated on cancellation");
+                    break;
+                }
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
                         Self::drain_on_shutdown(&mut rx, &mut batch, &db, &stats).await;
                         info!("Flush worker cleanly drained and terminated on cancellation");
                         break;
+                    }
+                    _ = worker_pause_notify.notified() => {
+                        continue;
                     }
                     op = rx.recv() => {
                         match op {
@@ -2893,7 +3132,7 @@ impl DualTierEngine {
         let mut bytes = 0usize;
         let split = batch.iter().enumerate().find_map(|(index, op)| {
             let size = match op {
-                FlushOp::PutHmcLock { lookup_tag, entry }
+                FlushOp::PutHmcLock { lookup_tag, entry, .. }
                 | FlushOp::PutHmcLockDurable {
                     lookup_tag, entry, ..
                 } => lookup_tag
@@ -2962,6 +3201,7 @@ impl DualTierEngine {
                     root,
                     complete,
                     health,
+                    ..
                 } = op
                 {
                     batch_entries.push(crate::storage::OriginalApprovalBatchEntry {
@@ -3051,11 +3291,12 @@ impl DualTierEngine {
                         failed: true,
                     };
                 }
-                FlushOp::PutHmcLock { lookup_tag, entry } => hmc.push((lookup_tag, entry, None)),
+                FlushOp::PutHmcLock { lookup_tag, entry, .. } => hmc.push((lookup_tag, entry, None)),
                 FlushOp::PutHmcLockDurable {
                     lookup_tag,
                     entry,
                     ack,
+                    ..
                 } => {
                     hmc.push((lookup_tag, entry, Some(ack)));
                 }
@@ -3501,6 +3742,7 @@ mod exact_hmc_durability_tests {
             root: 50_000,
             complete,
             health: health.clone(),
+            _reservation: None,
         }];
         let outcome = DualTierEngine::flush_batch(&mut batch, &db);
         assert_eq!(outcome.ops_committed, 0);
@@ -3547,6 +3789,7 @@ mod exact_hmc_durability_tests {
                 b"original".to_vec(),
                 0,
                 1_000,
+                PersistenceServiceClass::Public,
             )
             .await
             .unwrap();
@@ -3606,6 +3849,7 @@ mod exact_hmc_durability_tests {
                     approval_clone,
                     0,
                     now_ms,
+                    PersistenceServiceClass::Public,
                 )
                 .await
         });
@@ -3926,6 +4170,7 @@ mod confirmation_class_precedence_tests {
                 b"first".to_vec(),
                 0,
                 1_000,
+                PersistenceServiceClass::Public,
             )
             .await
             .unwrap();
@@ -3940,6 +4185,7 @@ mod confirmation_class_precedence_tests {
                 b"final".to_vec(),
                 1,
                 1_000,
+                PersistenceServiceClass::Public,
             )
             .await
             .unwrap();

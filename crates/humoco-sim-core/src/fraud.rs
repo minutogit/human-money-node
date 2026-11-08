@@ -1,6 +1,6 @@
 pub use crate::crypto::DOMAIN_HB_ANNOUNCE;
 use crate::crypto::{
-    compute_attestation_payload_digest, compute_sig_digest, verify_attestation, DOMAIN_INGRESS_DECL,
+    compute_attestation_payload_digest, compute_sig_digest, domain_ingress_decl, verify_attestation,
 };
 use crate::types::{Attestation, NetworkId, NodeId, SimTime};
 
@@ -64,21 +64,15 @@ pub fn decode_attestation(bytes: &[u8]) -> Option<Attestation> {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IngressEnvelopeEvidence {
+    pub network_id: crate::types::NetworkId,
     pub gateway_pubkey: [u8; 32],
-    #[serde(default)]
     pub epoch_day: u32,
-    #[serde(default)]
     pub epoch_seq: u64,
     pub timestamp_ms: u64,
-    #[serde(default)]
     pub declared_write_ema_micro_bj: u64,
-    #[serde(default)]
     pub declared_read_ema_credits: u64,
-    #[serde(default)]
     pub footprint_micro_bj: u64,
-    #[serde(default)]
     pub is_read: bool,
-    #[serde(default)]
     pub op_hash: [u8; 32],
     #[serde(with = "crate::types::serde_bytes_64")]
     pub signature: [u8; 64],
@@ -87,6 +81,7 @@ pub struct IngressEnvelopeEvidence {
 impl Default for IngressEnvelopeEvidence {
     fn default() -> Self {
         Self {
+            network_id: crate::types::NetworkId::Mainnet,
             gateway_pubkey: [0u8; 32],
             epoch_day: 0,
             epoch_seq: 0,
@@ -102,11 +97,10 @@ impl Default for IngressEnvelopeEvidence {
 }
 
 impl IngressEnvelopeEvidence {
-    /// Epoch-bound constructor (Phase 1 P0): `epoch_day` / `epoch_seq` are part of
-    /// the signed preimage so envelopes cannot be replayed across days or reordered
-    /// within a day without invalidating the Ed25519 signature.
+    /// Canonical constructor binding `network_id` (S07-11) and `epoch_day` / `epoch_seq` (Phase 1 P0).
     #[allow(clippy::too_many_arguments)]
-    pub fn new_v2(
+    pub fn new(
+        network_id: crate::types::NetworkId,
         gateway_pubkey: [u8; 32],
         epoch_day: u32,
         epoch_seq: u64,
@@ -119,6 +113,7 @@ impl IngressEnvelopeEvidence {
         signature: [u8; 64],
     ) -> Self {
         Self {
+            network_id,
             gateway_pubkey,
             epoch_day,
             epoch_seq,
@@ -133,19 +128,19 @@ impl IngressEnvelopeEvidence {
     }
 }
 
-/// # Architectural Invariant: Epoch-Bound Ingress Envelope (Phase 1 P0)
+/// # Architectural Invariant: Epoch-Bound and Network-Bound Ingress Envelope (S07-11)
 ///
-/// `epoch_day` and `epoch_seq` are folded into the signed preimage so a captured
-/// envelope cannot be replayed on a later day or reordered within the same day.
-/// Verifiers must reconstruct the digest from the envelope's own
-/// `(epoch_day, epoch_seq)` fields; envelopes with mismatched epochs fail
-/// Ed25519 verification and never trigger quota-fraud slashing.
+/// `network_id`, `epoch_day`, and `epoch_seq` are folded into the signed preimage so a captured
+/// envelope cannot be replayed across networks, across days, or reordered within a day.
+/// Verifiers must reconstruct the digest using the expected `network_id`; foreign-network
+/// envelopes fail verification and never trigger quota-fraud slashing.
 ///
-/// Digest = BLAKE3(len || DOMAIN_INGRESS_DECL || gateway_pubkey || epoch_day_le
+/// Digest = BLAKE3(len || domain_ingress_decl(net) || net_u8 || gateway_pubkey || epoch_day_le
 ///   || epoch_seq_le || timestamp_ms_le || write_ema_le || read_ema_le
 ///   || footprint_le || is_read || op_hash)
 #[allow(clippy::too_many_arguments)]
-pub fn compute_ingress_envelope_digest_v2(
+pub fn compute_ingress_envelope_digest(
+    network_id: crate::types::NetworkId,
     gateway_pubkey: &[u8; 32],
     epoch_day: u32,
     epoch_seq: u64,
@@ -156,10 +151,12 @@ pub fn compute_ingress_envelope_digest_v2(
     is_read: bool,
     op_hash: &[u8; 32],
 ) -> [u8; 32] {
+    let domain = domain_ingress_decl(network_id);
     let mut hasher = blake3::Hasher::new();
-    let tag_len = (DOMAIN_INGRESS_DECL.len() as u8).to_le_bytes();
+    let tag_len = (domain.len() as u8).to_le_bytes();
     hasher.update(&tag_len);
-    hasher.update(DOMAIN_INGRESS_DECL);
+    hasher.update(domain);
+    hasher.update(&[network_id.as_u8()]);
     hasher.update(gateway_pubkey);
     hasher.update(&epoch_day.to_le_bytes());
     hasher.update(&epoch_seq.to_le_bytes());
@@ -206,6 +203,7 @@ pub fn compute_heartbeat_announcement_hash(
 
 #[allow(clippy::too_many_arguments)]
 pub fn sign_ingress_evidence_with_key(
+    network_id: crate::types::NetworkId,
     signing_key: &ed25519_dalek::SigningKey,
     epoch_day: u32,
     epoch_seq: u64,
@@ -218,7 +216,8 @@ pub fn sign_ingress_evidence_with_key(
 ) -> IngressEnvelopeEvidence {
     use ed25519_dalek::Signer;
     let gateway_pubkey = signing_key.verifying_key().to_bytes();
-    let digest = compute_ingress_envelope_digest_v2(
+    let digest = compute_ingress_envelope_digest(
+        network_id,
         &gateway_pubkey,
         epoch_day,
         epoch_seq,
@@ -231,6 +230,7 @@ pub fn sign_ingress_evidence_with_key(
     );
     let signature = signing_key.sign(&digest).to_bytes();
     IngressEnvelopeEvidence {
+        network_id,
         gateway_pubkey,
         epoch_day,
         epoch_seq,
@@ -246,6 +246,7 @@ pub fn sign_ingress_evidence_with_key(
 
 #[allow(clippy::too_many_arguments)]
 pub fn sign_ingress_evidence(
+    network_id: crate::types::NetworkId,
     gateway_key_or_seed: [u8; 32],
     epoch_day: u32,
     epoch_seq: u64,
@@ -258,6 +259,7 @@ pub fn sign_ingress_evidence(
 ) -> IngressEnvelopeEvidence {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&gateway_key_or_seed);
     sign_ingress_evidence_with_key(
+        network_id,
         &signing_key,
         epoch_day,
         epoch_seq,
@@ -281,8 +283,15 @@ pub fn decode_ingress_envelope(bytes: &[u8]) -> Option<IngressEnvelopeEvidence> 
     bincode::deserialize(bytes).ok()
 }
 
-pub fn verify_ingress_envelope_signature(env: &IngressEnvelopeEvidence) -> bool {
-    let digest = compute_ingress_envelope_digest_v2(
+pub fn verify_ingress_envelope_signature(
+    env: &IngressEnvelopeEvidence,
+    expected_network: crate::types::NetworkId,
+) -> bool {
+    if env.network_id != expected_network {
+        return false;
+    }
+    let digest = compute_ingress_envelope_digest(
+        expected_network,
         &env.gateway_pubkey,
         env.epoch_day,
         env.epoch_seq,
@@ -382,6 +391,8 @@ pub type FraudProof = FraudProofPayload;
 pub enum FraudBuildError {
     #[error("Signer mismatch")]
     SignerMismatch,
+    #[error("Network mismatch")]
+    NetworkMismatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -496,6 +507,9 @@ impl FraudProofPayload {
         a: IngressEnvelopeEvidence,
         b: IngressEnvelopeEvidence,
     ) -> Result<Self, FraudBuildError> {
+        if a.network_id != b.network_id {
+            return Err(FraudBuildError::NetworkMismatch);
+        }
         if a.gateway_pubkey != b.gateway_pubkey {
             return Err(FraudBuildError::SignerMismatch);
         }
@@ -550,28 +564,27 @@ impl FraudProofPayload {
         p
     }
 
-    /// Checks if two ingress evidences constitute an under-reporting or rollback fraud conflict.
+    /// Checks if two ingress evidences constitute an under-reporting or rollback fraud conflict under an explicit network.
     pub fn check_ingress_conflict(
+        expected_network: crate::types::NetworkId,
         a: &IngressEnvelopeEvidence,
         b: &IngressEnvelopeEvidence,
     ) -> bool {
         let Ok(proof) = Self::try_new_ingress_counter_conflict(a.clone(), b.clone()) else {
             return false;
         };
-        proof.verify_ingress_counter_conflict()
+        proof.verify_ingress_counter_conflict_network(expected_network)
     }
 
     /// Generic verify dispatcher across known networks and simulator fallbacks.
     ///
     /// For simulation-mode test suites, this verifies shard equivocation across `Mainnet`
     /// or `Testnet`, and falls back to deterministic simulator signatures (`verify_attestation`).
-    /// In production daemon hot-paths and P2P mesh validation, callers MUST use
-    /// [`verify_shard_equivocation_network`] or [`verify_network`] with an explicit [`NetworkId`]
-    /// to avoid cross-universe domain confusion.
+    /// Ingress counter conflict strictly requires an explicit network domain and returns false here.
     pub fn verify(&self) -> bool {
         match self.proof_pillar {
             FraudProofPillar::ShardEquivocation => self.verify_shard_equivocation(),
-            FraudProofPillar::IngressCounterConflict => self.verify_ingress_counter_conflict(),
+            FraudProofPillar::IngressCounterConflict => false, // strictly requires explicit NetworkId (S07-11)
         }
     }
 
@@ -581,7 +594,9 @@ impl FraudProofPayload {
             FraudProofPillar::ShardEquivocation => {
                 self.verify_shard_equivocation_network(network_id)
             }
-            FraudProofPillar::IngressCounterConflict => self.verify_ingress_counter_conflict(),
+            FraudProofPillar::IngressCounterConflict => {
+                self.verify_ingress_counter_conflict_network(network_id)
+            }
         }
     }
 
@@ -684,7 +699,11 @@ impl FraudProofPayload {
         true
     }
 
-    pub fn verify_ingress_counter_conflict(&self) -> bool {
+    /// Explicit-network verification of ingress counter conflict (S07-11, S07-10).
+    pub fn verify_ingress_counter_conflict_network(
+        &self,
+        expected_network: crate::types::NetworkId,
+    ) -> bool {
         let a = match decode_ingress_envelope(&self.evidence_packet_a) {
             Some(v) => v,
             None => return false,
@@ -694,8 +713,15 @@ impl FraudProofPayload {
             None => return false,
         };
 
+        // Network check: both must match expected_network
+        if a.network_id != expected_network || b.network_id != expected_network {
+            return false;
+        }
+
         // Verify signatures of both packets (anti-framing protection)
-        if !verify_ingress_envelope_signature(&a) || !verify_ingress_envelope_signature(&b) {
+        if !verify_ingress_envelope_signature(&a, expected_network)
+            || !verify_ingress_envelope_signature(&b, expected_network)
+        {
             return false;
         }
 
@@ -709,12 +735,31 @@ impl FraudProofPayload {
             return false;
         }
 
-        // Exact mathematical under-reporting fraud check in V2 mode:
-        // Canonical normalization by (epoch_day, epoch_seq, timestamp_ms) ensures
-        // arrival order (a, b) vs (b, a) produces identical results.
-        let (p1, p2) = if (a.epoch_day, a.epoch_seq, a.timestamp_ms)
-            <= (b.epoch_day, b.epoch_seq, b.timestamp_ms)
-        {
+        // Exact mathematical under-reporting fraud check with physical-time EMA decay (S07-10):
+        // Canonical normalization by full tuple ensures arrival order (a, b) vs (b, a)
+        // produces strictly symmetric results.
+        let tuple_a = (
+            a.epoch_day,
+            a.epoch_seq,
+            a.timestamp_ms,
+            a.declared_write_ema_micro_bj,
+            a.declared_read_ema_credits,
+            a.footprint_micro_bj,
+            a.is_read,
+            a.op_hash,
+        );
+        let tuple_b = (
+            b.epoch_day,
+            b.epoch_seq,
+            b.timestamp_ms,
+            b.declared_write_ema_micro_bj,
+            b.declared_read_ema_credits,
+            b.footprint_micro_bj,
+            b.is_read,
+            b.op_hash,
+        );
+
+        let (p1, p2) = if tuple_a <= tuple_b {
             (a, b)
         } else {
             (b, a)
@@ -727,54 +772,59 @@ impl FraudProofPayload {
                         && p1.timestamp_ms == p2.timestamp_ms
                         && p1.declared_write_ema_micro_bj == p2.declared_write_ema_micro_bj
                         && p1.declared_read_ema_credits == p2.declared_read_ema_credits
-                        && p1.footprint_micro_bj == p2.footprint_micro_bj;
+                        && p1.footprint_micro_bj == p2.footprint_micro_bj
+                        && p1.is_read == p2.is_read
+                        && p1.network_id == p2.network_id;
                     return !is_exact_duplicate;
                 }
 
-                // Since normalized by (epoch_day, epoch_seq): p2.epoch_seq > p1.epoch_seq
-                // Counter rollback under sequence progression:
-                if p1.declared_write_ema_micro_bj > 0
-                    && p2.declared_write_ema_micro_bj > 0
-                    && p2.declared_write_ema_micro_bj < p1.declared_write_ema_micro_bj
-                {
-                    return true;
+                // Since normalized by full tuple: p2.epoch_seq > p1.epoch_seq
+                let max_delta_secs =
+                    (p2.timestamp_ms / 1000).saturating_sub(p1.timestamp_ms / 1000);
+                let inter_steps = max_delta_secs
+                    .min(p2.epoch_seq.saturating_sub(p1.epoch_seq).saturating_sub(1));
+
+                if p1.declared_write_ema_micro_bj > 0 {
+                    let min_write = crate::quota::decay_integer_ema(
+                        p1.declared_write_ema_micro_bj,
+                        max_delta_secs,
+                    )
+                    .saturating_sub(inter_steps);
+                    if p2.declared_write_ema_micro_bj < min_write {
+                        return true;
+                    }
                 }
-                if p1.declared_read_ema_credits > 0
-                    && p2.declared_read_ema_credits > 0
-                    && p2.declared_read_ema_credits < p1.declared_read_ema_credits
-                {
-                    return true;
+                if p1.declared_read_ema_credits > 0 {
+                    let min_read = crate::quota::decay_integer_ema(
+                        p1.declared_read_ema_credits,
+                        max_delta_secs,
+                    )
+                    .saturating_sub(inter_steps);
+                    if p2.declared_read_ema_credits < min_read {
+                        return true;
+                    }
                 }
             }
             return false;
-        } else if p1.timestamp_ms == p2.timestamp_ms {
-            // Concurrent operations within the same millisecond are normal for independent
-            // unsequenced reads/queries; an identical duplicate is not fraud.
+        } else if p1.timestamp_ms == p2.timestamp_ms || p2.is_read {
             return false;
         }
 
-        let delta_secs = (p2.timestamp_ms - p1.timestamp_ms) / 1000;
-        if p2.is_read {
-            // Unsequenced reads (seq = 0) have independent zero/ambient baselines;
-            // independent reads for different locks or reordered queries never constitute
-            // under-reporting fraud unless a non-zero sequence progression is declared.
-            if p1.epoch_seq > 0 || p2.epoch_seq > 0 {
-                let min_allowed =
-                    crate::quota::decay_integer_ema(p1.declared_read_ema_credits, delta_secs)
-                        .saturating_add(1);
-                if p2.declared_read_ema_credits < min_allowed {
-                    return true;
-                }
-            }
-        } else if p1.declared_write_ema_micro_bj > 0 || p2.declared_write_ema_micro_bj > 0 {
+        let max_delta_secs = (p2.timestamp_ms / 1000).saturating_sub(p1.timestamp_ms / 1000);
+        if p1.declared_write_ema_micro_bj > 0 || p2.declared_write_ema_micro_bj > 0 {
             let min_allowed =
-                crate::quota::decay_integer_ema(p1.declared_write_ema_micro_bj, delta_secs)
+                crate::quota::decay_integer_ema(p1.declared_write_ema_micro_bj, max_delta_secs)
                     .saturating_add(p2.footprint_micro_bj);
             if p2.declared_write_ema_micro_bj < min_allowed {
                 return true;
             }
         }
         false
+    }
+
+    /// Transitional helper defaulting to Mainnet.
+    pub fn verify_ingress_counter_conflict(&self) -> bool {
+        self.verify_ingress_counter_conflict_network(crate::types::NetworkId::Mainnet)
     }
 
 }
@@ -798,17 +848,28 @@ mod tests {
         let sk = test_signing_key(42);
         let op_hash = [0xAA; 32];
         let env = sign_ingress_evidence_with_key(
-            &sk, 10, 1, 100_000, 50_000, 10_000, 1_000, false, op_hash,
+            NetworkId::Mainnet,
+            &sk,
+            10,
+            1,
+            100_000,
+            50_000,
+            10_000,
+            1_000,
+            false,
+            op_hash,
         );
 
-        assert!(verify_ingress_envelope_signature(&env));
+        assert!(verify_ingress_envelope_signature(&env, NetworkId::Mainnet));
+        assert!(!verify_ingress_envelope_signature(&env, NetworkId::Testnet));
 
         let bytes = encode_ingress_envelope(&env);
         assert!(bytes.len() < 512);
 
         let decoded = decode_ingress_envelope(&bytes).expect("must decode");
         assert_eq!(decoded, env);
-        assert!(verify_ingress_envelope_signature(&decoded));
+        assert!(verify_ingress_envelope_signature(&decoded, NetworkId::Mainnet));
+        assert!(!verify_ingress_envelope_signature(&decoded, NetworkId::Testnet));
 
         // Test length boundaries:
         assert!(decode_ingress_envelope(&[]).is_none());
@@ -828,10 +889,28 @@ mod tests {
         let hash = [0xAA; 32];
 
         let mut p1 = sign_ingress_evidence_with_key(
-            &sk_victim, 5, 1, 100, 50_000, 10_000, 1_000, false, hash,
+            NetworkId::Mainnet,
+            &sk_victim,
+            5,
+            1,
+            100,
+            50_000,
+            10_000,
+            1_000,
+            false,
+            hash,
         );
         let p2 = sign_ingress_evidence_with_key(
-            &sk_victim, 5, 1, 100, 50_000, 10_000, 1_000, false, [0xBB; 32],
+            NetworkId::Mainnet,
+            &sk_victim,
+            5,
+            1,
+            100,
+            50_000,
+            10_000,
+            1_000,
+            false,
+            [0xBB; 32],
         );
 
         // Framing 1: tampered signature on packet 1
@@ -841,7 +920,7 @@ mod tests {
         proof_bad_sig_a.evidence_packet_a = encode_ingress_envelope(&p1);
         proof_bad_sig_a.evidence_packet_b = encode_ingress_envelope(&p2);
         assert!(
-            !proof_bad_sig_a.verify(),
+            !proof_bad_sig_a.verify_network(NetworkId::Mainnet),
             "invalid signature on packet A must be rejected"
         );
 
@@ -851,25 +930,43 @@ mod tests {
         let mut proof_bad_sig_b =
             FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p2.clone());
         let p1_good = sign_ingress_evidence_with_key(
-            &sk_victim, 5, 1, 100, 50_000, 10_000, 1_000, false, hash,
+            NetworkId::Mainnet,
+            &sk_victim,
+            5,
+            1,
+            100,
+            50_000,
+            10_000,
+            1_000,
+            false,
+            hash,
         );
         proof_bad_sig_b.evidence_packet_a = encode_ingress_envelope(&p1_good);
         proof_bad_sig_b.evidence_packet_b = encode_ingress_envelope(&p2_bad);
         assert!(
-            !proof_bad_sig_b.verify(),
+            !proof_bad_sig_b.verify_network(NetworkId::Mainnet),
             "invalid signature on packet B must be rejected"
         );
 
         // Framing 3: two different signers (attacker plants foreign packet)
         let p_foreign = sign_ingress_evidence_with_key(
-            &sk_attacker, 5, 1, 100, 50_000, 10_000, 1_000, false, [0xBB; 32],
+            NetworkId::Mainnet,
+            &sk_attacker,
+            5,
+            1,
+            100,
+            50_000,
+            10_000,
+            1_000,
+            false,
+            [0xBB; 32],
         );
         let mut proof_diff_signers =
             FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p1_good.clone());
         proof_diff_signers.evidence_packet_a = encode_ingress_envelope(&p1_good);
         proof_diff_signers.evidence_packet_b = encode_ingress_envelope(&p_foreign);
         assert!(
-            !proof_diff_signers.verify(),
+            !proof_diff_signers.verify_network(NetworkId::Mainnet),
             "different signers must never count as fraud"
         );
 
@@ -878,7 +975,7 @@ mod tests {
             FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p2.clone());
         proof_wrong_perp.perpetrator_node_id = sk_attacker.verifying_key().to_bytes();
         assert!(
-            !proof_wrong_perp.verify(),
+            !proof_wrong_perp.verify_network(NetworkId::Mainnet),
             "wrong perpetrator_node_id must be rejected"
         );
 
@@ -887,7 +984,7 @@ mod tests {
             FraudProofPayload::new_ingress_counter_conflict(p1_good.clone(), p2.clone());
         proof_corrupt.evidence_packet_a = vec![0xFF; 20];
         assert!(
-            !proof_corrupt.verify(),
+            !proof_corrupt.verify_network(NetworkId::Mainnet),
             "corrupted evidence must yield false"
         );
     }
@@ -899,10 +996,28 @@ mod tests {
         let hash = [0xAA; 32];
 
         let env_a = sign_ingress_evidence_with_key(
-            &sk_a, 5, 1, 100, 50_000, 10_000, 1_000, false, hash,
+            NetworkId::Mainnet,
+            &sk_a,
+            5,
+            1,
+            100,
+            50_000,
+            10_000,
+            1_000,
+            false,
+            hash,
         );
         let env_b = sign_ingress_evidence_with_key(
-            &sk_b, 5, 1, 100, 50_000, 10_000, 1_000, false, [0xBB; 32],
+            NetworkId::Mainnet,
+            &sk_b,
+            5,
+            1,
+            100,
+            50_000,
+            10_000,
+            1_000,
+            false,
+            [0xBB; 32],
         );
 
         // try_new_ingress_counter_conflict with mismatched gateway pubkeys must return SignerMismatch
@@ -911,9 +1026,27 @@ mod tests {
             Err(FraudBuildError::SignerMismatch)
         );
 
+        // Mismatched networks must return NetworkMismatch
+        let env_a_testnet = sign_ingress_evidence_with_key(
+            NetworkId::Testnet,
+            &sk_a,
+            5,
+            1,
+            100,
+            50_000,
+            10_000,
+            1_000,
+            false,
+            hash,
+        );
+        assert_eq!(
+            FraudProofPayload::try_new_ingress_counter_conflict(env_a.clone(), env_a_testnet.clone()),
+            Err(FraudBuildError::NetworkMismatch)
+        );
+
         // check_ingress_conflict with mismatched gateway pubkeys must return false without panicking
-        assert!(!FraudProofPayload::check_ingress_conflict(&env_a, &env_b));
-        assert!(!FraudProofPayload::check_ingress_conflict(&env_b, &env_a));
+        assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_a, &env_b));
+        assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_b, &env_a));
 
         // try_new_shard_equivocation with mismatched node IDs must return SignerMismatch
         let att_a = Attestation {

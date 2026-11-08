@@ -159,6 +159,7 @@ async fn timed_out_original_keeps_late_commit_and_retry_protection() {
             b"exact".to_vec(),
             0,
             1_000,
+            humoco_node::storage::PersistenceServiceClass::Public,
         )
         .await;
     assert!(result.is_err());
@@ -172,6 +173,8 @@ async fn timed_out_original_keeps_late_commit_and_retry_protection() {
         db.clone(),
         Arc::new(PersistenceStats::default()),
         cancel.clone(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(tokio::sync::Notify::new()),
     );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -195,7 +198,8 @@ async fn timed_out_original_keeps_late_commit_and_retry_protection() {
                 [7; 32],
                 b"retry".to_vec(),
                 0,
-                1_000
+                1_000,
+                humoco_node::storage::PersistenceServiceClass::Public,
             )
             .await
             .unwrap(),
@@ -271,7 +275,12 @@ async fn invalid_suffix_preserves_durable_prefix_and_never_returns_terminal_succ
         chain: vec![genesis.clone(), bad],
     };
     let (verdict, changed) = engine
-        .ingress_hmc_chain_lock_durable(request, IngressOrigin::ClientApi, Some(1_000))
+        .ingress_hmc_chain_lock_durable(
+            request,
+            IngressOrigin::ClientApi,
+            Some(1_000),
+            humoco_node::storage::PersistenceServiceClass::Public,
+        )
         .await;
     assert!(matches!(verdict, L2Verdict::Rejected { .. }));
     assert!(changed, "accepted prefix must be reported as progress");
@@ -343,8 +352,7 @@ async fn identical_pending_root_retries_wait_for_durable_barrier() {
     );
     assert!(db.get_hmc_lock(&tag).unwrap().is_none());
     let cancel = CancellationToken::new();
-    let worker =
-        DualTierEngine::spawn_flush_worker(rx, db.clone(), engine.stats.clone(), cancel.clone());
+    let worker = engine.spawn_worker_for_engine(rx, cancel.clone());
     assert!(matches!(first.await.unwrap().0, L2Verdict::Verified { .. }));
     assert!(matches!(
         second.await.unwrap().0,

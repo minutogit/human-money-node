@@ -570,3 +570,328 @@ async fn test_6_4_pruning_ntp_warp_protection() {
         "Prune must be rejected on forward jump >24h without F2F corroboration"
     );
 }
+
+#[tokio::test]
+async fn test_s06_05_u64_floor_median_and_peer_manager_overflow_safety() {
+    use humoco_node::network::manager::u64_floor_median;
+
+    // Edge cases for u64_floor_median:
+    assert_eq!(u64_floor_median(10, 13), 11);
+    assert_eq!(u64_floor_median(13, 10), 11);
+    assert_eq!(u64_floor_median(1 << 63, 1 << 63), 1 << 63);
+    assert_eq!(u64_floor_median(u64::MAX - 2, u64::MAX), u64::MAX - 1);
+    assert_eq!(u64_floor_median(u64::MAX, u64::MAX), u64::MAX);
+
+    // Test PeerManager::calculate_network_median_work without overflow on 2 nodes
+    let pm = PeerManager::new(vec![]);
+    pm.set_simulation_mode(true);
+    let addr1: SocketAddr = "127.0.0.1:9091".parse().unwrap();
+    let addr2: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+    let pk1 = [1u8; 32];
+    let pk2 = [2u8; 32];
+
+    // Case 1: [1 << 63, 1 << 63]
+    pm.learn_node_from_gossip_with_hrw_and_work(pk1, pk1, addr1, 0, None, 1 << 63).await;
+    pm.learn_node_from_gossip_with_hrw_and_work(pk2, pk2, addr2, 0, None, 1 << 63).await;
+    pm.set_first_seen_for_test(&pk1, Instant::now() - std::time::Duration::from_secs(25 * 3600)).await;
+    pm.set_first_seen_for_test(&pk2, Instant::now() - std::time::Duration::from_secs(25 * 3600)).await;
+    assert_eq!(pm.calculate_network_median_work(), 1 << 63);
+
+    // Case 2: [u64::MAX - 2, u64::MAX]
+    pm.set_work_score_for_test(&pk1, u64::MAX - 2).await;
+    pm.set_work_score_for_test(&pk2, u64::MAX).await;
+    assert_eq!(pm.calculate_network_median_work(), u64::MAX - 1);
+
+    // Case 3: [u64::MAX, u64::MAX]
+    pm.set_work_score_for_test(&pk1, u64::MAX).await;
+    pm.set_work_score_for_test(&pk2, u64::MAX).await;
+    assert_eq!(pm.calculate_network_median_work(), u64::MAX);
+
+    // Case 4: [10, 13]
+    pm.set_work_score_for_test(&pk1, 10).await;
+    pm.set_work_score_for_test(&pk2, 13).await;
+    assert_eq!(pm.calculate_network_median_work(), 11);
+}
+
+#[tokio::test]
+#[allow(clippy::type_complexity)]
+async fn test_s06_06_replacement_ticket_promotion_order_invariance_production_rules() {
+    let pk = [0x55u8; 32];
+    let hrw1 = [0x11u8; 32];
+    let hrw2 = [0x22u8; 32];
+    let addr: SocketAddr = "127.0.0.1:9095".parse().unwrap();
+    let local_pk = [0x99u8; 32];
+    let local_hrw = [0x88u8; 32];
+
+    let setup_node = |test_mode: &str| {
+        let pm = PeerManager::new(vec![]);
+        pm.set_min_work_floor_for_test(256);
+        pm.seed_local_ticket_age(local_pk, local_hrw, std::time::Duration::from_secs(25 * 3600));
+
+        let now = Instant::now();
+        let mature_first_seen = now - std::time::Duration::from_secs(25 * 3600);
+
+        // Seed mature & qualified initial ticket (work = 300)
+        pm.seed_persisted_ticket_state(pk, hrw1, std::time::Duration::from_secs(25 * 3600), true);
+
+        (pm, now, mature_first_seen, test_mode.to_string())
+    };
+
+    // Run 3 instances with different trigger orders:
+    // A: Heartbeat-first (learn_node_from_gossip_with_hrw_work_and_auth)
+    // B: Getter-first (get_effective_hrw_routing_id)
+    // C: Periodic-promotion-first (promote_mature_pending_hrw)
+    let modes = ["heartbeat_first", "getter_first", "periodic_promotion_first"];
+    let mut results: Vec<(
+        &str,
+        Option<[u8; 32]>,
+        u64,
+        bool,
+        usize,
+        Vec<humoco_sim_core::types::CommitteeMember>,
+        Vec<([u8; 32], [u8; 32])>,
+    )> = Vec::new();
+
+    for mode in modes {
+        let (pm, now, mature_first_seen, _) = setup_node(mode);
+
+        // 1. Initial admission: learn hrw1
+        pm.learn_node_from_gossip_with_hrw_work_and_auth_at(
+            pk,
+            hrw1,
+            addr,
+            0,
+            Some(addr),
+            300,
+            true,
+            mature_first_seen,
+        )
+        .await;
+
+        // Peer is mature and qualified
+        let info_initial = pm.get_known_node_info(&pk).await.unwrap();
+        assert!(info_initial.is_initial_admission_qualified());
+        assert_eq!(pm.get_effective_hrw_routing_id(&pk).await, Some(hrw1));
+        assert_eq!(info_initial.work_score(), 300);
+
+        // 2. Stage stronger replacement ticket hrw2 with work = 600
+        pm.learn_node_from_gossip_with_hrw_work_and_auth_at(
+            pk,
+            hrw2,
+            addr,
+            0,
+            Some(addr),
+            600,
+            true,
+            now,
+        )
+        .await;
+
+        let _info_pending = pm.get_known_node_info(&pk).await.unwrap();
+        assert_eq!(pm.get_effective_hrw_routing_id(&pk).await, Some(hrw1));
+        assert_eq!(pm.get_pending_hrw_routing_id(&pk).await, Some(hrw2));
+
+        // Fast-forward pending incubation past 24h
+        pm.set_pending_since_for_test(&pk, now - std::time::Duration::from_secs(25 * 3600)).await;
+
+        // 3. Trigger promotion in different orders
+        match mode {
+            "heartbeat_first" => {
+                // Incoming heartbeat triggers promotion in learn_node_from_gossip
+                pm.learn_node_from_gossip_with_hrw_work_and_auth_at(
+                    pk,
+                    hrw2,
+                    addr,
+                    0,
+                    Some(addr),
+                    600,
+                    true,
+                    now,
+                )
+                .await;
+            }
+            "getter_first" => {
+                // Querying effective HRW triggers promotion
+                let effective = pm.get_effective_hrw_routing_id(&pk).await;
+                assert_eq!(effective, Some(hrw2));
+            }
+            "periodic_promotion_first" => {
+                // Background daemon ticker triggers promotion
+                let promoted = pm.promote_mature_pending_hrw().await;
+                assert_eq!(promoted, 1);
+            }
+            _ => unreachable!(),
+        }
+
+        // 4. Capture state after promotion
+        let info_after = pm.get_known_node_info(&pk).await.unwrap();
+        let effective_hrw = pm.get_effective_hrw_routing_id(&pk).await;
+        let (committee, _, total) = pm.shard_committee(local_pk, local_hrw, 42).await;
+        let qualified_snapshot = pm.snapshot_qualified_tickets().await;
+
+        results.push((
+            mode,
+            effective_hrw,
+            info_after.work_score(),
+            info_after.is_initial_admission_qualified(),
+            total,
+            committee,
+            qualified_snapshot,
+        ));
+    }
+
+    // Assert that all 3 trigger orders produce identical results
+    let (_, eff_0, work_0, qual_0, total_0, comm_0, snap_0) = &results[0];
+    assert_eq!(*eff_0, Some(hrw2));
+    assert_eq!(*work_0, 600);
+    assert!(*qual_0);
+    assert_eq!(*total_0, 2);
+
+    for (mode, eff, work, qual, total, comm, snap) in &results[1..] {
+        assert_eq!(*eff, *eff_0, "Mode {mode} effective HRW mismatch");
+        assert_eq!(*work, *work_0, "Mode {mode} work score mismatch");
+        assert_eq!(*qual, *qual_0, "Mode {mode} qualification mismatch");
+        assert_eq!(*total, *total_0, "Mode {mode} total eligible mismatch");
+        assert_eq!(comm.len(), comm_0.len(), "Mode {mode} committee size mismatch");
+        assert_eq!(snap.len(), snap_0.len(), "Mode {mode} snapshot size mismatch");
+    }
+}
+
+#[tokio::test]
+async fn test_s06_06_admitted_peer_activates_replacement_ticket_over_real_quic_heartbeat() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).with_test_writer().try_init();
+    let (id_a, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine ticket a v1");
+    let (id_b, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine ticket b");
+
+    let pk_a = *id_a.node_pubkey();
+    let pk_b = *id_b.node_pubkey();
+    let hrw_a_v1 = *id_a.hrw_routing_id();
+    let hrw_b = *id_b.hrw_routing_id();
+
+    let addr_a: SocketAddr = "127.0.0.1:9851".parse().unwrap();
+    let addr_b: SocketAddr = "127.0.0.1:9852".parse().unwrap();
+
+    let cancel_b = CancellationToken::new();
+    let pm_b = Arc::new(PeerManager::with_f2f(
+        vec![(Some(pk_a), addr_a)],
+        vec![pk_a],
+    ));
+    pm_b.set_simulation_mode(true);
+    pm_b.seed_local_ticket_age(pk_b, hrw_b, std::time::Duration::from_secs(25 * 3600));
+    // Seed Node A as mature & qualified on Node B
+    pm_b.seed_persisted_ticket_state(pk_a, hrw_a_v1, std::time::Duration::from_secs(25 * 3600), true);
+
+    let transport_b = QuicTransport::bind_with_options(
+        addr_b,
+        &id_b,
+        pm_b.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_b.clone(),
+    )
+    .unwrap();
+    let _accept_b = transport_b.spawn_accept_loop();
+
+    let cancel_a = CancellationToken::new();
+    let pm_a = Arc::new(PeerManager::with_f2f(
+        vec![(Some(pk_b), addr_b)],
+        vec![pk_b],
+    ));
+    pm_a.set_simulation_mode(true);
+
+    let shared_id_a = Arc::new(parking_lot::RwLock::new(id_a.clone()));
+    let transport_a = QuicTransport::bind_with_options(
+        addr_a,
+        &id_a,
+        pm_a.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_a.clone(),
+    )
+    .unwrap()
+    .with_shared_identity(shared_id_a.clone());
+    let _accept_a = transport_a.spawn_accept_loop();
+
+    // 1. Node A sends signed QUIC heartbeat with initial ticket hrw_a_v1
+    transport_a
+        .send_heartbeat_to(addr_b, addr_a, 1, 0, 0, 1000, vec![])
+        .await
+        .unwrap();
+
+    // Deterministically await Node B learning Node A
+    let deadline = Instant::now() + std::time::Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if pm_b.get_known_node_info(&pk_a).await.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Node B must recognize Node A as admitted and committee-eligible with hrw_a_v1
+    assert_eq!(pm_b.get_effective_hrw_routing_id(&pk_a).await, Some(hrw_a_v1));
+    let (comm1, _, total1) = pm_b.shard_committee(pk_b, hrw_b, 42).await;
+    assert_eq!(total1, 2, "Node A and Node B must both be committee eligible");
+    assert!(comm1.iter().any(|m| m.node_pubkey == pk_a && m.hrw_routing_id == hrw_a_v1));
+
+    // 2. Node A mines a stronger replacement ticket
+    let (id_a_v2, _) = id_a
+        .mine_ticket(id_a.work_score() + 1, 1_750_000_000, Some(500))
+        .expect("mine ticket a v2");
+    let hrw_a_v2 = *id_a_v2.hrw_routing_id();
+    assert_ne!(hrw_a_v1, hrw_a_v2);
+    assert!(id_a_v2.work_score() > id_a.work_score());
+
+    // Update shared identity on Node A
+    *shared_id_a.write() = id_a_v2.clone();
+
+    // 3. Node A sends signed QUIC heartbeat with replacement ticket
+    transport_a
+        .send_heartbeat_to(addr_b, addr_a, 2, 0, 0, 2000, vec![])
+        .await
+        .unwrap();
+
+    // Deterministically await Node B staging hrw_a_v2 as pending
+    let deadline2 = Instant::now() + std::time::Duration::from_secs(3);
+    while Instant::now() < deadline2 {
+        if pm_b.get_pending_hrw_routing_id(&pk_a).await.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Node B must have staged hrw_a_v2 as pending while hrw_a_v1 remains active
+    assert_eq!(pm_b.get_effective_hrw_routing_id(&pk_a).await, Some(hrw_a_v1));
+    assert_eq!(pm_b.get_pending_hrw_routing_id(&pk_a).await, Some(hrw_a_v2));
+    assert!(pm_b.hrw_incubation_remaining(&pk_a).await.is_some());
+
+    // 4. Fast-forward pending incubation past 24h
+    pm_b.set_pending_since_for_test(&pk_a, Instant::now() - std::time::Duration::from_secs(25 * 3600)).await;
+
+    // 5. Node A sends next signed QUIC heartbeat -> triggers promotion!
+    transport_a
+        .send_heartbeat_to(addr_b, addr_a, 3, 0, 0, 3000, vec![])
+        .await
+        .unwrap();
+
+    // Deterministically await promotion
+    let deadline3 = Instant::now() + std::time::Duration::from_secs(3);
+    while Instant::now() < deadline3 {
+        if pm_b.get_effective_hrw_routing_id(&pk_a).await == Some(hrw_a_v2) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Node B now has hrw_a_v2 active, and Node A REMAINS committee eligible!
+    assert_eq!(pm_b.get_effective_hrw_routing_id(&pk_a).await, Some(hrw_a_v2));
+    assert_eq!(pm_b.get_pending_hrw_routing_id(&pk_a).await, None);
+
+    let (comm2, _, total2) = pm_b.shard_committee(pk_b, hrw_b, 42).await;
+    assert_eq!(total2, 2, "Node A must remain committee eligible with replacement ticket");
+    assert!(comm2.iter().any(|m| m.node_pubkey == pk_a && m.hrw_routing_id == hrw_a_v2));
+
+    cancel_a.cancel();
+    cancel_b.cancel();
+}

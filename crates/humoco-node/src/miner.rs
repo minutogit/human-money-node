@@ -342,8 +342,8 @@ impl BackgroundMiner {
 
                         if let Some(storage) = &self.storage {
                             let now_ms = self.peer_manager.net_time_ms();
-                            let _ = storage.record_ticket_observations_if_absent(&[(
-                                pubkey, new_hrw, now_ms,
+                            let _ = storage.record_ticket_observations(&[(
+                                pubkey, new_hrw, now_ms, false,
                             )]);
                         }
 

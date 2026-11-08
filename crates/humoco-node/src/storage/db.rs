@@ -130,8 +130,25 @@ pub const TABLE_BANNED_NODES: TableDefinition<&[u8; 32], u64> =
     TableDefinition::new("banned_nodes");
 pub const TABLE_SYSTEM_AUDIT_EVENTS: TableDefinition<u64, &[u8]> =
     TableDefinition::new("system_audit_events");
-pub const TABLE_TICKET_OBSERVATIONS: TableDefinition<&[u8; 64], u64> =
+pub const TABLE_TICKET_OBSERVATIONS: TableDefinition<&[u8; 64], [u8; 9]> =
     TableDefinition::new("ticket_observations");
+pub const TABLE_INGRESS_ACCOUNTING: TableDefinition<u8, &[u8]> =
+    TableDefinition::new("ingress_accounting_state");
+pub const TABLE_VIP_CREDENTIALS: TableDefinition<&[u8; 32], &[u8; 32]> =
+    TableDefinition::new("vip_credentials");
+
+/// Persisted VIP credential record mapping `(token_hash, account_tag)` (S05-12 / INV-1302).
+pub type VipCredentialRecord = ([u8; 32], [u8; 32]);
+
+/// Persistent ingress accounting state tracking local day sequence and cumulative consumption (S05-11).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedIngressAccountingState {
+    pub current_day: u64,
+    pub reserved_epoch_seq: u64,
+    pub last_timestamp_ms: u64,
+    pub cumulative_micro_byte_years: u64,
+    pub prev_day_final_bytes: u64,
+}
 
 /// Node-local original signing protection. Never included in shard synchronization.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -256,6 +273,8 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_BANNED_NODES)?;
             let _ = write_txn.open_table(TABLE_SYSTEM_AUDIT_EVENTS)?;
             let _ = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+            let _ = write_txn.open_table(TABLE_INGRESS_ACCOUNTING)?;
+            let _ = write_txn.open_table(TABLE_VIP_CREDENTIALS)?;
         }
         roots::initialize(&write_txn)?;
         let corrupt = signing::initialize(&write_txn, empty_database)?;
@@ -750,7 +769,15 @@ impl RedbStorage {
                 };
 
                 // Anti-framing check: verify that the evidence contains genuine Ed25519 signatures from the accused key
-                if !crate::network::transport::verify_equivocation_first_party(&vk, &proof) {
+                if !crate::network::transport::verify_equivocation_first_party_network(
+                    humoco_sim_core::types::NetworkId::Mainnet,
+                    &vk,
+                    &proof,
+                ) && !crate::network::transport::verify_equivocation_first_party_network(
+                    humoco_sim_core::types::NetworkId::Testnet,
+                    &vk,
+                    &proof,
+                ) {
                     warn!(
                         offender = %hex::encode(offender),
                         "Skipping unverified or forged evidence packet during ban reconstruction"
@@ -808,55 +835,57 @@ impl RedbStorage {
     }
 }
 
-/// Persisted `(node_pubkey, hrw_routing_id, first_seen_ms)` maturation record.
-pub type TicketObservationRow = ([u8; 32], [u8; 32], u64);
+/// Persisted `(node_pubkey, hrw_routing_id, first_seen_ms, admission_qualified)` maturation record.
+pub type TicketObservationRow = ([u8; 32], [u8; 32], u64, bool);
 
 impl RedbStorage {
-    /// Persists first-seen timestamps (`first_seen_ms`) for `(node_pubkey, hrw_routing_id)` pairs
-    /// only when absent so maturation history survives daemon restarts without resetting existing
-    /// or shortening newly mined 24h incubation windows (INV-0303).
-    pub fn record_ticket_observations_if_absent(
+    /// Persists first-seen timestamps (`first_seen_ms`) and admission qualification
+    /// for `(node_pubkey, hrw_routing_id)` pairs, preserving earliest `first_seen_ms`
+    /// and latching `admission_qualified = old_qualified || new_qualified` (INV-0303, INV-0703).
+    pub fn record_ticket_observations(
         &self,
         entries: &[TicketObservationRow],
     ) -> Result<usize, StorageError> {
         if entries.is_empty() {
             return Ok(0);
         }
-        // Fast read pass to skip write transaction if all entries are already recorded
-        let read_txn = self.db.begin_read()?;
-        let mut missing = Vec::new();
+        let write_txn = self.db.begin_write()?;
+        let mut modified = 0usize;
         {
-            let table = read_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
-            for &(pubkey, hrw, seen_ms) in entries {
+            let mut table = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+            for &(pubkey, hrw, seen_ms, qualified) in entries {
                 let mut key = [0u8; 64];
                 key[..32].copy_from_slice(&pubkey);
                 key[32..].copy_from_slice(&hrw);
-                if table.get(&key)?.is_none() {
-                    missing.push((key, seen_ms));
-                }
-            }
-        }
-        drop(read_txn);
-        if missing.is_empty() {
-            return Ok(0);
-        }
 
-        let write_txn = self.db.begin_write()?;
-        let mut inserted = 0usize;
-        {
-            let mut table = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
-            for (key, seen_ms) in missing {
-                if table.get(&key)?.is_none() {
-                    table.insert(&key, seen_ms)?;
-                    inserted += 1;
+                let (final_seen_ms, final_qualified) = if let Some(guard) = table.get(&key)? {
+                    let old_val = guard.value();
+                    let old_ms = u64::from_le_bytes(old_val[0..8].try_into().unwrap_or([0u8; 8]));
+                    let old_qualified = old_val[8] != 0;
+                    (old_ms.min(seen_ms), old_qualified || qualified)
+                } else {
+                    (seen_ms, qualified)
+                };
+
+                let mut new_val = [0u8; 9];
+                new_val[0..8].copy_from_slice(&final_seen_ms.to_le_bytes());
+                new_val[8] = if final_qualified { 1 } else { 0 };
+
+                let needs_write = match table.get(&key)? {
+                    Some(guard) => guard.value() != new_val,
+                    None => true,
+                };
+                if needs_write {
+                    table.insert(&key, new_val)?;
+                    modified += 1;
                 }
             }
         }
         write_txn.commit()?;
-        Ok(inserted)
+        Ok(modified)
     }
 
-    /// Loads all persisted `(node_pubkey, hrw_routing_id, first_seen_ms)` maturation entries.
+    /// Loads all persisted `(node_pubkey, hrw_routing_id, first_seen_ms, admission_qualified)` maturation entries.
     pub fn all_ticket_observations(&self) -> Result<Vec<TicketObservationRow>, StorageError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
@@ -877,7 +906,10 @@ impl RedbStorage {
             let mut hrw = [0u8; 32];
             pubkey.copy_from_slice(&raw[..32]);
             hrw.copy_from_slice(&raw[32..]);
-            results.push((pubkey, hrw, v_guard.value()));
+            let val = v_guard.value();
+            let seen_ms = u64::from_le_bytes(val[0..8].try_into().unwrap_or([0u8; 8]));
+            let qualified = val[8] != 0;
+            results.push((pubkey, hrw, seen_ms, qualified));
         }
         Ok(results)
     }
@@ -965,6 +997,94 @@ impl RedbStorage {
         };
         write_txn.commit()?;
         Ok(remaining)
+    }
+
+    /// Loads the persisted ingress accounting state, or None if not initialized (S05-11).
+    pub fn load_ingress_accounting_state(
+        &self,
+    ) -> Result<Option<PersistedIngressAccountingState>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(TABLE_INGRESS_ACCOUNTING) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        match table.get(0u8)? {
+            Some(v) => {
+                let bytes = v.value();
+                let state: PersistedIngressAccountingState = bincode::deserialize(bytes)?;
+                Ok(Some(state))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Durably persists ingress accounting state with monotonic high-water check (S05-11).
+    pub fn store_ingress_accounting_state(
+        &self,
+        state: &PersistedIngressAccountingState,
+    ) -> Result<(), StorageError> {
+        let mut write_txn = self.db.begin_write()?;
+        write_txn.set_durability(redb::Durability::Immediate);
+        {
+            let mut table = write_txn.open_table(TABLE_INGRESS_ACCOUNTING)?;
+            if let Some(existing) = table.get(0u8)? {
+                let existing_state: PersistedIngressAccountingState =
+                    bincode::deserialize(existing.value())?;
+                // Monotonic high-water check so older batches can never regress stored (current_day, reserved_epoch_seq)
+                if state.current_day < existing_state.current_day
+                    || (state.current_day == existing_state.current_day
+                        && state.reserved_epoch_seq < existing_state.reserved_epoch_seq)
+                    || (state.current_day == existing_state.current_day
+                        && state.reserved_epoch_seq == existing_state.reserved_epoch_seq
+                        && state.cumulative_micro_byte_years <= existing_state.cumulative_micro_byte_years)
+                {
+                    return Ok(());
+                }
+            }
+            let bytes = bincode::serialize(state)?;
+            table.insert(0u8, bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Stores a hashed VIP credential mapped to its funded account tag (S05-12 / INV-1302).
+    pub fn put_vip_credential(
+        &self,
+        token_hash: &[u8; 32],
+        account_tag: &[u8; 32],
+    ) -> Result<(), StorageError> {
+        let mut write_txn = self.db.begin_write()?;
+        write_txn.set_durability(redb::Durability::Immediate);
+        {
+            let mut table = write_txn.open_table(TABLE_VIP_CREDENTIALS)?;
+            table.insert(token_hash, account_tag)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Loads all persisted hashed VIP credentials (S05-12).
+    pub fn all_vip_credentials(&self) -> Result<Vec<VipCredentialRecord>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(TABLE_VIP_CREDENTIALS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut results = Vec::new();
+        for item in table.iter()? {
+            let (k, v) = match item {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warn!("Corrupt entry in TABLE_VIP_CREDENTIALS iterator: {}", err);
+                    continue;
+                }
+            };
+            results.push((*k.value(), *v.value()));
+        }
+        Ok(results)
     }
 
     /// Scans active unexpired HMC locks whose canonical voucher root belongs to `shard_id`.
@@ -1890,6 +2010,22 @@ impl RedbStorage {
             for item in src_tickets.iter()? {
                 let (k, v) = item?;
                 dst_tickets.insert(k.value(), v.value())?;
+            }
+
+            // 8c. TABLE_INGRESS_ACCOUNTING
+            let src_ingress = read_txn.open_table(TABLE_INGRESS_ACCOUNTING)?;
+            let mut dst_ingress = write_txn.open_table(TABLE_INGRESS_ACCOUNTING)?;
+            for item in src_ingress.iter()? {
+                let (k, v) = item?;
+                dst_ingress.insert(k.value(), v.value())?;
+            }
+
+            // 8d. TABLE_VIP_CREDENTIALS
+            let src_vip = read_txn.open_table(TABLE_VIP_CREDENTIALS)?;
+            let mut dst_vip = write_txn.open_table(TABLE_VIP_CREDENTIALS)?;
+            for item in src_vip.iter()? {
+                let (k, v) = item?;
+                dst_vip.insert(k.value(), v.value())?;
             }
 
             let support_src = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;

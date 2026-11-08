@@ -434,7 +434,8 @@ async fn signing_release_under_fault(fault: u8) {
     let ttl_s = root_valid_until.saturating_sub(now) / 1000;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
 
-    let digest_a = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_a = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender_pubkey,
         0,
         0,
@@ -581,7 +582,8 @@ async fn signing_release_under_fault(fault: u8) {
         ram.insert_lock_for_test(parent_hex.clone(), L2LockEntry::from(&lock_b_req));
     }
 
-    let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender_pubkey,
         0,
         2,

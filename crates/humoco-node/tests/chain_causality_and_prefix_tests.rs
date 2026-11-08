@@ -295,7 +295,8 @@ async fn quic_bad_suffix_reports_step_and_preserves_committed_prefix() {
             .unwrap();
         let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600) * 3;
         let last = req.chain.last().unwrap().clone();
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::Mainnet,
             client.node_pubkey(),
             0,
             0,
@@ -428,6 +429,7 @@ async fn historical_prefix_requires_complete_authentic_path_to_fresh_wallet_tip(
                 request.clone(),
                 humoco_node::storage::IngressOrigin::ClientApi,
                 Some(now),
+                humoco_node::storage::PersistenceServiceClass::Public,
             )
             .await;
         let prefix_tag = request.chain[1].ds_tag.as_ref().unwrap();

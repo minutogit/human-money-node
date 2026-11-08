@@ -59,7 +59,8 @@ async fn relay_probe(signed: bool) {
     let conn = a.connect_peer(ba).await.unwrap();
     let time = mb.net_time_ms();
     let signature = if signed {
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::Mainnet,
             victim.node_pubkey(),
             0,
             0,
@@ -157,7 +158,8 @@ async fn a09_cli_revoke_must_produce_peer_acceptable_self_evidence() {
         value.value().to_vec()
     };
     let proof: humoco_sim_core::fraud::FraudProofPayload = bincode::deserialize(&raw).unwrap();
-    let strict = humoco_node::network::transport::verify_equivocation_first_party(
+    let strict = humoco_node::network::transport::verify_equivocation_first_party_network(
+        humoco_sim_core::types::NetworkId::Mainnet,
         identity.verifying_key(),
         &proof,
     );
@@ -370,7 +372,8 @@ async fn a10_verified_ban_must_survive_closed_persistence_worker() {
     );
     assert!(proof.verify());
     assert!(
-        humoco_node::network::transport::verify_equivocation_first_party(
+        humoco_node::network::transport::verify_equivocation_first_party_network(
+            humoco_sim_core::types::NetworkId::Mainnet,
             victim.verifying_key(),
             &proof
         )

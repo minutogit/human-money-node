@@ -329,7 +329,8 @@ async fn real_quic_refreshed_legacy_timestamp_is_rejected() {
     let expiry = now + 600_000;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
     let sender = *source.identity.node_pubkey();
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender,
         0,
         1,

@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use humoco_node::identity::{build_self_revocation_fraud_proof, NodeIdentity};
-use humoco_node::network::transport::verify_equivocation_first_party;
+use humoco_node::network::transport::verify_equivocation_first_party_network;
 use humoco_node::network::{
     build_quinn_server_config_with_network, send_unidirectional_frame, DefaultRequestHandler,
     HeartbeatWirePayload, NodeRequestHandler, PeerManager, QuicTransport, RequestHandler,
@@ -651,7 +651,8 @@ async fn test_s04_r5_fraud_forwarding_priority_under_heartbeat_saturation() {
         humoco_sim_core::types::NetworkId::default(),
         2000,
     );
-    assert!(verify_equivocation_first_party(
+    assert!(verify_equivocation_first_party_network(
+        humoco_sim_core::types::NetworkId::default(),
         victim.verifying_key(),
         &fraud_proof
     ));

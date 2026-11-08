@@ -3,7 +3,6 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -41,7 +40,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::error::NodeError;
 use crate::identity::NodeIdentity;
 use crate::network::framing::{
-    checked_payload_len, read_frame, read_frame_with_timeout, write_frame,
+    checked_payload_len, read_frame_with_timeout, write_frame,
 };
 use crate::network::manager::PeerManager;
 use crate::network::tls::extract_peer_identity_from_connection;
@@ -133,26 +132,20 @@ impl RequestHandler for DefaultRequestHandler {
 /// A node is slashed ONLY on irrefutable cryptographic self-proof: two genuine
 /// Ed25519 signatures by the accused key within the same network universe (Testnet or Mainnet).
 /// Simulator BLAKE3 mocks, hearsay gossip, or third-party claims NEVER trigger a ban. Each pillar enforces:
+/// Network-aware strict first-party verifier (A02-01 / S07-11).
+///
+/// Restricts verification to the specified network domain. Both envelopes must match
+/// `expected_network` and pass signature verification under that domain.
+///
+/// Supported proof types:
 /// - ShardEquivocation: both attestations verify under `vk` against the
 ///   parent_lock-bound payload digest (`compute_attestation_payload_digest`).
-///   Anti-framing: `proof.perpetrator_node_id` MUST equal `vk.to_bytes()`.
-///   Network-awareness: both signatures must belong to the SAME network universe (Testnet or Mainnet).
+///   - Anti-framing: `proof.perpetrator_node_id` MUST equal `vk.to_bytes()`.
+///   - Network-awareness: both signatures must belong to the SAME network universe (Testnet or Mainnet).
 /// - IngressCounterConflict: both envelopes verify under `vk`, and both
 ///   `gateway_pubkey` fields as well as `proof.perpetrator_node_id` MUST equal `vk` (framing with foreign packets fails).
-pub fn verify_equivocation_first_party(
-    vk: &ed25519_dalek::VerifyingKey,
-    proof: &humoco_sim_core::fraud::FraudProofPayload,
-) -> bool {
-    verify_equivocation_first_party_network(None, vk, proof)
-}
-
-/// Network-aware strict first-party verifier (A02-01).
-///
-/// When `expected_network` is `Some(net)`, restricts verification to that network domain.
-/// When `None`, accepts genuine proofs from either network, provided both signatures
-/// belong to the SAME network universe.
 pub fn verify_equivocation_first_party_network(
-    expected_network: Option<humoco_sim_core::types::NetworkId>,
+    expected_network: humoco_sim_core::types::NetworkId,
     vk: &ed25519_dalek::VerifyingKey,
     proof: &humoco_sim_core::fraud::FraudProofPayload,
 ) -> bool {
@@ -178,12 +171,15 @@ pub fn verify_equivocation_first_party_network(
             if a.gateway_pubkey != vk_bytes || b.gateway_pubkey != vk_bytes {
                 return false;
             }
-            if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&a)
-                || !humoco_sim_core::fraud::verify_ingress_envelope_signature(&b)
+            if a.network_id != expected_network || b.network_id != expected_network {
+                return false;
+            }
+            if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&a, expected_network)
+                || !humoco_sim_core::fraud::verify_ingress_envelope_signature(&b, expected_network)
             {
                 return false;
             }
-            proof.verify()
+            proof.verify_network(expected_network)
         }
         humoco_sim_core::fraud::FraudProofPillar::ShardEquivocation => {
             let a = match humoco_sim_core::fraud::decode_attestation(&proof.evidence_packet_a) {
@@ -228,24 +224,14 @@ pub fn verify_equivocation_first_party_network(
             // Both signatures must belong to ONE network. Independent existential
             // checks would combine lawful originals from unrelated networks.
             let networks: &[(&[u8], &[u8])] = match expected_network {
-                Some(humoco_sim_core::types::NetworkId::Mainnet) => &[(
+                humoco_sim_core::types::NetworkId::Mainnet => &[(
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
                 )],
-                Some(humoco_sim_core::types::NetworkId::Testnet) => &[(
+                humoco_sim_core::types::NetworkId::Testnet => &[(
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
                     humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
                 )],
-                None => &[
-                    (
-                        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_MAINNET,
-                        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_MAINNET,
-                    ),
-                    (
-                        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_PROV_TESTNET,
-                        humoco_sim_core::crypto::HUMOCO_V1_APPROVE_FINAL_TESTNET,
-                    ),
-                ],
             };
 
             networks.iter().any(|(provisional, final_domain)| {
@@ -400,7 +386,7 @@ impl NodeRequestHandler {
         };
 
         let is_first_party_valid =
-            verify_equivocation_first_party_network(Some(self.network_id), &vk, &proof);
+            verify_equivocation_first_party_network(self.network_id, &vk, &proof);
         if !is_first_party_valid {
             warn!(
                 offender = %hex::encode(offender),
@@ -1034,7 +1020,8 @@ impl RequestHandler for NodeRequestHandler {
                 // 7. Epoch-bound signature verification and under-reporting check.
                 // The envelope digest commits to (epoch_day, epoch_seq), so replay
                 // across days or reordering within a day invalidates the signature.
-                let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new(
+                    this.network_id,
                     sender_pubkey,
                     envelope_epoch_day,
                     envelope_epoch_seq,
@@ -1047,7 +1034,7 @@ impl RequestHandler for NodeRequestHandler {
                     sender_signature,
                 );
 
-                if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
+                if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr, this.network_id) {
                     warn!(sender = %hex::encode(sender_pubkey), "LockVerifyRequest rejected: invalid ingress envelope signature");
                     let resp_header = WireHeader::new(
                         MsgType::LockVerifyResponse as u16,
@@ -1075,7 +1062,9 @@ impl RequestHandler for NodeRequestHandler {
                 if let Some(pm) = peer_manager.as_ref() {
                     if let Some(prev) = pm.get_node_write_evidence(&sender_pubkey).await {
                         if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
-                            &prev, &curr,
+                            this.network_id,
+                            &prev,
+                            &curr,
                         ) {
                             warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: under-reporting detected in LockVerifyRequest! Slashing perpetrator.");
                             let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
@@ -1195,14 +1184,11 @@ impl RequestHandler for NodeRequestHandler {
                             }
                             let tag = bs58::encode(req.transaction_hash).into_string();
                             let (verdict, _) = engine
-                                .ingress_hmc_lock_durable(
+                                .ingress_hmc_lock_durable_internal(
                                     tag,
                                     crate::api::hmc::L2LockEntry::from(&req),
                                     crate::storage::IngressOrigin::ClientApi,
                                     Some(now_ms),
-                                    None,
-                                    None,
-                                    None,
                                 )
                                 .await;
                             let bytes = serde_json::to_vec(&verdict)
@@ -1235,6 +1221,7 @@ impl RequestHandler for NodeRequestHandler {
                                     chain_req.clone(),
                                     crate::storage::IngressOrigin::ClientApi,
                                     Some(now_ms),
+                                    crate::storage::PersistenceServiceClass::Internal,
                                 )
                                 .await;
                             match verdict {
@@ -1324,6 +1311,7 @@ impl RequestHandler for NodeRequestHandler {
                                             candidate,
                                             final_status,
                                             now_ms,
+                                            crate::storage::PersistenceServiceClass::Internal,
                                         )
                                         .await;
                                     let resp_bytes = match retained {
@@ -1400,14 +1388,11 @@ impl RequestHandler for NodeRequestHandler {
                             // INV-1202: validate the ingress time window at the shard with
                             // the current network time (never blindly trust gateway time).
                             let (verdict, is_new) = engine
-                                .ingress_hmc_lock_durable(
+                                .ingress_hmc_lock_durable_internal(
                                     lookup_tag.clone(),
                                     entry.clone(),
                                     crate::storage::IngressOrigin::ClientApi,
                                     Some(now_ms),
-                                    None,
-                                    None,
-                                    None,
                                 )
                                 .await;
 
@@ -1483,6 +1468,7 @@ impl RequestHandler for NodeRequestHandler {
                                             candidate,
                                             final_status,
                                             now_ms,
+                                            crate::storage::PersistenceServiceClass::Internal,
                                         )
                                         .await;
                                     let resp_bytes = match retained {
@@ -1638,7 +1624,8 @@ impl RequestHandler for NodeRequestHandler {
                         return Ok((resp_header, Vec::new()));
                     }
 
-                    let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                    let curr = humoco_sim_core::fraud::IngressEnvelopeEvidence::new(
+                        this.network_id,
                         sender_pubkey,
                         0,
                         0,
@@ -1651,7 +1638,7 @@ impl RequestHandler for NodeRequestHandler {
                         sender_signature,
                     );
 
-                    if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr) {
+                    if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&curr, this.network_id) {
                         warn!(sender = %hex::encode(sender_pubkey), "StatusQuery rejected: invalid ingress envelope signature");
                         let resp_header = WireHeader::new(
                             MsgType::StatusResponse as u16,
@@ -1666,7 +1653,9 @@ impl RequestHandler for NodeRequestHandler {
                     if let Some(pm) = peer_manager.as_ref() {
                         if let Some(prev) = pm.get_node_read_evidence(&sender_pubkey).await {
                             if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
-                                &prev, &curr,
+                                this.network_id,
+                                &prev,
+                                &curr,
                             ) {
                                 warn!(sender = %hex::encode(sender_pubkey), "CRITICAL FRAUD: read under-reporting detected in StatusQuery! Slashing perpetrator.");
                                 let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, curr.clone());
@@ -2352,7 +2341,8 @@ impl RequestHandler for NodeRequestHandler {
 
                     if hb.signature != [0u8; 64] {
                         let announcement_hash = hb.compute_announcement_hash(this.network_id);
-                        let candidate_ev = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                        let candidate_ev = humoco_sim_core::fraud::IngressEnvelopeEvidence::new(
+                            this.network_id,
                             hb.node_id,
                             0,
                             0,
@@ -2364,7 +2354,7 @@ impl RequestHandler for NodeRequestHandler {
                             announcement_hash,
                             hb.signature,
                         );
-                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&candidate_ev)
+                        if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&candidate_ev, this.network_id)
                         {
                             warn!(node = %hex::encode(hb.node_id), "Heartbeat rejected: invalid signature");
                             return Ok(());
@@ -2374,7 +2364,9 @@ impl RequestHandler for NodeRequestHandler {
                         if let Some(pm) = peer_manager.as_ref() {
                             if let Some(prev) = pm.get_node_write_evidence(&hb.node_id).await {
                                 if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
-                                    &prev, &ev_write,
+                                    this.network_id,
+                                    &prev,
+                                    &ev_write,
                                 ) {
                                     warn!(node = %hex::encode(hb.node_id), "CRITICAL FRAUD: under-reporting detected in Heartbeat! Slashing perpetrator.");
                                     let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev_write.clone());
@@ -2398,7 +2390,8 @@ impl RequestHandler for NodeRequestHandler {
                             }
                             pm.update_node_write_evidence(&hb.node_id, ev_write).await;
 
-                            let ev_read = humoco_sim_core::fraud::IngressEnvelopeEvidence::new_v2(
+                            let ev_read = humoco_sim_core::fraud::IngressEnvelopeEvidence::new(
+                                this.network_id,
                                 hb.node_id,
                                 0,
                                 0,
@@ -2412,7 +2405,9 @@ impl RequestHandler for NodeRequestHandler {
                             );
                             if let Some(prev) = pm.get_node_read_evidence(&hb.node_id).await {
                                 if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
-                                    &prev, &ev_read,
+                                    this.network_id,
+                                    &prev,
+                                    &ev_read,
                                 ) {
                                     warn!(node = %hex::encode(hb.node_id), "CRITICAL FRAUD: read under-reporting detected in Heartbeat! Slashing perpetrator.");
                                     let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev_read.clone());
@@ -2440,7 +2435,7 @@ impl RequestHandler for NodeRequestHandler {
 
                     if let Some(pm) = peer_manager.as_ref() {
                         for ev in hb.piggyback_observations.into_iter().take(2) {
-                            if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev) {
+                            if !humoco_sim_core::fraud::verify_ingress_envelope_signature(&ev, this.network_id) {
                                 warn!(gateway = %hex::encode(ev.gateway_pubkey), "Piggybacked evidence ignored: invalid signature");
                                 continue;
                             }
@@ -2448,7 +2443,11 @@ impl RequestHandler for NodeRequestHandler {
 
                             if ev.is_read {
                                 if let Some(prev) = pm.get_node_read_evidence(&gw_pub).await {
-                                    if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &ev) {
+                                    if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
+                                        this.network_id,
+                                        &prev,
+                                        &ev,
+                                    ) {
                                         warn!(gateway = %hex::encode(gw_pub), "CRITICAL FRAUD: read under-reporting detected from piggyback observation! Slashing perpetrator.");
                                         let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev.clone());
                                         let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
@@ -2470,7 +2469,11 @@ impl RequestHandler for NodeRequestHandler {
                                 }
                             } else {
                                 if let Some(prev) = pm.get_node_write_evidence(&gw_pub).await {
-                                    if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(&prev, &ev) {
+                                    if humoco_sim_core::fraud::FraudProofPayload::check_ingress_conflict(
+                                        this.network_id,
+                                        &prev,
+                                        &ev,
+                                    ) {
                                         warn!(gateway = %hex::encode(gw_pub), "CRITICAL FRAUD: write under-reporting detected from piggyback observation! Slashing perpetrator.");
                                         let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(prev, ev.clone());
                                         let evidence_bytes = bincode::serialize(&proof).unwrap_or_default();
@@ -2521,6 +2524,7 @@ pub struct QuicTransport {
     outbound_forwarder_semaphore: Arc<Semaphore>,
     fraud_forwarder_semaphore: Arc<Semaphore>,
     handler_timeout: Arc<std::sync::atomic::AtomicU64>,
+    stream_read_timeout: Arc<std::sync::atomic::AtomicU64>,
 }
 
 async fn persist_fraud(
@@ -2637,6 +2641,25 @@ impl QuicTransport {
         self.is_sync_ready.clone()
     }
 
+    /// Sets the stream read timeout for testing (S04-17).
+    #[doc(hidden)]
+    pub fn set_stream_read_timeout_for_test(&self, dur: std::time::Duration) {
+        self.stream_read_timeout
+            .store(dur.as_millis() as u64, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Returns the number of available shard stream permits for testing (S04-17).
+    #[doc(hidden)]
+    pub fn shard_streams_available_for_test(&self) -> usize {
+        self.shard_streams.available_permits()
+    }
+
+    /// Returns the number of available sync stream permits for testing (S04-17).
+    #[doc(hidden)]
+    pub fn sync_streams_available_for_test(&self) -> usize {
+        self.sync_streams.available_permits()
+    }
+
     /// Binds a QUIC endpoint on the specified socket address using the NodeIdentity.
     pub fn bind(addr: SocketAddr, identity: &NodeIdentity) -> Result<Self, NodeError> {
         Self::bind_with_options(
@@ -2715,6 +2738,9 @@ impl QuicTransport {
             fraud_forwarder_semaphore: Arc::new(Semaphore::new(OUTBOUND_FRAUD_FORWARDER_LIMIT)),
             handler_timeout: Arc::new(std::sync::atomic::AtomicU64::new(
                 DEFAULT_HANDLER_TIMEOUT.as_millis() as u64,
+            )),
+            stream_read_timeout: Arc::new(std::sync::atomic::AtomicU64::new(
+                crate::network::framing::DEFAULT_STREAM_READ_TIMEOUT.as_millis() as u64,
             )),
         };
 
@@ -3383,7 +3409,7 @@ impl QuicTransport {
             return;
         }
 
-        let all_targets = self.peer_manager.active_f2f_target_addrs().await;
+        let all_targets = self.peer_manager.all_f2f_target_addrs().await;
         let mut candidates: Vec<SocketAddr> = all_targets
             .into_iter()
             .filter(|a| *a != sender_addr)
@@ -3959,6 +3985,7 @@ impl QuicTransport {
                                 let shard_pool = transport.shard_streams.clone();
                                 let cancel_token = transport.cancel_token.clone();
                                 let handler_timeout_ref = transport.handler_timeout.clone();
+                                let stream_read_timeout_ref = transport.stream_read_timeout.clone();
                                 transport.tasks.spawn(async move {
                                     let _lease = lease;
                                     let _permit = match sem.try_acquire_owned() {
@@ -3971,12 +3998,15 @@ impl QuicTransport {
                                             return;
                                         }
                                     };
+                                    let stream_read_timeout = std::time::Duration::from_millis(
+                                        stream_read_timeout_ref.load(std::sync::atomic::Ordering::Acquire),
+                                    );
                                     let read_res = tokio::select! {
                                         biased;
                                         _ = cancel_token.cancelled() => return,
                                         res = crate::network::framing::read_frame_admitted(
                                             &mut recv,
-                                            crate::network::framing::DEFAULT_STREAM_READ_TIMEOUT,
+                                            stream_read_timeout,
                                             Some((sync_pool, shard_pool))
                                         ) => res,
                                     };
@@ -4127,6 +4157,7 @@ impl QuicTransport {
                                 let conn_clone = conn.clone();
                                 let transport_clone = transport.clone();
                                 let cancel_token = transport.cancel_token.clone();
+                                let stream_read_timeout_ref = transport.stream_read_timeout.clone();
                                 transport.tasks.spawn(async move {
                                     let _lease = lease;
                                     let _permit = match sem.try_acquire_owned() {
@@ -4139,10 +4170,13 @@ impl QuicTransport {
                                             return;
                                         }
                                     };
+                                    let stream_read_timeout = std::time::Duration::from_millis(
+                                        stream_read_timeout_ref.load(std::sync::atomic::Ordering::Acquire),
+                                    );
                                     let read_res = tokio::select! {
                                         biased;
                                         _ = cancel_token.cancelled() => return,
-                                        res = read_frame(&mut recv) => res,
+                                        res = crate::network::framing::read_frame_with_timeout(&mut recv, stream_read_timeout) => res,
                                     };
                                     match read_res {
                                         Ok((header, payload)) => {
@@ -4329,28 +4363,6 @@ impl QuicTransport {
                                                                     "GOSSIP BARRIER: Dropped heartbeat outside +/-60s freshness window"
                                                                 );
                                                                 return;
-                                                            }
-                                                        }
-
-                                                        // Algo 3v2 + ShadowEdgeWindow: If received from a quarantined F2F friend,
-                                                        // record exclusively into the shadow edge window and drop immediately
-                                                        // without updating the dedup cache, clock, or forwarding.
-                                                        if is_f2f {
-                                                            let friend_pk = match remote_node_id {
-                                                                Some(pk) => Some(pk),
-                                                                None => pm.f2f_friend_pubkey_for_addr(&remote_addr).await,
-                                                            };
-                                                            if let Some(fpk) = friend_pk {
-                                                                if pm.is_f2f_quarantined(&fpk) {
-                                                                    pm.record_shadow_heartbeat(fpk, hb.node_id, hops as u8, Instant::now()).await;
-                                                                    debug!(
-                                                                        friend = %hex::encode(fpk),
-                                                                        origin = %hex::encode(hb.node_id),
-                                                                        hops,
-                                                                        "GOSSIP BARRIER: Recorded heartbeat in ShadowEdgeWindow of quarantined F2F friend"
-                                                                    );
-                                                                    return;
-                                                                }
                                                             }
                                                         }
 

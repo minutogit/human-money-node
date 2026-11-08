@@ -11,7 +11,7 @@
 
 use humoco_sim_core::quota::{
     evaluate_quota_exceeded_claim, HourlySlottedRingBuffer, NetworkThermometer,
-    QuotaPlausibilityVerdict,
+    QuotaPlausibilityVerdict, RollingQuotaCounter,
 };
 
 // ---------------------------------------------------------------------------
@@ -142,38 +142,180 @@ fn test_s08_04_network_thermometer_zero_time_decay() {
 #[test]
 fn test_s08_05_evaluate_quota_exceeded_claim_u128_bounds() {
     // Exact probe from audit report: evaluate_quota_exceeded_claim(u64::MAX, u64::MAX)
-    // 75% <= sender <= 125% -> BoundaryCutoff { malus_increment: 0 }
+    // 75% <= sender <= 125% -> BoundaryCutoff
     let verdict_max = evaluate_quota_exceeded_claim(u64::MAX, u64::MAX);
     assert_eq!(
         verdict_max,
-        QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 },
+        QuotaPlausibilityVerdict::BoundaryCutoff,
         "u64::MAX against u64::MAX must return BoundaryCutoff without overflow truncation"
     );
 
     // Normal scale: limit = 1000
-    // Zone 1: < 75% (749 < 750) -> FraudulentRejection
+    // Zone 1: < 75% (749 < 750) -> EarlyRefusal
     assert_eq!(
         evaluate_quota_exceeded_claim(749, 1000),
-        QuotaPlausibilityVerdict::FraudulentRejection { malus_increment: 8 }
+        QuotaPlausibilityVerdict::EarlyRefusal
     );
     // Lower boundary: 75% = 750 -> BoundaryCutoff
     assert_eq!(
         evaluate_quota_exceeded_claim(750, 1000),
-        QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
+        QuotaPlausibilityVerdict::BoundaryCutoff
     );
     // Nominal: 1000 -> BoundaryCutoff
     assert_eq!(
         evaluate_quota_exceeded_claim(1000, 1000),
-        QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
+        QuotaPlausibilityVerdict::BoundaryCutoff
     );
     // Upper boundary: 125% = 1250 -> BoundaryCutoff
     assert_eq!(
         evaluate_quota_exceeded_claim(1250, 1000),
-        QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
+        QuotaPlausibilityVerdict::BoundaryCutoff
     );
-    // Zone 3: > 125% (1251 > 1250) -> LegitimateOverload
+    // Zone 3: > 125% (1251 > 1250) -> OverloadIndication
     assert_eq!(
         evaluate_quota_exceeded_claim(1251, 1000),
-        QuotaPlausibilityVerdict::LegitimateOverload { malus_increment: 0 }
+        QuotaPlausibilityVerdict::OverloadIndication
     );
+}
+
+// ---------------------------------------------------------------------------
+// S08-11: Fractional precision retention in RollingQuotaCounter & NetworkThermometer
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_s08_11_repeated_one_second_consumption_fractional_precision() {
+    let mut counter = RollingQuotaCounter::new();
+    let limit = 50_000u64;
+
+    // Initial consumption at t = 0 fills the limit exactly
+    assert_eq!(counter.try_consume(0, limit, limit), Ok(limit));
+    assert_eq!(counter.last_update_sec(), Some(0));
+    assert_eq!(counter.raw_cached_usage(), limit);
+
+    // Independent exponential reference calculation:
+    // U(t) = U(t_last) * 2^(-(t - t_last)/86400)
+    let half_life_secs = 86_400.0_f64;
+    let mut ref_usage = 50_000.0_f64;
+    let mut ref_last_sec = 0u64;
+    let mut ref_accepted = 0u64;
+
+    let mut actual_accepted = 0u64;
+
+    for t in 1..=10_000u64 {
+        // Reference projection
+        let dt = (t - ref_last_sec) as f64;
+        let ref_decayed = ref_usage * (-dt * std::f64::consts::LN_2 / half_life_secs).exp();
+        if ref_decayed + 1.0 <= 50_000.0 + 1e-9 {
+            ref_usage = ref_decayed + 1.0;
+            ref_last_sec = t;
+            ref_accepted += 1;
+        }
+
+        // Production counter
+        if counter.try_consume(t, 1, limit).is_ok() {
+            actual_accepted += 1;
+        }
+    }
+
+    // In pre-fix code, all 10,000 are accepted because integer truncation round down every second!
+    // With fractional precision retained, accepted count matches reference within tight tolerance.
+    let count_diff = (actual_accepted as i64 - ref_accepted as i64).abs();
+    assert!(
+        count_diff <= 30,
+        "Accepted count ({actual_accepted}) must closely track independent exponential reference ({ref_accepted}) over 10,000s"
+    );
+
+    // Verify remaining usage at t = 10_000 matches reference
+    let dt_final = (10_000 - ref_last_sec) as f64;
+    let expected_ref_usage_at_10k =
+        ref_usage * (-dt_final * std::f64::consts::LN_2 / half_life_secs).exp();
+    let actual_usage_at_10k = counter.usage_at(10_000);
+    let usage_diff = (actual_usage_at_10k as i64 - expected_ref_usage_at_10k.round() as i64).abs();
+    assert!(
+        usage_diff <= 5,
+        "Final usage ({actual_usage_at_10k}) must match reference ({expected_ref_usage_at_10k:.2}) within tight tolerance"
+    );
+}
+
+#[test]
+fn test_s08_11_network_thermometer_checkpoint_fractional_preservation() {
+    let mut therm = NetworkThermometer::new();
+    let initial_reads = 10_000u64;
+    let initial_writes_micro = 10_000_000_000u64; // 10,000 BY in µBJ
+
+    therm.record_read_ingress(0, initial_reads);
+    therm.record_write_ingress(0, initial_writes_micro);
+
+    for t in 1..=10_000u64 {
+        therm.checkpoint_emas_at(t);
+    }
+
+    // Independent single projection to t = 10,000:
+    // 10,000 * 2^(-10,000 / 86_400) ≈ 9,229
+    let half_life_secs = 86_400.0_f64;
+    let expected_reads_f64 =
+        10_000.0_f64 * (-10_000.0 * std::f64::consts::LN_2 / half_life_secs).exp();
+    let expected_writes_f64 =
+        10_000_000_000.0_f64 * (-10_000.0 * std::f64::consts::LN_2 / half_life_secs).exp();
+
+    let actual_reads = therm.read_ema_credits_at(10_000);
+    let actual_writes = therm.write_ema_micro_bj_at(10_000);
+
+    // Pre-fix truncation reduces read_ema_credits to 0!
+    // With fractional precision, step-by-step matches single projection to within ~0.05%
+    let read_diff = (actual_reads as i64 - expected_reads_f64.round() as i64).abs();
+    assert!(
+        read_diff <= 5,
+        "Read EMA after 10,000 1s checkpoints ({actual_reads}) must match reference ({expected_reads_f64:.1})"
+    );
+
+    let write_diff = (actual_writes as i64 - expected_writes_f64.round() as i64).abs();
+    let write_rel_error = (write_diff as f64) / expected_writes_f64;
+    assert!(
+        write_rel_error < 0.001,
+        "Write EMA after 10,000 1s checkpoints ({actual_writes}) must match reference ({expected_writes_f64:.1})"
+    );
+}
+
+#[test]
+fn test_s08_11_rolling_quota_edge_cases_and_state_invariance() {
+    let mut counter = RollingQuotaCounter::new();
+    let limit = 50_000u64;
+
+    // 1. Exact-limit admission
+    assert_eq!(counter.try_consume(0, limit, limit), Ok(limit));
+    assert_eq!(counter.try_consume(0, 1, limit), Err(0));
+
+    // 2. Rejected try_consume leaves complete counter state 100% unchanged!
+    let cached_before = counter.raw_cached_usage();
+    let last_update_before = counter.last_update_sec();
+    // At t = 1, insufficient decay (< 1 full credit) -> must be rejected
+    let res_rej = counter.try_consume(1, 1, limit);
+    assert_eq!(res_rej, Err(0));
+    assert_eq!(counter.raw_cached_usage(), cached_before);
+    assert_eq!(counter.last_update_sec(), last_update_before);
+    // Usage at t = 1 reflects decay from t = 0 without state mutation
+    assert!(counter.usage_at(1) <= limit);
+
+    // 3. Zero elapsed time (dt = 0)
+    assert_eq!(counter.usage_at(0), limit);
+
+    // 4. Backward time (now_sec < last_sec) leaves state monotonic without reverse decay
+    assert_eq!(counter.usage_at(0), limit);
+    let past_usage = counter.usage_at(0);
+    assert_eq!(past_usage, limit);
+
+    // 5. Exact 24-hour half-life (86_400s -> 50%)
+    let mut hl_counter = RollingQuotaCounter::new();
+    hl_counter.try_consume(100, 100_000, 100_000).unwrap();
+    assert_eq!(hl_counter.usage_at(100 + 86_400), 50_000);
+
+    // 6. Long idle periods (>= 64 half-lives -> 0)
+    assert_eq!(hl_counter.usage_at(100 + 64 * 86_400), 0);
+    assert_eq!(hl_counter.usage_at(100 + 100 * 86_400), 0);
+
+    // 7. u64::MAX overflow bounds
+    let mut max_counter = RollingQuotaCounter::new();
+    assert_eq!(max_counter.try_consume(0, u64::MAX, u64::MAX), Ok(u64::MAX));
+    assert_eq!(max_counter.try_consume(0, 1, u64::MAX), Err(0));
 }

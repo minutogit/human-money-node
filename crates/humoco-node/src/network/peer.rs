@@ -39,7 +39,6 @@ pub struct PeerInfo {
     pub last_rpc_tested_at: Option<Instant>,
     pub last_connected_at: Option<Instant>,
     pub active_connected_failure_since: Option<Instant>,
-    pub zombie_since: Option<Instant>,
 }
 
 impl PeerInfo {
@@ -60,7 +59,6 @@ impl PeerInfo {
             last_rpc_tested_at: None,
             last_connected_at: None,
             active_connected_failure_since: None,
-            zombie_since: None,
         }
     }
 
@@ -99,7 +97,6 @@ impl PeerInfo {
     /// by exactly 1 (activity-locked healing, Spec 19).
     pub fn mark_shard_work_success(&mut self) {
         self.missing_count = self.missing_count.saturating_sub(1);
-        self.zombie_since = None;
         let now = Instant::now();
         self.last_seen = Some(now);
         self.last_rpc_tested_at = Some(now);
@@ -157,9 +154,6 @@ impl PeerInfo {
             self.missing_count = self.missing_count.saturating_add(1);
             if self.missing_count >= FAILURE_THRESHOLD_SUSPENDED {
                 self.status = PeerStatus::Suspended;
-                if self.zombie_since.is_none() {
-                    self.zombie_since = Some(now);
-                }
                 if self.conn_type != PeerConnectionType::FriendToFriend {
                     self.connection = None;
                 }
@@ -201,7 +195,6 @@ impl PeerInfo {
     /// Resets suspension state completely to healthy / initial degradation.
     pub fn reset_suspension(&mut self) {
         self.missing_count = 0;
-        self.zombie_since = None;
         self.last_failure = None;
         self.active_connected_failure_since = None;
         if self.connection.is_some() {
@@ -351,69 +344,5 @@ mod tests {
         peer.mark_shard_work_success();
         assert_eq!(peer.active_connected_failure_since, None);
         assert_eq!(peer.missing_count, 2);
-    }
-
-    #[test]
-    fn test_peer_zombie_since_lifecycle() {
-        let addr: SocketAddr = "127.0.0.1:9090".parse().unwrap();
-        let mut peer = PeerInfo::new(addr);
-        let t0 = Instant::now();
-
-        assert_eq!(peer.zombie_since, None);
-
-        // Failures 1 and 2: still Degrading, zombie_since is None
-        peer.mark_failure_at(t0);
-        assert_eq!(peer.zombie_since, None);
-        peer.mark_failure_at(t0 + Duration::from_secs(61));
-        assert_eq!(peer.zombie_since, None);
-
-        // Failure 3: reaches Suspended (3), zombie_since set to Some(t2)
-        let t2 = t0 + Duration::from_secs(122);
-        peer.mark_failure_at(t2);
-        assert_eq!(peer.missing_count, 3);
-        assert_eq!(peer.zombie_since, Some(t2));
-
-        // Subsequent failure does NOT overwrite existing zombie_since
-        let t3 = t0 + Duration::from_secs(183);
-        peer.mark_failure_at(t3);
-        assert_eq!(peer.missing_count, 4);
-        assert_eq!(peer.zombie_since, Some(t2));
-
-        // Hourly decay_malus reduces missing_count to 3, 2, 1, 0, but zombie_since is PRESERVED!
-        peer.decay_malus();
-        assert_eq!(peer.missing_count, 3);
-        assert_eq!(peer.zombie_since, Some(t2));
-
-        peer.decay_malus();
-        assert_eq!(peer.missing_count, 2);
-        assert_eq!(peer.zombie_since, Some(t2));
-
-        peer.decay_malus();
-        assert_eq!(peer.missing_count, 1);
-        assert_eq!(peer.zombie_since, Some(t2));
-
-        peer.decay_malus();
-        assert_eq!(peer.missing_count, 0);
-        assert_eq!(peer.zombie_since, Some(t2));
-
-        // Genuine shard work success clears zombie_since immediately upon authenticated proof!
-        peer.mark_shard_work_success();
-        assert_eq!(peer.zombie_since, None);
-
-        // Failure again to 3 -> fresh zombie_since
-        let t4 = t0 + Duration::from_secs(300);
-        peer.mark_failure_at(t4);
-        assert_eq!(peer.missing_count, 1);
-        peer.mark_failure_at(t4 + Duration::from_secs(61));
-        assert_eq!(peer.missing_count, 2);
-        let t5 = t4 + Duration::from_secs(122);
-        peer.mark_failure_at(t5);
-        assert_eq!(peer.missing_count, 3);
-        assert_eq!(peer.zombie_since, Some(t5));
-
-        // Reset suspension also clears completely
-        peer.reset_suspension();
-        assert_eq!(peer.missing_count, 0);
-        assert_eq!(peer.zombie_since, None);
     }
 }

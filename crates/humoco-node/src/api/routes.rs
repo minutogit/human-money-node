@@ -213,6 +213,11 @@ impl AppState {
         self
     }
 
+    pub fn with_peer_manager(mut self, peer_manager: Arc<PeerManager>) -> Self {
+        self.peer_manager = Some(peer_manager);
+        self
+    }
+
     /// Returns the P2P network-adjusted time (Spec 11) or falls back to SystemTime.
     pub fn net_time_ms(&self) -> u64 {
         if let Some(pm) = &self.peer_manager {
@@ -341,6 +346,10 @@ pub fn build_operator_router(state: AppState) -> Router {
         .route(
             "/dashboard/admin/quota",
             post(crate::api::dashboard::admin_topup_quota),
+        )
+        .route(
+            "/dashboard/admin/quota/credentials",
+            post(crate::api::dashboard::admin_provision_vip_credential),
         )
         .route(
             "/dashboard/admin/peers/:addr/reset",
@@ -1522,13 +1531,13 @@ pub async fn collect_peer_attestations_with_local(
                         //    are subjective observations. Subjective load discrepancies must NEVER trigger
                         //    automated bans or peer failure penalties (`record_failure` is strictly forbidden).
                         // 3. THREE-ZONE IMMUNITY (Spec 09 §5.2 / INV-0909):
-                        //    - Zone 1 (FraudulentRejection / apparent load divergence): Even if our local
+                        //    - Zone 1 (EarlyRefusal / apparent load divergence): Even if our local
                         //      load estimate appears lower than the peer's declared limit, dynamic network
                         //      jitter or regional traffic bursts prevent proving malicious intent.
                         //    - Zone 2 (BoundaryCutoff 75%..125%): Expected boundary fluctuation band.
-                        //    - Zone 3 (LegitimateOverload > 125%): Acknowledged network-wide saturation.
+                        //    - Zone 3 (OverloadIndication > 125%): Acknowledged network-wide saturation.
                         // 4. 24H MERGE MORATORIUM (INV-0908): After a partition merge (Village Merge),
-                        //    divergent regional thermometers are reconciled; no quota malus may be applied.
+                        //    divergent regional thermometers are reconciled; neutral feedback is maintained.
                         // 5. FIRST-PARTY EVIDENCE DOCTRINE: Sanctions require irrefutable cryptographic
                         //    self-proof (EquivocationProof). Quota exhaustion never affects `missing_count`.
                         // =========================================================================
@@ -1540,36 +1549,36 @@ pub async fn collect_peer_attestations_with_local(
                             query.quota_limit,
                         );
                         match verdict {
-                        humoco_sim_core::quota::QuotaPlausibilityVerdict::FraudulentRejection { .. } => {
-                            if in_moratorium {
+                            humoco_sim_core::quota::QuotaPlausibilityVerdict::EarlyRefusal => {
+                                if in_moratorium {
+                                    tracing::info!(
+                                        %addr,
+                                        rank_idx,
+                                        my_load = query.my_load,
+                                        quota_limit = query.quota_limit,
+                                        "Shard peer quota rejection during 24h merge moratorium - neutral feedback (INV-0908)"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        %addr,
+                                        rank_idx,
+                                        my_load = query.my_load,
+                                        quota_limit = query.quota_limit,
+                                        "Shard peer claimed FLAG_QUOTA_EXCEEDED (Zone 1 EarlyRefusal) - neutral feedback (Spec 09 §5.2)"
+                                    );
+                                }
+                            }
+                            humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff
+                            | humoco_sim_core::quota::QuotaPlausibilityVerdict::OverloadIndication => {
                                 tracing::info!(
                                     %addr,
                                     rank_idx,
                                     my_load = query.my_load,
                                     quota_limit = query.quota_limit,
-                                    "Shard peer quota rejection during 24h merge moratorium - neutral feedback (INV-0908)"
-                                );
-                            } else {
-                                tracing::info!(
-                                    %addr,
-                                    rank_idx,
-                                    my_load = query.my_load,
-                                    quota_limit = query.quota_limit,
-                                    "Shard peer claimed FLAG_QUOTA_EXCEEDED (Zone 1) - neutral feedback (Spec 09 §5.2)"
+                                    "Shard peer legitimately returned FLAG_QUOTA_EXCEEDED (Zone 2/3) - no peer penalty"
                                 );
                             }
                         }
-                        humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff { .. }
-                        | humoco_sim_core::quota::QuotaPlausibilityVerdict::LegitimateOverload { .. } => {
-                            tracing::info!(
-                                %addr,
-                                rank_idx,
-                                my_load = query.my_load,
-                                quota_limit = query.quota_limit,
-                                "Shard peer legitimately returned FLAG_QUOTA_EXCEEDED (Zone 2/3) - no peer penalty"
-                            );
-                        }
-                    }
                         spawn_next(
                             &mut join_set,
                             &mut candidate_idx,
@@ -1767,6 +1776,7 @@ pub async fn assemble_quorum_certificate_with_deadline_and_local(
                     bytes,
                     target_status,
                     now_ms,
+                    crate::storage::PersistenceServiceClass::Public,
                 )
                 .await
                 .ok()?;
@@ -2139,7 +2149,8 @@ async fn query_status(
                         let declared_read_ema = state.tier_controller.current_read_ema_credits();
                         let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
                         let sender_pubkey = self_pubkey;
-                        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+                        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+                            state.network_id,
                             &sender_pubkey,
                             0,
                             0,
@@ -2326,6 +2337,14 @@ fn map_ingress_error(state: &AppState, err: IngressError, has_auth_token: bool) 
         IngressError::QuotaPersistenceUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "VIP Quota persistence queue is full or closed".into(),
+        ),
+        IngressError::AccountingPersistenceUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Ingress accounting persistence unavailable".into(),
+        ),
+        IngressError::Internal(msg) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Internal ingress error: {msg}"),
         ),
     };
 
@@ -2701,8 +2720,6 @@ async fn submit_hmc_lock_with_deadline(
             lock_entry: existing.clone(),
         };
         let now_ms = state.net_time_ms();
-        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-        let declared_read_ema = state.tier_controller.current_read_ema_credits();
         let sender_pubkey = *state.identity.node_pubkey();
         let ttl_sec = (root_valid_until.saturating_sub(now_ms)) / 1000;
         let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
@@ -2710,14 +2727,34 @@ async fn submit_hmc_lock_with_deadline(
         // Epoch-bound envelope (Phase 1 P0): reserve epoch first so the
         // signed digest and the wire payload commit to the same
         // (epoch_day, epoch_seq).
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = state
-            .tier_controller
-            .record_declared_usage(now_ms, footprint);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let alloc = match tokio::time::timeout_at(
+            checkout_deadline,
+            state.tier_controller.record_declared_usage(now_ms, footprint),
+        )
+        .await
+        {
+            Ok(Ok(a)) => a,
+            Ok(Err(e)) => return map_ingress_error(&state, e, auth_token.is_some()),
+            Err(_) => {
+                return map_ingress_error(
+                    &state,
+                    IngressError::AccountingPersistenceUnavailable,
+                    auth_token.is_some(),
+                )
+            }
+        };
+        let epoch_day = alloc.epoch_day;
+        let epoch_seq = alloc.epoch_seq;
+        let cumulative_micro_byte_years = alloc.cumulative_micro_byte_years;
+        let prev_day_final_bytes = alloc.prev_day_final_bytes;
+        let declared_write_ema = alloc.declared_write_ema_micro_bj;
+        let declared_read_ema = alloc.declared_read_ema_credits;
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            state.network_id,
             &sender_pubkey,
             epoch_day,
             epoch_seq,
-            now_ms,
+            alloc.timestamp_ms,
             declared_write_ema,
             declared_read_ema,
             footprint,
@@ -2774,6 +2811,7 @@ async fn submit_hmc_lock_with_deadline(
                             bytes,
                             target_status,
                             now_ms,
+                            crate::storage::PersistenceServiceClass::Public,
                         )
                         .await
                     {
@@ -2872,21 +2910,38 @@ async fn submit_hmc_lock_with_deadline(
 
     // 4. Ingress: Local shard storage vs. Stateless Gateway routing
     let (verdict, is_new, quorum_certificate) = if is_responsible {
-        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-        let declared_read_ema = state.tier_controller.current_read_ema_credits();
         let sender_pubkey = *state.identity.node_pubkey();
         let footprint =
             humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
         let op_hash = entry.t_id;
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-            state
-                .tier_controller
-                .record_declared_usage(now_ms, footprint);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let alloc = match tokio::time::timeout_at(
+            checkout_deadline,
+            state.tier_controller.record_declared_usage(now_ms, footprint),
+        )
+        .await
+        {
+            Ok(Ok(a)) => a,
+            Ok(Err(e)) => return map_ingress_error(&state, e, auth_token.is_some()),
+            Err(_) => {
+                return map_ingress_error(
+                    &state,
+                    IngressError::AccountingPersistenceUnavailable,
+                    auth_token.is_some(),
+                )
+            }
+        };
+        let epoch_day = alloc.epoch_day;
+        let epoch_seq = alloc.epoch_seq;
+        let cumulative_micro_byte_years = alloc.cumulative_micro_byte_years;
+        let prev_day_final_bytes = alloc.prev_day_final_bytes;
+        let declared_write_ema = alloc.declared_write_ema_micro_bj;
+        let declared_read_ema = alloc.declared_read_ema_credits;
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            state.network_id,
             &sender_pubkey,
             epoch_day,
             epoch_seq,
-            now_ms,
+            alloc.timestamp_ms,
             declared_write_ema,
             declared_read_ema,
             footprint,
@@ -2962,6 +3017,7 @@ async fn submit_hmc_lock_with_deadline(
                                     bytes,
                                     target_status,
                                     now_ms,
+                                    crate::storage::PersistenceServiceClass::Public,
                                 )
                                 .await
                             {
@@ -3023,20 +3079,38 @@ async fn submit_hmc_lock_with_deadline(
     } else {
         // Stateless routing Gateway: DO NOT write to local engine or redb!
         // Instead, route and collect P2P shard attestations from the responsible shard nodes.
-        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-        let declared_read_ema = state.tier_controller.current_read_ema_credits();
         let sender_pubkey = *state.identity.node_pubkey();
         let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
         let op_hash = entry.t_id;
         // Epoch-bound envelope (Phase 1 P0).
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = state
-            .tier_controller
-            .record_declared_usage(now_ms, footprint);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let alloc = match tokio::time::timeout_at(
+            checkout_deadline,
+            state.tier_controller.record_declared_usage(now_ms, footprint),
+        )
+        .await
+        {
+            Ok(Ok(a)) => a,
+            Ok(Err(e)) => return map_ingress_error(&state, e, auth_token.is_some()),
+            Err(_) => {
+                return map_ingress_error(
+                    &state,
+                    IngressError::AccountingPersistenceUnavailable,
+                    auth_token.is_some(),
+                )
+            }
+        };
+        let epoch_day = alloc.epoch_day;
+        let epoch_seq = alloc.epoch_seq;
+        let cumulative_micro_byte_years = alloc.cumulative_micro_byte_years;
+        let prev_day_final_bytes = alloc.prev_day_final_bytes;
+        let declared_write_ema = alloc.declared_write_ema_micro_bj;
+        let declared_read_ema = alloc.declared_read_ema_credits;
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            state.network_id,
             &sender_pubkey,
             epoch_day,
             epoch_seq,
-            now_ms,
+            alloc.timestamp_ms,
             declared_write_ema,
             declared_read_ema,
             footprint,
@@ -3440,22 +3514,39 @@ async fn submit_hmc_chain_lock_inner(
     }
 
     let (verdict, is_new, quorum_certificate) = if is_responsible {
-        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-        let declared_read_ema = state.tier_controller.current_read_ema_credits();
         let sender_pubkey = *state.identity.node_pubkey();
         let footprint =
             humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds)
                 .saturating_mul(chain_req.chain.len() as u64);
         let op_hash = last_hop_entry.t_id;
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-            state
-                .tier_controller
-                .record_declared_usage(now_ms, footprint);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let alloc = match tokio::time::timeout_at(
+            checkout_deadline,
+            state.tier_controller.record_declared_usage(now_ms, footprint),
+        )
+        .await
+        {
+            Ok(Ok(a)) => a,
+            Ok(Err(e)) => return map_ingress_error(&state, e, auth_token.is_some()),
+            Err(_) => {
+                return map_ingress_error(
+                    &state,
+                    IngressError::AccountingPersistenceUnavailable,
+                    auth_token.is_some(),
+                )
+            }
+        };
+        let epoch_day = alloc.epoch_day;
+        let epoch_seq = alloc.epoch_seq;
+        let cumulative_micro_byte_years = alloc.cumulative_micro_byte_years;
+        let prev_day_final_bytes = alloc.prev_day_final_bytes;
+        let declared_write_ema = alloc.declared_write_ema_micro_bj;
+        let declared_read_ema = alloc.declared_read_ema_credits;
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            state.network_id,
             &sender_pubkey,
             epoch_day,
             epoch_seq,
-            now_ms,
+            alloc.timestamp_ms,
             declared_write_ema,
             declared_read_ema,
             footprint,
@@ -3533,6 +3624,7 @@ async fn submit_hmc_chain_lock_inner(
                                     bytes,
                                     target_status,
                                     now_ms,
+                                    crate::storage::PersistenceServiceClass::Public,
                                 )
                                 .await
                             {
@@ -3593,21 +3685,39 @@ async fn submit_hmc_chain_lock_inner(
     } else {
         // Stateless Gateway: do not write to local engine/redb
         let entry = L2LockEntry::from(last_hop);
-        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-        let declared_read_ema = state.tier_controller.current_read_ema_credits();
         let sender_pubkey = *state.identity.node_pubkey();
         let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds)
             .saturating_mul(chain_req.chain.len() as u64);
         let op_hash = entry.t_id;
         // Epoch-bound envelope (Phase 1 P0).
-        let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = state
-            .tier_controller
-            .record_declared_usage(now_ms, footprint);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let alloc = match tokio::time::timeout_at(
+            checkout_deadline,
+            state.tier_controller.record_declared_usage(now_ms, footprint),
+        )
+        .await
+        {
+            Ok(Ok(a)) => a,
+            Ok(Err(e)) => return map_ingress_error(&state, e, auth_token.is_some()),
+            Err(_) => {
+                return map_ingress_error(
+                    &state,
+                    IngressError::AccountingPersistenceUnavailable,
+                    auth_token.is_some(),
+                )
+            }
+        };
+        let epoch_day = alloc.epoch_day;
+        let epoch_seq = alloc.epoch_seq;
+        let cumulative_micro_byte_years = alloc.cumulative_micro_byte_years;
+        let prev_day_final_bytes = alloc.prev_day_final_bytes;
+        let declared_write_ema = alloc.declared_write_ema_micro_bj;
+        let declared_read_ema = alloc.declared_read_ema_credits;
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            state.network_id,
             &sender_pubkey,
             epoch_day,
             epoch_seq,
-            now_ms,
+            alloc.timestamp_ms,
             declared_write_ema,
             declared_read_ema,
             footprint,

@@ -375,26 +375,26 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
 
     // 3. 3-Zone Plausibility Check verification
     let quota_limit = 4_800_000u64;
-    // Zone 1: My load is 2_000_000 (< 75% = 3_600_000). Shard claimed QuotaExceeded -> Fraud / Malice!
+    // Zone 1: My load is 2_000_000 (< 75% = 3_600_000). Shard claimed QuotaExceeded -> EarlyRefusal
     let v_zone1 = humoco_sim_core::quota::evaluate_quota_exceeded_claim(2_000_000, quota_limit);
-    assert!(matches!(
+    assert_eq!(
         v_zone1,
-        humoco_sim_core::quota::QuotaPlausibilityVerdict::FraudulentRejection { .. }
-    ));
+        humoco_sim_core::quota::QuotaPlausibilityVerdict::EarlyRefusal
+    );
 
-    // Zone 2: My load is 4_000_000 (between 75% and 125%). Honest frontrunner -> No penalty
+    // Zone 2: My load is 4_000_000 (between 75% and 125%). Honest frontrunner -> BoundaryCutoff
     let v_zone2 = humoco_sim_core::quota::evaluate_quota_exceeded_claim(4_000_000, quota_limit);
-    assert!(matches!(
+    assert_eq!(
         v_zone2,
-        humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff { .. }
-    ));
+        humoco_sim_core::quota::QuotaPlausibilityVerdict::BoundaryCutoff
+    );
 
-    // Zone 3: My load is 7_000_000 (> 125%). Legitimate overload -> No penalty
+    // Zone 3: My load is 7_000_000 (> 125%). Legitimate overload -> OverloadIndication
     let v_zone3 = humoco_sim_core::quota::evaluate_quota_exceeded_claim(7_000_000, quota_limit);
-    assert!(matches!(
+    assert_eq!(
         v_zone3,
-        humoco_sim_core::quota::QuotaPlausibilityVerdict::LegitimateOverload { .. }
-    ));
+        humoco_sim_core::quota::QuotaPlausibilityVerdict::OverloadIndication
+    );
 }
 
 #[tokio::test]
@@ -642,7 +642,8 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
     let root_valid_until = t2 + 86_400_000;
     let ttl_s = 86_400;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
-    let digest2 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest2 = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         identity_client.node_pubkey(),
         0,
         0,
@@ -803,7 +804,8 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     let root_valid_until_a = t1 + 86_400_000;
     let ttl_s = 86_400;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
-    let digest_a = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_a = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         identity_g.node_pubkey(),
         0,
         0,
@@ -914,7 +916,8 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
     };
     let entry_b = humoco_node::api::hmc::L2LockEntry::from(&hmc_req_b);
     let root_valid_until_b = t2 + 86_400_000;
-    let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         identity_g.node_pubkey(),
         0,
         0,
@@ -980,7 +983,7 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         *identity_g.node_pubkey()
     );
     assert!(
-        broadcasted_proof.verify(),
+        broadcasted_proof.verify_network(humoco_sim_core::types::NetworkId::Mainnet),
         "Broadcasted proof must be cryptographically valid"
     );
 }

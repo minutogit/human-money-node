@@ -192,11 +192,11 @@ async fn test_operator_vip_credential_redaction_and_lookup_safety() {
     let (state, auth, _temp) = setup_test_operator_state();
     let router = build_operator_router(state.clone());
 
-    let secret_token = "vip_bearer_ultra_secret_passphrase_456789";
+    let account_tag = "vip_test_account_456789";
 
-    // Provision VIP account via POST /dashboard/admin/quota
+    // Top up VIP account via POST /dashboard/admin/quota
     let topup_body = serde_json::json!({
-        "account_tag": secret_token,
+        "account_tag": account_tag,
         "byte_years": 5000
     });
     let req = Request::builder()
@@ -210,6 +210,22 @@ async fn test_operator_vip_credential_redaction_and_lookup_safety() {
     let res = router.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
+    // Provision VIP credential via POST /dashboard/admin/quota/credentials (S05-12)
+    let prov_req = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/quota/credentials")
+        .header("Authorization", format!("Bearer {}", auth.token()))
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "account_tag": account_tag
+        })).unwrap()))
+        .unwrap();
+    let prov_res = router.clone().oneshot(prov_req).await.unwrap();
+    assert_eq!(prov_res.status(), StatusCode::CREATED);
+    let prov_bytes = prov_res.into_body().collect().await.unwrap().to_bytes();
+    let prov_json: serde_json::Value = serde_json::from_slice(&prov_bytes).unwrap();
+    let secret_token = prov_json["bearer_token"].as_str().unwrap().to_string();
+
     // 1. Check GET /dashboard/data
     let req = Request::builder()
         .method("GET")
@@ -220,7 +236,7 @@ async fn test_operator_vip_credential_redaction_and_lookup_safety() {
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let body_str = String::from_utf8_lossy(&body_bytes);
-    assert!(!body_str.contains(secret_token), "Raw secret bearer token must not leak into /dashboard/data");
+    assert!(!body_str.contains(&secret_token), "Raw secret bearer token must not leak into /dashboard/data");
 
     let data_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let vip_accounts = data_json["tiers"]["vip_accounts"].as_array().unwrap();
@@ -234,7 +250,7 @@ async fn test_operator_vip_credential_redaction_and_lookup_safety() {
     }
 
     // Raw secret authenticates
-    assert!(state.tier_controller.resolve_account_tag(secret_token).is_ok(), "Raw secret must authenticate");
+    assert!(state.tier_controller.resolve_account_tag(&secret_token).is_ok(), "Raw secret must authenticate");
 
     // 2. Check GET /dashboard (HTML)
     let req = Request::builder()
@@ -246,7 +262,7 @@ async fn test_operator_vip_credential_redaction_and_lookup_safety() {
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let html_str = String::from_utf8_lossy(&body_bytes);
-    assert!(!html_str.contains(secret_token), "Raw secret bearer token must not leak into HTML dashboard");
+    assert!(!html_str.contains(&secret_token), "Raw secret bearer token must not leak into HTML dashboard");
 
     // 3. Check GET /dashboard/events
     let req = Request::builder()
@@ -258,7 +274,7 @@ async fn test_operator_vip_credential_redaction_and_lookup_safety() {
     assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
     let events_str = String::from_utf8_lossy(&body_bytes);
-    assert!(!events_str.contains(secret_token), "Raw secret bearer token must not leak into /dashboard/events");
+    assert!(!events_str.contains(&secret_token), "Raw secret bearer token must not leak into /dashboard/events");
 }
 
 #[tokio::test]

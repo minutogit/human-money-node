@@ -6,6 +6,7 @@
 //! - M3: Shard readiness merge invalidation preserving in-flight syncs.
 //! - M4: Control server refusal to unlink an active daemon's control socket.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use humoco_node::{
     daemon::{BoundAddrs, NodeDaemon, ShardReadinessManager},
     error::NodeError,
     identity::NodeIdentity,
-    network::{BoxFuture, DefaultRequestHandler, PeerManager, QuicTransport, RequestHandler},
+    network::{BoxFuture, DefaultRequestHandler, HeartbeatWirePayload, PeerManager, QuicTransport, RequestHandler},
     storage::{DualTierEngine, RedbStorage},
 };
 use humoco_sim_core::wire::{MsgType, WireHeader};
@@ -408,36 +409,59 @@ async fn test_persisted_ticket_observations_survive_restart_while_new_tickets_in
     let (local_id, _) = NodeIdentity::generate()
         .mine_ticket(1, 1_750_000_000, Some(50))
         .unwrap();
-    let (peer_id, _) = NodeIdentity::generate()
+    let (qualified_peer, _) = NodeIdentity::generate()
         .mine_ticket(1, 1_750_000_000, Some(50))
         .unwrap();
+    let (unqualified_old_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .unwrap();
+    let (young_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .unwrap();
+
     let now_ms: u64 = 1_750_000_000_000;
     let mature_seen_ms = now_ms - (25 * 3600 * 1000); // observed 25h ago
+    let young_seen_ms = now_ms - (2 * 3600 * 1000);   // observed 2h ago
 
     {
         let storage = RedbStorage::open(&db_path).expect("open redb");
         let inserted = storage
-            .record_ticket_observations_if_absent(&[
+            .record_ticket_observations(&[
                 (
                     *local_id.node_pubkey(),
                     *local_id.hrw_routing_id(),
                     mature_seen_ms,
+                    true,
                 ),
                 (
-                    *peer_id.node_pubkey(),
-                    *peer_id.hrw_routing_id(),
+                    *qualified_peer.node_pubkey(),
+                    *qualified_peer.hrw_routing_id(),
                     mature_seen_ms,
+                    true,
+                ),
+                (
+                    *unqualified_old_peer.node_pubkey(),
+                    *unqualified_old_peer.hrw_routing_id(),
+                    mature_seen_ms,
+                    false,
+                ),
+                (
+                    *young_peer.node_pubkey(),
+                    *young_peer.hrw_routing_id(),
+                    young_seen_ms,
+                    true,
                 ),
             ])
             .expect("persist ticket observations");
-        assert_eq!(inserted, 2);
+        assert_eq!(inserted, 4);
 
-        // Re-recording with a newer timestamp must preserve the original first_seen_ms.
+        // Re-recording with a newer timestamp must preserve the original first_seen_ms and latch qualified flag.
         let inserted_again = storage
-            .record_ticket_observations_if_absent(&[(
-                *peer_id.node_pubkey(),
-                *peer_id.hrw_routing_id(),
+            .record_ticket_observations(&[(
+                *qualified_peer.node_pubkey(),
+                *qualified_peer.hrw_routing_id(),
                 now_ms,
+                false,
             )])
             .expect("idempotent re-record");
         assert_eq!(inserted_again, 0);
@@ -447,55 +471,300 @@ async fn test_persisted_ticket_observations_survive_restart_while_new_tickets_in
     let storage = RedbStorage::open(&db_path).expect("reopen redb");
     let pm = PeerManager::new(vec![]);
     pm.set_min_work_floor_for_test(1);
-    for (pk, hrw, seen_ms) in storage
+    for (pk, hrw, seen_ms, qualified) in storage
         .all_ticket_observations()
         .expect("load observations")
     {
         let age = Duration::from_millis(now_ms.saturating_sub(seen_ms));
-        pm.seed_persisted_ticket_age(pk, hrw, age);
+        pm.seed_persisted_ticket_state(pk, hrw, age, qualified);
         if pk == *local_id.node_pubkey() && hrw == *local_id.hrw_routing_id() {
             pm.seed_local_ticket_age(pk, hrw, age);
         }
     }
 
-    // Peer reconnects with its existing mature ticket -> immediately HRW-eligible!
-    let peer_addr = "127.0.0.1:19991".parse().unwrap();
+    // 1. Qualified peer reconnects -> immediately HRW & committee-eligible!
+    let qualified_addr = "127.0.0.1:19991".parse().unwrap();
     pm.learn_node_from_gossip_with_hrw_work_and_auth(
-        *peer_id.node_pubkey(),
-        *peer_id.hrw_routing_id(),
-        peer_addr,
+        *qualified_peer.node_pubkey(),
+        *qualified_peer.hrw_routing_id(),
+        qualified_addr,
         0,
-        Some(peer_addr),
+        Some(qualified_addr),
         1,
         true,
     )
     .await;
+
+    // 2. Unqualified old peer (age >= 24h, but admission_qualified = false) connects -> NOT eligible!
+    let unqualified_addr = "127.0.0.1:19992".parse().unwrap();
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(
+        *unqualified_old_peer.node_pubkey(),
+        *unqualified_old_peer.hrw_routing_id(),
+        unqualified_addr,
+        0,
+        Some(unqualified_addr),
+        1,
+        true,
+    )
+    .await;
+
+    // 3. Artificially young entry (age < 24h, admission_qualified = true) connects -> NOT eligible until age >= 24h!
+    let young_addr = "127.0.0.1:19993".parse().unwrap();
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(
+        *young_peer.node_pubkey(),
+        *young_peer.hrw_routing_id(),
+        young_addr,
+        0,
+        Some(young_addr),
+        1,
+        true,
+    )
+    .await;
+
+    // Verify snapshot_qualified_tickets only includes qualified mature nodes
+    let snap = pm.snapshot_qualified_tickets().await;
+    let snap_pks: HashSet<[u8; 32]> = snap.into_iter().map(|(pk, _)| pk).collect();
+    assert!(snap_pks.contains(qualified_peer.node_pubkey()), "Qualified peer must be in snapshot");
+    assert!(!snap_pks.contains(unqualified_old_peer.node_pubkey()), "Unqualified old peer must NOT be in snapshot");
+    assert!(!snap_pks.contains(young_peer.node_pubkey()), "Young peer must NOT be in snapshot");
 
     let (committee, _, total) = pm
         .shard_committee(*local_id.node_pubkey(), *local_id.hrw_routing_id(), 42)
         .await;
     assert_eq!(
         total, 2,
-        "Both restarted mature nodes must immediately re-enter HRW"
+        "Only local node and genuinely qualified mature peer must be committee-eligible"
     );
     assert_eq!(committee.len(), 2);
+    let committee_pks: Vec<[u8; 32]> = committee.iter().map(|m| m.node_pubkey).collect();
+    assert!(committee_pks.contains(local_id.node_pubkey()));
+    assert!(committee_pks.contains(qualified_peer.node_pubkey()));
+    assert!(!committee_pks.contains(unqualified_old_peer.node_pubkey()));
+    assert!(!committee_pks.contains(young_peer.node_pubkey()));
 
-    // Anti-shard-hopping invariant: if peer re-mines a brand-new HrwRoutingId, it MUST incubate for 24h!
+    // Anti-shard-hopping invariant: if qualified peer re-mines a brand-new HrwRoutingId, it MUST incubate for 24h!
     let fresh_peer_ticket = [0xABu8; 32];
     pm.learn_node_from_gossip_with_hrw_work_and_auth(
-        *peer_id.node_pubkey(),
+        *qualified_peer.node_pubkey(),
         fresh_peer_ticket,
-        peer_addr,
+        qualified_addr,
         0,
-        Some(peer_addr),
+        Some(qualified_addr),
         10,
         true,
     )
     .await;
     assert!(
-        pm.hrw_incubation_remaining(peer_id.node_pubkey())
+        pm.hrw_incubation_remaining(qualified_peer.node_pubkey())
             .await
             .is_some(),
         "Newly mined replacement ticket must enter 24h pending incubation"
     );
+}
+
+/// S06-04: Verifies that real QUIC heartbeats delivered from a mature qualified peer
+/// establish immediate committee eligibility, whereas heartbeats from a mature unqualified
+/// old peer (lacking admission qualification) do NOT enter the active shard committee.
+#[tokio::test]
+async fn test_real_quic_heartbeat_persisted_ticket_eligibility() {
+    let cancel_token = CancellationToken::new();
+
+    // 1. Generate 3 nodes with mined Argon2d shard tickets
+    let (local_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .unwrap();
+    let (qualified_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .unwrap();
+    let (unqualified_old_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .unwrap();
+
+    // 2. Set up local PeerManager and seed persisted ticket observations
+    let pm_local = Arc::new(PeerManager::new(vec![]));
+    pm_local.set_min_work_floor_for_test(1);
+    let now_ms = pm_local.clock().now_ms();
+    let mature_seen_ms = now_ms.saturating_sub(25 * 3600 * 1000); // 25 hours ago
+
+    let mature_age = Duration::from_millis(now_ms.saturating_sub(mature_seen_ms));
+    pm_local.seed_local_ticket_age(*local_id.node_pubkey(), *local_id.hrw_routing_id(), mature_age);
+    pm_local.seed_persisted_ticket_state(
+        *qualified_peer.node_pubkey(),
+        *qualified_peer.hrw_routing_id(),
+        mature_age,
+        true, // admission_qualified = true
+    );
+    pm_local.seed_persisted_ticket_state(
+        *unqualified_old_peer.node_pubkey(),
+        *unqualified_old_peer.hrw_routing_id(),
+        mature_age,
+        false, // admission_qualified = false
+    );
+
+    // 3. Bind local QuicTransport and spawn accept loop
+    let transport_local = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &local_id,
+        pm_local.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("Bind local transport");
+    let addr_local = transport_local.local_addr().expect("local addr");
+    let accept_handle_local = transport_local.spawn_accept_loop();
+
+    // 4. Bind transport for qualified peer
+    let pm_qualified = Arc::new(PeerManager::new(vec![]));
+    let transport_qualified = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &qualified_peer,
+        pm_qualified.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("Bind qualified peer transport");
+    let addr_qualified = transport_qualified.local_addr().expect("qualified addr");
+    let accept_handle_qualified = transport_qualified.spawn_accept_loop();
+
+    // 5. Bind transport for unqualified old peer
+    let pm_unqualified = Arc::new(PeerManager::new(vec![]));
+    let transport_unqualified = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &unqualified_old_peer,
+        pm_unqualified.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("Bind unqualified peer transport");
+    let addr_unqualified = transport_unqualified.local_addr().expect("unqualified addr");
+    let accept_handle_unqualified = transport_unqualified.spawn_accept_loop();
+
+    // 6. Mutual F2F friendship setup so direct QUIC heartbeats pass the gossip barrier
+    pm_local
+        .register_f2f_friend(*qualified_peer.node_pubkey(), Some(addr_qualified))
+        .await;
+    pm_qualified
+        .register_f2f_friend(*local_id.node_pubkey(), Some(addr_local))
+        .await;
+
+    pm_local
+        .register_f2f_friend(*unqualified_old_peer.node_pubkey(), Some(addr_unqualified))
+        .await;
+    pm_unqualified
+        .register_f2f_friend(*local_id.node_pubkey(), Some(addr_local))
+        .await;
+
+    // 7. Deliver real QUIC heartbeat from qualified peer to local node
+    let conn_qualified = transport_qualified
+        .connect_peer(addr_local)
+        .await
+        .expect("Qualified peer connects to local node");
+
+    let mut hb_qualified = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *qualified_peer.node_pubkey(),
+        addr: addr_qualified,
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: qualified_peer.nonce(),
+        hrw_routing_id: *qualified_peer.hrw_routing_id(),
+        ticket_epoch_t0: qualified_peer.t0(),
+        ttl: 16,
+    };
+    hb_qualified.sign_origin(&qualified_peer, 0, humoco_sim_core::types::NetworkId::default());
+    let payload_q = bincode::serialize(&hb_qualified).expect("serialize qualified hb");
+    let header_q = WireHeader::new(
+        MsgType::Heartbeat as u16,
+        1,
+        0,
+        0,
+        payload_q.len() as u32,
+    );
+    transport_qualified
+        .send_unidirectional(&conn_qualified, &header_q, &payload_q)
+        .await
+        .expect("Send qualified heartbeat over QUIC");
+
+    // 8. Deliver real QUIC heartbeat from unqualified old peer to local node
+    let conn_unqualified = transport_unqualified
+        .connect_peer(addr_local)
+        .await
+        .expect("Unqualified peer connects to local node");
+
+    let mut hb_unqualified = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *unqualified_old_peer.node_pubkey(),
+        addr: addr_unqualified,
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: unqualified_old_peer.nonce(),
+        hrw_routing_id: *unqualified_old_peer.hrw_routing_id(),
+        ticket_epoch_t0: unqualified_old_peer.t0(),
+        ttl: 16,
+    };
+    hb_unqualified.sign_origin(&unqualified_old_peer, 0, humoco_sim_core::types::NetworkId::default());
+    let payload_u = bincode::serialize(&hb_unqualified).expect("serialize unqualified hb");
+    let header_u = WireHeader::new(
+        MsgType::Heartbeat as u16,
+        1,
+        0,
+        0,
+        payload_u.len() as u32,
+    );
+    transport_unqualified
+        .send_unidirectional(&conn_unqualified, &header_u, &payload_u)
+        .await
+        .expect("Send unqualified heartbeat over QUIC");
+
+    // 9. Wait for both heartbeats to be processed by local PeerManager
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let snap = pm_local.snapshot_qualified_tickets().await;
+        if snap.iter().any(|(pk, _)| pk == qualified_peer.node_pubkey()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 10. Assert exact committee eligibility
+    assert!(
+        pm_local.is_hrw_eligible(qualified_peer.node_pubkey()).await,
+        "Mature qualified peer must be HRW eligible after real QUIC heartbeat"
+    );
+    assert!(
+        !pm_local.is_hrw_eligible(unqualified_old_peer.node_pubkey()).await,
+        "Mature unqualified peer must NOT be HRW eligible after real QUIC heartbeat"
+    );
+
+    let (committee, _, total) = pm_local
+        .shard_committee(*local_id.node_pubkey(), *local_id.hrw_routing_id(), 42)
+        .await;
+    assert_eq!(
+        total, 2,
+        "Only local node and qualified peer should be committee-eligible"
+    );
+    assert_eq!(committee.len(), 2);
+    let committee_pks: Vec<[u8; 32]> = committee.iter().map(|m| m.node_pubkey).collect();
+    assert!(committee_pks.contains(local_id.node_pubkey()));
+    assert!(committee_pks.contains(qualified_peer.node_pubkey()));
+    assert!(!committee_pks.contains(unqualified_old_peer.node_pubkey()));
+
+    // 11. Clean teardown
+    cancel_token.cancel();
+    transport_local.close();
+    transport_qualified.close();
+    transport_unqualified.close();
+    let _ = accept_handle_local.await;
+    let _ = accept_handle_qualified.await;
+    let _ = accept_handle_unqualified.await;
 }

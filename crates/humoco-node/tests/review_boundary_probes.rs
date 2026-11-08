@@ -81,7 +81,8 @@ async fn real_quic_root_rejection_preserves_signing_health() {
     let footprint =
         humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds((expiry - now) / 1_000);
     let sender = *source.identity.node_pubkey();
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender,
         0,
         1,
@@ -167,7 +168,8 @@ async fn real_quic_root_rejection_preserves_signing_health() {
         req.deletable_at = conflict.deletable_at.clone();
         *epoch_seq = 2;
         *cumulative_micro_byte_years = footprint * 2;
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::Mainnet,
             &sender,
             0,
             2,
@@ -470,8 +472,7 @@ async fn successful_retry_after_cancelled_root_and_spend_survives_recovery() {
         .to_bytes();
     cancel_after_mutation(&engine, "parent".into(), spend.clone(), now).await;
     let cancel = CancellationToken::new();
-    let worker =
-        DualTierEngine::spawn_flush_worker(rx, db.clone(), engine.stats.clone(), cancel.clone());
+    let worker = engine.spawn_worker_for_engine(rx, cancel.clone());
     let identity = NodeIdentity::generate();
     let pow = Arc::new(PowEngine::new(8));
     let tiers = Arc::new(TierController::new(db.clone(), pow.clone()));

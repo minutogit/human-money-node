@@ -41,7 +41,8 @@ fn payload(
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let now = reader.manager.net_time_ms() + seq;
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         reader.identity.node_pubkey(),
         0,
         0,
@@ -505,7 +506,8 @@ async fn pending_worker_then_late_commit_never_turns_status_into_an_original() {
         .connect_peer(receiver.local_addr().unwrap())
         .await
         .unwrap();
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client.node_pubkey(), 0, 0, now, 0, 0, 0, true, &row.t_id,
     );
     let bytes = bincode::serialize(&StatusQueryPayload {
@@ -529,6 +531,8 @@ async fn pending_worker_then_late_commit_never_turns_status_into_an_original() {
         db.clone(),
         Arc::new(PersistenceStats::default()),
         cancel.clone(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(tokio::sync::Notify::new()),
     );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while db.get_hmc_lock(tag).unwrap().is_none() {

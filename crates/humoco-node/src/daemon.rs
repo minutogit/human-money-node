@@ -512,6 +512,10 @@ impl NodeDaemon {
             .producers
             .lock()
             .push(tier_controller.quota_worker_abort_handle());
+        cleanup
+            .producers
+            .lock()
+            .push(tier_controller.accounting_worker_abort_handle());
         *cleanup.quota_failed.lock() = Some(tier_controller.quota_worker_failure_handle());
         // Client friend secrets are strictly decoupled from P2P network peer topology (A25-03).
         // P2P peer keys/endpoints are NEVER registered as HTTP ingress bearer tokens.
@@ -549,10 +553,11 @@ impl NodeDaemon {
             let local_pk = *current_id.node_pubkey();
             let local_hrw = *current_id.hrw_routing_id();
             let mut local_prior_age = std::time::Duration::ZERO;
+            let mut local_prior_qualified = false;
             let sim_mode = self.config.network.simulation_mode;
             match storage.all_ticket_observations() {
                 Ok(observations) => {
-                    for (pk, hrw, first_seen_ms) in &observations {
+                    for (pk, hrw, first_seen_ms, admission_qualified) in &observations {
                         let is_shortcut = *hrw == *blake3::hash(pk).as_bytes()
                             || *hrw == *pk
                             || *hrw == [0u8; 32];
@@ -562,9 +567,10 @@ impl NodeDaemon {
                         let age = std::time::Duration::from_millis(
                             boot_now_ms.saturating_sub(*first_seen_ms),
                         );
-                        peer_manager.seed_persisted_ticket_age(*pk, *hrw, age);
+                        peer_manager.seed_persisted_ticket_state(*pk, *hrw, age, *admission_qualified);
                         if *pk == local_pk && *hrw == local_hrw {
                             local_prior_age = age;
+                            local_prior_qualified = *admission_qualified;
                         }
                     }
                     if !observations.is_empty() {
@@ -581,7 +587,7 @@ impl NodeDaemon {
             if sim_mode || current_id.has_valid_pow_ticket() {
                 peer_manager.seed_local_ticket_age(local_pk, local_hrw, local_prior_age);
                 if let Err(err) =
-                    storage.record_ticket_observations_if_absent(&[(local_pk, local_hrw, boot_now_ms)])
+                    storage.record_ticket_observations(&[(local_pk, local_hrw, boot_now_ms, local_prior_qualified)])
                 {
                     warn!(error = %err, "Failed to persist initial local HRW ticket observation");
                 }
@@ -641,9 +647,6 @@ impl NodeDaemon {
         });
         cleanup.producer(&dns_re_resolve_handle);
 
-        let is_simulation = self.config.network.simulation_mode
-            || self.config.network.fast_ticker_interval_secs.is_some();
-
         // Background hourly malus decay ticker (Spec 19: Autonomous Peer Healing)
         let decay_pm = peer_manager.clone();
         let decay_token = self.cancel_token.clone();
@@ -661,26 +664,6 @@ impl NodeDaemon {
             }
         });
         cleanup.producer(&malus_decay_handle);
-
-        // Background F2F quarantine evaluation ticker (Algo 3v2 + ShadowEdgeWindow)
-        let q_pm = peer_manager.clone();
-        let q_token = self.cancel_token.clone();
-        let q_interval_secs = if is_simulation { 2 } else { 30 };
-        let quarantine_handle = tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(q_interval_secs));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = q_token.cancelled() => break,
-                    _ = interval.tick() => {
-                        let _events = q_pm.evaluate_f2f_quarantine(std::time::Instant::now()).await;
-                    }
-                }
-            }
-        });
-        cleanup.producer(&quarantine_handle);
 
         info!("Initializing QUIC P2P transport...");
 
@@ -769,19 +752,23 @@ impl NodeDaemon {
                     }
                     _ = interval.tick() => {
                         let now_ms = thermo_pm.net_time_ms();
-                        // Persist observed HRW tickets off the Tokio async worker thread.
-                        let mut active_tickets: Vec<([u8; 32], [u8; 32], u64)> = thermo_pm
-                            .snapshot_active_tickets()
+                        // Persist qualified HRW tickets off the Tokio async worker thread.
+                        let mut qualified_tickets: Vec<([u8; 32], [u8; 32], u64, bool)> = thermo_pm
+                            .snapshot_qualified_tickets()
                             .await
                             .into_iter()
-                            .map(|(pk, hrw)| (pk, hrw, now_ms))
+                            .map(|(pk, hrw)| (pk, hrw, now_ms, true))
                             .collect();
-                        active_tickets.push((thermo_self_ticket.0, thermo_self_ticket.1, now_ms));
-                        let persist_storage = thermo_storage.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            persist_storage.record_ticket_observations_if_absent(&active_tickets)
-                        })
-                        .await;
+                        if thermo_pm.local_ticket_is_mature() {
+                            qualified_tickets.push((thermo_self_ticket.0, thermo_self_ticket.1, now_ms, true));
+                        }
+                        if !qualified_tickets.is_empty() {
+                            let persist_storage = thermo_storage.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                persist_storage.record_ticket_observations(&qualified_tickets)
+                            })
+                            .await;
+                        }
                         // Mirror sync-readiness for the Provisional -> Final gate.
                         thermo_pm.set_local_sync_ready(
                             thermo_sync_flag.load(std::sync::atomic::Ordering::SeqCst),

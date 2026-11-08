@@ -453,43 +453,24 @@ fn test_spec_09_merge_fast_reseed_and_scale_jump() {
 }
 
 /// [INV-0909]
-/// Test 8: 3-Zonen-Plausibilitätsprüfung für 429 QuotaExceeded (Ehrlicher Vorreiter vs. Betrug)
+/// Test 8: 3-Zonen-Plausibilitätsprüfung für 429 QuotaExceeded (Diagnose-Zonen)
 #[test]
 fn test_spec_09_three_zone_quota_exceeded_plausibility_and_malus() {
     let quota_limit = 10_000_000; // 10M Byte-Jahre (z. B. 5x Limit)
 
-    // Fall 1: Eindeutige Betrugszone (< 75% des Limits, z. B. 2.000.000 Byte-Jahre verbraucht)
-    // Ein Shard-Node, der hier schon 429 QuotaExceeded behauptet, verweigert die Arbeit -> Malus +8!
-    let fraud_verdict = evaluate_quota_exceeded_claim(2_000_000, quota_limit);
-    assert_eq!(
-        fraud_verdict,
-        QuotaPlausibilityVerdict::FraudulentRejection { malus_increment: 8 }
-    );
-    assert_eq!(fraud_verdict.malus(), 8);
+    // Fall 1: EarlyRefusal-Zone (< 75% des Limits, z. B. 2.000.000 Byte-Jahre verbraucht)
+    let early_verdict = evaluate_quota_exceeded_claim(2_000_000, quota_limit);
+    assert_eq!(early_verdict, QuotaPlausibilityVerdict::EarlyRefusal);
 
     // Fall 2: Toleranter Grenzbereich (75% bis 125% des Limits, z. B. 8.000.000 Byte-Jahre)
-    // Shard-Node ist ein ehrlicher Vorreiter, der als Erster am Limit anstößt -> Kein Malus (0)!
     let boundary_verdict = evaluate_quota_exceeded_claim(8_000_000, quota_limit);
-    assert_eq!(
-        boundary_verdict,
-        QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
-    );
-    assert_eq!(boundary_verdict.malus(), 0);
+    assert_eq!(boundary_verdict, QuotaPlausibilityVerdict::BoundaryCutoff);
 
-    // Fall 3: Exakt am 100% Limit (10.000.000 Byte-Jahre) -> Kein Malus (0)!
+    // Fall 3: Exakt am 100% Limit (10.000.000 Byte-Jahre)
     let exact_verdict = evaluate_quota_exceeded_claim(10_000_000, quota_limit);
-    assert_eq!(
-        exact_verdict,
-        QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
-    );
-    assert_eq!(exact_verdict.malus(), 0);
+    assert_eq!(exact_verdict, QuotaPlausibilityVerdict::BoundaryCutoff);
 
     // Fall 4: Echte Überlast-Zone (> 125% des Limits, z. B. 15.000.000 Byte-Jahre)
-    // Sender ist meilenweit über dem Limit -> Regulärer Rate-Limit-Schutz -> Kein Malus (0)!
     let overload_verdict = evaluate_quota_exceeded_claim(15_000_000, quota_limit);
-    assert_eq!(
-        overload_verdict,
-        QuotaPlausibilityVerdict::LegitimateOverload { malus_increment: 0 }
-    );
-    assert_eq!(overload_verdict.malus(), 0);
+    assert_eq!(overload_verdict, QuotaPlausibilityVerdict::OverloadIndication);
 }

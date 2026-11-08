@@ -307,7 +307,8 @@ async fn test_s01_11_http_and_quic_bad_suffix_genesis_retains_valid_prefix() {
 
         let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600) * 3;
         let last = chain_req.chain.last().unwrap().clone();
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::Mainnet,
             client_id.node_pubkey(),
             0,
             0,
@@ -1520,10 +1521,19 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
     let root_valid_until = now + 600_000;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
     let op_hash = spend.transaction_hash;
-    let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = state
+    let alloc = state
         .tier_controller
-        .record_declared_usage(now, footprint);
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        .record_declared_usage(now, footprint)
+        .await
+        .expect("record usage");
+    let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = (
+        alloc.epoch_day,
+        alloc.epoch_seq,
+        alloc.cumulative_micro_byte_years,
+        alloc.prev_day_final_bytes,
+    );
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        state.network_id,
         &sender_pubkey,
         epoch_day,
         epoch_seq,
@@ -2035,7 +2045,8 @@ async fn test_s01_16_quic_single_genesis_chain_voucher_mismatch_rejected_and_con
 
     // 1. Send mismatched single-genesis chain via QUIC
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.node_pubkey(),
         0,
         0,
@@ -2095,7 +2106,8 @@ async fn test_s01_16_quic_single_genesis_chain_voucher_mismatch_rejected_and_con
         layer2_voucher_id: control_voucher.into(),
         chain: vec![control_hop.clone()],
     };
-    let digest_ctrl = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_ctrl = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.node_pubkey(),
         0,
         0,

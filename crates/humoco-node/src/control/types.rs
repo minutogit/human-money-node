@@ -26,6 +26,9 @@ pub enum ControlRequest {
         account_tag: String,
         byte_years: u64,
     },
+    ProvisionVipCredential {
+        account_tag: String,
+    },
     GetQuota {
         account_tag: String,
     },
@@ -150,6 +153,10 @@ pub enum ControlResponse {
     },
     QuotaUpdated {
         new_balance: u64,
+    },
+    VipCredentialProvisioned {
+        account_tag: String,
+        bearer_token: String,
     },
     Quota {
         balance: u64,

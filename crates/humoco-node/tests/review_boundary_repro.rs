@@ -435,7 +435,8 @@ async fn quic_lock_ingress_rejects_oversize_root() -> Result<(), Box<dyn std::er
     let sender_pubkey = *client_identity.node_pubkey();
     let op_hash = req.transaction_hash;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender_pubkey,
         0,
         0,

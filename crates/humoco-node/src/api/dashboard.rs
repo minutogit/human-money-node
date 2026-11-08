@@ -1320,7 +1320,7 @@ pub async fn admin_topup_quota(
 
     let trimmed = payload.account_tag.trim();
     let tag_bytes = crate::control::parse_account_tag(trimmed);
-    state.tier_controller.register_vip_token(trimmed, tag_bytes);
+    state.tier_controller.register_vip_tag(tag_bytes);
 
     match state
         .tier_controller
@@ -1351,6 +1351,58 @@ pub async fn admin_topup_quota(
             Json(serde_json::json!({
                 "error": "QuotaError",
                 "message": e.to_string()
+            })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProvisionVipCredentialRequest {
+    pub account_tag: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProvisionVipCredentialResponse {
+    pub status: &'static str,
+    pub account_tag: String,
+    pub bearer_token: String,
+}
+
+pub async fn admin_provision_vip_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ProvisionVipCredentialRequest>,
+) -> Response {
+    if let Err(unauth) = verify_admin_auth(&state, &headers) {
+        return unauth;
+    }
+
+    let trimmed = payload.account_tag.trim();
+    let tag_bytes = crate::control::parse_account_tag(trimmed);
+
+    match state.tier_controller.provision_vip_credential(tag_bytes) {
+        Ok(bearer_token) => {
+            let diag_id = crate::ingress::tier::vip_diagnostic_id(&tag_bytes);
+            state.event_log.record(
+                EventKind::QuotaTopup,
+                HealthLevel::Ok,
+                format!("VIP Credential provisioned for account '{diag_id}'"),
+            );
+            (
+                StatusCode::CREATED,
+                Json(ProvisionVipCredentialResponse {
+                    status: "ok",
+                    account_tag: trimmed.to_string(),
+                    bearer_token,
+                }),
+            )
+                .into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to provision VIP credential: {err}")
             })),
         )
             .into_response(),

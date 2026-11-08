@@ -1,6 +1,6 @@
 use humoco_sim_core::crypto::sign_lock_attestation;
-use humoco_sim_core::fraud::{FraudProofPayload, FraudProofPillar};
-use humoco_sim_core::types::SimTime;
+use humoco_sim_core::fraud::{FraudBuildError, FraudProofPayload, FraudProofPillar};
+use humoco_sim_core::types::{NetworkId, SimTime};
 
 /// Säule 1: Equivocation Double-Sign (L3A != L3B, gleicher parent_lock)
 #[test]
@@ -54,6 +54,7 @@ fn test_pillar_2_ingress_counter_conflict_bans_immediately() {
 
     // Erzeuge zwei betrügerische Pakete (Pfad 4: Zähler-Rückschritt am gleichen Tag)
     let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
         &signing_key,
         1,
         10,
@@ -65,6 +66,7 @@ fn test_pillar_2_ingress_counter_conflict_bans_immediately() {
         [0x11; 32],
     );
     let p2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
         &signing_key,
         1,
         11,
@@ -79,7 +81,14 @@ fn test_pillar_2_ingress_counter_conflict_bans_immediately() {
     let proof = FraudProofPayload::new_ingress_counter_conflict(p1, p2);
     assert_eq!(proof.proof_pillar, FraudProofPillar::IngressCounterConflict);
     assert_eq!(proof.perpetrator_node_id, gateway_pubkey);
-    assert!(proof.verify(), "Säule 2 Beweis muss gültig sein");
+    assert!(
+        proof.verify_network(NetworkId::Mainnet),
+        "Säule 2 Beweis muss unter Mainnet gültig sein"
+    );
+    assert!(
+        !proof.verify(),
+        "Säule 2 Beweis ohne explizites Netzwerk muss abgelehnt werden"
+    );
 }
 
 /// A08: Successor Shard Equivocation Evidence verifies when signed shard differs from parent bytes
@@ -149,6 +158,7 @@ fn test_pillar_2_v2_envelope_sequence_fork_conflict_bans_immediately() {
     let op_b = [0xBB; 32];
 
     let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
         &signing_key,
         epoch_day,
         epoch_seq,
@@ -160,6 +170,7 @@ fn test_pillar_2_v2_envelope_sequence_fork_conflict_bans_immediately() {
         op_a,
     );
     let p2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
         &signing_key,
         epoch_day,
         epoch_seq,
@@ -175,8 +186,12 @@ fn test_pillar_2_v2_envelope_sequence_fork_conflict_bans_immediately() {
     assert_eq!(proof.proof_pillar, FraudProofPillar::IngressCounterConflict);
     assert_eq!(proof.perpetrator_node_id, gateway_pubkey);
     assert!(
-        proof.verify(),
+        proof.verify_network(NetworkId::Mainnet),
         "A07: V2 envelope sequence fork must be detected as fraud!"
+    );
+    assert!(
+        !proof.verify_network(NetworkId::Testnet),
+        "A07: Mainnet proof must be rejected under Testnet!"
     );
 }
 
@@ -194,6 +209,7 @@ fn test_s07_02_v2_sequenced_under_reporting_symmetry_and_honest_progression() {
 
     // Packet 1: seq = 1
     let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
         &signing_key,
         epoch_day,
         1,
@@ -206,10 +222,11 @@ fn test_s07_02_v2_sequenced_under_reporting_symmetry_and_honest_progression() {
     );
 
     // Packet 2: seq = 2, 10 seconds later.
-    // Under-reporting malicious packet declares write_ema = 10_000 (< decayed(50_000, 10) + footprint).
+    // Under-reporting malicious packet declares write_ema = 10_000 (< decayed(50_000, 10)).
     let ts2 = ts1 + 10_000;
     let fraudulent_write_ema = 10_000;
     let p2_under_report = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
         &signing_key,
         epoch_day,
         2,
@@ -224,15 +241,16 @@ fn test_s07_02_v2_sequenced_under_reporting_symmetry_and_honest_progression() {
     // Both orders (p1, p2) and (p2, p1) must detect under-reporting fraud
     let proof_ab = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_under_report.clone());
     assert_eq!(proof_ab.perpetrator_node_id, gateway_pubkey);
-    assert!(proof_ab.verify(), "V2 under-reporting in (a, b) must verify as fraud");
+    assert!(proof_ab.verify_network(NetworkId::Mainnet), "V2 under-reporting in (a, b) must verify as fraud");
 
     let proof_ba = FraudProofPayload::new_ingress_counter_conflict(p2_under_report, p1.clone());
     assert_eq!(proof_ba.perpetrator_node_id, gateway_pubkey);
-    assert!(proof_ba.verify(), "V2 under-reporting in (b, a) must verify as fraud");
+    assert!(proof_ba.verify_network(NetworkId::Mainnet), "V2 under-reporting in (b, a) must verify as fraud");
 
     // Honest progression: seq = 2 with declared_write_ema = write_ema_1 + footprint_1
     let honest_write_ema = humoco_sim_core::quota::decay_integer_ema(write_ema_1, 10) + footprint_1;
     let p2_honest = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
         &signing_key,
         epoch_day,
         2,
@@ -245,8 +263,206 @@ fn test_s07_02_v2_sequenced_under_reporting_symmetry_and_honest_progression() {
     );
 
     let honest_proof_ab = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2_honest.clone());
-    assert!(!honest_proof_ab.verify(), "Honest V2 progression in (a, b) must not be conflict");
+    assert!(!honest_proof_ab.verify_network(NetworkId::Mainnet), "Honest V2 progression in (a, b) must not be conflict");
 
     let honest_proof_ba = FraudProofPayload::new_ingress_counter_conflict(p2_honest, p1);
-    assert!(!honest_proof_ba.verify(), "Honest V2 progression in (b, a) must not be conflict");
+    assert!(!honest_proof_ba.verify_network(NetworkId::Mainnet), "Honest V2 progression in (b, a) must not be conflict");
+}
+
+/// S07-11: Network-bound ingress evidence & explicit-network verification
+#[test]
+fn test_s07_11_network_bound_ingress_evidence_verification() {
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x55; 32]);
+    let _pk = sk.verifying_key().to_bytes();
+
+    let p1_main = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        1000,
+        500_000,
+        0,
+        100,
+        false,
+        [0x01; 32],
+    );
+    let p2_main_conflict = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        2,
+        2000,
+        100_000, // rollback -> fraud!
+        0,
+        100,
+        false,
+        [0x02; 32],
+    );
+
+    // 1. Same-network conflict on Mainnet verifies under Mainnet
+    let proof_main = FraudProofPayload::new_ingress_counter_conflict(p1_main.clone(), p2_main_conflict.clone());
+    assert!(proof_main.verify_network(NetworkId::Mainnet));
+    // Fails under foreign network Testnet
+    assert!(!proof_main.verify_network(NetworkId::Testnet));
+    // Networkless verify strictly returns false
+    assert!(!proof_main.verify());
+
+    // 2. Same-network conflict on Testnet verifies under Testnet, fails under Mainnet
+    let p1_test = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Testnet,
+        &sk,
+        1,
+        1,
+        1000,
+        500_000,
+        0,
+        100,
+        false,
+        [0x01; 32],
+    );
+    let p2_test_conflict = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Testnet,
+        &sk,
+        1,
+        2,
+        2000,
+        100_000,
+        0,
+        100,
+        false,
+        [0x02; 32],
+    );
+    let proof_test = FraudProofPayload::new_ingress_counter_conflict(p1_test.clone(), p2_test_conflict.clone());
+    assert!(proof_test.verify_network(NetworkId::Testnet));
+    assert!(!proof_test.verify_network(NetworkId::Mainnet));
+    assert!(!proof_test.verify());
+
+    // 3. Mixed-network construction must fail with NetworkMismatch
+    assert_eq!(
+        FraudProofPayload::try_new_ingress_counter_conflict(p1_main.clone(), p2_test_conflict.clone()),
+        Err(FraudBuildError::NetworkMismatch)
+    );
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p1_main, &p2_test_conflict));
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Testnet, &p1_main, &p2_test_conflict));
+
+    // 4. Forged payload containing mismatched packets must fail verification
+    let mut forged = FraudProofPayload::new_ingress_counter_conflict(p1_main.clone(), p1_main.clone());
+    forged.evidence_packet_b = humoco_sim_core::fraud::encode_ingress_envelope(&p2_test_conflict);
+    assert!(!forged.verify_network(NetworkId::Mainnet));
+    assert!(!forged.verify_network(NetworkId::Testnet));
+}
+
+/// S07-10: Physical-time EMA decay bounds & symmetry
+#[test]
+fn test_s07_10_physical_time_ema_decay_bounds_and_symmetry() {
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x77; 32]);
+
+    // Exact vector from finding: day=1, seq=1->2, timestamps=1_000_000->44_200_000ms (delta = 43_200s, 12h)
+    // and write_ema = 1_000_000_000 -> 707_106_782.
+    // 24h-half-life EMA decay for 12h: 1_000_000_000 * 2^(-0.5) = 707_106_781.18...
+    // decay_integer_ema(1_000_000_000, 43_200) produces 707_106_781.
+    // Declared 707_106_782 >= 707_106_781, so lawful decay MUST NOT be flagged as fraud!
+    let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        1_000_000,
+        1_000_000_000,
+        0,
+        0,
+        false,
+        [0x10; 32],
+    );
+    let p2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        2,
+        44_200_000,
+        707_106_782,
+        0,
+        0,
+        false,
+        [0x20; 32],
+    );
+
+    // Both (p1, p2) and (p2, p1) must return fraud = false
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p1, &p2),
+        "Lawful 12h write_ema decay in (p1, p2) must NOT be fraud!"
+    );
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p2, &p1),
+        "Lawful 12h write_ema decay in (p2, p1) must NOT be fraud!"
+    );
+
+    let proof_ab = FraudProofPayload::new_ingress_counter_conflict(p1.clone(), p2.clone());
+    assert!(!proof_ab.verify_network(NetworkId::Mainnet));
+    let proof_ba = FraudProofPayload::new_ingress_counter_conflict(p2.clone(), p1.clone());
+    assert!(!proof_ba.verify_network(NetworkId::Mainnet));
+
+    // Lawful declared_read_ema_credits decay in both orders:
+    let r1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        1_000_000,
+        0,
+        1_000_000,
+        0,
+        false,
+        [0x30; 32],
+    );
+    let r2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        2,
+        44_200_000,
+        0,
+        707_107,
+        0,
+        false,
+        [0x40; 32],
+    );
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &r1, &r2));
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &r2, &r1));
+
+    // Duplicate neutrality: identical seq=1 twice -> false
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p1, &p1));
+
+    // Genuine under-reporting: write_ema rollback below decay floor
+    let p2_under = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        2,
+        44_200_000,
+        500_000_000, // strictly below 707_106_781
+        0,
+        0,
+        false,
+        [0x50; 32],
+    );
+    assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p1, &p2_under));
+    assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p2_under, &p1));
+
+    // Rollback to 0:
+    let p2_zero = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        2,
+        44_200_000,
+        0, // rollback to 0
+        0,
+        0,
+        false,
+        [0x60; 32],
+    );
+    assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p1, &p2_zero));
+    assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p2_zero, &p1));
 }

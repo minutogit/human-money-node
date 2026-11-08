@@ -223,7 +223,8 @@ impl HeartbeatWirePayload {
         self.ticket_epoch_t0 = identity.t0();
 
         let op_hash = self.compute_announcement_hash(network);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            network,
             &self.node_id,
             0,
             0,
@@ -251,7 +252,8 @@ impl HeartbeatWirePayload {
         };
         let sig = ed25519_dalek::Signature::from_bytes(&self.signature);
         let op_hash = self.compute_announcement_hash(network);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            network,
             &self.node_id,
             0,
             0,
@@ -878,11 +880,21 @@ pub async fn read_frame_admitted<R: AsyncReadExt + Unpin>(
             None
         };
         let mut payload = Vec::with_capacity(payload_len.min(64 * 1024));
-        let mut limited_reader = reader.take(payload_len as u64);
-        limited_reader.read_to_end(&mut payload).await?;
+        (&mut *reader)
+            .take(payload_len as u64)
+            .read_to_end(&mut payload)
+            .await?;
         if payload.len() != payload_len {
             return Err(NodeError::Network(
                 "Unexpected EOF while reading frame payload".into(),
+            ));
+        }
+
+        let mut trailing_check = [0u8; 1];
+        let n = reader.read(&mut trailing_check).await?;
+        if n != 0 {
+            return Err(NodeError::Network(
+                "Excess trailing data on dedicated frame stream".into(),
             ));
         }
 
@@ -1182,7 +1194,8 @@ mod tests {
 
         // Legacy signature with op_hash = [0; 32] without canonical address binding must fail
         use ed25519_dalek::Signer;
-        let legacy_digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let legacy_digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::default(),
             identity.node_pubkey(),
             0,
             0,
@@ -1450,5 +1463,141 @@ mod f2f_payload_tests {
         let mut oversize = roster.clone();
         oversize.visible_neighbors = vec![[1u8; 32]; 65];
         assert!(oversize.to_bytes().is_err());
+    }
+
+    // --- S04-17 Framing Boundary Regressions ---
+
+    #[tokio::test]
+    async fn test_read_frame_trailing_byte_rejection_boundary() {
+        // 1-byte announced payload + 1 byte + trailing 0x99 -> rejected before returning frame
+        {
+            let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 1, 0, 1);
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&header.to_bytes());
+            buf.push(0x42);
+            buf.push(0x99); // trailing excess byte
+            let mut cursor = std::io::Cursor::new(buf);
+            let res = read_frame_with_timeout(&mut cursor, Duration::from_secs(1)).await;
+            assert!(res.is_err(), "1-byte payload with trailing byte must be rejected");
+            let err_msg = res.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Excess trailing data") || err_msg.contains("trailing"),
+                "expected excess trailing data error, got {err_msg}"
+            );
+        }
+
+        // Empty 0-byte announced payload + trailing 0x99 -> rejected
+        {
+            let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 1, 0, 0);
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&header.to_bytes());
+            buf.push(0x99); // trailing excess byte
+            let mut cursor = std::io::Cursor::new(buf);
+            let res = read_frame_with_timeout(&mut cursor, Duration::from_secs(1)).await;
+            assert!(res.is_err(), "0-byte payload with trailing byte must be rejected");
+        }
+
+        // Max 64 KiB (MAX_STANDARD_FRAME_PAYLOAD_LEN) announced payload + 64 KiB + trailing 0x99 -> rejected
+        {
+            let payload = vec![0xaa; MAX_STANDARD_FRAME_PAYLOAD_LEN];
+            let header = WireHeader::new(
+                MsgType::LockVerifyRequest as u16,
+                1,
+                1,
+                0,
+                MAX_STANDARD_FRAME_PAYLOAD_LEN as u32,
+            );
+            let mut buf = Vec::with_capacity(WireHeader::SIZE + payload.len() + 1);
+            buf.extend_from_slice(&header.to_bytes());
+            buf.extend_from_slice(&payload);
+            buf.push(0x99); // trailing excess byte
+            let mut cursor = std::io::Cursor::new(buf);
+            let res = read_frame_with_timeout(&mut cursor, Duration::from_secs(1)).await;
+            assert!(res.is_err(), "64 KiB payload with trailing byte must be rejected");
+        }
+
+        // Exact 1-byte and 0-byte frames with EOF -> accepted
+        {
+            let header_1 = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 1, 0, 1);
+            let mut buf_1 = Vec::new();
+            buf_1.extend_from_slice(&header_1.to_bytes());
+            buf_1.push(0x42);
+            let mut cursor_1 = std::io::Cursor::new(buf_1);
+            let res_1 = read_frame_with_timeout(&mut cursor_1, Duration::from_secs(1)).await;
+            assert!(res_1.is_ok(), "exact 1-byte frame with EOF must be accepted");
+            let (hdr, data) = res_1.unwrap();
+            assert_eq!(hdr.payload_len, 1);
+            assert_eq!(data, vec![0x42]);
+
+            let header_0 = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 1, 0, 0);
+            let mut buf_0 = Vec::new();
+            buf_0.extend_from_slice(&header_0.to_bytes());
+            let mut cursor_0 = std::io::Cursor::new(buf_0);
+            let res_0 = read_frame_with_timeout(&mut cursor_0, Duration::from_secs(1)).await;
+            assert!(res_0.is_ok(), "exact 0-byte frame with EOF must be accepted");
+            let (hdr, data) = res_0.unwrap();
+            assert_eq!(hdr.payload_len, 0);
+            assert!(data.is_empty());
+        }
+
+        // Truncated payload -> rejected
+        {
+            let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 1, 0, 10);
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&header.to_bytes());
+            buf.extend_from_slice(&[1, 2, 3, 4, 5]); // only 5 bytes instead of 10
+            let mut cursor = std::io::Cursor::new(buf);
+            let res = read_frame_with_timeout(&mut cursor, Duration::from_secs(1)).await;
+            assert!(res.is_err(), "truncated payload must be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_admitted_permit_release_on_trailing_byte_and_withheld_fin() {
+        let sync = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+        let rpc = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+
+        // 1) Admission permit (rpc_sem) released on trailing-byte rejection
+        {
+            let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 1, 0, 1);
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&header.to_bytes());
+            buf.push(0x42);
+            buf.push(0x99); // trailing excess byte
+            let mut cursor = std::io::Cursor::new(buf);
+            let res = read_frame_admitted(
+                &mut cursor,
+                Duration::from_secs(1),
+                Some((sync.clone(), rpc.clone())),
+            )
+            .await;
+            assert!(res.is_err(), "trailing byte must be rejected");
+            assert_eq!(
+                rpc.available_permits(),
+                10,
+                "admission permit must be released immediately on trailing-byte rejection"
+            );
+        }
+
+        // 2) Admission permit released on withheld-FIN timeout (tokio::io::duplex without closing writer)
+        {
+            let (mut reader, mut writer) = tokio::io::duplex(256);
+            let header = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 1, 0, 1);
+            writer.write_all(&header.to_bytes()).await.unwrap();
+            writer.write_all(&[0x42]).await.unwrap();
+            // Writer is kept open (withheld FIN), so reader waits for EOF until timeout
+            let res = read_frame_admitted(
+                &mut reader,
+                Duration::from_millis(50),
+                Some((sync.clone(), rpc.clone())),
+            )
+            .await;
+            assert!(res.is_err(), "withheld FIN must cause read timeout");
+            assert_eq!(
+                rpc.available_permits(),
+                10,
+                "admission permit must be released on withheld-FIN timeout"
+            );
+        }
     }
 }

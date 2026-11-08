@@ -48,7 +48,7 @@ use humoco_node::{
     storage::{DualTierEngine, RedbStorage},
 };
 use humoco_sim_core::{
-    fraud::{compute_ingress_envelope_digest_v2, FraudProofPayload, IngressEnvelopeEvidence},
+    fraud::{compute_ingress_envelope_digest, FraudProofPayload, IngressEnvelopeEvidence},
     wire::{MsgType, WireHeader, FLAG_QUOTA_EXCEEDED},
 };
 
@@ -114,6 +114,37 @@ fn make_test_hmc_genesis(
     let payload_hash = calculate_l2_payload_hash(&req);
     req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
     authenticate_root_fixture(&mut req, sender_key);
+    req
+}
+
+fn make_test_hmc_spend(
+    voucher_id: &str,
+    ds_tag: &str,
+    tx_hash: [u8; 32],
+    sender_key: &SigningKey,
+) -> L2LockRequest {
+    let sender_pub = sender_key.verifying_key().to_bytes();
+    let mut req = L2LockRequest {
+        causal_output: None,
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.to_string(),
+        ds_tag: Some(ds_tag.to_string()),
+        transaction_hash: tx_hash,
+        is_genesis: false,
+        sender_ephemeral_pub: sender_pub,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms: test_now_ms(),
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let payload_hash = calculate_l2_payload_hash(&req);
+    req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
     req
 }
 
@@ -185,6 +216,10 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
         let tc = controller.clone();
         let res = results.clone();
         handles.push(std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             b.wait();
             for i in 0..25 {
                 let now_ms = match (thread_idx % 4, i) {
@@ -195,7 +230,8 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
                     _ => unreachable!(),
                 };
                 let footprint = 100;
-                let (day, seq, cum, prev) = tc.record_declared_usage(now_ms, footprint);
+                let alloc = rt.block_on(tc.record_declared_usage(now_ms, footprint)).unwrap();
+                let (day, seq, cum, prev) = (alloc.epoch_day, alloc.epoch_seq, alloc.cumulative_micro_byte_years, alloc.prev_day_final_bytes);
                 res.lock().push((day, seq, cum, prev, now_ms));
             }
         }));
@@ -274,7 +310,8 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
         .iter()
         .map(|&(day, seq, cum, _prev, ts)| {
             let op_hash = *blake3::hash(&seq.to_le_bytes()).as_bytes();
-            let digest = compute_ingress_envelope_digest_v2(
+            let digest = compute_ingress_envelope_digest(
+                humoco_sim_core::types::NetworkId::default(),
                 &gateway_pubkey,
                 day,
                 seq,
@@ -287,6 +324,7 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
             );
             let signature = signing_key.sign(&digest).to_bytes();
             IngressEnvelopeEvidence {
+                network_id: humoco_sim_core::types::NetworkId::Mainnet,
                 gateway_pubkey,
                 epoch_day: day,
                 epoch_seq: seq,
@@ -307,7 +345,7 @@ async fn test_s05_01_concurrent_rollover_and_stale_timestamp_sequence_uniqueness
             let proof =
                 FraudProofPayload::new_ingress_counter_conflict(ev_a.clone(), ev_b.clone());
             assert!(
-                !proof.verify_ingress_counter_conflict(),
+                !proof.verify_ingress_counter_conflict_network(humoco_sim_core::types::NetworkId::Mainnet),
                 "False-positive fraud detected between honest envelopes! A: day={}, seq={} vs B: day={}, seq={}",
                 ev_a.epoch_day,
                 ev_a.epoch_seq,
@@ -409,14 +447,16 @@ async fn test_s05_01_real_quic_honest_rollover_no_slashing() {
 
     for (seq_idx, &now_ms) in timestamps.iter().enumerate() {
         let footprint = 100u64;
-        let (epoch_day, epoch_seq, cum, prev) = gw_tier.record_declared_usage(now_ms, footprint);
+        let alloc = gw_tier.record_declared_usage(now_ms, footprint).await.unwrap();
+        let (epoch_day, epoch_seq, cum, prev) = (alloc.epoch_day, alloc.epoch_seq, alloc.cumulative_micro_byte_years, alloc.prev_day_final_bytes);
 
         let parent = [0x50 + seq_idx as u8; 32];
         let root_valid = now_ms + 100_000;
         let lock_req = make_test_hmc_genesis(parent, root_valid, gateway_id.signing_key());
         let tx_hash = lock_req.transaction_hash;
 
-        let digest = compute_ingress_envelope_digest_v2(
+        let digest = compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::default(),
             &gateway_pubkey,
             epoch_day,
             epoch_seq,
@@ -550,8 +590,9 @@ async fn test_s05_02_control_server_topup_preserves_debits() {
     let account_tag = [0x88u8; 32];
     let tag_hex = hex::encode(account_tag);
 
+    let vip_token = format!("vip_{tag_hex}");
     let (_router, _operator, storage, _identity, tiers, _pow, _state) = setup_test_app_pair();
-    tiers.register_vip_token(&tag_hex, account_tag);
+    tiers.register_vip_token(&vip_token, account_tag);
     tiers.topup_vip_quota(account_tag, 200).unwrap();
 
     // Debit 50 in RAM before async persistence worker drains
@@ -559,9 +600,9 @@ async fn test_s05_02_control_server_topup_preserves_debits() {
     assert_eq!(rem, 150);
 
     // Exercise topup sequence matching control server / dashboard handler:
-    // (which calls register_vip_token and register_vip_tag before topup_vip_quota)
+    // (which calls register_vip_tag before topup_vip_quota)
     let tag_bytes = parse_account_tag(&tag_hex);
-    tiers.register_vip_token(tag_hex.clone(), tag_bytes);
+    tiers.register_vip_token(&vip_token, tag_bytes);
     tiers.register_vip_tag(tag_bytes);
     let new_bal = tiers.topup_vip_quota(tag_bytes, 10).unwrap();
 
@@ -642,7 +683,8 @@ async fn test_s05_02_operator_http_topup_after_unpersisted_debit() {
 
     let account_tag = [0x33u8; 32];
     let tag_hex = hex::encode(account_tag);
-    tiers.register_vip_token(&tag_hex, account_tag);
+    let vip_token = format!("vip_{tag_hex}");
+    tiers.register_vip_token(&vip_token, account_tag);
 
     // Initial quota = 200
     tiers.topup_vip_quota(account_tag, 200).unwrap();
@@ -762,8 +804,8 @@ async fn test_s05_03_vip_daily_allowance_enforcement_without_credit_burn() {
         "vip_writes_today must not increment on rejection!"
     );
 
-    // 3. Test HTTP POST /v1/lock endpoint rejection
-    let root = make_test_hmc_genesis([0x99; 32], now_ms + 100_000, identity.signing_key());
+    // 3. Test HTTP POST /v1/lock endpoint rejection (1 day TTL = 1 Byte-Year)
+    let root = make_test_hmc_genesis([0x99; 32], now_ms + 86_400_000, identity.signing_key());
     let req_body = serde_json::to_vec(&root).unwrap();
 
     let http_res = router
@@ -1505,9 +1547,10 @@ async fn test_s05_06_public_tier3_shared_rolling_budget_and_constant_memory() {
 
     // 4. HTTP layer verification: POST /v1/lock with another distinct parent returns HTTP 429
     let client_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let http_now = test_now_ms();
     let req_http = make_test_hmc_genesis(
         [0x99u8; 32],
-        now_ms + 86_400_000,
+        http_now + 31_536_000 * 1000,
         &client_key,
     );
     let http_res = router
@@ -1976,7 +2019,8 @@ async fn test_s05_09_rolling_ema_quota_exact_limit_retry_vip_latch_and_quic_node
     let root_valid_until = quic_now_ms + ttl_s * 1000;
     let lock_req = make_test_hmc_genesis([0x66u8; 32], root_valid_until, gateway_id.signing_key());
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
-    let digest = compute_ingress_envelope_digest_v2(
+    let digest = compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::default(),
         &gateway_pubkey,
         0,
         1,
@@ -2032,7 +2076,8 @@ async fn test_s05_09_rolling_ema_quota_exact_limit_retry_vip_latch_and_quic_node
 
     // StatusQuery over QUIC receives FLAG_QUOTA_EXCEEDED
     let query_lock_id = [0x77u8; 32];
-    let query_digest = compute_ingress_envelope_digest_v2(
+    let query_digest = compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::default(),
         &gateway_pubkey,
         0,
         0,
@@ -2165,3 +2210,884 @@ async fn test_s05_10_auth_expired_map_eviction_key_bounds_empty_file_and_bearer_
     );
 }
 
+// ===========================================================================
+// S05-11 & S05-12: Ingress Accounting Durability & VIP Bearer Separation
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s05_11_restart_preserves_ingress_accounting_monotonicity() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("ingress_monotonic.redb");
+    let day_ms = 86_400_000u64;
+
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let boot_day = pow.now_ms() / day_ms;
+    let base_t = boot_day * day_ms;
+
+    let alloc2_seq;
+    {
+        let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+
+        let alloc1 = tc.record_declared_usage(base_t + 1_000, 100).await.unwrap();
+        assert_eq!(alloc1.epoch_day, boot_day as u32);
+        assert_eq!(alloc1.epoch_seq, 1);
+        assert_eq!(alloc1.cumulative_micro_byte_years, 100);
+        assert_eq!(alloc1.prev_day_final_bytes, 0);
+
+        let alloc2 = tc.record_declared_usage(base_t + 2_000, 200).await.unwrap();
+        assert_eq!(alloc2.epoch_day, boot_day as u32);
+        assert_eq!(alloc2.epoch_seq, 2);
+        assert_eq!(alloc2.cumulative_micro_byte_years, 300);
+        assert_eq!(alloc2.prev_day_final_bytes, 0);
+        alloc2_seq = alloc2.epoch_seq;
+        tc.wait_for_accounting_drain().await;
+    }
+
+    // Node restart: re-instantiate TierController against intact storage (reloads from disk)
+    {
+        let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+
+        let alloc3 = tc.record_declared_usage(base_t + 3_000, 150).await.unwrap();
+        assert_eq!(alloc3.epoch_day, boot_day as u32);
+        assert!(
+            alloc3.epoch_seq > alloc2_seq,
+            "Sequence must continue monotonically from persisted state (post_seq > pre_seq), not reset to 1!"
+        );
+        assert_eq!(alloc3.cumulative_micro_byte_years, 450);
+        assert_eq!(alloc3.prev_day_final_bytes, 0);
+    }
+}
+
+#[tokio::test]
+async fn test_s05_11_allocation_persistence_failure_fail_closed() {
+    let (router, _operator, storage, identity, tier_controller, _pow, _state) = setup_test_app_pair();
+
+    // 1. Initial valid genesis registration succeeds (root anchor has no ingress envelope)
+    let now_ms = test_now_ms();
+    let root = make_test_hmc_genesis([0x77; 32], now_ms + 100_000, identity.signing_key());
+    let root_entry = humoco_node::api::hmc::L2LockEntry::from(&root);
+    let root_tag = bs58::encode(root_entry.t_id).into_string();
+    storage.put_hmc_lock(&root_tag, &root_entry).unwrap();
+
+    // 2. Fail persistence explicitly -> record_declared_usage fails closed immediately
+    tier_controller.fail_accounting_persistence_for_test();
+    let res = tier_controller.record_declared_usage(test_now_ms(), 100).await;
+    assert!(
+        matches!(res, Err(IngressError::AccountingPersistenceUnavailable)),
+        "Must return AccountingPersistenceUnavailable when persistence is broken"
+    );
+
+    // 3. HTTP POST /v1/lock spend submission must return 503 Service Unavailable when persistence fails
+    let spend_key = SigningKey::from_bytes(&[0x88; 32]);
+    let spend = make_test_hmc_spend(&root.layer2_voucher_id, "spent_tag_503", [0x99; 32], &spend_key);
+    let req_body = serde_json::to_vec(&spend).unwrap();
+
+    let http_res = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lock")
+                .header("content-type", "application/json")
+                .body(Body::from(req_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        http_res.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "HTTP POST /v1/lock spend must fail closed with 503 Service Unavailable when persistence fails"
+    );
+
+    // 3. Queue saturation: create controller with small capacity (e.g. capacity 1)
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("sat.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let bounded_tc = Arc::new(TierController::new_with_persist_capacity(storage, pow, 1));
+
+    // Fill channel capacity
+    let _held_permit = bounded_tc.reserve_accounting_permit_for_test().expect("reserve permit");
+    let sat_res = bounded_tc.record_declared_usage(test_now_ms(), 50).await;
+    assert!(
+        matches!(sat_res, Err(IngressError::AccountingPersistenceUnavailable)),
+        "Must fail closed when persistence channel is saturated"
+    );
+}
+
+#[tokio::test]
+async fn test_s05_11_calendar_day_rollover_and_restart() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("rollover_restart.redb");
+    let day_ms = 86_400_000u64;
+
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let boot_day = pow.now_ms() / day_ms;
+    let base_t = boot_day * day_ms;
+
+    let alloc3_seq;
+    {
+        let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+
+        // Day usage
+        let alloc1 = tc.record_declared_usage(base_t + 1_000, 500).await.unwrap();
+        assert_eq!(alloc1.epoch_day, boot_day as u32);
+        assert_eq!(alloc1.epoch_seq, 1);
+        assert_eq!(alloc1.cumulative_micro_byte_years, 500);
+        assert_eq!(alloc1.prev_day_final_bytes, 0);
+
+        let alloc2 = tc.record_declared_usage(base_t + 2_000, 300).await.unwrap();
+        assert_eq!(alloc2.epoch_day, boot_day as u32);
+        assert_eq!(alloc2.epoch_seq, 2);
+        assert_eq!(alloc2.cumulative_micro_byte_years, 800);
+        assert_eq!(alloc2.prev_day_final_bytes, 0);
+
+        // Day rollover
+        let alloc3 = tc.record_declared_usage(base_t + day_ms + 100, 200).await.unwrap();
+        assert_eq!(alloc3.epoch_day, (boot_day + 1) as u32);
+        assert_eq!(alloc3.epoch_seq, 1, "epoch_seq resets to 1 on calendar day rollover");
+        assert_eq!(alloc3.cumulative_micro_byte_years, 200);
+        assert_eq!(
+            alloc3.prev_day_final_bytes, 800,
+            "prev_day_final_bytes must preserve final cumulative bytes of Day 100"
+        );
+        alloc3_seq = alloc3.epoch_seq;
+        tc.wait_for_accounting_drain().await;
+    }
+
+    // Node restarts on next day against intact storage
+    {
+        let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+
+        let alloc4 = tc.record_declared_usage(base_t + day_ms + 500, 150).await.unwrap();
+        assert_eq!(alloc4.epoch_day, (boot_day + 1) as u32);
+        assert!(
+            alloc4.epoch_seq > alloc3_seq,
+            "epoch_seq must continue monotonically on Day 101 after restart (post_seq > pre_seq)"
+        );
+        assert_eq!(alloc4.cumulative_micro_byte_years, 350);
+        assert_eq!(
+            alloc4.prev_day_final_bytes, 800,
+            "prev_day_final_bytes must remain intact across restart on Day 101"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_s05_11_real_quic_restart_regression() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("server.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let server_id = NodeIdentity::generate();
+    let gateway_id = NodeIdentity::generate();
+    let gateway_pubkey = *gateway_id.node_pubkey();
+
+    let server_peer_mgr = Arc::new(PeerManager::new(vec![]));
+    server_peer_mgr.set_simulation_mode(true);
+    server_peer_mgr.seed_local_ticket_age(
+        *server_id.node_pubkey(),
+        *server_id.hrw_routing_id(),
+        std::time::Duration::from_secs(86_400),
+    );
+    let readiness = Arc::new(ShardReadinessManager::new());
+    for shard in 0..=u16::MAX {
+        readiness.mark_shard_ready(shard);
+    }
+
+    let handler = NodeRequestHandler::with_peer_manager(
+        engine.clone(),
+        storage.clone(),
+        server_id.clone(),
+        server_peer_mgr.clone(),
+    )
+    .with_readiness_manager(readiness);
+
+    let cancel_token = CancellationToken::new();
+
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        server_peer_mgr.clone(),
+        Arc::new(handler),
+        cancel_token.clone(),
+    )
+    .expect("bind server QUIC");
+    let server_addr = server_transport.local_addr().unwrap();
+    let _server_accept = server_transport.spawn_accept_loop();
+
+    let gw_db_path = temp.path().join("gw.redb");
+    let gw_storage = Arc::new(RedbStorage::open(&gw_db_path).unwrap());
+    let gw_pow = Arc::new(PowEngine::new(0));
+
+    let base_t = server_peer_mgr.net_time_ms();
+    let now_ms_1 = base_t;
+    let now_ms_2 = base_t + 1_000;
+
+    // Phase 1: Gateway boots, acquires seq 1, sends LockVerifyRequest over QUIC
+    {
+        let gw_tier = Arc::new(TierController::new(gw_storage.clone(), gw_pow.clone()));
+
+        let gw_cancel = CancellationToken::new();
+        let gw_peer_mgr = Arc::new(PeerManager::new(vec![server_addr]));
+        let gw_transport = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            &gateway_id,
+            gw_peer_mgr.clone(),
+            Arc::new(DefaultRequestHandler),
+            gw_cancel.clone(),
+        )
+        .expect("bind gw QUIC");
+        let _gw_accept = gw_transport.spawn_accept_loop();
+
+        server_peer_mgr
+            .register_f2f_friend(gateway_pubkey, Some(gw_transport.local_addr().unwrap()))
+            .await;
+        gw_peer_mgr
+            .register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+            .await;
+
+        let conn = gw_transport.connect_peer(server_addr).await.unwrap();
+
+        let alloc1 = gw_tier.record_declared_usage(now_ms_1, 100).await.unwrap();
+        assert_eq!(alloc1.epoch_seq, 1);
+
+        let parent1 = [0x71; 32];
+        let root_valid = now_ms_1 + 100_000;
+        let lock_req1 = make_test_hmc_genesis(parent1, root_valid, gateway_id.signing_key());
+        let tx_hash1 = lock_req1.transaction_hash;
+        let digest1 = compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::default(),
+            &gateway_pubkey,
+            alloc1.epoch_day,
+            alloc1.epoch_seq,
+            now_ms_1,
+            0,
+            0,
+            100,
+            false,
+            &tx_hash1,
+        );
+        let sender_sig1 = gateway_id.signing_key().sign(&digest1).to_bytes();
+
+        let wire_payload1 = bincode::serialize(&LockWirePayload::Hmc {
+            req: lock_req1,
+            chain: None,
+            root_valid_until: root_valid,
+            epoch_day: alloc1.epoch_day,
+            epoch_seq: alloc1.epoch_seq,
+            cumulative_micro_byte_years: alloc1.cumulative_micro_byte_years,
+            prev_day_final_bytes: alloc1.prev_day_final_bytes,
+            current_anl_24h: 0,
+            declared_write_ema_micro_bj: 0,
+            declared_read_ema_credits: 0,
+            sender_pubkey: gateway_pubkey,
+            sender_signature: sender_sig1,
+            timestamp_ms: now_ms_1,
+        })
+        .unwrap();
+
+        let header1 = WireHeader::new(
+            MsgType::LockVerifyRequest as u16,
+            1,
+            0,
+            0,
+            wire_payload1.len() as u32,
+        );
+
+        let (resp_hdr1, _) = gw_transport
+            .send_request(&conn, &header1, &wire_payload1)
+            .await
+            .expect("send 1st LockVerifyRequest over QUIC");
+        assert_eq!(resp_hdr1.msg_type, MsgType::LockVerifyResponse as u16);
+        assert_eq!(resp_hdr1.flags & humoco_sim_core::wire::FLAG_UNAUTHORIZED, 0);
+        assert_eq!(resp_hdr1.flags & humoco_sim_core::wire::FLAG_QUOTA_FRAUD, 0);
+
+        gw_cancel.cancel();
+        gw_transport.close();
+    }
+
+    // Phase 2: Gateway RESTARTS on the same RedbStorage & same day
+    // Verifies it seamlessly picks up seq 2, causing zero fraud flags, zero bans, zero slashes!
+    {
+        let gw_tier = Arc::new(TierController::new(gw_storage.clone(), gw_pow.clone()));
+
+        let gw_cancel = CancellationToken::new();
+        let gw_peer_mgr = Arc::new(PeerManager::new(vec![server_addr]));
+        let gw_transport = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            &gateway_id,
+            gw_peer_mgr.clone(),
+            Arc::new(DefaultRequestHandler),
+            gw_cancel.clone(),
+        )
+        .expect("bind gw QUIC restart");
+        let _gw_accept = gw_transport.spawn_accept_loop();
+
+        server_peer_mgr
+            .register_f2f_friend(gateway_pubkey, Some(gw_transport.local_addr().unwrap()))
+            .await;
+        gw_peer_mgr
+            .register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+            .await;
+
+        let conn = gw_transport.connect_peer(server_addr).await.unwrap();
+
+        let alloc2 = gw_tier.record_declared_usage(now_ms_2, 100).await.unwrap();
+        assert!(
+            alloc2.epoch_seq > 1,
+            "After gateway restart, sequence number must continue monotonically"
+        );
+
+        let parent2 = [0x72; 32];
+        let root_valid = now_ms_2 + 100_000;
+        let lock_req2 = make_test_hmc_genesis(parent2, root_valid, gateway_id.signing_key());
+        let tx_hash2 = lock_req2.transaction_hash;
+        let digest2 = compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::default(),
+            &gateway_pubkey,
+            alloc2.epoch_day,
+            alloc2.epoch_seq,
+            alloc2.timestamp_ms,
+            0,
+            0,
+            100,
+            false,
+            &tx_hash2,
+        );
+        let sender_sig2 = gateway_id.signing_key().sign(&digest2).to_bytes();
+
+        let wire_payload2 = bincode::serialize(&LockWirePayload::Hmc {
+            req: lock_req2,
+            chain: None,
+            root_valid_until: root_valid,
+            epoch_day: alloc2.epoch_day,
+            epoch_seq: alloc2.epoch_seq,
+            cumulative_micro_byte_years: alloc2.cumulative_micro_byte_years,
+            prev_day_final_bytes: alloc2.prev_day_final_bytes,
+            current_anl_24h: 0,
+            declared_write_ema_micro_bj: 0,
+            declared_read_ema_credits: 0,
+            sender_pubkey: gateway_pubkey,
+            sender_signature: sender_sig2,
+            timestamp_ms: alloc2.timestamp_ms,
+        })
+        .unwrap();
+
+        let header2 = WireHeader::new(
+            MsgType::LockVerifyRequest as u16,
+            2,
+            0,
+            0,
+            wire_payload2.len() as u32,
+        );
+
+        let (resp_hdr2, _) = gw_transport
+            .send_request(&conn, &header2, &wire_payload2)
+            .await
+            .expect("send 2nd LockVerifyRequest over QUIC after restart");
+        assert_eq!(resp_hdr2.msg_type, MsgType::LockVerifyResponse as u16);
+        assert_eq!(resp_hdr2.flags & humoco_sim_core::wire::FLAG_UNAUTHORIZED, 0);
+        assert_eq!(
+            resp_hdr2.flags & humoco_sim_core::wire::FLAG_QUOTA_FRAUD, 0,
+            "No quota fraud flag on restarted gateway request!"
+        );
+
+        gw_cancel.cancel();
+        gw_transport.close();
+    }
+
+    assert!(
+        !server_peer_mgr.is_banned(&gateway_pubkey).await,
+        "Honest gateway after restart must NOT be banned by receiver"
+    );
+    cancel_token.cancel();
+    server_transport.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_s05_12_vip_credential_separation_and_provisioning() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("vip_cred_sep.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pow_engine = Arc::new(PowEngine::new(0));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+
+    let state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    );
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
+    let auth = Arc::new(AdminTokenManager::with_token("admin_secret_sep", false));
+    let state = state.with_auth(auth);
+    let operator_router = build_operator_router(state.clone());
+    let public_router = build_router(state.clone());
+
+    let account_tag = [0x55u8; 32];
+    let tag_hex = hex::encode(account_tag);
+
+    // 1. Operator topup via HTTP POST /dashboard/admin/quota (+1000 BY)
+    let topup_payload = serde_json::json!({
+        "account_tag": tag_hex,
+        "byte_years": 1000
+    });
+    let topup_req = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/quota")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer admin_secret_sep")
+        .body(Body::from(serde_json::to_vec(&topup_payload).unwrap()))
+        .unwrap();
+    let topup_resp = operator_router.clone().oneshot(topup_req).await.unwrap();
+    assert_eq!(topup_resp.status(), StatusCode::OK);
+
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(1000),
+        "VIP account balance must be 1000 after topup"
+    );
+
+    // 2. Authentication failure: Presenting raw account_tag (NodePubKey hex) as bearer token on /v1/lock MUST FAIL (401)!
+    let now_ms = test_now_ms();
+    let root_1 = make_test_hmc_genesis([0x81; 32], now_ms + 100_000, identity.signing_key());
+    let req_1 = serde_json::to_vec(&root_1).unwrap();
+
+    let fail_auth_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {tag_hex}"))
+        .body(Body::from(req_1))
+        .unwrap();
+    let fail_auth_resp = public_router.clone().oneshot(fail_auth_req).await.unwrap();
+    assert_eq!(
+        fail_auth_resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "Presenting raw account_tag as bearer token on /v1/lock must be rejected with 401 Unauthorized"
+    );
+
+    // Assert quota was NOT charged!
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(1000),
+        "Quota must NOT be charged on unauthorized attempt"
+    );
+
+    // 3. Provision a dedicated VIP credential via POST /dashboard/admin/quota/credentials
+    let prov_payload = serde_json::json!({
+        "account_tag": tag_hex
+    });
+    let prov_req = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/quota/credentials")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer admin_secret_sep")
+        .body(Body::from(serde_json::to_vec(&prov_payload).unwrap()))
+        .unwrap();
+    let prov_resp = operator_router.clone().oneshot(prov_req).await.unwrap();
+    assert_eq!(prov_resp.status(), StatusCode::CREATED);
+
+    let prov_body = axum::body::to_bytes(prov_resp.into_body(), 1024 * 1024).await.unwrap();
+    let prov_json: serde_json::Value = serde_json::from_slice(&prov_body).unwrap();
+    let http_bearer = prov_json["bearer_token"].as_str().unwrap().to_string();
+
+    assert!(http_bearer.starts_with("vip_"), "Bearer token must start with vip_");
+    assert_ne!(http_bearer, tag_hex, "Bearer token must be distinct from account tag");
+
+    // 4. Provision another VIP credential via TierController / UNIX control flow
+    let unix_bearer = tier_controller.provision_vip_credential(account_tag).unwrap();
+    assert!(unix_bearer.starts_with("vip_"));
+    assert_ne!(unix_bearer, http_bearer);
+
+    // 5. Successful lock write on /v1/lock using provisioned VIP token
+    let root_2 = make_test_hmc_genesis([0x82; 32], now_ms + 100_000, identity.signing_key());
+    let req_2 = serde_json::to_vec(&root_2).unwrap();
+
+    let succ_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {http_bearer}"))
+        .body(Body::from(req_2))
+        .unwrap();
+    let succ_resp = public_router.clone().oneshot(succ_req).await.unwrap();
+    assert_eq!(
+        succ_resp.status(),
+        StatusCode::CREATED,
+        "HTTP POST /v1/lock with valid provisioned VIP token must succeed (201 Created)"
+    );
+
+    let charged_bal = tier_controller.get_cached_vip_quota(&account_tag).unwrap();
+    assert!(charged_bal < 1000, "Quota must be debited upon successful lock write");
+
+    // 6. Persistence across restart: re-create TierController and AppState against same storage
+    {
+        let pow_engine = Arc::new(PowEngine::new(0));
+        let restarted_tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+        let (restarted_engine, _) = DualTierEngine::new(storage.clone());
+        let restarted_state = AppState::new(
+            restarted_engine,
+            storage.clone(),
+            identity.clone(),
+            restarted_tier_controller.clone(),
+            pow_engine.clone(),
+        );
+        for shard in 0..=u16::MAX {
+            restarted_state.readiness_manager.mark_shard_ready(shard);
+        }
+        let restarted_public_router = build_router(restarted_state);
+
+        // Submit lock write with unix_bearer on restarted node: must succeed!
+        let root_3 = make_test_hmc_genesis([0x83; 32], now_ms + 100_000, identity.signing_key());
+        let req_3 = serde_json::to_vec(&root_3).unwrap();
+
+        let succ_req_restarted = Request::builder()
+            .method("POST")
+            .uri("/v1/lock")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {unix_bearer}"))
+            .body(Body::from(req_3))
+            .unwrap();
+        let succ_resp_restarted = restarted_public_router.oneshot(succ_req_restarted).await.unwrap();
+        assert_eq!(
+            succ_resp_restarted.status(),
+            StatusCode::CREATED,
+            "Provisioned VIP credentials must survive daemon restart"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S08-11: TierController 50,000-credit sequence fractional precision
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_s08_11_production_tier_controller_50k_credit_sequence() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s08_11_tc.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let tc = TierController::new(storage, pow);
+
+    let client_id: u16 = 1234;
+    // Consume 50,000 at t = 0
+    tc.evaluate_read_quota_with_time(client_id, 50_000, 1.0, Some(0))
+        .expect("initial 50,000 consumption");
+
+    let mut accepted = 0u64;
+    for t in 1..=10_000u64 {
+        let now_ms = t * 1000;
+        if tc
+            .evaluate_read_quota_with_time(client_id, 1, 1.0, Some(now_ms))
+            .is_ok()
+        {
+            accepted += 1;
+        }
+    }
+
+    // In pre-fix code, all 10,000 requests are accepted due to integer truncation.
+    // In post-fix code, only ~3,989 requests must be accepted!
+    assert!(
+        accepted < 5_000,
+        "TierController accepted count ({accepted}) must NOT accept all 10,000 requests"
+    );
+    let diff = (accepted as i64 - 4011).abs();
+    assert!(
+        diff <= 30,
+        "Accepted requests ({accepted}) must closely track physical decay (~4011)"
+    );
+}
+
+#[tokio::test]
+async fn test_s08_11_http_read_quota_subsecond_decay_rejection() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s08_11_http.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _) = DualTierEngine::new(storage.clone());
+    let pow = Arc::new(PowEngine::new(0));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let identity = NodeIdentity::generate();
+    let peer_manager = Arc::new(PeerManager::new(vec![]));
+    peer_manager.set_simulation_mode(true);
+    let state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow.clone(),
+    )
+    .with_peer_manager(peer_manager.clone());
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
+    let router = build_router(state);
+
+    let voucher_id = "s08_11_voucher_status_test";
+    let status_query = humoco_node::api::hmc::L2StatusQuery {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: [0u8; 32],
+            auth_signature: None,
+        },
+        layer2_voucher_id: voucher_id.to_string(),
+        challenge_ds_tag: "test_tag".to_string(),
+        locator_prefixes: vec![],
+        read_quorum: 1,
+        root_context: None,
+    };
+    let query_body = serde_json::to_vec(&status_query).unwrap();
+
+    let v_hash = *blake3::hash(voucher_id.as_bytes()).as_bytes();
+    let client_id = u16::from_be_bytes([v_hash[0], v_hash[1]]);
+
+    let start_now_ms = peer_manager.net_time_ms();
+    // Exhaust client read quota at start_now_ms (50,000 reads)
+    tier_controller
+        .evaluate_read_quota_with_time(client_id, 50_000, 1.0, Some(start_now_ms))
+        .expect("exhaust read quota at start_now_ms");
+
+    // Immediate request at start_now_ms must be 429
+    let req_0 = Request::builder()
+        .method("POST")
+        .uri("/v1/status")
+        .header("content-type", "application/json")
+        .body(Body::from(query_body.clone()))
+        .unwrap();
+    let resp_0 = router.clone().oneshot(req_0).await.unwrap();
+    assert_eq!(
+        resp_0.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "HTTP status query immediately after exhausting read quota must return 429"
+    );
+
+    // Advance time deterministically by 1_000 ms:
+    // In pre-fix code, decay_integer_ema truncated and gave 1 full credit!
+    // In post-fix code, < 1 full credit decayed (~0.401 credit), so still rejected with 429!
+    peer_manager.clock().advance_time_for_test(1_000);
+    let req_1 = Request::builder()
+        .method("POST")
+        .uri("/v1/status")
+        .header("content-type", "application/json")
+        .body(Body::from(query_body.clone()))
+        .unwrap();
+    let resp_1 = router.clone().oneshot(req_1).await.unwrap();
+    assert_eq!(
+        resp_1.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "HTTP status query after 1 second must be rejected with 429 because < 1 full credit decayed"
+    );
+
+    // Advance time deterministically by another 2_500 ms (total elapsed 3.5s, allowing >= 1 full credit to decay)
+    peer_manager.clock().advance_time_for_test(2_500);
+    let req_3 = Request::builder()
+        .method("POST")
+        .uri("/v1/status")
+        .header("content-type", "application/json")
+        .body(Body::from(query_body))
+        .unwrap();
+    let resp_3 = router.clone().oneshot(req_3).await.unwrap();
+    assert_eq!(
+        resp_3.status(),
+        StatusCode::OK,
+        "HTTP status query after >= 3.5 seconds must succeed (200 OK) because >= 1 full credit decayed"
+    );
+}
+
+#[tokio::test]
+async fn test_s08_11_quic_receiver_fractional_quota_exceeded() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s08_11_quic.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let server_id = NodeIdentity::generate();
+    let gateway_id = NodeIdentity::generate();
+    let gateway_pubkey = *gateway_id.node_pubkey();
+
+    let server_tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let (engine, _) = DualTierEngine::new(storage.clone());
+    let readiness = Arc::new(ShardReadinessManager::new());
+    for s in 0..=u16::MAX {
+        readiness.mark_shard_ready(s);
+    }
+
+    let server_peer_mgr = Arc::new(PeerManager::new(vec![]));
+    server_peer_mgr.set_simulation_mode(true);
+    let handler = NodeRequestHandler::with_peer_manager(
+        engine,
+        storage.clone(),
+        server_id.clone(),
+        server_peer_mgr.clone(),
+    )
+    .with_readiness_manager(readiness)
+    .with_tier_controller(server_tc.clone());
+
+    let cancel_token = CancellationToken::new();
+
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        server_peer_mgr.clone(),
+        Arc::new(handler),
+        cancel_token.clone(),
+    )
+    .expect("bind server QUIC");
+    let server_addr = server_transport.local_addr().unwrap();
+    let _server_accept = server_transport.spawn_accept_loop();
+
+    let gw_peer_mgr = Arc::new(PeerManager::new(vec![server_addr]));
+    gw_peer_mgr.set_simulation_mode(true);
+    let gateway_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &gateway_id,
+        gw_peer_mgr.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("bind gateway QUIC");
+    let _gw_accept = gateway_transport.spawn_accept_loop();
+
+    server_peer_mgr
+        .register_f2f_friend(gateway_pubkey, Some(gateway_transport.local_addr().unwrap()))
+        .await;
+    gw_peer_mgr
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+        .await;
+
+    let conn = gateway_transport
+        .connect_peer(server_addr)
+        .await
+        .expect("connect QUIC peer");
+
+    let quic_now_ms = server_peer_mgr.net_time_ms();
+    // Daily node read limit is 250,000 (5.0 * 50,000)
+    let daily_read_limit = server_tc.calculate_daily_read_quota(humoco_sim_core::quota::MAX_WHALE_MULTIPLIER, 1.0);
+    assert_eq!(daily_read_limit, 250_000);
+
+    // Exhaust gateway node read quota at quic_now_ms
+    server_tc
+        .evaluate_node_read_quota(&gateway_pubkey, daily_read_limit, quic_now_ms)
+        .expect("initial node read consume");
+
+    // Helper closure to send a valid authenticated StatusQuery over QUIC
+    let send_status_query = |seq: u64, timestamp_ms: u64| {
+        let gt = gateway_transport.clone();
+        let c = conn.clone();
+        let gid = gateway_id.clone();
+        async move {
+            let query_lock_id = [0x55u8; 32];
+            let query_digest = compute_ingress_envelope_digest(
+                humoco_sim_core::types::NetworkId::default(),
+                &gateway_pubkey,
+                0,
+                0,
+                timestamp_ms,
+                0,
+                0,
+                0,
+                true,
+                &query_lock_id,
+            );
+            let query_sig = gid.signing_key().sign(&query_digest).to_bytes();
+            let status_payload =
+                bincode::serialize(&humoco_node::network::framing::StatusQueryPayload {
+                    lock_id: query_lock_id,
+                    parent_lock: [0x55u8; 32],
+                    shard_id: 1,
+                    sender_pubkey: gateway_pubkey,
+                    declared_write_ema_micro_bj: 0,
+                    current_read_ema_credits: 0,
+                    timestamp_ms,
+                    sender_signature: query_sig,
+                })
+                .unwrap();
+            let status_hdr = WireHeader::new(
+                MsgType::StatusQuery as u16,
+                seq,
+                0,
+                0,
+                status_payload.len() as u32,
+            );
+            let (resp_hdr, _) = gt
+                .send_request(&c, &status_hdr, &status_payload)
+                .await
+                .expect("send QUIC query");
+            resp_hdr
+        }
+    };
+
+    let resp_hdr = send_status_query(1, quic_now_ms).await;
+    assert_eq!(
+        resp_hdr.flags & FLAG_QUOTA_EXCEEDED,
+        FLAG_QUOTA_EXCEEDED,
+        "StatusQuery immediately at t=0 must receive FLAG_QUOTA_EXCEEDED"
+    );
+
+    // Across successive seconds, small positive requests are accepted only up to decayed capacity,
+    // and excess requests receive deterministic FLAG_QUOTA_EXCEEDED when fractional capacity is insufficient.
+    // 1 second later: ~1.88 credits decayed.
+    server_peer_mgr.clock().advance_time_for_test(1_000);
+    gw_peer_mgr.clock().advance_time_for_test(1_000);
+    let t1 = server_peer_mgr.net_time_ms();
+    let resp_1 = send_status_query(2, t1).await;
+    assert_eq!(
+        resp_1.flags & FLAG_QUOTA_EXCEEDED,
+        0,
+        "First query after 1s must be accepted within decayed capacity"
+    );
+    let resp_2 = send_status_query(3, t1).await;
+    assert_eq!(
+        resp_2.flags & FLAG_QUOTA_EXCEEDED,
+        FLAG_QUOTA_EXCEEDED,
+        "Second query after 1s must receive FLAG_QUOTA_EXCEEDED because remaining fractional capacity (~0.88 credit) is insufficient"
+    );
+
+    // Another second later: ~1.88 more credits decayed (leaving ~2.76 credits).
+    server_peer_mgr.clock().advance_time_for_test(1_000);
+    gw_peer_mgr.clock().advance_time_for_test(1_000);
+    let t2 = server_peer_mgr.net_time_ms();
+    let resp_3 = send_status_query(4, t2).await;
+    assert_eq!(
+        resp_3.flags & FLAG_QUOTA_EXCEEDED,
+        0,
+        "Query after 2s must be accepted within newly decayed capacity"
+    );
+    let resp_4 = send_status_query(5, t2).await;
+    assert_eq!(
+        resp_4.flags & FLAG_QUOTA_EXCEEDED,
+        0,
+        "Second query after 2s must be accepted within newly decayed capacity"
+    );
+    let resp_5 = send_status_query(6, t2).await;
+    assert_eq!(
+        resp_5.flags & FLAG_QUOTA_EXCEEDED,
+        FLAG_QUOTA_EXCEEDED,
+        "Third query after 2s must receive FLAG_QUOTA_EXCEEDED when fractional capacity is exhausted"
+    );
+
+    // Verify zero presence penalty and zero identity ban
+    let peer = server_peer_mgr
+        .get_peer(&gateway_transport.local_addr().unwrap())
+        .await
+        .expect("peer present");
+    assert_eq!(
+        peer.missing_count, 0,
+        "missing_count must be unchanged (0) on quota exceeded"
+    );
+    assert!(
+        !peer.is_suspended(),
+        "peer must not be suspended on quota exceeded"
+    );
+    assert!(
+        !server_peer_mgr.is_banned(&gateway_pubkey).await,
+        "peer must not be banned on quota exceeded"
+    );
+}

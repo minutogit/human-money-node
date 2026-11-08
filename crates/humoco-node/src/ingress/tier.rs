@@ -1,4 +1,5 @@
 use parking_lot::RwLock as PlRwLock;
+use rand::RngCore;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -81,6 +82,12 @@ pub enum IngressError {
 
     #[error("VIP Quota persistence queue is full or closed")]
     QuotaPersistenceUnavailable,
+
+    #[error("Ingress accounting persistence unavailable")]
+    AccountingPersistenceUnavailable,
+
+    #[error("Internal ingress error: {0}")]
+    Internal(String),
 }
 
 /// FIFO-sequenced VIP quota persist operation.
@@ -90,19 +97,47 @@ struct VipQuotaPersistOp {
     remaining: u64,
 }
 
+pub const INGRESS_SEQ_LEASE_BLOCK: u64 = 1024;
+
 #[derive(Debug, Default)]
 struct IngressAccountingState {
     current_day: u64,
     epoch_seq: u64,
+    last_timestamp_ms: u64,
     cumulative_micro_byte_years: u64,
     prev_day_final_bytes: u64,
+    persisted_day: u64,
+    persisted_reserved_seq: u64,
+}
+
+/// Sealed allocation result returned by `record_declared_usage` (S05-11).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeclaredIngressAllocation {
+    pub epoch_day: u32,
+    pub epoch_seq: u64,
+    pub timestamp_ms: u64,
+    pub cumulative_micro_byte_years: u64,
+    pub prev_day_final_bytes: u64,
+    pub declared_write_ema_micro_bj: u64,
+    pub declared_read_ema_credits: u64,
+}
+
+pub const DOMAIN_VIP_BEARER_TOKEN: &[u8] = b"HUMOCO_V1_VIP_BEARER_TOKEN";
+
+/// Computes length-prefixed domain-separated hash of a VIP bearer secret (S05-12).
+pub fn compute_vip_token_hash(token: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[DOMAIN_VIP_BEARER_TOKEN.len() as u8]);
+    hasher.update(DOMAIN_VIP_BEARER_TOKEN);
+    hasher.update(token.as_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 #[derive(Clone)]
 pub struct TierController {
     storage: Arc<RedbStorage>,
     pow_engine: Arc<PowEngine>,
-    vip_tokens: Arc<RwLock<HashMap<String, [u8; 32]>>>,
+    vip_credentials: Arc<RwLock<HashMap<[u8; 32], [u8; 32]>>>,
     f2f_tokens: Arc<RwLock<HashSet<String>>>,
     f2f_clients: Arc<RwLock<HashMap<String, F2fClientMeta>>>,
     thermometer: Arc<RwLock<NetworkThermometer>>,
@@ -115,6 +150,12 @@ pub struct TierController {
     vip_persist_tx: tokio::sync::mpsc::Sender<VipQuotaPersistOp>,
     vip_persist_worker: tokio::task::AbortHandle,
     vip_persist_failed: Arc<AtomicBool>,
+    accounting_persist_tx: tokio::sync::mpsc::Sender<(
+        crate::storage::PersistedIngressAccountingState,
+        tokio::sync::oneshot::Sender<Result<(), IngressError>>,
+    )>,
+    accounting_persist_worker: tokio::task::AbortHandle,
+    accounting_persist_failed: Arc<AtomicBool>,
     vip_rolling_usage: Arc<RwLock<HashMap<[u8; 32], RollingQuotaCounter>>>,
     f2f_rolling_usage: Arc<RwLock<HashMap<[u8; 32], RollingQuotaCounter>>>,
     free_rolling_usage: Arc<RwLock<RollingQuotaCounter>>,
@@ -180,6 +221,137 @@ impl TierController {
             }
         });
 
+        let (accounting_persist_tx, mut accounting_persist_rx) =
+            tokio::sync::mpsc::channel::<(
+                crate::storage::PersistedIngressAccountingState,
+                tokio::sync::oneshot::Sender<Result<(), IngressError>>,
+            )>(persist_channel_capacity.max(1));
+        let accounting_storage = storage.clone();
+        let accounting_persist_failed = Arc::new(AtomicBool::new(false));
+        let accounting_persist_failed_clone = accounting_persist_failed.clone();
+
+        let accounting_worker = tokio::spawn(async move {
+            while let Some((first_state, first_tx)) = accounting_persist_rx.recv().await {
+                let mut highest = first_state;
+                let mut waiters: Vec<tokio::sync::oneshot::Sender<Result<(), IngressError>>> =
+                    vec![first_tx];
+                while let Ok((next_state, next_tx)) = accounting_persist_rx.try_recv() {
+                    if next_state.current_day > highest.current_day
+                        || (next_state.current_day == highest.current_day
+                            && (next_state.reserved_epoch_seq > highest.reserved_epoch_seq
+                                || (next_state.reserved_epoch_seq == highest.reserved_epoch_seq
+                                    && next_state.cumulative_micro_byte_years > highest.cumulative_micro_byte_years)))
+                    {
+                        highest = next_state;
+                    }
+                    waiters.push(next_tx);
+                    if waiters.len() >= 256 {
+                        break;
+                    }
+                }
+                let s = accounting_storage.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    s.store_ingress_accounting_state(&highest)
+                })
+                .await;
+
+                match res {
+                    Ok(Ok(())) => {
+                        for tx in waiters {
+                            let _ = tx.send(Ok(()));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("CRITICAL: Ingress accounting async persist error: {:?}", e);
+                        accounting_persist_failed_clone.store(true, Ordering::Release);
+                        for tx in waiters {
+                            let _ = tx.send(Err(IngressError::AccountingPersistenceUnavailable));
+                        }
+                    }
+                    Err(join_err) => {
+                        eprintln!(
+                            "CRITICAL: Ingress accounting async persist panic/cancelled: {:?}",
+                            join_err
+                        );
+                        accounting_persist_failed_clone.store(true, Ordering::Release);
+                        for tx in waiters {
+                            let _ = tx.send(Err(IngressError::AccountingPersistenceUnavailable));
+                        }
+                    }
+                }
+            }
+        });
+
+        let mut initial_accounting = IngressAccountingState::default();
+        match storage.load_ingress_accounting_state() {
+            Ok(Some(st)) => {
+                let start_day = st.current_day;
+                let start_seq = st.reserved_epoch_seq;
+                initial_accounting.last_timestamp_ms = st.last_timestamp_ms;
+                initial_accounting.cumulative_micro_byte_years = st.cumulative_micro_byte_years;
+                initial_accounting.prev_day_final_bytes = st.prev_day_final_bytes;
+
+                let pre_reserved = start_seq.saturating_add(INGRESS_SEQ_LEASE_BLOCK);
+                let pre_state = crate::storage::PersistedIngressAccountingState {
+                    current_day: start_day,
+                    reserved_epoch_seq: pre_reserved,
+                    last_timestamp_ms: initial_accounting.last_timestamp_ms,
+                    cumulative_micro_byte_years: initial_accounting.cumulative_micro_byte_years,
+                    prev_day_final_bytes: initial_accounting.prev_day_final_bytes,
+                };
+                match storage.store_ingress_accounting_state(&pre_state) {
+                    Ok(()) => {
+                        initial_accounting.current_day = start_day;
+                        initial_accounting.epoch_seq = start_seq;
+                        initial_accounting.persisted_day = start_day;
+                        initial_accounting.persisted_reserved_seq = pre_reserved;
+                    }
+                    Err(e) => {
+                        eprintln!("CRITICAL: Failed to pre-reserve ingress lease block: {:?}", e);
+                        accounting_persist_failed.store(true, Ordering::Release);
+                    }
+                }
+            }
+            Ok(None) => {
+                let boot_day = pow_engine.now_ms() / (86_400 * 1000);
+                let pre_state = crate::storage::PersistedIngressAccountingState {
+                    current_day: boot_day,
+                    reserved_epoch_seq: INGRESS_SEQ_LEASE_BLOCK,
+                    last_timestamp_ms: 0,
+                    cumulative_micro_byte_years: 0,
+                    prev_day_final_bytes: 0,
+                };
+                match storage.store_ingress_accounting_state(&pre_state) {
+                    Ok(()) => {
+                        initial_accounting.current_day = boot_day;
+                        initial_accounting.epoch_seq = 0;
+                        initial_accounting.persisted_day = boot_day;
+                        initial_accounting.persisted_reserved_seq = INGRESS_SEQ_LEASE_BLOCK;
+                    }
+                    Err(e) => {
+                        eprintln!("CRITICAL: Failed to pre-reserve ingress lease block: {:?}", e);
+                        accounting_persist_failed.store(true, Ordering::Release);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("CRITICAL: Failed to load ingress accounting state: {:?}", e);
+                accounting_persist_failed.store(true, Ordering::Release);
+            }
+        }
+
+        let mut initial_vip_credentials = HashMap::new();
+        match storage.all_vip_credentials() {
+            Ok(creds) => {
+                for (token_hash, account_tag) in creds {
+                    initial_vip_credentials.insert(token_hash, account_tag);
+                }
+            }
+            Err(e) => {
+                eprintln!("CRITICAL: Failed to load VIP credentials: {:?}", e);
+            }
+        }
+
         let mut initial_cache = HashMap::new();
         if let Ok(all) = storage.all_quotas() {
             for (tag, bal) in all {
@@ -190,7 +362,7 @@ impl TierController {
         Self {
             storage,
             pow_engine,
-            vip_tokens: Arc::new(RwLock::new(HashMap::new())),
+            vip_credentials: Arc::new(RwLock::new(initial_vip_credentials)),
             f2f_tokens: Arc::new(RwLock::new(HashSet::new())),
             f2f_clients: Arc::new(RwLock::new(HashMap::new())),
             thermometer: Arc::new(RwLock::new(NetworkThermometer::new())),
@@ -198,11 +370,14 @@ impl TierController {
             vip_writes_today: Arc::new(AtomicU64::new(0)),
             f2f_writes_today: Arc::new(AtomicU64::new(0)),
             free_writes_today: Arc::new(AtomicU64::new(0)),
-            accounting_state: Arc::new(parking_lot::Mutex::new(IngressAccountingState::default())),
+            accounting_state: Arc::new(parking_lot::Mutex::new(initial_accounting)),
             last_thermometer_day: Arc::new(AtomicU64::new(0)),
             vip_persist_tx,
             vip_persist_worker: worker.abort_handle(),
             vip_persist_failed,
+            accounting_persist_tx,
+            accounting_persist_worker: accounting_worker.abort_handle(),
+            accounting_persist_failed,
             vip_rolling_usage: Arc::new(RwLock::new(HashMap::new())),
             f2f_rolling_usage: Arc::new(RwLock::new(HashMap::new())),
             free_rolling_usage: Arc::new(RwLock::new(RollingQuotaCounter::new())),
@@ -222,6 +397,33 @@ impl TierController {
         self.vip_persist_failed.clone()
     }
 
+    /// Registers natural FIFO accounting-worker completion with daemon teardown (S05-11).
+    pub fn accounting_worker_abort_handle(&self) -> tokio::task::AbortHandle {
+        self.accounting_persist_worker.clone()
+    }
+
+    /// Local persistence failure evidence for truthful accounting worker failure (S05-11).
+    pub fn accounting_worker_failure_handle(&self) -> Arc<AtomicBool> {
+        self.accounting_persist_failed.clone()
+    }
+}
+
+impl TierController {
+
+    /// Injects an accounting persistence failure for testing.
+    pub fn fail_accounting_persistence_for_test(&self) {
+        self.accounting_persist_failed.store(true, Ordering::Release);
+    }
+
+    /// Reserves an accounting persistence permit to simulate queue saturation for testing.
+    pub fn reserve_accounting_permit_for_test(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        self.accounting_persist_tx
+            .clone()
+            .try_reserve_owned()
+            .ok()
+            .map(|permit| Box::new(permit) as Box<dyn std::any::Any + Send>)
+    }
+
     /// Returns the effective consensus timestamp in milliseconds, preferring explicit caller timestamp,
     /// falling back to the attached NetworkClock (or SystemTime when unclocked).
     pub fn effective_now_ms(&self, now_ms: Option<u64>) -> u64 {
@@ -234,43 +436,157 @@ impl TierController {
         self.effective_now_ms(None)
     }
 
-    /// Increments and returns the next epoch_seq for Spec 10 Signed Ingress Envelopes.
-    pub fn next_epoch_seq(&self) -> u64 {
-        let mut state = self.accounting_state.lock();
-        state.epoch_seq = state.epoch_seq.saturating_add(1);
-        state.epoch_seq
+    /// Returns decayed write EMA at `now_sec` (S07-10).
+    pub fn write_ema_micro_bj_at(&self, now_sec: u64) -> u64 {
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .write_ema_micro_bj_at(now_sec)
     }
 
-    /// Records gateway declared usage, advancing day roll-over if needed, and returns:
-    /// `(epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes)`.
+    /// Returns decayed read EMA credits at `now_sec` (S07-10).
+    pub fn read_ema_credits_at(&self, now_sec: u64) -> u64 {
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .read_ema_credits_at(now_sec)
+    }
+
+    /// Records gateway declared usage, advancing day roll-over if needed, persisting state durably
+    /// before releasing allocation to callers (S05-11).
     ///
     /// Uses a single short-held mutex covering day selection/rollover, sequence allocation,
-    /// and cumulative usage. Delayed requests carrying slightly older timestamps across a
-    /// rollover are monotonically clamped to `state.current_day` to prevent sequence forks.
-    pub fn record_declared_usage(
+    /// and cumulative usage. Awaits durable batch persistence before returning Ok.
+    pub async fn record_declared_usage(
         &self,
         now_ms: u64,
         footprint_micro_bj: u64,
-    ) -> (u32, u64, u64, u64) {
-        let incoming_day = self.current_epoch_day_at(now_ms);
-        let mut state = self.accounting_state.lock();
-        if state.current_day == 0 {
-            state.current_day = incoming_day;
-        } else if incoming_day > state.current_day {
-            state.prev_day_final_bytes = state.cumulative_micro_byte_years;
-            state.cumulative_micro_byte_years = 0;
-            state.epoch_seq = 0;
-            state.current_day = incoming_day;
+    ) -> Result<DeclaredIngressAllocation, IngressError> {
+        if self.accounting_persist_failed.load(Ordering::Acquire) {
+            return Err(IngressError::AccountingPersistenceUnavailable);
         }
-        let effective_day = state.current_day;
-        let seq = state.epoch_seq.saturating_add(1);
-        state.epoch_seq = seq;
-        state.cumulative_micro_byte_years = state
-            .cumulative_micro_byte_years
-            .saturating_add(footprint_micro_bj);
-        let cum = state.cumulative_micro_byte_years;
-        let prev = state.prev_day_final_bytes;
-        (effective_day as u32, seq, cum, prev)
+
+        let permit = self
+            .accounting_persist_tx
+            .try_reserve()
+            .map_err(|_| IngressError::AccountingPersistenceUnavailable)?;
+
+        let incoming_day = self.current_epoch_day_at(now_ms);
+        let (
+            persisted,
+            effective_day,
+            seq,
+            effective_ts_ms,
+            cum,
+            prev,
+            already_durably_reserved,
+            target_reserved_seq,
+        ) = {
+            let mut state = self.accounting_state.lock();
+            if state.current_day == 0 {
+                state.current_day = incoming_day;
+            } else if incoming_day > state.current_day {
+                state.prev_day_final_bytes = state.cumulative_micro_byte_years;
+                state.cumulative_micro_byte_years = 0;
+                state.epoch_seq = 0;
+                state.current_day = incoming_day;
+            } else if incoming_day < state.current_day && state.epoch_seq == 0 {
+                // If no envelopes have ever been issued, adopt the incoming day (e.g. simulated test time)
+                state.current_day = incoming_day;
+                state.persisted_day = 0;
+                state.persisted_reserved_seq = 0;
+            }
+            let effective_day = state.current_day;
+            let effective_ts_ms = now_ms
+                .max(state.last_timestamp_ms)
+                .max(effective_day.saturating_mul(86_400_000));
+            let seq = state
+                .epoch_seq
+                .checked_add(1)
+                .ok_or_else(|| IngressError::Internal("epoch_seq overflow".into()))?;
+            state.epoch_seq = seq;
+            state.last_timestamp_ms = effective_ts_ms;
+            state.cumulative_micro_byte_years = state
+                .cumulative_micro_byte_years
+                .saturating_add(footprint_micro_bj);
+            let cum = state.cumulative_micro_byte_years;
+            let prev = state.prev_day_final_bytes;
+
+            let already_durably_reserved =
+                effective_day == state.persisted_day && seq <= state.persisted_reserved_seq;
+            let target_reserved_seq = if already_durably_reserved {
+                state.persisted_reserved_seq
+            } else {
+                seq.saturating_add(INGRESS_SEQ_LEASE_BLOCK.saturating_sub(1))
+            };
+            let persisted = crate::storage::PersistedIngressAccountingState {
+                current_day: effective_day,
+                reserved_epoch_seq: target_reserved_seq,
+                last_timestamp_ms: effective_ts_ms,
+                cumulative_micro_byte_years: cum,
+                prev_day_final_bytes: prev,
+            };
+            (
+                persisted,
+                effective_day,
+                seq,
+                effective_ts_ms,
+                cum,
+                prev,
+                already_durably_reserved,
+                target_reserved_seq,
+            )
+        };
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        permit.send((persisted, ack_tx));
+
+        let (declared_write_ema, declared_read_ema) = self
+            .thermometer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .checkpoint_emas_at(effective_ts_ms / 1000);
+
+        if !already_durably_reserved {
+            match ack_rx.await {
+                Ok(Ok(())) => {
+                    let mut st = self.accounting_state.lock();
+                    st.persisted_day = effective_day;
+                    st.persisted_reserved_seq = target_reserved_seq;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(IngressError::AccountingPersistenceUnavailable),
+            }
+        }
+
+        Ok(DeclaredIngressAllocation {
+            epoch_day: effective_day as u32,
+            epoch_seq: seq,
+            timestamp_ms: effective_ts_ms,
+            cumulative_micro_byte_years: cum,
+            prev_day_final_bytes: prev,
+            declared_write_ema_micro_bj: declared_write_ema,
+            declared_read_ema_credits: declared_read_ema,
+        })
+    }
+
+    /// Flushes all queued ingress accounting updates to storage and awaits completion.
+    pub async fn wait_for_accounting_drain(&self) {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let persisted = {
+            let state = self.accounting_state.lock();
+            crate::storage::PersistedIngressAccountingState {
+                current_day: state.current_day,
+                reserved_epoch_seq: state.persisted_reserved_seq,
+                last_timestamp_ms: state.last_timestamp_ms,
+                cumulative_micro_byte_years: state.cumulative_micro_byte_years,
+                prev_day_final_bytes: state.prev_day_final_bytes,
+            }
+        };
+        if let Ok(permit) = self.accounting_persist_tx.reserve().await {
+            permit.send((persisted, ack_tx));
+            let _ = ack_rx.await;
+        }
     }
 
     /// Returns the tier write counters: (vip, f2f, free).
@@ -720,14 +1036,71 @@ impl TierController {
             })
     }
 
-    /// Registers an auth token associated with a specific VIP account tag.
-    pub fn register_vip_token(&self, token: impl Into<String>, account_tag: [u8; 32]) {
-        let token_str = token.into();
-        self.vip_tokens
+    /// Provisions a new cryptographically random VIP bearer credential for an account tag (S05-12).
+    /// Generates 32 CSPRNG bytes, returns the plaintext bearer secret once, and stores only its hash.
+    pub fn provision_vip_credential(&self, account_tag: [u8; 32]) -> Result<String, IngressError> {
+        let mut random_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut random_bytes);
+        let bearer_token = format!("vip_{}", hex::encode(random_bytes));
+        let token_hash = compute_vip_token_hash(&bearer_token);
+        self.storage.put_vip_credential(&token_hash, &account_tag)?;
+        self.vip_credentials
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(token_str, account_tag);
+            .insert(token_hash, account_tag);
         self.register_vip_tag(account_tag);
+        Ok(bearer_token)
+    }
+
+    /// Registers a VIP bearer token after strictly validating its independence from the account tag.
+    /// Rejects empty, raw 64-char hex (e.g. NodePubKey), account tag plaintext, diagnostic IDs, and f2f tokens.
+    pub fn try_register_vip_token(
+        &self,
+        token: &str,
+        account_tag: [u8; 32],
+    ) -> Result<(), IngressError> {
+        let trimmed = token.trim();
+        let stripped = if trimmed.len() >= 7
+            && trimmed.as_bytes()[..7].eq_ignore_ascii_case(b"bearer ")
+        {
+            trimmed[7..].trim()
+        } else {
+            trimmed
+        };
+
+        if stripped.is_empty() {
+            return Err(IngressError::InvalidAuthToken);
+        }
+        // Reject raw 64-char hex strings (blocks all raw NodePubKey / account_tag hex strings)
+        if stripped.len() == 64 && stripped.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(IngressError::InvalidAuthToken);
+        }
+        // Reject registering account's own plaintext tag/name as bearer secret
+        if crate::control::parse_account_tag(stripped) == account_tag {
+            return Err(IngressError::InvalidAuthToken);
+        }
+        // Reject diagnostic ID
+        if stripped == vip_diagnostic_id(&account_tag) {
+            return Err(IngressError::InvalidAuthToken);
+        }
+        // Reject f2f peer token
+        if stripped.starts_with("f2f_") {
+            return Err(IngressError::InvalidAuthToken);
+        }
+
+        let token_hash = compute_vip_token_hash(stripped);
+        self.storage.put_vip_credential(&token_hash, &account_tag)?;
+        self.vip_credentials
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token_hash, account_tag);
+        self.register_vip_tag(account_tag);
+        Ok(())
+    }
+
+    /// Registers an auth token associated with a specific VIP account tag.
+    pub fn register_vip_token(&self, token: impl Into<String>, account_tag: [u8; 32]) {
+        let _ = self.try_register_vip_token(&token.into(), account_tag);
     }
 
     /// Registers an authorized VIP account tag directly, hydrating cache if absent.
@@ -1098,8 +1471,8 @@ impl TierController {
         }
     }
 
-    /// Resolves an account tag from an auth token.
-    /// ONLY registered bearer secrets in `vip_tokens` can authenticate VIP ingress.
+    /// Resolves an account tag from an auth token (S05-12 / INV-1302).
+    /// ONLY registered bearer secrets in `vip_credentials` can authenticate VIP ingress.
     /// Diagnostic IDs, hex representations, and unauthorized strings are strictly rejected.
     pub fn resolve_account_tag(&self, token: &str) -> Result<[u8; 32], IngressError> {
         let trimmed = token.trim();
@@ -1111,11 +1484,22 @@ impl TierController {
             trimmed
         };
 
+        if stripped.is_empty() {
+            return Err(IngressError::InvalidAuthToken);
+        }
+        if stripped.len() == 64 && stripped.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(IngressError::InvalidAuthToken);
+        }
+        if stripped.starts_with("f2f_") {
+            return Err(IngressError::InvalidAuthToken);
+        }
+
+        let token_hash = compute_vip_token_hash(stripped);
         if let Some(tag) = self
-            .vip_tokens
+            .vip_credentials
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get(stripped)
+            .get(&token_hash)
         {
             return Ok(*tag);
         }

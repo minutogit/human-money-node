@@ -5,7 +5,6 @@ pub mod framing;
 pub mod manager;
 pub mod peer;
 pub mod pool;
-pub mod quarantine;
 pub mod tls;
 pub mod transport;
 
@@ -19,9 +18,6 @@ pub use manager::{
     W_MIN_FLOOR_SIMULATION,
 };
 pub use peer::{PeerConnectionType, PeerInfo, PeerStatus, FAILURE_DEBOUNCE_SECS};
-pub use quarantine::{
-    CandidateEdge, QuarantineDecision, QuarantineEvent, QuarantinePolicy, QuarantinedEdgeState,
-};
 pub use tls::{
     build_quinn_client_config, build_quinn_client_config_with_identity,
     build_quinn_client_config_with_identity_and_network,

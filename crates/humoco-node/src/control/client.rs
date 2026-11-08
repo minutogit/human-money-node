@@ -160,6 +160,21 @@ impl ControlClient {
         }
     }
 
+    pub async fn provision_vip_credential(&self, account_tag: &str) -> Result<String, NodeError> {
+        match self
+            .send_request(ControlRequest::ProvisionVipCredential {
+                account_tag: account_tag.to_string(),
+            })
+            .await?
+        {
+            ControlResponse::VipCredentialProvisioned { bearer_token, .. } => Ok(bearer_token),
+            ControlResponse::Error { message } => Err(NodeError::Daemon(message)),
+            _ => Err(NodeError::Daemon(
+                "Unexpected response variant from control server".into(),
+            )),
+        }
+    }
+
     pub async fn get_quota(&self, account_tag: &str) -> Result<u64, NodeError> {
         match self
             .send_request(ControlRequest::GetQuota {

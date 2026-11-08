@@ -330,6 +330,7 @@ fn test_a05_02_flush_worker_group_commit_batching_and_attempts() {
             root: 50_000,
             complete: c1_tx,
             health: health.clone(),
+            _reservation: None,
         },
         FlushOp::OriginalHmcApproval {
             tag: tag2,
@@ -340,6 +341,7 @@ fn test_a05_02_flush_worker_group_commit_batching_and_attempts() {
             root: 50_000,
             complete: c2_tx,
             health: health.clone(),
+            _reservation: None,
         },
         FlushOp::OriginalHmcApproval {
             tag: tag3,
@@ -350,6 +352,7 @@ fn test_a05_02_flush_worker_group_commit_batching_and_attempts() {
             root: 50_000,
             complete: c3_tx,
             health,
+            _reservation: None,
         },
     ];
 
@@ -401,6 +404,7 @@ fn test_a05_02_flush_worker_conflict_isolation_in_batch() {
             root: 50_000,
             complete: c2_tx,
             health: health.clone(),
+            _reservation: None,
         },
         FlushOp::OriginalHmcApproval {
             tag: tag1_conflict,
@@ -411,6 +415,7 @@ fn test_a05_02_flush_worker_conflict_isolation_in_batch() {
             root: 50_000,
             complete: c1_tx,
             health: health.clone(),
+            _reservation: None,
         },
         FlushOp::OriginalHmcApproval {
             tag: tag3,
@@ -421,6 +426,7 @@ fn test_a05_02_flush_worker_conflict_isolation_in_batch() {
             root: 50_000,
             complete: c3_tx,
             health: health.clone(),
+            _reservation: None,
         },
     ];
 

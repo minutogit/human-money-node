@@ -439,6 +439,7 @@ async fn root_ttl_numeric_and_rfc3339_accepted_and_mismatched_sidecar_rejected()
             bincode::serialize(&a_sig).unwrap(),
             0,
             1_000,
+            humoco_node::storage::PersistenceServiceClass::Public,
         )
         .await
         .unwrap();
@@ -487,6 +488,7 @@ async fn root_ttl_numeric_and_rfc3339_accepted_and_mismatched_sidecar_rejected()
             bincode::serialize(&b_sig).unwrap(),
             0,
             91_000,
+            humoco_node::storage::PersistenceServiceClass::Public,
         )
         .await;
     assert!(
@@ -1205,11 +1207,20 @@ async fn idempotent_variants_preserve_exact_entry_original_approval_digest_and_r
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
     let sender_pow = Arc::new(PowEngine::new(8));
     let sender_tier = TierController::new(db.clone(), sender_pow);
-    let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-        sender_tier.record_declared_usage(now_ms + 1, footprint);
+    let alloc = sender_tier
+        .record_declared_usage(now_ms + 1, footprint)
+        .await
+        .expect("record usage");
+    let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = (
+        alloc.epoch_day,
+        alloc.epoch_seq,
+        alloc.cumulative_micro_byte_years,
+        alloc.prev_day_final_bytes,
+    );
     let declared_write_ema = sender_tier.current_write_ema_micro_bj();
     let declared_read_ema = sender_tier.current_read_ema_credits();
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         sender_node.node_pubkey(),
         epoch_day,
         epoch_seq,
@@ -1294,6 +1305,7 @@ async fn idempotent_variants_preserve_exact_entry_original_approval_digest_and_r
             b"retained-vote".to_vec(),
             0,
             now_ms + 1,
+            humoco_node::storage::PersistenceServiceClass::Public,
         )
         .await
         .unwrap();
@@ -1384,6 +1396,7 @@ async fn idempotent_variants_preserve_exact_entry_original_approval_digest_and_r
             b"divergent-approval".to_vec(),
             0,
             now_ms + 2,
+            humoco_node::storage::PersistenceServiceClass::Public,
         )
         .await;
     assert!(
@@ -1450,6 +1463,7 @@ async fn concurrent_identical_and_diverging_submissions_preserve_exact_state_and
             b"winning-approval-a".to_vec(),
             0,
             1_000,
+            humoco_node::storage::PersistenceServiceClass::Public,
         )
         .await
         .unwrap();
@@ -1484,6 +1498,7 @@ async fn concurrent_identical_and_diverging_submissions_preserve_exact_state_and
                     format!("retry-approval-{i}").into_bytes(),
                     0,
                     1_000,
+                    humoco_node::storage::PersistenceServiceClass::Public,
                 )
                 .await;
         });
@@ -1516,6 +1531,7 @@ async fn concurrent_identical_and_diverging_submissions_preserve_exact_state_and
                     format!("variant-approval-{i}").into_bytes(),
                     0,
                     1_000 + i,
+                    humoco_node::storage::PersistenceServiceClass::Public,
                 )
                 .await;
         });
@@ -1550,6 +1566,7 @@ async fn concurrent_identical_and_diverging_submissions_preserve_exact_state_and
                     format!("conflict-approval-{i}").into_bytes(),
                     0,
                     1_000,
+                    humoco_node::storage::PersistenceServiceClass::Public,
                 )
                 .await;
         });

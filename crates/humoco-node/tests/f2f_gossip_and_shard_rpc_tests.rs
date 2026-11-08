@@ -1321,4 +1321,235 @@ async fn test_s06_03_unmined_pow_shortcuts_rejected_in_production() {
     cancel.cancel();
 }
 
+#[tokio::test]
+async fn test_s06_07_rpc_failure_suspension_does_not_suppress_gossip_heartbeats() {
+    use std::time::{Duration, Instant};
+    use humoco_node::network::peer::PeerStatus;
+
+    // Node A (local node)
+    let identity_a = NodeIdentity::generate();
+    let cancel_a = CancellationToken::new();
+
+    // Node B (F2F friend of A)
+    let identity_b = NodeIdentity::generate();
+    let cancel_b = CancellationToken::new();
+
+    // Node D (F2F friend of A, downstream for forwarding)
+    let identity_d = NodeIdentity::generate();
+    let cancel_d = CancellationToken::new();
+
+    // Node C (origin behind B)
+    let identity_c = NodeIdentity::generate();
+
+    let pm_a = Arc::new(PeerManager::with_f2f(
+        vec![],
+        vec![*identity_b.node_pubkey(), *identity_d.node_pubkey()],
+    ));
+    pm_a.set_simulation_mode(true);
+
+    let pm_b = Arc::new(PeerManager::with_f2f(
+        vec![],
+        vec![*identity_a.node_pubkey()],
+    ));
+    pm_b.set_simulation_mode(true);
+
+    let pm_d = Arc::new(PeerManager::with_f2f(
+        vec![],
+        vec![*identity_a.node_pubkey()],
+    ));
+    pm_d.set_simulation_mode(true);
+
+    let transport_a = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &identity_a,
+        pm_a.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_a.clone(),
+    ).expect("bind A");
+    let addr_a = transport_a.local_addr().unwrap();
+    transport_a.spawn_accept_loop();
+
+    let transport_b = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &identity_b,
+        pm_b.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_b.clone(),
+    ).expect("bind B");
+    let addr_b = transport_b.local_addr().unwrap();
+    transport_b.spawn_accept_loop();
+
+    let transport_d = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &identity_d,
+        pm_d.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_d.clone(),
+    ).expect("bind D");
+    let addr_d = transport_d.local_addr().unwrap();
+    transport_d.spawn_accept_loop();
+
+    // Register friend socket addresses
+    pm_a.register_f2f_friend(*identity_b.node_pubkey(), Some(addr_b)).await;
+    pm_a.register_f2f_friend(*identity_d.node_pubkey(), Some(addr_d)).await;
+    pm_b.register_f2f_friend(*identity_a.node_pubkey(), Some(addr_a)).await;
+    pm_d.register_f2f_friend(*identity_a.node_pubkey(), Some(addr_a)).await;
+
+    let t0 = Instant::now();
+
+    // Part 1: Direct F2F friend B has repeated local RPC failures on Node A
+    for i in 0..3 {
+        pm_a.record_failure_at(addr_b, t0 + Duration::from_secs(i * 70)).await;
+    }
+    assert!(pm_a.is_peer_suspended_by_addr(&addr_b).await);
+    let peer_b_on_a = pm_a.get_peer(&addr_b).await.unwrap();
+    assert_eq!(peer_b_on_a.missing_count, 3);
+    assert_eq!(peer_b_on_a.status, PeerStatus::Suspended);
+    let backoff_b = pm_a.get_reconnect_backoff(&addr_b).await;
+    assert!(backoff_b.is_some(), "Suspended peer must carry bounded backoff");
+
+    // Node B sends direct authenticated heartbeat (hops = 0) to Node A
+    let conn_b_to_a = transport_b.connect_peer_unchecked(addr_a).await.unwrap();
+    let mut hb_b = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *identity_b.node_pubkey(),
+        addr: addr_b,
+        timestamp_ms: 10_000,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *identity_b.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    hb_b.sign_origin(&identity_b, 10_000, humoco_sim_core::types::NetworkId::default());
+    let payload_b = bincode::serialize(&hb_b).unwrap();
+    let mut hdr_b = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, payload_b.len() as u32);
+    hdr_b.reserved = 0; // direct hops = 0
+
+    transport_b.send_unidirectional(&conn_b_to_a, &hdr_b, &payload_b).await.unwrap();
+
+    // Node A MUST accept B's heartbeat despite B being suspended for RPC!
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if pm_a.is_known_node(identity_b.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(pm_a.is_known_node(identity_b.node_pubkey()).await, "Node A must accept heartbeat from suspended friend B");
+
+    // Node A MUST forward B's heartbeat to friend D!
+    let deadline_d = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline_d {
+        if pm_d.is_known_node(identity_b.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(pm_d.is_known_node(identity_b.node_pubkey()).await, "Node D must receive forwarded heartbeat for B via A");
+
+    // Part 2: Relayed origin C has local RPC failures on Node A
+    let addr_c: SocketAddr = "127.0.0.1:9099".parse().unwrap();
+
+    // Node A first learns C via initial relayed gossip
+    let mut hb_c_init = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *identity_c.node_pubkey(),
+        addr: addr_c,
+        timestamp_ms: 15_000,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *identity_c.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 15,
+    };
+    hb_c_init.sign_origin(&identity_c, 15_000, humoco_sim_core::types::NetworkId::default());
+    let payload_c_init = bincode::serialize(&hb_c_init).unwrap();
+    let mut hdr_c_init = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, payload_c_init.len() as u32);
+    hdr_c_init.reserved = 1;
+    transport_b.send_unidirectional(&conn_b_to_a, &hdr_c_init, &payload_c_init).await.unwrap();
+
+    let deadline_c_init = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline_c_init {
+        if pm_a.is_known_node(identity_c.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(pm_a.is_known_node(identity_c.node_pubkey()).await);
+
+    // Node A now experiences 3 RPC failures when directly querying C
+    for i in 0..3 {
+        pm_a.record_failure_at(addr_c, t0 + Duration::from_secs(i * 70)).await;
+    }
+    assert!(pm_a.is_peer_suspended_by_addr(&addr_c).await);
+    let peer_c_on_a = pm_a.get_peer(&addr_c).await.unwrap();
+    assert_eq!(peer_c_on_a.missing_count, 3);
+    assert_eq!(peer_c_on_a.status, PeerStatus::Suspended);
+
+    // Node B relays a new heartbeat from origin C (hops = 1, ttl = 15) to Node A
+    let mut hb_c = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *identity_c.node_pubkey(),
+        addr: addr_c,
+        timestamp_ms: 20_000,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *identity_c.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 15,
+    };
+    hb_c.sign_origin(&identity_c, 20_000, humoco_sim_core::types::NetworkId::default());
+    let payload_c = bincode::serialize(&hb_c).unwrap();
+    let mut hdr_c = WireHeader::new(MsgType::Heartbeat as u16, 3, 0, 0, payload_c.len() as u32);
+    hdr_c.reserved = 1; // relayed hops = 1
+
+    transport_b.send_unidirectional(&conn_b_to_a, &hdr_c, &payload_c).await.unwrap();
+
+    // Node A MUST accept C's relayed heartbeat despite C having local RPC failures on A!
+    let deadline_c = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline_c {
+        if pm_a.is_known_node(identity_c.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(pm_a.is_known_node(identity_c.node_pubkey()).await, "Node A must accept relayed heartbeat for C despite local RPC failures");
+
+    // Node A MUST forward C's heartbeat to friend D!
+    let deadline_d_c = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline_d_c {
+        if pm_d.is_known_node(identity_c.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(pm_d.is_known_node(identity_c.node_pubkey()).await, "Node D must receive forwarded heartbeat for C via A");
+
+    // Part 3: Verify diagnostic RPC suspension status remains intact on Node A
+    assert!(pm_a.is_peer_suspended_by_addr(&addr_b).await, "Peer B diagnostic suspension must remain intact");
+    assert!(pm_a.is_peer_suspended_by_addr(&addr_c).await, "Peer C diagnostic suspension must remain intact");
+    assert_eq!(pm_a.get_peer(&addr_b).await.unwrap().missing_count, 3);
+    assert_eq!(pm_a.get_peer(&addr_c).await.unwrap().missing_count, 3);
+
+    cancel_a.cancel();
+    cancel_b.cancel();
+    cancel_d.cancel();
+}
+
 

@@ -618,7 +618,8 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
         forged.verify(),
         "forged simulator proof must pass sim fallback (test setup)"
     );
-    let strict_ok = humoco_node::network::transport::verify_equivocation_first_party(
+    let strict_ok = humoco_node::network::transport::verify_equivocation_first_party_network(
+        humoco_sim_core::types::NetworkId::Mainnet,
         victim_id.verifying_key(),
         &forged,
     );
@@ -697,7 +698,8 @@ async fn test_phase11c_adversarial_tls_close_and_fake_fraud_rejected_wire() {
             victim_pubkey,
         );
     assert!(
-        !humoco_node::network::transport::verify_equivocation_first_party(
+        !humoco_node::network::transport::verify_equivocation_first_party_network(
+            humoco_sim_core::types::NetworkId::Mainnet,
             victim_id.verifying_key(),
             &cross_network
         ),
@@ -1823,7 +1825,8 @@ async fn test_rank21_receiving_server_rejects_over_real_quic() {
     let entry = humoco_node::api::hmc::L2LockEntry::from(&req);
     let footprint =
         humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds((root_valid_until - now) / 1000);
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client.identity.node_pubkey(),
         0,
         0,

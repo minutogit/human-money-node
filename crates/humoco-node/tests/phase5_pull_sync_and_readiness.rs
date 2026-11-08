@@ -184,7 +184,8 @@ async fn test_boot_readiness_barrier_wire_flag() {
         .to_bytes();
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.node_pubkey(),
         0,
         0,
@@ -913,7 +914,8 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
         .to_bytes();
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.node_pubkey(),
         0,
         0,
@@ -1058,7 +1060,8 @@ async fn test_stable_network_keeps_finality_separate_from_each_shards_readiness(
             .sign(&humoco_node::api::hmc::calculate_l2_payload_hash(req))
             .to_bytes();
         let entry = humoco_node::api::hmc::L2LockEntry::from(&*req);
-        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+        let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+            humoco_sim_core::types::NetworkId::Mainnet,
             client_id.node_pubkey(),
             0,
             0,

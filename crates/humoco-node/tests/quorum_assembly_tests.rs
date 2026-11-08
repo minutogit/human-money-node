@@ -1061,9 +1061,18 @@ async fn test_s01_01_checkout_deadline_cancels_blocked_support_persistence_witho
     let ttl_sec = 900;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
     let op_hash = lock_req.transaction_hash;
-    let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) =
-        tier_controller.record_declared_usage(now, footprint);
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let alloc = tier_controller
+        .record_declared_usage(now, footprint)
+        .await
+        .expect("record usage");
+    let (epoch_day, epoch_seq, cumulative_micro_byte_years, prev_day_final_bytes) = (
+        alloc.epoch_day,
+        alloc.epoch_seq,
+        alloc.cumulative_micro_byte_years,
+        alloc.prev_day_final_bytes,
+    );
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender_pubkey,
         epoch_day,
         epoch_seq,

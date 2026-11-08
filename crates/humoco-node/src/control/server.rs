@@ -338,7 +338,7 @@ impl ControlServer {
                 } => {
                     let tag_bytes = parse_account_tag(&account_tag);
                     if let Some(ref tc) = state.tier_controller {
-                        tc.register_vip_token(account_tag.clone(), tag_bytes);
+                        tc.register_vip_tag(tag_bytes);
                         match tc.topup_vip_quota(tag_bytes, byte_years) {
                             Ok(new_balance) => ControlResponse::QuotaUpdated { new_balance },
                             Err(err) => ControlResponse::Error {
@@ -353,6 +353,24 @@ impl ControlServer {
                             Err(err) => ControlResponse::Error {
                                 message: format!("Failed to update quota in storage: {}", err),
                             },
+                        }
+                    }
+                }
+                ControlRequest::ProvisionVipCredential { account_tag } => {
+                    let tag_bytes = parse_account_tag(&account_tag);
+                    if let Some(ref tc) = state.tier_controller {
+                        match tc.provision_vip_credential(tag_bytes) {
+                            Ok(bearer_token) => ControlResponse::VipCredentialProvisioned {
+                                account_tag,
+                                bearer_token,
+                            },
+                            Err(err) => ControlResponse::Error {
+                                message: format!("Failed to provision VIP credential: {err}"),
+                            },
+                        }
+                    } else {
+                        ControlResponse::Error {
+                            message: "TierController unavailable for provisioning VIP credentials".to_string(),
                         }
                     }
                 }
@@ -543,7 +561,8 @@ impl ControlServer {
                                         "Perpetrator public key does not match daemon identity"
                                             .into(),
                                 }
-                            } else if !crate::network::transport::verify_equivocation_first_party(
+                            } else if !crate::network::transport::verify_equivocation_first_party_network(
+                                humoco_sim_core::types::NetworkId::Mainnet,
                                 state.identity.verifying_key(),
                                 &proof,
                             ) {

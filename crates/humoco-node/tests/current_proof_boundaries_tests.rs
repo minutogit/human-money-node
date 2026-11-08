@@ -314,6 +314,7 @@ async fn live_state_signature_over_quic_requires_exact_ready_state() {
             b"fixture-original".to_vec(),
             0,
             pm.net_time_ms(),
+            humoco_node::storage::PersistenceServiceClass::Public,
         )
         .await
         .unwrap();

@@ -334,15 +334,22 @@ const DYADIC_HALF_LIFE_TABLE: [u64; 65] = [
     0x80000000,
 ];
 
-/// Computes the exponential decay of a metric with a 24-hour half-life (86,400s):
+/// Number of fractional bits retained in continuous rolling quota and thermometer EMA state (Q96.32).
+pub const FRACTIONAL_BITS: u32 = 32;
+
+/// Maximum scaled usage in Q96.32 format: ((u64::MAX as u128) << 32) | 0xFFFF_FFFF.
+/// Guarantees that `(bounded * factor as u128)` never overflows u128 during dyadic table interpolation.
+pub const MAX_SCALED_USAGE: u128 = ((u64::MAX as u128) << FRACTIONAL_BITS) | 0xFFFF_FFFF;
+
+/// Computes the exponential decay of a scaled Q96.32 metric with a 24-hour half-life (86,400s):
 /// - Decays exactly 50% every 86,400s (24 hours).
-/// - 100% pure integer arithmetic, overflow-safe via u128.
+/// - Pure bounded integer arithmetic via u128 without precision loss across frequent updates.
 /// - 64-step dyadic lookup table with linear interpolation (error < 0.002%).
-/// - If `delta_secs == 0`: returns `value` without modification.
+/// - If `delta_secs == 0`: returns `value_scaled` (bounded to `MAX_SCALED_USAGE`).
 /// - If `delta_secs >= 64 * 86_400`: decays completely to 0.
-pub fn decay_integer_ema(value: u64, delta_secs: u64) -> u64 {
-    if value == 0 || delta_secs == 0 {
-        return value;
+pub fn decay_scaled_ema(value_scaled: u128, delta_secs: u64) -> u128 {
+    if value_scaled == 0 || delta_secs == 0 {
+        return value_scaled.min(MAX_SCALED_USAGE);
     }
     let half_lives = delta_secs / 86_400;
     if half_lives >= 64 {
@@ -356,7 +363,19 @@ pub fn decay_integer_ema(value: u64, delta_secs: u64) -> u64 {
     let y1 = DYADIC_HALF_LIFE_TABLE[i + 1];
     let factor = y0 - ((y0 - y1) * step_rem) / 1_350;
 
-    ((value as u128 * factor as u128) >> (32 + half_lives)) as u64
+    let bounded = value_scaled.min(MAX_SCALED_USAGE);
+    (bounded * factor as u128) >> (32 + half_lives)
+}
+
+/// Computes the exponential decay of a metric with a 24-hour half-life (86,400s):
+/// - Decays exactly 50% every 86,400s (24 hours).
+/// - 100% pure integer arithmetic, overflow-safe via u128.
+/// - 64-step dyadic lookup table with linear interpolation (error < 0.002%).
+/// - If `delta_secs == 0`: returns `value` without modification.
+/// - If `delta_secs >= 64 * 86_400`: decays completely to 0.
+pub fn decay_integer_ema(value: u64, delta_secs: u64) -> u64 {
+    let scaled = (value as u128) << FRACTIONAL_BITS;
+    (decay_scaled_ema(scaled, delta_secs) >> FRACTIONAL_BITS) as u64
 }
 
 /// Computes the integer EMA with 24h half-life decay followed by addition of footprint:
@@ -459,32 +478,22 @@ impl HourlySlottedRingBuffer {
 /// The 3-zone plausibility result for evaluating `429 QuotaExceeded` reports
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuotaPlausibilityVerdict {
-    /// Zone 1: Clear fraud/laziness zone (< 75% of limit)
-    /// Sender is far below the limit -> shard node wrongly refuses work -> malus +8!
-    FraudulentRejection { malus_increment: u8 },
+    /// Zone 1: Early refusal zone (< 75% of limit)
+    /// Sender is below 75% of limit; local volume does not indicate capacity exhaustion.
+    EarlyRefusal,
     /// Zone 2: Tolerant boundary band (75% to 125% of limit)
-    /// Sender is near the limit -> shard node is an honest frontrunner at the limit -> no malus (0)!
-    BoundaryCutoff { malus_increment: u8 },
-    /// Zone 3: Genuine overload zone (> 125% of limit)
-    /// Sender is far above the limit -> regular quota rejection -> no malus (0)!
-    LegitimateOverload { malus_increment: u8 },
-}
-
-impl QuotaPlausibilityVerdict {
-    pub fn malus(&self) -> u8 {
-        match self {
-            Self::FraudulentRejection { malus_increment } => *malus_increment,
-            Self::BoundaryCutoff { malus_increment } => *malus_increment,
-            Self::LegitimateOverload { malus_increment } => *malus_increment,
-        }
-    }
+    /// Sender is near the limit; normal boundary variation.
+    BoundaryCutoff,
+    /// Zone 3: Overload indication zone (> 125% of limit)
+    /// Sender is above 125% of limit; acknowledged saturation.
+    OverloadIndication,
 }
 
 /// [INV-0909]
 /// Evaluates a `429 QuotaExceeded` claim from a shard node against the locally measured sender volume:
-/// - < 75% of limit: fraud / refusal to work (malus +8)
-/// - 75% .. 125% of limit: tolerant boundary band / honest frontrunner (malus 0)
-/// - > 125% of limit: genuine overload (malus 0)
+/// - < 75% of limit: EarlyRefusal (local volume does not explain rejection)
+/// - 75% .. 125% of limit: BoundaryCutoff (tolerant boundary band)
+/// - > 125% of limit: OverloadIndication (acknowledged saturation)
 pub fn evaluate_quota_exceeded_claim(
     sender_volume: u64,
     quota_limit: u64,
@@ -495,19 +504,20 @@ pub fn evaluate_quota_exceeded_claim(
     let upper_tolerance = limit * 125 / 100; // 125%
 
     if sender < lower_tolerance {
-        QuotaPlausibilityVerdict::FraudulentRejection { malus_increment: 8 }
+        QuotaPlausibilityVerdict::EarlyRefusal
     } else if sender <= upper_tolerance {
-        QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
+        QuotaPlausibilityVerdict::BoundaryCutoff
     } else {
-        QuotaPlausibilityVerdict::LegitimateOverload { malus_increment: 0 }
+        QuotaPlausibilityVerdict::OverloadIndication
     }
 }
 
-/// Continuous rolling quota tracker using the 24-hour half-life integer EMA (`decay_integer_ema`).
+/// Continuous rolling quota tracker using the 24-hour half-life integer EMA (`decay_scaled_ema`).
+/// Retains 32-bit fractional precision (Q96.32) across successive updates to prevent truncation drift.
 /// Eliminates discrete UTC midnight rollover cliffs (`epoch_day` resets) and backward-timestamp races.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RollingQuotaCounter {
-    decayed_usage: u64,
+    decayed_usage_scaled: u128,
     last_update_sec: Option<u64>,
 }
 
@@ -515,30 +525,40 @@ impl RollingQuotaCounter {
     /// Creates a new, empty rolling quota counter.
     pub const fn new() -> Self {
         Self {
-            decayed_usage: 0,
+            decayed_usage_scaled: 0,
             last_update_sec: None,
         }
     }
 
-    /// Computes the effective decayed usage at timestamp `now_sec`.
+    /// Computes the effective decayed usage in scaled Q96.32 space at timestamp `now_sec`.
     ///
     /// Monotonicity guarantees:
     /// - Returns 0 if no usage has ever been recorded (`last_update_sec.is_none()`).
     /// - If `now_sec < last_sec` (e.g. out-of-order packet arrival or clock jitter),
     ///   `delta_secs = 0` so decay never resets or inflates backwards.
-    pub fn usage_at(&self, now_sec: u64) -> u64 {
+    pub fn usage_scaled_at(&self, now_sec: u64) -> u128 {
         match self.last_update_sec {
             None => 0,
             Some(last_sec) => {
                 let delta_secs = now_sec.saturating_sub(last_sec);
-                decay_integer_ema(self.decayed_usage, delta_secs)
+                decay_scaled_ema(self.decayed_usage_scaled, delta_secs)
             }
         }
     }
 
-    /// Returns the raw cached usage at the last recorded timestamp (without projecting forward).
-    pub const fn raw_cached_usage(&self) -> u64 {
-        self.decayed_usage
+    /// Computes the effective decayed usage at timestamp `now_sec` rounded down to whole integer units.
+    pub fn usage_at(&self, now_sec: u64) -> u64 {
+        (self.usage_scaled_at(now_sec) >> FRACTIONAL_BITS) as u64
+    }
+
+    /// Returns the raw cached whole-integer usage at the last recorded timestamp (without projecting forward).
+    pub fn raw_cached_usage(&self) -> u64 {
+        (self.decayed_usage_scaled >> FRACTIONAL_BITS) as u64
+    }
+
+    /// Returns the raw cached scaled usage (Q96.32) at the last recorded timestamp.
+    pub const fn raw_cached_usage_scaled(&self) -> u128 {
+        self.decayed_usage_scaled
     }
 
     /// Returns the timestamp in seconds of the last recorded update, or None if empty.
@@ -548,21 +568,28 @@ impl RollingQuotaCounter {
 
     /// Attempts to consume `amount` against `limit` at timestamp `now_sec`.
     ///
+    /// Evaluates consumption in scaled Q96.32 space:
     /// Returns:
-    /// - `Ok(new_usage)`: Consumption accepted. State is updated: `decayed_usage = new_usage`
+    /// - `Ok(new_usage)`: Consumption accepted. State is updated: `decayed_usage_scaled = new_scaled`
     ///   and `last_update_sec` is monotonically advanced to `max(last, now_sec)`.
     /// - `Err(available)`: Quota exceeded or overflow. `self` is completely unmodified.
-    ///   The error payload contains the remaining available budget at `now_sec` (`limit.saturating_sub(current)`).
+    ///   The error payload contains the remaining available budget in integer units at `now_sec`.
     pub fn try_consume(&mut self, now_sec: u64, amount: u64, limit: u64) -> Result<u64, u64> {
-        let current = self.usage_at(now_sec);
-        match current.checked_add(amount) {
-            Some(new_usage) if new_usage <= limit => {
-                self.decayed_usage = new_usage;
+        let current_scaled = self.usage_scaled_at(now_sec);
+        let amount_scaled = (amount as u128) << FRACTIONAL_BITS;
+        let limit_scaled = (limit as u128) << FRACTIONAL_BITS;
+
+        let available_scaled = limit_scaled.saturating_sub(current_scaled);
+        let available = (available_scaled >> FRACTIONAL_BITS) as u64;
+
+        match current_scaled.checked_add(amount_scaled) {
+            Some(new_scaled) if new_scaled <= limit_scaled => {
+                self.decayed_usage_scaled = new_scaled;
                 self.last_update_sec =
                     Some(self.last_update_sec.map_or(now_sec, |last| last.max(now_sec)));
-                Ok(new_usage)
+                Ok((new_scaled >> FRACTIONAL_BITS) as u64)
             }
-            _ => Err(limit.saturating_sub(current)),
+            _ => Err(available),
         }
     }
 }
@@ -577,9 +604,9 @@ pub struct NetworkThermometer {
     read_ring_buffer: SlottedMedianRingBuffer,
     node_write_usage: HashMap<NodeId, RollingQuotaCounter>,
     node_read_usage: HashMap<NodeId, RollingQuotaCounter>,
-    write_ema_micro_bj: u64,
+    write_ema_scaled: u128,
     last_write_ema_sec: Option<u64>,
-    read_ema_credits: u64,
+    read_ema_scaled: u128,
     last_read_ema_sec: Option<u64>,
 }
 
@@ -590,9 +617,9 @@ impl NetworkThermometer {
             read_ring_buffer: SlottedMedianRingBuffer::new(),
             node_write_usage: HashMap::new(),
             node_read_usage: HashMap::new(),
-            write_ema_micro_bj: 0,
+            write_ema_scaled: 0,
             last_write_ema_sec: None,
-            read_ema_credits: 0,
+            read_ema_scaled: 0,
             last_read_ema_sec: None,
         }
     }
@@ -818,8 +845,9 @@ impl NetworkThermometer {
             None => 0,
             Some(last) => now_sec.saturating_sub(last),
         };
-        self.write_ema_micro_bj =
-            calculate_integer_ema(self.write_ema_micro_bj, delta, footprint_micro_bj);
+        let decayed_scaled = decay_scaled_ema(self.write_ema_scaled, delta);
+        let footprint_scaled = (footprint_micro_bj as u128) << FRACTIONAL_BITS;
+        self.write_ema_scaled = decayed_scaled.saturating_add(footprint_scaled);
         self.last_write_ema_sec = Some(match self.last_write_ema_sec {
             None => now_sec,
             Some(last) => now_sec.max(last),
@@ -828,21 +856,68 @@ impl NetworkThermometer {
 
     /// Returns the current raw write EMA accumulator in micro-Byte-Years (µBJ)
     pub fn current_write_ema_micro_bj(&self) -> u64 {
-        self.write_ema_micro_bj
+        (self.write_ema_scaled >> FRACTIONAL_BITS) as u64
     }
 
-    /// Returns the current write EMA in Byte-Years (BJ)
-    pub fn current_write_ema_byte_years(&self) -> u64 {
-        self.write_ema_micro_bj / 1_000_000
-    }
-
-    /// Computes the rolling 24-hour write daily rate in Byte-Years at a specific time `now_sec`
-    pub fn rolling_24h_average_at(&self, now_sec: u64) -> u64 {
+    /// Evaluates decayed write EMA accumulator in micro-Byte-Years at `now_sec` (S07-10).
+    pub fn write_ema_micro_bj_at(&self, now_sec: u64) -> u64 {
         let delta = match self.last_write_ema_sec {
             None => 0,
             Some(last) => now_sec.saturating_sub(last),
         };
-        let decayed_ema_micro = decay_integer_ema(self.write_ema_micro_bj, delta);
+        (decay_scaled_ema(self.write_ema_scaled, delta) >> FRACTIONAL_BITS) as u64
+    }
+
+    /// Evaluates decayed read EMA accumulator in credits at `now_sec` (S07-10).
+    pub fn read_ema_credits_at(&self, now_sec: u64) -> u64 {
+        let delta = match self.last_read_ema_sec {
+            None => 0,
+            Some(last) => now_sec.saturating_sub(last),
+        };
+        (decay_scaled_ema(self.read_ema_scaled, delta) >> FRACTIONAL_BITS) as u64
+    }
+
+    /// Monotonically decays and advances EMA accumulators to `now_sec` (S07-10).
+    /// Prevents sequential snapshot drift on honest senders.
+    pub fn checkpoint_emas_at(&mut self, now_sec: u64) -> (u64, u64) {
+        if let Some(last) = self.last_write_ema_sec {
+            if now_sec > last {
+                let delta = now_sec - last;
+                self.write_ema_scaled = decay_scaled_ema(self.write_ema_scaled, delta);
+                self.last_write_ema_sec = Some(now_sec);
+            } else {
+                self.last_write_ema_sec = Some(last.max(now_sec));
+            }
+        } else {
+            self.last_write_ema_sec = Some(now_sec);
+        }
+
+        if let Some(last) = self.last_read_ema_sec {
+            if now_sec > last {
+                let delta = now_sec - last;
+                self.read_ema_scaled = decay_scaled_ema(self.read_ema_scaled, delta);
+                self.last_read_ema_sec = Some(now_sec);
+            } else {
+                self.last_read_ema_sec = Some(last.max(now_sec));
+            }
+        } else {
+            self.last_read_ema_sec = Some(now_sec);
+        }
+
+        (
+            (self.write_ema_scaled >> FRACTIONAL_BITS) as u64,
+            (self.read_ema_scaled >> FRACTIONAL_BITS) as u64,
+        )
+    }
+
+    /// Returns the current write EMA in Byte-Years (BJ)
+    pub fn current_write_ema_byte_years(&self) -> u64 {
+        self.current_write_ema_micro_bj() / 1_000_000
+    }
+
+    /// Computes the rolling 24-hour write daily rate in Byte-Years at a specific time `now_sec`
+    pub fn rolling_24h_average_at(&self, now_sec: u64) -> u64 {
+        let decayed_ema_micro = self.write_ema_micro_bj_at(now_sec);
         let daily_rate_micro = ema_to_daily_rate(decayed_ema_micro);
         daily_rate_micro / 1_000_000
     }
@@ -858,7 +933,9 @@ impl NetworkThermometer {
             None => 0,
             Some(last) => now_sec.saturating_sub(last),
         };
-        self.read_ema_credits = calculate_integer_ema(self.read_ema_credits, delta, credits);
+        let decayed_scaled = decay_scaled_ema(self.read_ema_scaled, delta);
+        let credits_scaled = (credits as u128) << FRACTIONAL_BITS;
+        self.read_ema_scaled = decayed_scaled.saturating_add(credits_scaled);
         self.last_read_ema_sec = Some(match self.last_read_ema_sec {
             None => now_sec,
             Some(last) => now_sec.max(last),
@@ -867,16 +944,12 @@ impl NetworkThermometer {
 
     /// Returns the current raw read EMA accumulator in credits
     pub fn current_read_ema_credits(&self) -> u64 {
-        self.read_ema_credits
+        (self.read_ema_scaled >> FRACTIONAL_BITS) as u64
     }
 
     /// Computes the rolling 24-hour read daily rate in credits at a specific time `now_sec`
     pub fn rolling_24h_read_average_at(&self, now_sec: u64) -> u64 {
-        let delta = match self.last_read_ema_sec {
-            None => 0,
-            Some(last) => now_sec.saturating_sub(last),
-        };
-        let decayed_read_ema = decay_integer_ema(self.read_ema_credits, delta);
+        let decayed_read_ema = self.read_ema_credits_at(now_sec);
         ema_to_daily_rate(decayed_read_ema)
     }
 
@@ -1303,45 +1376,25 @@ mod tests {
         let limit = 1000u64;
         // 75% = 750, 125% = 1250
 
-        // Zone 1: < 75% (FraudulentRejection)
+        // Zone 1: < 75% (EarlyRefusal)
         let v1 = evaluate_quota_exceeded_claim(749, limit);
-        assert_eq!(
-            v1,
-            QuotaPlausibilityVerdict::FraudulentRejection { malus_increment: 8 }
-        );
-        assert_eq!(v1.malus(), 8);
+        assert_eq!(v1, QuotaPlausibilityVerdict::EarlyRefusal);
 
         // Zone 2: == 75% (BoundaryCutoff)
         let v2 = evaluate_quota_exceeded_claim(750, limit);
-        assert_eq!(
-            v2,
-            QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
-        );
-        assert_eq!(v2.malus(), 0);
+        assert_eq!(v2, QuotaPlausibilityVerdict::BoundaryCutoff);
 
         // Zone 2: within [75%, 125%]
         let v3 = evaluate_quota_exceeded_claim(1000, limit);
-        assert_eq!(
-            v3,
-            QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
-        );
-        assert_eq!(v3.malus(), 0);
+        assert_eq!(v3, QuotaPlausibilityVerdict::BoundaryCutoff);
 
         // Zone 2: == 125% (BoundaryCutoff)
         let v4 = evaluate_quota_exceeded_claim(1250, limit);
-        assert_eq!(
-            v4,
-            QuotaPlausibilityVerdict::BoundaryCutoff { malus_increment: 0 }
-        );
-        assert_eq!(v4.malus(), 0);
+        assert_eq!(v4, QuotaPlausibilityVerdict::BoundaryCutoff);
 
-        // Zone 3: > 125% (LegitimateOverload)
+        // Zone 3: > 125% (OverloadIndication)
         let v5 = evaluate_quota_exceeded_claim(1251, limit);
-        assert_eq!(
-            v5,
-            QuotaPlausibilityVerdict::LegitimateOverload { malus_increment: 0 }
-        );
-        assert_eq!(v5.malus(), 0);
+        assert_eq!(v5, QuotaPlausibilityVerdict::OverloadIndication);
     }
 
     #[test]

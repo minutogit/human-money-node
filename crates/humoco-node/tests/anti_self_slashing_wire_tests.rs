@@ -238,7 +238,8 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
     let ttl_s = root_valid_until.saturating_sub(now) / 1000;
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
 
-    let digest_a = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_a = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender_pubkey,
         0,
         0,
@@ -337,7 +338,8 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
     // -----------------------------------------------------------------------
     // Step 2: Idempotent retry of Lock A succeeds and re-attests
     // -----------------------------------------------------------------------
-    let digest_a_retry = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_a_retry = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender_pubkey,
         0,
         1,
@@ -405,7 +407,8 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
         &sender_key,
     );
 
-    let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_b = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender_pubkey,
         0,
         2,
@@ -486,7 +489,8 @@ async fn test_shard_node_never_signs_conflicting_attestation_on_live_wire() {
     // -----------------------------------------------------------------------
     // Step 4: Repeating Lock B is still strictly rejected
     // -----------------------------------------------------------------------
-    let digest_b_retry = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_b_retry = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &sender_pubkey,
         0,
         3,
@@ -658,6 +662,7 @@ async fn test_s07_01_wire_high_bit_mutated_proof_rejected_honest_subject_unbanne
     // Construct V2 envelopes for honest subject, then high-bit mutate p1's epoch_seq
     let now = test_now_ms();
     let p1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
         honest_subject.signing_key(),
         1,
         10,
@@ -669,6 +674,7 @@ async fn test_s07_01_wire_high_bit_mutated_proof_rejected_honest_subject_unbanne
         [0x11; 32],
     );
     let p2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
         honest_subject.signing_key(),
         1,
         11,
@@ -891,7 +897,8 @@ async fn test_s07_02_wire_quic_v2_ingress_accounting_refusal_vs_under_reporting_
 
     // Initial valid sequenced envelope for fraud_client
     let fraud_pub = *fraud_client.node_pubkey();
-    let digest_1 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_1 = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &fraud_pub,
         1,
         1,
@@ -936,7 +943,8 @@ async fn test_s07_02_wire_quic_v2_ingress_accounting_refusal_vs_under_reporting_
     );
     let ttl_s_2 = root_valid_until.saturating_sub(now + 10_000) / 1000;
     let footprint_2 = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s_2);
-    let digest_2 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_2 = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &fraud_pub,
         1,
         2,
@@ -1008,7 +1016,8 @@ async fn test_s07_02_wire_quic_v2_ingress_accounting_refusal_vs_under_reporting_
         now + 900_000,
         &sender_key,
     );
-    let digest_3 = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest_3 = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         &quota_pub,
         1,
         1,
@@ -1112,4 +1121,444 @@ async fn test_s07_02_wire_quic_v2_ingress_accounting_refusal_vs_under_reporting_
     client_transport.close();
     quota_client_cancel.cancel();
     quota_client_transport.close();
+}
+
+// ---------------------------------------------------------------------------
+// S07-11: Real QUIC Foreign and Mixed Network Fraud Submission Rejected
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s07_11_real_quic_foreign_and_mixed_network_fraud_submission_rejected() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("test_s07_11_shard.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+
+    let shard_cancel = CancellationToken::new();
+    let (engine, _worker) = DualTierEngine::new_with_token(storage.clone(), shard_cancel.clone());
+    let shard_identity = NodeIdentity::generate();
+    let accused_identity = NodeIdentity::generate();
+
+    let shard_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    shard_pm.set_simulation_mode(true);
+
+    let client_identity = NodeIdentity::generate();
+    let client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    client_pm.set_simulation_mode(true);
+
+    let shard_handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            shard_identity.clone(),
+            shard_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+
+    let shard_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &shard_identity,
+        shard_pm.clone(),
+        shard_handler,
+        shard_cancel.clone(),
+    )
+    .expect("bind shard");
+    let shard_addr = shard_transport.local_addr().expect("shard addr");
+    shard_transport.spawn_accept_loop();
+
+    let client_dummy_handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            client_identity.clone(),
+            client_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+
+    let client_cancel = CancellationToken::new();
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &client_identity,
+        client_pm.clone(),
+        client_dummy_handler,
+        client_cancel.clone(),
+    )
+    .expect("bind client");
+    let client_addr = client_transport.local_addr().expect("client addr");
+    client_transport.spawn_accept_loop();
+
+    shard_pm
+        .register_f2f_friend(*client_identity.node_pubkey(), Some(client_addr))
+        .await;
+    client_pm
+        .register_f2f_friend(*shard_identity.node_pubkey(), Some(shard_addr))
+        .await;
+
+    let conn = client_transport
+        .connect_peer(shard_addr)
+        .await
+        .expect("connect client to shard");
+
+    let now = test_now_ms();
+
+    // 1. Foreign network proof: both envelopes signed under Testnet submitted to Mainnet node
+    let p1_testnet = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Testnet,
+        accused_identity.signing_key(),
+        1,
+        10,
+        now,
+        50_000,
+        0,
+        100,
+        false,
+        [0x11; 32],
+    );
+    let p2_testnet = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Testnet,
+        accused_identity.signing_key(),
+        1,
+        11,
+        now + 10,
+        0,
+        0,
+        100,
+        false,
+        [0x22; 32],
+    );
+    let foreign_proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(
+        p1_testnet.clone(),
+        p2_testnet.clone(),
+    );
+    let foreign_bytes = bincode::serialize(&foreign_proof).expect("serialize foreign proof");
+    let foreign_hash = *blake3::hash(&foreign_bytes).as_bytes();
+
+    let hdr_foreign = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        1,
+        0,
+        0,
+        foreign_bytes.len() as u32,
+    );
+    let _ = client_transport
+        .send_request(&conn, &hdr_foreign, &foreign_bytes)
+        .await
+        .expect("send foreign proof");
+
+    // Foreign network proof MUST be rejected: accused not banned, evidence not persisted
+    assert!(
+        !engine.is_node_banned(accused_identity.node_pubkey()).await,
+        "Accused subject must NOT be banned in engine on foreign-network proof"
+    );
+    assert!(
+        !shard_pm.is_banned(accused_identity.node_pubkey()).await,
+        "Accused subject must NOT be banned in PeerManager on foreign-network proof"
+    );
+    assert!(
+        !storage.is_node_banned(accused_identity.node_pubkey()).expect("check ban"),
+        "Accused subject must NOT be banned in storage on foreign-network proof"
+    );
+    assert!(
+        storage.get_evidence(&foreign_hash).expect("check evidence").is_none(),
+        "Foreign-network evidence must not be committed to storage"
+    );
+
+    // 2. Mixed network proof: one Mainnet, one Testnet
+    let p1_mainnet = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
+        accused_identity.signing_key(),
+        1,
+        10,
+        now,
+        50_000,
+        0,
+        100,
+        false,
+        [0x11; 32],
+    );
+    let mixed_proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(
+        p1_mainnet.clone(),
+        p2_testnet,
+    );
+    let mixed_bytes = bincode::serialize(&mixed_proof).expect("serialize mixed proof");
+    let mixed_hash = *blake3::hash(&mixed_bytes).as_bytes();
+
+    let hdr_mixed = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        2,
+        0,
+        0,
+        mixed_bytes.len() as u32,
+    );
+    let _ = client_transport
+        .send_request(&conn, &hdr_mixed, &mixed_bytes)
+        .await
+        .expect("send mixed proof");
+
+    assert!(
+        !engine.is_node_banned(accused_identity.node_pubkey()).await,
+        "Accused subject must NOT be banned in engine on mixed-network proof"
+    );
+    assert!(
+        storage.get_evidence(&mixed_hash).expect("check evidence").is_none(),
+        "Mixed-network evidence must not be committed to storage"
+    );
+
+    // 3. Genuine same-network Mainnet proof: both envelopes on Mainnet with blatant rollback to 0
+    let p2_mainnet_conflict = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
+        accused_identity.signing_key(),
+        1,
+        11,
+        now + 10,
+        0,
+        0,
+        100,
+        false,
+        [0x22; 32],
+    );
+    let genuine_proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(
+        p1_mainnet,
+        p2_mainnet_conflict,
+    );
+    let genuine_bytes = bincode::serialize(&genuine_proof).expect("serialize genuine proof");
+    let genuine_hash = *blake3::hash(&genuine_bytes).as_bytes();
+
+    let hdr_genuine = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        3,
+        0,
+        0,
+        genuine_bytes.len() as u32,
+    );
+    let _ = client_transport
+        .send_request(&conn, &hdr_genuine, &genuine_bytes)
+        .await
+        .expect("send genuine proof");
+
+    // Genuine same-network proof MUST ban perpetrator and persist evidence
+    assert!(
+        engine.is_node_banned(accused_identity.node_pubkey()).await,
+        "Accused subject MUST be banned in engine on genuine same-network proof"
+    );
+    assert!(
+        shard_pm.is_banned(accused_identity.node_pubkey()).await,
+        "Accused subject MUST be banned in PeerManager on genuine same-network proof"
+    );
+    assert!(
+        storage.is_node_banned(accused_identity.node_pubkey()).expect("check ban"),
+        "Accused subject MUST be banned in storage on genuine same-network proof"
+    );
+    assert!(
+        storage.get_evidence(&genuine_hash).expect("check evidence").is_some(),
+        "Genuine same-network evidence must be committed to storage"
+    );
+
+    shard_cancel.cancel();
+    shard_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}
+
+// ---------------------------------------------------------------------------
+// S07-10: Real QUIC Lawful Short EMA Decay Accepted
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s07_10_real_quic_lawful_ema_decay_over_short_interval_accepted() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("test_s07_10_shard.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+
+    let shard_cancel = CancellationToken::new();
+    let (engine, _worker) = DualTierEngine::new_with_token(storage.clone(), shard_cancel.clone());
+    let shard_identity = NodeIdentity::generate();
+    let client_identity = NodeIdentity::generate();
+    let client_pub = *client_identity.node_pubkey();
+
+    let shard_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    shard_pm.set_simulation_mode(true);
+
+    let client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    client_pm.set_simulation_mode(true);
+
+    let shard_handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            shard_identity.clone(),
+            shard_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+
+    let shard_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &shard_identity,
+        shard_pm.clone(),
+        shard_handler,
+        shard_cancel.clone(),
+    )
+    .expect("bind shard");
+    let shard_addr = shard_transport.local_addr().expect("shard addr");
+    shard_transport.spawn_accept_loop();
+
+    let client_dummy_handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            client_identity.clone(),
+            client_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+
+    let client_cancel = CancellationToken::new();
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &client_identity,
+        client_pm.clone(),
+        client_dummy_handler,
+        client_cancel.clone(),
+    )
+    .expect("bind client");
+    let client_addr = client_transport.local_addr().expect("client addr");
+    client_transport.spawn_accept_loop();
+
+    shard_pm.register_f2f_friend(client_pub, Some(client_addr)).await;
+    client_pm
+        .register_f2f_friend(*shard_identity.node_pubkey(), Some(shard_addr))
+        .await;
+
+    let conn = client_transport
+        .connect_peer(shard_addr)
+        .await
+        .expect("connect client to shard");
+
+    let now = test_now_ms();
+    let root_valid_until = now + 600_000;
+    let ttl_s = 600;
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+
+    // Operation 1 at T = now with large write EMA = 1_000_000_000
+    let tx_hash_1 = [0x51; 32];
+    let lock_1 = make_hmc_spend("v_decay", "parent_10_decay", tx_hash_1, root_valid_until, client_identity.signing_key());
+    let parent_tag_1 = lock_1.ds_tag.as_deref().unwrap();
+    let parent_bytes_1 = *blake3::hash(parent_tag_1.as_bytes()).as_bytes();
+    let shard_1 = humoco_sim_core::types::extract_shard_id(&parent_bytes_1);
+    engine.record_hmc_voucher_genesis_parent(&lock_1.layer2_voucher_id, parent_bytes_1).await;
+
+    let write_ema_1 = 1_000_000_000u64;
+    let digest_1 = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
+        &client_pub,
+        1,
+        1,
+        now,
+        write_ema_1,
+        0,
+        footprint,
+        false,
+        &tx_hash_1,
+    );
+    let sig_1 = client_identity.signing_key().sign(&digest_1).to_bytes();
+    let payload_1 = bincode::serialize(&LockWirePayload::Hmc {
+        req: lock_1,
+        chain: None,
+        root_valid_until,
+        epoch_day: 1,
+        epoch_seq: 1,
+        cumulative_micro_byte_years: footprint,
+        prev_day_final_bytes: 0,
+        current_anl_24h: write_ema_1,
+        declared_write_ema_micro_bj: write_ema_1,
+        declared_read_ema_credits: 0,
+        sender_pubkey: client_pub,
+        sender_signature: sig_1,
+        timestamp_ms: now,
+    })
+    .expect("serialize payload 1");
+
+    let hdr_1 = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, shard_1 as u32, 0, payload_1.len() as u32);
+    let (resp_hdr_1, _) = client_transport.send_request(&conn, &hdr_1, &payload_1).await.expect("send 1");
+    assert_eq!(resp_hdr_1.flags & humoco_sim_core::wire::FLAG_QUOTA_FRAUD, 0, "Op 1 must succeed without fraud");
+
+    // Operation 2 at T = now + 2000 ms (2 seconds later)
+    // 24h-half-life EMA decay over 2 seconds:
+    // decay(1_000_000_000, 2) ~ 999_983_954
+    // Declared write EMA = decay + footprint < 1_000_000_000
+    let now_2 = now + 2000;
+    let tx_hash_2 = [0x52; 32];
+    let lock_2 = make_hmc_spend("v_decay", "parent_10_decay_2", tx_hash_2, root_valid_until, client_identity.signing_key());
+    let parent_tag_2 = lock_2.ds_tag.as_deref().unwrap();
+    let parent_bytes_2 = *blake3::hash(parent_tag_2.as_bytes()).as_bytes();
+    let shard_2 = humoco_sim_core::types::extract_shard_id(&parent_bytes_2);
+    engine.record_hmc_voucher_genesis_parent(&lock_2.layer2_voucher_id, parent_bytes_2).await;
+
+    let write_ema_2 = humoco_sim_core::quota::decay_integer_ema(write_ema_1, 2) + footprint;
+    assert!(
+        write_ema_2 < write_ema_1,
+        "Lawfully decayed EMA ({write_ema_2}) must be strictly less than initial EMA ({write_ema_1})"
+    );
+
+    let digest_2 = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
+        &client_pub,
+        1,
+        2,
+        now_2,
+        write_ema_2,
+        0,
+        footprint,
+        false,
+        &tx_hash_2,
+    );
+    let sig_2 = client_identity.signing_key().sign(&digest_2).to_bytes();
+    let payload_2 = bincode::serialize(&LockWirePayload::Hmc {
+        req: lock_2,
+        chain: None,
+        root_valid_until,
+        epoch_day: 1,
+        epoch_seq: 2,
+        cumulative_micro_byte_years: footprint * 2,
+        prev_day_final_bytes: 0,
+        current_anl_24h: write_ema_2,
+        declared_write_ema_micro_bj: write_ema_2,
+        declared_read_ema_credits: 0,
+        sender_pubkey: client_pub,
+        sender_signature: sig_2,
+        timestamp_ms: now_2,
+    })
+    .expect("serialize payload 2");
+
+    let hdr_2 = WireHeader::new(MsgType::LockVerifyRequest as u16, 2, shard_2 as u32, 0, payload_2.len() as u32);
+    let (resp_hdr_2, _) = client_transport.send_request(&conn, &hdr_2, &payload_2).await.expect("send 2");
+
+    // CRITICAL: Lawful decay must NOT trigger FLAG_QUOTA_FRAUD or bans
+    assert_eq!(
+        resp_hdr_2.flags & humoco_sim_core::wire::FLAG_QUOTA_FRAUD,
+        0,
+        "Lawful EMA decay must NOT trigger FLAG_QUOTA_FRAUD (got {:x})",
+        resp_hdr_2.flags
+    );
+    assert!(
+        !engine.is_node_banned(&client_pub).await,
+        "Client must NOT be banned in engine on lawful decay"
+    );
+    assert!(
+        !shard_pm.is_banned(&client_pub).await,
+        "Client must NOT be banned in PeerManager on lawful decay"
+    );
+    assert!(
+        !storage.is_node_banned(&client_pub).expect("check ban"),
+        "Client must NOT be banned in storage on lawful decay"
+    );
+
+    shard_cancel.cancel();
+    shard_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
 }

@@ -32,4 +32,4 @@ pub use network::{
     read_frame, write_frame, BoxFuture, DefaultRequestHandler, NodeRequestHandler, PeerInfo,
     PeerManager, PeerStatus, QuicTransport, RequestHandler,
 };
-pub use storage::{DualTierEngine, FlushOp, RedbStorage, StorageError};
+pub use storage::{DualTierEngine, FlushOp, PersistenceServiceClass, RedbStorage, StorageError};

@@ -14,7 +14,8 @@ pub const HUMOCO_V1_HEARTBEAT_MAINNET: &[u8] = b"HUMOCO_V1_HEARTBEAT_MAINNET";
 pub const HUMOCO_V1_HEARTBEAT_TESTNET: &[u8] = b"HUMOCO_V1_HEARTBEAT_TESTNET";
 
 pub const DOMAIN_GENESIS: &[u8] = b"HUMOCO_V1_GENESIS";
-pub const DOMAIN_INGRESS_DECL: &[u8] = b"HUMOCO_V1_INGRESS_DECL";
+pub const HUMOCO_V1_INGRESS_DECL_MAINNET: &[u8] = b"HUMOCO_V1_INGRESS_DECL_MAINNET";
+pub const HUMOCO_V1_INGRESS_DECL_TESTNET: &[u8] = b"HUMOCO_V1_INGRESS_DECL_TESTNET";
 pub const DOMAIN_HRW_ROUTING_TICKET: &[u8] = b"HUMOCO_V1_HRW_ROUTING_TICKET";
 pub const DOMAIN_ATTESTATION_PAYLOAD: &[u8] = b"HUMOCO_V1_ATTESTATION_PAYLOAD";
 pub const DOMAIN_HB_ANNOUNCE: &[u8] = b"HUMOCO_V1_HB_ANNOUNCE";
@@ -87,6 +88,14 @@ pub fn domain_heartbeat(network_id: NetworkId) -> &'static [u8] {
     match network_id {
         NetworkId::Mainnet => HUMOCO_V1_HEARTBEAT_MAINNET,
         NetworkId::Testnet => HUMOCO_V1_HEARTBEAT_TESTNET,
+    }
+}
+
+/// Returns the domain tag for signed ingress declarations for the given network (S07-11).
+pub fn domain_ingress_decl(network_id: NetworkId) -> &'static [u8] {
+    match network_id {
+        NetworkId::Mainnet => HUMOCO_V1_INGRESS_DECL_MAINNET,
+        NetworkId::Testnet => HUMOCO_V1_INGRESS_DECL_TESTNET,
     }
 }
 

@@ -300,6 +300,7 @@ async fn test_a19_01_root_derived_receiver_accounting_over_quic() {
         let ttl_s = auth_root_valid_until.saturating_sub(now) / 1000;
         let base_fp = ByteYears::micro_from_ttl_seconds(ttl_s);
         let evidence = sign_ingress_evidence_with_key(
+            humoco_sim_core::types::NetworkId::Mainnet,
             client_id.signing_key(),
             0,
             1,
@@ -389,6 +390,7 @@ async fn test_a19_01_root_derived_receiver_accounting_over_quic() {
         let fake_ttl_s = fake_short_valid_until.saturating_sub(now) / 1000;
         let fake_fp = ByteYears::micro_from_ttl_seconds(fake_ttl_s);
         let evidence = sign_ingress_evidence_with_key(
+            humoco_sim_core::types::NetworkId::Mainnet,
             client_id.signing_key(),
             0,
             2,
@@ -604,8 +606,8 @@ async fn test_a19_03_neutral_quota_feedback_does_not_penalize_peer() {
     let candidates = [(*peer_id.node_pubkey(), peer_addr)];
     let expected_members = [*peer_id.node_pubkey()];
 
-    // 1. Zone 1: Apparent under-load / FraudulentRejection outside merge moratorium
-    // my_load = 100 < 75% of 10_000 -> evaluate_quota_exceeded_claim yields FraudulentRejection
+    // 1. Zone 1: Apparent under-load claim outside merge moratorium
+    // my_load = 100 < 75% of 10_000 -> evaluate_quota_exceeded_claim yields Plausibility::Underload
     mock_handler.mode.store(
         QuotaCollectorMockHandler::MODE_QUOTA_EXCEEDED,
         std::sync::atomic::Ordering::SeqCst,
@@ -637,7 +639,7 @@ async fn test_a19_03_neutral_quota_feedback_does_not_penalize_peer() {
         let peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
         assert_eq!(
             peer.missing_count, 0,
-            "Zone 1 (FraudulentRejection): quota feedback must remain strictly neutral"
+            "Zone 1 (Underload): quota feedback must remain strictly neutral"
         );
         assert!(!peer.is_suspended());
     }
@@ -676,8 +678,8 @@ async fn test_a19_03_neutral_quota_feedback_does_not_penalize_peer() {
         assert!(!peer.is_suspended());
     }
 
-    // 3. Zone 3: LegitimateOverload (> 125% of quota_limit)
-    // my_load = 15_000 (150% of 10_000) -> evaluate_quota_exceeded_claim yields LegitimateOverload
+    // 3. Zone 3: Apparent overload (> 125% of quota_limit)
+    // my_load = 15_000 (150% of 10_000) -> evaluate_quota_exceeded_claim yields Plausibility::Overload
     {
         let mut collected = Vec::new();
         let query = humoco_node::PeerAttestationQuery {
@@ -705,7 +707,7 @@ async fn test_a19_03_neutral_quota_feedback_does_not_penalize_peer() {
         let peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
         assert_eq!(
             peer.missing_count, 0,
-            "Zone 3 (LegitimateOverload): quota feedback must remain strictly neutral"
+            "Zone 3 (Overload): quota feedback must remain strictly neutral"
         );
         assert!(!peer.is_suspended());
     }
@@ -893,6 +895,7 @@ async fn test_a19_02_quic_receiver_declared_limit_and_identity_binding() {
         let imposter_key = SigningKey::from_bytes(&[0x55u8; 32]);
         let imposter_pubkey = imposter_key.verifying_key().to_bytes();
         let evidence = sign_ingress_evidence_with_key(
+            humoco_sim_core::types::NetworkId::Mainnet,
             &imposter_key,
             0,
             2,
@@ -1042,6 +1045,7 @@ async fn test_a19_r1_quic_reordered_and_concurrent_reads_never_ban() {
 
     // 1. Send status read at T = now
     let ev1 = sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.signing_key(),
         0,
         0,
@@ -1076,6 +1080,7 @@ async fn test_a19_r1_quic_reordered_and_concurrent_reads_never_ban() {
 
     // 2. Send status read for a different lock at T = now - 1ms (reordered packet arrival)
     let ev2_reordered = sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.signing_key(),
         0,
         0,
@@ -1117,6 +1122,7 @@ async fn test_a19_r1_quic_reordered_and_concurrent_reads_never_ban() {
 
     // 3. Send concurrent status read at T = now for different lock
     let ev3_concurrent = sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.signing_key(),
         0,
         0,
@@ -1197,6 +1203,7 @@ async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
 
     let fp = ByteYears::micro_from_ttl_seconds(ttl_s);
     let ev = sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.signing_key(),
         epoch_day as u32,
         1,
@@ -1273,6 +1280,7 @@ async fn test_a19_r2_exact_wire_retry_at_quota_boundary() {
     readiness.mark_shard_ready(shard_2);
 
     let ev2 = sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.signing_key(),
         epoch_day as u32,
         2,
@@ -1363,6 +1371,7 @@ async fn test_a19_r3_quic_write_budget_exhaustion_before_mutation() {
     let ttl_s = auth_root_valid_until.saturating_sub(now) / 1000;
     let fp = ByteYears::micro_from_ttl_seconds(ttl_s);
     let ev = sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.signing_key(),
         epoch_day as u32,
         1,

@@ -249,7 +249,8 @@ async fn unknown_shard_is_rejected_over_real_quic_despite_global_readiness() {
     }
     let entry = humoco_node::api::hmc::L2LockEntry::from(&hmc_req);
     let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(600);
-    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest_v2(
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::Mainnet,
         client_id.node_pubkey(),
         0,
         0,

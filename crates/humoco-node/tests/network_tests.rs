@@ -935,3 +935,259 @@ async fn test_s04_07_uni_rejects_unsupported_suite_headers_without_body_or_handl
     client.drain_tasks().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn test_quic_s04_17_trailing_bytes_and_withheld_fin() -> Result<(), Box<dyn std::error::Error>> {
+    let cancel = CancellationToken::new();
+    let server_id = NodeIdentity::generate();
+    let client_id = NodeIdentity::generate();
+    let handler = Arc::new(EchoHandler::new());
+
+    let server = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse()?,
+        &server_id,
+        Arc::new(PeerManager::new(vec![])),
+        handler.clone(),
+        cancel.clone(),
+    )?;
+    let client = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse()?,
+        &client_id,
+        Arc::new(PeerManager::new(vec![])),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )?;
+
+    server
+        .peer_manager()
+        .register_f2f_friend(*client_id.node_pubkey(), Some(client.local_addr()?))
+        .await;
+    client
+        .peer_manager()
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server.local_addr()?))
+        .await;
+
+    server.spawn_accept_loop();
+    client.spawn_accept_loop();
+
+    let conn = client.connect_peer(server.local_addr()?).await?;
+
+    // Initial permits
+    assert_eq!(server.shard_streams_available_for_test(), 256);
+    assert_eq!(server.sync_streams_available_for_test(), 32);
+
+    // 1. Bidirectional stream: send announced 1-byte payload, that byte, extra byte 0x99, and send.finish()
+    // Assert rejection BEFORE handler invocation (received_requests unchanged) and permits released!
+    {
+        let req_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 10, 1, 0, 1);
+        let (mut send, _recv) = conn.open_bi().await?;
+        send.write_all(&req_header.to_bytes()).await?;
+        send.write_all(&[0x42]).await?;
+        send.write_all(&[0x99]).await?; // trailing byte
+        send.finish()?;
+
+        // Wait for server to process and reject
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            handler.received_requests.load(Ordering::SeqCst),
+            0,
+            "Bi-stream handler must NOT be invoked when trailing bytes are present"
+        );
+        assert_eq!(
+            server.shard_streams_available_for_test(),
+            256,
+            "Shard stream admission permit must be fully released"
+        );
+        assert_eq!(
+            server.sync_streams_available_for_test(),
+            32,
+            "Sync stream admission permit must be fully released"
+        );
+    }
+
+    // 2. Unidirectional stream: send announced 1-byte payload, that byte, extra byte 0x99, and send.finish()
+    // Assert rejection BEFORE handler invocation (received_unidirectional unchanged) and permits released!
+    {
+        let uni_header = WireHeader::new(MsgType::Heartbeat as u16, 20, 1, 0, 1);
+        let mut send = conn.open_uni().await?;
+        send.write_all(&uni_header.to_bytes()).await?;
+        send.write_all(&[0x42]).await?;
+        send.write_all(&[0x99]).await?; // trailing byte
+        send.finish()?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            handler.received_unidirectional.load(Ordering::SeqCst),
+            0,
+            "Uni-stream handler must NOT be invoked when trailing bytes are present"
+        );
+    }
+
+    // 3. Controls:
+    // 3a. Exact 1-byte payload + FIN -> succeeds and invokes handler
+    {
+        let req_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 30, 1, 0, 1);
+        let (mut send, _recv) = conn.open_bi().await?;
+        send.write_all(&req_header.to_bytes()).await?;
+        send.write_all(&[0x42]).await?;
+        send.finish()?;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while handler.received_requests.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(handler.received_requests.load(Ordering::SeqCst), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(server.shard_streams_available_for_test(), 256);
+    }
+
+    // 3b. Empty 0-byte payload + FIN -> succeeds and invokes handler
+    {
+        let req_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 40, 1, 0, 0);
+        let (mut send, _recv) = conn.open_bi().await?;
+        send.write_all(&req_header.to_bytes()).await?;
+        send.finish()?;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while handler.received_requests.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(handler.received_requests.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(server.shard_streams_available_for_test(), 256);
+    }
+
+    // 3c. Truncated payload before FIN -> rejected before handler invocation
+    {
+        let req_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 50, 1, 0, 10);
+        let (mut send, _recv) = conn.open_bi().await?;
+        send.write_all(&req_header.to_bytes()).await?;
+        send.write_all(&[1, 2, 3, 4, 5]).await?; // only 5 of 10 bytes
+        send.finish()?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            handler.received_requests.load(Ordering::SeqCst),
+            2,
+            "Handler must NOT be invoked on truncated payload"
+        );
+        assert_eq!(server.shard_streams_available_for_test(), 256);
+    }
+
+    // 4. Withheld FIN beyond absolute read deadline:
+    // Send valid header + exact announced payload on QUIC stream, do NOT call send.finish(),
+    // wait past the configured stream read deadline -> assert rejection before handler invocation
+    // and assert admission permits are released!
+    {
+        server.set_stream_read_timeout_for_test(std::time::Duration::from_millis(100));
+        let req_header = WireHeader::new(MsgType::LockVerifyRequest as u16, 60, 1, 0, 4);
+        let (mut send, _recv) = conn.open_bi().await?;
+        send.write_all(&req_header.to_bytes()).await?;
+        send.write_all(b"1234").await?;
+        // Deliberately withhold FIN (do NOT call send.finish())
+
+        // Wait beyond the 100ms stream read deadline
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(
+            handler.received_requests.load(Ordering::SeqCst),
+            2,
+            "Handler must NOT be invoked when FIN is withheld past deadline"
+        );
+        assert_eq!(
+            server.shard_streams_available_for_test(),
+            256,
+            "Permit must be released on stream read timeout"
+        );
+        assert_eq!(server.sync_streams_available_for_test(), 32);
+    }
+
+    cancel.cancel();
+    server.close();
+    client.close();
+    server.drain_tasks().await;
+    client.drain_tasks().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_quic_s04_17_outbound_response_trailing_byte_rejection() -> Result<(), Box<dyn std::error::Error>> {
+    let cancel = CancellationToken::new();
+    let responder_id = NodeIdentity::generate();
+    let caller_id = NodeIdentity::generate();
+
+    let responder = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse()?,
+        &responder_id,
+        Arc::new(PeerManager::new(vec![])),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )?;
+    let caller = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse()?,
+        &caller_id,
+        Arc::new(PeerManager::new(vec![])),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )?;
+
+    responder
+        .peer_manager()
+        .register_f2f_friend(*caller_id.node_pubkey(), Some(caller.local_addr()?))
+        .await;
+    caller
+        .peer_manager()
+        .register_f2f_friend(*responder_id.node_pubkey(), Some(responder.local_addr()?))
+        .await;
+
+    let responder_endpoint = responder.endpoint().clone();
+    let responder_handle = tokio::spawn(async move {
+        let incoming = responder_endpoint.accept().await.expect("accept connection");
+        let conn = incoming.await.expect("establish connection");
+        let (mut send, mut recv) = conn.accept_bi().await.expect("accept bi stream");
+        let (_req_hdr, _req_body) = humoco_node::network::read_frame(&mut recv)
+            .await
+            .expect("read request");
+        // Write valid response header + exact payload + 1 extra trailing byte (0x99) + finish()
+        let resp_payload = b"ok_payload";
+        let resp_hdr = WireHeader::new(
+            MsgType::StatusResponse as u16,
+            1,
+            0,
+            0,
+            resp_payload.len() as u32,
+        );
+        send.write_all(&resp_hdr.to_bytes()).await.expect("write header");
+        send.write_all(resp_payload).await.expect("write payload");
+        send.write_all(&[0x99]).await.expect("write trailing byte");
+        send.finish().expect("finish send stream");
+        let _ = send.stopped().await;
+    });
+
+    let conn = caller.connect_peer(responder.local_addr()?).await?;
+    let req_hdr = WireHeader::new(MsgType::LockVerifyRequest as u16, 1, 0, 0, 4);
+    let res = humoco_node::network::transport::send_request_bounded(
+        &conn,
+        &req_hdr,
+        b"ping",
+        std::time::Duration::from_secs(2),
+        None,
+    )
+    .await;
+
+    assert!(
+        res.is_err(),
+        "Caller's send_request_bounded MUST reject outbound response with trailing bytes"
+    );
+
+    responder_handle.await?;
+    cancel.cancel();
+    responder.close();
+    caller.close();
+    responder.drain_tasks().await;
+    caller.drain_tasks().await;
+    Ok(())
+}

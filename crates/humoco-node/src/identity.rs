@@ -754,7 +754,8 @@ mod tests {
 
         assert_eq!(proof.perpetrator_node_id, *identity.node_pubkey());
         assert!(proof.verify());
-        assert!(crate::network::transport::verify_equivocation_first_party(
+        assert!(crate::network::transport::verify_equivocation_first_party_network(
+            humoco_sim_core::types::NetworkId::Mainnet,
             identity.verifying_key(),
             &proof
         ));

@@ -126,24 +126,22 @@ pub(super) fn initialize(
                 }
                 let key = slot.value();
                 if let Some((_, rest)) = key.split_once(':') {
-                    if !rest.starts_with("native:") {
-                        let raw_entry = if let Some(guard) = hmc_locks.get(rest)? {
-                            Some(guard.value().to_vec())
-                        } else {
-                            prov_hmc_locks
-                                .get(rest)?
-                                .map(|guard| guard.value().to_vec())
-                        };
-                        if let Some(raw_bytes) = raw_entry {
-                            if let Ok(hmc_entry) =
-                                serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&raw_bytes)
+                    let raw_entry = if let Some(guard) = hmc_locks.get(rest)? {
+                        Some(guard.value().to_vec())
+                    } else {
+                        prov_hmc_locks
+                            .get(rest)?
+                            .map(|guard| guard.value().to_vec())
+                    };
+                    if let Some(raw_bytes) = raw_entry {
+                        if let Ok(hmc_entry) =
+                            serde_json::from_slice::<crate::api::hmc::L2LockEntry>(&raw_bytes)
+                        {
+                            if let Some(&root_ttl) =
+                                valid_roots.get(&hmc_entry.layer2_voucher_id)
                             {
-                                if let Some(&root_ttl) =
-                                    valid_roots.get(&hmc_entry.layer2_voucher_id)
-                                {
-                                    if root_ttl != choice.valid_until_ms {
-                                        measured.corrupt = true;
-                                    }
+                                if root_ttl != choice.valid_until_ms {
+                                    measured.corrupt = true;
                                 }
                             }
                         }

@@ -240,7 +240,9 @@ impl TierController {
                         || (next_state.current_day == highest.current_day
                             && (next_state.reserved_epoch_seq > highest.reserved_epoch_seq
                                 || (next_state.reserved_epoch_seq == highest.reserved_epoch_seq
-                                    && next_state.cumulative_micro_byte_years > highest.cumulative_micro_byte_years)))
+                                    && (next_state.cumulative_micro_byte_years > highest.cumulative_micro_byte_years
+                                        || (next_state.cumulative_micro_byte_years == highest.cumulative_micro_byte_years
+                                            && next_state.last_timestamp_ms >= highest.last_timestamp_ms)))))
                     {
                         highest = next_state;
                     }
@@ -479,7 +481,6 @@ impl TierController {
             effective_ts_ms,
             cum,
             prev,
-            already_durably_reserved,
             target_reserved_seq,
         ) = {
             let mut state = self.accounting_state.lock();
@@ -533,7 +534,6 @@ impl TierController {
                 effective_ts_ms,
                 cum,
                 prev,
-                already_durably_reserved,
                 target_reserved_seq,
             )
         };
@@ -541,23 +541,27 @@ impl TierController {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         permit.send((persisted, ack_tx));
 
+        match ack_rx.await {
+            Ok(Ok(())) => {
+                let mut st = self.accounting_state.lock();
+                st.persisted_day = effective_day;
+                st.persisted_reserved_seq = st.persisted_reserved_seq.max(target_reserved_seq);
+            }
+            Ok(Err(e)) => {
+                self.accounting_persist_failed.store(true, Ordering::Release);
+                return Err(e);
+            }
+            Err(_) => {
+                self.accounting_persist_failed.store(true, Ordering::Release);
+                return Err(IngressError::AccountingPersistenceUnavailable);
+            }
+        }
+
         let (declared_write_ema, declared_read_ema) = self
             .thermometer
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .checkpoint_emas_at(effective_ts_ms / 1000);
-
-        if !already_durably_reserved {
-            match ack_rx.await {
-                Ok(Ok(())) => {
-                    let mut st = self.accounting_state.lock();
-                    st.persisted_day = effective_day;
-                    st.persisted_reserved_seq = target_reserved_seq;
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(IngressError::AccountingPersistenceUnavailable),
-            }
-        }
 
         Ok(DeclaredIngressAllocation {
             epoch_day: effective_day as u32,
@@ -1298,20 +1302,19 @@ impl TierController {
             let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
             let daily_quota = self.calculate_daily_quota(5.0, 1.0);
 
-            // 1. Check daily rolling quota
+            // 1. Check daily rolling quota using candidate counter
             let mut vip_usage = self
                 .vip_rolling_usage
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let counter = vip_usage.entry(account_tag).or_default();
-            let current_usage = counter.usage_at(now_sec);
-            if current_usage.saturating_add(required_byte_years) > daily_quota {
-                let available = daily_quota.saturating_sub(current_usage);
-                return Err(IngressError::QuotaExceeded {
+            let mut candidate_counter = *counter;
+            candidate_counter
+                .try_consume(now_sec, required_byte_years, daily_quota)
+                .map_err(|available| IngressError::QuotaExceeded {
                     available,
                     required: required_byte_years,
-                });
-            }
+                })?;
 
             // 2. Check purchased credit balance in RAM cache
             let mut cache = self.vip_quota_cache.write();
@@ -1323,7 +1326,7 @@ impl TierController {
                 });
             }
 
-            // 3. Reserve persistence capacity BEFORE mutating RAM balance (A02-02)
+            // 3. Reserve persistence capacity BEFORE mutating RAM balance
             let permit = self
                 .vip_persist_tx
                 .try_reserve()
@@ -1338,7 +1341,7 @@ impl TierController {
             });
             drop(cache);
 
-            let _ = counter.try_consume(now_sec, required_byte_years, daily_quota);
+            *counter = candidate_counter;
             drop(vip_usage);
 
             self.vip_writes_today.fetch_add(1, Ordering::Relaxed);

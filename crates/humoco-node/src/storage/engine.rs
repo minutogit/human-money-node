@@ -832,14 +832,102 @@ pub enum FlushOp {
 pub const FLUSH_BATCH_SIZE: usize = 100;
 /// Finite wait for a commit; expiry never rolls a late commit back.
 pub const DURABLE_ACK_TIMEOUT_MS: u64 = 750;
-const MAX_PENDING_APPROVALS: usize = 256;
-const MAX_APPROVAL_WAITERS: usize = 32;
-const MAX_BATCH_BYTES: usize = 1_048_576;
+pub const MAX_PUBLIC_PENDING_APPROVALS: usize = 256;
+pub const MAX_INTERNAL_PENDING_APPROVALS: usize = 64;
+pub const MAX_APPROVAL_WAITERS: usize = 32;
+pub const MAX_BATCH_BYTES: usize = 1_048_576;
 type ApprovalCompletion = tokio::sync::watch::Receiver<Option<Result<Vec<u8>, String>>>;
+
 #[derive(Clone)]
-struct PendingOriginalApproval {
+struct PendingApprovalEntry {
     receiver: ApprovalCompletion,
     waiters: Arc<tokio::sync::Semaphore>,
+    owner_class: PersistenceServiceClass,
+}
+
+#[derive(Default)]
+struct PendingApprovalsState {
+    entries: HashMap<[u8; 32], PendingApprovalEntry>,
+    public_count: usize,
+    internal_count: usize,
+}
+
+impl PendingApprovalsState {
+    fn prune_completed(&mut self) {
+        let mut to_remove = Vec::new();
+        for (key, entry) in &self.entries {
+            if entry.receiver.borrow().is_some() || entry.receiver.has_changed().is_err() {
+                to_remove.push(*key);
+            }
+        }
+        for key in to_remove {
+            self.remove(&key);
+        }
+    }
+
+    fn insert(&mut self, key: [u8; 32], entry: PendingApprovalEntry) {
+        match entry.owner_class {
+            PersistenceServiceClass::Public => {
+                self.public_count = self.public_count.saturating_add(1);
+            }
+            PersistenceServiceClass::Internal => {
+                self.internal_count = self.internal_count.saturating_add(1);
+            }
+        }
+        if let Some(old) = self.entries.insert(key, entry) {
+            match old.owner_class {
+                PersistenceServiceClass::Public => {
+                    self.public_count = self.public_count.saturating_sub(1);
+                }
+                PersistenceServiceClass::Internal => {
+                    self.internal_count = self.internal_count.saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &[u8; 32]) -> Option<PendingApprovalEntry> {
+        if let Some(entry) = self.entries.remove(key) {
+            match entry.owner_class {
+                PersistenceServiceClass::Public => {
+                    self.public_count = self.public_count.saturating_sub(1);
+                }
+                PersistenceServiceClass::Internal => {
+                    self.internal_count = self.internal_count.saturating_sub(1);
+                }
+            }
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn public_count(&self) -> usize {
+        self.public_count
+    }
+
+    fn internal_count(&self) -> usize {
+        self.internal_count
+    }
+}
+
+struct ApprovalWaiterGuard {
+    pending: Arc<parking_lot::Mutex<PendingApprovalsState>>,
+    key: [u8; 32],
+    rx: ApprovalCompletion,
+}
+
+impl Drop for ApprovalWaiterGuard {
+    fn drop(&mut self) {
+        if self.rx.borrow().is_some() || self.rx.has_changed().is_err() {
+            let mut pending = self.pending.lock();
+            pending.remove(&self.key);
+        }
+    }
 }
 pub const FLUSH_INTERVAL_MS: u64 = 50;
 pub const MAX_FLUSH_RETRIES: u32 = 3;
@@ -892,7 +980,7 @@ pub struct DualTierEngine {
     pub stats: Arc<PersistenceStats>,
     /// Previous pruning anchor timestamp in ms for detecting forward clock jumps (local NTP warp protection)
     pub(crate) last_prune_anchor: Arc<std::sync::atomic::AtomicU64>,
-    pending_approvals: Arc<parking_lot::Mutex<HashMap<[u8; 32], PendingOriginalApproval>>>,
+    pending_approvals: Arc<parking_lot::Mutex<PendingApprovalsState>>,
     support_updates: Arc<tokio::sync::Semaphore>,
     activity: super::activity::ShardActivity,
     pub(crate) recovery_work: tokio_util::task::TaskTracker,
@@ -901,6 +989,7 @@ pub struct DualTierEngine {
     pub(crate) public_admission: Arc<tokio::sync::Semaphore>,
     pub(crate) internal_admission: Arc<tokio::sync::Semaphore>,
     pub(crate) worker_paused: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) worker_approvals_paused: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) worker_pause_notify: Arc<tokio::sync::Notify>,
 }
 
@@ -935,14 +1024,16 @@ impl DualTierEngine {
         let public_admission = Arc::new(tokio::sync::Semaphore::new(public_limit));
         let internal_admission = Arc::new(tokio::sync::Semaphore::new(internal_limit));
         let worker_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_approvals_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_pause_notify = Arc::new(tokio::sync::Notify::new());
 
-        let handle = Self::spawn_flush_worker(
+        let handle = Self::spawn_flush_worker_internal(
             rx,
             Arc::clone(&db),
             Arc::clone(&stats),
             cancel_token,
             Arc::clone(&worker_paused),
+            Arc::clone(&worker_approvals_paused),
             Arc::clone(&worker_pause_notify),
         );
         (
@@ -955,7 +1046,7 @@ impl DualTierEngine {
                 recent_locks,
                 stats,
                 last_prune_anchor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                pending_approvals: Arc::new(parking_lot::Mutex::new(PendingApprovalsState::default())),
                 support_updates: Arc::new(tokio::sync::Semaphore::new(32)),
                 activity: super::activity::ShardActivity::default(),
                 recovery_work: tokio_util::task::TaskTracker::new(),
@@ -964,6 +1055,7 @@ impl DualTierEngine {
                 public_admission,
                 internal_admission,
                 worker_paused,
+                worker_approvals_paused,
                 worker_pause_notify,
             },
             handle,
@@ -1019,7 +1111,7 @@ impl DualTierEngine {
             recent_locks,
             stats,
             last_prune_anchor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            pending_approvals: Arc::new(parking_lot::Mutex::new(PendingApprovalsState::default())),
             support_updates: Arc::new(tokio::sync::Semaphore::new(32)),
             activity: super::activity::ShardActivity::default(),
             recovery_work: tokio_util::task::TaskTracker::new(),
@@ -1028,6 +1120,7 @@ impl DualTierEngine {
             public_admission: Arc::new(tokio::sync::Semaphore::new(public_limit)),
             internal_admission: Arc::new(tokio::sync::Semaphore::new(internal_limit)),
             worker_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker_approvals_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             worker_pause_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -1056,7 +1149,25 @@ impl DualTierEngine {
     /// Test-only hook to inspect count of pending approvals.
     #[doc(hidden)]
     pub fn pending_approvals_count_for_test(&self) -> usize {
-        self.pending_approvals.lock().len()
+        let mut pending = self.pending_approvals.lock();
+        pending.prune_completed();
+        pending.len()
+    }
+
+    /// Test-only hook to inspect count of public pending approvals.
+    #[doc(hidden)]
+    pub fn public_pending_approvals_count_for_test(&self) -> usize {
+        let mut pending = self.pending_approvals.lock();
+        pending.prune_completed();
+        pending.public_count()
+    }
+
+    /// Test-only hook to inspect count of internal pending approvals.
+    #[doc(hidden)]
+    pub fn internal_pending_approvals_count_for_test(&self) -> usize {
+        let mut pending = self.pending_approvals.lock();
+        pending.prune_completed();
+        pending.internal_count()
     }
 
     /// Test-only hook to inspect available public persistence permits (Spec 14 / INV-1307).
@@ -1080,6 +1191,15 @@ impl DualTierEngine {
         self.worker_pause_notify.notify_one();
     }
 
+    /// Test-only gate to deterministically pause/resume approval persistence while letting lock persistence proceed.
+    #[doc(hidden)]
+    pub fn set_worker_approvals_paused_for_test(&self, paused: bool) {
+        self.worker_approvals_paused
+            .store(paused, std::sync::atomic::Ordering::Release);
+        self.worker_pause_notify.notify_waiters();
+        self.worker_pause_notify.notify_one();
+    }
+
     /// Test helper to spawn a flush worker bound to this engine instance.
     #[doc(hidden)]
     pub fn spawn_worker_for_engine(
@@ -1087,12 +1207,13 @@ impl DualTierEngine {
         rx: mpsc::Receiver<FlushOp>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
-        Self::spawn_flush_worker(
+        Self::spawn_flush_worker_internal(
             rx,
             Arc::clone(&self.db),
             Arc::clone(&self.stats),
             cancel_token,
             Arc::clone(&self.worker_paused),
+            Arc::clone(&self.worker_approvals_paused),
             Arc::clone(&self.worker_pause_notify),
         )
     }
@@ -1124,16 +1245,22 @@ impl DualTierEngine {
         }
         let (mut rx, _waiter) = {
             let mut pending = self.pending_approvals.lock();
-            pending.retain(|_, entry| {
-                entry.receiver.borrow().is_none() && entry.receiver.has_changed().is_ok()
-            });
-            if let Some(existing) = pending.get(&key) {
+            pending.prune_completed();
+            if let Some(existing) = pending.entries.get(&key) {
                 let waiter = existing.waiters.clone().try_acquire_owned().map_err(|_| {
                     StorageError::DurableCommitFailed("Too many approval waiters".into())
                 })?;
                 (existing.receiver.clone(), waiter)
             } else {
-                if pending.len() >= MAX_PENDING_APPROVALS {
+                let is_full = match service_class {
+                    PersistenceServiceClass::Public => {
+                        pending.public_count() >= MAX_PUBLIC_PENDING_APPROVALS
+                    }
+                    PersistenceServiceClass::Internal => {
+                        pending.internal_count() >= MAX_INTERNAL_PENDING_APPROVALS
+                    }
+                };
+                if is_full {
                     return Err(StorageError::DurableCommitFailed(
                         "Approval capacity exhausted".into(),
                     ));
@@ -1156,13 +1283,30 @@ impl DualTierEngine {
                 })?;
                 pending.insert(
                     key,
-                    PendingOriginalApproval {
+                    PendingApprovalEntry {
                         receiver: receiver.clone(),
                         waiters,
+                        owner_class: service_class,
                     },
                 );
+                let pending_bg = Arc::clone(&self.pending_approvals);
+                let mut rx_bg = receiver.clone();
+                tokio::spawn(async move {
+                    while rx_bg.borrow().is_none() {
+                        if rx_bg.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                    let mut pending = pending_bg.lock();
+                    pending.remove(&key);
+                });
                 (receiver, waiter)
             }
+        };
+        let _guard = ApprovalWaiterGuard {
+            pending: Arc::clone(&self.pending_approvals),
+            key,
+            rx: rx.clone(),
         };
         let wait = async {
             loop {
@@ -2885,15 +3029,36 @@ impl DualTierEngine {
     ///   returning, so `daemon.rs` (`flush_handle.await`) closes redb only after the
     ///   queue is empty. Never holds `RamIndex` locks across I/O (Rule 1).
     pub fn spawn_flush_worker(
-        mut rx: mpsc::Receiver<FlushOp>,
+        rx: mpsc::Receiver<FlushOp>,
         db: Arc<RedbStorage>,
         stats: Arc<PersistenceStats>,
         cancel_token: tokio_util::sync::CancellationToken,
         worker_paused: Arc<std::sync::atomic::AtomicBool>,
         worker_pause_notify: Arc<tokio::sync::Notify>,
     ) -> tokio::task::JoinHandle<()> {
+        Self::spawn_flush_worker_internal(
+            rx,
+            db,
+            stats,
+            cancel_token,
+            worker_paused,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker_pause_notify,
+        )
+    }
+
+    pub(crate) fn spawn_flush_worker_internal(
+        mut rx: mpsc::Receiver<FlushOp>,
+        db: Arc<RedbStorage>,
+        stats: Arc<PersistenceStats>,
+        cancel_token: tokio_util::sync::CancellationToken,
+        worker_paused: Arc<std::sync::atomic::AtomicBool>,
+        worker_approvals_paused: Arc<std::sync::atomic::AtomicBool>,
+        worker_pause_notify: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut batch: Vec<FlushOp> = Vec::with_capacity(FLUSH_BATCH_SIZE);
+            let mut deferred_approvals: Vec<FlushOp> = Vec::new();
             let mut interval =
                 tokio::time::interval(tokio::time::Duration::from_millis(FLUSH_INTERVAL_MS));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2909,6 +3074,7 @@ impl DualTierEngine {
                     }
                 }
                 if cancel_token.is_cancelled() {
+                    batch.append(&mut deferred_approvals);
                     Self::drain_on_shutdown(&mut rx, &mut batch, &db, &stats).await;
                     info!("Flush worker cleanly drained and terminated on cancellation");
                     break;
@@ -2916,36 +3082,52 @@ impl DualTierEngine {
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
+                        batch.append(&mut deferred_approvals);
                         Self::drain_on_shutdown(&mut rx, &mut batch, &db, &stats).await;
                         info!("Flush worker cleanly drained and terminated on cancellation");
                         break;
                     }
                     _ = worker_pause_notify.notified() => {
+                        if !worker_approvals_paused.load(std::sync::atomic::Ordering::Acquire) && !deferred_approvals.is_empty() {
+                            batch.append(&mut deferred_approvals);
+                            let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
+                            Self::commit_batch(to_flush, &db, &stats).await;
+                        }
                         continue;
                     }
                     op = rx.recv() => {
                         match op {
                             Some(op) => {
-                                let mut has_durable = matches!(op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. });
-                                batch.push(op);
-                                while batch.len() < FLUSH_BATCH_SIZE {
-                                    match rx.try_recv() {
-                                        Ok(next_op) => {
-                                            if matches!(next_op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. }) {
-                                                has_durable = true;
+                                let approvals_paused = worker_approvals_paused.load(std::sync::atomic::Ordering::Acquire);
+                                if approvals_paused && matches!(op, FlushOp::OriginalHmcApproval { .. }) {
+                                    deferred_approvals.push(op);
+                                } else {
+                                    let mut has_durable = matches!(op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. });
+                                    batch.push(op);
+                                    while batch.len() < FLUSH_BATCH_SIZE {
+                                        match rx.try_recv() {
+                                            Ok(next_op) => {
+                                                if approvals_paused && matches!(next_op, FlushOp::OriginalHmcApproval { .. }) {
+                                                    deferred_approvals.push(next_op);
+                                                } else {
+                                                    if matches!(next_op, FlushOp::PutHmcLockDurable { .. } | FlushOp::OriginalHmcApproval { .. }) {
+                                                        has_durable = true;
+                                                    }
+                                                    batch.push(next_op);
+                                                }
                                             }
-                                            batch.push(next_op);
+                                            Err(_) => break,
                                         }
-                                        Err(_) => break,
                                     }
-                                }
-                                if has_durable || batch.len() >= FLUSH_BATCH_SIZE {
-                                    let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
-                                    Self::commit_batch(to_flush, &db, &stats).await;
+                                    if has_durable || batch.len() >= FLUSH_BATCH_SIZE {
+                                        let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
+                                        Self::commit_batch(to_flush, &db, &stats).await;
+                                    }
                                 }
                             }
                             None => {
                                 // All senders dropped: flush remainder synchronously, then exit.
+                                batch.append(&mut deferred_approvals);
                                 if !batch.is_empty() {
                                     let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
                                     Self::commit_batch(to_flush, &db, &stats).await;
@@ -2955,6 +3137,9 @@ impl DualTierEngine {
                         }
                     }
                     _ = interval.tick() => {
+                        if !worker_approvals_paused.load(std::sync::atomic::Ordering::Acquire) && !deferred_approvals.is_empty() {
+                            batch.append(&mut deferred_approvals);
+                        }
                         if !batch.is_empty() {
                             let to_flush = std::mem::replace(&mut batch, Vec::with_capacity(FLUSH_BATCH_SIZE));
                             Self::commit_batch(to_flush, &db, &stats).await;

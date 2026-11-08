@@ -1353,6 +1353,36 @@ impl F2fOperatorMessageAckPayload {
     }
 }
 
+/// Fixed serialization metadata overhead for [`F2fNeighborRosterPayload`]:
+/// - `sender_pubkey`: 32 bytes (`[u8; 32]`)
+/// - `timestamp_ms`: 8 bytes (`u64`)
+/// - `shares_roster`: 1 byte (`bool`)
+/// - `visible_neighbors` length prefix: 8 bytes (`u64` bincode length prefix)
+/// - `hidden_neighbor_count`: 2 bytes (`u16`)
+///
+/// Total: 32 + 8 + 1 + 8 + 2 = 51 bytes.
+pub const F2F_ROSTER_METADATA_OVERHEAD_BYTES: usize = 32 + 8 + 1 + 8 + 2;
+
+/// Maximum number of visible neighbors permitted in a single [`F2fNeighborRosterPayload`],
+/// derived from the bounded F2F payload budget ([`MAX_F2F_FRAME_PAYLOAD_LEN`]), fixed
+/// metadata overhead ([`F2F_ROSTER_METADATA_OVERHEAD_BYTES`]), and 32-byte public keys:
+/// `(2048 - 51) / 32 == 62`.
+pub const MAX_VISIBLE_F2F_NEIGHBORS: usize =
+    (MAX_F2F_FRAME_PAYLOAD_LEN - F2F_ROSTER_METADATA_OVERHEAD_BYTES) / 32;
+
+const _: () = {
+    assert!(F2F_ROSTER_METADATA_OVERHEAD_BYTES == 51);
+    assert!(MAX_VISIBLE_F2F_NEIGHBORS == 62);
+    assert!(
+        F2F_ROSTER_METADATA_OVERHEAD_BYTES + MAX_VISIBLE_F2F_NEIGHBORS * 32
+            <= MAX_F2F_FRAME_PAYLOAD_LEN
+    );
+    assert!(
+        F2F_ROSTER_METADATA_OVERHEAD_BYTES + (MAX_VISIBLE_F2F_NEIGHBORS + 1) * 32
+            > MAX_F2F_FRAME_PAYLOAD_LEN
+    );
+};
+
 /// Direct 1-hop F2F neighbor roster payload for Hop-2 environment transparency.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct F2fNeighborRosterPayload {
@@ -1365,10 +1395,11 @@ pub struct F2fNeighborRosterPayload {
 
 impl F2fNeighborRosterPayload {
     pub fn validate(&self) -> Result<(), bincode::Error> {
-        if self.visible_neighbors.len() > 64 {
-            return Err(Box::new(bincode::ErrorKind::Custom(
-                "F2F neighbor roster visible_neighbors exceeds maximum limit of 64 items".into(),
-            )));
+        if self.visible_neighbors.len() > MAX_VISIBLE_F2F_NEIGHBORS {
+            return Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "F2F neighbor roster visible_neighbors exceeds maximum limit of {} items",
+                MAX_VISIBLE_F2F_NEIGHBORS
+            ))));
         }
         Ok(())
     }
@@ -1459,10 +1490,82 @@ mod f2f_payload_tests {
         let parsed = F2fNeighborRosterPayload::from_bytes(&bytes).unwrap();
         assert_eq!(roster, parsed);
 
-        // > 64 visible neighbors rejected
+        // > MAX_VISIBLE_F2F_NEIGHBORS visible neighbors rejected
         let mut oversize = roster.clone();
-        oversize.visible_neighbors = vec![[1u8; 32]; 65];
+        oversize.visible_neighbors = vec![[1u8; 32]; MAX_VISIBLE_F2F_NEIGHBORS + 1];
         assert!(oversize.to_bytes().is_err());
+        assert!(oversize.validate().is_err());
+    }
+
+    #[test]
+    fn test_s04_18_f2f_roster_payload_boundary() {
+        let sender = [42u8; 32];
+        let now = 1_700_000_000_000u64;
+
+        // Exact metadata overhead check: 0 visible neighbors -> 51 bytes
+        let empty_roster = F2fNeighborRosterPayload {
+            sender_pubkey: sender,
+            timestamp_ms: now,
+            shares_roster: true,
+            visible_neighbors: vec![],
+            hidden_neighbor_count: 0,
+        };
+        let empty_bytes = empty_roster.to_bytes().expect("empty roster encodes");
+        assert_eq!(
+            empty_bytes.len(),
+            51,
+            "F2F neighbor roster fixed metadata overhead must be exactly 51 bytes"
+        );
+
+        // Boundary: 62 visible neighbors fits within 2048 bytes (51 + 62 * 32 = 2035 bytes)
+        let roster_62 = F2fNeighborRosterPayload {
+            sender_pubkey: sender,
+            timestamp_ms: now,
+            shares_roster: true,
+            visible_neighbors: (0..62).map(|i| [i as u8; 32]).collect(),
+            hidden_neighbor_count: 0,
+        };
+        assert!(roster_62.validate().is_ok());
+        let bytes_62 = roster_62.to_bytes().expect("62 neighbors must encode");
+        assert_eq!(bytes_62.len(), 2035);
+        assert!(bytes_62.len() <= MAX_F2F_FRAME_PAYLOAD_LEN);
+        let decoded_62 = F2fNeighborRosterPayload::from_bytes(&bytes_62).expect("decode 62");
+        assert_eq!(decoded_62, roster_62);
+
+        // Boundary: 63 visible neighbors exceeds 2048 bytes (51 + 63 * 32 = 2067 bytes)
+        // Validator must reject it directly at validation time.
+        let roster_63 = F2fNeighborRosterPayload {
+            sender_pubkey: sender,
+            timestamp_ms: now,
+            shares_roster: true,
+            visible_neighbors: (0..63).map(|i| [i as u8; 32]).collect(),
+            hidden_neighbor_count: 0,
+        };
+        assert!(
+            roster_63.validate().is_err(),
+            "Validator must reject 63 visible neighbors as exceeding payload budget"
+        );
+        assert!(
+            roster_63.to_bytes().is_err(),
+            "to_bytes must reject 63 visible neighbors"
+        );
+
+        // Boundary: 64 visible neighbors (51 + 64 * 32 = 2099 bytes)
+        let roster_64 = F2fNeighborRosterPayload {
+            sender_pubkey: sender,
+            timestamp_ms: now,
+            shares_roster: true,
+            visible_neighbors: (0..64).map(|i| [i as u8; 32]).collect(),
+            hidden_neighbor_count: 0,
+        };
+        assert!(
+            roster_64.validate().is_err(),
+            "Validator must reject 64 visible neighbors as exceeding payload budget"
+        );
+        assert!(
+            roster_64.to_bytes().is_err(),
+            "to_bytes must reject 64 visible neighbors"
+        );
     }
 
     // --- S04-17 Framing Boundary Regressions ---

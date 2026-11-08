@@ -630,7 +630,10 @@ async fn test_s01_09_parallel_quorum_assembly_when_gateway_worker_blocked() {
     }
 
     let pow_engine = Arc::new(PowEngine::new(8));
-    let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
+    let tc_storage = Arc::new(
+        RedbStorage::open(&gw_temp.path().join("tc_gw_s01_09.redb")).expect("open tc redb"),
+    );
+    let tier_controller = Arc::new(TierController::new(tc_storage, pow_engine.clone()));
     tier_controller.register_f2f_peer("s01_09_peer");
 
     let mut state = AppState::new(
@@ -1141,7 +1144,10 @@ async fn test_s01_13_prompt_quorum_failure_and_preserved_durable_commit_when_per
     }
 
     let pow_engine = Arc::new(PowEngine::new(8));
-    let tier_controller = Arc::new(TierController::new(gw_storage.clone(), pow_engine.clone()));
+    let tc_storage = Arc::new(
+        RedbStorage::open(&gw_temp.path().join("tc_gw_s01_13.redb")).expect("open tc redb"),
+    );
+    let tier_controller = Arc::new(TierController::new(tc_storage, pow_engine.clone()));
     tier_controller.register_f2f_peer("s01_13_peer");
 
     let mut state = AppState::new(

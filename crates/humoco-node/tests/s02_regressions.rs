@@ -129,6 +129,33 @@ fn spend(root: &L2LockRequest, seed: u8, key: &SigningKey) -> TestResult<L2LockR
     Ok(req)
 }
 
+fn spend_indexed(root: &L2LockRequest, index: u32, key: &SigningKey) -> TestResult<L2LockRequest> {
+    let mut req = root.clone();
+    let mut hash = Sha256::new();
+    hash.update(root.transaction_hash);
+    hash.update(4u32.to_le_bytes());
+    hash.update(b"test");
+    hash.update(32u32.to_le_bytes());
+    hash.update(key.verifying_key().as_bytes());
+    hash.update(index.to_le_bytes());
+    req.ds_tag = Some(bs58::encode(hash.finalize()).into_string());
+    let mut tx_hash = [0u8; 32];
+    tx_hash[0..4].copy_from_slice(&index.to_le_bytes());
+    tx_hash[4..8].copy_from_slice(&0x5a5a5a5au32.to_le_bytes());
+    req.transaction_hash = tx_hash;
+    req.is_genesis = false;
+    req.deletable_at = None;
+    let proof = req.causal_output.as_mut().ok_or("root proof missing")?;
+    proof.transaction_id = req.transaction_hash;
+    proof.state_hash = req.transaction_hash;
+    proof.is_root = false;
+    proof.signature = key
+        .sign(&proof.digest().map_err(std::io::Error::other)?)
+        .to_bytes();
+    req.layer2_signature = key.sign(&calculate_l2_payload_hash(&req)).to_bytes();
+    Ok(req)
+}
+
 fn shard(root: &L2LockRequest) -> u16 {
     humoco_sim_core::types::canonical_voucher_shard(
         &humoco_sim_core::types::genesis_parent_bytes_from_tag(
@@ -534,6 +561,61 @@ async fn send_spend(
         .network
         .send_request(connection, &header, &bytes)
         .await?)
+}
+
+async fn send_spend_wire(
+    network: QuicTransport,
+    connection: quinn::Connection,
+    req: L2LockRequest,
+    sender_pubkey: [u8; 32],
+    signing_key: SigningKey,
+    now: u64,
+    seq: u64,
+) -> TestResult<(WireHeader, Vec<u8>)> {
+    let expiry = req
+        .causal_output
+        .as_ref()
+        .ok_or("missing output proof")?
+        .root_valid_until_ms;
+    let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(
+        expiry.saturating_sub(now) / 1000,
+    );
+    let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        NetworkId::Mainnet,
+        &sender_pubkey,
+        0,
+        seq,
+        now,
+        0,
+        0,
+        footprint,
+        false,
+        &req.transaction_hash,
+    );
+    let wire = LockWirePayload::Hmc {
+        req: req.clone(),
+        chain: None,
+        root_valid_until: expiry,
+        epoch_day: 0,
+        epoch_seq: seq,
+        cumulative_micro_byte_years: footprint.saturating_mul(seq),
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey,
+        sender_signature: signing_key.sign(&digest).to_bytes(),
+        timestamp_ms: now,
+    };
+    let bytes = bincode::serialize(&wire)?;
+    let header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        seq,
+        0,
+        0,
+        u32::try_from(bytes.len())?,
+    );
+    Ok(network.send_request(&connection, &header, &bytes).await?)
 }
 
 #[tokio::test]
@@ -1870,6 +1952,7 @@ async fn test_s02_12_real_quic_corruption_latched_during_clock_wait_suppresses_a
     let target_db = target.db.clone();
     let spend_tag_clone = spend_tag.clone();
     let spend_entry_clone = spend_entry.clone();
+    let target_pubkey = *target.identity.node_pubkey();
 
     let step_fut = async move {
         // Wait until persist_original_approval has passed line 1116 and enqueued the op
@@ -1884,19 +1967,25 @@ async fn test_s02_12_real_quic_corruption_latched_during_clock_wait_suppresses_a
         // Now acquire pm_guard: this intercepts line 1168 (calibrated_now_ms() wait)
         let pm_guard = target_engine.peer_manager_rwlock_for_test().write().await;
 
-        // Wait deterministically until the entry is committed and marked durable in RAM
+        // Wait deterministically until the entry is committed and marked durable in RAM,
+        // and its own signing choice is committed to redb
         tokio::time::timeout(Duration::from_secs(5), async {
             while !target_engine
                 .hmc_ram
                 .read()
                 .await
                 .is_entry_durable(&spend_tag_clone, &spend_entry_clone, root_expiry)
+                || target_db
+                    .own_signing_choice(&target_pubkey, &spend_tag_clone)
+                    .ok()
+                    .flatten()
+                    .is_none()
             {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("durability marker wait timed out");
+        .expect("durability and choice wait timed out");
 
         // Latch corruption on target while persist_original_approval is awaiting pm_guard in calibrated_now_ms()
         target_db.latch_corruption();
@@ -2462,5 +2551,671 @@ async fn test_s02_13_real_quic_concurrent_http_root_retry_separation() -> TestRe
     drop(connection);
     source.stop().await?;
     target.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_s02_14_controlled_worker_pending_approvals_isolation() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let db = Arc::new(RedbStorage::open(&dir.path().join("s02_14_controlled.redb"))?);
+    let cancel = CancellationToken::new();
+    let public_limit = 1000;
+    let internal_limit = 1000;
+    let (engine, worker) = DualTierEngine::new_with_limits(
+        db.clone(),
+        cancel.clone(),
+        public_limit,
+        internal_limit,
+    );
+
+    let key = SigningKey::from_bytes(&[104; 32]);
+    let now = now_ms()?;
+    let root_req = root_with_ttl(&key, 1, now, 200_000)?;
+    anchor(&engine, &root_req).await?;
+
+    // 1. Pause persistence worker
+    engine.set_worker_paused_for_test(true);
+
+    // 2. Prepare 256 distinct spend requests
+    let mut spend_tags = Vec::with_capacity(256);
+    let mut spend_entries = Vec::with_capacity(256);
+    for i in 0..256 {
+        let req = spend_indexed(&root_req, i, &key)?;
+        let tag = req.ds_tag.clone().ok_or("missing spend tag")?;
+        let entry: L2LockEntry = (&req).into();
+        engine
+            .hmc_ram
+            .write()
+            .await
+            .insert_recovered(tag.clone(), entry.clone());
+        spend_tags.push(tag);
+        spend_entries.push(entry);
+    }
+
+    // 3. Fill all 256 Public pending approval slots
+    let node_id = [42u8; 32];
+    let mut public_tasks = Vec::with_capacity(256);
+    for i in 0..256 {
+        let eng = engine.clone();
+        let tag = spend_tags[i].clone();
+        let entry = spend_entries[i].clone();
+        public_tasks.push(tokio::spawn(async move {
+            eng.persist_original_approval(
+                tag,
+                entry,
+                node_id,
+                b"pub_app".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Public,
+            )
+            .await
+        }));
+    }
+
+    // Wait until all 256 public approvals are in pending_approvals
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while engine.pending_approvals_count_for_test() < 256 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.pending_approvals_count_for_test(), 256);
+
+    // 4. A 257th Public approval must receive bounded backpressure
+    let pub_spend_256 = spend_indexed(&root_req, 256, &key)?;
+    let pub_tag_256 = pub_spend_256.ds_tag.clone().ok_or("missing spend tag")?;
+    let pub_entry_256: L2LockEntry = (&pub_spend_256).into();
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(pub_tag_256.clone(), pub_entry_256.clone());
+
+    let res_pub_257 = engine
+        .persist_original_approval(
+            pub_tag_256,
+            pub_entry_256,
+            node_id,
+            b"pub_app_257".to_vec(),
+            0,
+            now,
+            humoco_node::storage::PersistenceServiceClass::Public,
+        )
+        .await;
+    assert!(
+        matches!(res_pub_257, Err(StorageError::DurableCommitFailed(ref s)) if s.contains("Approval capacity exhausted")),
+        "257th Public approval must receive bounded backpressure, got: {res_pub_257:?}"
+    );
+
+    // 5. Distinct Internal operation:
+    // With Public pending-approvals full at 256, an authorized Internal operation MUST still enqueue!
+    let int_spend = spend_indexed(&root_req, 300, &key)?;
+    let int_tag = int_spend.ds_tag.clone().ok_or("missing spend tag")?;
+    let int_entry: L2LockEntry = (&int_spend).into();
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(int_tag.clone(), int_entry.clone());
+
+    let eng_int = engine.clone();
+    let int_tag_clone = int_tag.clone();
+    let int_entry_clone = int_entry.clone();
+    let int_task = tokio::spawn(async move {
+        eng_int
+            .persist_original_approval(
+                int_tag_clone,
+                int_entry_clone,
+                node_id,
+                b"internal_app_300".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Internal,
+            )
+            .await
+    });
+    // In pre-fix code: int_task hits pending.len() >= 256 and fails immediately with "Approval capacity exhausted"
+    // In post-fix code: int_task enqueues under separate internal capacity and remains pending
+    let int_early = tokio::time::timeout(Duration::from_millis(50), async {
+        while !int_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        int_early.is_err(),
+        "Internal operation must NOT fail immediately with capacity exhausted when public is full!"
+    );
+
+    // 6. Duplicate coalescing across service classes:
+    // Internal caller joining an already-pending Public approval
+    let eng_coalesce_int = engine.clone();
+    let coal_tag_int = spend_tags[0].clone();
+    let coal_entry_int = spend_entries[0].clone();
+    let int_coalesce_task = tokio::spawn(async move {
+        eng_coalesce_int
+            .persist_original_approval(
+                coal_tag_int,
+                coal_entry_int,
+                node_id,
+                b"pub_app".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Internal,
+            )
+            .await
+    });
+
+    // Public caller joining the same already-pending Public approval
+    let eng_coalesce_pub = engine.clone();
+    let coal_tag_pub = spend_tags[0].clone();
+    let coal_entry_pub = spend_entries[0].clone();
+    let pub_coalesce_task = tokio::spawn(async move {
+        eng_coalesce_pub
+            .persist_original_approval(
+                coal_tag_pub,
+                coal_entry_pub,
+                node_id,
+                b"pub_app".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Public,
+            )
+            .await
+    });
+
+    // Public caller joining an already-pending Internal approval
+    let eng_coalesce_pub_to_int = engine.clone();
+    let coal_tag_pub_to_int = int_tag.clone();
+    let coal_entry_pub_to_int = int_entry.clone();
+    let pub_to_int_coalesce_task = tokio::spawn(async move {
+        eng_coalesce_pub_to_int
+            .persist_original_approval(
+                coal_tag_pub_to_int,
+                coal_entry_pub_to_int,
+                node_id,
+                b"internal_app_300".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Public,
+            )
+            .await
+    });
+
+    // Bounded waiters: MAX_APPROVAL_WAITERS = 32.
+    // 3 are already waiting (creator + int_coalesce + pub_coalesce).
+    // Exactly 29 more can join (reaching 32). The next one MUST fail with "Too many approval waiters".
+    let mut excess_tasks = Vec::new();
+    for _ in 0..29 {
+        let eng_w = engine.clone();
+        let w_tag = spend_tags[0].clone();
+        let w_entry = spend_entries[0].clone();
+        excess_tasks.push(tokio::spawn(async move {
+            eng_w
+                .persist_original_approval(
+                    w_tag,
+                    w_entry,
+                    node_id,
+                    b"pub_app".to_vec(),
+                    0,
+                    now,
+                    humoco_node::storage::PersistenceServiceClass::Public,
+                )
+                .await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let res_overflow = engine
+        .persist_original_approval(
+            spend_tags[0].clone(),
+            spend_entries[0].clone(),
+            node_id,
+            b"pub_app".to_vec(),
+            0,
+            now,
+            humoco_node::storage::PersistenceServiceClass::Public,
+        )
+        .await;
+    assert!(
+        matches!(res_overflow, Err(StorageError::DurableCommitFailed(ref s)) if s.contains("Too many approval waiters")),
+        "overflow waiter must fail with Too many approval waiters, got: {res_overflow:?}"
+    );
+
+    // 7. Resume worker: all pending work must commit durably in redb before release!
+    engine.set_worker_paused_for_test(false);
+
+    // Await all 256 public tasks
+    for (i, task) in public_tasks.into_iter().enumerate() {
+        let res = task.await?;
+        assert!(res.is_ok(), "public task {i} failed: {res:?}");
+        assert_eq!(res.unwrap(), b"pub_app");
+    }
+
+    // Await internal task
+    let int_res = int_task.await?;
+    assert!(int_res.is_ok(), "distinct internal task failed: {int_res:?}");
+    assert_eq!(int_res.unwrap(), b"internal_app_300");
+
+    // Await coalesced tasks
+    let coal_int_res = int_coalesce_task.await?;
+    assert!(coal_int_res.is_ok(), "internal coalesced task failed: {coal_int_res:?}");
+    assert_eq!(coal_int_res.unwrap(), b"pub_app");
+
+    let coal_pub_res = pub_coalesce_task.await?;
+    assert!(coal_pub_res.is_ok(), "public coalesced task failed: {coal_pub_res:?}");
+    assert_eq!(coal_pub_res.unwrap(), b"pub_app");
+
+    let coal_pub_to_int_res = pub_to_int_coalesce_task.await?;
+    assert!(coal_pub_to_int_res.is_ok(), "public joining internal failed: {coal_pub_to_int_res:?}");
+    assert_eq!(coal_pub_to_int_res.unwrap(), b"internal_app_300");
+
+    for task in excess_tasks {
+        let res = task.await?;
+        assert!(res.is_ok(), "waiter task failed: {res:?}");
+    }
+
+    // Verify all distinct spends are durably stored in redb
+    for tag in &spend_tags {
+        assert!(db.get_hmc_lock(tag)?.is_some(), "lock {tag} must be in redb");
+        assert!(
+            db.own_signing_choice(&node_id, tag)?.is_some(),
+            "choice for {tag} must be in redb"
+        );
+    }
+    assert!(db.get_hmc_lock(&int_tag)?.is_some(), "internal lock must be in redb");
+
+    // Verify reservation cleanup: per-class pending counts return cleanly to 0
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while engine.pending_approvals_count_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.pending_approvals_count_for_test(), 0);
+    assert_eq!(engine.public_pending_approvals_count_for_test(), 0);
+    assert_eq!(engine.internal_pending_approvals_count_for_test(), 0);
+
+    // 8. Cancellation / timeout test:
+    engine.set_worker_paused_for_test(true);
+    let timeout_spend = spend_indexed(&root_req, 400, &key)?;
+    let timeout_tag = timeout_spend.ds_tag.clone().ok_or("missing spend tag")?;
+    let timeout_entry: L2LockEntry = (&timeout_spend).into();
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(timeout_tag.clone(), timeout_entry.clone());
+
+    let timeout_res = tokio::time::timeout(
+        Duration::from_millis(50),
+        engine.persist_original_approval(
+            timeout_tag.clone(),
+            timeout_entry.clone(),
+            node_id,
+            b"timeout_app".to_vec(),
+            0,
+            now,
+            humoco_node::storage::PersistenceServiceClass::Public,
+        ),
+    )
+    .await;
+    assert!(timeout_res.is_err(), "waiter timeout expected");
+    // While worker paused, the operation remains pending
+    assert_eq!(engine.pending_approvals_count_for_test(), 1);
+    assert_eq!(engine.public_pending_approvals_count_for_test(), 1);
+
+    // Also test cancellation via explicit task drop/abort while in flight:
+    let cancel_spend = spend_indexed(&root_req, 405, &key)?;
+    let cancel_tag = cancel_spend.ds_tag.clone().ok_or("missing spend tag")?;
+    let cancel_entry: L2LockEntry = (&cancel_spend).into();
+    engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(cancel_tag.clone(), cancel_entry.clone());
+
+    let eng_cancel = engine.clone();
+    let c_tag = cancel_tag.clone();
+    let c_entry = cancel_entry.clone();
+    let cancel_handle = tokio::spawn(async move {
+        eng_cancel
+            .persist_original_approval(
+                c_tag,
+                c_entry,
+                node_id,
+                b"cancel_app".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Internal,
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    cancel_handle.abort(); // Cancel waiter task explicitly
+    assert_eq!(engine.internal_pending_approvals_count_for_test(), 1);
+    assert_eq!(engine.public_pending_approvals_count_for_test(), 1);
+    assert_eq!(engine.pending_approvals_count_for_test(), 2);
+
+    // Resume worker: late completion succeeds and cleans up to 0 without count leaks!
+    engine.set_worker_paused_for_test(false);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while engine.pending_approvals_count_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.pending_approvals_count_for_test(), 0);
+    assert_eq!(engine.public_pending_approvals_count_for_test(), 0);
+    assert_eq!(engine.internal_pending_approvals_count_for_test(), 0);
+    assert!(db.get_hmc_lock(&timeout_tag)?.is_some());
+    assert!(db.get_hmc_lock(&cancel_tag)?.is_some());
+
+    // 9. Failure cleanup: worker dropped
+    let (tx_dead, rx_dead) = tokio::sync::mpsc::channel(10);
+    let dead_engine = DualTierEngine::from_parts_with_limits(
+        engine.hmc_ram.clone(),
+        db.clone(),
+        tx_dead,
+        10,
+        10,
+    );
+    drop(rx_dead);
+    let fail_spend = spend_indexed(&root_req, 401, &key)?;
+    let fail_tag = fail_spend.ds_tag.clone().ok_or("missing spend tag")?;
+    let fail_entry: L2LockEntry = (&fail_spend).into();
+    dead_engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(fail_tag.clone(), fail_entry.clone());
+
+    let fail_res = dead_engine
+        .persist_original_approval(
+            fail_tag,
+            fail_entry,
+            node_id,
+            b"fail_app".to_vec(),
+            0,
+            now,
+            humoco_node::storage::PersistenceServiceClass::Public,
+        )
+        .await;
+    assert!(fail_res.is_err(), "dead worker must cause failure");
+    assert_eq!(dead_engine.pending_approvals_count_for_test(), 0);
+
+    cancel.cancel();
+    worker.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_14_real_quic_pending_approval_isolation() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source_path = dir.path().join("s02_14_quic_source.redb");
+    let target_path = dir.path().join("s02_14_quic_target.redb");
+    let source_id = NodeIdentity::generate();
+    let target_id = NodeIdentity::generate();
+    let wallet_node = NodeIdentity::generate();
+
+    let source = WireNode::start(&source_path, source_id).await?;
+    let target = WireNode::start(&target_path, target_id).await?;
+
+    let now = target.manager.clock().net_time_ms();
+    let root_ttl = 120_000u64;
+    let root_req = root_with_ttl(wallet_node.signing_key(), 42, now, root_ttl)?;
+    let shard_id = shard(&root_req);
+
+    target
+        .manager
+        .register_f2f_friend(*wallet_node.node_pubkey(), None)
+        .await;
+    anchor(&target.engine, &root_req).await?;
+    target.ready.mark_shard_ready(shard_id);
+
+    let connection = connect_friends(&source, &target).await?;
+
+    // 1. Pause target persistence worker
+    target.engine.set_worker_paused_for_test(true);
+
+    // 2. Prepare 256 distinct spend requests and insert into target RAM
+    let mut spend_tags = Vec::with_capacity(256);
+    let mut spend_entries = Vec::with_capacity(256);
+    for i in 0..256 {
+        let req = spend_indexed(&root_req, i, wallet_node.signing_key())?;
+        let tag = req.ds_tag.clone().ok_or("missing spend tag")?;
+        let entry: L2LockEntry = (&req).into();
+        target
+            .engine
+            .hmc_ram
+            .write()
+            .await
+            .insert_recovered(tag.clone(), entry.clone());
+        spend_tags.push(tag);
+        spend_entries.push(entry);
+    }
+
+    // 3. Fill all 256 Public pending approval slots on target
+    let target_pubkey = *target.identity.node_pubkey();
+    let mut public_tasks = Vec::with_capacity(256);
+    for i in 0..256 {
+        let eng = target.engine.clone();
+        let tag = spend_tags[i].clone();
+        let entry = spend_entries[i].clone();
+        public_tasks.push(tokio::spawn(async move {
+            eng.persist_original_approval(
+                tag,
+                entry,
+                target_pubkey,
+                b"pub_app_wire".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Public,
+            )
+            .await
+        }));
+    }
+
+    // Wait until all 256 public approvals are in pending_approvals
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while target.engine.pending_approvals_count_for_test() < 256 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.pending_approvals_count_for_test(), 256);
+
+    // 4. Send authorized Internal QUIC LockVerifyRequest while Public pending capacity is 100% full!
+    let quic_spend_req = spend_indexed(&root_req, 300, wallet_node.signing_key())?;
+    let quic_tag = quic_spend_req.ds_tag.clone().ok_or("missing tag")?;
+    let quic_entry: L2LockEntry = (&quic_spend_req).into();
+    target
+        .engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(quic_tag, quic_entry);
+
+    let source_net = source.network.clone();
+    let conn_wire = (*connection).clone();
+    let sender_pk = *source.identity.node_pubkey();
+    let sk = source.identity.signing_key().clone();
+    let quic_task = tokio::spawn(async move {
+        send_spend_wire(
+            source_net,
+            conn_wire,
+            quic_spend_req.clone(),
+            sender_pk,
+            sk,
+            now,
+            20,
+        )
+        .await
+    });
+
+    // In pre-fix code, target rejected this with "Approval capacity exhausted" and sent FLAG_NOT_READY immediately.
+    // In fixed code, target enqueues the internal approval (using reserved internal capacity) and waits for worker.
+    // Check that attestation is NOT released immediately while worker is paused:
+    let early = tokio::time::timeout(Duration::from_millis(50), async {
+        while !quic_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(early.is_err(), "QUIC request must wait for worker commit before releasing attestation");
+
+    // 5. Resume persistence worker: Internal QUIC approval succeeds and receives signed attestation!
+    target.engine.set_worker_paused_for_test(false);
+
+    let (quic_header, quic_reply) = quic_task.await??;
+    assert_eq!(
+        quic_header.flags & humoco_sim_core::wire::FLAG_NOT_READY,
+        0,
+        "Authorized internal QUIC request must NOT return FLAG_NOT_READY after worker resume"
+    );
+    let att = humoco_node::api::dto::AttestationDto::from_wire_bytes(&quic_reply)
+        .expect("must return valid signed attestation");
+    let expected_lock_id = hex::encode(spend_indexed(&root_req, 300, wallet_node.signing_key())?.transaction_hash);
+    assert_eq!(att.lock_id, expected_lock_id);
+
+    // Await all 256 public tasks
+    for task in public_tasks {
+        let res = task.await?;
+        assert!(res.is_ok());
+    }
+
+    // Wait until all pending approvals clear
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while target.engine.pending_approvals_count_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.pending_approvals_count_for_test(), 0);
+
+    // 6. Verify saturation of Internal pending capacity returns neutral FLAG_NOT_READY without slashing
+    target.engine.set_worker_approvals_paused_for_test(true);
+    let max_internal = 64; // MAX_INTERNAL_PENDING_APPROVALS
+    let mut int_tasks = Vec::with_capacity(max_internal);
+    for i in 0..max_internal {
+        let req = spend_indexed(&root_req, 500 + i as u32, wallet_node.signing_key())?;
+        let tag = req.ds_tag.clone().ok_or("missing spend tag")?;
+        let entry: L2LockEntry = (&req).into();
+        target
+            .engine
+            .hmc_ram
+            .write()
+            .await
+            .insert_recovered(tag.clone(), entry.clone());
+        let eng = target.engine.clone();
+        int_tasks.push(tokio::spawn(async move {
+            eng.persist_original_approval(
+                tag,
+                entry,
+                target_pubkey,
+                b"int_fill_app".to_vec(),
+                0,
+                now,
+                humoco_node::storage::PersistenceServiceClass::Internal,
+            )
+            .await
+        }));
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while target.engine.internal_pending_approvals_count_for_test() < max_internal {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.internal_pending_approvals_count_for_test(), max_internal);
+
+    // Now send the 65th Internal QUIC request when Internal pending approvals are saturated:
+    let excess_int_spend = spend_indexed(&root_req, 800, wallet_node.signing_key())?;
+    let (excess_header, excess_reply) = send_spend(&source, &connection, &excess_int_spend, 21, false).await?;
+    assert_ne!(
+        excess_header.flags & humoco_sim_core::wire::FLAG_NOT_READY,
+        0,
+        "Saturated internal pending capacity must return FLAG_NOT_READY"
+    );
+    assert!(excess_reply.is_empty(), "Reply payload must be empty on NOT_READY");
+
+    // Peer must NOT be banned or slashed!
+    assert!(
+        !target.manager.is_banned(source.identity.node_pubkey()).await,
+        "Peer must not be banned when capacity is saturated"
+    );
+
+    // Resume approval persistence and await all 64 internal tasks
+    target.engine.set_worker_approvals_paused_for_test(false);
+    for task in int_tasks {
+        let res = task.await?;
+        assert!(res.is_ok());
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while target.engine.internal_pending_approvals_count_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.internal_pending_approvals_count_for_test(), 0);
+
+    drop(connection);
+    source.stop().await?;
+    target.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pre_launch_cleanup_uniform_choice_ttl_no_native_bypass() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("cleanup_no_native.redb");
+    let key = SigningKey::from_bytes(&[85; 32]);
+    let root_req1 = root_with_ttl(&key, 1, 10_000, 50_000)?;
+    let root_req2 = root_with_ttl(&key, 2, 10_000, 90_000)?;
+    let root_tag1 = bs58::encode(root_req1.transaction_hash).into_string();
+    let root_tag2 = bs58::encode(root_req2.transaction_hash).into_string();
+
+    let node = [9u8; 32];
+    // Choice slot with "native:" in the tag portion of the key
+    let spend_tag = "native:test_voucher";
+
+    let mut spend_req = spend(&root_req1, 3, &key)?;
+    spend_req.ds_tag = Some(spend_tag.to_string());
+    let spend_entry: L2LockEntry = (&spend_req).into();
+
+    {
+        let db = RedbStorage::open(&path)?;
+        // Anchor both root 1 (TTL 60_000) and root 2 (TTL 100_000)
+        db.put_hmc_lock(&root_tag1, &(&root_req1).into())?;
+        db.put_hmc_lock(&root_tag2, &(&root_req2).into())?;
+
+        // Commit choice under root 1 (choice.valid_until_ms = 60_000)
+        let root_ttl1 = 10_000 + 50_000;
+        db.commit_original_approval(spend_tag, &spend_entry, &node, b"appr", 0, root_ttl1)?;
+        assert!(db.is_signing_history_healthy());
+
+        // Now modify TABLE_HMC_LOCKS for spend_tag so it points to root 2 (TTL 100_000)
+        // This makes root_ttl (100_000) != choice.valid_until_ms (60_000)
+        let txn = db.raw_database_for_test().begin_write()?;
+        {
+            let mut hmc_locks = txn.open_table(TABLE_HMC_LOCKS)?;
+            let mut modified_lock_entry = spend_entry.clone();
+            modified_lock_entry.layer2_voucher_id = root_req2.layer2_voucher_id.clone();
+            hmc_locks.insert(spend_tag, serde_json::to_vec(&modified_lock_entry)?.as_slice())?;
+        }
+        txn.commit()?;
+    }
+
+    // Reopen database: signing initialization scans choices and validates root/choice-TTL uniformly.
+    // In pre-fix code: "native:" prefix caused this check to be BYPASSED, so reopened reported healthy!
+    // In post-fix code: "native:" exception is removed, so root/choice-TTL mismatch is detected!
+    let reopened = RedbStorage::open(&path)?;
+    assert!(
+        !reopened.is_signing_history_healthy(),
+        "Reopened storage must detect corrupt signing state uniformly without native: bypass"
+    );
     Ok(())
 }

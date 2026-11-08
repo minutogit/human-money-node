@@ -433,3 +433,96 @@ async fn test_dashboard_html_knotenfreunde_terminology() {
     assert!(!body_str.contains("F2F Friend"), "Must NOT contain old F2F Friend role label");
     assert!(body_str.contains("Bevorzugte Kassen"), "Must use unambiguous Kassen label in tab-access");
 }
+
+async fn check_quic_roster_receipt(
+    candidate_count: usize,
+) -> Option<F2fNeighborRosterPayload> {
+    let identity_a = NodeIdentity::generate();
+    let identity_b = NodeIdentity::generate();
+    let pk_a = *identity_a.node_pubkey();
+    let pk_b = *identity_b.node_pubkey();
+
+    let other_friends: Vec<[u8; 32]> = (0..candidate_count.saturating_sub(1))
+        .map(|_| *NodeIdentity::generate().node_pubkey())
+        .collect();
+
+    let mut a_friends = vec![pk_b];
+    a_friends.extend_from_slice(&other_friends);
+
+    let pm_a = Arc::new(PeerManager::with_f2f(vec![], a_friends.clone()));
+    pm_a.set_simulation_mode(true);
+
+    let pm_b = Arc::new(PeerManager::with_f2f(vec![], vec![pk_a]));
+    pm_b.set_simulation_mode(true);
+
+    let cancel_a = CancellationToken::new();
+    let cancel_b = CancellationToken::new();
+
+    let transport_a = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &identity_a,
+        pm_a.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_a.clone(),
+    )
+    .expect("Bind transport A");
+    transport_a.spawn_accept_loop();
+
+    let transport_b = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &identity_b,
+        pm_b.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_b.clone(),
+    )
+    .expect("Bind transport B");
+    let addr_b = transport_b.local_addr().expect("local addr B");
+    let addr_a = transport_a.local_addr().expect("local addr A");
+    transport_b.spawn_accept_loop();
+
+    pm_a.register_f2f_friend(pk_b, Some(addr_b)).await;
+    pm_b.register_f2f_friend(pk_a, Some(addr_a)).await;
+    for friend_pk in &other_friends {
+        pm_a.register_f2f_friend(*friend_pk, None).await;
+    }
+
+    let _conn = transport_a.connect_peer(addr_b).await.expect("Connect A to B");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    let mut received = None;
+    while tokio::time::Instant::now() < deadline {
+        if let Some(r) = pm_b.f2f_collab().lock().roster().get_roster(&pk_a) {
+            received = Some(r.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    cancel_a.cancel();
+    cancel_b.cancel();
+    received
+}
+
+#[tokio::test]
+async fn test_s04_18_f2f_roster_real_quic_boundary_exchange() {
+    // 62 candidates -> remote peer receives roster with 62 visible and 0 hidden
+    let roster_62 = check_quic_roster_receipt(62)
+        .await
+        .expect("remote peer must receive roster for 62 candidates");
+    assert_eq!(roster_62.visible_neighbors.len(), 62);
+    assert_eq!(roster_62.hidden_neighbor_count, 0);
+
+    // 63 candidates -> remote peer receives roster with 62 visible and 1 hidden
+    let roster_63 = check_quic_roster_receipt(63)
+        .await
+        .expect("remote peer must receive roster for 63 candidates");
+    assert_eq!(roster_63.visible_neighbors.len(), 62);
+    assert_eq!(roster_63.hidden_neighbor_count, 1);
+
+    // 64 candidates -> remote peer receives roster with 62 visible and 2 hidden
+    let roster_64 = check_quic_roster_receipt(64)
+        .await
+        .expect("remote peer must receive roster for 64 candidates");
+    assert_eq!(roster_64.visible_neighbors.len(), 62);
+    assert_eq!(roster_64.hidden_neighbor_count, 2);
+}

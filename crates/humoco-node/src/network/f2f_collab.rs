@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::network::framing::{
-    F2fNeighborRosterPayload, F2fOperatorMessagePayload,
+    F2fNeighborRosterPayload, F2fOperatorMessagePayload, MAX_VISIBLE_F2F_NEIGHBORS,
 };
 
 pub const MAX_STORED_MESSAGES_PER_FRIEND: usize = 20;
@@ -298,7 +298,7 @@ impl F2fRosterTracker {
     ///
     /// If local `share_neighbor_roster` is false, zero neighbors are shared and all are counted as hidden.
     /// If true, friends who explicitly opted out (`shares_roster == false`) are excluded from `visible_neighbors`
-    /// and counted as hidden. All other friends (up to 64) are visible.
+    /// and counted as hidden. All other friends (up to [`MAX_VISIBLE_F2F_NEIGHBORS`]) are visible.
     pub fn build_local_roster(
         &self,
         self_pubkey: &[u8; 32],
@@ -306,12 +306,18 @@ impl F2fRosterTracker {
         now_ms: u64,
     ) -> F2fNeighborRosterPayload {
         if !self.share_neighbor_roster {
+            let mut hidden: u16 = 0;
+            for friend in f2f_friend_pubkeys {
+                if friend != self_pubkey {
+                    hidden = hidden.saturating_add(1);
+                }
+            }
             return F2fNeighborRosterPayload {
                 sender_pubkey: *self_pubkey,
                 timestamp_ms: now_ms,
                 shares_roster: false,
                 visible_neighbors: Vec::new(),
-                hidden_neighbor_count: f2f_friend_pubkeys.len() as u16,
+                hidden_neighbor_count: hidden,
             };
         }
 
@@ -330,7 +336,7 @@ impl F2fRosterTracker {
 
             if !friend_shares {
                 hidden = hidden.saturating_add(1);
-            } else if visible.len() < 64 {
+            } else if visible.len() < MAX_VISIBLE_F2F_NEIGHBORS {
                 visible.push(*friend);
             } else {
                 hidden = hidden.saturating_add(1);
@@ -604,5 +610,111 @@ mod tests {
             hidden_neighbor_count: 5, // 35 total > 32
         });
         assert!(tracker.is_mega_hub(&f1));
+    }
+
+    #[test]
+    fn test_s04_18_roster_builder_payload_ceiling_and_mutual_consent_boundary() {
+        let mut tracker = F2fRosterTracker::new(true);
+        let me = [0xAAu8; 32];
+        let now_ms = 1_700_000_000_000u64;
+
+        // Test 62, 63, 64, 65 candidate friends
+        for total_candidates in [62usize, 63, 64, 65] {
+            let candidates: Vec<[u8; 32]> = (1..=total_candidates)
+                .map(|i| {
+                    let mut pk = [0u8; 32];
+                    pk[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                    pk
+                })
+                .collect();
+
+            let roster = tracker.build_local_roster(&me, &candidates, now_ms);
+
+            // Invariant 1: Visible neighbors must NEVER exceed 62
+            assert!(
+                roster.visible_neighbors.len() <= 62,
+                "Visible neighbors must never exceed 62, got {}",
+                roster.visible_neighbors.len()
+            );
+
+            // Invariant 2: Total candidate accounting must be preserved
+            let total_accounted = roster
+                .visible_neighbors
+                .len()
+                .saturating_add(roster.hidden_neighbor_count as usize);
+            assert_eq!(
+                total_accounted, total_candidates,
+                "Total accounted friends (visible + hidden) must match total candidates"
+            );
+
+            // Invariant 3: Expected split
+            let expected_visible = total_candidates.min(62);
+            let expected_hidden = total_candidates.saturating_sub(62) as u16;
+            assert_eq!(roster.visible_neighbors.len(), expected_visible);
+            assert_eq!(roster.hidden_neighbor_count, expected_hidden);
+
+            // Invariant 4: Validation and serialization must succeed and fit <= 2048 bytes
+            assert!(
+                roster.validate().is_ok(),
+                "Builder output must pass validation for {} candidates",
+                total_candidates
+            );
+            let bytes = roster
+                .to_bytes()
+                .expect("Builder output must serialize within payload ceiling");
+            assert!(
+                bytes.len() <= crate::network::framing::MAX_F2F_FRAME_PAYLOAD_LEN,
+                "Encoded bytes {} must be <= 2048",
+                bytes.len()
+            );
+
+            // Invariant 5: Round-trip decode
+            let decoded = crate::network::framing::F2fNeighborRosterPayload::from_bytes(&bytes)
+                .expect("Roundtrip decode must succeed");
+            assert_eq!(decoded, roster);
+        }
+
+        // Mixed test: opt-out friends and overflow friends
+        // 70 candidates: 65 willing, 5 opted-out
+        let willing: Vec<[u8; 32]> = (1..=65)
+            .map(|i| {
+                let mut pk = [1u8; 32];
+                pk[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                pk
+            })
+            .collect();
+        let opted_out: Vec<[u8; 32]> = (66..=70)
+            .map(|i| {
+                let mut pk = [2u8; 32];
+                pk[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                pk
+            })
+            .collect();
+
+        for friend in &opted_out {
+            tracker.record_roster(F2fNeighborRosterPayload {
+                sender_pubkey: *friend,
+                timestamp_ms: now_ms,
+                shares_roster: false,
+                visible_neighbors: vec![],
+                hidden_neighbor_count: 0,
+            });
+        }
+
+        let mut all_70 = willing.clone();
+        all_70.extend(opted_out);
+
+        let roster_70 = tracker.build_local_roster(&me, &all_70, now_ms);
+        // 65 willing -> 62 visible, 3 overflow hidden
+        // 5 opted out -> 5 hidden
+        // total hidden = 8
+        assert_eq!(roster_70.visible_neighbors.len(), 62);
+        assert_eq!(roster_70.hidden_neighbor_count, 8);
+        assert_eq!(
+            roster_70.visible_neighbors.len() + roster_70.hidden_neighbor_count as usize,
+            70
+        );
+        let bytes_70 = roster_70.to_bytes().expect("roster_70 encodes");
+        assert!(bytes_70.len() <= crate::network::framing::MAX_F2F_FRAME_PAYLOAD_LEN);
     }
 }
